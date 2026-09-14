@@ -10,6 +10,27 @@ pub(super) struct Rows {
     pub(super) reservation: Reservation,
 }
 impl Rows {
+    /// Borrow batches without copying rows. The parent relation retains its
+    /// reservation for the entire lifetime of every returned view.
+    pub fn batches(&self, count: usize) -> impl Iterator<Item = Batch<'_>> {
+        self.data
+            .chunks(count)
+            .map(|rows| Batch(BatchStorage::Borrowed(rows)))
+    }
+
+    /// Transfer a complete construction reservation to its final row owner.
+    /// Both payload and vector capacity must already fit the incoming bound;
+    /// this constructor can release admission but cannot acquire more of it.
+    pub fn from_admitted(data: Vec<super::r::Row>, mut reservation: Reservation) -> Self {
+        reservation.shrink_to(
+            super::rows_bytes(&data).saturating_add(
+                data.capacity()
+                    .saturating_sub(data.len())
+                    .saturating_mul(size_of::<super::r::Row>()),
+            ),
+        );
+        Self { data, reservation }
+    }
     pub fn new(data: Vec<super::r::Row>, budget: &Budget) -> Result<Self> {
         let mut rows = Self {
             data,
@@ -61,6 +82,27 @@ impl std::ops::Deref for Rows {
 impl std::ops::DerefMut for Rows {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
+    }
+}
+
+/// A batch can only be built from an admitted owner or a view borrowed from
+/// that owner. A bare Vec or slice cannot manufacture an admitted batch.
+pub(super) struct Batch<'a>(BatchStorage<'a>);
+enum BatchStorage<'a> {
+    Owned(Rows),
+    Borrowed(&'a [super::r::Row]),
+}
+impl From<Rows> for Batch<'_> {
+    fn from(rows: Rows) -> Self {
+        Self(BatchStorage::Owned(rows))
+    }
+}
+impl AsRef<[super::r::Row]> for Batch<'_> {
+    fn as_ref(&self) -> &[super::r::Row] {
+        match &self.0 {
+            BatchStorage::Owned(rows) => &rows.data,
+            BatchStorage::Borrowed(rows) => rows,
+        }
     }
 }
 

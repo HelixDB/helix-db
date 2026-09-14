@@ -1,7 +1,8 @@
 //! A bounded top-k consumer shared by materialized and streaming row sources.
 use super::projection::Projection;
 use super::{
-    memory::Rows, push_row, row_bytes, ExecutionContext, GraphBatch, Limits, Result, RowBuffer,
+    memory::{Batch, Budget, Reservation, Rows},
+    row_bytes, ExecutionContext, GraphBatch, Limits, Result, RowBuffer,
 };
 use helix_planner::relational as r;
 use std::{
@@ -10,13 +11,17 @@ use std::{
 };
 
 impl ExecutionContext<'_> {
-    pub(super) async fn top_k_batches<S: futures::Stream<Item = Result<Rows>>>(
+    pub(super) async fn top_k_batches<'rows, S>(
         &self,
         batches: S,
+        width: usize,
         projection: Projection<'_>,
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
-    ) -> Result<Rows> {
+    ) -> Result<Rows>
+    where
+        S: futures::Stream<Item = Result<Batch<'rows>>>,
+    {
         use futures::StreamExt;
         futures::pin_mut!(batches);
         let Projection {
@@ -37,27 +42,22 @@ impl ExecutionContext<'_> {
             .map(|e| evaluation.eval(e).and_then(|v| r::nonnegative(&v)))
             .transpose()?
             .unwrap_or(usize::MAX);
-        let mut heap = BinaryHeap::<RankedRow<'_>>::new();
-        let keep = skip.saturating_add(limit);
-        let mut heap_memory = self.row_budget().reserve(0)?;
-        let mut retained_bytes = 0_usize;
+        let inputs = projection.input_slots(self, width)?;
+        let mut top_k = TopK::new(self.row_budget(), skip.saturating_add(limit))?;
         let mut ordinal = 0_usize;
         while let Some(batch) = batches.next().await {
             let batch = batch?;
+            let batch = batch.as_ref();
             self.check_execution_deadline()?;
             let graph = self
-                .expression_graph_batch(&batch, items.iter().map(|i| &i.expression))
+                .expression_graph_batch(batch, items.iter().map(|i| &i.expression))
                 .await?;
             let mut projected = RowBuffer::new(self.row_budget())?;
             for row in batch.iter() {
                 self.check_execution_deadline()?;
                 let mut evaluation = self.evaluate(row, parameters, &graph, limits);
                 let values = items.evaluate(&mut evaluation).await?;
-                let mut row = row.clone();
-                for (item, value) in items.iter().zip(values) {
-                    row[item.slot.0 as usize] = value;
-                }
-                push_row(&mut projected, row, limits)?;
+                projected.push_projection(row, items, values, &inputs, self.row_budget())?;
             }
             drop(graph);
             let projected = projected.finish();
@@ -77,12 +77,9 @@ impl ExecutionContext<'_> {
                 {
                     continue;
                 }
-                let keys = ordering
-                    .iter()
-                    .map(|key| evaluation.eval(&key.expression))
-                    .collect::<r::Result<Vec<_>>>()?;
+                let keys = evaluation.eval_sequence(ordering.iter().map(|key| &key.expression))?;
                 for (index, value) in row.iter_mut().enumerate() {
-                    if !items.iter().any(|item| item.slot.0 as usize == index) {
+                    if !items.outputs().contains(&r::Slot(index as u32)) {
                         *value = r::Value::Null;
                     }
                 }
@@ -93,39 +90,74 @@ impl ExecutionContext<'_> {
                     ordinal,
                 };
                 ordinal = ordinal.saturating_add(1);
-                if keep == 0
-                    || heap
-                        .peek()
-                        .is_some_and(|worst| heap.len() >= keep && &candidate >= worst)
-                {
-                    continue;
-                }
-                if heap.len() == keep {
-                    let removed = heap.pop().expect("nonzero full heap");
-                    retained_bytes = retained_bytes.saturating_sub(removed.allocated_bytes());
-                }
-                retained_bytes = retained_bytes.saturating_add(candidate.allocated_bytes());
-                let capacity = if heap.len() == heap.capacity() {
-                    heap.capacity().saturating_mul(2).max(4).min(keep)
-                } else {
-                    heap.capacity()
-                };
-                heap_memory.resize(
-                    retained_bytes
-                        .saturating_add(capacity.saturating_mul(size_of::<RankedRow<'_>>())),
-                )?;
-                heap.reserve_exact(capacity.saturating_sub(heap.len()));
-                heap.push(candidate);
+                top_k.push(candidate)?;
             }
         }
-        Rows::new(
-            heap.into_sorted_vec()
-                .into_iter()
-                .skip(skip)
-                .map(|entry| entry.row)
-                .collect(),
-            self.row_budget(),
-        )
+        Ok(top_k.into_rows(skip))
+    }
+}
+
+/// The heap drops before its reservation on errors and cancelled futures.
+struct TopK<'a> {
+    heap: BinaryHeap<RankedRow<'a>>,
+    memory: Reservation,
+    retained_bytes: usize,
+    keep: usize,
+}
+impl<'a> TopK<'a> {
+    fn new(budget: &Budget, keep: usize) -> Result<Self> {
+        Ok(Self {
+            heap: BinaryHeap::new(),
+            memory: budget.reserve(0)?,
+            retained_bytes: 0,
+            keep,
+        })
+    }
+    fn push(&mut self, candidate: RankedRow<'a>) -> Result<()> {
+        if self.keep == 0
+            || self
+                .heap
+                .peek()
+                .is_some_and(|worst| self.heap.len() >= self.keep && &candidate >= worst)
+        {
+            return Ok(());
+        }
+        if self.heap.len() == self.keep {
+            let removed = self.heap.pop().expect("nonzero full heap");
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(removed.allocated_bytes());
+        }
+        let retained_bytes = self
+            .retained_bytes
+            .saturating_add(candidate.allocated_bytes());
+        let capacity = if self.heap.len() == self.heap.capacity() {
+            self.heap.capacity().saturating_mul(2).max(4).min(self.keep)
+        } else {
+            self.heap.capacity()
+        };
+        self.memory.resize(
+            retained_bytes.saturating_add(capacity.saturating_mul(size_of::<RankedRow<'_>>())),
+        )?;
+        if capacity > self.heap.capacity() {
+            self.heap
+                .try_reserve_exact(capacity - self.heap.len())
+                .map_err(|_| super::resource("MemoryLimit", "top-k allocation failed"))?;
+        }
+        self.heap.push(candidate);
+        self.retained_bytes = retained_bytes;
+        Ok(())
+    }
+    fn into_rows(self, skip: usize) -> Rows {
+        // Retained candidates pre-admit final row slots. Sorting reuses heap
+        // storage; moving payload into the exact output needs no second charge.
+        let count = self.heap.len().saturating_sub(skip);
+        let mut rows = Vec::with_capacity(count);
+        for entry in self.heap.into_sorted_vec().into_iter().skip(skip) {
+            assert!(rows.len() < count, "fixed top-k output capacity");
+            rows.push(entry.row);
+        }
+        Rows::from_admitted(rows, self.memory)
     }
 }
 
@@ -139,9 +171,10 @@ struct RankedRow<'a> {
 }
 impl RankedRow<'_> {
     fn allocated_bytes(&self) -> usize {
+        // Heap storage is counted separately. Reserve payload plus the final
+        // row slot that coexists with that storage during ownership transfer.
         row_bytes(&self.row)
-            .saturating_add(row_bytes(&self.keys))
-            .saturating_add(size_of::<Self>())
+            .saturating_add(row_bytes(&self.keys).saturating_sub(size_of::<Vec<r::Value>>()))
     }
 }
 impl PartialEq for RankedRow<'_> {

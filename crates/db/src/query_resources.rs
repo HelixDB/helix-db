@@ -350,6 +350,16 @@ impl Reservation {
         other.bytes = 0;
     }
 
+    /// Shrink an existing ownership bound without admitting new allocation.
+    /// A conversion that exceeds its pre-admitted bound is an invariant failure.
+    pub(crate) fn shrink_to(&mut self, bytes: usize) {
+        self.release(
+            self.bytes
+                .checked_sub(bytes)
+                .expect("converted owner exceeds its admitted bound"),
+        );
+    }
+
     /// Release an already-dropped portion without recounting the retained owner.
     /// The owner must never release more than it previously admitted.
     pub(crate) fn release(&mut self, bytes: usize) {

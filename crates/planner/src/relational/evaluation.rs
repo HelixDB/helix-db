@@ -18,6 +18,31 @@ pub struct Evaluation<'a> {
 }
 
 impl Evaluation<'_> {
+    /// Evaluate a sized expression sequence in declaration order under one
+    /// memory allowance. Earlier payloads and the vector's slots remain live
+    /// while later expressions run. Empty sequences allocate nothing.
+    pub fn eval_sequence<'e>(
+        &self,
+        expressions: impl ExactSizeIterator<Item = &'e Expression>,
+    ) -> Result<Vec<Value>> {
+        let count = expressions.len();
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut remaining = self.remaining(
+            size_of::<Vec<Value>>().saturating_add(count.saturating_mul(size_of::<Value>())),
+        )?;
+        let mut values = Vec::with_capacity(count);
+        for expression in expressions {
+            let value = remaining.eval(expression)?;
+            remaining =
+                remaining.remaining(value.allocated_bytes().saturating_sub(size_of::<Value>()))?;
+            assert!(values.len() < count, "exact expression count");
+            values.push(value);
+        }
+        Ok(values)
+    }
+
     /// Stream the range generator in UNWIND without allocating a list. Other
     /// expressions retain scalar evaluation and null/list coercion semantics.
     pub fn unwind(&self, expression: &Expression) -> Result<UnwindValues> {

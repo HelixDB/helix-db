@@ -559,6 +559,50 @@ impl RowBuffer {
         self.bytes = bytes;
         Ok(())
     }
+    /// Install simultaneous projection values after admitting both vector slot
+    /// allocations. Only incoming values needed by later ordering/predicates
+    /// are copied; overwritten and out-of-scope payloads remain in the source.
+    fn push_projection(
+        &mut self,
+        input: &[r::Value],
+        items: &r::ProjectionProgram,
+        values: Vec<r::Value>,
+        inputs: &projection::ProjectionInputs,
+        budget: &memory::Budget,
+    ) -> Result<()> {
+        assert_eq!(items.len(), values.len(), "complete projection evaluation");
+        let _values_slots =
+            budget.reserve(values.capacity().saturating_mul(size_of::<r::Value>()))?;
+        let kept = |index| inputs.keeps(index) && !items.outputs().contains(&r::Slot(index as u32));
+        let bytes = input
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| kept(*index))
+            .map(|(_, value)| value)
+            .chain(values.iter())
+            .fold(
+                size_of::<r::Row>()
+                    .saturating_add(input.len().saturating_mul(size_of::<r::Value>())),
+                |bytes, value| {
+                    bytes.saturating_add(
+                        value
+                            .allocated_bytes()
+                            .saturating_sub(size_of::<r::Value>()),
+                    )
+                },
+            );
+        self.push_with(bytes, || {
+            let mut row = vec![r::Value::Null; input.len()];
+            for (index, value) in input.iter().enumerate().filter(|(index, _)| kept(*index)) {
+                row[index] = value.clone();
+            }
+            for (item, value) in items.iter().zip(values) {
+                row[item.slot.0 as usize] = value;
+            }
+            row
+        })
+    }
+
     /// Copy a row while replacing one binding, without cloning the old value
     /// that is being overwritten. Shared by UNWIND, scans, and joins.
     fn push_replacing(&mut self, input: &r::Row, slot: r::Slot, value: r::Value) -> Result<()> {

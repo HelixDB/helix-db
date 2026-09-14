@@ -118,7 +118,13 @@ impl ExecutionContext<'_> {
             )),
             r::BatchConsumer::TopK => Ok((
                 self.row_budget()
-                    .admitted_future(self.top_k_batches(batches, projection, parameters, limits))?
+                    .admitted_future(self.top_k_batches(
+                        batches.map(|batch| batch.map(super::memory::Batch::from)),
+                        width,
+                        projection,
+                        parameters,
+                        limits,
+                    ))?
                     .await?,
                 ConsumedProjection::Complete(end),
             )),
@@ -443,7 +449,13 @@ impl ExecutionContext<'_> {
             );
             Ok((
                 self.row_budget()
-                    .admitted_future(self.top_k_batches(batches, projection, parameters, limits))?
+                    .admitted_future(self.top_k_batches(
+                        batches.map(|batch| batch.map(super::memory::Batch::from)),
+                        width,
+                        projection,
+                        parameters,
+                        limits,
+                    ))?
                     .await?,
                 ConsumedProjection::Complete(end),
             ))

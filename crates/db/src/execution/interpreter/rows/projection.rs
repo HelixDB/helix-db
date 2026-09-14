@@ -1,4 +1,4 @@
-use super::memory::Rows;
+use super::memory::{Budget, Reservation, Rows};
 use super::{
     check_memory, push_row, row_bytes, ExecutionContext, GraphBatch, Limits, Result, RowBuffer,
 };
@@ -12,6 +12,118 @@ pub(super) struct Projection<'a> {
     pub predicate: Option<&'a r::SelectionProgram>,
     pub skip: Option<&'a r::Expression>,
     pub limit: Option<&'a r::Expression>,
+}
+
+/// Incoming values needed after simultaneous projection, including ORDER BY
+/// references that are not output columns. The mask stays admitted with its owner.
+pub(super) enum ProjectionInputs {
+    Discard,
+    Keep {
+        slots: Vec<bool>,
+        _memory: super::memory::Reservation,
+    },
+}
+impl ProjectionInputs {
+    pub(super) fn keeps(&self, slot: usize) -> bool {
+        match self {
+            Self::Discard => false,
+            Self::Keep { slots, .. } => slots[slot],
+        }
+    }
+}
+
+impl Projection<'_> {
+    pub(super) fn input_slots(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        width: usize,
+    ) -> Result<ProjectionInputs> {
+        ctx.check_execution_deadline()?;
+        if self.ordering.is_empty() && self.predicate.is_none() {
+            return Ok(ProjectionInputs::Discard);
+        }
+        let memory = ctx
+            .row_budget()
+            .reserve(width.saturating_mul(size_of::<bool>()))?;
+        let mut slots = vec![false; width];
+        for expression in self
+            .ordering
+            .iter()
+            .map(|order| &order.expression)
+            .chain(self.predicate.map(r::SelectionProgram::expression))
+        {
+            ctx.check_execution_deadline()?;
+            expression.visit(&mut |expression| {
+                let (r::Expression::Slot(slot) | r::Expression::HasLabel(slot, _)) = expression
+                else {
+                    return;
+                };
+                // Query validation proves every reference fits the row schema.
+                slots[slot.0 as usize] = true;
+            });
+        }
+        ctx.check_execution_deadline()?;
+        Ok(ProjectionInputs::Keep {
+            slots,
+            _memory: memory,
+        })
+    }
+}
+
+/// Keys, copied rows, vector growth and stable-sort scratch share one bound.
+/// Once sorting finishes, the scratch allowance covers the row headers used by
+/// grouping or final output while the keyed allocation still exists.
+struct KeyedRows {
+    entries: Vec<KeyedRow>,
+    memory: Reservation,
+    bytes: usize,
+}
+struct KeyedRow {
+    keys: Vec<r::Value>,
+    row: r::Row,
+}
+impl KeyedRows {
+    fn new(budget: &Budget) -> Result<Self> {
+        Ok(Self {
+            entries: Vec::new(),
+            memory: budget.reserve(0)?,
+            bytes: 0,
+        })
+    }
+    fn push(&mut self, keys: Vec<r::Value>, row: &r::Row) -> Result<()> {
+        let bytes = self
+            .bytes
+            .saturating_add(row_bytes(&keys).saturating_sub(size_of::<Vec<r::Value>>()))
+            .saturating_add(row_bytes(row).saturating_sub(size_of::<r::Row>()))
+            .saturating_add(size_of::<KeyedRow>().max(size_of::<r::Row>()));
+        let capacity = if self.entries.len() == self.entries.capacity() {
+            self.entries.capacity().saturating_mul(2).max(4)
+        } else {
+            self.entries.capacity()
+        };
+        self.memory
+            .resize(bytes.saturating_add(capacity.saturating_mul(size_of::<KeyedRow>())))?;
+        if capacity > self.entries.capacity() {
+            self.entries
+                .try_reserve_exact(capacity - self.entries.len())
+                .map_err(|_| super::resource("MemoryLimit", "sort buffer allocation failed"))?;
+        }
+        self.entries.push(KeyedRow {
+            keys,
+            row: row.clone(),
+        });
+        self.bytes = bytes;
+        Ok(())
+    }
+    fn into_rows(self) -> Rows {
+        let count = self.entries.len();
+        let mut rows = Vec::with_capacity(count);
+        for entry in self.entries {
+            assert!(rows.len() < count, "fixed sorted output capacity");
+            rows.push(entry.row);
+        }
+        Rows::from_admitted(rows, self.memory)
+    }
 }
 
 impl ExecutionContext<'_> {
@@ -121,15 +233,15 @@ impl ExecutionContext<'_> {
             .unwrap_or(usize::MAX);
         let aggregated = items.iter().any(|item| item.expression.has_aggregate());
         if !aggregated && !distinct && !ordering.is_empty() && limit != usize::MAX {
-            let batches = futures::stream::iter(
-                rows.chunks(limits.batch_rows)
-                    .map(|batch| Rows::new(batch.to_vec(), self.row_budget())),
-            );
+            // The parent Rows owner retains admission while these slices are
+            // consumed. Switching to a batch interface needs no payload copy.
+            let batches = futures::stream::iter(rows.batches(limits.batch_rows).map(Ok));
             return self
-                .top_k_batches(batches, projection, parameters, limits)
+                .top_k_batches(batches, width, projection, parameters, limits)
                 .await;
         }
 
+        let inputs = projection.input_slots(self, width)?;
         let mut projected = RowBuffer::new(self.row_budget())?;
         if aggregated
             && items.iter().all(|item| {
@@ -140,66 +252,73 @@ impl ExecutionContext<'_> {
             projected = self
                 .aggregate_rows(&rows, width, items, parameters, limits)
                 .await?;
+            drop(rows);
         } else if aggregated {
-            let keys = items
+            let key_count = items
                 .iter()
                 .filter(|item| !item.expression.has_aggregate())
-                .map(|item| &item.expression)
-                .collect::<Vec<_>>();
-            let mut keyed = Vec::new();
-            let mut keyed_bytes = 0_usize;
-            let mut keyed_memory = self.row_budget().reserve(0)?;
+                .count();
+            let _key_slots = self
+                .row_budget()
+                .reserve(key_count.saturating_mul(size_of::<&r::Expression>()))?;
+            let mut keys = Vec::with_capacity(key_count);
+            keys.extend(
+                items
+                    .iter()
+                    .filter(|item| !item.expression.has_aggregate())
+                    .map(|item| &item.expression),
+            );
+            let mut keyed = KeyedRows::new(self.row_budget())?;
             for batch in rows.chunks(limits.batch_rows) {
                 let graph = self
                     .expression_graph_batch(batch, keys.iter().copied())
                     .await?;
                 for row in batch {
-                    let key = keys
-                        .iter()
-                        .map(|e| self.evaluate(row, parameters, &graph, limits).eval(e))
-                        .collect::<r::Result<Vec<_>>>()?;
-                    keyed_bytes = keyed_bytes
-                        .saturating_add(row_bytes(&key))
-                        .saturating_add(row_bytes(row))
-                        .saturating_add(2 * size_of::<(Vec<r::Value>, r::Row)>());
-                    keyed_memory.resize(keyed_bytes)?;
-                    keyed.push((key, row.clone()));
+                    let key = self
+                        .evaluate(row, parameters, &graph, limits)
+                        .eval_sequence(keys.iter().copied())?;
+                    keyed.push(key, row)?;
                 }
             }
-            keyed.sort_by(|(a, _), (b, _)| compare(a, b));
-            let mut groups: Vec<Vec<r::Row>> = Vec::new();
-            let mut previous: Option<Vec<r::Value>> = None;
-            for (key, row) in keyed {
-                if previous
-                    .as_ref()
-                    .is_none_or(|old| compare(old, &key) != Ordering::Equal)
-                {
-                    groups.push(Vec::new());
-                    previous = Some(key);
+            drop(rows);
+            keyed.entries.sort_by(|a, b| compare(&a.keys, &b.keys));
+            let empty_global = keyed.entries.is_empty() && keys.is_empty();
+            let mut empty: [KeyedRow; 0] = [];
+            for entries in keyed
+                .entries
+                .chunk_by_mut(|a, b| compare(&a.keys, &b.keys).is_eq())
+                .chain(empty_global.then_some(empty.as_mut_slice()))
+            {
+                // KeyedRows' post-sort workspace covers these exact headers.
+                // Its reservation continues owning payload moved into this group.
+                let mut group = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    entry.keys = Vec::new();
+                    group.push(std::mem::take(&mut entry.row));
                 }
-                groups.last_mut().expect("group was added").push(row);
-            }
-            if groups.is_empty() && keys.is_empty() {
-                groups.push(Vec::new());
-            }
-            for group in groups {
                 let graph = self
                     .expression_graph_batch(&group, items.iter().map(|i| &i.expression))
                     .await?;
+                let _base_memory = group
+                    .is_empty()
+                    .then(|| {
+                        self.row_budget().reserve(
+                            size_of::<r::Row>()
+                                .saturating_add(width.saturating_mul(size_of::<r::Value>())),
+                        )
+                    })
+                    .transpose()?;
+                let empty_base = group.is_empty().then(|| vec![r::Value::Null; width]);
                 let base = group
                     .first()
-                    .cloned()
-                    .unwrap_or_else(|| vec![r::Value::Null; width]);
+                    .or(empty_base.as_ref())
+                    .expect("group representative or admitted null row");
                 let mut evaluation = r::Evaluation {
                     group: Some(&group),
-                    ..self.evaluate(&base, parameters, &graph, limits)
+                    ..self.evaluate(base, parameters, &graph, limits)
                 };
                 let values = items.evaluate(&mut evaluation).await?;
-                let mut row = base;
-                for (item, value) in items.iter().zip(values) {
-                    row[item.slot.0 as usize] = value;
-                }
-                push_row(&mut projected, row, limits)?;
+                projected.push_projection(base, items, values, &inputs, self.row_budget())?;
             }
         } else {
             for batch in rows.chunks(limits.batch_rows) {
@@ -210,13 +329,10 @@ impl ExecutionContext<'_> {
                     self.check_execution_deadline()?;
                     let mut evaluation = self.evaluate(row, parameters, &graph, limits);
                     let values = items.evaluate(&mut evaluation).await?;
-                    let mut row = row.clone();
-                    for (item, value) in items.iter().zip(values) {
-                        row[item.slot.0 as usize] = value;
-                    }
-                    push_row(&mut projected, row, limits)?;
+                    projected.push_projection(row, items, values, &inputs, self.row_budget())?;
                 }
             }
+            drop(rows);
         }
         let mut projected = projected.finish();
         if let Some(predicate) = predicate {
@@ -226,6 +342,9 @@ impl ExecutionContext<'_> {
                 .await?;
         }
         if distinct {
+            let scratch = self
+                .row_budget()
+                .reserve(projected.len().saturating_mul(size_of::<r::Row>()))?;
             projected.sort_by(|a, b| {
                 items
                     .iter()
@@ -233,6 +352,7 @@ impl ExecutionContext<'_> {
                     .find(|o| !o.is_eq())
                     .unwrap_or(Ordering::Equal)
             });
+            drop(scratch);
             projected.dedup_by(|a, b| {
                 items.iter().all(|item| {
                     a[item.slot.0 as usize]
@@ -240,32 +360,24 @@ impl ExecutionContext<'_> {
                         .is_eq()
                 })
             });
+            projected.refresh()?;
         }
         if !ordering.is_empty() {
-            let mut keyed = Vec::new();
-            let mut keyed_bytes = 0_usize;
-            let mut keyed_memory = self.row_budget().reserve(0)?;
+            let mut keyed = KeyedRows::new(self.row_budget())?;
             for batch in projected.chunks(limits.batch_rows) {
                 let graph = self
                     .expression_graph_batch(batch, ordering.iter().map(|o| &o.expression))
                     .await?;
                 for row in batch {
-                    let keys = ordering
-                        .iter()
-                        .map(|key| {
-                            self.evaluate(row, parameters, &graph, limits)
-                                .eval(&key.expression)
-                        })
-                        .collect::<r::Result<Vec<_>>>()?;
-                    keyed_bytes = keyed_bytes
-                        .saturating_add(row_bytes(&keys))
-                        .saturating_add(row_bytes(row))
-                        .saturating_add(2 * size_of::<(Vec<r::Value>, r::Row)>());
-                    keyed_memory.resize(keyed_bytes)?;
-                    keyed.push((keys, row.clone()));
+                    let keys = self
+                        .evaluate(row, parameters, &graph, limits)
+                        .eval_sequence(ordering.iter().map(|key| &key.expression))?;
+                    keyed.push(keys, row)?;
                 }
             }
-            let order = |(a, _): &(Vec<r::Value>, r::Row), (b, _): &(Vec<r::Value>, r::Row)| {
+            drop(projected);
+            let order = |a: &KeyedRow, b: &KeyedRow| {
+                let (a, b) = (&a.keys, &b.keys);
                 ordering
                     .iter()
                     .zip(a.iter().zip(b))
@@ -281,31 +393,29 @@ impl ExecutionContext<'_> {
                     .unwrap_or(Ordering::Equal)
             };
             let keep = skip.saturating_add(limit);
-            if keep < keyed.len() {
-                keyed.select_nth_unstable_by(keep, order);
-                keyed.truncate(keep);
+            if keep < keyed.entries.len() {
+                keyed.entries.select_nth_unstable_by(keep, order);
+                keyed.entries.truncate(keep);
             }
-            keyed.sort_by(order);
-            projected = Rows::new(
-                keyed.into_iter().map(|(_, row)| row).collect(),
-                self.row_budget(),
-            )?;
+            keyed.entries.sort_by(order);
+            projected = keyed.into_rows();
         }
         check_memory(&projected, limits)?;
-        let mut output = projected
-            .into_iter()
-            .skip(skip)
-            .take(limit)
-            .collect::<Vec<_>>();
+        // Window the admitted relation in place, including the empty window.
+        // Its vector capacity remains accounted without another header buffer.
+        projected.truncate(skip.saturating_add(limit));
+        let discarded = skip.min(projected.len());
+        drop(projected.drain(..discarded));
         // Projection is the scope boundary: release unreachable values/paths.
-        for row in &mut output {
+        for row in &mut projected {
             for (index, value) in row.iter_mut().enumerate() {
-                if !items.iter().any(|item| item.slot.0 as usize == index) {
+                if !items.outputs().contains(&r::Slot(index as u32)) {
                     *value = r::Value::Null;
                 }
             }
         }
-        Rows::new(output, self.row_budget())
+        projected.refresh()?;
+        Ok(projected)
     }
 }
 

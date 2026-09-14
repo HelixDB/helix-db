@@ -245,3 +245,64 @@ fn graph_outputs_and_path_expansion_are_admitted_before_materialization() {
         );
     }
 }
+
+#[test]
+fn expression_sequences_share_live_memory_and_preserve_error_order() {
+    use r::{Expression as E, Value as V};
+    let row = vec![V::Integer(7)];
+    let parameters = BTreeMap::from([("large".into(), V::String("x".repeat(1024)))]);
+    let evaluation = r::Evaluation {
+        row: &row,
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: 1600,
+    };
+    let large = E::Parameter("large".into());
+    let missing = E::Parameter("missing".into());
+    let slot = E::Slot(r::Slot(0));
+    assert!(evaluation.eval(&large).is_ok());
+    let result = evaluation
+        .eval_sequence([&large, &large, &missing].into_iter())
+        .unwrap_err();
+    assert_eq!(
+        (&*result.category, &*result.detail),
+        ("ResourceLimit", "MemoryLimit")
+    );
+    assert_eq!(
+        evaluation
+            .eval_sequence([&missing, &large].into_iter())
+            .unwrap_err()
+            .detail,
+        "MissingParameter"
+    );
+    assert_eq!(
+        evaluation
+            .eval_sequence([&slot, &large].into_iter())
+            .unwrap(),
+        vec![V::Integer(7), parameters["large"].clone()]
+    );
+    assert_eq!(row, vec![V::Integer(7)]);
+    assert_eq!(parameters["large"], V::String("x".repeat(1024)));
+    let no_memory = r::Evaluation {
+        max_value_bytes: 0,
+        ..evaluation
+    };
+    assert!(no_memory
+        .eval_sequence(std::iter::empty())
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        no_memory
+            .eval_sequence([&slot].into_iter())
+            .unwrap_err()
+            .detail,
+        "MemoryLimit"
+    );
+    let oversized = std::iter::repeat_n(&slot, usize::MAX);
+    assert_eq!(
+        evaluation.eval_sequence(oversized).unwrap_err().detail,
+        "MemoryLimit"
+    );
+}
