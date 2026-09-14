@@ -291,3 +291,10 @@ The public entry point exports scalar helpers, AST types, traversal builders,
 batch builders, query request helpers, graph helpers, and the server/embedded
 client. The wire contract follows Rust serde names while TypeScript builders use
 camel case.
+
+## Cypher
+
+Clients built from this checkout expose an additive Cypher method for local HTTP
+and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
+the language profile, method signatures, parameters, lossless values, and
+transaction behavior. Native DSL query methods keep their existing contract.

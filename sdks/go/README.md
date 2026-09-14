@@ -273,3 +273,10 @@ bindings and native libraries.
 - Datetime parameters serialize as RFC3339 UTC strings with millisecond precision.
 - Query JSON cannot represent bytes parameters; bytes remain valid node and edge property values.
 - Non-success responses return `*HelixError` with `Kind: ErrorRemote`, `Details`, and `StatusCode`; Cloud warm success is `204 No Content` with no payload.
+
+## Cypher
+
+Clients built from this checkout expose an additive Cypher method for local HTTP
+and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
+the language profile, method signatures, parameters, lossless values, and
+transaction behavior. Native DSL query methods keep their existing contract.
