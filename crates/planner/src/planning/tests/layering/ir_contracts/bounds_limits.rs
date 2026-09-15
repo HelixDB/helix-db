@@ -15,6 +15,14 @@ fn stream_bound_plan_wraps_literals_and_validates_expressions() {
     assert_eq!(expression, StreamBound::expr(Expr::param("limit")));
     let bound_expr = StreamBoundExprPlan::new(Expr::param("limit")).unwrap();
     assert_eq!(
+        bound_expr.expression_plan().resolved(),
+        &crate::ir::native::Expression::Parameter("limit".into())
+    );
+    assert_eq!(
+        serde_json::to_string(&bound_expr).unwrap(),
+        r#"{"param":"limit"}"#
+    );
+    assert_eq!(
         serde_json::from_str::<StreamBoundExprPlan>(&serde_json::to_string(&bound_expr).unwrap())
             .unwrap(),
         bound_expr

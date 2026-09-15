@@ -1,9 +1,7 @@
 //! Stream bound expression evaluation contracts.
 
-use helix_ast::expr::Expr;
-use helix_ast::value::PropertyValue as AstPropertyValue;
+use helix_ast::query;
 
-use super::super::values::param_value_from;
 use super::*;
 
 impl<'db> ExecutionContext<'db> {
@@ -35,41 +33,33 @@ pub(in crate::execution::interpreter) fn eval_stream_bound(
     match count {
         ir::StreamBoundPlan::Literal(count) => Ok(*count),
         ir::StreamBoundPlan::Expr(expr) => {
-            let value = eval_bound_expr(expr.expr(), params)?;
+            let ir::native::Expression::Parameter(name) = expr.expression_plan().resolved() else {
+                // Preserve the native diagnostic payload, but never evaluate or
+                // lower the compatibility AST on the runtime path.
+                return Err(HelixDbError::Query(format!(
+                    "unsupported stream bound expression {:?}",
+                    expr.expr()
+                )));
+            };
+            // Borrow before checking the scalar type. A rejected collection must
+            // not be cloned or converted merely to discover it is not an i64.
+            // Property-compatible bindings retain precedence, including errors.
+            let value = match params.values.get(name.as_str()) {
+                Some(value) => value.as_i64(),
+                None => match params.query_values.get(name.as_str()) {
+                    Some(query::QueryValue::I64(value)) => Some(*value),
+                    Some(_) => None,
+                    None => {
+                        return Err(HelixDbError::Query(format!(
+                            "parameter `{name}` is not bound"
+                        )))
+                    }
+                },
+            }
+            .ok_or_else(|| HelixDbError::Query(format!("parameter `{name}` is not an i64")))?;
             usize::try_from(value).map_err(|_| {
                 HelixDbError::Query(format!("stream bound expression returned {value}"))
             })
         }
-    }
-}
-
-pub(in crate::execution::interpreter::stream::bounds) fn eval_bound_expr(
-    expr: &Expr,
-    params: &context::ParamBindings,
-) -> Result<i64> {
-    match expr {
-        Expr::Param(name) => {
-            let name = ir::NonEmptyString::new(name.clone()).ok_or_else(|| {
-                HelixDbError::Query("stream bound parameter name must not be empty".to_string())
-            })?;
-            param_value_from(params, &name)?
-                .as_i64()
-                .ok_or_else(|| HelixDbError::Query(format!("parameter `{name}` is not an i64")))
-        }
-        Expr::Constant(AstPropertyValue::I64(value)) => Ok(*value),
-        Expr::Property(_)
-        | Expr::Id
-        | Expr::Timestamp
-        | Expr::DateTimeNow
-        | Expr::Constant(_)
-        | Expr::Add { .. }
-        | Expr::Sub { .. }
-        | Expr::Mul { .. }
-        | Expr::Div { .. }
-        | Expr::Mod { .. }
-        | Expr::Neg { .. }
-        | Expr::Case { .. } => Err(HelixDbError::Query(format!(
-            "unsupported stream bound expression {expr:?}"
-        ))),
     }
 }

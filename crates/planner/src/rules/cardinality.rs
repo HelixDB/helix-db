@@ -1,6 +1,6 @@
 //! Logical cardinality implementation and physical program construction.
 
-use helix_ast::{expr::Expr, query, value};
+use helix_ast::{query, value};
 
 use crate::{catalog, context, cost, exec, ir, logical, optimizer, physical, properties};
 
@@ -363,23 +363,12 @@ fn fold_cursor(
 fn bound_expr(bound: &ir::StreamBoundPlan) -> Result<exec::ExecUsizeExpr, RuleRejection> {
     match bound {
         ir::StreamBoundPlan::Literal(value) => Ok(exec::ExecUsizeExpr::literal(*value)),
-        ir::StreamBoundPlan::Expr(expr) => match expr.expr() {
-            Expr::Param(param) => Ok(exec::ExecUsizeExpr::Param(
+        ir::StreamBoundPlan::Expr(expr) => match expr.expression_plan().resolved() {
+            ir::native::Expression::Parameter(param) => Ok(exec::ExecUsizeExpr::Param(
                 ir::NonEmptyString::new(param.clone())
                     .expect("validated stream-bound parameters are non-empty"),
             )),
-            Expr::Property(_)
-            | Expr::Id
-            | Expr::Timestamp
-            | Expr::DateTimeNow
-            | Expr::Constant(_)
-            | Expr::Add { .. }
-            | Expr::Sub { .. }
-            | Expr::Mul { .. }
-            | Expr::Div { .. }
-            | Expr::Mod { .. }
-            | Expr::Neg { .. }
-            | Expr::Case { .. } => Err(rejection("unsupported_count_window_expression")),
+            _ => Err(rejection("unsupported_count_window_expression")),
         },
     }
 }
@@ -1832,7 +1821,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use helix_ast::{
-        expr::Predicate,
+        expr::{Expr, Predicate},
         index::RangeIndexDirection,
         query::QueryValue,
         traversal::Order,
@@ -3778,15 +3767,26 @@ mod tests {
         );
 
         for expression in [
-            helix_ast::expr::Expr::Id,
-            helix_ast::expr::Expr::Timestamp,
-            helix_ast::expr::Expr::DateTimeNow,
-            helix_ast::expr::Expr::Constant(PropertyValue::I64(3)),
+            Expr::Id,
+            Expr::Timestamp,
+            Expr::DateTimeNow,
+            Expr::prop("limit"),
+            Expr::param("missing").add_expr(Expr::val(1)),
+            Expr::param("missing").sub_expr(Expr::val(1)),
+            Expr::param("missing").mul_expr(Expr::val(1)),
+            Expr::param("missing").div_expr(Expr::val(0)),
+            Expr::param("missing").modulo(Expr::val(0)),
+            Expr::param("missing").neg_expr(),
+            Expr::case(vec![], Some(Expr::param("missing"))),
         ] {
-            let Ok(expression) = ir::StreamBoundExprPlan::new(expression) else {
-                continue;
-            };
-            assert!(bound_expr(&ir::StreamBoundPlan::Expr(expression)).is_err());
+            let expression = ir::StreamBoundExprPlan::new(expression).unwrap();
+            assert_eq!(
+                bound_expr(&ir::StreamBoundPlan::Expr(expression))
+                    .unwrap_err()
+                    .reason
+                    .as_ref(),
+                "unsupported_count_window_expression"
+            );
         }
     }
 
