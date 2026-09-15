@@ -27,86 +27,185 @@ impl<'a, R> VectorReadView<'a, R> {
     }
 }
 
-#[async_trait::async_trait]
+// Forward the underlying future synchronously. An async wrapper would allocate
+// before the provider can admit or reject the call. Override defaults too, since
+// the trait's convenience methods otherwise introduce another boxed frame.
+type Read<'a, T> = futures::future::BoxFuture<'a, Result<T, slatedb::Error>>;
+
 impl<R> DbReadOps for VectorReadView<'_, R>
 where
     R: DbReadOps + Send + Sync,
 {
-    async fn get_with_options<K: AsRef<[u8]> + Send>(
-        &self,
+    fn get<'life0, 'async_trait, K>(
+        &'life0 self,
         key: K,
-        options: &slatedb::config::ReadOptions,
-    ) -> std::result::Result<Option<bytes::Bytes>, slatedb::Error> {
-        match self {
-            Self::Transaction(transaction) => transaction.get_with_options(key, options).await,
-            Self::Snapshot(snapshot) => snapshot.get_with_options(key, options).await,
-        }
-    }
-
-    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &slatedb::config::ReadOptions,
-    ) -> std::result::Result<Option<slatedb::KeyValue>, slatedb::Error> {
-        match self {
-            Self::Transaction(transaction) => {
-                transaction.get_key_value_with_options(key, options).await
-            }
-            Self::Snapshot(snapshot) => snapshot.get_key_value_with_options(key, options).await,
-        }
-    }
-
-    async fn multi_get_with_options<K>(
-        &self,
-        keys: &[K],
-        options: &slatedb::config::ReadOptions,
-    ) -> std::result::Result<Vec<Option<bytes::Bytes>>, slatedb::Error>
+    ) -> Read<'async_trait, Option<bytes::Bytes>>
     where
-        K: AsRef<[u8]> + Send + Sync,
+        'life0: 'async_trait,
+        K: AsRef<[u8]> + Send + 'async_trait,
+        Self: 'async_trait,
     {
         match self {
-            Self::Transaction(transaction) => {
-                transaction.multi_get_with_options(keys, options).await
-            }
-            Self::Snapshot(snapshot) => snapshot.multi_get_with_options(keys, options).await,
+            Self::Transaction(transaction) => transaction.get(key),
+            Self::Snapshot(snapshot) => snapshot.get(key),
         }
     }
 
-    async fn scan_with_options<T>(
-        &self,
+    fn get_with_options<'life0, 'life1, 'async_trait, K>(
+        &'life0 self,
+        key: K,
+        options: &'life1 slatedb::config::ReadOptions,
+    ) -> Read<'async_trait, Option<bytes::Bytes>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        K: AsRef<[u8]> + Send + 'async_trait,
+        Self: 'async_trait,
+    {
+        match self {
+            Self::Transaction(transaction) => transaction.get_with_options(key, options),
+            Self::Snapshot(snapshot) => snapshot.get_with_options(key, options),
+        }
+    }
+
+    fn get_key_value<'life0, 'async_trait, K>(
+        &'life0 self,
+        key: K,
+    ) -> Read<'async_trait, Option<slatedb::KeyValue>>
+    where
+        'life0: 'async_trait,
+        K: AsRef<[u8]> + Send + 'async_trait,
+        Self: 'async_trait,
+    {
+        match self {
+            Self::Transaction(transaction) => transaction.get_key_value(key),
+            Self::Snapshot(snapshot) => snapshot.get_key_value(key),
+        }
+    }
+
+    fn get_key_value_with_options<'life0, 'life1, 'async_trait, K>(
+        &'life0 self,
+        key: K,
+        options: &'life1 slatedb::config::ReadOptions,
+    ) -> Read<'async_trait, Option<slatedb::KeyValue>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        K: AsRef<[u8]> + Send + 'async_trait,
+        Self: 'async_trait,
+    {
+        match self {
+            Self::Transaction(transaction) => transaction.get_key_value_with_options(key, options),
+            Self::Snapshot(snapshot) => snapshot.get_key_value_with_options(key, options),
+        }
+    }
+
+    fn multi_get<'life0, 'life1, 'async_trait, K>(
+        &'life0 self,
+        keys: &'life1 [K],
+    ) -> Read<'async_trait, Vec<Option<bytes::Bytes>>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        K: AsRef<[u8]> + Send + Sync + 'async_trait,
+        Self: 'async_trait,
+    {
+        match self {
+            Self::Transaction(transaction) => transaction.multi_get(keys),
+            Self::Snapshot(snapshot) => snapshot.multi_get(keys),
+        }
+    }
+
+    fn multi_get_with_options<'life0, 'life1, 'life2, 'async_trait, K>(
+        &'life0 self,
+        keys: &'life1 [K],
+        options: &'life2 slatedb::config::ReadOptions,
+    ) -> Read<'async_trait, Vec<Option<bytes::Bytes>>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        K: AsRef<[u8]> + Send + Sync + 'async_trait,
+        Self: 'async_trait,
+    {
+        match self {
+            Self::Transaction(transaction) => transaction.multi_get_with_options(keys, options),
+            Self::Snapshot(snapshot) => snapshot.multi_get_with_options(keys, options),
+        }
+    }
+
+    fn scan<'life0, 'async_trait, T>(
+        &'life0 self,
         range: T,
-        options: &slatedb::config::ScanOptions,
-    ) -> std::result::Result<slatedb::DbIterator, slatedb::Error>
+    ) -> Read<'async_trait, slatedb::DbIterator>
     where
-        T: slatedb::ByteRangeBounds + Send,
+        'life0: 'async_trait,
+        T: slatedb::ByteRangeBounds + Send + 'async_trait,
+        Self: 'async_trait,
     {
         match self {
-            Self::Transaction(transaction) => transaction.scan_with_options(range, options).await,
-            Self::Snapshot(snapshot) => snapshot.scan_with_options(range, options).await,
+            Self::Transaction(transaction) => transaction.scan(range),
+            Self::Snapshot(snapshot) => snapshot.scan(range),
         }
     }
 
-    async fn scan_prefix_with_options<P, T>(
-        &self,
+    fn scan_with_options<'life0, 'life1, 'async_trait, T>(
+        &'life0 self,
+        range: T,
+        options: &'life1 slatedb::config::ScanOptions,
+    ) -> Read<'async_trait, slatedb::DbIterator>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        T: slatedb::ByteRangeBounds + Send + 'async_trait,
+        Self: 'async_trait,
+    {
+        match self {
+            Self::Transaction(transaction) => transaction.scan_with_options(range, options),
+            Self::Snapshot(snapshot) => snapshot.scan_with_options(range, options),
+        }
+    }
+
+    fn scan_prefix<'life0, 'async_trait, P, T>(
+        &'life0 self,
         prefix: P,
         subrange: T,
-        options: &slatedb::config::ScanOptions,
-    ) -> std::result::Result<slatedb::DbIterator, slatedb::Error>
+    ) -> Read<'async_trait, slatedb::DbIterator>
     where
-        P: AsRef<[u8]> + Send,
-        T: slatedb::ByteRangeBounds + Send,
+        'life0: 'async_trait,
+        P: AsRef<[u8]> + Send + 'async_trait,
+        T: slatedb::ByteRangeBounds + Send + 'async_trait,
+        Self: 'async_trait,
+    {
+        match self {
+            Self::Transaction(transaction) => transaction.scan_prefix(prefix, subrange),
+            Self::Snapshot(snapshot) => snapshot.scan_prefix(prefix, subrange),
+        }
+    }
+
+    fn scan_prefix_with_options<'life0, 'life1, 'async_trait, P, T>(
+        &'life0 self,
+        prefix: P,
+        subrange: T,
+        options: &'life1 slatedb::config::ScanOptions,
+    ) -> Read<'async_trait, slatedb::DbIterator>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        P: AsRef<[u8]> + Send + 'async_trait,
+        T: slatedb::ByteRangeBounds + Send + 'async_trait,
+        Self: 'async_trait,
     {
         match self {
             Self::Transaction(transaction) => {
-                transaction
-                    .scan_prefix_with_options(prefix, subrange, options)
-                    .await
+                transaction.scan_prefix_with_options(prefix, subrange, options)
             }
             Self::Snapshot(snapshot) => {
-                snapshot
-                    .scan_prefix_with_options(prefix, subrange, options)
-                    .await
+                snapshot.scan_prefix_with_options(prefix, subrange, options)
             }
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

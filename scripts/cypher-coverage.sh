@@ -22,6 +22,9 @@ if "$CYPHER_FULL_COVERAGE"; then
     # verify it separately instead of mixing those modules into that denominator.
     cargo test --locked -p db --features production-coverage \
         --test production_internal_contracts
+    # Process-global vector counters must be verified in an isolated test run.
+    cargo test --locked -p db --features production-coverage --lib \
+        native_read_telemetry_counts_each_entry_once -- --ignored
     # Exercise the existing ignored topology conflict/preparation test at a
     # bounded local size; its source is included in the repository's denominator.
     HELIX_SWEEP_BENCH_EXPIRED=1000 HELIX_SWEEP_BENCH_INSERTED=100 \

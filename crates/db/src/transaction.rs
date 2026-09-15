@@ -66,6 +66,41 @@ mod sealed {
 impl sealed::Sealed for DbTransaction {}
 impl sealed::Sealed for Owned {}
 impl sealed::Sealed for View<'_> {}
+impl sealed::Sealed for crate::search::vector::MeasuredVectorTransaction<'_> {}
+
+/// Opaque read authority consumed only by the admitted storage adapter. A native
+/// read wrapper can return this context without exposing writes or lifecycle.
+pub(crate) struct ReadContext<'a>(View<'a>);
+
+/// Logical read category for native measurement hooks, independent of options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadKind {
+    Point,
+    MultiGet { keys: usize },
+    Scan,
+}
+
+/// Closed source contract for one admitted read frame. Hooks run once, after
+/// frame admission and before dependency registration or backend access.
+pub(crate) trait ReadSource: Send + Sync + sealed::Sealed {
+    fn read_context(&self) -> ReadContext<'_>;
+
+    fn before_read(&self, _: ReadKind) -> std::result::Result<(), slatedb::Error> {
+        Ok(())
+    }
+}
+
+impl ReadSource for Owned {
+    fn read_context(&self) -> ReadContext<'_> {
+        ReadContext(self.mutation_view())
+    }
+}
+
+impl ReadSource for View<'_> {
+    fn read_context(&self) -> ReadContext<'_> {
+        ReadContext(*self)
+    }
+}
 
 /// The native mutation contract preserves backend isolation and write behavior.
 /// Checked disjoint merges deliberately retain their untracked validation reads.

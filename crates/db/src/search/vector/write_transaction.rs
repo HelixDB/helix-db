@@ -15,6 +15,7 @@
 //! changes vector keys, vector row values, metadata, or the SlateDB wire format.
 
 use crate::transaction::Mutation;
+
 use std::collections::BTreeMap;
 use std::ops::Bound;
 #[cfg(any(test, feature = "production-coverage"))]
@@ -322,89 +323,33 @@ impl VectorWriteRecorder {
     }
 }
 
-#[async_trait::async_trait]
-impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
-    async fn get_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &slatedb::config::ReadOptions,
-    ) -> Result<Option<Bytes>, slatedb::Error> {
-        #[cfg(any(test, feature = "production-coverage"))]
-        if Self::take_injected_failure(&self.reads_until_failure) {
-            return Err(Self::injected_read_error());
-        }
-        #[cfg(feature = "production-coverage")]
-        super::record_benchmark_point_get();
-        self.inner.get_with_options(key, options).await
+impl crate::transaction::ReadSource for MeasuredVectorTransaction<'_> {
+    fn read_context(&self) -> crate::transaction::ReadContext<'_> {
+        crate::transaction::ReadSource::read_context(&self.inner)
     }
 
-    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &slatedb::config::ReadOptions,
-    ) -> Result<Option<slatedb::KeyValue>, slatedb::Error> {
+    fn before_read(&self, kind: crate::transaction::ReadKind) -> Result<(), slatedb::Error> {
         #[cfg(any(test, feature = "production-coverage"))]
         if Self::take_injected_failure(&self.reads_until_failure) {
             return Err(Self::injected_read_error());
         }
-        #[cfg(feature = "production-coverage")]
-        super::record_benchmark_point_get();
-        self.inner.get_key_value_with_options(key, options).await
-    }
-
-    async fn multi_get_with_options<K>(
-        &self,
-        keys: &[K],
-        options: &slatedb::config::ReadOptions,
-    ) -> Result<Vec<Option<Bytes>>, slatedb::Error>
-    where
-        K: AsRef<[u8]> + Send + Sync,
-    {
-        #[cfg(any(test, feature = "production-coverage"))]
-        if Self::take_injected_failure(&self.reads_until_failure) {
-            return Err(Self::injected_read_error());
+        match kind {
+            crate::transaction::ReadKind::Point => {
+                #[cfg(feature = "production-coverage")]
+                super::record_benchmark_point_get();
+            }
+            crate::transaction::ReadKind::MultiGet { keys } => {
+                #[cfg(feature = "production-coverage")]
+                super::record_benchmark_multi_get(keys);
+                #[cfg(not(feature = "production-coverage"))]
+                let _ = keys;
+            }
+            crate::transaction::ReadKind::Scan => {
+                #[cfg(feature = "production-coverage")]
+                super::record_benchmark_scan();
+            }
         }
-        #[cfg(feature = "production-coverage")]
-        super::record_benchmark_multi_get(keys.len());
-        self.inner.multi_get_with_options(keys, options).await
-    }
-
-    async fn scan_with_options<T>(
-        &self,
-        range: T,
-        options: &slatedb::config::ScanOptions,
-    ) -> Result<slatedb::DbIterator, slatedb::Error>
-    where
-        T: slatedb::ByteRangeBounds + Send,
-    {
-        #[cfg(any(test, feature = "production-coverage"))]
-        if Self::take_injected_failure(&self.reads_until_failure) {
-            return Err(Self::injected_read_error());
-        }
-        #[cfg(feature = "production-coverage")]
-        super::record_benchmark_scan();
-        self.inner.scan_with_options(range, options).await
-    }
-
-    async fn scan_prefix_with_options<P, T>(
-        &self,
-        prefix: P,
-        subrange: T,
-        options: &slatedb::config::ScanOptions,
-    ) -> Result<slatedb::DbIterator, slatedb::Error>
-    where
-        P: AsRef<[u8]> + Send,
-        T: slatedb::ByteRangeBounds + Send,
-    {
-        #[cfg(any(test, feature = "production-coverage"))]
-        if Self::take_injected_failure(&self.reads_until_failure) {
-            return Err(Self::injected_read_error());
-        }
-        #[cfg(feature = "production-coverage")]
-        super::record_benchmark_scan();
-        self.inner
-            .scan_prefix_with_options(prefix, subrange, options)
-            .await
+        Ok(())
     }
 }
 
@@ -588,6 +533,9 @@ pub(crate) enum VectorWriteMeasurementError {
 #[cfg(feature = "production-coverage")]
 #[path = "../../../tests/production_support/vector/write_transaction.rs"]
 pub(crate) mod production_contracts;
+
+#[cfg(test)]
+mod read_admission_tests;
 
 #[cfg(test)]
 mod tests {

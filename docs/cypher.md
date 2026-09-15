@@ -203,9 +203,10 @@ An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
 Modifying statements admit boxed transaction read operations before allocation,
-including calls that are dropped without being polled. They also admit the
-serializable transaction's retained read
-keys and requested scan ranges, including empty scans. Repeated keys share one
+including measured vector reads and calls that are dropped without being polled.
+Vector dispatch forwards the underlying reader's future without another wrapper
+allocation. They also admit the serializable transaction's retained read keys and requested
+scan ranges, including empty scans. Repeated keys share one
 retained payload allowance; table growth and commit-time read-state copies are
 included. This admission lasts through backend commit or transaction abort, so
 a write that streams a small result can still reach its budget through a large

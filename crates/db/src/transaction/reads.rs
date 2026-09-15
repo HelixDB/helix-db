@@ -2,7 +2,7 @@
 //! Every entry point creates exactly one admitted future; defaults are overridden
 //! so they cannot allocate an extra frame before reaching this boundary.
 
-use super::{call, storage_error, Mutation, Owned, View};
+use super::{call, storage_error, Owned, ReadKind, ReadSource, View};
 use bytes::Bytes;
 use slatedb::{config, DbReadOps};
 
@@ -21,8 +21,9 @@ macro_rules! read_ops {
                 K: AsRef<[u8]> + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Point)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.keys(std::slice::from_ref(&key)))
@@ -43,8 +44,9 @@ macro_rules! read_ops {
                 K: AsRef<[u8]> + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Point)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.keys(std::slice::from_ref(&key)))
@@ -63,8 +65,9 @@ macro_rules! read_ops {
                 K: AsRef<[u8]> + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Point)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.keys(std::slice::from_ref(&key)))
@@ -85,8 +88,9 @@ macro_rules! read_ops {
                 K: AsRef<[u8]> + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Point)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.keys(std::slice::from_ref(&key)))
@@ -106,8 +110,9 @@ macro_rules! read_ops {
                 K: AsRef<[u8]> + Send + Sync + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::MultiGet { keys: keys.len() })?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.keys(keys))
@@ -129,8 +134,9 @@ macro_rules! read_ops {
                 K: AsRef<[u8]> + Send + Sync + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::MultiGet { keys: keys.len() })?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.keys(keys))
@@ -149,8 +155,9 @@ macro_rules! read_ops {
                 T: slatedb::ByteRangeBounds + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Scan)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.range(&range, None))
@@ -171,8 +178,9 @@ macro_rules! read_ops {
                 T: slatedb::ByteRangeBounds + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Scan)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.range(&range, None))
@@ -193,8 +201,9 @@ macro_rules! read_ops {
                 T: slatedb::ByteRangeBounds + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Scan)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.range(&subrange, Some(prefix.as_ref().len())))
@@ -217,8 +226,9 @@ macro_rules! read_ops {
                 T: slatedb::ByteRangeBounds + Send + 'async_trait,
                 Self: 'async_trait,
             {
-                let view = self.mutation_view();
+                let view = self.read_context().0;
                 call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+                    self.before_read(ReadKind::Scan)?;
                     let _memory = view
                         .tracking
                         .map(|tracker| tracker.range(&subrange, Some(prefix.as_ref().len())))
@@ -234,3 +244,4 @@ macro_rules! read_ops {
 }
 read_ops!(Owned);
 read_ops!(View<'_>);
+read_ops!(crate::search::vector::MeasuredVectorTransaction<'_>);
