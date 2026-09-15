@@ -169,9 +169,9 @@ async fn collection_epochs_preserve_overlays_and_release_consumed_delta_state() 
         }
         assert!(budget.available() < before);
         indexes.flush_topology(&transaction).await.unwrap();
-        // This slice accounts collection ownership. Retained backend operands
-        // require their own future admission; they cannot borrow this guard.
-        assert_eq!(budget.available(), before);
+        // Collection ownership ends at flush, while canonical key aliases and
+        // the backend's growing operand history remain admitted.
+        assert!(budget.available() < before);
         let values = indexes
             .observe_topology(&transaction, &[label.clone(), adjacency.clone()])
             .await

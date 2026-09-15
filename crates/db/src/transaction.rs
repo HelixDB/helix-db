@@ -1,9 +1,9 @@
-//! Borrowed mutation authority and request-owned serializable read admission.
+//! Borrowed mutation authority and request-owned read/merge admission.
 //!
 //! Helpers receive [`Mutation`], which exposes reads and writes but cannot
 //! commit, roll back, or extract the underlying transaction. Native callers
 //! retain their existing SlateDB transaction; request execution owns [`Owned`].
-//! Its ledger must remain inside the database's finite commit-completion task
+//! Its ledgers remain inside the database's finite commit-completion task
 //! until the backend finishes. No persisted representation is changed here.
 
 use bytes::Bytes;
@@ -13,6 +13,7 @@ use crate::error::{HelixDbError, Result};
 use crate::query_resources;
 
 mod call;
+pub(crate) mod merges;
 mod read_tracking;
 mod reads;
 #[cfg(test)]
@@ -22,6 +23,7 @@ mod tests;
 pub(crate) struct Owned {
     raw: DbTransaction,
     tracking: Option<Box<read_tracking::Tracker>>,
+    merges: Option<Box<merges::Tracker>>,
 }
 
 impl Owned {
@@ -36,18 +38,28 @@ impl Owned {
             .transpose()
             .map_err(|AdmissionFailure| HelixDbError::QueryMemoryLimitExceeded)?
             .map(Box::new);
+        let merges = budget.map(merges::Tracker::new).transpose()?.map(Box::new);
         let raw = db
             .begin(slatedb::IsolationLevel::SerializableSnapshot)
             .await?;
-        Ok(Self { raw, tracking })
+        Ok(Self {
+            raw,
+            tracking,
+            merges,
+        })
     }
 
     /// Called only inside the finite commit owner, which survives cancellation.
     pub(crate) async fn commit(
         self,
     ) -> std::result::Result<Option<slatedb::WriteHandle>, slatedb::Error> {
-        let Self { raw, tracking } = self;
+        let Self {
+            raw,
+            tracking,
+            merges,
+        } = self;
         let result = raw.commit().await;
+        drop(merges);
         drop(tracking);
         result
     }
@@ -58,6 +70,7 @@ impl Owned {
 pub(crate) struct View<'a> {
     raw: &'a DbTransaction,
     tracking: Option<&'a read_tracking::Tracker>,
+    merges: Option<&'a merges::Tracker>,
 }
 
 mod sealed {
@@ -134,20 +147,10 @@ pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
         }
     }
 
-    fn merge_disjoint_checked_batch<M>(
-        &self,
-        merges: M,
-    ) -> impl std::future::Future<Output = std::result::Result<(), slatedb::Error>> + Send
-    where
-        M: IntoIterator<Item = slatedb::DisjointMergeBatchEntry> + Send,
-        M::IntoIter: Send,
-    {
-        async move {
-            self.mutation_view()
-                .raw
-                .merge_disjoint_checked_batch(merges)
-                .await
-        }
+    /// Prepare canonical merge entries under this transaction's admission.
+    /// The borrowed batch cannot be submitted to a different transaction.
+    fn merge_batch(&self, entries: usize) -> Result<merges::Batch<'_>> {
+        merges::Batch::new(self.mutation_view(), entries)
     }
 }
 
@@ -156,6 +159,7 @@ impl Mutation for DbTransaction {
         View {
             raw: self,
             tracking: None,
+            merges: None,
         }
     }
 }
@@ -164,6 +168,7 @@ impl Mutation for Owned {
         View {
             raw: &self.raw,
             tracking: self.tracking.as_deref(),
+            merges: self.merges.as_deref(),
         }
     }
 }

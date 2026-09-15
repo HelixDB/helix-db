@@ -2584,7 +2584,7 @@ async fn stage_bitmap_changes(
     transaction: &impl crate::transaction::Mutation,
     changes: &BTreeMap<Bytes, BTreeMap<u64, bool>>,
 ) -> Result<()> {
-    let mut merges = Vec::with_capacity(changes.len());
+    let mut merges = transaction.merge_batch(changes.len())?;
     for (key, members) in changes {
         let mut delta = BitmapMembershipDelta::default();
         for (&entity_id, &present) in members {
@@ -2594,13 +2594,9 @@ async fn stage_bitmap_changes(
                 delta.remove(entity_id);
             }
         }
-        merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
-            key.clone(),
-            delta.members().map(u128::from),
-            delta.encode(),
-        ));
+        merges.bitmap(crate::transaction::merges::Key::Encoded(key), &delta)?;
     }
-    transaction.merge_disjoint_checked_batch(merges).await?;
+    merges.stage().await?;
     Ok(())
 }
 

@@ -223,6 +223,13 @@ included. This admission lasts through backend commit or transaction abort, so
 a write that streams a small result can still reach its budget through a large
 read set. Graph topology collection also admits its membership deltas and bitmap
 growth. Repeated additions and removals share a bounded allowance within each
-collection epoch. A memory failure before commit rolls back the complete statement.
+collection epoch. Checked bitmap and adjacency merges admit canonical key and
+operand construction, token buffers and batch containers. Encoded key aliases
+retain their own admission. Backend operand history and conflict metadata stay
+charged across flushes until commit or abort; repeated writes use a conservative
+bound proportional to the submitted history. The backend's untracked reads of
+existing merge rows and full validation decode buffers remain outside this
+bound, as does upstream secondary-index collection. A memory failure before
+commit rolls back the complete statement.
 Frontend/planner allocations and some native storage working buffers still need
 memory accounting; the current budget covers the integrated execution buffers.

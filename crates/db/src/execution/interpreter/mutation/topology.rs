@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
+use helix_planner::relational::allocation;
 #[cfg(test)]
 use slatedb::DbTransaction;
 
@@ -23,6 +24,7 @@ use crate::encoding::v2::values::indexes as secondary;
 use crate::{HelixDbError, Result};
 
 use crate::query_resources::{self, membership};
+use crate::transaction::merges;
 use membership::Change as MembershipMutation;
 
 /// Logical identity for one shared bitmap row. Physical keys are encoded once
@@ -51,7 +53,7 @@ enum BitmapRow {
 }
 
 impl BitmapRow {
-    fn to_bytes(self) -> Bytes {
+    fn key(self) -> DataKey<'static> {
         match self {
             Self::NodeLabel { scope, label_hash } => DataKey::Data {
                 scope,
@@ -61,13 +63,11 @@ impl BitmapRow {
                         label_hash,
                     ),
                 )),
-            }
-            .to_bytes(),
+            },
             Self::EdgePair { scope, from, to } => DataKey::Data {
                 scope,
                 kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(from, to)),
-            }
-            .to_bytes(),
+            },
             Self::EdgeLabelNeighbor {
                 scope,
                 direction,
@@ -78,15 +78,13 @@ impl BitmapRow {
                 kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
                     EdgeLabelNeighborKey::new(direction, node, label_hash),
                 )),
-            }
-            .to_bytes(),
+            },
             Self::GlobalEdgeLabel { scope, label_hash } => DataKey::Data {
                 scope,
                 kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
                     label_hash,
                 ))),
-            }
-            .to_bytes(),
+            },
         }
     }
 }
@@ -162,6 +160,7 @@ impl TopologyMutationBatch {
 pub(in crate::execution::interpreter) struct TopologyMutationRuntime {
     state: TopologyMutationRuntimeState,
     staged_keys: BTreeSet<Bytes>,
+    staged_memory: Option<query_resources::Reservation>,
     budget: Option<query_resources::Budget>,
 }
 impl std::fmt::Debug for TopologyMutationRuntime {
@@ -485,17 +484,40 @@ impl TopologyMutationRuntime {
             adjacency,
             mut memory,
         } = batch;
-        let mut merges = Vec::with_capacity(bitmaps.len() + adjacency.len());
-        let mut staged_keys = Vec::with_capacity(merges.capacity());
+        let count = bitmaps
+            .len()
+            .checked_add(adjacency.len())
+            .ok_or(HelixDbError::QueryMemoryLimitExceeded)?;
+        if count == 0 {
+            return Ok(());
+        }
+        // The temporary key vector and retained lookup tree own their container
+        // admission. Each encoded key returned by the common batch owns its bytes.
+        let key_vector_memory = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(count.saturating_mul(size_of::<Bytes>())))
+            .transpose()?;
+        if self.staged_memory.is_none() {
+            self.staged_memory = self
+                .budget
+                .as_ref()
+                .map(|budget| budget.reserve(0))
+                .transpose()?;
+        }
+        self.staged_memory
+            .as_mut()
+            .map(|memory| {
+                memory.resize(allocation::btree_bytes::<Bytes, ()>(
+                    self.staged_keys.len().saturating_add(count),
+                ))
+            })
+            .transpose()?;
+        let mut merges = transaction.merge_batch(count)?;
+        let mut staged_keys = Vec::with_capacity(count);
         for (row, delta) in bitmaps {
             let (delta, admission) = delta.into_parts();
-            let key = row.to_bytes();
-            staged_keys.push(key.clone());
-            merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
-                key,
-                delta.members().map(u128::from),
-                delta.encode(),
-            ));
+            staged_keys.push(merges.bitmap(merges::Key::Typed(row.key()), &delta)?);
             let Some(admission) = admission else {
                 continue;
             };
@@ -515,27 +537,20 @@ impl TopologyMutationRuntime {
                     .absorb(admission);
             }
             let delta = edges::AdjacencyMembershipDelta::from_directions(outgoing, incoming);
-            const INCOMING_DIRECTION_TOKEN: u128 = 1_u128 << u64::BITS;
-
             let key = DataKey::Data {
                 scope,
                 kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
-            }
-            .to_bytes();
-            let outgoing = delta.outgoing_members().map(u128::from);
-            let incoming = delta
-                .incoming_members()
-                .map(|neighbor| INCOMING_DIRECTION_TOKEN | u128::from(neighbor));
-            staged_keys.push(key.clone());
-            merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
-                key,
-                outgoing.chain(incoming),
-                delta.encode(),
-            ));
+            };
+            staged_keys.push(merges.adjacency(merges::Key::Typed(key), &delta)?);
         }
 
-        transaction.merge_disjoint_checked_batch(merges).await?;
+        merges.stage().await?;
         self.staged_keys.extend(staged_keys);
+        drop(key_vector_memory);
+        let Some(memory) = self.staged_memory.as_mut() else {
+            return Ok(());
+        };
+        memory.shrink_to(allocation::btree_bytes::<Bytes, ()>(self.staged_keys.len()));
         Ok(())
     }
 
