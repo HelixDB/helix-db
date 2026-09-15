@@ -81,6 +81,7 @@ pub(crate) fn prepare_edges(data: &[u8]) -> Result<PreparedEdges<'_>, EncodingEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BufMut;
 
     #[test]
     fn plain_and_delta_adjacency_match_the_existing_decoder_and_membership_oracle() {

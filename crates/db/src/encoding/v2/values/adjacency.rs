@@ -1,10 +1,11 @@
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use roaring::RoaringTreemap;
 
 use super::codec::{take_slice, take_u32_le, take_u8, ENCODING_TYPE_LEN, U32_LEN};
 use super::indexes::BitmapMembershipDelta;
 use crate::encoding::{error::EncodingError, NodeId};
 
+pub(crate) mod encoding;
 mod prepared;
 pub(crate) use prepared::prepare_edges;
 
@@ -166,23 +167,7 @@ impl AdjacencyMembershipDelta {
     }
 
     pub(crate) fn encode(&self) -> Bytes {
-        let outgoing = self.outgoing.encode();
-        let incoming = self.incoming.encode();
-        let mut bytes = Vec::with_capacity(
-            ADJACENCY_MEMBERSHIP_DELTA_MAGIC.len()
-                + ADJACENCY_RESET_OUT_LEN
-                + BITMAP_LEN_PREFIX_LEN
-                + outgoing.len()
-                + BITMAP_LEN_PREFIX_LEN
-                + incoming.len(),
-        );
-        bytes.extend_from_slice(ADJACENCY_MEMBERSHIP_DELTA_MAGIC);
-        bytes.put_u8(u8::from(self.reset_out));
-        bytes.put_u32_le(u32::try_from(outgoing.len()).expect("outgoing delta length fits u32"));
-        bytes.extend_from_slice(&outgoing);
-        bytes.put_u32_le(u32::try_from(incoming.len()).expect("incoming delta length fits u32"));
-        bytes.extend_from_slice(&incoming);
-        Bytes::from(bytes)
+        self.prepare_encoding().encode()
     }
 
     pub(crate) fn decode_if_delta(bytes: &[u8]) -> Result<Option<Self>, EncodingError> {

@@ -1,10 +1,11 @@
 //! Stored values for lifecycle-managed equality indexes.
 
 mod admission;
+pub(crate) mod encoding;
 
 use std::io::Cursor;
 
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use roaring::RoaringTreemap;
 
 use crate::encoding::error::EncodingError;
@@ -78,27 +79,7 @@ impl BitmapMembershipDelta {
     }
 
     pub(crate) fn encode(&self) -> Bytes {
-        let mut additions = Vec::new();
-        self.additions
-            .serialize_into(&mut additions)
-            .expect("serializing membership additions into memory is infallible");
-        let mut removals = Vec::new();
-        self.removals
-            .serialize_into(&mut removals)
-            .expect("serializing membership removals into memory is infallible");
-        let mut bytes = Vec::with_capacity(
-            BITMAP_MEMBERSHIP_DELTA_MAGIC.len()
-                + BITMAP_MEMBERSHIP_DELTA_LEN_PREFIX_LEN
-                + additions.len()
-                + BITMAP_MEMBERSHIP_DELTA_LEN_PREFIX_LEN
-                + removals.len(),
-        );
-        bytes.extend_from_slice(BITMAP_MEMBERSHIP_DELTA_MAGIC);
-        bytes.put_u32(u32::try_from(additions.len()).expect("roaring additions fit u32"));
-        bytes.extend_from_slice(&additions);
-        bytes.put_u32(u32::try_from(removals.len()).expect("roaring removals fit u32"));
-        bytes.extend_from_slice(&removals);
-        Bytes::from(bytes)
+        self.prepare_encoding().encode()
     }
 
     pub(crate) fn decode_if_delta(bytes: &[u8]) -> Result<Option<Self>, EncodingError> {
