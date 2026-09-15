@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use slatedb::DbTransaction;
-
 use super::contracts::{label_of, EdgeMutationTarget};
 use super::MutationIndexContext;
 use super::*;
@@ -143,7 +141,7 @@ impl ObservedEdgeDeletions {
 impl<'db> ExecutionContext<'db> {
     pub(super) async fn store_edge(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge: EdgeMutationTarget,
         label: &ir::NonEmptyString,
         property_row: &CanonicalPropertyRow,
@@ -154,7 +152,7 @@ impl<'db> ExecutionContext<'db> {
             GraphEntity::edge(edge.edge_id),
             property_row.clone(),
         );
-        crate::search::store_edge_endpoints_scoped(
+        crate::search::stage_edge_endpoints_scoped(
             txn,
             edge.edge_id,
             edge.from,
@@ -213,7 +211,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn set_edge_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         property: Property,
         index_context: &mut MutationIndexContext,
@@ -235,7 +233,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn set_edge_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         property: Property,
         observed: ObservedEdgeRow,
@@ -288,7 +286,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn remove_edge_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         name: &ir::NonEmptyString,
         index_context: &mut MutationIndexContext,
@@ -305,7 +303,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn remove_edge_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         name: &ir::NonEmptyString,
         observed: ObservedEdgeRow,
@@ -362,7 +360,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn observe_edge_rows(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedEdgeRows> {
         let requested = super::observations::RowKeys::new(
@@ -435,7 +433,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn observe_edge_deletions(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_ids: impl IntoIterator<Item = u64>,
         index_context: &MutationIndexContext,
     ) -> Result<ObservedEdgeDeletions> {
@@ -532,7 +530,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn delete_edge(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         index_context: &mut MutationIndexContext,
     ) -> Result<()> {
@@ -547,7 +545,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn delete_edge_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         observed: ObservedEdgeDeletion,
         index_context: &mut MutationIndexContext,
@@ -602,7 +600,7 @@ impl<'db> ExecutionContext<'db> {
                 ir::ExpandDirection::In,
             )?;
         }
-        crate::search::delete_edge_endpoints_scoped(txn, edge_id, self.tenant_scope).await?;
+        crate::search::stage_delete_edge_endpoints_scoped(txn, edge_id, self.tenant_scope).await?;
         index_context
             .maintain_graph_indexes(
                 txn,
@@ -628,7 +626,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn edge_matches_label(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         expected: Option<&ir::NonEmptyString>,
     ) -> Result<bool> {

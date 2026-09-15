@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
+#[cfg(test)]
 use slatedb::DbTransaction;
 
 use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
@@ -117,7 +118,7 @@ impl TopologyMutationRuntime {
     /// Reads topology rows while preserving transaction-local staged overlays.
     pub(in crate::execution::interpreter) async fn observe(
         &self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         keys: &[Bytes],
     ) -> Result<Vec<Option<Bytes>>> {
         let mut values = vec![None; keys.len()];
@@ -390,7 +391,7 @@ impl TopologyMutationRuntime {
     /// Flushes one coalesced epoch and returns to the collecting state.
     pub(in crate::execution::interpreter) async fn flush(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<()> {
         let state = std::mem::take(&mut self.state);
         let batch = match state {
@@ -444,7 +445,7 @@ impl TopologyMutationRuntime {
     /// Flushes the final epoch and seals the runtime for commit.
     pub(in crate::execution::interpreter) async fn prepare(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<()> {
         self.flush(transaction).await?;
         self.state = TopologyMutationRuntimeState::Prepared;

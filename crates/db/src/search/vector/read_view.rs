@@ -5,20 +5,20 @@
 //! interpreter-owned stable snapshot contract. Both delegate the narrow
 //! SlateDB [`DbReadOps`] interface used by vector storage.
 
-use slatedb::{DbReadOps, DbTransaction};
+use slatedb::DbReadOps;
 
 /// The only storage views accepted by request-driven vector search.
 pub(crate) enum VectorReadView<'a, R> {
     /// Read-your-writes view owned by one write request.
-    Transaction(&'a DbTransaction),
+    Transaction(crate::transaction::View<'a>),
     /// Stable view owned by one read request.
     Snapshot(&'a R),
 }
 
 impl<'a, R> VectorReadView<'a, R> {
     /// Binds vector traversal to the request's read/write transaction.
-    pub(crate) const fn transaction(transaction: &'a DbTransaction) -> Self {
-        Self::Transaction(transaction)
+    pub(crate) fn transaction(transaction: &'a impl crate::transaction::Mutation) -> Self {
+        Self::Transaction(transaction.mutation_view())
     }
 
     /// Binds vector traversal to the request's read-only snapshot contract.

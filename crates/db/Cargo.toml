@@ -14,6 +14,7 @@ helix-metrics = { path = "../metrics" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "fs", "time"] }
 futures = "0.3"
 async-trait = "0.1"
+pin-project-lite = "0.2"
 arc-swap = "1"
 foyer = { version = "0.22.0", features = ["serde"] }
 

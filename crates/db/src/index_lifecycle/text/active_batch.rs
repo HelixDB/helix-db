@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
-use slatedb::DbTransaction;
 use tokio::sync::Semaphore;
 
 use crate::config::ActiveTextMutationLimits;
@@ -191,7 +190,7 @@ struct AnalyzedActiveTextDocument {
 
 /// Prepares a complete epoch without staging graph or index rows.
 pub(crate) async fn prepare_active_text_epoch(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     mutations: &mutation::TextMutationSet,
     routes: &index_lifecycle::mutation_catalog::MutationRouteCatalog,
     graphs: Vec<CoalescedActiveTextMutation>,
@@ -409,7 +408,7 @@ pub(crate) async fn prepare_active_text_epoch(
 }
 
 async fn validate_final_graph_state(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     graph: &CoalescedActiveTextMutation,
 ) -> Result<()> {
     let expected = graph.final_state.as_ref().map(|row| row.encoded().clone());
@@ -558,7 +557,7 @@ fn insert_retirement(
 }
 
 async fn prepare_destination(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     destination: DestinationWork,
     limits: ActiveTextMutationLimits,
 ) -> Result<PreparedDestination> {
@@ -954,7 +953,7 @@ struct AppendSplitRequest<'a> {
 }
 
 async fn append_split(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     request: AppendSplitRequest<'_>,
 ) -> Result<(work::TextManifestRootValue, Option<PreparedRow>, u32)> {
     let AppendSplitRequest {
@@ -1104,7 +1103,7 @@ async fn append_split(
 
 /// Stages index-owned rows prepared from this transaction's observed snapshot.
 pub(crate) fn stage_active_text_epoch(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     published: &super::active_publication::PublishedActiveTextEpoch,
 ) -> Result<()> {
     let prepared = published.prepared();

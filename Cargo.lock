@@ -1280,6 +1280,7 @@ dependencies = [
  "object_store 0.12.5",
  "parking_lot",
  "parquet",
+ "pin-project-lite",
  "proptest",
  "rand 0.10.2",
  "range-cache",

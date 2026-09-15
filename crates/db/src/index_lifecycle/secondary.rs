@@ -183,7 +183,7 @@ impl PreparedSecondaryOperationStep {
     /// Stages the prepared exact-key batch or exclusive empty-prefix barrier.
     pub(crate) async fn stage(
         &self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         scope: DataScope,
         operation: &IndexOperationRecord,
         limits: SearchIndexBatchLimits,
@@ -338,7 +338,7 @@ impl SecondaryMutationRuntime {
     /// Observes exclusive keys once, applies changes in input order, and clears the epoch.
     pub(crate) async fn flush(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         mutations: &SecondaryMutationSet,
     ) -> Result<()> {
         let state = std::mem::take(&mut self.state);
@@ -458,7 +458,7 @@ impl SecondaryMutationRuntime {
     /// Flushes the final epoch and seals the runtime for commit.
     pub(crate) async fn prepare(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         mutations: &SecondaryMutationSet,
     ) -> Result<()> {
         self.flush(transaction, mutations).await?;
@@ -538,7 +538,7 @@ impl SecondaryMutationSet {
     feature = "index-lifecycle-testing"
 ))]
 pub(crate) async fn load_mutation_set(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
 ) -> Result<SecondaryMutationSet> {
     let logical_prefix = ScopedKey::logical_prefix(RecordKind::IndexRecord);
@@ -602,7 +602,7 @@ pub(crate) async fn load_mutation_set(
     feature = "index-lifecycle-testing"
 ))]
 pub(crate) async fn maintain_entity(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     mutations: &SecondaryMutationSet,
     entity_kind: IndexElementKind,
@@ -642,7 +642,7 @@ pub(crate) async fn maintain_entity(
 
 /// Preserves the original secondary value across repeated coalesced mutations.
 async fn stage_secondary_build_delta(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &SecondaryMutationTarget,
     entity: IndexEntity,
@@ -864,7 +864,7 @@ async fn prepare_secondary_catch_up(
 }
 
 async fn step_build(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -971,7 +971,7 @@ enum ObservedSourceScanCandidateKind {
 }
 
 async fn scan_source(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -1248,7 +1248,7 @@ async fn scan_source(
 }
 
 async fn catch_up(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -1375,7 +1375,7 @@ struct ExactCatchUpRow {
     reason = "the prepared catch-up boundary requires exact operation, definition, limits, keys, and scheduling policy"
 )]
 async fn catch_up_exact(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -1616,7 +1616,7 @@ async fn catch_up_exact(
 }
 
 async fn validate_and_release_applied(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -1743,7 +1743,7 @@ async fn validate_and_release_applied(
 }
 
 async fn step_cleanup(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -1829,7 +1829,7 @@ async fn step_cleanup(
 }
 
 async fn delete_generation_rows(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     index_id: IndexId,
     generation: IndexGenerationId,
@@ -1976,7 +1976,7 @@ async fn delete_generation_rows(
 }
 
 async fn delete_delta_and_applied_rows(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     index_id: IndexId,
     generation: IndexGenerationId,
@@ -2064,7 +2064,7 @@ enum CleanupBatch {
     feature = "index-lifecycle-testing"
 ))]
 async fn apply_active_change(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &SecondaryMutationTarget,
     entity_id: IndexEntityId,
@@ -2179,7 +2179,7 @@ async fn apply_active_change(
 }
 
 fn apply_active_change_from_overlay(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &SecondaryMutationTarget,
     entity_id: IndexEntityId,
@@ -2263,7 +2263,7 @@ fn apply_active_change_from_overlay(
 }
 
 async fn reconciliation_plan(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     state_key: IndexEntityStateKey,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -2542,7 +2542,7 @@ impl EntityWritePlan {
         });
     }
 
-    async fn stage(&self, transaction: &DbTransaction) -> Result<()> {
+    async fn stage(&self, transaction: &impl crate::transaction::Mutation) -> Result<()> {
         let mut bitmap_changes = BTreeMap::<Bytes, BTreeMap<u64, bool>>::new();
         for write in &self.writes {
             match write {
@@ -2581,7 +2581,7 @@ enum EntityWrite {
 }
 
 async fn stage_bitmap_changes(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     changes: &BTreeMap<Bytes, BTreeMap<u64, bool>>,
 ) -> Result<()> {
     let mut merges = Vec::with_capacity(changes.len());
@@ -3334,7 +3334,7 @@ pub(crate) fn authoritative_property_key(scope: DataScope, entity: IndexEntity) 
 }
 
 async fn load_operation_index(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
 ) -> Result<IndexRecordV2> {
@@ -3354,7 +3354,7 @@ async fn load_operation_index(
 }
 
 async fn generation_has_rows(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     kind: RecordKind,
     index_id: IndexId,

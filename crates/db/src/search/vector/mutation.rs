@@ -13,9 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "production-coverage"))]
 use slatedb::DbReadOps;
-use slatedb::DbTransaction;
 
 use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
 use crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors;
@@ -1071,7 +1069,7 @@ impl<D: Distance> VectorIndex<D> {
     /// primitives used by the surrounding mutation session.
     pub(super) async fn select_neighbors_heuristic(
         &self,
-        txn: &DbTransaction,
+        txn: &(impl DbReadOps + Send + Sync),
         query: &Item<'_, D>,
         candidates: &[Candidate],
         maximum_neighbors: usize,

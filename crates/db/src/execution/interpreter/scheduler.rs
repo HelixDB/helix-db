@@ -287,7 +287,6 @@ fn is_parallel_isolated_step(step: &exec::ExecStep) -> bool {
 #[cfg(test)]
 mod tests {
     use helix_planner::{context, exec, ir, properties, trace};
-    use slatedb::IsolationLevel;
 
     use super::super::runtime_context;
     use super::super::test_support;
@@ -489,11 +488,9 @@ mod tests {
             exec::ExecExecutionStage::Parallel(_)
         ));
 
-        let txn = db
-            .inner_db()
-            .begin(IsolationLevel::Snapshot)
+        let txn = crate::transaction::Owned::begin(&db.inner_db(), None)
             .await
-            .expect("snapshot transaction begins");
+            .expect("request transaction begins");
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
         context.request_write_scope = runtime_context::RequestWriteScopeState::Active(Box::new(
             runtime_context::ActiveWriteTx {

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use slatedb::{DbReadOps, DbTransaction};
+use slatedb::DbReadOps;
 
 use crate::config::TextAnalyzerKind;
 use crate::encoding::v2::keys as index_keys;
@@ -238,7 +238,10 @@ impl PreparedTextStatisticsBatch {
     }
 
     /// Revalidates the first observation of every composed row.
-    pub(crate) async fn validate(&self, transaction: &DbTransaction) -> Result<()> {
+    pub(crate) async fn validate(
+        &self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<()> {
         let keys = self.rows.keys().cloned().collect::<Vec<_>>();
         let observations = if keys.is_empty() {
             Vec::new()
@@ -256,7 +259,10 @@ impl PreparedTextStatisticsBatch {
     }
 
     /// Stages only the final replacement for every composed row.
-    pub(crate) fn stage_validated(&self, transaction: &DbTransaction) -> Result<()> {
+    pub(crate) fn stage_validated(
+        &self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<()> {
         self.stage_transaction_observed(transaction)
     }
 
@@ -264,7 +270,10 @@ impl PreparedTextStatisticsBatch {
     ///
     /// No second read can strengthen validation inside the same snapshot. The
     /// serializable commit remains the authority for concurrent changes.
-    pub(crate) fn stage_transaction_observed(&self, transaction: &DbTransaction) -> Result<()> {
+    pub(crate) fn stage_transaction_observed(
+        &self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<()> {
         for row in self.rows.values() {
             if row.replacement == row.observed {
                 continue;
@@ -373,7 +382,7 @@ impl ActiveTextStatisticsMutation {
 
 /// Prepares one Active transition against the latest composed epoch state.
 pub(crate) async fn prepare_active_in_batch(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: &PreparedTextStatisticsBatch,
     mutation: ActiveTextStatisticsMutation,
 ) -> Result<PreparedTextStatisticsTransition> {
@@ -381,7 +390,7 @@ pub(crate) async fn prepare_active_in_batch(
 }
 
 async fn prepare_active_from(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: Option<&PreparedTextStatisticsBatch>,
     mutation: ActiveTextStatisticsMutation,
 ) -> Result<PreparedTextStatisticsTransition> {
@@ -434,7 +443,7 @@ async fn prepare_active_from(
 
 /// Prepares a BUILD mutation; an absent marker means the source scan never accounted it.
 pub(crate) async fn prepare_build_mutation(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     index_id: index_lifecycle::IndexId,
     generation: index_lifecycle::IndexGenerationId,
@@ -455,7 +464,7 @@ pub(crate) async fn prepare_build_mutation(
 
 /// Prepares one BUILD mutation against the latest composed epoch state.
 pub(crate) async fn prepare_build_mutation_in_batch(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: &PreparedTextStatisticsBatch,
     scope: DataScope,
     index_id: index_lifecycle::IndexId,
@@ -476,7 +485,7 @@ pub(crate) async fn prepare_build_mutation_in_batch(
 }
 
 async fn prepare_build_mutation_from(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: Option<&PreparedTextStatisticsBatch>,
     scope: DataScope,
     index_id: index_lifecycle::IndexId,
@@ -505,7 +514,7 @@ async fn prepare_build_mutation_from(
 
 /// Prepares one source contribution against the latest state of a composed batch.
 pub(crate) async fn prepare_source_scan_in_batch(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: &PreparedTextStatisticsBatch,
     scope: DataScope,
     index_id: index_lifecycle::IndexId,
@@ -579,7 +588,7 @@ pub(crate) async fn load_entity_contribution(
 /// Revalidates every observed row without buffering writes.
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn validate(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     prepared: &PreparedTextStatisticsTransition,
 ) -> Result<()> {
     for row in &prepared.rows {
@@ -595,7 +604,7 @@ pub(crate) async fn validate(
 /// Buffers a transition after its complete request-level validation pass.
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) fn stage_validated(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     prepared: &PreparedTextStatisticsTransition,
 ) -> Result<()> {
     for row in &prepared.rows {
@@ -611,7 +620,7 @@ pub(crate) fn stage_validated(
 }
 
 async fn prepare_transition(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     request: TextStatisticsTransitionRequest<'_>,
 ) -> Result<PreparedTextStatisticsTransition> {
     let TextStatisticsTransitionRequest {
@@ -825,7 +834,7 @@ fn apply_signed(current: u64, delta: i128) -> Result<u64> {
 }
 
 async fn read_document_count(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: Option<&PreparedTextStatisticsBatch>,
     scope: DataScope,
     index_id: index_lifecycle::IndexId,
@@ -842,7 +851,7 @@ async fn read_document_count(
 }
 
 async fn read_marker(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: Option<&PreparedTextStatisticsBatch>,
     scope: DataScope,
     index_id: index_lifecycle::IndexId,
@@ -874,7 +883,7 @@ async fn read_marker(
 }
 
 async fn read_value(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     batch: Option<&PreparedTextStatisticsBatch>,
     key: &[u8],
 ) -> Result<Option<Bytes>> {

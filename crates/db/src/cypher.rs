@@ -99,7 +99,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<HelixDbError> for Error {
     fn from(error: HelixDbError) -> Self {
-        let (detail, message) = if matches!(error, HelixDbError::QueryMemoryLimitExceeded) {
+        let (detail, message) = if error.error_code()
+            == helix_ast::error_code::QueryErrorCode::QueryMemoryLimitExceeded
+        {
             ("MemoryLimit", "query live buffers exceed the memory budget")
         } else if matches!(
             error,

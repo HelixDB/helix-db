@@ -3005,6 +3005,17 @@ pub async fn store_edge_endpoints_scoped(
     to: NodeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
+    stage_edge_endpoints_scoped(txn, edge_id, from, to, tenant_scope).await
+}
+
+/// Stages canonical endpoint bytes through borrowed native mutation authority.
+pub(crate) async fn stage_edge_endpoints_scoped(
+    txn: &impl crate::transaction::Mutation,
+    edge_id: EdgeId,
+    from: NodeId,
+    to: NodeId,
+    tenant_scope: DataScope,
+) -> Result<(), HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::EdgeEndpoints(EdgeEndpointsKey::new(edge_id)),
@@ -3051,6 +3062,15 @@ pub async fn delete_edge_endpoints(
 
 pub async fn delete_edge_endpoints_scoped(
     txn: &DbTransaction,
+    edge_id: EdgeId,
+    tenant_scope: DataScope,
+) -> Result<(), HelixDbError> {
+    stage_delete_edge_endpoints_scoped(txn, edge_id, tenant_scope).await
+}
+
+/// Stages endpoint removal without exposing request transaction ownership.
+pub(crate) async fn stage_delete_edge_endpoints_scoped(
+    txn: &impl crate::transaction::Mutation,
     edge_id: EdgeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {

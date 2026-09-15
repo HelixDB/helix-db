@@ -14,8 +14,9 @@
 //! Measurement counts existing encoded key/value bytes. It neither wraps nor
 //! changes vector keys, vector row values, metadata, or the SlateDB wire format.
 
+use crate::transaction::Mutation;
 use std::collections::BTreeMap;
-use std::ops::{Bound, Deref};
+use std::ops::Bound;
 #[cfg(any(test, feature = "production-coverage"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -74,12 +75,12 @@ impl VectorWriteMeasurement {
 
 /// Borrowed SlateDB transaction that records its final vector write set.
 ///
-/// Read methods continue through [`Deref`] to the underlying transaction, so
+/// Read methods retain the borrowed transaction admission contract, so
 /// HNSW traversal observes earlier staged writes exactly as normal. Vector code
 /// must use this type's `put`, `put_bytes`, and `delete` methods for every write
 /// that belongs to the measured invariant.
 pub(crate) struct MeasuredVectorTransaction<'txn> {
-    inner: &'txn slatedb::DbTransaction,
+    inner: crate::transaction::View<'txn>,
     recorder: VectorWriteRecorder,
     #[cfg(any(test, feature = "production-coverage"))]
     writes_until_failure: AtomicUsize,
@@ -89,9 +90,9 @@ pub(crate) struct MeasuredVectorTransaction<'txn> {
 
 impl<'txn> MeasuredVectorTransaction<'txn> {
     /// Starts empty measurement around an existing caller-owned transaction.
-    pub(crate) fn new(inner: &'txn slatedb::DbTransaction) -> Self {
+    pub(crate) fn new(inner: &'txn impl Mutation) -> Self {
         Self {
-            inner,
+            inner: inner.mutation_view(),
             recorder: VectorWriteRecorder::new(),
             #[cfg(any(test, feature = "production-coverage"))]
             writes_until_failure: AtomicUsize::new(NO_INJECTED_FAILURE),
@@ -269,7 +270,7 @@ impl PlannedVectorMutation {
     /// vector state. Lifecycle callers establish that contract only for a
     /// builder-exclusive hidden generation whose foreground changes are durable
     /// deltas. Any staging failure must abort the target outbox transaction.
-    pub(crate) fn apply_to(self, target: &slatedb::DbTransaction) -> Result<(), slatedb::Error> {
+    pub(crate) fn apply_to(self, target: &impl Mutation) -> Result<(), slatedb::Error> {
         self.apply_with(|write| match write {
             PlannedVectorWrite::Put { key, value } => target.put_bytes(key, value),
             PlannedVectorWrite::Delete { key } => target.delete(key),
@@ -309,26 +310,15 @@ impl VectorWriteRecorder {
     }
 
     /// Borrows a SlateDB transaction while sharing this recorder's write state.
-    pub(crate) fn bind<'txn>(
-        &self,
-        inner: &'txn slatedb::DbTransaction,
-    ) -> MeasuredVectorTransaction<'txn> {
+    pub(crate) fn bind<'txn>(&self, inner: &'txn impl Mutation) -> MeasuredVectorTransaction<'txn> {
         MeasuredVectorTransaction {
-            inner,
+            inner: inner.mutation_view(),
             recorder: self.clone(),
             #[cfg(any(test, feature = "production-coverage"))]
             writes_until_failure: AtomicUsize::new(NO_INJECTED_FAILURE),
             #[cfg(any(test, feature = "production-coverage"))]
             reads_until_failure: AtomicUsize::new(NO_INJECTED_FAILURE),
         }
-    }
-}
-
-impl Deref for MeasuredVectorTransaction<'_> {
-    type Target = slatedb::DbTransaction;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner
     }
 }
 
@@ -604,7 +594,7 @@ mod tests {
     use std::sync::Arc;
 
     use slatedb::object_store::memory::InMemory;
-    use slatedb::IsolationLevel;
+    use slatedb::{DbReadOps, IsolationLevel};
 
     use super::*;
 

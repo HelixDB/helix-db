@@ -163,7 +163,7 @@ pub enum SecondaryIndexValueError {
 pub enum HelixDbError {
     /// Error from the underlying SlateDB storage
     #[error("Storage error: {0}")]
-    Storage(#[from] slatedb::Error),
+    Storage(#[source] slatedb::Error),
 
     /// Error encoding/decoding graph data
     #[error("Encoding error: {0}")]
@@ -485,10 +485,23 @@ impl From<ConfigError> for HelixDbError {
     }
 }
 
+impl From<slatedb::Error> for HelixDbError {
+    fn from(error: slatedb::Error) -> Self {
+        if crate::transaction::is_admission_failure(&error) {
+            Self::QueryMemoryLimitExceeded
+        } else {
+            Self::Storage(error)
+        }
+    }
+}
+
 impl HelixDbError {
     /// Stable machine-readable code for this database failure.
     pub fn error_code(&self) -> error_code::QueryErrorCode {
         match self {
+            Self::Storage(error) if crate::transaction::is_admission_failure(error) => {
+                error_code::QueryErrorCode::QueryMemoryLimitExceeded
+            }
             Self::Storage(error) if error.kind() == ErrorKind::Transaction => {
                 error_code::QueryErrorCode::TransactionConflict
             }

@@ -5,8 +5,6 @@
 //! writes. Canonical V2 generations remain in the transaction-owned family
 //! mutation sets.
 
-use slatedb::{DbTransaction, IsolationLevel};
-
 use super::super::runtime_context::{
     ActiveWriteTx, PendingCatalogFreshness, RequestWriteScopeState,
 };
@@ -14,7 +12,7 @@ use super::*;
 
 /// Temporarily extracted mutation state returned after one operation finishes.
 pub(super) struct MutationWriteScope {
-    pub(super) txn: DbTransaction,
+    pub(super) txn: crate::transaction::Owned,
     pub(super) index_context: MutationIndexContext,
     request_scoped: bool,
 }
@@ -64,7 +62,9 @@ impl<'db> ExecutionContext<'db> {
     }
 
     /// Opens the one snapshot transaction owned by the request scope.
-    pub(super) async fn begin_write_tx(&mut self) -> Result<(DbTransaction, MutationIndexContext)> {
+    pub(super) async fn begin_write_tx(
+        &mut self,
+    ) -> Result<(crate::transaction::Owned, MutationIndexContext)> {
         self.check_execution_deadline()?;
         let catalog_freshness = std::mem::replace(
             &mut self.pending_catalog_freshness,
@@ -88,11 +88,8 @@ impl<'db> ExecutionContext<'db> {
         self.check_execution_deadline()?;
         let scope_permit = self.db.index_mutation_scope_permit(self.tenant_scope).await;
         self.check_execution_deadline()?;
-        let transaction = self
-            .writer()?
-            .db()
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await?;
+        let transaction =
+            crate::transaction::Owned::begin(self.writer()?.db(), self.row_memory.as_ref()).await?;
         self.check_execution_deadline()?;
         let mutation_catalog =
             crate::index_lifecycle::mutation_catalog::MutationIndexCatalog::load(
@@ -326,6 +323,7 @@ impl<'db> ExecutionContext<'db> {
 
 #[cfg(test)]
 mod additional_tests {
+    use crate::transaction::Mutation;
     use std::num::NonZeroU64;
     use std::sync::Arc;
     use std::time::Duration;

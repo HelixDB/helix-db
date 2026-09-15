@@ -10,7 +10,6 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::encoding::v2::keys::indexes::vector::{
     VectorKey, VectorLayer0NeighborsKey, VectorUpperNeighborsKey,
@@ -193,7 +192,7 @@ impl ActiveVectorMutationRuntime {
     /// Applies one Active V2 upsert without flushing reusable neighbor state.
     pub(crate) async fn upsert(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         generation: &ValidatedVectorGenerationHandle,
         cache_writes: &VectorCacheWriteSet,
         node_id: NodeId,
@@ -252,7 +251,7 @@ impl ActiveVectorMutationRuntime {
     /// Applies one Active V2 deletion and returns whether metadata is now empty.
     pub(crate) async fn delete(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         generation: &ValidatedVectorGenerationHandle,
         cache_writes: &VectorCacheWriteSet,
         node_id: NodeId,
@@ -304,7 +303,7 @@ impl ActiveVectorMutationRuntime {
     /// Flushes and removes one exact generation before physical-empty validation.
     pub(crate) async fn drain_generation(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         generation: &ValidatedVectorGenerationHandle,
     ) -> Result<(), HelixDbError> {
         let open = self.open_mut()?;
@@ -326,14 +325,17 @@ impl ActiveVectorMutationRuntime {
     }
 
     /// Flushes dirty rows for read-your-writes while retaining clean entries.
-    pub(crate) async fn flush(&mut self, transaction: &DbTransaction) -> Result<(), HelixDbError> {
+    pub(crate) async fn flush(
+        &mut self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<(), HelixDbError> {
         self.open_mut()?.flush(transaction).await
     }
 
     /// Performs the final deterministic flush and seals the runtime for commit.
     pub(crate) async fn prepare(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), HelixDbError> {
         let open = self.open_mut()?;
         open.flush(transaction).await?;
@@ -378,7 +380,7 @@ impl<D: Distance> ActiveMetricSession<D> {
     )]
     async fn upsert(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         generation: &ValidatedVectorGenerationHandle,
         cache_writes: &VectorCacheWriteSet,
         node_id: NodeId,
@@ -434,7 +436,7 @@ impl<D: Distance> ActiveMetricSession<D> {
 
     async fn delete(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         generation: &ValidatedVectorGenerationHandle,
         cache_writes: &VectorCacheWriteSet,
         node_id: NodeId,
@@ -481,7 +483,7 @@ impl<D: Distance> ActiveMetricSession<D> {
 
     async fn take_or_load(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         generation: &ValidatedVectorGenerationHandle,
         cache_writes: &VectorCacheWriteSet,
         create: bool,
@@ -553,7 +555,10 @@ impl<D: Distance> ActiveMetricSession<D> {
         })
     }
 
-    async fn flush(&mut self, transaction: &DbTransaction) -> Result<(), HelixDbError> {
+    async fn flush(
+        &mut self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<(), HelixDbError> {
         let mut identities = self.entries.keys().cloned().collect::<Vec<_>>();
         identities.sort();
         let measured = MeasuredVectorTransaction::new(transaction);
@@ -574,7 +579,7 @@ impl<D: Distance> ActiveMetricSession<D> {
 
     async fn drain(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         identity: &VectorGenerationIdentity,
     ) -> Result<(), HelixDbError> {
         let Some(mut entry) = self.entries.remove(identity) else {
@@ -647,13 +652,19 @@ impl<D: Distance> ActiveMutationEntry<D> {
 }
 
 impl OpenActiveVectorMutations {
-    async fn flush(&mut self, transaction: &DbTransaction) -> Result<(), HelixDbError> {
+    async fn flush(
+        &mut self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<(), HelixDbError> {
         self.cosine.flush(transaction).await?;
         self.euclidean.flush(transaction).await?;
         self.manhattan.flush(transaction).await
     }
 
-    async fn enforce_limits(&mut self, transaction: &DbTransaction) -> Result<(), HelixDbError> {
+    async fn enforce_limits(
+        &mut self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<(), HelixDbError> {
         loop {
             let payload_bytes = self.retained_payload_bytes();
             let payload_pressure = payload_bytes > self.max_payload_bytes;
@@ -983,7 +994,7 @@ fn evict_item<D: Distance>(
 }
 
 async fn evict_neighbor<D: Distance>(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     session: &mut ActiveMetricSession<D>,
     identity: &VectorGenerationIdentity,
     row: NeighborRowId,

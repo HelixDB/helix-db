@@ -13,7 +13,6 @@
 //! tenant identity before any HNSW or lifecycle row is staged.
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
@@ -179,7 +178,7 @@ impl VectorMutationSet {
 /// commit rather than allowing writes to cross a lifecycle boundary.
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn load_mutation_set(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
 ) -> Result<VectorMutationSet> {
     let logical_prefix =
@@ -241,7 +240,7 @@ pub(crate) async fn load_mutation_set(
     feature = "index-lifecycle-testing"
 ))]
 pub(crate) async fn maintain_entity_with_runtime(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     mutations: &VectorMutationSet,
     runtime: &mut vector::ActiveVectorMutationRuntime,
@@ -259,7 +258,7 @@ pub(crate) async fn maintain_entity_with_runtime(
 }
 
 async fn maintain_target(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     runtime: &mut vector::ActiveVectorMutationRuntime,
@@ -318,7 +317,7 @@ async fn maintain_target(
 
 /// Preserves the original partition across repeated coalesced mutations.
 async fn stage_vector_build_delta(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     entity: IndexEntity,
@@ -373,7 +372,7 @@ async fn stage_vector_build_delta(
 
 /// Maintains only vector targets selected by the transaction-owned router.
 pub(crate) async fn maintain_routed_entity_with_runtime(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     mutations: &VectorMutationSet,
     routes: &super::mutation_catalog::RoutedMutationTargets<'_>,
@@ -417,7 +416,7 @@ pub(crate) async fn maintain_routed_entity_with_runtime(
     feature = "index-lifecycle-testing"
 ))]
 pub(crate) async fn maintain_entity(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     mutations: &VectorMutationSet,
     cache_writes: &VectorCacheWriteSet,
@@ -444,7 +443,7 @@ pub(crate) async fn maintain_entity(
     reason = "active mutation requires the exact transaction, generation, cache, entity, and state transition"
 )]
 async fn maintain_active(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     handle: &ActiveIndexHandle,
@@ -505,7 +504,7 @@ async fn maintain_active(
     reason = "the distance-specialized mutation owns one complete graph state transition"
 )]
 async fn maintain_active_with_distance<D: Distance>(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     handle: &ActiveIndexHandle,
@@ -588,7 +587,7 @@ async fn maintain_active_with_distance<D: Distance>(
     reason = "the removal binds exact lifecycle and transaction identity before physical access"
 )]
 async fn remove_active_document<D: Distance>(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     active: &ActiveIndexHandle,
@@ -640,7 +639,7 @@ async fn remove_active_document<D: Distance>(
 /// metadata, and the optional legacy transaction guard disappear atomically.
 /// Shared cache retirement is recorded only as a post-commit effect.
 async fn reclaim_empty_tenant_partition<D: Distance>(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     generation: &vector::ValidatedVectorGenerationHandle,
@@ -731,7 +730,7 @@ async fn reclaim_empty_tenant_partition<D: Distance>(
     reason = "the upsert binds exact lifecycle and transaction identity before physical access"
 )]
 async fn upsert_active_document<D: Distance>(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     active: &ActiveIndexHandle,
@@ -765,7 +764,7 @@ async fn upsert_active_document<D: Distance>(
 }
 
 async fn resolve_active_physical(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     target: &VectorMutationTarget,
     active: &ActiveIndexHandle,

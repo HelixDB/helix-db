@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use slatedb::object_store::ObjectStore;
-use slatedb::DbTransaction;
 
 use crate::config::ActiveTextMutationLimits;
 use crate::encoding::v2::keys::scope::DataScope;
@@ -58,7 +57,7 @@ impl ActiveTextMutationRuntime {
     #[cfg(test)]
     pub(crate) async fn collect(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         mutation: GraphMutationTransition,
         limits: ActiveTextMutationLimits,
     ) -> Result<()> {
@@ -148,7 +147,7 @@ impl ActiveTextMutationRuntime {
     /// Drains one epoch, stages its text effects, and returns to empty collecting.
     pub(crate) async fn flush(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         mutations: &super::mutation::TextMutationSet,
         routes: &crate::index_lifecycle::mutation_catalog::MutationRouteCatalog,
         limits: ActiveTextMutationLimits,
@@ -193,7 +192,7 @@ impl ActiveTextMutationRuntime {
     /// Flushes the final epoch and transitions irreversibly to prepared.
     pub(crate) async fn prepare(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         mutations: &super::mutation::TextMutationSet,
         routes: &crate::index_lifecycle::mutation_catalog::MutationRouteCatalog,
         limits: ActiveTextMutationLimits,

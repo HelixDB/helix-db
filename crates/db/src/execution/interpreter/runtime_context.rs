@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arrayvec::ArrayVec;
-use slatedb::DbTransaction;
 
 use super::*;
 
@@ -45,7 +44,7 @@ impl ProjectionReadCounters {
 }
 
 pub(in crate::execution::interpreter) struct ActiveWriteTx {
-    pub(in crate::execution::interpreter) txn: DbTransaction,
+    pub(in crate::execution::interpreter) txn: crate::transaction::Owned,
     pub(in crate::execution::interpreter) index_context: super::mutation::MutationIndexContext,
 }
 

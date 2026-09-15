@@ -6,6 +6,7 @@ use crate::{
     index_lifecycle::graph_mutation::CanonicalPropertyRow,
 };
 use helix_planner::context;
+use slatedb::DbReadOps;
 
 #[tokio::test]
 async fn pending_property_versions_coalesce_without_releasing_shared_index_owners() {
@@ -86,13 +87,16 @@ async fn pending_property_versions_coalesce_without_releasing_shared_index_owner
             Some(&budget),
         )
         .unwrap();
+    assert!(
+        budget.available() > coalesced,
+        "the tombstone releases the pending property payload"
+    );
     assert!(scope
         .txn
         .get(entity.property_key(context.tenant_scope))
         .await
         .unwrap()
         .is_none());
-    assert!(budget.available() > coalesced);
     drop(scope);
     assert_eq!(budget.available(), 1024 * 1024);
     db.close().await.unwrap();
@@ -185,7 +189,14 @@ async fn pending_property_admission_precedes_backend_writes_and_survives_prepara
         "sealing runtimes retains pending property admission"
     );
     scope.txn.commit().await.unwrap();
-    assert_eq!(budget.available(), before);
+    assert!(
+        budget.available() > before,
+        "commit releases the completed read ledger"
+    );
+    assert!(
+        budget.available() <= 128 * 1024 - storage_bytes.len(),
+        "prepared property bytes remain admitted after the read ledger ends"
+    );
     drop(prepared);
     assert_eq!(budget.available(), 128 * 1024);
     assert_eq!(

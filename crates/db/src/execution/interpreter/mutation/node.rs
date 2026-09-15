@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use slatedb::DbTransaction;
-
 use super::contracts::{decode_stored_edges, label_of};
 use super::MutationIndexContext;
 use super::*;
@@ -54,7 +52,7 @@ impl ObservedNodeRows {
 impl<'db> ExecutionContext<'db> {
     pub(super) async fn store_node(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         properties: Vec<Property>,
         index_context: &mut MutationIndexContext,
@@ -102,7 +100,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn set_node_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         property: Property,
         index_context: &mut MutationIndexContext,
@@ -131,7 +129,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn set_node_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         property: Property,
         observed: Option<CanonicalPropertyRow>,
@@ -229,7 +227,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn remove_node_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         name: &ir::NonEmptyString,
         index_context: &mut MutationIndexContext,
@@ -257,7 +255,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn remove_node_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         name: &ir::NonEmptyString,
         observed: Option<CanonicalPropertyRow>,
@@ -316,7 +314,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn observe_node_rows(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedNodeRows> {
         let requested = super::observations::RowKeys::new(
@@ -384,7 +382,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn observe_node_existence(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedNodeExistence> {
         let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
@@ -412,7 +410,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn delete_node(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         index_context: &mut MutationIndexContext,
     ) -> Result<()> {
@@ -478,7 +476,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn incident_edge_ids(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         index_context: &MutationIndexContext,
     ) -> Result<BTreeSet<u64>> {
@@ -540,7 +538,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn ensure_node_exists_in_tx(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
     ) -> Result<()> {
         let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(

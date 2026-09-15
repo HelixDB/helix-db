@@ -31,7 +31,7 @@ impl Pending {
     /// version remains admitted throughout replacement.
     pub(super) fn stage(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         scope: DataScope,
         entity: GraphEntity,
         value: Option<properties::Encoded>,

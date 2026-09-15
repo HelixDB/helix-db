@@ -30,6 +30,7 @@ mod query_resources;
 pub mod query_service;
 mod runtime_dependencies;
 pub mod search;
+mod transaction;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 

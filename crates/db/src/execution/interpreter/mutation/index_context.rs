@@ -126,7 +126,7 @@ impl MutationIndexContext {
     /// Routes one complete graph transition through every configured family.
     pub(crate) async fn maintain_graph_indexes(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         graph: crate::index_lifecycle::graph_mutation::GraphMutationTransition,
         text_limits: crate::config::ActiveTextMutationLimits,
         budget: Option<&crate::query_resources::Budget>,
@@ -159,7 +159,7 @@ impl MutationIndexContext {
     /// Flushes one topology epoch before topology-dependent reads.
     pub(crate) async fn flush_topology(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.topology_runtime.flush(transaction).await
     }
@@ -167,7 +167,7 @@ impl MutationIndexContext {
     /// Reads current topology rows through the runtime's staged overlay.
     pub(crate) async fn observe_topology(
         &self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         keys: &[bytes::Bytes],
     ) -> Result<Vec<Option<bytes::Bytes>>, crate::HelixDbError> {
         self.topology_runtime.observe(transaction, keys).await
@@ -176,7 +176,7 @@ impl MutationIndexContext {
     /// Flushes and seals topology state at the commit boundary.
     pub(crate) async fn prepare_topology(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.topology_runtime.prepare(transaction).await
     }
@@ -184,7 +184,7 @@ impl MutationIndexContext {
     /// Flushes routed secondary mutations through one ordered observation batch.
     pub(crate) async fn flush_secondary(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.secondary_runtime
             .flush(transaction, &self.secondary)
@@ -194,7 +194,7 @@ impl MutationIndexContext {
     /// Flushes and seals the final secondary mutation epoch.
     pub(crate) async fn prepare_secondary(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.secondary_runtime
             .prepare(transaction, &self.secondary)
@@ -204,7 +204,7 @@ impl MutationIndexContext {
     /// Flushes Active vector rows before a non-mutation operation reads the transaction.
     pub(crate) async fn flush_active_vectors(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.active_vector_runtime.flush(transaction).await
     }
@@ -212,7 +212,7 @@ impl MutationIndexContext {
     /// Drains one Active text epoch before a transaction-visible read.
     pub(crate) async fn flush_active_text(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         limits: crate::config::ActiveTextMutationLimits,
         object_store: &Arc<dyn slatedb::object_store::ObjectStore>,
         database: &str,
@@ -235,7 +235,7 @@ impl MutationIndexContext {
     /// Flushes the final Active text epoch and seals its runtime.
     pub(crate) async fn prepare_active_text(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         limits: crate::config::ActiveTextMutationLimits,
         object_store: &Arc<dyn slatedb::object_store::ObjectStore>,
         database: &str,
@@ -258,7 +258,7 @@ impl MutationIndexContext {
     /// Seals Active vector state after its final deterministic flush.
     pub(crate) async fn prepare_active_vectors(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.active_vector_runtime.prepare(transaction).await
     }
@@ -267,7 +267,7 @@ impl MutationIndexContext {
     #[cfg(test)]
     pub(crate) async fn stage_active_vector_for_test(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         generation: &vector::ValidatedVectorGenerationHandle,
         entity_id: u64,
         value: &[f32],

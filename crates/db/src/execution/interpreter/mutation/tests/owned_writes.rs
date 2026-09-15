@@ -10,6 +10,7 @@ use crate::{
 };
 use helix_planner::{context, ir, relational};
 use serde_json::json;
+use slatedb::DbReadOps;
 
 #[tokio::test]
 async fn canonical_writes_share_payloads_through_edits_and_transaction_completion() {

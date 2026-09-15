@@ -59,13 +59,21 @@ async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() 
             .rows,
         vec![vec![json!(99999)], vec![json!(99998)]]
     );
+    let update = "MATCH (n:N) WITH n ORDER BY n.key LIMIT 1 SET n.touched=true RETURN n.key";
+    // Streaming bounds the row buffers, but a serializable write must retain
+    // the scan's read dependencies until commit. Admit those independently.
+    let error = execute(update).await.unwrap_err();
+    assert!(matches!(error, cypher::Error::Query(e)
+        if e.category == "ResourceLimit" && e.detail == "MemoryLimit"
+            && e.phase == helix_planner::relational::ErrorPhase::Runtime));
     assert_eq!(
-        execute("MATCH (n:N) WITH n ORDER BY n.key LIMIT 1 SET n.touched=true RETURN n.key")
+        execute("MATCH (n:N) WHERE n.touched RETURN count(*)")
             .await
             .unwrap()
             .rows,
         vec![vec![json!(0)]]
     );
+    assert_eq!(run(&db, update).await.rows, vec![vec![json!(0)]]);
     assert_eq!(
         execute("MATCH (n:N) WHERE n.touched RETURN count(*)")
             .await

@@ -202,5 +202,13 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
+Modifying statements admit boxed transaction read operations before allocation,
+including calls that are dropped without being polled. They also admit the
+serializable transaction's retained read
+keys and requested scan ranges, including empty scans. Repeated keys share one
+retained payload allowance; table growth and commit-time read-state copies are
+included. This admission lasts through backend commit or transaction abort, so
+a write that streams a small result can still reach its budget through a large
+read set. A memory failure before commit rolls back the complete statement.
 Frontend/planner allocations and some native storage working buffers still need
 memory accounting; the current budget covers the integrated execution buffers.

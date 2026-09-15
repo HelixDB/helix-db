@@ -4,6 +4,9 @@
 //! interpreter boundary that turns those physical read requests into SlateDB
 //! raw `get`/`scan` calls and enforces writer-only execution modes.
 
+#[cfg(test)]
+mod read_admission_tests;
+
 use bytes::Bytes;
 use slatedb::DbReadOps;
 
@@ -311,6 +314,7 @@ fn writer_mode_required(mode: crate::HelixDbMode) -> HelixDbError {
 
 #[cfg(test)]
 mod tests {
+    use crate::transaction::Mutation;
     use helix_planner::context;
 
     use super::test_support;

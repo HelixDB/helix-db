@@ -6,9 +6,9 @@
 //! metadata write.
 
 use bytes::Bytes;
+use slatedb::DbReadOps;
 #[cfg(test)]
 use slatedb::{Db, IsolationLevel};
-use slatedb::{DbReadOps, DbTransaction};
 
 use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorStorageLane};
 use crate::encoding::v2::keys::scope::DataScope;
@@ -848,7 +848,9 @@ fn stale_generation(handle: &ActiveIndexHandle) -> HelixDbError {
 }
 
 /// Reserves the current logical ID and advances its watermark in `transaction`.
-pub(crate) async fn allocate_index_id(transaction: &DbTransaction) -> Result<IndexId> {
+pub(crate) async fn allocate_index_id(
+    transaction: &impl crate::transaction::Mutation,
+) -> Result<IndexId> {
     let key = global_key(GlobalKey::LogicalIndexIdWatermark);
     let Some(value) = transaction.get(&key).await? else {
         return Err(HelixDbError::MigrationRequired {
@@ -878,7 +880,7 @@ pub(crate) async fn allocate_index_id(transaction: &DbTransaction) -> Result<Ind
 
 /// Reserves the current vector physical ID and advances its watermark.
 pub(crate) async fn allocate_vector_physical_id(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
 ) -> Result<VectorPhysicalIndexId> {
     let key = global_key(GlobalKey::VectorPhysicalIdWatermark);
     let mut candidate = peek_vector_physical_id(transaction).await?;
@@ -1012,7 +1014,7 @@ pub(crate) async fn load_vector_partition_mapping(
 /// builder transaction. Concurrent first writers therefore conflict and retry
 /// instead of publishing two physical namespaces for one partition.
 pub(crate) async fn stage_vector_partition_mapping(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     index_id: IndexId,
     generation: IndexGenerationId,
@@ -1047,7 +1049,7 @@ pub(crate) async fn stage_vector_partition_mapping(
 /// physical lane empty except the metadata and optional transaction guard that
 /// it deletes in the same transaction.
 pub(crate) async fn stage_delete_vector_partition_mapping(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     index_id: IndexId,
     generation: IndexGenerationId,
@@ -1093,7 +1095,7 @@ fn vector_partition_mapping_key(
 
 /// Finds an unused operation ID without writing outside the caller's transaction.
 pub(crate) async fn allocate_operation_id(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
 ) -> Result<IndexOperationId> {
     allocate_operation_id_from(
@@ -1106,7 +1108,7 @@ pub(crate) async fn allocate_operation_id(
 }
 
 async fn allocate_operation_id_from(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     candidates: impl IntoIterator<Item = IndexOperationId>,
     attempts: usize,

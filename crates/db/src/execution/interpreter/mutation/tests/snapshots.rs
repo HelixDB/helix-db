@@ -115,8 +115,12 @@ async fn node_and_edge_observation_batches_retain_snapshots_after_the_batch_drop
     drop(nodes);
     assert!(ctx.row_budget().available() > before && ctx.row_budget().available() < limit);
     assert_eq!(node.encoded(), &encoded);
+    // End the transaction's read ledger while the returned snapshot still owns
+    // its encoded and decoded buffers independently of the observation batch.
+    drop(scope);
     drop(node);
     assert_eq!(ctx.row_budget().available(), limit);
+    let scope = ctx.take_or_begin_write_scope().await.unwrap();
     let edges = ctx
         .observe_edge_rows(&scope.txn, [9, 9, u64::MAX])
         .await
@@ -125,8 +129,10 @@ async fn node_and_edge_observation_batches_retain_snapshots_after_the_batch_drop
     let before = ctx.row_budget().available();
     drop(edges);
     assert!(ctx.row_budget().available() > before && ctx.row_budget().available() < limit);
+    drop(scope);
     drop(edge);
     assert_eq!(ctx.row_budget().available(), limit);
+    let scope = ctx.take_or_begin_write_scope().await.unwrap();
     let budget = query_resources::Budget::new(1024);
     ctx.row_memory = Some(budget.clone());
     assert!(matches!(

@@ -13,7 +13,6 @@
 use std::collections::HashSet;
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::encoding::property::Property;
 use crate::encoding::v2::keys::scope::DataScope;
@@ -339,7 +338,7 @@ impl TextMutationSet {
 /// orchestrator.
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn load_mutation_set(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
 ) -> Result<TextMutationSet> {
     let logical_prefix = ScopedKey::logical_prefix(RecordKind::IndexRecord);
@@ -399,7 +398,7 @@ pub(crate) async fn load_mutation_set(
 /// measured without staging.
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn prepare_text_build_deltas(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     mutations: &TextMutationSet,
     entity: TextEntityMutation<'_>,
@@ -420,7 +419,7 @@ pub(crate) async fn prepare_text_build_deltas(
 
 /// Prepares BUILD deltas while composing their shared statistics rows for one epoch.
 pub(super) async fn prepare_text_build_deltas_in_batch(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     mutations: &TextMutationSet,
     routes: &crate::index_lifecycle::mutation_catalog::RoutedMutationTargets<'_>,
@@ -439,7 +438,7 @@ pub(super) async fn prepare_text_build_deltas_in_batch(
 }
 
 async fn prepare_text_build_deltas_from(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     mutations: &TextMutationSet,
     routes: &crate::index_lifecycle::mutation_catalog::RoutedMutationTargets<'_>,
@@ -631,7 +630,7 @@ async fn prepare_text_build_deltas_from(
 
 /// Stages one foreground batch whose preparation reads are conflict-tracked.
 pub(super) fn stage_prepared_text_build_delta_rows(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     prepared: &PreparedTextBuildDeltas,
 ) -> Result<()> {
     for row in &prepared.rows {
@@ -643,7 +642,7 @@ pub(super) fn stage_prepared_text_build_delta_rows(
 /// Revalidates every hidden-build delta source without staging any write.
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn validate_text_build_deltas(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     prepared: &PreparedTextBuildDeltas,
 ) -> Result<ValidatedTextBuildDeltas> {
     let keys = prepared
@@ -672,7 +671,7 @@ pub(crate) async fn validate_text_build_deltas(
 /// Stages hidden-build rows only after the complete request has validated.
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) fn stage_validated_text_build_deltas(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     validated: ValidatedTextBuildDeltas,
 ) -> Result<()> {
     for row in validated.rows {

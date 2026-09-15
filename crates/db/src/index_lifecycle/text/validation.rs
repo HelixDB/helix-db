@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::ops::Bound;
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::config::SearchIndexBatchLimits;
 use crate::encoding::v2::keys as index_keys;
@@ -42,7 +41,7 @@ impl PreparedDatabaseValidation {
     /// Revalidates every exact range and point observation before returning its result.
     pub(super) async fn stage(
         &self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<IndexOperationStepResult> {
         for range in &self.ranges {
             if !range.is_current(transaction).await? {
@@ -74,7 +73,7 @@ impl PreparedPageValidation {
     /// Revalidates the database proof after object metadata validation.
     pub(super) async fn stage(
         &self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<IndexOperationStepResult> {
         self.database.stage(transaction).await
     }
@@ -140,7 +139,7 @@ impl PreparedValidationScan {
 
 impl PreparedValidationRange {
     /// Replays one selected or exhausted interval inside the commit transaction.
-    async fn is_current(&self, transaction: &DbTransaction) -> Result<bool> {
+    async fn is_current(&self, transaction: &impl crate::transaction::Mutation) -> Result<bool> {
         let bounds = (self.start.clone(), self.end.clone());
         let mut current = transaction.scan_prefix(&self.prefix, bounds).await?;
         for (expected_key, expected_value) in &self.rows {
@@ -164,7 +163,7 @@ struct RowObservation {
 
 /// Selects one bounded validation checkpoint from the current closed lane.
 pub(super) async fn select(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedTextIndexDefinition,
@@ -203,7 +202,7 @@ pub(super) async fn select(
 
 /// Validates one bounded batch of immutable pages and exact root relationships.
 async fn select_page(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     progress: &TextManifestPageValidationProgress,
@@ -411,7 +410,7 @@ async fn select_page(
 
 /// Validates one bounded batch of roots, including canonical empty roots.
 async fn select_root(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedTextIndexDefinition,
@@ -578,7 +577,7 @@ async fn select_root(
 
 /// Validates one bounded entity-state batch against exact owning roots.
 async fn select_entity_state(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     progress: &PrefixScanProgress,
@@ -780,7 +779,7 @@ async fn select_entity_state(
 
 /// Proves no late delta or artifact can cross activation.
 async fn select_activation_prerequisites(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     counters: OperationCounters,
@@ -812,7 +811,7 @@ async fn select_activation_prerequisites(
 
 /// Selects at most `max_rows` exact rows from one typed prefix.
 async fn select_many(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     prefix: Bytes,
     cursor: Option<&IndexCursor>,
     max_rows: usize,
@@ -843,7 +842,7 @@ async fn select_many(
 
 /// Selects one exact row or one exact exhausted suffix from a typed prefix.
 async fn select_one(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     prefix: Bytes,
     cursor: Option<&IndexCursor>,
 ) -> Result<(PreparedValidationRange, Option<(Bytes, Bytes)>)> {
@@ -955,7 +954,7 @@ mod tests {
 
     async fn stage_database(
         selection: ValidationSelection,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> IndexOperationStepResult {
         let ValidationSelection::Database(prepared) = selection else {
             panic!("fixture must select database-only validation")
