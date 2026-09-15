@@ -1,6 +1,138 @@
 use super::*;
 
 #[tokio::test]
+async fn composed_native_predicates_preserve_scalar_semantics_and_first_errors() {
+    enum Expected {
+        Value(bool),
+        Error(&'static str),
+    }
+    let db = test_support::open_db("native-predicate-composition").await;
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let row = ExecutionRow::empty();
+    let yes = Predicate::Eq {
+        left: Expr::val(1),
+        right: Expr::val(1),
+    };
+    let no = Predicate::Eq {
+        left: Expr::val(1),
+        right: Expr::val(2),
+    };
+    let missing = Predicate::Eq {
+        left: Expr::param("first_missing"),
+        right: Expr::val(0),
+    };
+    for (children, expected) in [
+        (vec![no.clone(), missing.clone()], Expected::Value(false)),
+        (
+            vec![missing.clone(), no.clone()],
+            Expected::Error("first_missing"),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::and(vec![yes.clone(), missing.clone()]),
+            ],
+            Expected::Error("first_missing"),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::Eq {
+                    left: Expr::val(PropertyValue::Null),
+                    right: Expr::val(PropertyValue::Null),
+                },
+            ],
+            Expected::Value(true),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::Eq {
+                    left: Expr::val(PropertyValue::F64(f64::NAN)),
+                    right: Expr::val(PropertyValue::F64(f64::NAN)),
+                },
+            ],
+            Expected::Value(false),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::Eq {
+                    left: Expr::val(PropertyValue::F32(1.0)),
+                    right: Expr::val(PropertyValue::F64(1.0)),
+                },
+            ],
+            Expected::Value(true),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::IsIn {
+                    value: Expr::val(1),
+                    values: Expr::val(1),
+                },
+            ],
+            Expected::Value(true),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::Between {
+                    value: Expr::val(0),
+                    min: Expr::val(1),
+                    max: Expr::param("upper_missing"),
+                },
+            ],
+            Expected::Value(false),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::Between {
+                    value: Expr::val(2),
+                    min: Expr::val(1),
+                    max: Expr::param("upper_missing"),
+                },
+            ],
+            Expected::Error("upper_missing"),
+        ),
+        (
+            vec![
+                yes.clone(),
+                Predicate::Eq {
+                    left: Expr::case(
+                        vec![(Predicate::and(vec![yes.clone()]), Expr::val(1))],
+                        Some(Expr::param("unused_missing")),
+                    ),
+                    right: Expr::val(1),
+                },
+            ],
+            Expected::Value(true),
+        ),
+    ] {
+        let composed = ir::PredicatePlan::conjunction(
+            &ir::AtLeast::<_, 2>::try_from_vec(
+                children
+                    .iter()
+                    .cloned()
+                    .map(|p| ir::PredicatePlan::new(p).unwrap())
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let legacy = ir::PredicatePlan::new(Predicate::and(children)).unwrap();
+        for plan in [&composed, &legacy] {
+            let actual = ctx.eval_predicate_plan(&row, plan).await;
+            match expected {
+                Expected::Value(value) => assert_eq!(actual.unwrap(), value),
+                Expected::Error(name) => assert!(actual.unwrap_err().to_string().contains(name)),
+            }
+        }
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn predicates_cover_comparisons_strings_nulls_membership_and_short_circuiting() {
     let db = test_support::open_db("stream-eval-predicates").await;
     let id = test_support::add_node_with_properties(
