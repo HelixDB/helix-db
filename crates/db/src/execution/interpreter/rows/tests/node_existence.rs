@@ -5,6 +5,56 @@ use futures::{FutureExt, TryStreamExt};
 use helix_planner::context;
 
 #[tokio::test]
+async fn simple_label_matches_validate_existence_in_pattern_completion() {
+    let db =
+        crate::execution::interpreter::test_support::open_db("cypher-label-validation-pass").await;
+    db.cypher(crate::cypher::Request::new(
+        "UNWIND range(1,1027) AS key CREATE (:Measured {key:key})",
+    ))
+    .await
+    .unwrap();
+    let mut observations = Vec::new();
+    for (text, expected, passes) in [
+        ("MATCH (n:Measured) RETURN count(*)", 1027, 1),
+        ("MATCH (n:Measured) RETURN sum(n.key)", 1027 * 1028 / 2, 2),
+    ] {
+        let plan = r::plan(
+            helix_cypher::compile(text).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        assert!(
+            plan.batch_consumer(0).is_some(),
+            "fixture must stream its selected source"
+        );
+        let response = Interpreter::new(&db, context::ParamBindings::default())
+            .execute_rows(
+                &plan,
+                &BTreeMap::new(),
+                Limits {
+                    batch_rows: 17,
+                    ..Default::default()
+                },
+            )
+            .await;
+        observations.push((text, expected, passes, response));
+    }
+    db.close().await.unwrap();
+    for (text, expected, passes, response) in observations {
+        let response = response.unwrap();
+        assert_eq!(response.rows, vec![vec![serde_json::json!(expected)]]);
+        assert_eq!(response.resources.reads.scans, 0);
+        assert_eq!(response.resources.reads.point_gets, 1);
+        assert_eq!(response.resources.reads.multi_get_keys, passes * 1027,
+            "single-node label matching must not probe existence before its mandatory validation: {text}");
+        assert_eq!(
+            response.resources.reads.multi_get_batches,
+            passes * 1027_usize.div_ceil(17)
+        );
+    }
+}
+
+#[tokio::test]
 async fn existence_batches_preserve_sparse_owner_order_tenants_and_missing_prefixes() {
     use keys::scope::{DataScope, TenantId};
     let db = crate::execution::interpreter::test_support::open_db("cypher-existence-batches").await;

@@ -208,6 +208,11 @@ validation and explain output. Simultaneous inputs, outputs and sort expressions
 keep distinct cells. The retained compiled layout is admitted before execution
 storage access and remains charged through result preparation and commit;
 compilation itself still precedes this admission.
+For an initial single-node label match, candidate validation also checks node
+existence, avoiding a separate storage probe. Stale label postings are skipped;
+corrupt stored values still fail the query. Property expressions may require a
+later hydration pass. Joins, expansions and correlated sources retain their
+existing validation contracts.
 Modifying statements admit boxed transaction read operations before allocation,
 including measured vector reads and calls that are dropped without being polled.
 Vector dispatch forwards the underlying reader's future without another wrapper

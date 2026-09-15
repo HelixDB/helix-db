@@ -113,6 +113,7 @@ async fn every_cancellation_checkpoint_before_commit_rolls_back_a_small_write() 
     );
 }
 
+mod label_completion;
 mod node_existence;
 
 mod lookup_frames;

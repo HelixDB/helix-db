@@ -195,31 +195,22 @@ impl ExecutionContext<'_> {
                     }
                     if let Some(consumer) = plan.batch_consumer(index)
                         && let Some(match_plan) = plan.matches().get(&index)
-                        && let Some(r::MatchStep::Scan(start)) = match_plan.steps.first()
-                        && let Some(source) = match_plan
-                            .sources
-                            .iter()
-                            .find(|source| source.slot == *start)
-                        && let [step] = source.access.steps()
-                        && let Some(cursor) =
-                            budget.admitted_future(self.node_cursor(&step.op))?.await?
+                        && let Some(source) = budget
+                            .admitted_future(self.initial_match_source(
+                                matches::Match {
+                                    pattern,
+                                    optional: *optional,
+                                    predicate: predicate.as_deref(),
+                                    demand,
+                                },
+                                match_plan,
+                            ))?
+                            .await?
                     {
                         // Only the initial independent MATCH is admitted. The
                         // consumer finishes before any subsequent mutation runs.
                         drop(rows);
-                        let batches = self.graph_match_batches(
-                            cursor,
-                            width,
-                            matches::Match {
-                                pattern,
-                                optional: *optional,
-                                predicate: predicate.as_deref(),
-                                demand,
-                            },
-                            match_plan,
-                            parameters,
-                            limits,
-                        );
+                        let batches = self.graph_match_batches(source, width, parameters, limits);
                         // Pin the producer once before moving it through consumer
                         // dispatch; suspended consumers retain only its small owner.
                         let batches = self.row_budget().admitted_stream(batches)?;

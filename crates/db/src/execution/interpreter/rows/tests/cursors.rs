@@ -552,7 +552,12 @@ async fn cursor_contracts_cover_fallbacks_write_visibility_filters_and_exhaustio
     };
     let params = BTreeMap::new();
     assert!(ctx
-        .graph_match_batches(empty, 1, operation, &plan, &params, Limits::default())
+        .graph_match_batches(
+            matches::InitialSource::checked(empty, operation, &plan),
+            1,
+            &params,
+            Limits::default()
+        )
         .try_collect::<Vec<_>>()
         .await
         .unwrap()
@@ -595,10 +600,8 @@ async fn cursor_contracts_cover_fallbacks_write_visibility_filters_and_exhaustio
             .unwrap();
         let batches = ctx
             .graph_match_batches(
-                cursor,
+                matches::InitialSource::checked(cursor, operation, &plan),
                 1,
-                operation,
-                &plan,
                 &params,
                 Limits {
                     batch_rows: 1,
@@ -620,7 +623,12 @@ async fn cursor_contracts_cover_fallbacks_write_visibility_filters_and_exhaustio
         .unwrap()
         .unwrap();
     let error = ctx
-        .graph_match_batches(cursor, 1, operation, &plan, &params, Limits::default())
+        .graph_match_batches(
+            matches::InitialSource::checked(cursor, operation, &plan),
+            1,
+            &params,
+            Limits::default(),
+        )
         .try_collect::<Vec<_>>()
         .await
         .err()

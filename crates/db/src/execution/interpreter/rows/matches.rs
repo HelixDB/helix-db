@@ -7,6 +7,9 @@ use helix_planner::{exec, ir, relational as r};
 use r::GraphValues;
 use std::collections::BTreeMap;
 
+mod initial;
+pub(super) use initial::InitialSource;
+
 #[cfg(test)]
 #[path = "tests/pattern_finish.rs"]
 mod tests;
@@ -354,13 +357,17 @@ impl ExecutionContext<'_> {
     /// the Cartesian product of all preceding expansion levels.
     pub(super) fn graph_match_batches<'a>(
         &'a self,
-        cursor: super::scan::NodeCursor,
+        source: InitialSource<'a>,
         width: usize,
-        operation: Match<'a>,
-        plan: &'a r::MatchPlan,
         parameters: &'a BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> impl futures::Stream<Item = Result<Rows>> + 'a {
+        let InitialSource {
+            cursor,
+            operation,
+            plan,
+            membership,
+        } = source;
         let Some(r::MatchStep::Scan(slot)) = plan.steps.first() else {
             unreachable!("validated streamed pattern has an initial scan");
         };
@@ -417,12 +424,13 @@ impl ExecutionContext<'_> {
                     };
                     let mut output = RowBuffer::new(self.row_budget())?;
                     self.row_budget()
-                        .admitted_future(self.finish_pattern_rows(
+                        .admitted_future(self.finish_pattern_candidates(
                             candidates,
                             operation,
                             parameters,
                             limits,
                             &mut output,
+                            membership,
                         ))?
                         .await?;
                     if output.len() > 0 {
@@ -435,13 +443,32 @@ impl ExecutionContext<'_> {
 
     /// Validate complete candidates in batches. Both execution strategies use
     /// identical label/property, path and predicate semantics.
-    pub(super) async fn finish_pattern_rows<O: PatternOutput>(
+    pub(super) fn finish_pattern_rows<'a, O: PatternOutput + 'a>(
+        &'a self,
+        candidates: Rows,
+        operation: Match<'a>,
+        parameters: &'a BTreeMap<String, r::Value>,
+        limits: Limits,
+        output: &'a mut O,
+    ) -> impl std::future::Future<Output = Result<bool>> + 'a {
+        self.finish_pattern_candidates(
+            candidates,
+            operation,
+            parameters,
+            limits,
+            output,
+            initial::Membership::Checked,
+        )
+    }
+
+    async fn finish_pattern_candidates<O: PatternOutput>(
         &self,
         candidates: Rows,
         operation: Match<'_>,
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
         output: &mut O,
+        membership: initial::Membership,
     ) -> Result<bool> {
         let Match {
             pattern,
@@ -499,6 +526,21 @@ impl ExecutionContext<'_> {
                 }
                 let current_position = position;
                 position += 1;
+                match membership {
+                    initial::Membership::Checked => {}
+                    initial::Membership::FreshLabel(slot) => {
+                        let r::Value::Entity(entity @ r::Entity::Node(_)) = row[slot.0 as usize]
+                        else {
+                            unreachable!("fresh label candidate is a node ID");
+                        };
+                        // Stale index owners are source misses. This permission is
+                        // limited to the producer's fresh node; ordinary graph-value
+                        // access and already-bound deleted entities still fail.
+                        if !graph.entities.contains_key(&entity) {
+                            continue;
+                        }
+                    }
+                }
                 let evaluation = self.evaluate(&row, parameters, &graph, limits);
                 let mut valid = true;
                 for node in &pattern.nodes {
