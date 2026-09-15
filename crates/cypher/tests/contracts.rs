@@ -315,7 +315,9 @@ fn mixed_batch_spans_stop_at_blocking_and_effect_boundaries() {
         let pipeline = r::RowPipeline::new(std::sync::Arc::new(query), r::RowExecution::Batched);
         let actual = pipeline.batch_consumer(0).map(|consumer| match consumer {
             r::BatchConsumer::Pipeline { end } => end,
-            _ => 1,
+            r::BatchConsumer::Aggregate
+            | r::BatchConsumer::TopK
+            | r::BatchConsumer::Project { .. } => 1,
         });
         assert_eq!(actual, end, "{text}");
         let round_trip: r::RowPipeline =

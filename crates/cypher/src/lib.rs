@@ -10,6 +10,16 @@ pub mod syntax;
 pub use helix_planner::relational::{QueryError, Span};
 
 /// Parse a single statement without assigning meaning to variable names.
+/// The returned syntax owns its names and literal values.
+///
+/// ```
+/// let statement = {
+///     let text = String::from("RETURN 'owned' AS value");
+///     helix_cypher::parse(&text)?
+/// };
+/// assert_eq!(statement.clauses.len(), 1);
+/// # Ok::<(), helix_cypher::QueryError>(())
+/// ```
 pub fn parse(text: &str) -> Result<syntax::Statement, QueryError> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(QueryError::compile(

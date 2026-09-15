@@ -1,4 +1,8 @@
 use helix_planner::relational::{QueryError, Result, Span};
+use std::borrow::Cow;
+
+#[cfg(test)]
+mod tests;
 
 /// Unicode alternatives in the pinned grammar are valid only in patterns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,24 +13,26 @@ pub enum PatternPunctuation {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Kind {
-    Word(String),
-    Escaped(String),
-    String(String),
-    Number(String),
-    Parameter(String),
+pub enum Kind<'source> {
+    Word(Cow<'source, str>),
+    Escaped(Cow<'source, str>),
+    String(Cow<'source, str>),
+    Number(Cow<'source, str>),
+    Parameter(Cow<'source, str>),
     Symbol(&'static str),
     Pattern(PatternPunctuation),
     End,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Token {
-    pub kind: Kind,
+pub struct Token<'source> {
+    pub kind: Kind<'source>,
     pub span: Span,
 }
 
-pub fn lex(source: &str) -> Result<Vec<Token>> {
+/// Ordinary payloads borrow the source; only decoding escapes allocates text.
+/// Tokens remain immutable during parser probes. Public syntax owns its text.
+pub fn lex(source: &str) -> Result<Vec<Token<'_>>> {
     let mut tokens = Vec::new();
     let mut i = 0;
     while i < source.len() {
@@ -54,32 +60,33 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             i += quote.len_utf8();
-            let mut value = String::new();
+            let content_start = i;
+            let mut decoded: Option<String> = None;
             let mut closed = false;
             while i < source.len() {
+                let character_start = i;
                 let ch = source[i..].chars().next().expect("character boundary");
                 i += ch.len_utf8();
-                if ch == quote {
+                let scalar = if ch == quote {
                     if quote == '`' && source[i..].starts_with('`') {
-                        value.push('`');
                         i += 1;
-                        continue;
+                        '`'
+                    } else {
+                        closed = true;
+                        break;
                     }
-                    closed = true;
-                    break;
-                }
-                if ch == '\\' && quote != '`' {
+                } else if ch == '\\' && quote != '`' {
                     let Some(escape) = source[i..].chars().next() else {
                         break;
                     };
                     i += escape.len_utf8();
                     match escape {
-                        'n' => value.push('\n'),
-                        'r' => value.push('\r'),
-                        't' => value.push('\t'),
-                        'b' => value.push('\u{8}'),
-                        'f' => value.push('\u{c}'),
-                        '\\' | '\'' | '"' => value.push(escape),
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        'b' => '\u{8}',
+                        'f' => '\u{c}',
+                        '\\' | '\'' | '"' => escape,
                         'u' | 'U' => {
                             let len = if escape == 'u' { 4 } else { 8 };
                             let Some(hex) = source.get(i..i + len) else {
@@ -104,18 +111,39 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                                         end: i + len,
                                     })
                                 })?;
-                            value.push(scalar);
                             i += len;
+                            scalar
                         }
                         _ => return Err(error(start, i, "invalid string escape")),
                     }
                 } else {
+                    let Some(value) = decoded.as_mut() else {
+                        continue;
+                    };
                     value.push(ch);
-                }
+                    continue;
+                };
+                let value = decoded.get_or_insert_with(|| {
+                    // Match byte-at-a-time String growth when copying the
+                    // prefix in one allocation. A prefix-sized buffer followed
+                    // by push would otherwise immediately double its capacity.
+                    let capacity = (character_start - content_start + scalar.len_utf8())
+                        .next_power_of_two()
+                        .max(8);
+                    let mut value = String::with_capacity(capacity);
+                    value.push_str(&source[content_start..character_start]);
+                    value
+                });
+                value.push(scalar);
             }
             if !closed {
                 return Err(error(start, i, "unterminated quoted value"));
             }
+            let content_end = i - quote.len_utf8();
+            let value = match decoded {
+                Some(value) => Cow::Owned(value),
+                None => Cow::Borrowed(&source[content_start..content_end]),
+            };
             if quoted_parameter {
                 if value.is_empty() {
                     return Err(error(start, i, "expected parameter name"));
@@ -139,7 +167,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             if i == beginning {
                 return Err(error(start, i, "expected parameter name"));
             }
-            Kind::Parameter(source[beginning..i].to_owned())
+            Kind::Parameter(Cow::Borrowed(&source[beginning..i]))
         } else if c.is_ascii_digit()
             || c == '.' && source[i + 1..].starts_with(|ch: char| ch.is_ascii_digit())
         {
@@ -155,7 +183,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     break;
                 }
             }
-            Kind::Number(source[start..i].to_owned())
+            Kind::Number(Cow::Borrowed(&source[start..i]))
         } else if c.is_alphabetic() || c == '_' {
             i += c.len_utf8();
             while let Some(ch) = source[i..].chars().next() {
@@ -165,7 +193,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     break;
                 }
             }
-            Kind::Word(source[start..i].to_owned())
+            Kind::Word(Cow::Borrowed(&source[start..i]))
         } else {
             let pattern = match c {
                 '\u{27e8}' | '\u{3008}' | '\u{fe64}' | '\u{ff1c}' => {

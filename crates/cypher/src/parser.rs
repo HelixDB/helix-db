@@ -17,7 +17,7 @@ pub fn parse(source: &str) -> Result<Statement> {
 
 struct Parser<'a> {
     source: &'a str,
-    tokens: Vec<Token>,
+    tokens: Vec<Token<'a>>,
     position: usize,
     depth: usize,
     pattern_mode: PatternMode,
@@ -36,8 +36,8 @@ enum PatternContext {
     Comprehension,
 }
 
-impl Parser<'_> {
-    fn token(&self) -> &Token {
+impl<'source> Parser<'source> {
+    fn token(&self) -> &Token<'source> {
         &self.tokens[self.position]
     }
     fn is(&self, s: &str) -> bool {
@@ -90,7 +90,7 @@ impl Parser<'_> {
     }
     fn name(&mut self) -> Result<String> {
         let name = match &self.token().kind {
-            Kind::Word(s) | Kind::Escaped(s) => s.clone(),
+            Kind::Word(s) | Kind::Escaped(s) => s.clone().into_owned(),
             Kind::String(_)
             | Kind::Number(_)
             | Kind::Parameter(_)
@@ -573,9 +573,9 @@ impl Parser<'_> {
             let token = self.token().clone();
             self.position += 1;
             match token.kind {
-                Kind::String(s) => ExprKind::Literal(r::Value::String(s)),
+                Kind::String(s) => ExprKind::Literal(r::Value::String(s.into_owned())),
                 Kind::Number(s) => ExprKind::Literal(number_value(&s, false, token.span)?),
-                Kind::Parameter(name) => ExprKind::Parameter(name),
+                Kind::Parameter(name) => ExprKind::Parameter(name.into_owned()),
                 Kind::Word(ref word) if word.eq_ignore_ascii_case("null") => {
                     ExprKind::Literal(r::Value::Null)
                 }
@@ -586,6 +586,7 @@ impl Parser<'_> {
                     ExprKind::Literal(r::Value::Boolean(false))
                 }
                 Kind::Word(name) | Kind::Escaped(name) => {
+                    let name = name.into_owned();
                     if self.take("(") {
                         if ["all", "any", "none", "single", "reduce"]
                             .iter()
