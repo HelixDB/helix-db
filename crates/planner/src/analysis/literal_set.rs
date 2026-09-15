@@ -11,6 +11,10 @@ use helix_value_semantics::CanonicalNumber;
 #[path = "tests/literal_set.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "tests/literal_membership.rs"]
+mod membership_tests;
+
 /// Native index domains retain literal widths. Scalar proofs identify top-level
 /// numbers exactly across widths, while nested values retain their native types.
 #[derive(Clone, Copy, Debug)]
@@ -156,4 +160,33 @@ pub(crate) fn dedup_by<T>(
     // Duplicate-heavy domains must not retain the original wide-list capacity.
     values.shrink_to_fit();
     values
+}
+
+/// Borrow a finite domain for repeated membership checks. The caller retains
+/// probe order and payload ownership. Comparison and equality have the same
+/// consistency contract as [`dedup_by`]; non-reflexive values never match.
+/// For m domain values and n probes, wide inputs use O(m log m + n log m)
+/// comparisons and O(m) borrowed references. Small inputs allocate no index.
+/// `probes` selects the construction strategy; it does not restrict lookups.
+pub(crate) fn membership_by<T>(
+    values: &[T],
+    probes: usize,
+    compare: impl Fn(&T, &T) -> Ordering,
+    equal: impl Fn(&T, &T) -> bool,
+) -> impl Fn(&T) -> bool {
+    let ordered = (values.len() > 16 && probes > 16).then(|| {
+        let mut candidates: Vec<_> = values.iter().collect();
+        candidates.sort_unstable_by(|left, right| compare(left, right));
+        candidates
+    });
+    move |value| {
+        let Some(candidates) = &ordered else {
+            return values.iter().any(|candidate| equal(value, candidate));
+        };
+        // Ordering only finds the equality class. A NaN or nested non-reflexive
+        // value must still fail the caller's actual equality contract.
+        candidates
+            .binary_search_by(|candidate| compare(candidate, value))
+            .is_ok_and(|index| equal(value, candidates[index]))
+    }
 }

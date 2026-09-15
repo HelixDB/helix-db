@@ -307,10 +307,17 @@ fn domain_from_labels(labels: impl IntoIterator<Item = String>) -> FiniteLabelDo
 }
 
 fn intersect_domains(left: FiniteLabelDomain, right: FiniteLabelDomain) -> FiniteLabelDomain {
+    let left = domain_labels(left);
+    let right = domain_labels(right);
+    let contains = crate::analysis::literal_membership(
+        &right,
+        left.len(),
+        |left: &ir::NonEmptyString, right: &ir::NonEmptyString| left.as_ref().cmp(right.as_ref()),
+        PartialEq::eq,
+    );
     domain_from_labels(
-        domain_labels(left)
-            .into_iter()
-            .filter(|label| domain_contains(&right, label))
+        left.into_iter()
+            .filter(contains)
             .map(ir::NonEmptyString::into_string),
     )
 }
@@ -343,6 +350,38 @@ fn domain_contains(domain: &FiniteLabelDomain, label: &ir::NonEmptyString) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_intersections_preserve_order_and_empty_single_many_states() {
+        for (left_size, right_size) in [
+            (0, 0),
+            (0, 32),
+            (32, 0),
+            (1, 32),
+            (32, 1),
+            (16, 17),
+            (17, 16),
+            (17, 17),
+            (4096, 4096),
+        ] {
+            for offset in [0, 1, 16, 4096] {
+                let left: Vec<_> = (0..left_size)
+                    .rev()
+                    .map(|index| format!("L{index}"))
+                    .collect();
+                let right: Vec<_> = (0..right_size)
+                    .map(|index| format!("L{}", index + offset))
+                    .collect();
+                let model: std::collections::BTreeSet<_> = right.iter().collect();
+                let expected =
+                    domain_from_labels(left.iter().filter(|label| model.contains(label)).cloned());
+                assert_eq!(
+                    intersect_domains(domain_from_labels(left), domain_from_labels(right)),
+                    expected
+                );
+            }
+        }
+    }
 
     #[test]
     fn wide_label_domains_preserve_first_order_and_ignore_empty_names() {

@@ -22,7 +22,9 @@ pub(crate) use self::index_atoms::{
     equality_atom, range_atom, EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,
 };
 pub(crate) use self::labels::{label_equality_atom, label_scope, FeasibleLabelScope, LabelScope};
-pub(crate) use self::literal_set::dedup_by as dedup_literal_values;
+pub(crate) use self::literal_set::{
+    dedup_by as dedup_literal_values, membership_by as literal_membership,
+};
 pub(crate) use self::prune::{prune_statically_impossible_branches, PrunedPredicate};
 pub(crate) use self::scalar::{
     literal_in_values, predicate_is_statically_tautological,

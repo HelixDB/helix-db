@@ -121,6 +121,10 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
             .map(|b| vec![Some(b)])
             .collect();
         let mut cases = vec![
+            Case { query: "MATCH (a:N) WHERE a.key IN [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20] AND a.key IN [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22] RETURN a.key AS a ORDER BY a",
+                columns: &["a"], rows: (0..5).filter(|key| (0..=20).contains(key) && (2..=22).contains(key)).map(|key| vec![Some(key)]).collect() },
+            Case { query: "MATCH (a:N) WHERE a.key IN [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20] AND a.key IN [21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41] RETURN a.key AS a ORDER BY a",
+                columns: &["a"], rows: vec![] },
             Case { query: "MATCH (a:N {key:2})-[r:R]->(b:N) RETURN a.key AS a,b.key AS b ORDER BY a,b",
                 columns: &["a", "b"], rows: directed.iter().filter(|(_, a, _)| *a == 2)
                     .map(|(_, a, b)| vec![Some(*a), Some(*b)]).collect() },

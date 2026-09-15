@@ -100,6 +100,52 @@ async fn verify_membership() {
                 .collect();
             assert_eq!(actual, expected, "indexed: {indexed}");
         }
+        for right in [
+            Vec::new(),
+            (8..4104).collect::<Vec<i64>>(),
+            (4096..8192).collect(),
+            vec![7; 4096],
+        ] {
+            let left: Vec<_> = (0..4096_i64).rev().collect();
+            let expected: Vec<_> = (0..16_i64)
+                .filter(|key| left.contains(key) && right.contains(key))
+                .map(|key| vec![json!(key)])
+                .collect();
+            let request: cypher::Request = serde_json::from_value(json!({
+                "query":"MATCH (n:Membership) WHERE n.key IN $left AND n.key IN $right RETURN n.key ORDER BY n.key",
+                "parameters":{"left":left,"right":right}
+            })).unwrap();
+            assert_eq!(db.cypher(request).await.unwrap().rows, expected);
+            let read = batch::read_batch()
+                .var_as(
+                    "nodes",
+                    traversal::g()
+                        .n_with_label_where(
+                            "Membership",
+                            expr::Predicate::and(vec![
+                                expr::Predicate::is_in("key", value::PropertyValue::I64Array(left)),
+                                expr::Predicate::is_in(
+                                    "key",
+                                    value::PropertyValue::I64Array(right),
+                                ),
+                            ]),
+                        )
+                        .order_by("key", traversal::Order::Asc)
+                        .value_map(Some(vec!["key"])),
+                )
+                .returning(["nodes"]);
+            let native = db.query(query::QueryRequest::read(read)).await.unwrap();
+            let actual: Vec<_> = native["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| vec![node["key"].clone()])
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "intersected membership, indexed: {indexed}"
+            );
+        }
     }
     db.close().await.unwrap();
 }
