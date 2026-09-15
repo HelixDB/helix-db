@@ -482,4 +482,33 @@ mod tests {
                     && msg.starts_with("Query error: invalid query JSON:")
         ));
     }
+
+    #[tokio::test]
+    async fn direct_helixdb_query_json_maps_planner_errors() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "uniffi-planner-error".to_string(),
+        })
+        .await
+        .expect("in-memory DB should open");
+        let request = QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "matches",
+                    g().text_search_nodes("Document", "body", "needle", 5, None),
+                )
+                .returning(["matches"]),
+        );
+        let body = sonic_rs::to_vec(&request).expect("query request should serialize");
+
+        let err = db
+            .query_json(body)
+            .await
+            .expect_err("missing text index should fail planning");
+
+        assert!(matches!(
+            err,
+            HelixError::Planner { error, msg }
+                if error == "index_not_found" && msg.starts_with("planner error: ")
+        ));
+    }
 }

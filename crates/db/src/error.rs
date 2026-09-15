@@ -326,6 +326,10 @@ pub enum HelixDbError {
     #[error("Query error: {0}")]
     Query(String),
 
+    /// Query planning failed before execution started.
+    #[error("planner error: {0}")]
+    Planner(#[from] helix_planner::error::PlannerError),
+
     /// Query JSON could not be decoded at the embedded boundary.
     #[error("Query error: invalid query JSON: {0}")]
     InvalidQueryJson(String),
@@ -558,6 +562,7 @@ impl HelixDbError {
             }
             Self::InvalidVectorConfig(_) => error_code::QueryErrorCode::InvalidVectorConfiguration,
             Self::Query(_) => error_code::QueryErrorCode::InvalidQuery,
+            Self::Planner(error) => error.error_code(),
             Self::InvalidQueryJson(_) => error_code::QueryErrorCode::InvalidQueryJson,
             Self::WriterModeRequired { .. } => error_code::QueryErrorCode::WriterModeRequired,
             Self::ReaderModeRequired { .. } => error_code::QueryErrorCode::ReaderModeRequired,
@@ -713,6 +718,18 @@ pub type Result<T> = std::result::Result<T, HelixDbError>;
 mod tests {
     use super::*;
     use helix_ast::error_code::QueryErrorCode as Code;
+    use helix_planner::catalog::{ElementKind, SearchIndexKind};
+    use helix_planner::error::PlannerError;
+    use helix_planner::ir::NonEmptyString;
+
+    fn missing_text_index() -> PlannerError {
+        PlannerError::MissingSearchIndex {
+            element: ElementKind::Node,
+            kind: SearchIndexKind::Text,
+            label: NonEmptyString::new("Document").expect("label is non-empty"),
+            property: NonEmptyString::new("body").expect("property is non-empty"),
+        }
+    }
 
     #[test]
     fn config_errors_convert_to_database_errors_with_display_context() {
@@ -980,6 +997,14 @@ mod tests {
                 Code::IndexNotFound,
             ),
             (
+                HelixDbError::Planner(PlannerError::UnsupportedEdgeAllTarget),
+                Code::UnsupportedEdgeAllTarget,
+            ),
+            (
+                HelixDbError::Planner(missing_text_index()),
+                Code::IndexNotFound,
+            ),
+            (
                 HelixDbError::UniqueConstraintViolation {
                     label: "User".to_string(),
                     property: "email".to_string(),
@@ -1041,6 +1066,22 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(error.error_code(), expected, "{error}");
         }
+    }
+
+    #[test]
+    fn planner_failures_keep_planner_codes_and_message() {
+        let unsupported = HelixDbError::Planner(PlannerError::UnsupportedEdgeAllTarget);
+        assert_eq!(unsupported.index_error_code(), None);
+        assert!(!unsupported.is_invalid_input());
+        assert_eq!(
+            unsupported.to_string(),
+            format!("planner error: {}", PlannerError::UnsupportedEdgeAllTarget)
+        );
+
+        let missing_index = HelixDbError::from(missing_text_index());
+        assert_eq!(missing_index.index_error_code(), Some("index_not_found"));
+        assert!(!missing_index.is_invalid_input());
+        assert!(!missing_index.is_transaction_conflict());
     }
 
     #[test]

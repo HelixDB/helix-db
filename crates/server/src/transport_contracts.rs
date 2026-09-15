@@ -628,26 +628,188 @@ async fn query_service_scoped_entry_points_execute_the_same_tenant_read() {
 }
 
 #[tokio::test]
+async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
+    use db::error::HelixDbError;
+    use db::query_service::QueryFailureClass;
+    use helix_planner::error::PlannerError;
+
+    struct Case {
+        class: QueryFailureClass,
+        error: fn() -> QueryServiceError,
+        http_status: StatusCode,
+        retryable: Option<bool>,
+        grpc_code: tonic::Code,
+        code: &'static str,
+    }
+
+    let cases = [
+        Case {
+            class: QueryFailureClass::CommitOutcomeUnknown,
+            error: || QueryServiceError::Db(HelixDbError::WriterFencedCommitOutcomeUnknown),
+            http_status: StatusCode::SERVICE_UNAVAILABLE,
+            retryable: Some(false),
+            grpc_code: tonic::Code::Unavailable,
+            code: "writer_fenced_commit_outcome_unknown",
+        },
+        Case {
+            class: QueryFailureClass::Conflict,
+            error: || QueryServiceError::Db(HelixDbError::TransactionConflict("retry".to_string())),
+            http_status: StatusCode::CONFLICT,
+            retryable: None,
+            grpc_code: tonic::Code::Aborted,
+            code: "transaction_conflict",
+        },
+        Case {
+            class: QueryFailureClass::InvalidRequest,
+            error: || QueryServiceError::InvalidRequest("bad request".to_string()),
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "invalid_request",
+        },
+        Case {
+            class: QueryFailureClass::Planning,
+            error: || QueryServiceError::Planner(PlannerError::UnsupportedEdgeAllTarget),
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "unsupported_edge_all_target",
+        },
+        Case {
+            class: QueryFailureClass::WriterModeRequired,
+            error: || QueryServiceError::Db(HelixDbError::WriterModeRequired { actual: "reader" }),
+            http_status: StatusCode::SERVICE_UNAVAILABLE,
+            retryable: None,
+            grpc_code: tonic::Code::FailedPrecondition,
+            code: "writer_mode_required",
+        },
+        Case {
+            class: QueryFailureClass::Execution,
+            error: || QueryServiceError::Db(HelixDbError::IndexNotFound("documents".to_string())),
+            http_status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: None,
+            grpc_code: tonic::Code::Internal,
+            code: "index_not_found",
+        },
+        Case {
+            class: QueryFailureClass::Internal,
+            error: || {
+                QueryServiceError::Serialize(
+                    sonic_rs::from_str::<u8>("not-json").expect_err("invalid JSON should fail"),
+                )
+            },
+            http_status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: None,
+            grpc_code: tonic::Code::Internal,
+            code: "response_serialization_error",
+        },
+    ];
+
+    for Case {
+        class,
+        error,
+        http_status,
+        retryable,
+        grpc_code,
+        code,
+    } in cases
+    {
+        assert_eq!(error().classify(), class);
+        let message = error().to_string();
+
+        let response = http::service_error_response(error());
+        assert_eq!(response.status(), http_status, "{class:?}");
+        let body = to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
+            .await
+            .unwrap();
+        let mut expected_body = serde_json::json!({"error": code, "msg": message});
+        if let Some(retryable) = retryable {
+            expected_body["retryable"] = serde_json::Value::Bool(retryable);
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            expected_body,
+            "{class:?}"
+        );
+
+        let status = grpc::status_from_service_error(error());
+        assert_eq!(status.code(), grpc_code, "{class:?}");
+        assert_eq!(
+            status.metadata().get("helix-error-code").unwrap(),
+            code,
+            "{class:?}"
+        );
+        assert_eq!(status.message(), message, "{class:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_text_index_preserves_the_public_error_code() {
+    use helix_ast::error_code::QueryErrorCode;
+
     let db = fresh_database("transport-query-service-missing-text-index").await;
     let service = HelixQueryService::new(Arc::clone(&db));
-    let request = QueryRequest::read(
-        batch::read_batch()
-            .var_as(
-                "matches",
-                traversal::g().text_search_nodes("Document", "body", "needle", 5, None),
-            )
-            .returning(["matches"]),
+    let request = || {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "matches",
+                    traversal::g().text_search_nodes("Document", "body", "needle", 5, None),
+                )
+                .returning(["matches"]),
+        )
+    };
+
+    let service_error = service.execute_query(request()).await.unwrap_err();
+    assert_eq!(service_error.error_code(), QueryErrorCode::IndexNotFound);
+    assert_eq!(service_error.index_error_code(), Some("index_not_found"));
+    let expected_message = service_error.to_string();
+
+    let embedded_error = db.query(request()).await.unwrap_err();
+    assert!(matches!(
+        embedded_error,
+        db::error::HelixDbError::Planner(_)
+    ));
+    assert_eq!(embedded_error.error_code(), QueryErrorCode::IndexNotFound);
+    assert_eq!(embedded_error.index_error_code(), Some("index_not_found"));
+    assert_eq!(embedded_error.to_string(), expected_message);
+
+    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let response = router
+        .oneshot(
+            HttpRequest::post("/v2/query")
+                .header("content-type", "application/json")
+                .body(Body::from(sonic_rs::to_vec(&request()).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"error": "index_not_found", "msg": expected_message})
     );
 
-    let error = service.execute_query(request).await.unwrap_err();
-    assert_eq!(error.index_error_code(), Some("index_not_found"));
-    let db_error: db::error::HelixDbError = error.into();
-    assert!(matches!(
-        db_error,
-        db::error::HelixDbError::IndexNotFound(_)
-    ));
-    db.close().await.unwrap();
+    let mut grpc = GrpcAdapter::start(db).await;
+    let status = grpc
+        .raw_query(QueryJsonRequest {
+            body: sonic_rs::to_vec(&request()).unwrap().into(),
+            warm_only: false,
+            require_writer: false,
+            await_durable: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.metadata().get("helix-error-code").unwrap(),
+        "index_not_found"
+    );
+    assert_eq!(status.message(), expected_message);
+    grpc.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

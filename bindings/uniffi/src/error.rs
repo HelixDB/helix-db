@@ -4,7 +4,8 @@
 //! and the smaller error vocabulary exposed to foreign-language callers.
 //! Configuration and request mistakes remain actionable to the caller, while
 //! corrupt persisted vector rows and fail-closed lifecycle cutover states are
-//! reported as internal failures.
+//! reported as internal failures. Query planning failures surface as `Planner`
+//! and keep the planner's own error code.
 
 use db::encoding::error::EncodingError;
 use db::error::HelixDbError;
@@ -61,6 +62,10 @@ impl From<HelixDbError> for HelixError {
             HelixDbError::Config(_)
             | HelixDbError::InvalidVectorConfig(_)
             | HelixDbError::IndexDefinitionConflict { .. } => Self::InvalidConfig {
+                error: error_code,
+                msg,
+            },
+            HelixDbError::Planner(_) => Self::Planner {
                 error: error_code,
                 msg,
             },

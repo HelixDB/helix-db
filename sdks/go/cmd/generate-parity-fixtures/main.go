@@ -209,7 +209,8 @@ func executeEmbeddedFixtures(fixtures []fixture, results string) error {
 		if err == nil {
 			return fmt.Errorf("%s unexpectedly succeeded after index DROP", search.name)
 		}
-		if !strings.Contains(err.Error(), "index_not_found") {
+		var helixErr *helix.HelixError
+		if !errors.As(err, &helixErr) || helixErr.Code != helix.QueryErrorCode("index_not_found") {
 			return fmt.Errorf("%s returned the wrong post-DROP error: %w", search.name, err)
 		}
 	}
