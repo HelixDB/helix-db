@@ -14,7 +14,7 @@ struct Case {
 /// positions. It uses neither storage traversal nor planner/evaluator helpers.
 #[tokio::test]
 async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_model() {
-    let (mut indexed, mut hash_joined, mut correlated) = (false, false, false);
+    let mut observed_accesses = [(false, false, false); 2];
     for seed in 0..4 {
         let db = test_support::open_db_with_config(
             test_support::in_memory_config("cypher-reference-multigraph")
@@ -155,59 +155,74 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
             // preserves duplicates while avoiding storage-ID ordering assumptions.
             case.rows
                 .sort_by_key(|row| row.iter().map(|v| (v.is_none(), *v)).collect::<Vec<_>>());
-            let query = helix_cypher::compile(case.query).unwrap();
-            let selected = r::plan(
-                query.clone(),
-                &db.planner_context(context::ParamBindings::default()),
-            )
-            .unwrap();
-            for plan in selected.matches().values() {
-                hash_joined |= plan
-                    .steps
-                    .iter()
-                    .any(|step| matches!(step, r::MatchStep::HashJoin { .. }));
-                correlated |= plan
-                    .steps
-                    .iter()
-                    .any(|step| matches!(step, r::MatchStep::IndexLookup(_)));
-                indexed |= plan.sources.iter().any(|source| source.access.steps().iter().any(|step| matches!(&step.op,
+            // Scope prefixes force physical reuse while the independent graph model stays unchanged.
+            for prefix in ["", "WITH 1 AS seed WITH seed AS old WITH old AS unused "] {
+                let text = format!("{prefix}{}", case.query);
+                let query = helix_cypher::compile(&text).unwrap();
+                let selected = r::plan(
+                    query.clone(),
+                    &db.planner_context(context::ParamBindings::default()),
+                )
+                .unwrap();
+                if !prefix.is_empty() {
+                    assert!(selected.program().query().width() < selected.query().bindings().len());
+                }
+                let (indexed, hash_joined, correlated) =
+                    &mut observed_accesses[usize::from(!prefix.is_empty())];
+                for plan in selected.program().matches().values() {
+                    *hash_joined |= plan
+                        .steps
+                        .iter()
+                        .any(|step| matches!(step, r::MatchStep::HashJoin { .. }));
+                    *correlated |= plan
+                        .steps
+                        .iter()
+                        .any(|step| matches!(step, r::MatchStep::IndexLookup(_)));
+                    *indexed |= plan.sources.iter().any(|source| source.access.steps().iter().any(|step| matches!(&step.op,
                     exec::ExecOp::Access { plan } if matches!(plan.as_ref(), exec::ExecAccessPlan::Node(
                         exec::ExecNodeAccessPlan::Bitmap { .. } | exec::ExecNodeAccessPlan::Unique { .. }
                     )))));
-            }
-            let reference = r::RowPlan::reference(query).unwrap();
-            assert_eq!(reference.metrics.memo_groups, 0);
-            for plan in reference.matches().values() {
-                assert!(plan.steps.iter().all(|step| matches!(
-                    step,
-                    r::MatchStep::Scan(_) | r::MatchStep::Expand { .. }
-                )));
-                assert!(plan.sources.iter().all(|source| source.access.steps().iter().all(|step| matches!(&step.op,
+                }
+                let reference = r::RowPlan::reference(query).unwrap();
+                assert_eq!(reference.metrics.memo_groups, 0);
+                for plan in reference.matches().values() {
+                    assert!(plan.steps.iter().all(|step| matches!(
+                        step,
+                        r::MatchStep::Scan(_) | r::MatchStep::Expand { .. }
+                    )));
+                    assert!(plan.sources.iter().all(|source| source.access.steps().iter().all(|step| matches!(&step.op,
                     exec::ExecOp::Access { plan } if matches!(plan.as_ref(), exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::AllScan))))));
-            }
-            for plan in [
-                selected.clone(),
-                selected.with_execution(r::RowExecution::Materialized),
-                reference,
-            ] {
-                let response = Interpreter::new(&db, context::ParamBindings::default())
-                    .execute_rows(
-                        &plan,
-                        &BTreeMap::new(),
-                        Limits {
-                            batch_rows: 2,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap_or_else(|error| panic!("seed {seed}, {}: {error}", case.query));
-                assert_eq!(response.columns, case.columns, "{}", case.query);
-                assert_eq!(
-                    json!(response.rows),
-                    json!(case.rows),
-                    "seed {seed}, {}",
-                    case.query
-                );
+                }
+                for plan in [
+                    selected.clone(),
+                    selected
+                        .clone()
+                        .with_execution(r::RowExecution::Materialized),
+                    selected.clone().with_layout(r::RowLayoutMode::Identity),
+                    selected
+                        .with_layout(r::RowLayoutMode::Identity)
+                        .with_execution(r::RowExecution::Materialized),
+                    reference,
+                ] {
+                    let response = Interpreter::new(&db, context::ParamBindings::default())
+                        .execute_rows(
+                            &plan,
+                            &BTreeMap::new(),
+                            Limits {
+                                batch_rows: 2,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("seed {seed}, {}: {error}", case.query));
+                    assert_eq!(response.columns, case.columns, "{}", case.query);
+                    assert_eq!(
+                        json!(response.rows),
+                        json!(case.rows),
+                        "seed {seed}, {}",
+                        case.query
+                    );
+                }
             }
         }
         // Native frontend checks use the same fixture but an independent model
@@ -260,7 +275,9 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
         db.close().await.unwrap();
     }
     assert!(
-        indexed && hash_joined && correlated,
-        "the oracle must compare distinct physical implementations"
+        observed_accesses
+            .into_iter()
+            .all(|(indexed, hash_joined, correlated)| indexed && hash_joined && correlated),
+        "both ordinary and reused-cell queries must exercise indexed, hash and correlated access"
     );
 }

@@ -3,11 +3,12 @@
 use super::*;
 use crate::{catalog, context, exec, ir, logical, optimizer, rules, trace};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PlannedNode {
     pub slot: Slot,
-    pub access: exec::ExecutablePlan,
+    pub access: Arc<exec::ExecutablePlan>,
     pub estimated_rows: usize,
 }
 
@@ -41,10 +42,12 @@ pub struct MatchPlan {
 /// Physical program whose schema/effects are inherited from a validated query.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RowPlan {
-    pipeline: RowPipeline,
-    matches: BTreeMap<usize, MatchPlan>,
+    pipeline: Arc<RowPipeline>,
+    matches: Arc<BTreeMap<usize, MatchPlan>>,
     #[serde(skip)]
-    consumers: BTreeMap<usize, BatchConsumer>,
+    consumers: Arc<BTreeMap<usize, BatchConsumer>>,
+    #[serde(skip)]
+    program: Arc<RowProgram>,
     pub metrics: exec::PlannerMetrics,
 }
 
@@ -63,11 +66,23 @@ impl RowPlan {
     /// assert_eq!(reference.metrics.memo_groups, 0);
     /// ```
     pub fn reference(query: Query) -> Result<Self> {
-        let matches = super::reference::matches(&query)?;
+        let matches = Arc::new(super::reference::matches(&query)?);
+        let pipeline = Arc::new(RowPipeline::new(
+            Arc::new(query),
+            RowExecution::Materialized,
+        ));
+        let consumers = Arc::new(BTreeMap::new());
+        let program = Arc::new(RowProgram::new(
+            Arc::clone(&pipeline),
+            Arc::clone(&matches),
+            Arc::clone(&consumers),
+            RowLayoutMode::Identity,
+        ));
         Ok(Self {
-            pipeline: RowPipeline::new(std::sync::Arc::new(query), RowExecution::Materialized),
+            pipeline,
             matches,
-            consumers: BTreeMap::new(),
+            consumers,
+            program,
             metrics: exec::PlannerMetrics::default(),
         })
     }
@@ -76,9 +91,37 @@ impl RowPlan {
     /// expression semantics, schemas, or effect boundaries. This also permits
     /// independent batch-versus-materialized execution checks.
     pub fn with_execution(mut self, execution: RowExecution) -> Self {
-        self.pipeline = RowPipeline::new(std::sync::Arc::new(self.query().clone()), execution);
-        self.consumers = super::consumers::prepare(&self.pipeline, &self.matches);
+        self.pipeline = Arc::new(RowPipeline::new(
+            Arc::clone(&self.pipeline.query),
+            execution,
+        ));
+        self.consumers = Arc::new(super::consumers::prepare(&self.pipeline, &self.matches));
+        self.program = Arc::new(RowProgram::new(
+            Arc::clone(&self.pipeline),
+            Arc::clone(&self.matches),
+            Arc::clone(&self.consumers),
+            self.program.layout_mode(),
+        ));
         self
+    }
+
+    /// Select an execution layout without changing logical bindings, access
+    /// selection or semantics. Identity is a diagnostic correctness oracle;
+    /// planner cost estimates still describe the optimized layout.
+    pub fn with_layout(mut self, mode: RowLayoutMode) -> Self {
+        self.program = Arc::new(RowProgram::new(
+            Arc::clone(&self.pipeline),
+            Arc::clone(&self.matches),
+            Arc::clone(&self.consumers),
+            mode,
+        ));
+        self
+    }
+
+    /// Validated cell-addressed operators for execution. Explain and serialized
+    /// plans continue to use the logical query and logical match metadata.
+    pub fn program(&self) -> &RowProgram {
+        &self.program
     }
     /// Validated adjacent consumer. Node cursor availability also depends on the
     /// selected native access primitive; unsupported primitives keep their executor.
@@ -146,11 +189,20 @@ pub fn plan(query: Query, ctx: &context::PlannerContext) -> Result<RowPlan> {
             | Operator::Delete { .. } => {}
         }
     }
-    let consumers = super::consumers::prepare(&pipeline, &matches);
+    let consumers = Arc::new(super::consumers::prepare(&pipeline, &matches));
+    let matches = Arc::new(matches);
+    let pipeline = Arc::new(pipeline);
+    let program = Arc::new(RowProgram::new(
+        Arc::clone(&pipeline),
+        Arc::clone(&matches),
+        Arc::clone(&consumers),
+        RowLayoutMode::Compact,
+    ));
     Ok(RowPlan {
         pipeline,
         consumers,
         matches,
+        program,
         metrics,
     })
 }
@@ -543,7 +595,7 @@ fn plan_accesses(
             (operator, slot),
             PlannedNode {
                 slot,
-                access,
+                access: Arc::new(access),
                 estimated_rows: usize::try_from(estimated_rows).unwrap_or(usize::MAX),
             },
         );

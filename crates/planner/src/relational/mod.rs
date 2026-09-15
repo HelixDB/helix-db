@@ -20,6 +20,8 @@ mod expression;
 mod graph_values;
 mod input_window;
 pub use input_window::InputWindow;
+mod layout;
+pub use layout::{RowCell, RowLayout, RowLayoutMode, RowProgram, RowProgramQuery};
 mod consumers;
 mod pipeline;
 mod planning;

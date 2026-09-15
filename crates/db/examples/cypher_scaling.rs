@@ -290,6 +290,11 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
     mixed_top.sort_unstable_by(|left, right| right.cmp(left));
     mixed_top.truncate(5);
     let mixed_prefix = "MATCH (a:Left) UNWIND [a.key,a.key+1] AS key WITH key WHERE key%2=0 UNWIND [key,key] AS value";
+    let mut compact_chain = "MATCH (a:Left) WITH a.key AS value_0".to_owned();
+    for index in 1..65 {
+        compact_chain.push_str(&format!(" WITH value_{} AS value_{index}", index - 1));
+    }
+    compact_chain.push_str(" RETURN sum(value_64)");
     let queries = [
         (
             "selective_index",
@@ -399,6 +404,11 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[size * (size + 1) / 2, (size + 1) as f64 / 2.0]]),
         ),
         (
+            "compact_projection_chain",
+            compact_chain,
+            json!([[size * (size - 1) / 2]]),
+        ),
+        (
             "projection_chain_top_k",
             "MATCH (a:Left) WITH a.key AS key WITH key+1 AS value RETURN value ORDER BY value DESC LIMIT 3".into(),
             json!([[size], [size - 1], [size - 2]]),
@@ -477,6 +487,21 @@ async fn measure_cases(
                     "downstream limit failed to bound property reads at size {size}"
                 )
                 .into());
+            }
+            if case == "compact_projection_chain"
+                // The fixture also retains graph hydration and validation batches.
+                // Three key passes match the ordinary projection-chain baseline;
+                // additional aliases must not introduce additional graph reads.
+                && (response.resources.peak_memory_bytes > 2 * 1024 * 1024
+                    || response.resources.reads.multi_get_keys > 3 * size
+                    || response.resources.reads.multi_get_batches > 3 * size.div_ceil(512)
+                    || response.resources.reads.point_gets > 1
+                    || response.resources.reads.scans != 0)
+            {
+                return Err(format!(
+                    "long WITH chain exceeded its memory/property-read guard at size {size}: peak={}, reads={:?}",
+                    response.resources.peak_memory_bytes, response.resources.reads,
+                ).into());
             }
             if case == "correlated_index_aggregate"
                 // The allocator-verified sparse map bounds replace the old

@@ -1,7 +1,9 @@
 use super::Value;
 use std::collections::BTreeSet;
 
-/// An index into a query's binding catalog. Runtime rows use slots, never names.
+/// A logical Query binding index. RowProgram relocates these fields into its
+/// private execution-cell space; its operators must not be used as a Query.
+/// Both representations resolve references by index, never by runtime name.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]

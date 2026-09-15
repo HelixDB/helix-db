@@ -202,6 +202,12 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
+Rows reuse execution cells after bindings leave scope, so successive `WITH`
+aliases do not widen every retained row. Logical binding IDs remain stable in
+validation and explain output. Simultaneous inputs, outputs and sort expressions
+keep distinct cells. The retained compiled layout is admitted before execution
+storage access and remains charged through result preparation and commit;
+compilation itself still precedes this admission.
 Modifying statements admit boxed transaction read operations before allocation,
 including measured vector reads and calls that are dropped without being polled.
 Vector dispatch forwards the underlying reader's future without another wrapper

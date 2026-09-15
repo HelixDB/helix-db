@@ -17,9 +17,9 @@ pub enum RowExecution {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "PipelineInput")]
 pub struct RowPipeline {
-    query: Arc<Query>,
+    pub(super) query: Arc<Query>,
     execution: RowExecution,
-    input_windows: BTreeMap<usize, InputWindow>,
+    pub(super) input_windows: BTreeMap<usize, InputWindow>,
     batch_consumers: BTreeMap<usize, BatchConsumer>,
 }
 #[derive(serde::Deserialize)]
@@ -174,7 +174,7 @@ impl RowPipeline {
     pub fn cost(&self, storage: &cost::StorageCostProfile) -> cost::CostVector {
         let mut rows = 1_u64;
         let mut total = cost::CostVector::ZERO;
-        let row_bytes = (self.query.bindings().len() as u64)
+        let row_bytes = (self.query.layout().width() as u64)
             .saturating_mul(size_of::<Value>() as u64)
             .saturating_add(size_of::<Row>() as u64);
         let mut batched_until = None;

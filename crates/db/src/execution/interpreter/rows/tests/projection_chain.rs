@@ -3,6 +3,54 @@ use helix_planner::context;
 use serde_json::json;
 
 #[tokio::test]
+async fn dead_projection_bindings_do_not_widen_every_retained_row() {
+    let db =
+        crate::execution::interpreter::test_support::open_db("cypher-physical-row-layout").await;
+    let mut text = "UNWIND range(1,128) AS value_0".to_owned();
+    for index in 1..65 {
+        text.push_str(&format!(" WITH value_{} AS value_{index}", index - 1));
+    }
+    text.push_str(" RETURN value_64 AS value ORDER BY value");
+    let query = helix_cypher::compile(&text).unwrap();
+    assert!(query.bindings().len() >= 65);
+    assert_eq!(query.layout().width(), 2);
+    let plan = r::plan(
+        query,
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let limits = Limits {
+        batch_rows: 8,
+        memory_bytes: 256 * 1024,
+        ..Default::default()
+    };
+    let result = Interpreter::new(&db, context::ParamBindings::default())
+        .execute_rows(&plan, &BTreeMap::new(), limits)
+        .await;
+    let identity = plan.with_layout(r::RowLayoutMode::Identity);
+    let reference = Interpreter::new(&db, context::ParamBindings::default())
+        .execute_rows(&identity, &BTreeMap::new(), Limits::default())
+        .await;
+    let bounded_reference = Interpreter::new(&db, context::ParamBindings::default())
+        .execute_rows(&identity, &BTreeMap::new(), limits)
+        .await;
+    db.close().await.unwrap();
+    let result = result.expect("dead logical bindings must not consume cells in every row");
+    let reference = reference.unwrap();
+    assert_eq!(result.rows, reference.rows);
+    assert!(result.resources.peak_memory_bytes < reference.resources.peak_memory_bytes);
+    assert!(matches!(bounded_reference, Err(Error::Query(error)) if error.detail == "MemoryLimit"));
+    assert_eq!(result.columns, vec!["value"]);
+    assert_eq!(
+        result.rows,
+        (1..=128)
+            .map(|value| vec![json!(value)])
+            .collect::<Vec<_>>()
+    );
+    assert!(result.resources.peak_memory_bytes <= limits.memory_bytes);
+}
+
+#[tokio::test]
 async fn projection_chains_keep_global_windows_and_bounded_intermediate_memory() {
     let db = crate::execution::interpreter::test_support::open_db("cypher-projection-chain").await;
     for (text, expected) in [

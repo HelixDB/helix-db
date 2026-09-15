@@ -133,7 +133,8 @@ fn unsupported_access_clips_each_suffix_at_its_last_safe_projection() {
         crate::trace::PlanningTrace::default(),
         exec::PlannerMetrics::default(),
     )
-    .unwrap();
+    .unwrap()
+    .into();
     let consumers = prepare(&pipeline, &matches);
     assert_eq!(consumers[&0], r::BatchConsumer::Pipeline { end: 3 });
     assert_eq!(

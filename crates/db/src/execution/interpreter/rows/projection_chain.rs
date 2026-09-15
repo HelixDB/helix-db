@@ -46,7 +46,7 @@ impl ExecutionContext<'_> {
     pub(super) async fn consume_batches<'a, S>(
         &'a self,
         batches: S,
-        plan: &'a r::RowPlan,
+        plan: &'a r::RowProgram,
         source: usize,
         consumer: r::BatchConsumer,
         parameters: &'a BTreeMap<String, r::Value>,
@@ -92,7 +92,7 @@ impl ExecutionContext<'_> {
             skip: skip.as_ref(),
             limit: limit.as_ref(),
         };
-        let width = plan.query().bindings().len();
+        let width = plan.query().width();
         match consumer {
             r::BatchConsumer::Aggregate => Ok((
                 self.row_budget()
@@ -168,7 +168,7 @@ impl ExecutionContext<'_> {
     pub(super) async fn projection_chain<'a, S>(
         &'a self,
         batches: S,
-        plan: &'a r::RowPlan,
+        plan: &'a r::RowProgram,
         operators: ops::RangeInclusive<usize>,
         window: Option<&'a r::InputWindow>,
         parameters: &'a BTreeMap<String, r::Value>,
@@ -178,7 +178,7 @@ impl ExecutionContext<'_> {
         S: futures::Stream<Item = Result<Rows>> + Send + 'a,
     {
         let query = plan.query();
-        let width = query.bindings().len();
+        let width = query.width();
         let end = *operators.end();
         let r::Operator::Project {
             items,

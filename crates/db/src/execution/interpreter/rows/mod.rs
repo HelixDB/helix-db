@@ -54,6 +54,10 @@ impl Interpreter<'_> {
     ) -> Result<O::Value> {
         self.ctx.check_execution_deadline()?;
         self.ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
+        let _program_memory = self
+            .ctx
+            .row_budget()
+            .reserve(plan.program().retained_layout_bytes())?;
         match plan.query().effect() {
             r::Effect::Read => self.ctx.enable_request_read_view().await?,
             r::Effect::Write => {
@@ -109,8 +113,10 @@ impl ExecutionContext<'_> {
         parameters: &BTreeMap<String, r::Value>,
         limits: Limits,
     ) -> Result<output::AdmittedResponse> {
+        let diagnostics = &plan.metrics;
+        let plan = plan.program();
         let budget = self.row_budget().clone();
-        let width = plan.query().bindings().len();
+        let width = plan.query().width();
         if width
             .saturating_mul(size_of::<r::Value>())
             .saturating_add(size_of::<r::Row>())
@@ -454,7 +460,7 @@ impl ExecutionContext<'_> {
             Response {
                 columns,
                 rows: output,
-                diagnostics: plan.metrics.clone(),
+                diagnostics: diagnostics.clone(),
                 resources: crate::cypher::ResourceUsage {
                     peak_memory_bytes: self.row_budget().peak(),
                     reads: self.row_budget().reads(),

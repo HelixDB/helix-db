@@ -53,7 +53,7 @@ pub(super) fn matches(query: &Query) -> Result<BTreeMap<usize, MatchPlan>> {
             })?;
             sources.push(PlannedNode {
                 slot,
-                access,
+                access: std::sync::Arc::new(access),
                 estimated_rows: 1,
             });
         }

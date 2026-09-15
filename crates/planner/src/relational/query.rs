@@ -201,6 +201,8 @@ pub struct Query {
     returns: Vec<(String, Slot)>,
     effect: Effect,
     contracts: Vec<super::OperatorContract>,
+    #[serde(skip)]
+    layout: std::sync::Arc<super::RowLayout>,
 }
 
 #[derive(serde::Deserialize)]
@@ -460,16 +462,30 @@ impl Query {
                 "query output does not match the binding catalog",
             ));
         }
+        let layout = std::sync::Arc::new(super::RowLayout::new(bindings.len(), &contracts));
         Ok(Self {
             bindings,
             operators,
             returns,
             effect,
             contracts,
+            layout,
         })
     }
     pub fn contracts(&self) -> &[super::OperatorContract] {
         &self.contracts
+    }
+    /// Physical storage derived from the logical scopes. Binding IDs, types,
+    /// nullability and serialized query contracts retain their logical meaning.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// let query = r::Query::new(vec![], vec![], vec![]).unwrap();
+    /// assert_eq!(query.layout().width(), 0);
+    /// assert_eq!(query.layout().cell(r::Slot(0)), None);
+    /// ```
+    pub fn layout(&self) -> &super::RowLayout {
+        &self.layout
     }
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings

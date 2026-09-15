@@ -67,6 +67,9 @@ impl<E: ExpressionInput> ProjectionProgram<E> {
 }
 
 impl<E> ProjectionProgram<E> {
+    pub(super) fn capacity(&self) -> usize {
+        self.items.capacity()
+    }
     pub fn references(&self) -> &BTreeSet<Slot> {
         &self.references
     }

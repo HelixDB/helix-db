@@ -15,6 +15,23 @@ pub struct InputWindow {
 }
 
 impl InputWindow {
+    pub(super) fn expression_heap_bytes(&self, heap: impl Fn(&Expression) -> usize) -> usize {
+        self.skips.iter().fold(
+            self.skips
+                .capacity()
+                .saturating_mul(size_of::<Expression>())
+                .saturating_add(heap(&self.limit)),
+            |bytes, expression| bytes.saturating_add(heap(expression)),
+        )
+    }
+    pub(super) fn map_expressions(&self, map: impl Fn(&Expression) -> Expression) -> Self {
+        Self {
+            projection: self.projection,
+            skips: self.skips.iter().map(&map).collect(),
+            limit: map(&self.limit),
+            termination: self.termination,
+        }
+    }
     pub(super) fn for_initial_source(query: &Query) -> Option<Self> {
         // A correlated source can contain later failing input expressions.
         // Only the initial source has the required single-input proof.

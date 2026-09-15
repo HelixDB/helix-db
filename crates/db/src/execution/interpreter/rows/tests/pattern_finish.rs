@@ -120,7 +120,8 @@ async fn cached_native_fallback_preserves_subplan_isolation_and_validates_result
                 ),
             ],
             2,
-        ),
+        )
+        .into(),
     };
     let ids = ctx
         .match_source_ids(&source, usize::MAX, Limits::default())
@@ -157,7 +158,8 @@ async fn cached_native_fallback_preserves_subplan_isolation_and_validates_result
                 },
             )],
             1,
-        ),
+        )
+        .into(),
     };
     let ids = ctx
         .match_source_ids(&source, 1, Limits::default())
