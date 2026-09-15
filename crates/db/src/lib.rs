@@ -8,6 +8,7 @@ extern crate self as db;
 #[cfg(test)]
 mod allocation_testing;
 
+mod commit_completion;
 pub mod config;
 pub mod cypher;
 pub mod encoding;
@@ -800,6 +801,7 @@ struct HelixDBInner {
     lifecycle_metrics: Arc<index_lifecycle_testing::AutomaticLifecycleMetrics>,
     query_metrics: RwLock<Option<OssQueryMetrics>>,
     query_metrics_runtime: Mutex<Option<telemetry::Runtime>>,
+    commit_completions: commit_completion::Tracker,
     close_state: Mutex<CloseState>,
 }
 
@@ -1554,6 +1556,7 @@ impl HelixDB {
                 lifecycle_metrics,
                 query_metrics: RwLock::new(None),
                 query_metrics_runtime: Mutex::new(None),
+                commit_completions: commit_completion::Tracker::default(),
                 close_state: Mutex::new(CloseState::Open),
                 config,
             }),
@@ -2140,9 +2143,10 @@ impl HelixDB {
 
     /// Cancels owned tasks and idempotently closes the underlying storage.
     ///
-    /// Concurrent callers either perform the close or wait for the current
-    /// attempt. Migration and outbox workers are always joined before SlateDB
-    /// or its cache closes, preserving their acyclic ownership contracts.
+    /// Concurrent callers elect one owned close task or wait for that attempt.
+    /// Dropping a caller does not interrupt shutdown. Started commits finish
+    /// before migration/outbox workers are joined and storage or caches close.
+    /// The finite close task retains no handle in the runtime it owns.
     pub async fn close(&self) -> Result<()> {
         loop {
             let wait = {
@@ -2168,7 +2172,25 @@ impl HelixDB {
             let _ = wait.await;
         }
 
+        self.inner.commit_completions.seal();
+        let db = Self {
+            inner: Arc::clone(&self.inner),
+        };
+        tokio::spawn(async move { db.finish_close().await })
+            .await
+            .map_err(|error| {
+                HelixDbError::InvariantViolation(format!(
+                    "database shutdown task terminated: {error}"
+                ))
+            })?
+    }
+
+    /// Complete the elected shutdown even when its original waiter is dropped.
+    async fn finish_close(&self) -> Result<()> {
         let result = async {
+            // Started commits own mutation permits and cache fences even if their
+            // request was dropped. Finish them before closing shared resources.
+            self.inner.commit_completions.seal_and_wait().await;
             let _secondary_step = self.inner.secondary_lifecycle_step.lock().await;
             self.inner
                 .query_metrics

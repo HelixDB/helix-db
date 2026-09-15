@@ -142,6 +142,13 @@ statement. `DETACH DELETE` removes those relationships and the node. An error in
 later clause also rolls back earlier writes. Do not automatically retry an
 uncertain commit outcome; follow the existing transaction error contract.
 
+Once commit starts, dropping the caller does not stop commit finalization. The
+engine retains mutation guards, pending property admission, and cache fences
+until finalization completes. `HelixDB::close()` stops new commit admission and
+waits for started commits before closing shared resources; dropping the close
+waiter does not abandon shutdown. Keep the async runtime alive until close
+finishes. A cancelled transport request does not prove that its write rolled back.
+
 ## Lossless values
 
 Nulls, booleans, strings, lists, maps, and finite floats use ordinary JSON values.

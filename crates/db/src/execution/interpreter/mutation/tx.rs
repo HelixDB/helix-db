@@ -248,69 +248,79 @@ impl<'db> ExecutionContext<'db> {
             .await?;
         let ActiveWriteTx { txn, index_context } = active;
         let prepared_index_context = index_context.into_prepared()?;
-        let vector_cache_effects = prepared_index_context.vector_cache_writes().entries();
-        let text_compaction_staged = prepared_index_context.text_compaction_staged();
-        let pending_vector_cache = vector_cache_effects
-            .iter()
-            .filter_map(|write| self.db.vector_cache_registry().prepare_commit(write))
-            .collect::<Vec<_>>();
-        let vector_cache_retirements = vector_cache_effects
-            .iter()
-            .filter_map(|write| write.retirement().cloned())
-            .collect::<Vec<_>>();
-        let committed = match txn.commit().await {
-            Ok(committed) => committed,
-            Err(error) => {
-                return Err(prepared_index_context
-                    .classify_commit_error(self.writer()?.db(), error)
-                    .await);
-            }
+        // Commit may outlive its awaiting request. This finite task retains the
+        // exact runtime, mutation permit and cache fences until finalization.
+        // The tracker owns no task handles, so this Arc creates no ownership cycle.
+        let db = HelixDB {
+            inner: std::sync::Arc::clone(&self.db.inner),
         };
-        let committed_sequence = committed.map(|committed| committed.seqnum());
-        let committed_sequence = if pending_vector_cache.is_empty() {
-            None
-        } else {
-            Some(committed_sequence.ok_or_else(|| {
-                HelixDbError::InvariantViolation(
-                    "dirty vector cache rows committed without a storage sequence".to_string(),
-                )
-            })?)
-        };
-        for pending in pending_vector_cache {
-            let Some(committed_sequence) = committed_sequence else {
-                return Err(HelixDbError::InvariantViolation(
-                    "vector cache eviction lost its committed storage sequence".to_string(),
-                ));
+        let complete = async move {
+            let crate::HelixStorage::Writer(writer) = db.storage() else {
+                unreachable!("a prepared write retains its original writer runtime");
             };
-            pending.evict_after_commit(committed_sequence).await;
-        }
-        self.apply_vector_cache_retirements(vector_cache_retirements)
-            .await?;
-        if text_compaction_staged {
-            self.db.wake_index_worker().await;
-        }
-        Ok(())
-    }
-
-    /// Closes exact empty-partition caches only after durable graph commit.
-    async fn apply_vector_cache_retirements(
-        &self,
-        retirements: Vec<crate::search::vector::ValidatedVectorGenerationHandle>,
-    ) -> Result<()> {
-        for handle in retirements {
-            self.db.vector_cache_registry().retire(&handle).await;
-            if !self
-                .db
-                .vector_cache_registry()
-                .forget_validated_closed(&handle)
-            {
-                return Err(HelixDbError::InvariantViolation(
-                    "committed vector partition cache retirement did not close its exact entry"
-                        .to_string(),
-                ));
+            let vector_cache_effects = prepared_index_context.vector_cache_writes().entries();
+            let text_compaction_staged = prepared_index_context.text_compaction_staged();
+            let pending_vector_cache = vector_cache_effects
+                .iter()
+                .filter_map(|write| db.vector_cache_registry().prepare_commit(write))
+                .collect::<Vec<_>>();
+            let vector_cache_retirements = vector_cache_effects
+                .iter()
+                .filter_map(|write| write.retirement().cloned())
+                .collect::<Vec<_>>();
+            let committed = match txn.commit().await {
+                Ok(committed) => committed,
+                Err(error) => {
+                    return Err(prepared_index_context
+                        .classify_commit_error(writer.db(), error)
+                        .await);
+                }
+            };
+            let committed_sequence = committed.map(|committed| committed.seqnum());
+            let committed_sequence = if pending_vector_cache.is_empty() {
+                None
+            } else {
+                Some(committed_sequence.ok_or_else(|| {
+                    HelixDbError::InvariantViolation(
+                        "dirty vector cache rows committed without a storage sequence".to_string(),
+                    )
+                })?)
+            };
+            for pending in pending_vector_cache {
+                let Some(committed_sequence) = committed_sequence else {
+                    return Err(HelixDbError::InvariantViolation(
+                        "vector cache eviction lost its committed storage sequence".to_string(),
+                    ));
+                };
+                pending.evict_after_commit(committed_sequence).await;
             }
-        }
-        Ok(())
+            for handle in vector_cache_retirements {
+                db.vector_cache_registry().retire(&handle).await;
+                if !db.vector_cache_registry().forget_validated_closed(&handle) {
+                    return Err(HelixDbError::InvariantViolation(
+                        "committed vector partition cache retirement did not close its exact entry"
+                            .to_string(),
+                    ));
+                }
+            }
+            if text_compaction_staged {
+                db.wake_index_worker().await;
+            }
+            Ok(())
+        };
+        let task = match self.row_memory.as_ref() {
+            Some(budget) => self
+                .db
+                .inner
+                .commit_completions
+                .spawn(budget.admitted_future(complete)?)?,
+            None => self.db.inner.commit_completions.spawn(complete)?,
+        };
+        task.await.map_err(|error| {
+            HelixDbError::InvariantViolation(format!(
+                "commit completion task terminated; outcome may be unknown: {error}"
+            ))
+        })?
     }
 }
 
@@ -1070,5 +1080,160 @@ mod additional_tests {
         .to_bytes();
         assert!(db.inner_db().get(staged_graph_key).await.unwrap().is_none());
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_committed_request_keeps_cache_fences_until_publication_finishes() {
+        use futures::FutureExt;
+        let db = Arc::new(test_support::open_db("mutation-aborted-commit-owner").await);
+        let handle = cache_handle();
+        let store = ready_store(&db, &handle);
+        let read = db.vector_cache_registry().read_guard_for(&handle).unwrap();
+        let pending = Arc::clone(read.pending_dirty());
+        drop(read);
+        let publication = pending.lock_publish().await;
+        let memory_bytes = 1024 * 1024;
+        let budget = crate::query_resources::Budget::new(memory_bytes);
+        let request = {
+            let db = Arc::clone(&db);
+            let budget = budget.clone();
+            tokio::spawn(async move {
+                let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+                context.row_memory = Some(budget.clone());
+                context.enable_request_write_scope().await.unwrap();
+                let mut scope = context.take_or_begin_write_scope().await.unwrap();
+                scope
+                    .index_context
+                    .vector_cache_writes()
+                    .dirty_rows_for(&handle)
+                    .mark_node_dirty(7);
+                let row =
+                    crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new_with_budget(
+                        vec![crate::encoding::v2::values::property::Property::bytes(
+                            "pending",
+                            vec![7; 65536],
+                        )],
+                        Some(&budget),
+                    )
+                    .unwrap();
+                scope
+                    .index_context
+                    .property_writes
+                    .stage(
+                        &scope.txn,
+                        context.tenant_scope,
+                        crate::index_lifecycle::graph_mutation::GraphEntity::node(99),
+                        Some(row.write_payload()),
+                        Some(&budget),
+                    )
+                    .unwrap();
+                drop(row);
+                context.finish_write_scope(scope).await.unwrap();
+                context.commit_request_write_scope().await
+            })
+        };
+        let scope = crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped;
+        let key = crate::encoding::v2::keys::DataKey::Data {
+            scope,
+            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
+                crate::encoding::v2::keys::NodePropertyKey::new(99),
+            ),
+        }
+        .to_bytes();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while db.inner_db().get(&key).await.unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("storage commits while cache publication is held");
+        assert!(pending.is_node_dirty(7));
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        let fence_retained = pending.is_node_dirty(7);
+        let retained_bytes = memory_bytes - budget.available();
+        let permit_released = db
+            .inner
+            .index_scope_gates
+            .lifecycle_permit(scope)
+            .now_or_never()
+            .is_some();
+        drop(publication);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pending.is_node_dirty(7) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("commit finalization releases the dirty fence");
+        let evicted = store.get_upper_vector(7).is_none();
+        db.close().await.unwrap();
+        assert!(
+            retained_bytes >= 65536,
+            "pending property payload lost its admission"
+        );
+        assert_eq!(budget.available(), memory_bytes);
+        assert!(
+            fence_retained,
+            "request cancellation released a committed row's dirty fence"
+        );
+        assert!(
+            !permit_released,
+            "request cancellation released mutation authority before publication"
+        );
+        assert!(
+            evicted,
+            "request cancellation skipped committed cache eviction"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_commit_submission_rolls_back_before_spawning() {
+        for shutting_down in [false, true] {
+            let db = test_support::open_db("commit-submission-rejected").await;
+            let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+            context.enable_request_write_scope().await.unwrap();
+            let row =
+                crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new_with_budget(
+                    vec![crate::encoding::v2::values::property::Property::i64(
+                        "value", 1,
+                    )],
+                    None,
+                )
+                .unwrap();
+            let entity = crate::index_lifecycle::graph_mutation::GraphEntity::node(99);
+            let mut scope = context.take_or_begin_write_scope().await.unwrap();
+            scope
+                .index_context
+                .property_writes
+                .stage(
+                    &scope.txn,
+                    context.tenant_scope,
+                    entity,
+                    Some(row.write_payload()),
+                    None,
+                )
+                .unwrap();
+            drop(row);
+            context.finish_write_scope(scope).await.unwrap();
+            if shutting_down {
+                db.inner.commit_completions.seal();
+            } else {
+                context.row_memory = Some(crate::query_resources::Budget::new(0));
+            }
+            let error = context.commit_request_write_scope().await.unwrap_err();
+            assert!(match error {
+                HelixDbError::DatabaseClosed => shutting_down,
+                HelixDbError::QueryMemoryLimitExceeded => !shutting_down,
+                _ => false,
+            });
+            assert!(db
+                .inner_db()
+                .get(entity.property_key(context.tenant_scope))
+                .await
+                .unwrap()
+                .is_none());
+            db.close().await.unwrap();
+        }
     }
 }
