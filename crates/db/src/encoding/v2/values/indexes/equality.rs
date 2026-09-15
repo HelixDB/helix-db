@@ -68,6 +68,11 @@ impl BitmapMembershipDelta {
         *ids |= &self.additions;
     }
 
+    /// Logarithmic membership lookup without enumerating the delta's IDs.
+    pub(crate) fn contains_member(&self, id: u64) -> bool {
+        self.additions.contains(id) || self.removals.contains(id)
+    }
+
     pub(crate) fn members(&self) -> impl Iterator<Item = u64> + '_ {
         self.additions.iter().chain(self.removals.iter())
     }

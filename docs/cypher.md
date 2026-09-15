@@ -210,6 +210,8 @@ scan ranges, including empty scans. Repeated keys share one
 retained payload allowance; table growth and commit-time read-state copies are
 included. This admission lasts through backend commit or transaction abort, so
 a write that streams a small result can still reach its budget through a large
-read set. A memory failure before commit rolls back the complete statement.
+read set. Graph topology collection also admits its membership deltas and bitmap
+growth. Repeated additions and removals share a bounded allowance within each
+collection epoch. A memory failure before commit rolls back the complete statement.
 Frontend/planner allocations and some native storage working buffers still need
 memory accounting; the current budget covers the integrated execution buffers.

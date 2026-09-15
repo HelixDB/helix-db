@@ -6,6 +6,7 @@ use crate::error::{HelixDbError, Result};
 pub(crate) mod adjacency;
 pub(crate) mod bitmap;
 pub(crate) mod future;
+pub(crate) mod membership;
 pub(crate) mod properties;
 
 /// Logical storage calls made through a request. Object-store reads are separate:

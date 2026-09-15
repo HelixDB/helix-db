@@ -96,6 +96,19 @@ pub(crate) struct AdjacencyMembershipDelta {
 }
 
 impl AdjacencyMembershipDelta {
+    /// Assemble independently constructed directions without cloning their maps.
+    /// This constructor preserves the ordinary delta format and never resets a row.
+    pub(crate) fn from_directions(
+        outgoing: BitmapMembershipDelta,
+        incoming: BitmapMembershipDelta,
+    ) -> Self {
+        Self {
+            reset_out: false,
+            outgoing,
+            incoming,
+        }
+    }
+
     pub(crate) fn from_edges(edges: &Edges) -> Self {
         Self {
             reset_out: false,

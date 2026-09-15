@@ -111,6 +111,7 @@ impl<'db> ExecutionContext<'db> {
                     .search_index_backfill()
                     .batch()
                     .max_input_bytes(),
+                self.row_memory.as_ref(),
             ),
         ))
     }

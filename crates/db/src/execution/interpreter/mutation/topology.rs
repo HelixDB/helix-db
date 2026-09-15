@@ -17,15 +17,13 @@ use crate::encoding::indexes::{
 };
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, EdgePairIndexKey};
-use crate::encoding::v2::values::{adjacency as edges, indexes as secondary};
+use crate::encoding::v2::values::adjacency as edges;
+#[cfg(test)]
+use crate::encoding::v2::values::indexes as secondary;
 use crate::{HelixDbError, Result};
 
-/// A final membership operation for one ID within the current epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MembershipMutation {
-    Present,
-    Absent,
-}
+use crate::query_resources::{self, membership};
+use membership::Change as MembershipMutation;
 
 /// Logical identity for one shared bitmap row. Physical keys are encoded once
 /// when the coalesced epoch is flushed.
@@ -94,16 +92,85 @@ impl BitmapRow {
 }
 
 #[derive(Debug, Default)]
+struct AdjacencyDelta {
+    outgoing: membership::Delta,
+    incoming: membership::Delta,
+}
+
+impl AdjacencyDelta {
+    fn apply(
+        &mut self,
+        neighbor: u64,
+        direction: helix_planner::ir::ExpandDirection,
+        mutation: MembershipMutation,
+    ) -> Result<()> {
+        match direction {
+            helix_planner::ir::ExpandDirection::Out => {
+                self.outgoing.prepare(neighbor, mutation)?.apply()
+            }
+            helix_planner::ir::ExpandDirection::In => {
+                self.incoming.prepare(neighbor, mutation)?.apply()
+            }
+            helix_planner::ir::ExpandDirection::Both => {
+                let outgoing = self.outgoing.prepare(neighbor, mutation)?;
+                let incoming = self.incoming.prepare(neighbor, mutation)?;
+                outgoing.apply();
+                incoming.apply();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct TopologyMutationBatch {
-    bitmaps: BTreeMap<BitmapRow, secondary::BitmapMembershipDelta>,
-    adjacency: BTreeMap<(DataScope, u64), edges::AdjacencyMembershipDelta>,
+    bitmaps: BTreeMap<BitmapRow, membership::Delta>,
+    adjacency: BTreeMap<(DataScope, u64), AdjacencyDelta>,
+    // Field order keeps collection admission alive until its maps are dropped.
+    memory: Option<query_resources::Reservation>,
+}
+impl std::fmt::Debug for TopologyMutationBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopologyMutationBatch")
+            .field("bitmaps", &self.bitmaps)
+            .field("adjacency", &self.adjacency)
+            .finish_non_exhaustive()
+    }
+}
+impl TopologyMutationBatch {
+    fn admit_rows(&mut self, bitmaps: usize, adjacency: usize) -> Result<()> {
+        let Some(memory) = &mut self.memory else {
+            return Ok(());
+        };
+        use helix_planner::relational::allocation;
+        let bitmap_bytes = if bitmaps == 0 {
+            0
+        } else {
+            allocation::btree_bytes::<BitmapRow, membership::Delta>(bitmaps)
+        };
+        let adjacency_bytes = if adjacency == 0 {
+            0
+        } else {
+            allocation::btree_bytes::<(DataScope, u64), AdjacencyDelta>(adjacency)
+        };
+        memory.resize(bitmap_bytes.saturating_add(adjacency_bytes))
+    }
 }
 
 /// Transaction-owned topology mutations with a terminal prepared state.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(in crate::execution::interpreter) struct TopologyMutationRuntime {
     state: TopologyMutationRuntimeState,
     staged_keys: BTreeSet<Bytes>,
+    budget: Option<query_resources::Budget>,
+}
+impl std::fmt::Debug for TopologyMutationRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopologyMutationRuntime")
+            .field("state", &self.state)
+            .field("staged_keys", &self.staged_keys)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -115,6 +182,14 @@ enum TopologyMutationRuntimeState {
 }
 
 impl TopologyMutationRuntime {
+    /// Bind collection growth to this request's optional memory admission.
+    pub(super) fn new(budget: Option<&query_resources::Budget>) -> Self {
+        Self {
+            budget: budget.cloned(),
+            ..Self::default()
+        }
+    }
+
     /// Reads topology rows while preserving transaction-local staged overlays.
     pub(in crate::execution::interpreter) async fn observe(
         &self,
@@ -327,11 +402,18 @@ impl TopologyMutationRuntime {
         id: u64,
         mutation: MembershipMutation,
     ) -> Result<()> {
-        let delta = self.collecting_batch()?.bitmaps.entry(row).or_default();
-        match mutation {
-            MembershipMutation::Present => delta.add(id),
-            MembershipMutation::Absent => delta.remove(id),
-        }
+        let budget = self.budget.clone();
+        let batch = self.collecting_batch()?;
+        let Some(delta) = batch.bitmaps.get_mut(&row) else {
+            // Admit map growth and the first member before publishing the row.
+            // A rejected update must never leave an empty delta for later flush.
+            batch.admit_rows(batch.bitmaps.len() + 1, batch.adjacency.len())?;
+            let mut delta = membership::Delta::new(budget.as_ref())?;
+            delta.prepare(id, mutation)?.apply();
+            batch.bitmaps.insert(row, delta);
+            return Ok(());
+        };
+        delta.prepare(id, mutation)?.apply();
         Ok(())
     }
 
@@ -343,39 +425,32 @@ impl TopologyMutationRuntime {
         direction: helix_planner::ir::ExpandDirection,
         mutation: MembershipMutation,
     ) -> Result<()> {
-        let delta = self
-            .collecting_batch()?
-            .adjacency
-            .entry((scope, node))
-            .or_default();
-        match (direction, mutation) {
-            (helix_planner::ir::ExpandDirection::Out, MembershipMutation::Present) => {
-                delta.add_out(neighbor);
-            }
-            (helix_planner::ir::ExpandDirection::In, MembershipMutation::Present) => {
-                delta.add_in(neighbor);
-            }
-            (helix_planner::ir::ExpandDirection::Both, MembershipMutation::Present) => {
-                delta.add_out(neighbor);
-                delta.add_in(neighbor);
-            }
-            (helix_planner::ir::ExpandDirection::Out, MembershipMutation::Absent) => {
-                delta.remove_out(neighbor);
-            }
-            (helix_planner::ir::ExpandDirection::In, MembershipMutation::Absent) => {
-                delta.remove_in(neighbor);
-            }
-            (helix_planner::ir::ExpandDirection::Both, MembershipMutation::Absent) => {
-                delta.remove_out(neighbor);
-                delta.remove_in(neighbor);
-            }
-        }
-        Ok(())
+        let budget = self.budget.clone();
+        let batch = self.collecting_batch()?;
+        let row = (scope, node);
+        let Some(delta) = batch.adjacency.get_mut(&row) else {
+            batch.admit_rows(batch.bitmaps.len(), batch.adjacency.len() + 1)?;
+            let mut delta = AdjacencyDelta {
+                outgoing: membership::Delta::new(budget.as_ref())?,
+                incoming: membership::Delta::new(budget.as_ref())?,
+            };
+            delta.apply(neighbor, direction, mutation)?;
+            batch.adjacency.insert(row, delta);
+            return Ok(());
+        };
+        delta.apply(neighbor, direction, mutation)
     }
 
     fn collecting_batch(&mut self) -> Result<&mut TopologyMutationBatch> {
         if matches!(self.state, TopologyMutationRuntimeState::Collecting) {
-            self.state = TopologyMutationRuntimeState::Pending(TopologyMutationBatch::default());
+            self.state = TopologyMutationRuntimeState::Pending(TopologyMutationBatch {
+                memory: self
+                    .budget
+                    .as_ref()
+                    .map(|budget| budget.reserve(0))
+                    .transpose()?,
+                ..TopologyMutationBatch::default()
+            });
         }
         match &mut self.state {
             TopologyMutationRuntimeState::Pending(batch) => Ok(batch),
@@ -405,9 +480,15 @@ impl TopologyMutationRuntime {
             }
         };
 
-        let mut merges = Vec::with_capacity(batch.bitmaps.len() + batch.adjacency.len());
+        let TopologyMutationBatch {
+            bitmaps,
+            adjacency,
+            mut memory,
+        } = batch;
+        let mut merges = Vec::with_capacity(bitmaps.len() + adjacency.len());
         let mut staged_keys = Vec::with_capacity(merges.capacity());
-        for (row, delta) in batch.bitmaps {
+        for (row, delta) in bitmaps {
+            let (delta, admission) = delta.into_parts();
             let key = row.to_bytes();
             staged_keys.push(key.clone());
             merges.push(slatedb::DisjointMergeBatchEntry::from_tokens(
@@ -415,9 +496,25 @@ impl TopologyMutationRuntime {
                 delta.members().map(u128::from),
                 delta.encode(),
             ));
+            let Some(admission) = admission else {
+                continue;
+            };
+            memory
+                .as_mut()
+                .expect("budgeted collection epoch")
+                .absorb(admission);
         }
 
-        for ((scope, node), delta) in batch.adjacency {
+        for ((scope, node), delta) in adjacency {
+            let (outgoing, out_admission) = delta.outgoing.into_parts();
+            let (incoming, in_admission) = delta.incoming.into_parts();
+            for admission in [out_admission, in_admission].into_iter().flatten() {
+                memory
+                    .as_mut()
+                    .expect("budgeted collection epoch")
+                    .absorb(admission);
+            }
+            let delta = edges::AdjacencyMembershipDelta::from_directions(outgoing, incoming);
             const INCOMING_DIRECTION_TOKEN: u128 = 1_u128 << u64::BITS;
 
             let key = DataKey::Data {
@@ -1958,3 +2055,6 @@ mod tests {
         assert_eq!(after_conflicts.writer_conflicts, 0);
     }
 }
+
+#[cfg(test)]
+mod admission_tests;

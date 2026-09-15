@@ -47,6 +47,7 @@ impl MutationIndexContext {
         loaded: crate::index_lifecycle::mutation_catalog::MutationIndexCatalog,
         simhasher_registry: Arc<vector::SimHasherRegistry>,
         vector_retained_payload_limit: std::num::NonZeroU64,
+        budget: Option<&crate::query_resources::Budget>,
     ) -> Self {
         let (active, secondary, vector, text, routes) = loaded.into_components();
         Self {
@@ -59,7 +60,7 @@ impl MutationIndexContext {
             vector,
             text,
             routes,
-            topology_runtime: super::topology::TopologyMutationRuntime::default(),
+            topology_runtime: super::topology::TopologyMutationRuntime::new(budget),
             active_text_runtime:
                 crate::index_lifecycle::text::active_runtime::ActiveTextMutationRuntime::new(),
             active_vector_runtime: vector::ActiveVectorMutationRuntime::new(
