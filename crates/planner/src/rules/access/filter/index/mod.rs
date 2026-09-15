@@ -21,7 +21,7 @@ pub(in crate::rules) fn index_access_filter(
     indexes: &catalog::IndexCatalogSnapshot,
     planner_limits: &context::PlannerLimits,
 ) -> AccessFilterRewrite {
-    let pruned = match analysis::prune_statically_impossible_branches(filter.predicate().as_ref()) {
+    let pruned = match analysis::prune_borrowed(filter.predicate().as_ref()) {
         Ok(predicate) => predicate,
         Err(_) => return AccessFilterRewrite::NotApplicable,
     };

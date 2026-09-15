@@ -25,7 +25,9 @@ pub(crate) use self::labels::{label_equality_atom, label_scope, FeasibleLabelSco
 pub(crate) use self::literal_set::{
     dedup_by as dedup_literal_values, membership_by as literal_membership,
 };
-pub(crate) use self::prune::{prune_statically_impossible_branches, PrunedPredicate};
+pub(crate) use self::prune::{
+    prune_borrowed, prune_statically_impossible_branches, PrunedPredicate,
+};
 pub(crate) use self::scalar::{
     predicate_is_statically_tautological, scalar_property_conjunction_is_impossible,
 };

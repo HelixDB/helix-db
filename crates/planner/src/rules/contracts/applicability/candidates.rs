@@ -69,7 +69,7 @@ pub(crate) fn access_filter_has_simplification_candidate(filter: &logical::Acces
 
 pub(crate) fn access_filter_has_index_candidate(filter: &logical::AccessFilter) -> bool {
     let Ok(analysis::PrunedPredicate::Feasible { predicate, label }) =
-        analysis::prune_statically_impossible_branches(filter.predicate().as_ref())
+        analysis::prune_borrowed(filter.predicate().as_ref())
     else {
         return false;
     };

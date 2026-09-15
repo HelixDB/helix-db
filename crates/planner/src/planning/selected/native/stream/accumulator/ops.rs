@@ -17,7 +17,7 @@ impl NativeAccessStream {
         let predicate = parameter_specialization::predicate(ctx, predicate)?;
         let predicate_plan = ir::PredicatePlan::new(predicate.clone())
             .expect("specializing validated parameters preserves predicate validity");
-        let _ = analysis::prune_statically_impossible_branches(&predicate)?;
+        let _ = analysis::prune_borrowed(&predicate)?;
         Ok(self.filter_plan(predicate_plan))
     }
 

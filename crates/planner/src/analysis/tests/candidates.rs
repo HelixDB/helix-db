@@ -1,9 +1,6 @@
 use helix_ast::{expr, value::PropertyValue};
 
-// Test-only allocator observation delegates unchanged operations to System.
-// Production planner code continues to deny unsafe code.
-#[allow(unsafe_code)]
-mod allocations;
+use super::allocations;
 
 #[test]
 fn candidate_classification_borrows_large_literals_without_allocating() {

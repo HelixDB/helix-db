@@ -1,3 +1,5 @@
+mod borrowed;
+
 use helix_ast::expr::{CompareOp, Predicate};
 
 use super::super::prune::feasible_pruned_predicate;
