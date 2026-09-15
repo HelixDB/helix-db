@@ -12,6 +12,9 @@ async fn database() -> HelixDB {
 #[path = "cypher/maps.rs"]
 mod maps;
 
+#[path = "cypher/membership.rs"]
+mod membership;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

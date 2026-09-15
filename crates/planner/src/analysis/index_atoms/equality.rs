@@ -8,6 +8,10 @@ use crate::ir::{
     IndexValue, NameField, NonEmptyString, SecondaryIndexLiteral, SecondaryIndexLiteralError,
 };
 
+#[cfg(test)]
+#[path = "../tests/index_atoms/stable_set.rs"]
+mod stable_set_tests;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EqualityIndexDomain {
     One(IndexValue),
@@ -165,16 +169,20 @@ fn literal_equality_set(value: &PropertyValue) -> Option<EqualityIndexDomain> {
         .map(SecondaryIndexLiteral::new)
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    let mut values = values.into_iter().fold(Vec::new(), |mut unique, value| {
-        if value.semantics() != crate::ir::LiteralEqualityIndexValueSemantics::NonReflexive
-            && !unique.iter().any(|existing: &SecondaryIndexLiteral| {
-                existing.as_property_value() == value.as_property_value()
-            })
-        {
-            unique.push(value);
-        }
-        unique
-    });
+    let values = values
+        .into_iter()
+        .filter(|value| {
+            value.semantics() != crate::ir::LiteralEqualityIndexValueSemantics::NonReflexive
+        })
+        .collect();
+    let mut values = super::super::literal_set::dedup_by(
+        values,
+        |left: &SecondaryIndexLiteral, right: &SecondaryIndexLiteral| {
+            super::super::literal_set::LiteralOrder::Typed
+                .compare(left.as_property_value(), right.as_property_value())
+        },
+        |left, right| left.as_property_value() == right.as_property_value(),
+    );
     Some(match values.len() {
         0 => EqualityIndexDomain::Empty,
         1 => EqualityIndexDomain::One(IndexValue::Literal(

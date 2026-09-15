@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn wide_literal_sets_preserve_index_branch_limits_and_duplicate_singletons() {
+    let rule = AccessFilterIndexRule::default();
+    let storage = cost::StorageCostProfile::default();
+    let key = catalog::ScopedPropertyKey::try_new("User", "age").unwrap();
+    let indexes = catalog::IndexCatalogSnapshot::default().with_node_eq(key.clone());
+    let limits = crate::context::PlannerLimits {
+        max_index_union_branches: crate::context::IndexUnionBranchLimit::Disabled,
+    };
+    for duplicate in [false, true] {
+        let values = (0..4096)
+            .map(|index| if duplicate { 42 } else { index })
+            .collect();
+        let expr = node_access_filter_expr(
+            ir::NodeAccessPlan::LabelScan {
+                label: name("User"),
+            },
+            ir::PredicatePlan::new(helix_ast::expr::Predicate::is_in(
+                "age",
+                helix_ast::value::PropertyValue::I64Array(values),
+            ))
+            .unwrap(),
+        );
+        let result = rule.apply(optimizer::RuleInput {
+            expr: &expr,
+            storage: &storage,
+            indexes: &indexes,
+            planner_limits: &limits,
+            stats: default_stats(),
+        });
+        if !duplicate {
+            assert_eq!(result, optimizer::RuleResult::NotApplicable);
+            continue;
+        }
+        assert!(
+            matches!(logical_access_path(result), logical::AccessPath::Node(path)
+            if matches!(path.source().as_ref(), ir::NodeAccessPlan::EqualityIndex { key: actual, value, .. }
+                if actual == &key && *value == equality_literal(42)))
+        );
+    }
+}
+
+#[test]
 fn access_filter_index_rule_applies_union_branch_limits_without_blocking_singletons() {
     let rule = AccessFilterIndexRule::default();
     let storage = cost::StorageCostProfile::default();

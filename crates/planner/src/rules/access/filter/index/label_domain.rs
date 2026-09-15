@@ -283,15 +283,15 @@ fn label_membership(value: &Expr, values: &Expr) -> Option<FiniteLabelDomain> {
 }
 
 fn domain_from_labels(labels: impl IntoIterator<Item = String>) -> FiniteLabelDomain {
-    let mut labels = labels.into_iter().fold(Vec::new(), |mut unique, label| {
-        let Some(label) = ir::NonEmptyString::new(label) else {
-            return unique;
-        };
-        if !unique.contains(&label) {
-            unique.push(label);
-        }
-        unique
-    });
+    let labels = labels
+        .into_iter()
+        .filter_map(ir::NonEmptyString::new)
+        .collect();
+    let mut labels = crate::analysis::dedup_literal_values(
+        labels,
+        |left: &ir::NonEmptyString, right: &ir::NonEmptyString| left.as_ref().cmp(right.as_ref()),
+        PartialEq::eq,
+    );
     match labels.len() {
         0 => FiniteLabelDomain::Empty,
         1 => FiniteLabelDomain::One(
@@ -343,6 +343,32 @@ fn domain_contains(domain: &FiniteLabelDomain, label: &ir::NonEmptyString) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_label_domains_preserve_first_order_and_ignore_empty_names() {
+        for size in [0, 1, 16, 17, 4096] {
+            let labels: Vec<_> = (0..size)
+                .map(|index| {
+                    if index % 3 == 0 {
+                        String::new()
+                    } else {
+                        format!("Label-{}", (size - index) % 23)
+                    }
+                })
+                .collect();
+            let mut expected = Vec::new();
+            for label in &labels {
+                if !label.is_empty() && !expected.contains(label) {
+                    expected.push(label.clone());
+                }
+            }
+            let actual: Vec<_> = domain_labels(domain_from_labels(labels))
+                .into_iter()
+                .map(ir::NonEmptyString::into_string)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn pure_label_domains_normalize_intersections_unions_and_non_strings() {

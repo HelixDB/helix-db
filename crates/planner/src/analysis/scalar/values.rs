@@ -9,6 +9,10 @@ use std::cmp::Ordering;
 use helix_ast::value::PropertyValue;
 use helix_value_semantics::CanonicalNumber;
 
+#[cfg(test)]
+#[path = "../tests/scalar/stable_set.rs"]
+mod stable_set_tests;
+
 pub(super) fn literal_collection_is_empty(value: &PropertyValue) -> bool {
     match value {
         PropertyValue::I64Array(values) => values.is_empty(),
@@ -165,13 +169,9 @@ fn canonical_number(value: &PropertyValue) -> Option<CanonicalNumber> {
 }
 
 fn dedup_property_values(values: Vec<PropertyValue>) -> Vec<PropertyValue> {
-    values.into_iter().fold(Vec::new(), |mut unique, value| {
-        if !unique
-            .iter()
-            .any(|existing| property_values_equal(existing, &value))
-        {
-            unique.push(value);
-        }
-        unique
-    })
+    super::super::literal_set::dedup_by(
+        values,
+        |left, right| super::super::literal_set::LiteralOrder::ScalarNumeric.compare(left, right),
+        property_values_equal,
+    )
 }
