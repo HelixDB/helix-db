@@ -32,47 +32,75 @@ pub(super) fn literal_collection_is_empty(value: &PropertyValue) -> bool {
     }
 }
 
+/// Validated borrowed finite collection. Only this module can construct the
+/// private slice variants, preserving the existing scalar-proof eligibility.
+#[derive(Clone, Copy)]
+pub(super) struct LiteralCollection<'a>(CollectionSlice<'a>);
+
+#[derive(Clone, Copy)]
+enum CollectionSlice<'a> {
+    I64(&'a [i64]),
+    F64(&'a [f64]),
+    F32(&'a [f32]),
+    Strings(&'a [String]),
+    Values(&'a [PropertyValue]),
+}
+
+impl<'a> LiteralCollection<'a> {
+    pub(super) fn new(value: &'a PropertyValue) -> Option<Self> {
+        let values = match value {
+            PropertyValue::I64Array(values) => CollectionSlice::I64(values),
+            PropertyValue::F64Array(values) if values.iter().all(|value| !value.is_nan()) => {
+                CollectionSlice::F64(values)
+            }
+            PropertyValue::F32Array(values) if values.iter().all(|value| !value.is_nan()) => {
+                CollectionSlice::F32(values)
+            }
+            PropertyValue::StringArray(values) => CollectionSlice::Strings(values),
+            PropertyValue::Array(values)
+                if values.iter().all(property_value_has_reflexive_equality) =>
+            {
+                CollectionSlice::Values(values)
+            }
+            PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::I64(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::F64(_)
+            | PropertyValue::F32(_)
+            | PropertyValue::String(_)
+            | PropertyValue::Bytes(_)
+            | PropertyValue::Object(_)
+            | PropertyValue::F64Array(_)
+            | PropertyValue::F32Array(_)
+            | PropertyValue::Array(_) => return None,
+        };
+        Some(Self(values))
+    }
+
+    /// Materialize only for an authoritative proof that needs the actual domain.
+    pub(super) fn owned_values(self) -> Vec<PropertyValue> {
+        let values = match self.0 {
+            CollectionSlice::I64(values) => {
+                values.iter().copied().map(PropertyValue::I64).collect()
+            }
+            CollectionSlice::F64(values) => {
+                values.iter().copied().map(PropertyValue::F64).collect()
+            }
+            CollectionSlice::F32(values) => {
+                values.iter().copied().map(PropertyValue::F32).collect()
+            }
+            CollectionSlice::Strings(values) => {
+                values.iter().cloned().map(PropertyValue::String).collect()
+            }
+            CollectionSlice::Values(values) => values.to_vec(),
+        };
+        dedup_property_values(values)
+    }
+}
+
 pub(super) fn literal_collection_values(value: &PropertyValue) -> Option<Vec<PropertyValue>> {
-    let values = match value {
-        PropertyValue::I64Array(values) => values
-            .iter()
-            .copied()
-            .map(PropertyValue::I64)
-            .collect::<Vec<_>>(),
-        PropertyValue::F64Array(values) if values.iter().all(|value| !value.is_nan()) => values
-            .iter()
-            .copied()
-            .map(PropertyValue::F64)
-            .collect::<Vec<_>>(),
-        PropertyValue::F32Array(values) if values.iter().all(|value| !value.is_nan()) => values
-            .iter()
-            .copied()
-            .map(PropertyValue::F32)
-            .collect::<Vec<_>>(),
-        PropertyValue::StringArray(values) => values
-            .iter()
-            .cloned()
-            .map(PropertyValue::String)
-            .collect::<Vec<_>>(),
-        PropertyValue::Array(values)
-            if values.iter().all(property_value_has_reflexive_equality) =>
-        {
-            values.clone()
-        }
-        PropertyValue::Null
-        | PropertyValue::Bool(_)
-        | PropertyValue::I64(_)
-        | PropertyValue::DateTime(_)
-        | PropertyValue::F64(_)
-        | PropertyValue::F32(_)
-        | PropertyValue::String(_)
-        | PropertyValue::Bytes(_)
-        | PropertyValue::Object(_)
-        | PropertyValue::F64Array(_)
-        | PropertyValue::F32Array(_)
-        | PropertyValue::Array(_) => return None,
-    };
-    Some(dedup_property_values(values))
+    LiteralCollection::new(value).map(LiteralCollection::owned_values)
 }
 
 pub(super) fn property_value_has_reflexive_equality(value: &PropertyValue) -> bool {

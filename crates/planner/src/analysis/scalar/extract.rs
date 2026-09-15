@@ -3,7 +3,7 @@
 use helix_ast::expr::{CompareOp, Expr, Predicate};
 use helix_ast::value::PropertyValue;
 
-use super::values::literal_collection_values;
+use super::values::LiteralCollection;
 use crate::ir::{BoundInclusivity, RangeIndexLiteral};
 
 /// Extract a finite, reflexive literal collection from a property `IN` predicate.
@@ -12,6 +12,13 @@ use crate::ir::{BoundInclusivity, RangeIndexLiteral};
 /// collections, non-collection literals, and collections containing non-reflexive
 /// float values return `None`.
 pub(super) fn literal_in_values(predicate: &Predicate) -> Option<(String, Vec<PropertyValue>)> {
+    let (property, values) = literal_in_collection(predicate)?;
+    Some((property.to_owned(), values.owned_values()))
+}
+
+pub(super) fn literal_in_collection(
+    predicate: &Predicate,
+) -> Option<(&str, LiteralCollection<'_>)> {
     let Predicate::IsIn {
         value: Expr::Property(property),
         values: Expr::Constant(values),
@@ -19,7 +26,7 @@ pub(super) fn literal_in_values(predicate: &Predicate) -> Option<(String, Vec<Pr
     else {
         return None;
     };
-    literal_collection_values(values).map(|values| (property.clone(), values))
+    LiteralCollection::new(values).map(|values| (property.as_str(), values))
 }
 
 pub(super) fn nullability_constraint(

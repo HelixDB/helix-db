@@ -75,11 +75,17 @@ pub struct SecondaryIndexLiteral {
 impl SecondaryIndexLiteral {
     /// Build a secondary-index literal, rejecting nested array/object values.
     pub fn new(value: PropertyValue) -> Result<Self, SecondaryIndexLiteralError> {
+        Self::validate_value(&value)?;
+        Ok(Self { value })
+    }
+
+    /// Borrowed eligibility shared by scheduling and owned literal construction.
+    pub(crate) fn validate_value(value: &PropertyValue) -> Result<(), SecondaryIndexLiteralError> {
         match value {
             PropertyValue::Array(_) | PropertyValue::Object(_) => {
                 Err(SecondaryIndexLiteralError::NestedValue)
             }
-            value => Ok(Self { value }),
+            _ => Ok(()),
         }
     }
 

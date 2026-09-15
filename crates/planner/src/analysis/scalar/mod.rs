@@ -14,6 +14,7 @@ mod truth;
 mod values;
 
 use helix_ast::expr::Predicate;
+#[cfg(test)]
 use helix_ast::value::PropertyValue;
 
 pub(crate) fn scalar_property_conjunction_is_impossible(predicate: &Predicate) -> bool {
@@ -24,8 +25,13 @@ pub(crate) fn predicate_is_statically_tautological(predicate: &Predicate) -> boo
     truth::static_predicate_value(predicate) == Some(true)
 }
 
+#[cfg(test)]
 pub(crate) fn literal_in_values(predicate: &Predicate) -> Option<(String, Vec<PropertyValue>)> {
     extract::literal_in_values(predicate)
+}
+
+pub(super) fn has_literal_in_values(predicate: &Predicate) -> bool {
+    extract::literal_in_collection(predicate).is_some()
 }
 
 pub(super) fn predicate_is_statically_impossible(predicate: &Predicate) -> bool {

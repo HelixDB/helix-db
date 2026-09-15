@@ -308,9 +308,13 @@ fn domain_from_labels(labels: impl IntoIterator<Item = String>) -> FiniteLabelDo
 
 fn intersect_domains(left: FiniteLabelDomain, right: FiniteLabelDomain) -> FiniteLabelDomain {
     let left = domain_labels(left);
-    let right = domain_labels(right);
+    let right: &[ir::NonEmptyString] = match &right {
+        FiniteLabelDomain::Empty => &[],
+        FiniteLabelDomain::One(label) => std::slice::from_ref(label),
+        FiniteLabelDomain::Many(labels) => labels.as_ref(),
+    };
     let contains = crate::analysis::literal_membership(
-        &right,
+        right,
         left.len(),
         |left: &ir::NonEmptyString, right: &ir::NonEmptyString| left.as_ref().cmp(right.as_ref()),
         PartialEq::eq,

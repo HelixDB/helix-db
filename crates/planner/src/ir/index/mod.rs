@@ -8,6 +8,8 @@ mod equality;
 mod range;
 mod search;
 
+pub(crate) use range::RangeLiteralRef;
+
 pub use equality::{
     EqualityIndexValueSemantics, IndexValue, LiteralEqualityIndexValueSemantics,
     RuntimeEqualitySet, SecondaryIndexLiteral, SecondaryIndexLiteralError,
