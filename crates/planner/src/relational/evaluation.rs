@@ -258,6 +258,21 @@ impl Evaluation<'_> {
                 }
                 self.eval(otherwise)?
             }
+            E::SimpleCase(case) => {
+                let operand = self.eval(&case.operand)?;
+                // Keep the operand admitted while evaluating each comparison.
+                // Both temporaries are released before the selected result.
+                let remaining = self.remaining(operand.allocated_bytes())?;
+                for (comparison, value) in &case.branches {
+                    let matches = operand.equals(&remaining.eval(comparison)?) == Some(true);
+                    if matches {
+                        drop(operand);
+                        return self.eval(value);
+                    }
+                }
+                drop(operand);
+                self.eval(&case.otherwise)?
+            }
             E::Function(Function::Coalesce, args) => {
                 for argument in args {
                     let v = self.eval(argument)?;

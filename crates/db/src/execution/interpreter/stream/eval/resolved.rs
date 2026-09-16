@@ -256,6 +256,7 @@ impl<'db> ExecutionContext<'db> {
                 Box::pin(self.eval_resolved(row, otherwise, resolver)).await
             }
             E::Slot(_)
+            | E::SimpleCase(_)
             | E::Index(..)
             | E::Slice { .. }
             | E::Aggregate { .. }

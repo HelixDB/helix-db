@@ -139,6 +139,11 @@ fn every_child_shape_matches_existing_rewrite_order_and_pruning() {
             branches: vec![(leaf(12), leaf(13))],
             otherwise: Box::new(leaf(14)),
         },
+        E::SimpleCase(Box::new(r::SimpleCase {
+            operand: leaf(15),
+            branches: helix_planner::ir::AtLeast::from_one((leaf(16), leaf(17))),
+            otherwise: leaf(18),
+        })),
         E::HasLabel(r::Slot(0), "N".into()),
         E::Parameter("p".into()),
         E::Slot(r::Slot(1)),
@@ -154,14 +159,23 @@ fn every_child_shape_matches_existing_rewrite_order_and_pruning() {
         },
     ]);
     for prune in [false, true] {
-        for failure in [None, Some(0), Some(7), Some(14)] {
+        for failure in [
+            None,
+            Some(0),
+            Some(7),
+            Some(14),
+            Some(15),
+            Some(16),
+            Some(17),
+            Some(18),
+        ] {
             let mut old_seen = Vec::new();
             let mut new_seen = Vec::new();
             let control = |node: &E, seen: &mut Vec<u8>| -> r::Result<bool> {
                 if prune
                     && matches!(
                         node,
-                        E::Property(..) | E::Function(..) | E::Aggregate { .. }
+                        E::Property(..) | E::Function(..) | E::Aggregate { .. } | E::SimpleCase(_)
                     )
                 {
                     return Ok(true);

@@ -122,6 +122,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                 }
                 let mut projections = Vec::new();
                 let mut output = Scope::new();
+                let first_output_binding = binder.bindings.len();
                 let mut columns = Vec::new();
                 let mut missing_alias = false;
                 for item in items {
@@ -172,6 +173,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                                 ScopeRef::Single(&binder.scope),
                                 true,
                             )?;
+                            let value_type = expression.value_type(&binder.bindings)?;
                             let kind = match &expression {
                                 r::Expression::Slot(slot) => binder.bindings[slot.0 as usize].kind,
                                 r::Expression::Literal(_)
@@ -186,11 +188,23 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                                 | r::Expression::List(_)
                                 | r::Expression::Map(_)
                                 | r::Expression::Case { .. }
-                                | r::Expression::HasLabel(..) => r::BindingType::Scalar,
+                                | r::Expression::SimpleCase(_)
+                                | r::Expression::HasLabel(..) => match value_type {
+                                    r::ValueType::Node => r::BindingType::Node,
+                                    r::ValueType::Relationship => r::BindingType::Relationship,
+                                    r::ValueType::Path => r::BindingType::Path,
+                                    r::ValueType::Any
+                                    | r::ValueType::Null
+                                    | r::ValueType::Boolean
+                                    | r::ValueType::Integer
+                                    | r::ValueType::Float
+                                    | r::ValueType::String
+                                    | r::ValueType::List
+                                    | r::ValueType::Map => r::BindingType::Scalar,
+                                },
                             };
                             let slot = binder.allocate(name.clone(), kind, true)?;
-                            binder.bindings[slot.0 as usize].value_type =
-                                expression.value_type(&binder.bindings)?;
+                            binder.bindings[slot.0 as usize].value_type = value_type;
                             output.insert(name.clone(), slot);
                             columns.push((name, slot));
                             projections.push(r::Projection { slot, expression });
@@ -241,12 +255,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                         Ok(r::TraversalControl::Descend)
                     })?;
                 }
-                let projected_index = aggregation::ExpressionIndex::new(
-                    projections
-                        .iter()
-                        .filter(|_| !ordering.is_empty())
-                        .map(|item| (&item.expression, item.slot)),
-                )?;
+                let mut projected_index = None;
                 let mut aggregate_arguments = Vec::new();
                 if mixed && !ordering.is_empty() {
                     for item in &projections {
@@ -267,6 +276,19 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                         let expression = binder.expression(expression, full_scope, true)?;
                         let has_aggregate = expression.has_aggregate();
                         let expression = expression.rewrite_owned(&mut |e| {
+                            // Newly allocated outputs cannot occur in expressions
+                            // resolved against the incoming projection scope.
+                            if matches!(&e, r::Expression::Slot(slot)
+                                if slot.0 as usize >= first_output_binding)
+                            {
+                                return Ok(ControlFlow::Break(e));
+                            }
+                            let projected_index = match &mut projected_index {
+                                Some(index) => index,
+                                vacant @ None => vacant.insert(aggregation::ExpressionIndex::new(
+                                    projections.iter().map(|item| (&item.expression, item.slot)),
+                                )?),
+                            };
                             let projected = if !has_aggregate
                                 || e.has_aggregate()
                                 || matches!(e, r::Expression::Slot(_) | r::Expression::Property(..))
@@ -901,25 +923,29 @@ impl Binder {
                     .iter()
                     .map(|(a, b)| {
                         let condition = match &operand {
-                            Some(x) => r::Expression::Binary(
-                                r::Binary::Equal,
-                                Box::new(x.clone()),
-                                Box::new(resolve(a)?),
-                            ),
+                            Some(_) => resolve(a)?,
                             None => self.boolean_expression(a, scope, allow_aggregate)?,
                         };
                         Ok((condition, resolve(b)?))
                     })
                     .collect::<Result<_>>()?;
-                r::Expression::Case {
-                    branches,
-                    otherwise: Box::new(
-                        otherwise
-                            .as_ref()
-                            .map(|e| resolve(e))
-                            .transpose()?
-                            .unwrap_or(r::Expression::Literal(r::Value::Null)),
-                    ),
+                let otherwise = otherwise
+                    .as_ref()
+                    .map(|e| resolve(e))
+                    .transpose()?
+                    .unwrap_or(r::Expression::Literal(r::Value::Null));
+                match operand {
+                    Some(operand) => r::Expression::SimpleCase(Box::new(r::SimpleCase {
+                        operand,
+                        branches: helix_planner::ir::AtLeast::try_from_vec(branches).ok_or_else(
+                            || semantic("InvalidCase", "CASE requires a WHEN branch"),
+                        )?,
+                        otherwise,
+                    })),
+                    None => r::Expression::Case {
+                        branches,
+                        otherwise: Box::new(otherwise),
+                    },
                 }
             }
             E::Call {

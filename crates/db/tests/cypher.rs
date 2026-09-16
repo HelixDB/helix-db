@@ -9,6 +9,12 @@ async fn database() -> HelixDB {
     .unwrap()
 }
 
+#[path = "cypher/graph_bindings.rs"]
+mod graph_bindings;
+
+#[path = "cypher/simple_case.rs"]
+mod simple_case;
+
 #[path = "cypher/aggregation.rs"]
 mod aggregation;
 

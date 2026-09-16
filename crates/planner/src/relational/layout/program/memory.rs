@@ -154,6 +154,17 @@ fn expression_heap(expression: &r::Expression) -> usize {
                     .saturating_add(expression_heap(then))
             },
         ),
+        E::SimpleCase(case) => case.branches.iter().fold(
+            size_of::<r::SimpleCase<E>>()
+                .saturating_add(case.branches.capacity().saturating_mul(size_of::<(E, E)>()))
+                .saturating_add(expression_heap(&case.operand))
+                .saturating_add(expression_heap(&case.otherwise)),
+            |bytes, (when, then)| {
+                bytes
+                    .saturating_add(expression_heap(when))
+                    .saturating_add(expression_heap(then))
+            },
+        ),
     }
 }
 

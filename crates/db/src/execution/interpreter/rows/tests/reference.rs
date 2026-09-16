@@ -121,6 +121,12 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
             .map(|b| vec![Some(b)])
             .collect();
         let mut cases = vec![
+            Case { query: "MATCH (a:N) RETURN CASE a.group WHEN 0 THEN 10 WHEN 1 THEN 20 ELSE 30 END AS chosen ORDER BY chosen",
+                columns: &["chosen"], rows: (0..5).map(|key| vec![Some(if key==4 {30} else if key%2==0 {10} else {20})]).collect() },
+            Case { query: "MATCH (a:N)-[r:R]->(b:N) RETURN CASE a.key WHEN 0 THEN b.key WHEN 1 THEN a.key ELSE -1 END AS chosen ORDER BY chosen",
+                columns: &["chosen"], rows: directed.iter().map(|(_,a,b)|vec![Some(match a {0=>*b,1=>*a,_=>-1})]).collect() },
+            Case { query: "MATCH (a:N)-[r:R]->(b:N) RETURN CASE count(*) WHEN 0 THEN -1 ELSE sum(b.key) END AS total",
+                columns: &["total"], rows: vec![vec![Some(if directed.is_empty() {-1} else {directed.iter().map(|(_,_,b)|*b).sum()})]] },
             Case { query: "MATCH (a:N) WHERE a.key IN [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20] AND a.key IN [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22] RETURN a.key AS a ORDER BY a",
                 columns: &["a"], rows: (0..5).filter(|key| (0..=20).contains(key) && (2..=22).contains(key)).map(|key| vec![Some(key)]).collect() },
             Case { query: "MATCH (a:N) WHERE a.key IN [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20] AND a.key IN [21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41] RETURN a.key AS a ORDER BY a",

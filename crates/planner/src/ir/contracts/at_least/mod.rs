@@ -22,6 +22,11 @@ pub struct AtLeast<T, const MIN: usize> {
 }
 
 impl<T, const MIN: usize> AtLeast<T, MIN> {
+    /// Retained allocation capacity, including spare slots, for plan admission.
+    pub(crate) fn capacity(&self) -> usize {
+        self.items.capacity()
+    }
+
     /// Build a collection from a vector, returning `None` when it has fewer
     /// than `MIN` items.
     pub fn try_from_vec(items: Vec<T>) -> Option<Self> {

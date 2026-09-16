@@ -108,6 +108,11 @@ fn fallible_visitors_preserve_child_order_across_every_container() {
             Box::new(E::Literal(r::Value::Integer(0))),
         ),
         field(14, "p"),
+        E::SimpleCase(Box::new(r::SimpleCase {
+            operand: field(15, "p"),
+            branches: helix_planner::ir::AtLeast::from_one((field(16, "p"), field(17, "p"))),
+            otherwise: field(18, "p"),
+        })),
         E::Parameter("unused".into()),
     ]);
     expression.validate_shape().unwrap();
@@ -120,11 +125,11 @@ fn fallible_visitors_preserve_child_order_across_every_container() {
         .unwrap();
     assert_eq!(
         demands,
-        (0..15)
+        (0..19)
             .map(|i| (r::Slot(i), r::PropertyRequirement::Key("p")))
             .collect::<Vec<_>>()
     );
-    for stop in 0..15 {
+    for stop in 0..19 {
         let mut slots = Vec::new();
         let result = expression.try_visit(&mut |expression| {
             let E::Slot(slot) = expression else {

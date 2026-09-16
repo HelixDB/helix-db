@@ -168,6 +168,20 @@ impl Expression {
                 }
                 result
             }
+            Self::SimpleCase(case) => {
+                infer(&case.operand)?;
+                let mut result = infer(&case.otherwise)?;
+                for (comparison, value) in &case.branches {
+                    infer(comparison)?;
+                    let value_type = infer(value)?;
+                    if result == T::Null {
+                        result = value_type;
+                    } else if value_type != T::Null && value_type != result {
+                        result = T::Any;
+                    }
+                }
+                result
+            }
             Self::Aggregate {
                 function, argument, ..
             } => {

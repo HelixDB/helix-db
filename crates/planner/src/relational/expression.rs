@@ -81,6 +81,31 @@ pub enum Aggregate {
     Collect,
 }
 
+/// A simple CASE owns its operand once and requires a first alternative.
+/// Comparison values and selected results remain lazy; the evaluator supplies
+/// its frontend's equality semantics. Boxing this owner keeps ordinary scalar
+/// expression nodes from growing with CASE-specific state.
+///
+/// ```
+/// use helix_planner::{ir, relational as r};
+/// let expression = r::Expression::SimpleCase(Box::new(r::SimpleCase {
+///     operand: r::Expression::Slot(r::Slot(0)),
+///     branches: ir::AtLeast::from_one((
+///         r::Expression::Literal(r::Value::Integer(1)),
+///         r::Expression::Slot(r::Slot(1)),
+///     )),
+///     otherwise: r::Expression::Literal(r::Value::Null),
+/// }));
+/// assert_eq!(expression.slots(), [r::Slot(0), r::Slot(1)].into());
+/// expression.validate_shape().unwrap();
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SimpleCase<E> {
+    pub operand: E,
+    pub branches: crate::ir::AtLeast<(E, E), 1>,
+    pub otherwise: E,
+}
+
 /// Frontend-independent expression shape. The operation and literal domains
 /// encode semantic differences (for example native two-valued comparisons and
 /// Cypher null propagation), without retaining either frontend's syntax tree.
@@ -110,6 +135,7 @@ pub enum ScalarExpression<L, U, B, F> {
         branches: Vec<(Self, Self)>,
         otherwise: Box<Self>,
     },
+    SimpleCase(Box<SimpleCase<Self>>),
     HasLabel(Slot, String),
 }
 
@@ -231,6 +257,14 @@ impl Expression {
                         child(b);
                     }
                 }
+                Self::SimpleCase(case) => {
+                    child(&case.operand);
+                    child(&case.otherwise);
+                    for (when, then) in &case.branches {
+                        child(when);
+                        child(then);
+                    }
+                }
                 Self::Function(function, args) => {
                     let valid = match function {
                         Function::Coalesce => !args.is_empty(),
@@ -342,6 +376,19 @@ impl<L, U, B, F> ScalarExpression<L, U, B, F> {
                     .collect::<Result<_, _>>()?,
                 otherwise: Box::new(rewrite(*otherwise)?),
             },
+            Self::SimpleCase(case) => {
+                let SimpleCase {
+                    operand,
+                    branches,
+                    otherwise,
+                } = *case;
+                Self::SimpleCase(Box::new(SimpleCase {
+                    operand: rewrite(operand)?,
+                    branches: branches
+                        .try_map(|(when, then)| Ok::<_, E>((rewrite(when)?, rewrite(then)?)))?,
+                    otherwise: rewrite(otherwise)?,
+                }))
+            }
             Self::Aggregate {
                 function,
                 argument,
@@ -443,6 +490,14 @@ impl<L, U, B, F> ScalarExpression<L, U, B, F> {
                 }
                 otherwise.try_visit_pruned(f)?;
             }
+            Self::SimpleCase(case) => {
+                case.operand.try_visit_pruned(f)?;
+                for (when, then) in &case.branches {
+                    when.try_visit_pruned(f)?;
+                    then.try_visit_pruned(f)?;
+                }
+                case.otherwise.try_visit_pruned(f)?;
+            }
             Self::Literal(_) | Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(_, _) => {}
         }
         Ok(())
@@ -519,6 +574,13 @@ impl<L: Clone, U: Copy, B: Copy, F: Clone> ScalarExpression<L, U, B, F> {
                     otherwise: Box::new(rewrite(otherwise)?),
                 }
             }
+            Self::SimpleCase(case) => Self::SimpleCase(Box::new(SimpleCase {
+                operand: rewrite(&case.operand)?,
+                branches: case.branches.try_map_ref(|(when, then)| {
+                    Ok::<_, super::QueryError>((rewrite(when)?, rewrite(then)?))
+                })?,
+                otherwise: rewrite(&case.otherwise)?,
+            })),
             Self::Aggregate {
                 function,
                 argument,

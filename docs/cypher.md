@@ -138,6 +138,14 @@ branch that is not selected; an argument error fails the statement and rolls
 back its writes. Ordinary scalar `CASE` branches remain lazy. Group state and
 `collect` results are charged against query limits.
 
+Simple `CASE value WHEN ...` evaluates `value` once and tests alternatives in
+order. Only the selected result expression is evaluated. Null does not match
+null in a simple `CASE`; use `CASE WHEN value IS NULL THEN ...` to test for a
+missing value. Node and relationship results keep their graph type when assigned
+to aliases, so they can be used in subsequent patterns and property updates.
+For example, `WITH CASE WHEN condition THEN n END AS selected` keeps the node
+type of `n` even when the result can be null. Path results remain path values.
+
 `ORDER BY` can reuse a projected aggregate or an aggregate contained in a mixed
 projection without exposing another result column:
 

@@ -28,6 +28,11 @@ fn tree() -> Expr {
             branches: vec![(literal(11), literal(12))],
             otherwise: Box::new(literal(13)),
         },
+        Expr::SimpleCase(Box::new(r::SimpleCase {
+            operand: literal(14),
+            branches: helix_planner::ir::AtLeast::from_one((literal(15), literal(16))),
+            otherwise: literal(17),
+        })),
         Expr::HasLabel(r::Slot(1), "N".into()),
         Expr::Parameter("p".into()),
     ])
@@ -56,12 +61,13 @@ fn traversal_borrows_nonclone_leaves_in_stable_child_order() {
                 | Expr::Aggregate { .. }
                 | Expr::List(_)
                 | Expr::Map(_)
+                | Expr::SimpleCase(_)
                 | Expr::Case { .. } => {}
             }
             Ok::<_, ()>(TraversalControl::Descend)
         })
         .unwrap();
-    assert_eq!(ids, (0..14).collect::<Vec<_>>());
+    assert_eq!(ids, (0..18).collect::<Vec<_>>());
     assert_eq!(slots, [r::Slot(0)]);
     assert_eq!(labels, [(r::Slot(1), "N")]);
     assert_eq!(parameters, ["p"]);
@@ -79,6 +85,7 @@ fn pruning_visits_the_root_and_skips_only_that_subtree() {
                     | Expr::Function(..)
                     | Expr::Aggregate { .. }
                     | Expr::Property(..)
+                    | Expr::SimpleCase(_)
             ) {
                 return Ok::<_, ()>(TraversalControl::Prune);
             }
