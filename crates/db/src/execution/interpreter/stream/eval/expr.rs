@@ -15,7 +15,10 @@ impl ExecutionContext<'_> {
             ir::ExprPlanError::EmptyName {
                 field: ir::NameField::Param,
             } => HelixDbError::Query("expression parameter name must not be empty".into()),
-            error => HelixDbError::Query(error.to_string()),
+            error @ (ir::ExprPlanError::EmptyName { .. }
+            | ir::ExprPlanError::EmptyPredicateSet { .. }) => {
+                HelixDbError::Query(error.to_string())
+            }
         })?;
         self.eval_expr_plan(row, &plan).await
     }

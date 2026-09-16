@@ -1221,11 +1221,11 @@ mod additional_tests {
                 context.row_memory = Some(crate::query_resources::Budget::new(0));
             }
             let error = context.commit_request_write_scope().await.unwrap_err();
-            assert!(match error {
-                HelixDbError::DatabaseClosed => shutting_down,
-                HelixDbError::QueryMemoryLimitExceeded => !shutting_down,
-                _ => false,
-            });
+            assert!(matches!(
+                (error, shutting_down),
+                (HelixDbError::DatabaseClosed, true)
+                    | (HelixDbError::QueryMemoryLimitExceeded, false)
+            ));
             assert!(db
                 .inner_db()
                 .get(entity.property_key(context.tenant_scope))

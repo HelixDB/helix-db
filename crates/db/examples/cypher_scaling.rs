@@ -428,6 +428,25 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             format!("{mixed_prefix} RETURN value ORDER BY value DESC LIMIT 5"),
             json!(mixed_top.into_iter().map(|value| [value]).collect::<Vec<_>>()),
         ),
+        (
+            "mixed_scalar_aggregation",
+            "MATCH (a:Left) RETURN 1+sum(a.key)+count(*) AS total ORDER BY 2-sum(a.key)"
+                .into(),
+            json!([[1 + size * (size - 1) / 2 + size]]),
+        ),
+        (
+            "mixed_scalar_aggregation_top_k",
+            "MATCH (a:Left) WITH a.key%7 AS g,a.key AS x RETURN g,1+sum(x) AS total ORDER BY 2-sum(x),g LIMIT 3".into(),
+            {
+                let mut groups = BTreeMap::<usize, usize>::new();
+                for key in 0..size {
+                    *groups.entry(key % 7).or_default() += key;
+                }
+                let mut expected: Vec<_> = groups.into_iter().collect();
+                expected.sort_unstable_by(|a,b| b.1.cmp(&a.1).then_with(||a.0.cmp(&b.0)));
+                json!(expected.into_iter().take(3).map(|(group,sum)| [group,1+sum]).collect::<Vec<_>>())
+            },
+        ),
     ];
     measure_cases(db, size, queries).await
 }
@@ -487,6 +506,20 @@ async fn measure_cases(
                     "downstream limit failed to bound property reads at size {size}"
                 )
                 .into());
+            }
+            if case.starts_with("mixed_scalar_aggregation")
+                // The existing 512-row graph hydration/validation batch peaks
+                // near 1.4 MiB. Leave bounded aggregate-state headroom while
+                // rejecting retention of the complete 4,096-row relation.
+                && (response.resources.peak_memory_bytes > 2 * 1024 * 1024
+                    || response.resources.reads.multi_get_keys > 3 * size
+                    || response.resources.reads.multi_get_batches > 3 * size.div_ceil(512)
+                    || response.resources.reads.scans != 0)
+            {
+                return Err(format!(
+                    "{case} exceeded its memory/property-read guard at size {size}: peak={}, reads={:?}",
+                    response.resources.peak_memory_bytes, response.resources.reads,
+                ).into());
             }
             if case == "compact_projection_chain"
                 // The fixture also retains graph hydration and validation batches.

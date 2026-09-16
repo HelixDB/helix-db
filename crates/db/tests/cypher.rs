@@ -9,6 +9,9 @@ async fn database() -> HelixDB {
     .unwrap()
 }
 
+#[path = "cypher/aggregation.rs"]
+mod aggregation;
+
 #[path = "cypher/grouping.rs"]
 mod grouping;
 

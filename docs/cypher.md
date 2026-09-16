@@ -131,6 +131,27 @@ dependency. Ambiguous aggregation is rejected during
 compilation, before any graph changes. These restrictions follow the pinned
 [openCypher M23 grouping rules](https://github.com/opencypher/openCypher/blob/007895aff5f33097d67b2e48a0a2babd6bd18590/cip/1.accepted/CIP2021-07-07-Grouping-keys-and-aggregation-expressions.adoc).
 
+Mixed expressions compute aggregate states first, then evaluate their scalar
+operations. For example, `1 + sum(x)` retains a sum state instead of retaining
+all input rows. Aggregate arguments are evaluated even inside an outer `CASE`
+branch that is not selected; an argument error fails the statement and rolls
+back its writes. Ordinary scalar `CASE` branches remain lazy. Group state and
+`collect` results are charged against query limits.
+
+`ORDER BY` can reuse a projected aggregate or an aggregate contained in a mixed
+projection without exposing another result column:
+
+```cypher
+UNWIND $amounts AS amount
+RETURN 1 + sum(amount) AS total
+ORDER BY 2 - sum(amount)
+```
+
+Outside aggregate arguments, ordering names refer to output aliases first.
+Aggregate arguments refer to the incoming rows: in
+`RETURN sum(x) AS x ORDER BY x + sum(x)`, the first `x` is the result alias and
+the `x` inside `sum` is the input value.
+
 ## Storage and mutation rules
 
 New nodes require exactly one nonempty label; new relationships require exactly

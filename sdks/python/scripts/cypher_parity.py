@@ -18,7 +18,7 @@ def cases() -> list[dict]:
         )
     )
     corpus = json.loads(path.read_text(encoding="utf-8"))
-    if corpus.get("schema_version") != 1 or len(corpus["cases"]) != 10:
+    if corpus.get("schema_version") != 1 or len(corpus["cases"]) != 16:
         raise ValueError("unsupported or incomplete Cypher parity corpus")
     seen: set[str] = set()
     for case in corpus["cases"]:

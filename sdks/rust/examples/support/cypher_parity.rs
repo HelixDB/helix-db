@@ -24,7 +24,7 @@ fn load() -> Result<Vec<Case>, Box<dyn std::error::Error>> {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/cypher/runtime.json").into()
     });
     let corpus: Corpus = serde_json::from_slice(&fs::read(fixture)?)?;
-    if corpus.schema_version != 1 || corpus.cases.len() != 10 {
+    if corpus.schema_version != 1 || corpus.cases.len() != 16 {
         return Err("unsupported or incomplete Cypher parity corpus".into());
     }
     let mut names = std::collections::BTreeSet::new();

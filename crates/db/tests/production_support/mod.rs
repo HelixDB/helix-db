@@ -587,3 +587,6 @@ pub async fn vector_migration_scale_1m() {
 pub async fn vector_migration_scale_10m() {
     crate::migrations::run_vector_migration_scale_contract(10_000_000).await;
 }
+
+mod mixed_aggregation;
+pub use mixed_aggregation::mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values;

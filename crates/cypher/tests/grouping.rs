@@ -56,6 +56,8 @@ fn aggregation_validation_does_not_clone_owned_literal_payloads() {
         for text in [
             format!("RETURN count('{payload}') AS n"),
             format!("RETURN size('{payload}') + count(*) AS n"),
+            format!("RETURN size('{payload}') + count(*) AS n ORDER BY n"),
+            format!("RETURN count('{payload}') AS n ORDER BY n"),
             format!("WITH 1 AS x RETURN x AS x, x + count('{payload}') AS n"),
         ] {
             let statement = helix_cypher::parse(&text).unwrap();
@@ -82,4 +84,31 @@ fn aggregation_validation_does_not_clone_owned_literal_payloads() {
             assert_eq!(literals, 1);
         }
     }
+}
+
+#[test]
+fn ordering_reuses_projected_expressions_without_copying_literal_payloads() {
+    let size = 1_048_576;
+    let payload = "x".repeat(size);
+    let text =
+        format!("RETURN size('{payload}') + count(*) AS n ORDER BY size('{payload}') + count(*)");
+    let statement = helix_cypher::parse(&text).unwrap();
+    let (query, count) = allocations::observe(|| helix_cypher::resolve(&statement));
+    let query = query.unwrap();
+    // The two syntax occurrences each produce one owned resolved literal.
+    // Matching ORDER BY discards its occurrence without cloning either payload.
+    assert!(count.bytes <= 2 * size + 16 * 1024, "{count:?}");
+    let mut retained = 0;
+    for operator in query.operators() {
+        for expression in operator.expressions() {
+            expression.visit(&mut |node| {
+                let r::Expression::Literal(r::Value::String(value)) = node else {
+                    return;
+                };
+                assert_eq!(value, &payload);
+                retained += 1;
+            });
+        }
+    }
+    assert_eq!(retained, 1);
 }

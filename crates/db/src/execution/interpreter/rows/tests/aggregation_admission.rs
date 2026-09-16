@@ -3,6 +3,75 @@ use crate::allocation_testing;
 use helix_planner::relational as r;
 use std::collections::BTreeMap;
 
+#[path = "../../../../../tests/production_support/mixed_aggregation.rs"]
+mod mixed_aggregation;
+
+#[tokio::test]
+async fn mixed_aggregate_failures_release_groups_and_allow_retry() {
+    use super::super::*;
+    use crate::execution::interpreter::test_support;
+    use helix_planner::context;
+
+    let db = test_support::open_db("mixed-aggregate-failure-admission").await;
+    for (memory_bytes, divisor, expected_error) in [
+        (512, 1, Some("MemoryLimit")),
+        (64 * 1024, 0, Some("DivisionByZero")),
+        (64 * 1024, 1, None),
+    ] {
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.row_memory = Some(memory::Budget::new(memory_bytes));
+        for _ in 0..2 {
+            let rows = Rows::new(
+                vec![vec![r::Value::Integer(3), r::Value::Null]],
+                ctx.row_budget(),
+            )
+            .unwrap();
+            let items = r::ProjectionProgram::new(vec![r::Projection {
+                slot: r::Slot(1),
+                expression: r::Expression::Binary(
+                    r::Binary::Divide,
+                    Box::new(r::Expression::Aggregate {
+                        function: r::Aggregate::Sum,
+                        argument: Some(Box::new(r::Expression::Slot(r::Slot(0)))),
+                        distinct: false,
+                    }),
+                    Box::new(r::Expression::Literal(r::Value::Integer(divisor))),
+                ),
+            }])
+            .unwrap();
+            let result = ctx
+                .project_rows(
+                    rows,
+                    2,
+                    projection::Projection {
+                        items: &items,
+                        distinct: false,
+                        ordering: &[],
+                        predicate: None,
+                        skip: None,
+                        limit: None,
+                    },
+                    &BTreeMap::new(),
+                    Limits {
+                        memory_bytes,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            match (result, expected_error) {
+                (Err(Error::Query(error)), Some(detail)) => assert_eq!(error.detail, detail),
+                (Ok(rows), None) => {
+                    assert_eq!(rows.data, vec![vec![r::Value::Null, r::Value::Integer(3)]])
+                }
+                (Err(error), expected) => panic!("expected {expected:?}, got {error:?}"),
+                (Ok(rows), Some(detail)) => panic!("expected {detail}, got {:?}", rows.data),
+            }
+            assert_eq!(ctx.row_budget().available(), memory_bytes);
+        }
+    }
+    db.close().await.unwrap();
+}
+
 #[test]
 fn distinct_duplicate_probes_reuse_owned_inputs_without_allocating() {
     let values = [
@@ -41,6 +110,104 @@ fn distinct_duplicate_probes_reuse_owned_inputs_without_allocating() {
             assert_eq!(accumulator.finish().unwrap(), expected);
         }
     }
+}
+
+#[tokio::test]
+async fn mixed_aggregate_memory_and_cancellation_boundaries_release_every_owner() {
+    use super::super::*;
+    use crate::execution::interpreter::test_support;
+    use helix_planner::context;
+
+    let db = test_support::open_db("mixed-aggregate-boundaries").await;
+    for (grouped, count) in [(false, 0), (false, 4), (true, 4)] {
+        let mut items = Vec::new();
+        if grouped {
+            items.push(r::Projection {
+                slot: r::Slot(2),
+                expression: r::Expression::Slot(r::Slot(0)),
+            });
+        }
+        items.push(r::Projection {
+            slot: r::Slot(3),
+            expression: r::Expression::Binary(
+                r::Binary::Add,
+                Box::new(r::Expression::Aggregate {
+                    function: r::Aggregate::Count,
+                    argument: None,
+                    distinct: false,
+                }),
+                Box::new(r::Expression::Literal(r::Value::Integer(1))),
+            ),
+        });
+        let items = r::ProjectionProgram::new(items).unwrap();
+        let mut memory_failures = 0;
+        let mut cancellations = 0;
+        let mut successes = 0;
+        for (memory_bytes, checkpoint) in (128..=8192)
+            .step_by(32)
+            .map(|bytes| (bytes, usize::MAX))
+            .chain((0..64).map(|check| (8192, check)))
+        {
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.row_memory = Some(memory::Budget::new(memory_bytes));
+            // An unreachable checkpoint leaves the memory sweep uncancelled.
+            ctx.fail_deadline_after(checkpoint);
+            let data = (0..count)
+                .map(|value| {
+                    vec![
+                        r::Value::Integer(value % 2),
+                        r::Value::Null,
+                        r::Value::Null,
+                        r::Value::Null,
+                    ]
+                })
+                .collect();
+            let result = match Rows::new(data, ctx.row_budget()) {
+                Ok(rows) => {
+                    ctx.project_rows(
+                        rows,
+                        4,
+                        projection::Projection {
+                            items: &items,
+                            distinct: false,
+                            ordering: &[],
+                            predicate: None,
+                            skip: None,
+                            limit: None,
+                        },
+                        &BTreeMap::new(),
+                        Limits {
+                            memory_bytes,
+                            batch_rows: 1,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(rows) => {
+                    successes += 1;
+                    assert_eq!(rows.len(), if grouped { 2 } else { 1 });
+                    for row in rows.iter() {
+                        assert_eq!(
+                            row[3],
+                            r::Value::Integer(if grouped { 3 } else { count + 1 })
+                        );
+                    }
+                }
+                Err(Error::Query(error)) if error.detail == "MemoryLimit" => memory_failures += 1,
+                Err(Error::Storage(crate::HelixDbError::QueryDeadlineExceeded)) => {
+                    cancellations += 1
+                }
+                Err(error) => panic!("unexpected failure: {error:?}"),
+            }
+            assert_eq!(ctx.row_budget().available(), memory_bytes, "grouped={grouped}, count={count}, memory={memory_bytes}, checkpoint={checkpoint:?}");
+        }
+        assert!(memory_failures > 0 && cancellations > 0 && successes > 0);
+    }
+    db.close().await.unwrap();
 }
 
 #[test]

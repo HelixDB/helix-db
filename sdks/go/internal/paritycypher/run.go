@@ -40,7 +40,7 @@ func load() ([]fixture, error) {
 	if err := decoder.Decode(&corpus); err != nil {
 		return nil, err
 	}
-	if corpus.SchemaVersion != 1 || len(corpus.Cases) != 10 {
+	if corpus.SchemaVersion != 1 || len(corpus.Cases) != 16 {
 		return nil, fmt.Errorf("unsupported or incomplete Cypher parity corpus")
 	}
 	valid := regexp.MustCompile(`^[a-z0-9-]+$`)

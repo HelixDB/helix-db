@@ -39,7 +39,7 @@ function result(value: unknown): ResultValue {
 export function parseCypherCases(value: unknown): CypherCase[] {
   const corpus = object(value);
   assert.equal(corpus.schema_version, 1);
-  assert(Array.isArray(corpus.cases) && corpus.cases.length === 10, "missing Cypher runtime cases");
+  assert(Array.isArray(corpus.cases) && corpus.cases.length === 16, "missing Cypher runtime cases");
   const names = new Set<string>();
   const cases: CypherCase[] = corpus.cases.map((value: unknown) => {
     const entry = object(value);
@@ -88,6 +88,12 @@ export function parseCypherCases(value: unknown): CypherCase[] {
       "update",
       "persistent-read",
       "match-after-distinct",
+      "mixed-aggregate-ordering",
+      "aggregate-alias-shadowing",
+      "mixed-empty-aggregation",
+      "aggregate-error-rollback",
+      "aggregate-rollback-observation",
+      "renamed-node-ordering",
       "detach-delete",
       "deleted-observation",
     ],

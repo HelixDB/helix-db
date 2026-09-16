@@ -142,6 +142,132 @@ impl Budget {
     }
 }
 
+pub(crate) struct Reservation {
+    budget: Budget,
+    bytes: usize,
+}
+impl Reservation {
+    /// Split already-admitted ownership within the same query. The live total
+    /// stays unchanged; callers keep the original guard for allocations that
+    /// have not moved. Splitting past the proven bound is an invariant failure.
+    pub(crate) fn split(&mut self, bytes: usize) -> Self {
+        self.bytes = self
+            .bytes
+            .checked_sub(bytes)
+            .expect("split exceeds admitted ownership");
+        Self {
+            budget: self.budget.clone(),
+            bytes,
+        }
+    }
+
+    /// Transfer an already-admitted owner in the same query without briefly
+    /// charging both reservations for the same output. Callers release surplus
+    /// construction allowance before transferring the retained allocation.
+    pub(crate) fn absorb(&mut self, mut other: Self) {
+        assert!(
+            Arc::ptr_eq(&self.budget.0, &other.budget.0),
+            "reservation transfer crosses query budgets"
+        );
+        self.bytes = self
+            .bytes
+            .checked_add(other.bytes)
+            .expect("same-budget reservations fit its admitted total");
+        other.bytes = 0;
+    }
+
+    /// Shrink an existing ownership bound without admitting new allocation.
+    /// A conversion that exceeds its pre-admitted bound is an invariant failure.
+    pub(crate) fn shrink_to(&mut self, bytes: usize) {
+        self.release(
+            self.bytes
+                .checked_sub(bytes)
+                .expect("converted owner exceeds its admitted bound"),
+        );
+    }
+
+    /// Release an already-dropped portion without recounting the retained owner.
+    /// The owner must never release more than it previously admitted.
+    pub(crate) fn release(&mut self, bytes: usize) {
+        assert!(
+            bytes <= self.bytes,
+            "released bytes exceed their reservation"
+        );
+        self.budget.0.used.fetch_sub(bytes, Ordering::Relaxed);
+        self.bytes -= bytes;
+    }
+
+    pub fn resize(&mut self, bytes: usize) -> Result<()> {
+        if bytes <= self.bytes {
+            self.budget
+                .0
+                .used
+                .fetch_sub(self.bytes - bytes, Ordering::Relaxed);
+            self.bytes = bytes;
+            return Ok(());
+        }
+        let additional = bytes - self.bytes;
+        let previous = self
+            .budget
+            .0
+            .used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(additional)
+                    .filter(|total| *total <= self.budget.0.limit)
+            })
+            .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)?;
+        self.budget
+            .0
+            .peak
+            .fetch_max(previous + additional, Ordering::Relaxed);
+        self.bytes = bytes;
+        Ok(())
+    }
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.budget.0.used.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+use bytes::Bytes;
+
+struct ReadOwner {
+    bytes: Bytes,
+    _reservation: Reservation,
+}
+
+impl AsRef<[u8]> for ReadOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Budget {
+    /// Retain a storage-returned value without copying its contents. Admission
+    /// occurs before decoding or retaining it in an interpreter read result.
+    /// The storage engine's shared caches and internal I/O buffers are separate
+    /// from these request-owned references.
+    pub(crate) fn retain_read(&self, bytes: Bytes) -> Result<Bytes> {
+        // Besides the owner/refcount, reserve room for byte handles in a growing
+        // read-result vector. Sharing or slicing the admitted Bytes keeps the
+        // entire original read charged until its final reference is released.
+        let reservation = self.reserve(
+            bytes
+                .len()
+                .saturating_add(size_of::<ReadOwner>())
+                .saturating_add(size_of::<std::sync::atomic::AtomicUsize>())
+                .saturating_add(2 * size_of::<Bytes>()),
+        )?;
+        Ok(Bytes::from_owner(ReadOwner {
+            bytes,
+            _reservation: reservation,
+        }))
+    }
+}
+
+pub(crate) use crate::encoding::v2::values::indexes::equality::retained_allocation_estimate as bitmap_bytes;
+
 #[cfg(test)]
 mod stream_tests;
 
@@ -357,129 +483,3 @@ mod tests {
         assert_eq!(budget.available(), 4096);
     }
 }
-
-pub(crate) struct Reservation {
-    budget: Budget,
-    bytes: usize,
-}
-impl Reservation {
-    /// Split already-admitted ownership within the same query. The live total
-    /// stays unchanged; callers keep the original guard for allocations that
-    /// have not moved. Splitting past the proven bound is an invariant failure.
-    pub(crate) fn split(&mut self, bytes: usize) -> Self {
-        self.bytes = self
-            .bytes
-            .checked_sub(bytes)
-            .expect("split exceeds admitted ownership");
-        Self {
-            budget: self.budget.clone(),
-            bytes,
-        }
-    }
-
-    /// Transfer an already-admitted owner in the same query without briefly
-    /// charging both reservations for the same output. Callers release surplus
-    /// construction allowance before transferring the retained allocation.
-    pub(crate) fn absorb(&mut self, mut other: Self) {
-        assert!(
-            Arc::ptr_eq(&self.budget.0, &other.budget.0),
-            "reservation transfer crosses query budgets"
-        );
-        self.bytes = self
-            .bytes
-            .checked_add(other.bytes)
-            .expect("same-budget reservations fit its admitted total");
-        other.bytes = 0;
-    }
-
-    /// Shrink an existing ownership bound without admitting new allocation.
-    /// A conversion that exceeds its pre-admitted bound is an invariant failure.
-    pub(crate) fn shrink_to(&mut self, bytes: usize) {
-        self.release(
-            self.bytes
-                .checked_sub(bytes)
-                .expect("converted owner exceeds its admitted bound"),
-        );
-    }
-
-    /// Release an already-dropped portion without recounting the retained owner.
-    /// The owner must never release more than it previously admitted.
-    pub(crate) fn release(&mut self, bytes: usize) {
-        assert!(
-            bytes <= self.bytes,
-            "released bytes exceed their reservation"
-        );
-        self.budget.0.used.fetch_sub(bytes, Ordering::Relaxed);
-        self.bytes -= bytes;
-    }
-
-    pub fn resize(&mut self, bytes: usize) -> Result<()> {
-        if bytes <= self.bytes {
-            self.budget
-                .0
-                .used
-                .fetch_sub(self.bytes - bytes, Ordering::Relaxed);
-            self.bytes = bytes;
-            return Ok(());
-        }
-        let additional = bytes - self.bytes;
-        let previous = self
-            .budget
-            .0
-            .used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(additional)
-                    .filter(|total| *total <= self.budget.0.limit)
-            })
-            .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)?;
-        self.budget
-            .0
-            .peak
-            .fetch_max(previous + additional, Ordering::Relaxed);
-        self.bytes = bytes;
-        Ok(())
-    }
-}
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        self.budget.0.used.fetch_sub(self.bytes, Ordering::Relaxed);
-    }
-}
-
-use bytes::Bytes;
-
-struct ReadOwner {
-    bytes: Bytes,
-    _reservation: Reservation,
-}
-
-impl AsRef<[u8]> for ReadOwner {
-    fn as_ref(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl Budget {
-    /// Retain a storage-returned value without copying its contents. Admission
-    /// occurs before decoding or retaining it in an interpreter read result.
-    /// The storage engine's shared caches and internal I/O buffers are separate
-    /// from these request-owned references.
-    pub(crate) fn retain_read(&self, bytes: Bytes) -> Result<Bytes> {
-        // Besides the owner/refcount, reserve room for byte handles in a growing
-        // read-result vector. Sharing or slicing the admitted Bytes keeps the
-        // entire original read charged until its final reference is released.
-        let reservation = self.reserve(
-            bytes
-                .len()
-                .saturating_add(size_of::<ReadOwner>())
-                .saturating_add(size_of::<std::sync::atomic::AtomicUsize>())
-                .saturating_add(2 * size_of::<Bytes>()),
-        )?;
-        Ok(Bytes::from_owner(ReadOwner {
-            bytes,
-            _reservation: reservation,
-        }))
-    }
-}
-
-pub(crate) use crate::encoding::v2::values::indexes::equality::retained_allocation_estimate as bitmap_bytes;

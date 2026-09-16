@@ -428,3 +428,9 @@ fn process_local_runtime_dependencies_preserve_identity_and_readiness() {
     assert!(debug.contains("production-runtime-dependencies"));
     assert!(!debug.contains("object_store"));
 }
+
+/// Shared mixed aggregates execute through the production-linked row interpreter.
+#[tokio::test]
+async fn mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values() {
+    db::production_coverage::mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values().await;
+}

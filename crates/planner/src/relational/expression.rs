@@ -1,5 +1,5 @@
 use super::Value;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, ops::ControlFlow};
 
 /// A logical Query binding index. RowProgram relocates these fields into its
 /// private execution-cell space; its operators must not be used as a Query.
@@ -269,6 +269,93 @@ impl Expression {
 }
 
 impl<L, U, B, F> ScalarExpression<L, U, B, F> {
+    /// Consume and rewrite nodes in preorder without cloning their payloads.
+    /// `Break(replacement)` replaces the subtree without visiting its children;
+    /// `Continue(node)` descends into that node in the ordinary visitor order.
+    /// The first error stops traversal and drops all remaining owned values.
+    /// Callers must validate input depth and keep returned subtrees within the
+    /// same structural limits before using this recursive operation.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// use std::ops::ControlFlow;
+    /// let expression = r::Expression::List(vec![r::Expression::Slot(r::Slot(0))]);
+    /// let rewritten = expression.rewrite_owned(&mut |node| {
+    ///     let r::Expression::Slot(slot) = node else {
+    ///         return Ok::<_, ()>(ControlFlow::Continue(node));
+    ///     };
+    ///     Ok(ControlFlow::Break(r::Expression::Slot(r::Slot(slot.0 + 1))))
+    /// }).unwrap();
+    /// assert_eq!(rewritten.slots(), std::collections::BTreeSet::from([r::Slot(1)]));
+    /// ```
+    pub fn rewrite_owned<E>(
+        self,
+        replace: &mut impl FnMut(Self) -> Result<ControlFlow<Self, Self>, E>,
+    ) -> Result<Self, E> {
+        let expression = match replace(self)? {
+            ControlFlow::Break(replacement) => return Ok(replacement),
+            ControlFlow::Continue(expression) => expression,
+        };
+        let mut rewrite = |value: Self| value.rewrite_owned(replace);
+        Ok(match expression {
+            leaf @ (Self::Literal(_) | Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(..)) => {
+                leaf
+            }
+            Self::Property(value, key) => Self::Property(Box::new(rewrite(*value)?), key),
+            Self::Index(a, b) => Self::Index(Box::new(rewrite(*a)?), Box::new(rewrite(*b)?)),
+            Self::Slice { value, start, end } => Self::Slice {
+                value: Box::new(rewrite(*value)?),
+                start: start
+                    .map(|value| rewrite(*value).map(Box::new))
+                    .transpose()?,
+                end: end.map(|value| rewrite(*value).map(Box::new)).transpose()?,
+            },
+            Self::Unary(op, value) => Self::Unary(op, Box::new(rewrite(*value)?)),
+            Self::Binary(op, a, b) => {
+                Self::Binary(op, Box::new(rewrite(*a)?), Box::new(rewrite(*b)?))
+            }
+            Self::Function(function, args) => Self::Function(
+                function,
+                args.into_iter()
+                    .map(&mut rewrite)
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::List(values) => Self::List(
+                values
+                    .into_iter()
+                    .map(&mut rewrite)
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Map(values) => Self::Map(
+                values
+                    .into_iter()
+                    .map(|(key, value)| Ok((key, rewrite(value)?)))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Case {
+                branches,
+                otherwise,
+            } => Self::Case {
+                branches: branches
+                    .into_iter()
+                    .map(|(a, b)| Ok((rewrite(a)?, rewrite(b)?)))
+                    .collect::<Result<_, _>>()?,
+                otherwise: Box::new(rewrite(*otherwise)?),
+            },
+            Self::Aggregate {
+                function,
+                argument,
+                distinct,
+            } => Self::Aggregate {
+                function,
+                argument: argument
+                    .map(|value| rewrite(*value).map(Box::new))
+                    .transpose()?,
+                distinct,
+            },
+        })
+    }
+
     pub fn visit(&self, f: &mut impl FnMut(&Self)) {
         self.try_visit(&mut |expression| {
             f(expression);

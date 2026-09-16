@@ -244,6 +244,72 @@
       }
     },
     {
+      "name": "mixed-aggregate-ordering",
+      "query": "UNWIND $values AS x RETURN 1+sum(x) AS total ORDER BY 2-sum(x)",
+      "parameters": {
+        "values": [
+          {
+            "$type": "integer",
+            "value": "9007199254740992"
+          },
+          1
+        ]
+      },
+      "expected": {
+        "columns": ["total"],
+        "rows": [
+          [
+            {
+              "$type": "integer",
+              "value": "9007199254740994"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "aggregate-alias-shadowing",
+      "query": "UNWIND [{g:0,x:2},{g:1,x:4},{g:0,x:3}] AS row WITH row.g AS g,row.x AS x RETURN g,sum(x) AS x ORDER BY x+sum(x) DESC,g",
+      "expected": {
+        "columns": ["g", "x"],
+        "rows": [
+          [0, 5],
+          [1, 4]
+        ]
+      }
+    },
+    {
+      "name": "mixed-empty-aggregation",
+      "query": "UNWIND [] AS x RETURN 1+count(*) AS count,[sum(x),avg(x),min(x),max(x),collect(x)] AS values",
+      "expected": {
+        "columns": ["count", "values"],
+        "rows": [[1, [0, null, null, null, []]]]
+      }
+    },
+    {
+      "name": "aggregate-error-rollback",
+      "query": "MATCH (a:CypherParity {key:'a'}) SET a.aggregate_marker=true WITH 0 AS zero RETURN CASE WHEN false THEN sum(1/zero) ELSE 0 END AS result",
+      "expected_error_detail": "DivisionByZero",
+      "expected_error_category": "ArithmeticError",
+      "expected_error_phase": "runtime"
+    },
+    {
+      "name": "aggregate-rollback-observation",
+      "query": "MATCH (a:CypherParity {key:'a'}) RETURN a.aggregate_marker AS marker",
+      "expected": {
+        "columns": ["marker"],
+        "rows": [[null]]
+      }
+    },
+    {
+      "name": "renamed-node-ordering",
+      "query": "MATCH (n:CypherParity) WITH DISTINCT n AS node ORDER BY n:CypherParity,n.key DESC RETURN collect(node.key) AS keys",
+      "expected": {
+        "columns": ["keys"],
+        "rows": [[["b", "a"]]]
+      }
+    },
+    {
       "name": "detach-delete",
       "query": "MATCH (n:CypherParity) DETACH DELETE n RETURN count(*) AS deleted",
       "expected": {

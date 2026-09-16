@@ -150,11 +150,12 @@ async fn explicit_read_iterator_stops_before_unadmitted_keys_and_keeps_prior_dep
         .collect();
     let error = tracker.mark_read(&transaction, &keys).unwrap_err();
     assert!(super::super::is_admission_failure(&error));
-    let state = tracker.state.lock();
-    assert!(!state.keys.is_empty() && state.keys.len() < keys.len());
-    assert!(state.keys.contains(keys[0].as_ref()));
-    assert!(!state.keys.contains(keys.last().unwrap().as_ref()));
-    drop(state);
+    {
+        let state = tracker.state.lock();
+        assert!(!state.keys.is_empty() && state.keys.len() < keys.len());
+        assert!(state.keys.contains(keys[0].as_ref()));
+        assert!(!state.keys.contains(keys.last().unwrap().as_ref()));
+    }
     let row = crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new(Vec::new());
     db.inner_db().put(&keys[0], row.encoded()).await.unwrap();
     assert_eq!(

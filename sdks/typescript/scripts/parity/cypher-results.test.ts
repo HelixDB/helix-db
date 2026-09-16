@@ -35,7 +35,7 @@ const scalar: CypherCase = {
 
 test("corpus rejects missing cases, unsafe filenames and incompatible assertions", async () => {
   const original = JSON.parse(await readFile(cypherFixturePath, "utf8"));
-  assert.equal(parseCypherCases(original).length, 10);
+  assert.equal(parseCypherCases(original).length, 16);
   const changes = [
     (v: typeof original) => {
       v.schema_version = 2;

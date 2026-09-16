@@ -145,7 +145,7 @@ mod tests {
         use crate::search::vector::unaligned_vector::UnalignedVector;
 
         if std::arch::is_aarch64_feature_detected!("neon") {
-            let mut rng = TestRng(0x2026_09_04);
+            let mut rng = TestRng(0x2026_0904);
             for dimension in AGREEMENT_DIMENSIONS {
                 let left_values = rng.vector(dimension);
                 let right_values = rng.vector(dimension);

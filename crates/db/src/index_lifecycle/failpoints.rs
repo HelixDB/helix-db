@@ -132,11 +132,7 @@ pub(crate) fn inject_once(failpoint: IndexOutboxFailpoint) -> Result<()> {
 }
 
 /// Installs one failure that only the named operation can consume.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) fn inject_for_operation_once(
     failpoint: IndexOutboxFailpoint,
     operation_id: IndexOperationId,

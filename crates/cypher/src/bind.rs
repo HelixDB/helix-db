@@ -1,6 +1,8 @@
+mod aggregation;
 use crate::syntax::{self as s, ExprKind as E};
 use helix_planner::relational::{self as r, QueryError, Result};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 
 type Scope = BTreeMap<String, r::Slot>;
 
@@ -15,6 +17,12 @@ enum ScopeRef<'a> {
     },
 }
 impl<'a> ScopeRef<'a> {
+    fn aggregate_input(self) -> Self {
+        match self {
+            Self::Single(_) => self,
+            Self::Overlay { fallback, .. } => Self::Single(fallback),
+        }
+    }
     fn get(self, name: &str) -> Option<&'a r::Slot> {
         match self {
             Self::Single(scope) => scope.get(name),
@@ -190,6 +198,10 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                     }
                 }
                 let aggregated = projections.iter().any(|p| p.expression.has_aggregate());
+                let mixed = projections.iter().any(|p| {
+                    p.expression.has_aggregate()
+                        && !matches!(p.expression, r::Expression::Aggregate { .. })
+                });
                 let full_scope = ScopeRef::Overlay {
                     primary: &output,
                     fallback: &binder.scope,
@@ -229,42 +241,84 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                         Ok(r::TraversalControl::Descend)
                     })?;
                 }
+                let projected_index = aggregation::ExpressionIndex::new(
+                    projections
+                        .iter()
+                        .filter(|_| !ordering.is_empty())
+                        .map(|item| (&item.expression, item.slot)),
+                )?;
+                let mut aggregate_arguments = Vec::new();
+                if mixed && !ordering.is_empty() {
+                    for item in &projections {
+                        item.expression.try_visit_pruned(&mut |expression| {
+                            if matches!(expression, r::Expression::Aggregate { .. }) {
+                                aggregate_arguments.push((expression, ()));
+                                return Ok::<_, QueryError>(r::TraversalControl::Prune);
+                            }
+                            Ok(r::TraversalControl::Descend)
+                        })?;
+                    }
+                }
+                let available_aggregates =
+                    aggregation::ExpressionIndex::new(aggregate_arguments.into_iter())?;
                 let ordering = ordering
                     .iter()
                     .map(|(expression, descending)| {
                         let expression = binder.expression(expression, full_scope, true)?;
                         let has_aggregate = expression.has_aggregate();
-                        let expression = expression.rewrite(&mut |e| {
-                            if let Some(item) = projections.iter().find(|p| {
-                                p.expression == *e
-                                    && (!has_aggregate
-                                        || matches!(
-                                            e,
-                                            r::Expression::Slot(_)
-                                                | r::Expression::Property(..)
-                                                | r::Expression::Aggregate { .. }
-                                        ))
-                            }) {
-                                return Ok(Some(r::Expression::Slot(item.slot)));
-                            }
-                            if matches!(e, r::Expression::Aggregate { .. }) {
-                                return Err(semantic(
-                                    if aggregated {
-                                        "UndefinedVariable"
-                                    } else {
-                                        "InvalidAggregation"
-                                    },
-                                    "ORDER BY aggregate must be projected",
-                                ));
-                            }
-                            Ok(None)
+                        let expression = expression.rewrite_owned(&mut |e| {
+                            let projected = if !has_aggregate
+                                || e.has_aggregate()
+                                || matches!(e, r::Expression::Slot(_) | r::Expression::Property(..))
+                            {
+                                projected_index.find(&e)?
+                            } else {
+                                None
+                            };
+                            let Some(projected) = projected else {
+                                if matches!(e, r::Expression::Aggregate { .. }) {
+                                    if mixed && available_aggregates.find(&e)?.is_some() {
+                                        return Ok(ControlFlow::Break(e));
+                                    }
+                                    return Err(semantic(
+                                        if aggregated {
+                                            "UndefinedVariable"
+                                        } else {
+                                            "InvalidAggregation"
+                                        },
+                                        "ORDER BY aggregate must be projected",
+                                    ));
+                                }
+                                let r::Expression::HasLabel(slot, label) = e else {
+                                    return Ok(ControlFlow::Continue(e));
+                                };
+                                let Some(projected) =
+                                    projected_index.find(&r::Expression::Slot(slot))?
+                                else {
+                                    return Ok(ControlFlow::Continue(r::Expression::HasLabel(
+                                        slot, label,
+                                    )));
+                                };
+                                return Ok(ControlFlow::Break(r::Expression::HasLabel(
+                                    projected, label,
+                                )));
+                            };
+                            Ok(ControlFlow::Break(r::Expression::Slot(projected)))
                         })?;
-                        if (*distinct || aggregated)
-                            && expression
-                                .slots()
-                                .iter()
-                                .any(|slot| !output.values().any(|out| out == slot))
-                        {
+                        let mut unprojected = false;
+                        expression.try_visit_pruned(&mut |node| {
+                            if matches!(node, r::Expression::Aggregate { .. }) {
+                                return Ok::<_, QueryError>(r::TraversalControl::Prune);
+                            }
+                            let (r::Expression::Slot(slot) | r::Expression::HasLabel(slot, _)) =
+                                node
+                            else {
+                                return Ok(r::TraversalControl::Descend);
+                            };
+                            unprojected |= !output.values().any(|out| out == slot);
+                            Ok(r::TraversalControl::Descend)
+                        })?;
+                        if (*distinct || aggregated) && unprojected {
                             let detail = if has_aggregate
                                 && grouping.iter().any(|e| {
                                     !matches!(
@@ -303,8 +357,50 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                             .and_then(r::SelectionProgram::new)
                     })
                     .transpose()?;
+                let (items, ordering) = if mixed {
+                    let (aggregate, post) =
+                        aggregation::split_projection(projections, &mut binder.bindings)?;
+                    let aggregate_index = aggregation::ExpressionIndex::new(
+                        aggregate
+                            .iter()
+                            .filter(|item| !ordering.is_empty() && item.expression.has_aggregate())
+                            .map(|item| (&item.expression, item.slot)),
+                    )?;
+                    let ordering = ordering
+                        .into_iter()
+                        .map(|order| {
+                            let expression = order.expression.rewrite_owned(&mut |node| {
+                                if !matches!(node, r::Expression::Aggregate { .. }) {
+                                    return Ok(ControlFlow::Continue(node));
+                                }
+                                let Some(slot) = aggregate_index.find(&node)? else {
+                                    return Err(semantic(
+                                        "UndefinedVariable",
+                                        "ORDER BY aggregate must be projected",
+                                    ));
+                                };
+                                Ok(ControlFlow::Break(r::Expression::Slot(slot)))
+                            })?;
+                            Ok(r::Ordering {
+                                expression,
+                                descending: order.descending,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    operators.push(r::Operator::Project {
+                        items: aggregate,
+                        distinct: false,
+                        ordering: vec![],
+                        predicate: None,
+                        skip: None,
+                        limit: None,
+                    });
+                    (post, ordering)
+                } else {
+                    (r::ProjectionProgram::new(projections)?, ordering)
+                };
                 operators.push(r::Operator::Project {
-                    items: r::ProjectionProgram::new(projections)?,
+                    items,
                     distinct: *distinct,
                     ordering,
                     predicate,
@@ -860,7 +956,7 @@ impl Binder {
                     let argument = arguments
                         .first()
                         .map(|a| {
-                            let expression = self.expression(a, scope, true)?;
+                            let expression = self.expression(a, scope.aggregate_input(), true)?;
                             if expression.has_aggregate() {
                                 return Err(semantic(
                                     "NestedAggregation",
