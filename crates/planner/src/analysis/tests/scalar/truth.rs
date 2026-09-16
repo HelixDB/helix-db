@@ -324,3 +324,43 @@ fn static_predicate_values_cover_constant_boolean_contracts() {
         None
     );
 }
+
+#[test]
+fn constant_membership_proofs_do_not_allocate_collection_payloads() {
+    use super::super::allocations;
+    for size in [0, 1, 16, 17, 4096] {
+        let text = "κλειδί🙂".repeat(128);
+        let object = PropertyValue::object([("payload", PropertyValue::String(text.clone()))]);
+        for (needle, values) in [
+            (
+                PropertyValue::I64(-1),
+                PropertyValue::I64Array((0..size as i64).collect()),
+            ),
+            (
+                PropertyValue::I64(1),
+                PropertyValue::F64Array(vec![1.0; size]),
+            ),
+            (
+                PropertyValue::F64(1.0),
+                PropertyValue::F32Array(vec![1.0; size]),
+            ),
+            (
+                PropertyValue::String(text.clone()),
+                PropertyValue::StringArray(vec![text.clone(); size]),
+            ),
+            (object.clone(), PropertyValue::Array(vec![object; size])),
+            (
+                PropertyValue::F64Array(vec![f64::NAN]),
+                PropertyValue::Array(vec![PropertyValue::F64Array(vec![f64::NAN]); size]),
+            ),
+        ] {
+            let predicate = Predicate::IsIn {
+                value: Expr::Constant(needle),
+                values: Expr::Constant(values),
+            };
+            let (_, count) = allocations::observe(|| static_predicate_value(&predicate));
+            assert_eq!(count.allocations, 0, "size={size}");
+            assert_eq!(count.bytes, 0, "size={size}");
+        }
+    }
+}

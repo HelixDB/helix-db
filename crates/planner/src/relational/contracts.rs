@@ -1,7 +1,10 @@
 //! Derived operator contracts. Scope, correlation, multiplicity and barriers are
 //! computed once at the validated query boundary and shared with planning.
 use super::{Binding, Effect, Expression, Operator, Slot, ValueType};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ColumnType {
@@ -10,11 +13,12 @@ pub struct ColumnType {
 }
 
 /// A row's visible bindings; sparse slot IDs keep name shadowing unambiguous.
+/// Immutable maps are shared across adjacent operator contracts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct RowSchema(BTreeMap<Slot, ColumnType>);
+pub struct RowSchema(Arc<BTreeMap<Slot, ColumnType>>);
 impl RowSchema {
     pub(super) fn empty() -> Self {
-        Self(BTreeMap::new())
+        Self(Arc::new(BTreeMap::new()))
     }
     pub fn columns(&self) -> &BTreeMap<Slot, ColumnType> {
         &self.0
@@ -96,25 +100,12 @@ impl OperatorContract {
         output: &BTreeSet<Slot>,
         bindings: &[Binding],
     ) -> Self {
-        let input_slots = input_schema.slots();
-        let input = &input_slots;
-        let schema = |slots: &BTreeSet<Slot>| {
-            RowSchema(
-                slots
-                    .iter()
-                    .map(|slot| {
-                        let binding = &bindings[slot.0 as usize];
-                        (
-                            *slot,
-                            ColumnType {
-                                value_type: binding.value_type,
-                                nullable: binding.nullable,
-                            },
-                        )
-                    })
-                    .collect(),
-            )
-        };
+        let input = input_schema.columns();
+        // Query::new derives every scope from one immutable binding catalog.
+        debug_assert!(input.iter().all(|(slot, column)| {
+            let binding = &bindings[slot.0 as usize];
+            column.value_type == binding.value_type && (!binding.nullable || column.nullable)
+        }));
         let mut references = operator
             .expressions()
             .into_iter()
@@ -127,7 +118,12 @@ impl OperatorContract {
             Operator::Match {
                 pattern, optional, ..
             } => {
-                references.extend(pattern.slots().intersection(input));
+                references.extend(
+                    pattern
+                        .slots()
+                        .into_iter()
+                        .filter(|slot| input.contains_key(slot)),
+                );
                 if *optional {
                     boundaries.push(Boundary::OptionalMatch);
                 }
@@ -175,7 +171,12 @@ impl OperatorContract {
                 }
             }
             Operator::Create(pattern) => {
-                references.extend(pattern.slots().intersection(input));
+                references.extend(
+                    pattern
+                        .slots()
+                        .into_iter()
+                        .filter(|slot| input.contains_key(slot)),
+                );
                 effect = Effect::Write;
                 boundaries.push(Boundary::Mutation);
                 Multiplicity::PreservesRows
@@ -201,25 +202,49 @@ impl OperatorContract {
             }
         };
         let correlation = if let Operator::Match { .. } = operator {
-            crate::ir::AtLeast::try_from_vec(references.intersection(input).copied().collect())
-                .map(Correlation::Bound)
-                .unwrap_or(Correlation::Independent)
+            crate::ir::AtLeast::try_from_vec(
+                references
+                    .iter()
+                    .filter(|slot| input.contains_key(*slot))
+                    .copied()
+                    .collect(),
+            )
+            .map(Correlation::Bound)
+            .unwrap_or(Correlation::Independent)
         } else {
             Correlation::Independent
         };
-        let mut output_schema = schema(output);
-        for (slot, column) in &mut output_schema.0 {
-            if let Some(incoming) = input_schema.0.get(slot) {
+        let output_schema = if output.iter().eq(input.keys()) {
+            input_schema.clone()
+        } else {
+            let mut columns: BTreeMap<_, _> = output
+                .iter()
+                .map(|slot| {
+                    let binding = &bindings[slot.0 as usize];
+                    (
+                        *slot,
+                        ColumnType {
+                            value_type: binding.value_type,
+                            nullable: binding.nullable,
+                        },
+                    )
+                })
+                .collect();
+            for (slot, column) in &mut columns {
+                let Some(incoming) = input.get(slot) else {
+                    continue;
+                };
                 column.nullable |= incoming.nullable;
             }
-        }
-        if matches!(operator, Operator::Match { optional: true, .. }) {
-            for (slot, column) in &mut output_schema.0 {
-                if !input.contains(slot) {
-                    column.nullable = true;
+            if matches!(operator, Operator::Match { optional: true, .. }) {
+                for (slot, column) in &mut columns {
+                    if !input.contains_key(slot) {
+                        column.nullable = true;
+                    }
                 }
             }
-        }
+            RowSchema(Arc::new(columns))
+        };
         Self {
             input: input_schema.clone(),
             output: output_schema,

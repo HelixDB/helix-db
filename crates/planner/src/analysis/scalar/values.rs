@@ -13,6 +13,10 @@ use helix_value_semantics::CanonicalNumber;
 #[path = "../tests/scalar/stable_set.rs"]
 mod stable_set_tests;
 
+#[cfg(test)]
+#[path = "../tests/scalar/constant_membership.rs"]
+mod constant_membership_tests;
+
 pub(super) fn literal_collection_is_empty(value: &PropertyValue) -> bool {
     match value {
         PropertyValue::I64Array(values) => values.is_empty(),
@@ -78,6 +82,33 @@ impl<'a> LiteralCollection<'a> {
         Some(Self(values))
     }
 
+    /// Test membership without materializing or deduplicating the domain.
+    /// Construction validates the complete collection before any early match.
+    /// Numeric scalars share the native equality kernel; nested values retain
+    /// their existing typed equality.
+    pub(super) fn contains(self, needle: &PropertyValue) -> bool {
+        match self.0 {
+            CollectionSlice::I64(values) => values
+                .iter()
+                .any(|value| property_values_equal(&PropertyValue::I64(*value), needle)),
+            CollectionSlice::F64(values) => values
+                .iter()
+                .any(|value| property_values_equal(&PropertyValue::F64(*value), needle)),
+            CollectionSlice::F32(values) => values
+                .iter()
+                .any(|value| property_values_equal(&PropertyValue::F32(*value), needle)),
+            CollectionSlice::Strings(values) => {
+                let PropertyValue::String(needle) = needle else {
+                    return false;
+                };
+                values.iter().any(|value| value == needle)
+            }
+            CollectionSlice::Values(values) => values
+                .iter()
+                .any(|value| property_values_equal(value, needle)),
+        }
+    }
+
     /// Materialize only for an authoritative proof that needs the actual domain.
     pub(super) fn owned_values(self) -> Vec<PropertyValue> {
         let values = match self.0 {
@@ -99,6 +130,7 @@ impl<'a> LiteralCollection<'a> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn literal_collection_values(value: &PropertyValue) -> Option<Vec<PropertyValue>> {
     LiteralCollection::new(value).map(LiteralCollection::owned_values)
 }
