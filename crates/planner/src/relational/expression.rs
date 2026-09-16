@@ -113,6 +113,14 @@ pub enum ScalarExpression<L, U, B, F> {
     HasLabel(Slot, String),
 }
 
+/// Whether a borrowed preorder visitor should descend into this node's children.
+/// Pruning still visits the node itself and continues with its later siblings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalControl {
+    Descend,
+    Prune,
+}
+
 /// Resolved expressions with Cypher's graph-value and scalar semantics.
 pub type Expression = ScalarExpression<Value, Unary, Binary, Function>;
 
@@ -276,30 +284,66 @@ impl<L, U, B, F> ScalarExpression<L, U, B, F> {
         &'a self,
         f: &mut impl FnMut(&'a Self) -> Result<(), E>,
     ) -> Result<(), E> {
-        f(self)?;
+        self.try_visit_pruned(&mut |expression| f(expression).map(|()| TraversalControl::Descend))
+    }
+
+    /// Borrow nodes in preorder, optionally pruning a subtree. No expression
+    /// payload or heap traversal stack is copied. Errors stop immediately;
+    /// structural depth must be validated before recursive traversal.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// let expression = r::Expression::List(vec![
+    ///     r::Expression::Slot(r::Slot(0)),
+    ///     r::Expression::Aggregate {
+    ///         function: r::Aggregate::Count,
+    ///         argument: Some(Box::new(r::Expression::Slot(r::Slot(1)))),
+    ///         distinct: false,
+    ///     },
+    /// ]);
+    /// let mut slots = Vec::new();
+    /// expression.try_visit_pruned(&mut |node| {
+    ///     if matches!(node, r::Expression::Aggregate { .. }) {
+    ///         return Ok::<_, ()>(r::TraversalControl::Prune);
+    ///     }
+    ///     let r::Expression::Slot(slot) = node else {
+    ///         return Ok(r::TraversalControl::Descend);
+    ///     };
+    ///     slots.push(*slot);
+    ///     Ok(r::TraversalControl::Descend)
+    /// }).unwrap();
+    /// assert_eq!(slots, [r::Slot(0)]);
+    /// ```
+    pub fn try_visit_pruned<'a, E>(
+        &'a self,
+        f: &mut impl FnMut(&'a Self) -> Result<TraversalControl, E>,
+    ) -> Result<(), E> {
+        if f(self)? == TraversalControl::Prune {
+            return Ok(());
+        }
         match self {
-            Self::Property(x, _) | Self::Unary(_, x) => x.try_visit(f)?,
+            Self::Property(x, _) | Self::Unary(_, x) => x.try_visit_pruned(f)?,
             Self::Index(a, b) | Self::Binary(_, a, b) => {
-                a.try_visit(f)?;
-                b.try_visit(f)?;
+                a.try_visit_pruned(f)?;
+                b.try_visit_pruned(f)?;
             }
             Self::Slice { value, start, end } => {
-                value.try_visit(f)?;
+                value.try_visit_pruned(f)?;
                 for x in start.iter().chain(end.iter()) {
-                    x.try_visit(f)?;
+                    x.try_visit_pruned(f)?;
                 }
             }
             Self::Function(_, xs) | Self::List(xs) => {
                 for x in xs {
-                    x.try_visit(f)?;
+                    x.try_visit_pruned(f)?;
                 }
             }
             Self::Aggregate { argument, .. } => {
-                argument.iter().try_for_each(|x| x.try_visit(f))?;
+                argument.iter().try_for_each(|x| x.try_visit_pruned(f))?;
             }
             Self::Map(xs) => {
                 for (_, x) in xs {
-                    x.try_visit(f)?;
+                    x.try_visit_pruned(f)?;
                 }
             }
             Self::Case {
@@ -307,10 +351,10 @@ impl<L, U, B, F> ScalarExpression<L, U, B, F> {
                 otherwise,
             } => {
                 for (a, b) in branches {
-                    a.try_visit(f)?;
-                    b.try_visit(f)?;
+                    a.try_visit_pruned(f)?;
+                    b.try_visit_pruned(f)?;
                 }
-                otherwise.try_visit(f)?;
+                otherwise.try_visit_pruned(f)?;
             }
             Self::Literal(_) | Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(_, _) => {}
         }

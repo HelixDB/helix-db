@@ -112,6 +112,25 @@ profile. Unsupported syntax receives a specific error. Use the existing native
 index-management API to create indexes; Cypher planning can select existing
 compatible indexes.
 
+## Grouping expressions
+
+Projected expressions without aggregates define the groups. Inside an expression
+that mixes aggregation with other operations, dependencies outside aggregate
+arguments must be constants, parameters, grouped variables, or projected direct
+property/map accesses:
+
+```cypher
+MATCH (n:N)
+RETURN n.key AS key, n.key + count(*) AS total
+```
+
+Within a mixed aggregation expression, group by `n` before using `n:N` outside
+an aggregate argument. For nested access such as `b.dim.x`, group by `b` or
+`b.dim`; projecting only `b.dim.x` does not make it a recognized grouping
+dependency. Ambiguous aggregation is rejected during
+compilation, before any graph changes. These restrictions follow the pinned
+[openCypher M23 grouping rules](https://github.com/opencypher/openCypher/blob/007895aff5f33097d67b2e48a0a2babd6bd18590/cip/1.accepted/CIP2021-07-07-Grouping-keys-and-aggregation-expressions.adoc).
+
 ## Storage and mutation rules
 
 New nodes require exactly one nonempty label; new relationships require exactly

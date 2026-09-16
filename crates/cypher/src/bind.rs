@@ -4,6 +4,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 type Scope = BTreeMap<String, r::Slot>;
 
+/// Borrow an input scope or a projection overlay. Projection aliases take
+/// precedence, while DISTINCT/aggregation can restrict visibility to outputs.
+#[derive(Clone, Copy)]
+enum ScopeRef<'a> {
+    Single(&'a Scope),
+    Overlay {
+        primary: &'a Scope,
+        fallback: &'a Scope,
+    },
+}
+impl<'a> ScopeRef<'a> {
+    fn get(self, name: &str) -> Option<&'a r::Slot> {
+        match self {
+            Self::Single(scope) => scope.get(name),
+            Self::Overlay { primary, fallback } => primary.get(name).or_else(|| fallback.get(name)),
+        }
+    }
+}
+
 pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
     if statement.clauses.is_empty() || statement.clauses.len() > 4096 {
         return Err(QueryError::compile(
@@ -52,7 +71,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                     .as_ref()
                     .map(|e| {
                         binder
-                            .predicate(e, &binder.scope)
+                            .predicate(e, ScopeRef::Single(&binder.scope))
                             .and_then(r::SelectionProgram::new)
                     })
                     .transpose()?;
@@ -66,7 +85,8 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                 operators.push(r::Operator::Create(binder.pattern(patterns, false, true)?))
             }
             s::Clause::Unwind { expression, name } => {
-                let expression = binder.expression(expression, &binder.scope, false)?;
+                let expression =
+                    binder.expression(expression, ScopeRef::Single(&binder.scope), false)?;
                 if binder.scope.contains_key(name) {
                     return Err(semantic(
                         "VariableAlreadyBound",
@@ -105,7 +125,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                                     "wildcard projection requires an input binding",
                                 ));
                             }
-                            for (name, slot) in binder.scope.clone() {
+                            for (name, &slot) in &binder.scope {
                                 if output.insert(name.clone(), slot).is_some() {
                                     return Err(semantic(
                                         "ColumnNameConflict",
@@ -116,7 +136,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                                     slot,
                                     expression: r::Expression::Slot(slot),
                                 });
-                                columns.push((name, slot));
+                                columns.push((name.clone(), slot));
                             }
                         }
                         s::Item::Expression {
@@ -139,7 +159,11 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                                     format!("duplicate projection name {name}"),
                                 ));
                             }
-                            let expression = binder.expression(expression, &binder.scope, true)?;
+                            let expression = binder.expression(
+                                expression,
+                                ScopeRef::Single(&binder.scope),
+                                true,
+                            )?;
                             let kind = match &expression {
                                 r::Expression::Slot(slot) => binder.bindings[slot.0 as usize].kind,
                                 r::Expression::Literal(_)
@@ -166,43 +190,49 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                     }
                 }
                 let aggregated = projections.iter().any(|p| p.expression.has_aggregate());
-                let mut order_scope = if *distinct || aggregated {
-                    Scope::new()
-                } else {
-                    binder.scope.clone()
+                let full_scope = ScopeRef::Overlay {
+                    primary: &output,
+                    fallback: &binder.scope,
                 };
-                order_scope.extend(output.clone());
+                let order_scope = if *distinct || aggregated {
+                    ScopeRef::Single(&output)
+                } else {
+                    full_scope
+                };
                 let grouping = projections
                     .iter()
                     .filter(|p| !p.expression.has_aggregate())
                     .map(|p| &p.expression)
                     .collect::<Vec<_>>();
+                // M23 recognizes only variables and direct property/map access
+                // as grouping dependencies. Nested access must reach one of
+                // those keys; an arbitrary projected expression is insufficient.
                 for item in projections.iter().filter(|p| p.expression.has_aggregate()) {
-                    item.expression.rewrite(&mut |expression| {
+                    item.expression.try_visit_pruned(&mut |expression| {
                         if matches!(expression, r::Expression::Aggregate { .. })
                             || grouping.contains(&expression)
-                                && matches!(
-                                    expression,
-                                    r::Expression::Slot(_) | r::Expression::Property(..)
-                                )
+                                && (matches!(expression, r::Expression::Slot(_))
+                                    || matches!(expression, r::Expression::Property(base, _) if matches!(base.as_ref(), r::Expression::Slot(_))))
                         {
-                            return Ok(Some(expression.clone()));
+                            return Ok(r::TraversalControl::Prune);
                         }
-                        if matches!(expression, r::Expression::Slot(_)) {
+                        // Label predicates keep their node reference directly in the
+                        // variant; there is no Slot child for the visitor to find.
+                        let ungrouped = matches!(expression, r::Expression::Slot(_))
+                            || matches!(expression, r::Expression::HasLabel(slot, _) if !grouping.contains(&&r::Expression::Slot(*slot)));
+                        if ungrouped {
                             return Err(semantic(
                                 "AmbiguousAggregationExpression",
                                 "aggregate expression references an ungrouped binding",
                             ));
                         }
-                        Ok(None)
+                        Ok(r::TraversalControl::Descend)
                     })?;
                 }
-                let mut full_scope = binder.scope.clone();
-                full_scope.extend(output.clone());
                 let ordering = ordering
                     .iter()
                     .map(|(expression, descending)| {
-                        let expression = binder.expression(expression, &full_scope, true)?;
+                        let expression = binder.expression(expression, full_scope, true)?;
                         let has_aggregate = expression.has_aggregate();
                         let expression = expression.rewrite(&mut |e| {
                             if let Some(item) = projections.iter().find(|p| {
@@ -269,7 +299,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                     .as_ref()
                     .map(|e| {
                         binder
-                            .predicate(e, &order_scope)
+                            .predicate(e, order_scope)
                             .and_then(r::SelectionProgram::new)
                     })
                     .transpose()?;
@@ -295,16 +325,28 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                             r::PropertyMutation::Set {
                                 entity,
                                 key,
-                                value: binder.expression(value, &binder.scope, false)?,
+                                value: binder.expression(
+                                    value,
+                                    ScopeRef::Single(&binder.scope),
+                                    false,
+                                )?,
                             }
                         }
                         s::Assignment::Replace(name, e) => r::PropertyMutation::Replace {
                             entity: binder.entity(name)?,
-                            properties: binder.expression(e, &binder.scope, false)?,
+                            properties: binder.expression(
+                                e,
+                                ScopeRef::Single(&binder.scope),
+                                false,
+                            )?,
                         },
                         s::Assignment::Extend(name, e) => r::PropertyMutation::Extend {
                             entity: binder.entity(name)?,
-                            properties: binder.expression(e, &binder.scope, false)?,
+                            properties: binder.expression(
+                                e,
+                                ScopeRef::Single(&binder.scope),
+                                false,
+                            )?,
                         },
                     });
                 }
@@ -328,7 +370,8 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                 entities: expressions
                     .iter()
                     .map(|e| {
-                        let expression = binder.expression(e, &binder.scope, false)?;
+                        let expression =
+                            binder.expression(e, ScopeRef::Single(&binder.scope), false)?;
                         if matches!(expression, r::Expression::HasLabel(..)) {
                             return Err(semantic("InvalidDelete", "DELETE cannot remove a label"));
                         }
@@ -380,7 +423,7 @@ struct Binder {
 
 impl Binder {
     fn bound(&self, e: &s::Expr) -> Result<r::Expression> {
-        let expression = self.expression(e, &self.scope, false)?;
+        let expression = self.expression(e, ScopeRef::Single(&self.scope), false)?;
         if !expression.slots().is_empty() {
             return Err(semantic(
                 "NonConstantExpression",
@@ -414,7 +457,7 @@ impl Binder {
         }
         Ok(expression)
     }
-    fn predicate(&self, e: &s::Expr, scope: &Scope) -> Result<r::Expression> {
+    fn predicate(&self, e: &s::Expr, scope: ScopeRef<'_>) -> Result<r::Expression> {
         let expression = self.boolean_expression(e, scope, false)?;
         if !matches!(
             expression.value_type(&self.bindings)?,
@@ -431,7 +474,7 @@ impl Binder {
     fn boolean_expression(
         &self,
         e: &s::Expr,
-        scope: &Scope,
+        scope: ScopeRef<'_>,
         allow_aggregate: bool,
     ) -> Result<r::Expression> {
         if matches!(e.kind, E::PatternPredicate) {
@@ -672,7 +715,10 @@ impl Binder {
                         "duplicate property key",
                     ));
                 }
-                Ok((name.clone(), self.expression(e, &self.scope, false)?))
+                Ok((
+                    name.clone(),
+                    self.expression(e, ScopeRef::Single(&self.scope), false)?,
+                ))
             })
             .collect()
     }
@@ -680,7 +726,7 @@ impl Binder {
     fn expression(
         &self,
         e: &s::Expr,
-        scope: &Scope,
+        scope: ScopeRef<'_>,
         allow_aggregate: bool,
     ) -> Result<r::Expression> {
         let resolve = |e: &s::Expr| self.expression(e, scope, allow_aggregate);
