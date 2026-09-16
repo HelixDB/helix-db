@@ -278,8 +278,10 @@ impl Query {
             }
             match operator {
                 Operator::Match { pattern, .. } | Operator::Create(pattern) => {
-                    let mut scope = defined.clone();
-                    scope.extend(pattern.slots());
+                    // This constructor owns the validation scope; an error
+                    // discards it together with the unfinished query. Reuse it
+                    // instead of cloning every unrelated visible binding.
+                    defined.extend(outputs.iter().copied());
                     for node in &pattern.nodes {
                         if node.label.as_ref().is_some_and(String::is_empty) {
                             return Err(QueryError::compile(
@@ -302,7 +304,7 @@ impl Query {
                             ));
                         }
                         for (_, e) in &node.properties {
-                            check(e, &scope)?;
+                            check(e, &defined)?;
                         }
                     }
                     for rel in &pattern.relationships {
@@ -319,8 +321,8 @@ impl Query {
                                     b.value_type,
                                     super::ValueType::Any | super::ValueType::Null
                                 )
-                        }) || !scope.contains(&rel.from)
-                            || !scope.contains(&rel.to)
+                        }) || !defined.contains(&rel.from)
+                            || !defined.contains(&rel.to)
                         {
                             return Err(QueryError::compile(
                                 "InternalPlannerError",
@@ -329,7 +331,7 @@ impl Query {
                             ));
                         }
                         for (_, e) in &rel.properties {
-                            check(e, &scope)?;
+                            check(e, &defined)?;
                         }
                     }
                     for path in &pattern.paths {
@@ -340,7 +342,7 @@ impl Query {
                                 .iter()
                                 .any(|rel| rel.slot == path.slot)
                             || path.nodes.iter().any(|s| {
-                                !scope.contains(s)
+                                !defined.contains(s)
                                     || !pattern.nodes.iter().any(|node| node.slot == *s)
                                     || (bindings[s.0 as usize].kind != BindingType::Node
                                         && !matches!(
@@ -349,7 +351,7 @@ impl Query {
                                         ))
                             })
                             || path.relationships.iter().any(|s| {
-                                !scope.contains(s)
+                                !defined.contains(s)
                                     || (bindings[s.0 as usize].kind != BindingType::Relationship
                                         && !matches!(
                                             bindings[s.0 as usize].value_type,
@@ -391,9 +393,8 @@ impl Query {
                         predicate: Some(e), ..
                     } = operator
                     {
-                        e.validate_input(&scope)?;
+                        e.validate_input(&defined)?;
                     }
-                    defined = scope;
                     if matches!(operator, Operator::Create(_)) {
                         effect = Effect::Write;
                     }

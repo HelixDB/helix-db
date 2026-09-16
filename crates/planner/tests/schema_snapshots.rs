@@ -360,3 +360,73 @@ fn wide_scopes_share_unchanged_maps_while_shadowed_slots_remain_distinct() {
         }
     }
 }
+
+#[test]
+fn repeated_bound_matches_do_not_copy_unrelated_visible_bindings() {
+    let mut expected = [None; 3];
+    for width in [1, 16, 128, 512] {
+        for (index, repetitions) in [1, 16, 128].into_iter().enumerate() {
+            let build = |repetitions| {
+                let bindings = (0..width)
+                    .map(|slot| r::Binding {
+                        name: format!("n{slot}"),
+                        kind: r::BindingType::Node,
+                        nullable: false,
+                        value_type: r::ValueType::Node,
+                    })
+                    .collect();
+                let node = |slot| r::NodePattern {
+                    slot: r::Slot(slot),
+                    label: None,
+                    properties: vec![],
+                };
+                let mut operators = vec![r::Operator::Match {
+                    pattern: r::Pattern {
+                        nodes: (0..width).map(node).collect(),
+                        relationships: vec![],
+                        paths: vec![],
+                    },
+                    optional: false,
+                    predicate: None,
+                }];
+                operators.extend((0..repetitions).map(|_| r::Operator::Match {
+                    pattern: r::Pattern {
+                        nodes: vec![node(0)],
+                        relationships: vec![],
+                        paths: vec![],
+                    },
+                    optional: false,
+                    predicate: None,
+                }));
+                // Observe validation, contracts and layout construction only.
+                // Input fixtures are already owned, so query text and pattern
+                // construction cannot obscure scope-copy allocation growth.
+                allocations::observe(|| r::Query::new(bindings, operators, vec![]))
+            };
+            let (baseline, before) = build(0);
+            let baseline = baseline.unwrap();
+            let (query, after) = build(repetitions);
+            let query = query.unwrap();
+            let extra = (
+                after.allocations - before.allocations,
+                after.bytes - before.bytes,
+            );
+            let expected = expected[index].get_or_insert(extra);
+            assert_eq!(extra, *expected, "width={width}, repetitions={repetitions}");
+            assert_eq!(query.layout(), baseline.layout());
+            assert_eq!(query.contracts().len(), 1 + repetitions);
+            for contract in &query.contracts()[1..] {
+                assert!(ptr::eq(
+                    contract.input().columns(),
+                    contract.output().columns()
+                ));
+                assert_eq!(contract.input().columns().len(), width as usize);
+                assert_eq!(
+                    contract.correlation(),
+                    &r::Correlation::Bound(helix_planner::ir::AtLeast::from_one(r::Slot(0)))
+                );
+                assert_eq!(contract.references(), &BTreeSet::from([r::Slot(0)]));
+            }
+        }
+    }
+}

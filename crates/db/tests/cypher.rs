@@ -869,3 +869,6 @@ async fn generated_rows_feed_grouped_aggregates_in_bounded_batches() {
     );
     db.close().await.unwrap();
 }
+
+#[path = "cypher/wildcard_identity.rs"]
+mod wildcard_identity;

@@ -67,6 +67,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
     };
     let mut operators = Vec::new();
     let mut returns = Vec::new();
+    let mut anonymous_at_projection = 0;
     for (position, clause) in statement.clauses.iter().enumerate() {
         match clause {
             s::Clause::Match {
@@ -119,6 +120,21 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                         "InvalidClauseComposition",
                         "RETURN must finish the statement",
                     ));
+                }
+                // WITH * also discards anonymous pattern bindings. Only omit
+                // it when no such bindings have entered the row since the last
+                // projection; preserve modifiers and terminal RETURN handling.
+                if !returning
+                    && matches!(items.as_slice(), [s::Item::Wildcard])
+                    && !binder.scope.is_empty()
+                    && binder.anonymous == anonymous_at_projection
+                    && !distinct
+                    && ordering.is_empty()
+                    && skip.is_none()
+                    && limit.is_none()
+                    && predicate.is_none()
+                {
+                    continue;
                 }
                 let mut projections = Vec::new();
                 let mut output = Scope::new();
@@ -430,6 +446,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                     limit,
                 });
                 binder.scope = output;
+                anonymous_at_projection = binder.anonymous;
                 if *returning {
                     returns = columns;
                 }
@@ -705,7 +722,9 @@ impl Binder {
                 "CREATE requires a directed relationship",
             ));
         }
-        let previous = self.scope.values().copied().collect::<BTreeSet<_>>();
+        // Binding IDs grow monotonically. A name resolved below the entry
+        // boundary is incoming; a newly allocated or shadowed name is not.
+        let first_new_binding = self.bindings.len();
         let mut nodes = Vec::new();
         let mut relationships = Vec::new();
         let mut paths = Vec::new();
@@ -721,14 +740,15 @@ impl Binder {
                 }
                 let slot = self.binding(&node.name, r::BindingType::Node, optional)?;
                 if create
-                    && !previous.contains(&slot)
+                    && slot.0 as usize >= first_new_binding
                     && !nodes.iter().any(|(s, _)| *s == slot)
                     && node.labels.len() != 1
                 {
                     return Err(QueryError::unsupported("NodeLabelRequired"));
                 }
                 if create
-                    && (previous.contains(&slot) || nodes.iter().any(|(s, _)| *s == slot))
+                    && ((slot.0 as usize) < first_new_binding
+                        || nodes.iter().any(|(s, _)| *s == slot))
                     && (!node.labels.is_empty()
                         || node.has_properties
                         || pattern.relationships.is_empty())
@@ -759,7 +779,7 @@ impl Binder {
                 }
                 let slot = self.binding(&rel.name, r::BindingType::Relationship, optional)?;
                 if create
-                    && (previous.contains(&slot)
+                    && ((slot.0 as usize) < first_new_binding
                         || relationships.iter().any(|(s, _, _, _)| *s == slot))
                 {
                     return Err(semantic(
