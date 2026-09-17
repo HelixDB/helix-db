@@ -8,7 +8,11 @@ use crate::encoding::v2::{
     },
 };
 use helix_planner::relational as r;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+
+#[cfg(test)]
+#[path = "tests/entity_visits.rs"]
+mod tests;
 
 #[derive(Default)]
 pub(super) struct GraphBatch {
@@ -162,11 +166,18 @@ impl ExecutionContext<'_> {
         let mut entity_bytes = 0_usize;
         for row in rows {
             for (slot, properties) in demand {
-                let mut found = BTreeSet::new();
-                let mut found_memory = self.row_budget().reserve(0)?;
-                collect_entities(&row[slot.0 as usize], &mut found, &mut found_memory)?;
-                for entity in found {
+                visit_entities(&row[slot.0 as usize], &mut |entity| {
                     let previous = entities.get(&entity);
+                    // The destination map already deduplicates graph IDs. A
+                    // repeated reference needs work only when its demand grows.
+                    if previous.is_some_and(|existing| match properties {
+                        r::PropertyDemand::All => matches!(existing, r::PropertyDemand::All),
+                        r::PropertyDemand::Keys(keys) => {
+                            keys.iter().all(|key| existing.contains(key))
+                        }
+                    }) {
+                        return Ok(());
+                    }
                     let (old_keys, new_keys, name_bytes) = match (previous, properties) {
                         (Some(r::PropertyDemand::All), _) | (_, r::PropertyDemand::All) => {
                             (0, 0, 0)
@@ -214,7 +225,8 @@ impl ExecutionContext<'_> {
                         )),
                     )?;
                     entities.entry(entity).or_default().merge(properties);
-                }
+                    Ok(())
+                })?;
             }
         }
         if entities.is_empty() {
@@ -383,35 +395,29 @@ impl ExecutionContext<'_> {
     }
 }
 
-fn collect_entities(
-    value: &r::Value,
-    out: &mut BTreeSet<r::Entity>,
-    memory: &mut super::memory::Reservation,
-) -> Result<()> {
+/// Visit graph references without allocating an intermediate set. The admitted
+/// destination demand map owns deduplication; repeated references may expand its
+/// property demand but never create duplicate storage requests.
+fn visit_entities(value: &r::Value, visit: &mut impl FnMut(r::Entity) -> Result<()>) -> Result<()> {
     match value {
-        r::Value::Entity(entity) => {
-            if !out.contains(entity) {
-                memory.resize(r::allocation::btree_bytes::<r::Entity, ()>(
-                    out.len().saturating_add(1),
-                ))?;
-                out.insert(*entity);
-            }
-        }
+        r::Value::Entity(entity) => visit(*entity)?,
         r::Value::Path(path) => {
-            for entity in path.nodes().iter().map(|id| r::Entity::Node(*id)).chain(
-                path.relationships()
-                    .iter()
-                    .map(|id| r::Entity::Relationship(*id)),
-            ) {
-                collect_entities(&r::Value::Entity(entity), out, memory)?;
-            }
+            path.nodes()
+                .iter()
+                .map(|id| r::Entity::Node(*id))
+                .chain(
+                    path.relationships()
+                        .iter()
+                        .map(|id| r::Entity::Relationship(*id)),
+                )
+                .try_for_each(visit)?;
         }
         r::Value::List(xs) => xs
             .iter()
-            .try_for_each(|x| collect_entities(x, out, memory))?,
+            .try_for_each(|value| visit_entities(value, visit))?,
         r::Value::Map(xs) => xs
             .values()
-            .try_for_each(|x| collect_entities(x, out, memory))?,
+            .try_for_each(|value| visit_entities(value, visit))?,
         r::Value::Null
         | r::Value::Boolean(_)
         | r::Value::Integer(_)
