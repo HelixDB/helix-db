@@ -34,10 +34,9 @@ impl RowLayout {
         for (operator, contract) in contracts.iter().enumerate() {
             for slot in contract
                 .input()
-                .columns()
-                .keys()
-                .chain(contract.output().columns().keys())
-                .chain(contract.references())
+                .slot_iter()
+                .chain(contract.output().slot_iter())
+                .chain(contract.references().iter().copied())
             {
                 let lifetime = &mut lifetimes[slot.0 as usize];
                 let Some((_, last)) = lifetime else {

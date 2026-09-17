@@ -247,7 +247,7 @@ impl Query {
         let mut defined = BTreeSet::new();
         let mut effect = Effect::Read;
         let mut contracts = Vec::with_capacity(operators.len());
-        let mut row_schema = super::RowSchema::empty();
+        let mut row_schema = super::RowSchema::empty(&bindings);
         let check = |expression: &Expression, defined: &BTreeSet<Slot>| -> Result<()> {
             expression.validate_shape()?;
             if expression.slots().iter().any(|s| !defined.contains(s)) {

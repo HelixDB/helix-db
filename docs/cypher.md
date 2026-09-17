@@ -256,6 +256,13 @@ validation and explain output. Simultaneous inputs, outputs and sort expressions
 keep distinct cells. The retained compiled layout is admitted before execution
 storage access and remains charged through result preparation and commit;
 compilation itself still precedes this admission.
+Logical scope snapshots share binding types and store compact membership and
+optional-match nullability. Both growing scopes and long alias chains have local
+allocation regression tests. The Rust schema API offers allocation-free lookup
+and iteration; its existing `columns()` map is materialized only when requested
+and shared by clones. Diagnostic formatting and serialization stream the same
+column facts without retaining that map. Compilation remains bounded by the
+binding and operator limits and is outside the execution memory budget.
 For an initial single-node label match, candidate validation also checks node
 existence, avoiding a separate storage probe. Stale label postings are skipped;
 corrupt stored values still fail the query. Property expressions may require a

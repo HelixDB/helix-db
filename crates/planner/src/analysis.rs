@@ -16,7 +16,7 @@ mod prune;
 mod scalar;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use self::index_atoms::{
     equality_atom, range_atom, EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,

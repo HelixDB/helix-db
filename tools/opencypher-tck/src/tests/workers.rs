@@ -30,11 +30,42 @@ mod processes {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn executable(script: &str) -> tempfile::TempDir {
+    async fn executable(script: &str) -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("worker");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\nexec cat >/dev/null\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --fixture-ready ]; then exit 0; fi\n{script}\nexec cat >/dev/null\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A new executable can undergo a slow first-start platform inspection.
+        // Prepare the fixture before measuring protocol deadlines; this branch
+        // emits no frames and never touches scenario markers or failure scripts.
+        let mut child = Command::new(&path)
+            .arg("--fixture-ready")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let status = match tokio::time::timeout(Duration::from_secs(60), child.wait()).await {
+            Ok(status) => status.unwrap(),
+            Err(error) => {
+                tokio::time::timeout(CLEANUP_TIMEOUT, child.kill())
+                    .await
+                    .expect("fixture cleanup deadline")
+                    .expect("fixture cleanup");
+                panic!("fixture startup deadline: {error}");
+            }
+        };
+        assert!(status.success(), "fixture preparation failed: {status}");
+        assert!(
+            !path.with_extension("marker").exists(),
+            "fixture preparation must not execute the worker body"
+        );
         directory
     }
 
@@ -65,7 +96,7 @@ mod processes {
             },
         ])
         .await;
-        let directory = executable(&good);
+        let directory = executable(&good).await;
         let report = run(
             std::slice::from_ref(&scenario),
             1,
@@ -110,7 +141,7 @@ mod processes {
             }],
         ];
         for replies in variants {
-            let directory = executable(&output(&replies).await);
+            let directory = executable(&output(&replies).await).await;
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,
@@ -119,7 +150,12 @@ mod processes {
             )
             .await
             .unwrap();
-            assert_eq!(report.counts["harness_error"], 1);
+            assert_eq!(
+                report.counts.get("harness_error"),
+                Some(&1),
+                "{}",
+                serde_json::to_string(&report).unwrap()
+            );
         }
         for status in [
             report::Status::Failed,
@@ -143,7 +179,8 @@ mod processes {
                     }),
                 }])
                 .await,
-            );
+            )
+            .await;
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,
@@ -152,7 +189,12 @@ mod processes {
             )
             .await
             .unwrap();
-            assert_eq!(report.counts[&expected], 1);
+            assert_eq!(
+                report.counts.get(&expected),
+                Some(&1),
+                "{}",
+                serde_json::to_string(&report).unwrap()
+            );
             assert_eq!(report.outcomes[0].reason.as_deref(), Some("visible"));
         }
         for script in [
@@ -160,7 +202,7 @@ mod processes {
             "printf '\\000\\000\\000\\002{'",
             "printf '\\377\\377\\377\\377'",
         ] {
-            let directory = executable(script);
+            let directory = executable(script).await;
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,
@@ -169,7 +211,12 @@ mod processes {
             )
             .await
             .unwrap();
-            assert_eq!(report.counts["harness_error"], 1);
+            assert_eq!(
+                report.counts.get("harness_error"),
+                Some(&1),
+                "{}",
+                serde_json::to_string(&report).unwrap()
+            );
         }
     }
 
@@ -187,7 +234,7 @@ mod processes {
             result: Ok(()),
         }])
         .await;
-        let directory = executable(&format!("if [ ! -f \"$0.marker\" ]; then\n: >\"$0.marker\"\n{progress}\nexec sleep 60\nfi\n{completed}"));
+        let directory = executable(&format!("if [ ! -f \"$0.marker\" ]; then\n: >\"$0.marker\"\n{progress}\nexec sleep 60\nfi\n{completed}")).await;
         let report = run(
             &scenarios,
             1,
@@ -196,7 +243,12 @@ mod processes {
         )
         .await
         .unwrap();
-        assert_eq!(report.counts["timed_out"], 1);
+        assert_eq!(
+            report.counts.get("timed_out"),
+            Some(&1),
+            "{}",
+            serde_json::to_string(&report).unwrap()
+        );
         assert_eq!(
             report.counts.get("passed"),
             Some(&1),
@@ -220,7 +272,7 @@ mod processes {
         }])
         .await;
         for suffix in ["read -r discard || :\nexit 9", "exec sleep 60"] {
-            let directory = executable(&format!("{completed}\n{suffix}"));
+            let directory = executable(&format!("{completed}\n{suffix}")).await;
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,
@@ -229,7 +281,12 @@ mod processes {
             )
             .await
             .unwrap();
-            assert_eq!(report.counts["harness_error"], 1);
+            assert_eq!(
+                report.counts.get("harness_error"),
+                Some(&1),
+                "{}",
+                serde_json::to_string(&report).unwrap()
+            );
             assert!(report.outcomes[0]
                 .reason
                 .as_ref()

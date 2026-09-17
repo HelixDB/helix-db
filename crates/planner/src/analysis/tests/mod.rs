@@ -3,7 +3,7 @@
 // Test-only allocator observation delegates unchanged operations to System.
 // Production planner code continues to deny unsafe code.
 #[allow(unsafe_code)]
-mod allocations;
+pub(crate) mod allocations;
 
 mod candidates;
 mod index_atoms;

@@ -1,31 +1,15 @@
 //! Derived operator contracts. Scope, correlation, multiplicity and barriers are
 //! computed once at the validated query boundary and shared with planning.
 use super::{Binding, Effect, Expression, Operator, Slot, ValueType};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::BTreeSet;
+
+mod schema;
+pub use schema::RowSchema;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ColumnType {
     pub value_type: ValueType,
     pub nullable: bool,
-}
-
-/// A row's visible bindings; sparse slot IDs keep name shadowing unambiguous.
-/// Immutable maps are shared across adjacent operator contracts.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct RowSchema(Arc<BTreeMap<Slot, ColumnType>>);
-impl RowSchema {
-    pub(super) fn empty() -> Self {
-        Self(Arc::new(BTreeMap::new()))
-    }
-    pub fn columns(&self) -> &BTreeMap<Slot, ColumnType> {
-        &self.0
-    }
-    pub fn slots(&self) -> BTreeSet<Slot> {
-        self.0.keys().copied().collect()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -100,7 +84,7 @@ impl OperatorContract {
         output: &BTreeSet<Slot>,
         bindings: &[Binding],
     ) -> Self {
-        let input = input_schema.columns();
+        let input = input_schema;
         // Query::new derives every scope from one immutable binding catalog.
         debug_assert!(input.iter().all(|(slot, column)| {
             let binding = &bindings[slot.0 as usize];
@@ -122,7 +106,7 @@ impl OperatorContract {
                     pattern
                         .slots()
                         .into_iter()
-                        .filter(|slot| input.contains_key(slot)),
+                        .filter(|slot| input.get(*slot).is_some()),
                 );
                 if *optional {
                     boundaries.push(Boundary::OptionalMatch);
@@ -175,7 +159,7 @@ impl OperatorContract {
                     pattern
                         .slots()
                         .into_iter()
-                        .filter(|slot| input.contains_key(slot)),
+                        .filter(|slot| input.get(*slot).is_some()),
                 );
                 effect = Effect::Write;
                 boundaries.push(Boundary::Mutation);
@@ -205,7 +189,7 @@ impl OperatorContract {
             crate::ir::AtLeast::try_from_vec(
                 references
                     .iter()
-                    .filter(|slot| input.contains_key(*slot))
+                    .filter(|slot| input.get(**slot).is_some())
                     .copied()
                     .collect(),
             )
@@ -214,37 +198,10 @@ impl OperatorContract {
         } else {
             Correlation::Independent
         };
-        let output_schema = if output.iter().eq(input.keys()) {
-            input_schema.clone()
-        } else {
-            let mut columns: BTreeMap<_, _> = output
-                .iter()
-                .map(|slot| {
-                    let binding = &bindings[slot.0 as usize];
-                    (
-                        *slot,
-                        ColumnType {
-                            value_type: binding.value_type,
-                            nullable: binding.nullable,
-                        },
-                    )
-                })
-                .collect();
-            for (slot, column) in &mut columns {
-                let Some(incoming) = input.get(slot) else {
-                    continue;
-                };
-                column.nullable |= incoming.nullable;
-            }
-            if matches!(operator, Operator::Match { optional: true, .. }) {
-                for (slot, column) in &mut columns {
-                    if !input.contains_key(slot) {
-                        column.nullable = true;
-                    }
-                }
-            }
-            RowSchema(Arc::new(columns))
-        };
+        let output_schema = input.derive(
+            output,
+            matches!(operator, Operator::Match { optional: true, .. }),
+        );
         Self {
             input: input_schema.clone(),
             output: output_schema,
