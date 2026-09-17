@@ -219,3 +219,29 @@ fn public_syntax_cannot_bypass_pattern_validation() {
         "InvalidStatement"
     );
 }
+
+#[test]
+fn named_and_unnamed_shortest_path_calls_report_the_deferred_feature() {
+    for function in ["shortestPath", "allShortestPaths", "SHORTESTPATH"] {
+        for prefix in ["", "p = ", "p = /* path */ "] {
+            let query = format!("MATCH {prefix}{function}((a)-[*1..3]->(b)) RETURN a");
+            let error = helix_cypher::compile(&query).unwrap_err();
+            assert_eq!(error.category, "UnsupportedFeature");
+            assert_eq!(error.detail, "ShortestPath");
+            assert_eq!(error.phase, r::ErrorPhase::Compile);
+            let span = error.span.unwrap();
+            assert_eq!(&query[span.start..span.end], function);
+        }
+    }
+    for name in ["shortestPath", "allShortestPaths", "`shortestPath`"] {
+        helix_cypher::compile(&format!("MATCH {name} = (a) RETURN {name}")).unwrap();
+    }
+    for query in [
+        "MATCH p = shortestPath",
+        "MATCH allShortestPaths",
+        "MATCH p =",
+    ] {
+        let error = helix_cypher::compile(query).unwrap_err();
+        assert_eq!(error.category, "SyntaxError");
+    }
+}

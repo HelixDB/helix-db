@@ -4,6 +4,7 @@ mod bound_match;
 mod correlated;
 mod correlated_batch;
 mod cross_product;
+mod distinct;
 mod expansion;
 mod expansion_stack;
 mod graph;
@@ -152,6 +153,7 @@ impl ExecutionContext<'_> {
                 let end = match consumer {
                     r::BatchConsumer::Pipeline { end } => end,
                     r::BatchConsumer::Aggregate
+                    | r::BatchConsumer::Distinct
                     | r::BatchConsumer::TopK
                     | r::BatchConsumer::Project { .. } => index + 1,
                 };

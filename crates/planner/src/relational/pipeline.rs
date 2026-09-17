@@ -38,13 +38,15 @@ impl TryFrom<PipelineInput> for RowPipeline {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum BatchConsumer {
     Aggregate,
+    /// Deduplicate projected batches before retaining the complete relation.
+    Distinct,
     TopK,
     Project {
         termination: Termination,
     },
     /// Nonblocking projections, filters and UNWIND stages, ending at an
     /// inclusive operator index. The terminal projection may also be a direct
-    /// aggregation or bounded top-k. Correlated graph stages require a separate
+    /// aggregation, DISTINCT, or bounded top-k. Correlated graph stages require a separate
     /// cursor proof for the selected schedule in `RowPlan::batch_consumer`.
     /// Mutations remain barriers.
     Pipeline {
@@ -52,9 +54,9 @@ pub enum BatchConsumer {
     },
 }
 
-/// A window's proof for stopping source evaluation. An initial UNWIND must
-/// evaluate its one input expression first. Correlated inputs may contain later
-/// errors and must instead be drained.
+/// A window's proof for stopping source evaluation. Initial UNWIND expressions
+/// and MATCH constraints with parameters must first produce a batch. Correlated
+/// inputs may contain later errors and must instead be drained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Termination {
     Drain,
@@ -91,6 +93,8 @@ impl BatchConsumer {
             })
         {
             Some(Self::Aggregate)
+        } else if !aggregate && *distinct && ordering.is_empty() {
+            Some(Self::Distinct)
         } else if !aggregate && !distinct && !ordering.is_empty() && limit.is_some() {
             Some(Self::TopK)
         } else if !aggregate && !distinct && ordering.is_empty() {

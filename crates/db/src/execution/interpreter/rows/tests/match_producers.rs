@@ -66,7 +66,7 @@ async fn a_distinct_barrier_does_not_force_the_following_product_to_materialize(
         helix_cypher::compile("UNWIND range(0,31) AS key WITH DISTINCT key MATCH (a:A {key:key}),(b:B) RETURN count(*),sum(b.key)").unwrap(),
         &db.planner_context(context::ParamBindings::default()),
     ).unwrap();
-    assert_eq!(plan.batch_consumer(0), None);
+    assert_eq!(plan.batch_consumer(0), Some(r::BatchConsumer::Distinct));
     assert_eq!(plan.batch_consumer(2), Some(r::BatchConsumer::Aggregate));
     assert!(plan.matches()[&2]
         .steps

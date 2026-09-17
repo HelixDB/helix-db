@@ -41,16 +41,33 @@ impl InputWindow {
                 pattern,
                 predicate: None,
                 ..
-            } if pattern.nodes.iter().all(|node| node.properties.is_empty())
-                && pattern
-                    .relationships
+            } => {
+                let mut constraints = pattern
+                    .nodes
                     .iter()
-                    .all(|edge| edge.properties.is_empty()) =>
-            {
-                // Fixed graph matching, including labels, directions, paths
-                // and relationship uniqueness, has no scalar expression error
-                // to hide. Constraints with expressions retain the drain proof.
-                Termination::BeforeInput
+                    .flat_map(|node| &node.properties)
+                    .chain(
+                        pattern
+                            .relationships
+                            .iter()
+                            .flat_map(|edge| &edge.properties),
+                    );
+                if constraints.clone().next().is_none() {
+                    Termination::BeforeInput
+                } else if constraints.all(|(_, expression)| {
+                    matches!(
+                        expression,
+                        Expression::Literal(_) | Expression::Parameter(_)
+                    )
+                }) {
+                    // A complete match has evaluated every immutable constraint.
+                    // Parameters cannot fail on a later row once that succeeds.
+                    // Demand at least one result even for LIMIT 0, so a missing
+                    // parameter is never hidden by skipping source evaluation.
+                    Termination::AfterFirstBatch
+                } else {
+                    return None;
+                }
             }
             Operator::Match { .. }
             | Operator::Filter(_)
@@ -99,7 +116,11 @@ impl InputWindow {
                 offset.saturating_add(super::nonnegative(&evaluate(expression)?)?),
             )
         })?;
-        Ok(skip.saturating_add(super::nonnegative(&evaluate(&self.limit)?)?))
+        let demand = skip.saturating_add(super::nonnegative(&evaluate(&self.limit)?)?);
+        Ok(match self.termination {
+            Termination::AfterFirstBatch => demand.max(1),
+            Termination::Drain | Termination::BeforeInput => demand,
+        })
     }
 
     /// A constant upper bound for costing, without evaluating parameters or
@@ -113,6 +134,10 @@ impl InputWindow {
                     return None;
                 };
                 Some(offset.saturating_add(u64::try_from(*value).ok()?))
+            })
+            .map(|demand| match self.termination {
+                Termination::AfterFirstBatch => demand.max(1),
+                Termination::Drain | Termination::BeforeInput => demand,
             })
     }
 }

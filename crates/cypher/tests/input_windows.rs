@@ -70,7 +70,7 @@ fn source_demand_never_crosses_error_ordering_or_multiplicity_boundaries() {
         "UNWIND [1] AS x WITH count(x) AS y RETURN y LIMIT 1",
         "UNWIND [1] AS x WITH x UNWIND [x] AS y RETURN y LIMIT 1",
         "CREATE (:N) WITH 1 AS x RETURN x LIMIT 1",
-        "MATCH (n {key:1}) WITH n RETURN n LIMIT 1",
+        "MATCH (n {key:1/0}) WITH n RETURN n LIMIT 1",
         "MATCH (n) WHERE n.key=1 WITH n RETURN n LIMIT 1",
         "MATCH (n)-[:R {key:1/0}]->() WITH n RETURN n LIMIT 1",
         "MATCH (n)-[:R]->() WHERE n.key=1 WITH n RETURN n LIMIT 1",
@@ -85,6 +85,30 @@ fn source_demand_never_crosses_error_ordering_or_multiplicity_boundaries() {
         }
     }
     for (text, stage, termination, demand) in [
+        (
+            "MATCH (n {key:1}) WITH n RETURN n LIMIT 1",
+            2,
+            r::Termination::AfterFirstBatch,
+            1,
+        ),
+        (
+            "MATCH (n {key:$key}) WITH n RETURN n LIMIT 0",
+            2,
+            r::Termination::AfterFirstBatch,
+            1,
+        ),
+        (
+            "MATCH (n)-[:R {key:$key}]->(m) RETURN m LIMIT 1",
+            1,
+            r::Termination::AfterFirstBatch,
+            1,
+        ),
+        (
+            "UNWIND [] AS x RETURN x LIMIT 0",
+            1,
+            r::Termination::AfterFirstBatch,
+            1,
+        ),
         (
             "MATCH (n)-[:R]->() WITH n RETURN n LIMIT 1",
             2,

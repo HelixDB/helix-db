@@ -250,6 +250,13 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
+Nonaggregate `DISTINCT` without `ORDER BY` consumes batches and retains one row
+per distinct projected value. Its retained state scales with unique results;
+all input is still evaluated before `SKIP` and `LIMIT`, preserving late errors.
+Initial fixed-length matches with literal or parameter property constraints can
+stop at a downstream limit when intervening projections preserve rows and cannot
+fail. The engine evaluates enough input to validate those constraints even for
+`LIMIT 0`; correlated inputs and potentially failing expressions remain barriers.
 Rows reuse execution cells after bindings leave scope, so successive `WITH`
 aliases do not widen every retained row. Logical binding IDs remain stable in
 validation and explain output. Simultaneous inputs, outputs and sort expressions

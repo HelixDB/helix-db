@@ -296,7 +296,11 @@ fn mixed_batch_spans_stop_at_blocking_and_effect_boundaries() {
         ),
         (
             "UNWIND [1] AS x WITH DISTINCT x UNWIND [x] AS y RETURN y",
-            None,
+            Some(1),
+        ),
+        (
+            "UNWIND [1] AS x WITH x UNWIND [x] AS y RETURN DISTINCT y",
+            Some(3),
         ),
         (
             "UNWIND [1] AS x WITH x ORDER BY x UNWIND [x] AS y RETURN y",
@@ -316,6 +320,7 @@ fn mixed_batch_spans_stop_at_blocking_and_effect_boundaries() {
         let actual = pipeline.batch_consumer(0).map(|consumer| match consumer {
             r::BatchConsumer::Pipeline { end } => end,
             r::BatchConsumer::Aggregate
+            | r::BatchConsumer::Distinct
             | r::BatchConsumer::TopK
             | r::BatchConsumer::Project { .. } => 1,
         });

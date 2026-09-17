@@ -70,6 +70,7 @@ impl ExecutionContext<'_> {
                     .await;
             }
             r::BatchConsumer::Aggregate
+            | r::BatchConsumer::Distinct
             | r::BatchConsumer::TopK
             | r::BatchConsumer::Project { .. } => source + 1,
         };
@@ -106,6 +107,14 @@ impl ExecutionContext<'_> {
                     .await?
                     .finish(),
                 ConsumedProjection::Aggregate(end),
+            )),
+            r::BatchConsumer::Distinct => Ok((
+                self.row_budget()
+                    .admitted_future(
+                        self.distinct_batches(batches, width, projection, parameters, limits),
+                    )?
+                    .await?,
+                ConsumedProjection::Complete(end),
             )),
             r::BatchConsumer::Project { termination } => Ok((
                 self.row_budget()
@@ -450,10 +459,19 @@ impl ExecutionContext<'_> {
                     .finish(),
                 ConsumedProjection::Aggregate(end),
             ))
+        } else if *distinct {
+            Ok((
+                self.row_budget()
+                    .admitted_future(
+                        self.distinct_batches(batches, width, projection, parameters, limits),
+                    )?
+                    .await?,
+                ConsumedProjection::Complete(end),
+            ))
         } else {
             assert!(
                 !ordering.is_empty(),
-                "validated terminal consumer is aggregation, projection, or top-k"
+                "validated terminal consumer is aggregation, projection, distinct, or top-k"
             );
             Ok((
                 self.row_budget()

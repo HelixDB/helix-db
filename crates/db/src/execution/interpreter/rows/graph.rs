@@ -446,6 +446,9 @@ impl GraphBatch {
                     |bytes, value| Ok::<_, Error>(bytes.saturating_add(self.wire_memory(value)?)),
                 )?
             }
+            // wire() collects a fresh empty JSON map, which owns no heap
+            // allocation even when the input map retained a vacant B-tree root.
+            r::Value::Map(values) if values.is_empty() => size_of::<serde_json::Value>(),
             r::Value::Map(values) => {
                 values.iter().try_fold(2048_usize, |bytes, (key, value)| {
                     Ok::<_, Error>(

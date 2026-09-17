@@ -370,3 +370,75 @@ fn stored_value_conversion_preserves_widths_and_rejects_unstorable_composites() 
         )])))
         .is_err());
 }
+
+#[test]
+fn empty_map_response_admission_covers_fresh_and_previously_populated_inputs() {
+    let graph = GraphBatch::default();
+    for entries in [0, 1, 17, 257] {
+        let mut input = (0..entries)
+            .map(|key| (key.to_string(), r::Value::Integer(key)))
+            .collect::<BTreeMap<_, _>>();
+        for key in 0..entries {
+            input.remove(&key.to_string());
+        }
+        let value = r::Value::Map(input);
+        let estimate = graph.wire_memory(&value).unwrap();
+        let (result, allocated) = crate::allocation_testing::observe(|| graph.wire(&value));
+        let result = result.unwrap();
+        assert_eq!(result, json!({}));
+        assert_eq!((allocated.allocations, allocated.bytes), (0, 0));
+        assert_eq!(estimate, size_of::<serde_json::Value>());
+        assert_eq!(estimate, json_bytes(&result));
+        assert!(memory::Budget::new(estimate).reserve(estimate).is_ok());
+    }
+}
+
+#[test]
+fn nested_empty_map_admission_preserves_typed_map_wrapping() {
+    let graph = GraphBatch::default();
+    for length in [1, 17, 257] {
+        let value = r::Value::List(
+            (0..length)
+                .map(|_| r::Value::Map(BTreeMap::new()))
+                .collect(),
+        );
+        let estimate = graph.wire_memory(&value).unwrap();
+        let (wire, allocated) = crate::allocation_testing::observe(|| graph.wire(&value));
+        let wire = wire.unwrap();
+        assert_eq!(wire, json!(vec![json!({}); length]));
+        assert!(estimate >= json_bytes(&wire));
+        assert!(estimate >= allocated.peak_bytes);
+    }
+    let value = r::Value::Map(BTreeMap::from([(
+        "$type".into(),
+        r::Value::Map(BTreeMap::new()),
+    )]));
+    let estimate = graph.wire_memory(&value).unwrap();
+    let (wire, allocated) = crate::allocation_testing::observe(|| graph.wire(&value));
+    let wire = wire.unwrap();
+    assert_eq!(wire, json!({"$type":"map", "value":{"$type":{}}}));
+    assert!(estimate >= json_bytes(&wire));
+    assert!(estimate >= allocated.peak_bytes);
+}
+
+#[tokio::test]
+async fn empty_property_maps_fit_their_bounded_response_budget() {
+    let db = crate::execution::interpreter::test_support::open_db("empty-map-output-budget").await;
+    let response = crate::cypher::execute(
+        &db,
+        crate::cypher::Request::new("UNWIND range(1,4096) AS i RETURN {} AS properties"),
+        crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+        crate::query_service::QueryMode::Execute,
+        crate::execution_control::ExecutionControl::unlimited(),
+        Limits {
+            memory_bytes: 12 * 1024 * 1024,
+            ..Limits::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.columns, ["properties"]);
+    assert_eq!(response.rows, vec![vec![json!({})]; 4096]);
+    assert!(response.resources.peak_memory_bytes <= 12 * 1024 * 1024);
+    db.close().await.unwrap();
+}

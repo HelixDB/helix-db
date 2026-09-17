@@ -350,7 +350,12 @@ impl<'source> Parser<'source> {
 
     fn pattern(&mut self) -> Result<Pattern> {
         let name = if !self.is("(") {
-            if self.is("shortestPath") || self.is("allShortestPaths") {
+            if (self.is("shortestPath") || self.is("allShortestPaths"))
+                && self
+                    .tokens
+                    .get(self.position + 1)
+                    .is_some_and(|token| matches!(token.kind, Kind::Symbol("(")))
+            {
                 return Err(self.unsupported("ShortestPath"));
             }
             let name = self.name()?;
@@ -359,6 +364,14 @@ impl<'source> Parser<'source> {
         } else {
             None
         };
+        if (self.is("shortestPath") || self.is("allShortestPaths"))
+            && self
+                .tokens
+                .get(self.position + 1)
+                .is_some_and(|token| matches!(token.kind, Kind::Symbol("(")))
+        {
+            return Err(self.unsupported("ShortestPath"));
+        }
         let mut nodes = vec![self.node()?];
         let mut relationships = Vec::new();
         loop {
