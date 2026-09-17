@@ -69,7 +69,7 @@ pub(crate) fn label_scope(predicate: &Predicate) -> Result<LabelScope, PlannerEr
             op: CompareOp::Eq,
             right,
         } => match property_literal_string(left, right)
-            .filter(|(property, _value)| property == "$label")
+            .filter(|(property, _value)| *property == "$label")
         {
             Some((_property, value)) => NonEmptyString::new(value)
                 .map(|label| LabelScope::Feasible(FeasibleLabelScope::Scoped(label)))
@@ -116,7 +116,9 @@ pub(crate) fn label_scope(predicate: &Predicate) -> Result<LabelScope, PlannerEr
     }
 }
 
-pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<String> {
+/// Borrow an exact label literal without copying either string.
+/// The predicate owns the returned slice.
+pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<&str> {
     match predicate {
         Predicate::Eq { left, right }
         | Predicate::Compare {
@@ -124,7 +126,7 @@ pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<String> {
             op: CompareOp::Eq,
             right,
         } => property_literal_string(left, right)
-            .filter(|(property, _value)| property == "$label")
+            .filter(|(property, _value)| *property == "$label")
             .map(|(_property, value)| value),
         Predicate::Neq { .. }
         | Predicate::Gt { .. }
@@ -149,13 +151,13 @@ pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<String> {
     }
 }
 
-fn property_literal_string(left: &Expr, right: &Expr) -> Option<(String, String)> {
+fn property_literal_string<'a>(left: &'a Expr, right: &'a Expr) -> Option<(&'a str, &'a str)> {
     match (left, right) {
         (Expr::Property(property), Expr::Constant(PropertyValue::String(value))) => {
-            Some((property.clone(), value.clone()))
+            Some((property.as_str(), value.as_str()))
         }
         (Expr::Constant(PropertyValue::String(value)), Expr::Property(property)) => {
-            Some((property.clone(), value.clone()))
+            Some((property.as_str(), value.as_str()))
         }
         (Expr::Property(_), Expr::Constant(PropertyValue::Null))
         | (Expr::Property(_), Expr::Constant(PropertyValue::Bool(_)))

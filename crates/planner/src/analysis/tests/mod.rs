@@ -7,6 +7,7 @@ pub(crate) mod allocations;
 
 mod candidates;
 mod index_atoms;
+mod labels;
 mod prune;
 mod scalar;
 mod support;

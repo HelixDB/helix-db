@@ -45,7 +45,7 @@ pub(crate) fn predicate_is_tautological_for_label(
     label: &crate::ir::NonEmptyString,
 ) -> bool {
     predicate_is_statically_tautological(predicate)
-        || label_equality_atom(predicate).as_deref() == Some(label.as_ref())
+        || label_equality_atom(predicate) == Some(label.as_ref())
         || match predicate {
             helix_ast::expr::Predicate::And { predicates } => predicates
                 .iter()
