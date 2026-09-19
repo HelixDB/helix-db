@@ -247,7 +247,22 @@ class DslAstTests(unittest.TestCase):
             DateTime.parse_rfc3339("2026-04-05t12:34:56z").to_rfc3339(),
             "2026-04-05T12:34:56.000Z",
         )
-        for value in ["2026-04-05", "2026-04-05T12:34:56"]:
+        self.assertEqual(
+            DateTime.parse_rfc3339("2026-04-05T12:34:56+23:59").to_rfc3339(),
+            "2026-04-04T12:35:56.000Z",
+        )
+        self.assertEqual(
+            DateTime.parse_rfc3339("2026-04-05T12:34:56-23:59").to_rfc3339(),
+            "2026-04-06T12:33:56.000Z",
+        )
+        for value in [
+            "2026-04-05",
+            "2026-04-05T12:34:56",
+            "2026-04-05T12:34:56+00:60",
+            "2026-04-05T12:34:56-00:60",
+            "2026-04-05T12:34:56+24:00",
+            "2026-04-05T12:34:56-24:00",
+        ]:
             with self.assertRaisesRegex(TypeError, "invalid RFC3339 datetime"):
                 DateTime.parse_rfc3339(value)
 
