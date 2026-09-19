@@ -97,6 +97,17 @@ pub enum EmitBehavior {
     All,
 }
 
+/// The widest edit distance a keyword search can ask for. Two is where the
+/// Levenshtein automaton stops being cheap enough to run against a whole term
+/// dictionary, and it is the same ceiling Lucene settled on.
+pub const MAX_FUZZY_DISTANCE: u8 = 2;
+
+/// Zero means the query never asked for fuzzy matching, so it is left out of
+/// the serialised form and an older reader sees exactly what it always saw.
+fn is_exact_match(distance: &u8) -> bool {
+    *distance == 0
+}
+
 /// Aggregate function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,6 +164,9 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        #[serde(default, skip_serializing_if = "is_exact_match")]
+        fuzzy_distance: u8,
     },
     /// Vector search on edges.
     VectorSearchEdges {
@@ -181,6 +195,9 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        #[serde(default, skip_serializing_if = "is_exact_match")]
+        fuzzy_distance: u8,
     },
     /// Rank the current node stream by one text index.
     TextSearchNodesWithin {
@@ -197,6 +214,9 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        #[serde(default, skip_serializing_if = "is_exact_match")]
+        fuzzy_distance: u8,
     },
     /// Rank the current edge stream by one text index.
     TextSearchEdgesWithin {
@@ -213,6 +233,9 @@ pub enum AstNode {
         query_text: PropertyInput,
         /// Result count.
         k: StreamBound,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        #[serde(default, skip_serializing_if = "is_exact_match")]
+        fuzzy_distance: u8,
     },
     /// Rank the current node stream by one vector index.
     VectorSearchNodesWithin {
@@ -768,6 +791,19 @@ impl AstNode {
         }
     }
 
+    /// The edit distance slot of a text search step, so a later builder call
+    /// can widen a search that has already been written. Edit distance means
+    /// nothing to any other node, so they have no slot to hand back.
+    pub(crate) fn fuzzy_distance_mut(&mut self) -> Option<&mut u8> {
+        match self {
+            Self::TextSearchNodes { fuzzy_distance, .. }
+            | Self::TextSearchEdges { fuzzy_distance, .. }
+            | Self::TextSearchNodesWithin { fuzzy_distance, .. }
+            | Self::TextSearchEdgesWithin { fuzzy_distance, .. } => Some(fuzzy_distance),
+            _ => None,
+        }
+    }
+
     /// Returns true when this node is terminal.
     pub fn is_terminal(&self) -> bool {
         matches!(
@@ -820,6 +856,7 @@ enum Operation {
         tenant_value: Option<PropertyInput>,
         query_text: PropertyInput,
         k: StreamBound,
+        fuzzy_distance: u8,
     },
     TextSearchEdgesWithin {
         label: String,
@@ -827,6 +864,7 @@ enum Operation {
         tenant_value: Option<PropertyInput>,
         query_text: PropertyInput,
         k: StreamBound,
+        fuzzy_distance: u8,
     },
     VectorSearchNodesWithin {
         label: String,
@@ -940,6 +978,7 @@ impl Operation {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             } => AstNode::TextSearchNodesWithin {
                 input,
                 label,
@@ -947,6 +986,7 @@ impl Operation {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             },
             Self::TextSearchEdgesWithin {
                 label,
@@ -954,6 +994,7 @@ impl Operation {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             } => AstNode::TextSearchEdgesWithin {
                 input,
                 label,
@@ -961,6 +1002,7 @@ impl Operation {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             },
             Self::VectorSearchNodesWithin {
                 label,
@@ -1374,6 +1416,23 @@ impl<S: TraversalState, M: MutationMode> Traversal<S, M> {
         self.root.as_ref().is_some_and(AstNode::is_terminal)
     }
 
+    /// Let the preceding text search tolerate misspellings up to `distance`
+    /// edits. Distances above [`MAX_FUZZY_DISTANCE`] are lowered to it, because
+    /// that is the widest automaton the index can be walked with.
+    ///
+    /// Panics when the preceding step is not a text search, since no other
+    /// source has a notion of edit distance.
+    pub fn fuzzy(mut self, distance: u8) -> Self {
+        let distance = distance.min(MAX_FUZZY_DISTANCE);
+        let slot = self
+            .root
+            .as_mut()
+            .and_then(AstNode::fuzzy_distance_mut)
+            .expect("fuzzy can only follow a text search step");
+        *slot = distance;
+        self
+    }
+
     fn from_root<T: TraversalState>(root: AstNode) -> Traversal<T, M> {
         Traversal {
             root: Some(root),
@@ -1529,6 +1588,7 @@ impl Traversal<Empty, ReadOnly> {
             tenant_value,
             query_text: query_text.into(),
             k: k.into(),
+            fuzzy_distance: 0,
         })
     }
 
@@ -1630,6 +1690,7 @@ impl Traversal<Empty, ReadOnly> {
             tenant_value,
             query_text: query_text.into(),
             k: k.into(),
+            fuzzy_distance: 0,
         })
     }
 
@@ -1928,6 +1989,7 @@ impl<M: MutationMode> Traversal<OnNodes, M> {
             tenant_value,
             query_text: query_text.into(),
             k: k.into(),
+            fuzzy_distance: 0,
         })
     }
 
@@ -2338,6 +2400,7 @@ impl<M: MutationMode> Traversal<OnEdges, M> {
             tenant_value,
             query_text: query_text.into(),
             k: k.into(),
+            fuzzy_distance: 0,
         })
     }
 

@@ -704,6 +704,8 @@ pub struct ExecNodeTextSearchCountPlan {
     pub query_text: ir::TextQueryInputPlan,
     /// Search result limit.
     pub k: ir::SearchLimitPlan,
+    /// Maximum edit distance for keyword matching. Zero is exact.
+    pub fuzzy_distance: u8,
     /// Normalized count window.
     pub window: ExecCountWindowPlan,
 }
@@ -719,6 +721,8 @@ pub struct ExecEdgeTextSearchCountPlan {
     pub query_text: ir::TextQueryInputPlan,
     /// Search result limit.
     pub k: ir::SearchLimitPlan,
+    /// Maximum edit distance for keyword matching. Zero is exact.
+    pub fuzzy_distance: u8,
     /// Normalized count window.
     pub window: ExecCountWindowPlan,
 }
@@ -862,6 +866,8 @@ pub enum ExecCountCursorPlan {
         query_text: ir::TextQueryInputPlan,
         /// Result limit.
         k: ir::SearchLimitPlan,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        fuzzy_distance: u8,
     },
     /// Edge text-search rows.
     EdgeTextSearch {
@@ -873,6 +879,8 @@ pub enum ExecCountCursorPlan {
         query_text: ir::TextQueryInputPlan,
         /// Result limit.
         k: ir::SearchLimitPlan,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        fuzzy_distance: u8,
     },
     /// Explicit node runtime equality dispatch exception.
     NodeDynamicEquality {
@@ -1506,12 +1514,14 @@ mod tests {
                 index: search_index(),
                 query_text: text_input(),
                 k: search_limit(),
+                fuzzy_distance: 0,
             },
             ExecCountCursorPlan::EdgeTextSearch {
                 key: catalog::EdgeSearchIndexKey::try_new("LIKES", "body").unwrap(),
                 index: search_index(),
                 query_text: text_input(),
                 k: search_limit(),
+                fuzzy_distance: 0,
             },
             ExecCountCursorPlan::NodeDynamicEquality {
                 index: catalog::NodeEqualityIndexMeta::new(name("node_eq:User:status")),
@@ -1576,6 +1586,7 @@ mod tests {
                     index: search_index(),
                     query_text: text_input(),
                     k: search_limit(),
+                    fuzzy_distance: 0,
                 }),
             },
             ExecCountCursorPlan::Variable {
@@ -2185,6 +2196,7 @@ mod tests {
                 index: search_index(),
                 query_text: text_input(),
                 k: search_limit(),
+                fuzzy_distance: 0,
                 window: window.clone(),
             }),
             ExecCountPlan::EdgeTextSearch(ExecEdgeTextSearchCountPlan {
@@ -2192,6 +2204,7 @@ mod tests {
                 index: search_index(),
                 query_text: text_input(),
                 k: search_limit(),
+                fuzzy_distance: 0,
                 window: window.clone(),
             }),
             ExecCountPlan::NodeDynamicEquality(ExecNodeDynamicEqualityCountPlan {

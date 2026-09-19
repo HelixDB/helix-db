@@ -2120,6 +2120,7 @@ mod text_transaction_benchmark {
                                 },
                                 query_text: ir::TextQueryInputPlan::Text(name(QUERY)),
                                 k: ir::SearchLimitPlan::Literal(std::num::NonZeroUsize::MIN),
+                                fuzzy_distance: 0,
                             },
                         )),
                     },
@@ -2165,6 +2166,7 @@ mod text_transaction_benchmark {
                                     std::num::NonZeroUsize::new(batch_size)
                                         .expect("benchmark result limit is positive"),
                                 ),
+                                fuzzy_distance: 0,
                             },
                         )),
                     },
