@@ -196,7 +196,7 @@ cargo add helix-db@3.0.0 tokio serde_json
 ```
 
 ```bash TypeScript
-npm install @helix-db/helix-db@3.0.4
+npm install @helix-db/helix-db@3.1.0
 ```
 
 ```bash Go
@@ -861,7 +861,7 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The published `@helix-db/helix-db` 3.0.4 package targets Node.js 20 or newer and
+The published `@helix-db/helix-db` 3.1.0 package targets Node.js 20 or newer and
 emits the same operation-tree AST as the Rust, Go, and Python SDKs.
 
 The package is ESM and requires Node.js 20 or newer.
@@ -869,7 +869,7 @@ The package is ESM and requires Node.js 20 or newer.
 ## Install
 
 ```bash
-npm install @helix-db/helix-db@3.0.4
+npm install @helix-db/helix-db@3.1.0
 ```
 
 The package is ESM. Set `"type": "module"` or compile to ESM.
@@ -1199,6 +1199,10 @@ Have a feature request? [Let us know on Discord](https://discord.com/invite/2stg
 Page type: Reference
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+- **[TypeScript SDK 3.1.0](/database/helix-db/start-here/sdk-setup/typescript-project-setup)** exposes `HelixError.code`, `statusCode`, `serverMessage`, `rawBody`, and explicit `retryable` metadata. npm 3.0.4 did not expose these fields. Legacy response formats and unknown future codes remain readable.
+- **[Transaction conflicts](/database/helix-db/query-guides/error-handling#typescript-release-compatibility)** can be recognized with `error.statusCode === 409` and `error.code === "transaction_conflict"`. Docker v0.0.5 already supplies this contract; no Docker or CLI release is required. A lost response remains distinct from a confirmed abort, and mutations are never automatically replayed.
+- This release updates the TypeScript SDK only. Embedded runtime packages and the Rust, Python, and Go SDK versions are unchanged.
 
 - **[Go SDK v0.3.1](/database/helix-db/start-here/sdk-setup/go-project-setup)** — operation-tree query construction, typed parameters, `/v2/query` execution, index lifecycle requests, and traversal-scoped vector and BM25 search. Upgrade from v0.3.0: this patch keeps unreleased embedded adapters out of public module discovery. Embedded execution and native graph bindings are not distributed in this release.
 - **[Python async client](/database/helix-db/start-here/sdk-setup/python-project-setup#async-execution)** — `helix-db` 0.3.3 adds reusable HTTPX connection pooling, concurrent requests, cancellation-safe response cleanup, and asynchronous embedded writer and reader clients.
@@ -4158,6 +4162,25 @@ Page type: Reference
 Helix query failures expose a stable machine-readable code separately from the
 human-readable diagnostic. Branch on the code; log or display the message.
 Messages can gain context over time and are not a compatibility contract.
+
+## TypeScript release compatibility
+
+`@helix-db/helix-db` **3.1.0** exposes `HelixError.code`, `statusCode`,
+`serverMessage`, `rawBody`, and explicit `retryable` metadata. The published
+**3.0.4** package lacks these structured fields. Docker **v0.0.5** already
+returns a confirmed transaction conflict as HTTP **409** with
+`{"error":"transaction_conflict","msg":"<diagnostic>"}`.
+
+Use both `error.code === "transaction_conflict"` and `error.statusCode === 409`
+to recognize that condition. Reload the asset before rebuilding the mutation;
+do not match diagnostic wording. A dropped connection after sending a write is
+a `Network` failure with an unknown commit outcome, not proof that the write
+was aborted. An explicit `writer_fenced_commit_outcome_unknown` response is also
+distinct from a conflict and carries `retryable: false`. Reconcile state before
+resubmitting such writes. The SDK does not automatically replay mutations.
+
+This compatibility statement concerns transaction conflicts; it does not claim
+that v0.0.5 implements every newer error classification in the reference below.
 
 ## HTTP error envelope
 

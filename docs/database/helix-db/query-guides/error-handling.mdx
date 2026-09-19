@@ -11,6 +11,25 @@ Helix query failures expose a stable machine-readable code separately from the
 human-readable diagnostic. Branch on the code; log or display the message.
 Messages can gain context over time and are not a compatibility contract.
 
+## TypeScript release compatibility
+
+`@helix-db/helix-db` **3.1.0** exposes `HelixError.code`, `statusCode`,
+`serverMessage`, `rawBody`, and explicit `retryable` metadata. The published
+**3.0.4** package lacks these structured fields. Docker **v0.0.5** already
+returns a confirmed transaction conflict as HTTP **409** with
+`{"error":"transaction_conflict","msg":"<diagnostic>"}`.
+
+Use both `error.code === "transaction_conflict"` and `error.statusCode === 409`
+to recognize that condition. Reload the asset before rebuilding the mutation;
+do not match diagnostic wording. A dropped connection after sending a write is
+a `Network` failure with an unknown commit outcome, not proof that the write
+was aborted. An explicit `writer_fenced_commit_outcome_unknown` response is also
+distinct from a conflict and carries `retryable: false`. Reconcile state before
+resubmitting such writes. The SDK does not automatically replay mutations.
+
+This compatibility statement concerns transaction conflicts; it does not claim
+that v0.0.5 implements every newer error classification in the reference below.
+
 ## HTTP error envelope
 
 Every non-success response from `POST /v2/query` uses `error` for the static

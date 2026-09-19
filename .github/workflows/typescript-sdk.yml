@@ -1,0 +1,90 @@
+name: TypeScript SDK
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/typescript-sdk.yml"
+      - "sdks/typescript/**"
+  push:
+    branches: [main, "codex/**"]
+    paths:
+      - ".github/workflows/typescript-sdk.yml"
+      - "sdks/typescript/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typescript-sdk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package:
+    name: Package (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        node: [20, 24]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: sdks/typescript
+      - name: Validate source
+        working-directory: sdks/typescript
+        run: npm run check
+      - name: Enforce coverage thresholds
+        # Node 20 runs the full suite above but lacks the coverage threshold flags.
+        if: matrix.node == 24
+        working-directory: sdks/typescript
+        run: npm run test:coverage
+      - name: Pack release artifact
+        run: |
+          mkdir npm-dist
+          npm pack ./sdks/typescript --ignore-scripts --pack-destination npm-dist
+      - name: Test installed package and declarations
+        run: node sdks/typescript/scripts/package-smoke.mjs --package npm-dist/*.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helix-db-typescript-node-${{ matrix.node }}
+          path: npm-dist/*.tgz
+          if-no-files-found: error
+
+  image-contract:
+    name: Published server contract (${{ matrix.architecture }})
+    needs: package
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: helix-db-typescript-node-24
+          path: npm-dist
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: sdks/typescript
+      - name: Exercise real concurrent writes through the installed SDK
+        run: >-
+          node sdks/typescript/scripts/package-smoke.mjs
+          --package npm-dist/*.tgz
+          --image ghcr.io/helixdb/helixdb:v0.0.5@sha256:1eacb4d8f957965047279d8ab337254014c12162d14332821f68171b50297e21
+          --platform linux/${{ matrix.architecture }}

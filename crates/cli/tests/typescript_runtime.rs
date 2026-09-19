@@ -10,7 +10,7 @@ use support::CliFixture;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const SDK_VERSION: &str = "3.0.4";
+const SDK_VERSION: &str = "3.1.0";
 
 fn stderr(assert: Assert) -> String {
     String::from_utf8(assert.get_output().stderr.clone()).expect("stderr should be utf8")
@@ -433,10 +433,10 @@ async fn local_tarball_runtime_is_offline_and_executes_read_and_write() {
 }
 
 /// This is deliberately selected only by the scheduled/manual registry-smoke
-/// workflow. It becomes the release-availability gate after npm 3.0.4 is
+/// workflow. It becomes the release-availability gate after npm 3.1.0 is
 /// published; normal tests use the checkout tarball and never contact npm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires the separately published @helix-db/helix-db@3.0.4 registry release"]
+#[ignore = "requires the separately published @helix-db/helix-db@3.1.0 registry release"]
 async fn registry_smoke_executes_exact_sdk_read_and_write() {
     exercise_real_sdk(None, "typescript-registry-smoke-project").await;
 }

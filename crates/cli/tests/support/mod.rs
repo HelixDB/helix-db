@@ -247,7 +247,7 @@ if defined HELIX_TEST_TOOL_FAIL_COMMAND if "%HELIX_TEST_TOOL_FIRST_ARGUMENT%"=="
 )
 if "{tool}"=="npm" if "%1"=="install" (
   mkdir "node_modules\@helix-db\helix-db\dist" 2>nul
-  >"node_modules\@helix-db\helix-db\package.json" echo {{"name":"@helix-db/helix-db","version":"3.0.4","type":"module","exports":"./dist/index.js"}}
+  >"node_modules\@helix-db\helix-db\package.json" echo {{"name":"@helix-db/helix-db","version":"3.1.0","type":"module","exports":"./dist/index.js"}}
   >"node_modules\@helix-db\helix-db\dist\index.js" echo export const g = ^(^) =^> ({{}}^); export const readBatch = ^(^) =^> ({{}}^); export const writeBatch = ^(^) =^> ({{}}^);
 )
 if "{tool}"=="node" if not "%~1"=="--input-type" if defined HELIX_TEST_TOOL_FAIL_NODE_QUERY (
@@ -283,7 +283,7 @@ if [ "$1" = "$HELIX_TEST_TOOL_FAIL_COMMAND" ]; then
 fi
 if [ '{tool}' = 'npm' ] && [ "$1" = 'install' ]; then
   mkdir -p 'node_modules/@helix-db/helix-db/dist'
-  printf '%s\n' '{{"name":"@helix-db/helix-db","version":"3.0.4","type":"module","exports":"./dist/index.js"}}' > 'node_modules/@helix-db/helix-db/package.json'
+  printf '%s\n' '{{"name":"@helix-db/helix-db","version":"3.1.0","type":"module","exports":"./dist/index.js"}}' > 'node_modules/@helix-db/helix-db/package.json'
   printf '%s\n' 'export const g = () => ({{}}); export const readBatch = () => ({{}}); export const writeBatch = () => ({{}});' > 'node_modules/@helix-db/helix-db/dist/index.js'
 fi
 if [ '{tool}' = 'node' ] && [ "$1" != '--input-type=module' ] && [ -n "$HELIX_TEST_TOOL_FAIL_NODE_QUERY" ]; then

@@ -11,6 +11,18 @@ pageType: "Reference"
 > For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
 <Update
+  label="September 2026"
+  rss={{
+    title: "TypeScript SDK 3.1.0: structured transaction errors",
+    description: "Stable error codes and HTTP status metadata in the npm package"
+  }}
+>
+- **[TypeScript SDK 3.1.0](/database/helix-db/start-here/sdk-setup/typescript-project-setup)** exposes `HelixError.code`, `statusCode`, `serverMessage`, `rawBody`, and explicit `retryable` metadata. npm 3.0.4 did not expose these fields. Legacy response formats and unknown future codes remain readable.
+- **[Transaction conflicts](/database/helix-db/query-guides/error-handling#typescript-release-compatibility)** can be recognized with `error.statusCode === 409` and `error.code === "transaction_conflict"`. Docker v0.0.5 already supplies this contract; no Docker or CLI release is required. A lost response remains distinct from a confirmed abort, and mutations are never automatically replayed.
+- This release updates the TypeScript SDK only. Embedded runtime packages and the Rust, Python, and Go SDK versions are unchanged.
+</Update>
+
+<Update
   label="August 2026"
   rss={{
     title: "Go SDK v0.3.1 and asynchronous Python SDK client",
