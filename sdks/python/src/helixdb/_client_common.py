@@ -11,6 +11,7 @@ from .dsl import QueryRequest
 
 DEFAULT_URL = "http://localhost:6969"
 QUERY_PATH = "/v2/query"
+DATABASE_ID_HEADER = "x-helix-database-id"
 
 
 class HelixError(Exception):
@@ -186,11 +187,14 @@ def validate_base_url(url: str | None) -> str:
 def prepare_request(
     base_url: str,
     api_key: str | None,
+    database_id: str | None,
+    require_database_id: bool,
     headers: Mapping[str, str],
     query: QueryRequest,
 ) -> PreparedRequest:
     """Serialize a query and resolve the common HelixDB HTTP request."""
 
+    validate_database_id(database_id, required=require_database_id)
     body = serialize_query(query)
     try:
         url = urljoin(base_url.rstrip("/") + "/", QUERY_PATH)
@@ -200,7 +204,18 @@ def prepare_request(
     prepared_headers = dict(headers)
     if api_key is not None:
         prepared_headers["Authorization"] = f"Bearer {api_key}"
+    if database_id is not None:
+        prepared_headers[DATABASE_ID_HEADER] = database_id
     return PreparedRequest(url, tuple(prepared_headers.items()), body)
+
+
+def validate_database_id(database_id: str | None, *, required: bool = False) -> None:
+    """Validate a managed database ID before a request is sent."""
+
+    if required and database_id is None:
+        raise HelixError.invalid_request("managed clients require a database ID")
+    if database_id is not None and not database_id.strip():
+        raise HelixError.invalid_request("database ID must not be empty")
 
 
 def serialize_query(query: QueryRequest) -> bytes:

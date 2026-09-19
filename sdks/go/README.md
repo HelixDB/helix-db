@@ -58,6 +58,17 @@ var out FindUsersResponse
 err = client.Exec(ctx, FindUsers("acme", 25), &out)
 ```
 
+For Helix Cloud, use the managed constructor with the dashboard database ID. It
+sends that ID in the `x-helix-database-id` header on query and warm requests:
+
+```go
+client, err := helix.NewManagedClient(
+	"https://cluster.helix-db.com",
+	"db_your_database_id",
+	helix.WithAPIKey("hx_your_api_key"),
+)
+```
+
 Pass `helix.WarmOnly()` to mark a read for cache warming. Helix Cloud fans the
 request out to every eligible backend and returns `204 No Content` after at
 least one succeeds, so do not expect a query payload. Combine it with

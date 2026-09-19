@@ -17,6 +17,7 @@ from ._client_common import (
     remote_error,
     serialize_query,
     validate_base_url,
+    validate_database_id,
 )
 from .dsl import QueryRequest
 
@@ -27,15 +28,36 @@ QUERY_PATH = _client_common.QUERY_PATH
 class Client:
     """Synchronous client for running queries against HelixDB."""
 
-    def __init__(self, url: str | None = None, *, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        url: str | None = None,
+        *,
+        api_key: str | None = None,
+        database_id: str | None = None,
+    ) -> None:
         self._mode: Literal["server", "embedded"] = "server"
         self._base_url = validate_base_url(url)
         self._api_key = api_key
+        self._database_id = database_id
+        self._require_database_id = False
         self._native: Any | None = None
 
     @classmethod
-    def server(cls, url: str | None = None, *, api_key: str | None = None) -> "Client":
-        return cls(url, api_key=api_key)
+    def server(
+        cls,
+        url: str | None = None,
+        *,
+        api_key: str | None = None,
+        database_id: str | None = None,
+    ) -> "Client":
+        return cls(url, api_key=api_key, database_id=database_id)
+
+    @classmethod
+    def managed(cls, url: str | None, *, api_key: str | None = None, database_id: str) -> "Client":
+        validate_database_id(database_id, required=True)
+        client = cls(url, api_key=api_key, database_id=database_id)
+        client._require_database_id = True
+        return client
 
     @classmethod
     def embedded(
@@ -88,8 +110,20 @@ class Client:
             self._api_key = api_key
         return self
 
+    def with_database_id(self, database_id: str | None = None) -> "Client":
+        """Set or clear the managed database ID sent as ``x-helix-database-id``."""
+
+        if self._mode == "server":
+            self._database_id = database_id
+        return self
+
     def request_builder(self) -> "QueryBuilder":
-        return QueryBuilder(self._base_url, self._api_key)
+        return QueryBuilder(
+            self._base_url,
+            self._api_key,
+            self._database_id,
+            self._require_database_id,
+        )
 
     def query(self, request: QueryRequest | None = None) -> Any:
         if request is None:
@@ -212,6 +246,8 @@ class EmbeddedCacheConfig:
 class QueryBuilder:
     _base_url: str
     _api_key: str | None = None
+    _database_id: str | None = None
+    _require_database_id: bool = False
     _headers: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -234,6 +270,8 @@ class QueryBuilder:
         return QueryExecutionRequest(
             base_url=self._base_url,
             api_key=self._api_key,
+            database_id=self._database_id,
+            require_database_id=self._require_database_id,
             headers=dict(self._headers or {}),
             query=query,
         )
@@ -243,11 +281,20 @@ class QueryBuilder:
 class QueryExecutionRequest:
     base_url: str
     api_key: str | None
+    database_id: str | None
+    require_database_id: bool
     headers: dict[str, str]
     query: QueryRequest
 
     def send_bytes(self) -> bytes:
-        prepared = prepare_request(self.base_url, self.api_key, self.headers, self.query)
+        prepared = prepare_request(
+            self.base_url,
+            self.api_key,
+            self.database_id,
+            self.require_database_id,
+            self.headers,
+            self.query,
+        )
         request = Request(
             prepared.url,
             data=prepared.body,
