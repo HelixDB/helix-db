@@ -5,7 +5,9 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize, Serializer};
 use std::{cmp::Ordering, collections::BTreeMap};
 
-use crate::encoding::property::{datetime_millis_to_rfc3339, sortable_i64_index_string};
+use crate::encoding::property::{
+    datetime_millis_to_rfc3339, sortable_f64_index_string, sortable_i64_index_string,
+};
 use crate::encoding::v2::values::property::canonical_number::{self, CanonicalNumber};
 
 ///
@@ -281,8 +283,10 @@ impl PropertyValue {
     /// Convert to a string representation suitable for index keys
     ///
     /// Numbers are zero-padded for lexicographic ordering:
-    /// - i64: 20-character zero-padded decimal
-    /// - f64: Scientific notation with sign prefix
+    /// - i64: 20-character zero-padded decimal of the sign-flipped bits
+    /// - f64/f32: 20-character zero-padded decimal of the order-preserving
+    ///   bits (the `F32` variant stores its value as `f64`, so it shares
+    ///   the `f64` encoding)
     /// - Strings: As-is
     /// - Other types: Debug representation (not indexable)
     pub fn to_index_string(&self) -> String {
@@ -292,13 +296,13 @@ impl PropertyValue {
             // was PropertyValue::I64(n) => format!("{:020}", n), check compatibility
             PropertyValue::I64(n) => sortable_i64_index_string(*n),
             PropertyValue::DateTime(n) => sortable_i64_index_string(*n),
-            PropertyValue::F64(n) => format!("{:+024.15e}", n),
+            PropertyValue::F64(n) => sortable_f64_index_string(*n),
             PropertyValue::String(s) => s.clone(),
             PropertyValue::Bytes(b) => format!("<bytes:{}>", b.len()),
             PropertyValue::I64Array(a) => format!("<i64[{}]>", a.len()),
             PropertyValue::F64Array(a) => format!("<f64[{}]>", a.len()),
             PropertyValue::StringArray(a) => format!("<str[{}]>", a.len()),
-            PropertyValue::F32(n) => format!("{:+024.15e}", n),
+            PropertyValue::F32(n) => sortable_f64_index_string(*n),
             PropertyValue::F32Array(items) => format!("<f32[{}]>", items.len()),
             PropertyValue::Array(a) => format!("<array[{}]>", a.len()),
             PropertyValue::Object(o) => format!("<object[{}]>", o.len()),
@@ -612,6 +616,58 @@ mod tests {
     }
 
     #[test]
+    fn f64_index_strings_preserve_numeric_order() {
+        // regression test: `{:+024.15e}` did not zero-pad the exponent and
+        // did not invert digits for negative numbers, so the previous
+        // encoding sorted as roughly [1, 1000, 0.001, -1, -1000, -0.001]
+        // instead of numeric order.
+        let values = [
+            f64::NEG_INFINITY,
+            -1000.0,
+            -1.0,
+            -0.001,
+            -0.0,
+            0.0,
+            0.001,
+            1.0,
+            1000.0,
+            f64::INFINITY,
+        ];
+        let encoded = values
+            .iter()
+            .map(|value| PropertyValue::F64(*value).to_index_string())
+            .collect::<Vec<_>>();
+
+        assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn f32_variant_index_strings_preserve_numeric_order() {
+        // `PropertyValue::F32` stores its value as `f64` (see the variant
+        // definition), so it shares `F64`'s encoding. this exercises that
+        // arm directly so a future change that special-cases `F32` again
+        // can't silently reintroduce the same bug.
+        let values = [
+            f64::NEG_INFINITY,
+            -1000.0,
+            -1.0,
+            -0.001,
+            -0.0,
+            0.0,
+            0.001,
+            1.0,
+            1000.0,
+            f64::INFINITY,
+        ];
+        let encoded = values
+            .iter()
+            .map(|value| PropertyValue::F32(*value).to_index_string())
+            .collect::<Vec<_>>();
+
+        assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
     fn property_value_accessors_and_equality_work_for_common_types() {
         assert_eq!(PropertyValue::from("hello").as_str(), Some("hello"));
         assert_eq!(PropertyValue::from(42i64).as_i64(), Some(42));
@@ -751,8 +807,8 @@ mod tests {
                 "09223372036854775808",
                 "1970-01-01T00:00:00.000Z",
             ),
-            (PropertyValue::F64(1.5), "+00001.500000000000000e0", "1.5"),
-            (PropertyValue::F32(2.5), "+00002.500000000000000e0", "2.5"),
+            (PropertyValue::F64(1.5), "13832806255468478464", "1.5"),
+            (PropertyValue::F32(2.5), "13836183955189006336", "2.5"),
             (PropertyValue::String("value".to_string()), "value", "value"),
             (PropertyValue::Bytes(vec![1, 2]), "<bytes:2>", "<bytes:2>"),
             (PropertyValue::I64Array(vec![1, 2]), "<i64[2]>", "<i64[2]>"),
