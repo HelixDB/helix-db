@@ -33,9 +33,30 @@ use crate::index_lifecycle::{
 /// One prepared validation decision that needs no external blob authority.
 #[derive(Debug)]
 pub(crate) struct PreparedDatabaseValidation {
+    diagnostic: ValidationDiagnostic,
     ranges: Vec<PreparedValidationRange>,
     observations: Vec<RowObservation>,
     result: IndexOperationStepResult,
+}
+
+/// Disposable failure context; never serialized into index metadata.
+#[derive(Debug)]
+struct ValidationDiagnostic {
+    operation_id: uuid::Uuid,
+    index_id: u64,
+    generation: u64,
+    check: Option<&'static str>,
+}
+
+impl ValidationDiagnostic {
+    fn new(operation: &IndexOperationRecord) -> Self {
+        Self {
+            operation_id: operation.operation_id().as_uuid(),
+            index_id: operation.index_id().get(),
+            generation: operation.generation().get(),
+            check: None,
+        }
+    }
 }
 
 impl PreparedDatabaseValidation {
@@ -53,6 +74,15 @@ impl PreparedDatabaseValidation {
             if transaction.get(&observation.key).await? != observation.value {
                 return Ok(IndexOperationStepResult::TransientFailure);
             }
+        }
+        if matches!(self.result, IndexOperationStepResult::Blocked(_)) {
+            tracing::warn!(
+                operation_id = %self.diagnostic.operation_id,
+                index_id = self.diagnostic.index_id,
+                generation = self.diagnostic.generation,
+                check = self.diagnostic.check.unwrap_or("manifest_limit"),
+                "text manifest validation failed after snapshot revalidation"
+            );
         }
         Ok(self.result.clone())
     }
@@ -84,6 +114,12 @@ impl PreparedPageValidation {
         mut self,
         result: IndexOperationStepResult,
     ) -> PreparedDatabaseValidation {
+        if matches!(
+            result,
+            IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
+        ) {
+            self.database.diagnostic.check = Some("blob_missing_or_size_mismatch");
+        }
         self.database.result = result;
         self.database
     }
@@ -175,6 +211,7 @@ pub(super) async fn select(
     let (delta_range, delta) = select_one(transaction, delta_prefix, None).await?;
     if delta.is_some() {
         return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+            diagnostic: ValidationDiagnostic::new(operation),
             ranges: vec![delta_range],
             observations: Vec::new(),
             result: progressed(TextBuildStage::CatchUp(PrefixScanProgress {
@@ -230,6 +267,7 @@ async fn select_page(
             ))
         };
         return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+            diagnostic: ValidationDiagnostic::new(operation),
             ranges: vec![scan.range_through(0)],
             observations: Vec::new(),
             result,
@@ -250,11 +288,21 @@ async fn select_page(
                 ..
             }) => key,
             Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "page_key_encoding",
+                    range(),
+                    observations,
+                ));
             }
         };
         let Ok(page) = index_values::decode_manifest_page(row_value) else {
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "page_value_encoding",
+                range(),
+                observations,
+            ));
         };
         let root_key = scoped_key(
             scope,
@@ -267,11 +315,21 @@ async fn select_page(
         }];
         let Some(root_value) = root_value.as_ref() else {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "page_root_missing",
+                range(),
+                observations,
+            ));
         };
         let Ok(root) = index_values::decode_manifest_root(root_value) else {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "page_root_encoding",
+                range(),
+                observations,
+            ));
         };
 
         let minimum_revision = u64::from(root.page_count()).saturating_add(1);
@@ -291,7 +349,12 @@ async fn select_page(
             || page_key.page >= root.page_count()
         {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "page_root_identity_or_revision",
+                range(),
+                observations,
+            ));
         }
 
         let observed_before = match next_partition.as_ref() {
@@ -307,7 +370,12 @@ async fn select_page(
             None if page_key.page == 0 => 0,
             Some(_) | None => {
                 observations.extend(row_observations);
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "page_sequence",
+                    range(),
+                    observations,
+                ));
             }
         };
         let page_split_count =
@@ -317,7 +385,12 @@ async fn select_page(
         let candidate_partition = if next_page == root.page_count() {
             if observed_split_count != root.split_count() {
                 observations.extend(row_observations);
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "partition_split_count",
+                    range(),
+                    observations,
+                ));
             }
             None
         } else {
@@ -330,7 +403,12 @@ async fn select_page(
                 observed_split_count,
             ) else {
                 observations.extend(row_observations);
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "partition_progress",
+                    range(),
+                    observations,
+                ));
             };
             Some(partition)
         };
@@ -347,7 +425,12 @@ async fn select_page(
             ) || !page_distinct_blobs.insert(blob)
             {
                 observations.extend(row_observations);
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "split_layout_or_duplicate_blob",
+                    range(),
+                    observations,
+                ));
             }
             page_blobs.push(blob);
         }
@@ -360,6 +443,7 @@ async fn select_page(
         if admitted_rows == 0 && row_input_bytes > limits.max_input_bytes().get() {
             observations.extend(row_observations);
             return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+                diagnostic: ValidationDiagnostic::new(operation),
                 ranges: range(),
                 observations,
                 result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
@@ -399,6 +483,7 @@ async fn select_page(
         .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
     Ok(ValidationSelection::Page(PreparedPageValidation {
         database: PreparedDatabaseValidation {
+            diagnostic: ValidationDiagnostic::new(operation),
             ranges: vec![scan.range_through(admitted_rows)],
             observations,
             result: progressed(TextBuildStage::ValidateManifests(
@@ -429,6 +514,7 @@ async fn select_root(
     .await?;
     if scan.rows.is_empty() {
         return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+            diagnostic: ValidationDiagnostic::new(operation),
             ranges: vec![scan.range_through(0)],
             observations: Vec::new(),
             result: progressed(TextBuildStage::ValidateManifests(
@@ -451,11 +537,21 @@ async fn select_root(
                 ..
             }) => key,
             Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "root_key_encoding",
+                    range(),
+                    observations,
+                ));
             }
         };
         let Ok(root) = index_values::decode_manifest_root(row_value) else {
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "root_value_encoding",
+                range(),
+                observations,
+            ));
         };
         let partition_mode_is_valid = match (definition.tenant_property(), root.partition()) {
             (None, TextPartition::Unpartitioned) | (Some(_), TextPartition::TenantValue(_)) => true,
@@ -477,7 +573,12 @@ async fn select_root(
             || !partition_mode_is_valid
             || !revision_is_valid
         {
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "root_identity_partition_or_revision",
+                range(),
+                observations,
+            ));
         }
 
         let corpus_key = super::statistics::corpus_key(
@@ -501,7 +602,12 @@ async fn select_root(
         .is_err()
         {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "root_corpus_statistics",
+                range(),
+                observations,
+            ));
         }
         if root.page_count() != 0 {
             let page_key = scoped_key(
@@ -526,7 +632,12 @@ async fn select_root(
             });
             if !exact_page_zero {
                 observations.extend(row_observations);
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "root_page_zero",
+                    range(),
+                    observations,
+                ));
             }
         }
         let row_input_bytes = row_bytes(row_key, Some(row_value)).saturating_add(
@@ -537,6 +648,7 @@ async fn select_root(
         if admitted_rows == 0 && row_input_bytes > limits.max_input_bytes().get() {
             observations.extend(row_observations);
             return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+                diagnostic: ValidationDiagnostic::new(operation),
                 ranges: range(),
                 observations,
                 result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
@@ -562,6 +674,7 @@ async fn select_root(
         ..progress.counters
     };
     Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+        diagnostic: ValidationDiagnostic::new(operation),
         ranges: vec![scan.range_through(admitted_rows)],
         observations,
         result: progressed(TextBuildStage::ValidateManifests(
@@ -615,11 +728,21 @@ async fn select_entity_state(
                 ..
             }) => key,
             Ok(ManagedIndexKey::Data { .. } | ManagedIndexKey::Global { .. }) | Err(_) => {
-                return Ok(blocked_database(range(), observations));
+                return Ok(blocked_database(
+                    operation,
+                    "entity_key_encoding",
+                    range(),
+                    observations,
+                ));
             }
         };
         let Ok(state) = index_values::decode_text_entity_state(row_value) else {
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_value_encoding",
+                range(),
+                observations,
+            ));
         };
         let root_key = scoped_key(
             scope,
@@ -632,11 +755,21 @@ async fn select_entity_state(
         }];
         let Some(root_value) = root_value.as_ref() else {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_root_missing",
+                range(),
+                observations,
+            ));
         };
         let Ok(root) = index_values::decode_manifest_root(root_value) else {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_root_encoding",
+                range(),
+                observations,
+            ));
         };
         if state_key.root.index_id != operation.index_id()
             || state_key.root.generation != operation.generation()
@@ -652,7 +785,12 @@ async fn select_entity_state(
             || (state.live && root.page_count() == 0)
         {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_root_identity_or_version",
+                range(),
+                observations,
+            ));
         }
         let marker_key = scoped_key(
             scope,
@@ -669,11 +807,21 @@ async fn select_entity_state(
         });
         let Some(marker_value) = marker_value.as_ref() else {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_statistics_missing",
+                range(),
+                observations,
+            ));
         };
         let Ok(marker) = index_values::decode_statistics_entity(marker_value) else {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_statistics_encoding",
+                range(),
+                observations,
+            ));
         };
         if marker.index_id != operation.index_id()
             || marker.generation != operation.generation()
@@ -681,7 +829,12 @@ async fn select_entity_state(
             || marker.entity_id != state_key.entity.id
         {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_statistics_identity",
+                range(),
+                observations,
+            ));
         }
         let marker_matches = match (&marker.contribution, state.live) {
             (work::TextStatisticsContribution::Present { partition, .. }, true) => {
@@ -724,7 +877,12 @@ async fn select_entity_state(
         };
         if !marker_matches {
             observations.extend(row_observations);
-            return Ok(blocked_database(range(), observations));
+            return Ok(blocked_database(
+                operation,
+                "entity_statistics_contribution",
+                range(),
+                observations,
+            ));
         }
         let row_input_bytes = row_bytes(row_key, Some(row_value)).saturating_add(
             row_observations.iter().fold(0_u64, |bytes, observation| {
@@ -734,6 +892,7 @@ async fn select_entity_state(
         if admitted_rows == 0 && row_input_bytes > limits.max_input_bytes().get() {
             observations.extend(row_observations);
             return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+                diagnostic: ValidationDiagnostic::new(operation),
                 ranges: range(),
                 observations,
                 result: IndexOperationStepResult::Blocked(IndexOperationBlocker::ManifestLimit {
@@ -764,6 +923,7 @@ async fn select_entity_state(
         ..progress.counters
     };
     Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+        diagnostic: ValidationDiagnostic::new(operation),
         ranges: vec![scan.range_through(admitted_rows)],
         observations,
         result: progressed(TextBuildStage::ValidateManifests(
@@ -804,6 +964,10 @@ async fn select_activation_prerequisites(
         ))
     };
     Ok(ValidationSelection::Database(PreparedDatabaseValidation {
+        diagnostic: ValidationDiagnostic {
+            check: Some("build_artifact_remaining"),
+            ..ValidationDiagnostic::new(operation)
+        },
         ranges: vec![entity_state_range, delta_range, artifact_range],
         observations: Vec::new(),
         result,
@@ -895,10 +1059,16 @@ fn validation_start(prefix: &Bytes, cursor: Option<&IndexCursor>) -> Result<Boun
 
 /// Constructs a range-fenced durable invariant blocker.
 fn blocked_database(
+    operation: &IndexOperationRecord,
+    check: &'static str,
     ranges: Vec<PreparedValidationRange>,
     observations: Vec<RowObservation>,
 ) -> ValidationSelection {
     ValidationSelection::Database(PreparedDatabaseValidation {
+        diagnostic: ValidationDiagnostic {
+            check: Some(check),
+            ..ValidationDiagnostic::new(operation)
+        },
         ranges,
         observations,
         result: IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation),
@@ -1198,6 +1368,16 @@ mod tests {
         let blocked = page.into_database_with_result(IndexOperationStepResult::Blocked(
             IndexOperationBlocker::InvariantViolation,
         ));
+        assert_eq!(
+            blocked.diagnostic.operation_id,
+            operation.operation_id().as_uuid()
+        );
+        assert_eq!(blocked.diagnostic.index_id, operation.index_id().get());
+        assert_eq!(blocked.diagnostic.generation, operation.generation().get());
+        assert_eq!(
+            blocked.diagnostic.check,
+            Some("blob_missing_or_size_mismatch")
+        );
         assert!(matches!(
             blocked.stage(&transaction).await.unwrap(),
             IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
