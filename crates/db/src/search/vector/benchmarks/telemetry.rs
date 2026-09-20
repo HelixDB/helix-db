@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::mutation::VectorBuildSessionStats;
+use crate::search::vector::hnsw::mutation::VectorBuildSessionStats;
 
 #[derive(Default)]
 struct Counters {

@@ -118,6 +118,10 @@ assert.equal(Object.isFrozen(writeBatch()), true);
 assert.equal(PropertyValue.string("x").asStr(), "x");
 assert.equal(PropertyValue.i64(1n).asI64(), 1n);
 assert.equal(DateTime.parseRfc3339("1969-12-31T23:59:59.999-00:00").toRfc3339(), "1969-12-31T23:59:59.999Z");
+assert.equal(DateTime.parseRfc3339("2026-04-05t12:34:56z").toRfc3339(), "2026-04-05T12:34:56.000Z");
+for (const value of ["2026-04-05", "2026-04-05T12:34:56", "2026-02-30T12:00:00Z", "2026-01-01T24:00:00Z"]) {
+  assert.throws(() => DateTime.parseRfc3339(value), TypeError);
+}
 
 assert.deepEqual(parsed(Expr.prop("a").add(Expr.val(1)).neg()), {
   neg: { expr: { add: { left: { property: "a" }, right: { constant: { i64: 1 } } } } },

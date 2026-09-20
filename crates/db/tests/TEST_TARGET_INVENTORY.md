@@ -50,7 +50,7 @@ The final inventory reports exactly:
 
 The vector library also owns the ignored, release-only diagnostic
 `vector_search_scale_gate_reports_recall_and_median_throughput` contract in
-`search/vector/scale_contracts.rs`. It is not a separate Cargo target and is
+`search/vector/hnsw/scale_contracts.rs`. It is not a separate Cargo target and is
 excluded from production-only coverage. Because it constructs a raw
 `VectorIndex` and writes physical rows directly, it is retained only as a
 search-kernel regression and does not satisfy a V2 production lifecycle or

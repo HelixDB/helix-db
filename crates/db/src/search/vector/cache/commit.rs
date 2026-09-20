@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::memory_registry::VectorCacheIdentity;
-use super::memory_store::VectorMemoryDirtyRows;
-use super::ValidatedVectorGenerationHandle;
+use super::registry::VectorCacheIdentity;
+use super::store::VectorMemoryDirtyRows;
+use crate::search::vector::{SimHasherRegistry, ValidatedVectorGenerationHandle};
 
 /// One exact generation and its transaction-owned post-commit cache effect.
 #[derive(Debug, Clone)]
@@ -58,12 +58,12 @@ impl VectorCacheWriteEntry {
 #[derive(Debug)]
 pub(crate) struct VectorCacheWriteSet {
     entries: Mutex<HashMap<VectorCacheIdentity, VectorCacheWriteEntry>>,
-    simhasher_registry: Arc<super::SimHasherRegistry>,
+    simhasher_registry: Arc<SimHasherRegistry>,
 }
 
 impl VectorCacheWriteSet {
     /// Creates transaction tracking bound to its database's projection owner.
-    pub(crate) fn new(simhasher_registry: Arc<super::SimHasherRegistry>) -> Self {
+    pub(crate) fn new(simhasher_registry: Arc<SimHasherRegistry>) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
             simhasher_registry,
@@ -71,7 +71,7 @@ impl VectorCacheWriteSet {
     }
 
     /// Clones the projection owner for exact vector-index construction.
-    pub(crate) fn simhasher_registry(&self) -> Arc<super::SimHasherRegistry> {
+    pub(crate) fn simhasher_registry(&self) -> Arc<SimHasherRegistry> {
         Arc::clone(&self.simhasher_registry)
     }
 
@@ -123,7 +123,7 @@ impl VectorCacheWriteSet {
 
 impl Default for VectorCacheWriteSet {
     fn default() -> Self {
-        Self::new(Arc::new(super::SimHasherRegistry::default()))
+        Self::new(Arc::new(SimHasherRegistry::default()))
     }
 }
 

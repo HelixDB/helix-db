@@ -46,7 +46,7 @@ fixtures_dir="$script_dir/fixtures"
 compose_file="$fixtures_dir/docker-compose.yml"
 port=${HELIX_IMAGE_COMPOSE_PORT:-18120}
 project="helixdb-image-compose-${RANDOM}-$$"
-mc_image="minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+mc_image="quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -131,6 +131,9 @@ assert_minio_objects_present() {
     exit 1
   fi
 }
+
+log "Pulling pinned MinIO dependencies from Quay"
+compose pull minio minio-init
 
 log "Starting pinned MinIO Compose fixture"
 compose up -d >/dev/null

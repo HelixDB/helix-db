@@ -45,7 +45,7 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
 LABEL org.opencontainers.image.title="helixdb" \
     org.opencontainers.image.description="HelixDB single-process database server." \
     org.opencontainers.image.licenses="Apache-2.0" \
-    org.opencontainers.image.source="https://github.com/HelixDB/helix-proper" \
+    org.opencontainers.image.source="https://github.com/HelixDB/helix-db" \
     org.opencontainers.image.base.name="gcr.io/distroless/cc-debian12:nonroot"
 
 WORKDIR /home/nonroot

@@ -8,7 +8,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use db::query_service::{QueryMode, QueryResponse, QueryServiceError};
+use db::query_service::{QueryFailureClass, QueryMode, QueryResponse, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use serde::Serialize;
@@ -140,32 +140,22 @@ fn query_response(response: QueryResponse) -> Response {
 }
 
 pub(super) fn service_error_response(error: QueryServiceError) -> Response {
-    let terminal_write_outcome = error.is_commit_outcome_unknown();
-    let status = if terminal_write_outcome {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else if error.is_transaction_conflict() {
-        StatusCode::CONFLICT
-    } else {
-        match &error {
-            QueryServiceError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-            QueryServiceError::Planner(_) => StatusCode::BAD_REQUEST,
-            QueryServiceError::Db(error) if error.is_invalid_input() => StatusCode::BAD_REQUEST,
-            QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired { .. }) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            QueryServiceError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            QueryServiceError::JsonSerialize(_) | QueryServiceError::Serialize(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+    let class = error.classify();
+    let status = match class {
+        QueryFailureClass::CommitOutcomeUnknown | QueryFailureClass::WriterModeRequired => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        QueryFailureClass::Conflict => StatusCode::CONFLICT,
+        QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => StatusCode::BAD_REQUEST,
+        QueryFailureClass::Execution | QueryFailureClass::Internal => {
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     };
-    let code = error.error_code();
-    let message = error.to_string();
     error_response_with_retryable(
         status,
-        code,
-        message,
-        terminal_write_outcome.then_some(false),
+        error.error_code(),
+        error.to_string(),
+        (class == QueryFailureClass::CommitOutcomeUnknown).then_some(false),
     )
 }
 

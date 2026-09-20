@@ -4,6 +4,11 @@ This directory owns the build and test surface for the standalone HelixDB image.
 
 The canonical image repository is `ghcr.io/helixdb/helixdb`. The scripts require an explicit platform and image tag so local and CI runs exercise the same artifact.
 
+The published release is `ghcr.io/helixdb/helixdb:v0.0.5`, available for Linux amd64
+and arm64. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
+for release-image commands. The `local-amd64` and `local-arm64` tags below refer
+to images built from your checkout.
+
 ## Container contract
 
 - `/bin/helix-server` is PID 1 and runs as the distroless `nonroot` user (`65532:65532`).
@@ -68,6 +73,9 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 
 `HELIX_DATA_DIR` and `S3_BUCKET` are mutually exclusive. Credentials are runtime-only and are never baked into the image.
 
+Leave both variables unset for memory storage. Bind mounts and existing volumes
+must be writable by the container's `65532:65532` user and group.
+
 ## Test
 
 After loading a native image, run the full packaging and runtime suite:
@@ -80,10 +88,43 @@ docker-image/test.sh \
 
 The suite inspects the saved image metadata and filesystem, scans it for credential material, exercises memory and native-volume behavior, rejects invalid configuration, checks clean `SIGTERM` shutdown, and verifies S3-compatible persistence with digest-pinned MinIO images. It creates only `helixdb-image-*` Docker resources and removes them on exit.
 
+MinIO and `mc` use the upstream `quay.io/minio` repositories. The server
+`RELEASE.2025-09-07T16-13-09Z` and client `RELEASE.2025-08-13T08-35-41Z`
+are pinned to multi-platform index digests shared with the CLI disk runtime.
+These are the same digests previously used through Docker Hub, whose MinIO
+repositories no longer allow anonymous pulls. Both pins contain Linux amd64
+and arm64 images. The Compose suite explicitly pulls both dependencies for the
+requested platform before startup and fails if either pull fails, even when
+images are cached. It does not remove or retag cached images.
+
+When updating a pin, keep the Compose fixture, object-check client in
+`compose-smoke.sh`, CLI defaults, CLI test fixtures, and local-server docs aligned.
+Verify anonymous pulls and run the full suite on both platforms.
+
 Archive and secret-scanner unit tests can be run without Docker:
 
 ```bash
 python3 -m unittest discover -s docker-image/tests -p 'test_*.py'
 ```
 
-Pull requests and main-branch pushes build and run this suite natively for both amd64 and arm64. CI does not log in to GHCR or publish an image.
+Pull requests and main-branch pushes build and run this suite natively for both amd64 and arm64. Automatic CI runs do not log in to GHCR or publish an image.
+
+
+## Release
+
+Run the `Docker image` workflow manually from `main` with `release_version`
+set to a new version tag matching `DEFAULT_LOCAL_IMAGE_TAG` in the CLI.
+An empty version runs tests only. The release waits for workspace quality and
+both native image suites, then loads their tested archives without rebuilding.
+It publishes both architectures to GHCR, creates the versioned index, checks its
+platforms, and updates `latest`. An existing version tag or registry lookup error
+stops publication. Only the publication job has package write permission.
+
+```text
+native amd64 + arm64 build/test → tested archives
+workspace checks + tested archives → versioned image → latest
+published image → CLI release → fresh-install verification
+```
+
+Publish the Docker image before dispatching `cli.yml` so the new CLI default
+is available when binaries are released. Keep the previous version tag for rollback.

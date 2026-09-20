@@ -729,7 +729,7 @@
         }
       },
       "QueryParameterValue": {
-        "description": "JSON-compatible runtime parameter. Datetimes are RFC 3339 strings when declared as date_time. Raw bytes cannot be represented on the JSON route. Send floating-point JSON numbers without parameter_types because JSON Schema cannot distinguish an integral number token from the integer representation used by the exact typed decoder.",
+        "description": "JSON-compatible runtime parameter. Datetimes are RFC 3339 strings when declared as date_time. Raw bytes cannot be represented on the JSON route. Integer and floating-point JSON numbers are accepted for f32 and f64 declarations and converted to the declared type. Values must be finite; f32 values must fit within its finite range.",
         "anyOf": [
           {
             "type": "null"
@@ -764,7 +764,7 @@
       },
       "QueryParameterTypes": {
         "type": "object",
-        "description": "When present, keys must exactly match parameters. Typed and untyped parameters cannot be mixed. The HTTP contract deliberately omits f32 and f64 declarations because JSON Schema cannot express the lexical distinction required by exact typed decoding; send floating-point JSON numbers without parameter_types.",
+        "description": "When present, keys must exactly match parameters. Typed and untyped parameters cannot be mixed. Floating-point declarations accept integer or floating-point JSON numbers and convert them to the declared f32 or f64 type.",
         "propertyNames": {
           "minLength": 1
         },
@@ -779,6 +779,8 @@
             "enum": [
               "bool",
               "i64",
+              "f32",
+              "f64",
               "string",
               "date_time",
               "value",

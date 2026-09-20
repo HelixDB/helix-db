@@ -122,6 +122,17 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyKey,
         values: &[DbPropertyValue],
     ) -> Result<roaring::RoaringTreemap> {
+        self.lookup_managed_equality_batch(element_kind, key, values, false)
+            .await
+    }
+
+    pub(super) async fn lookup_managed_equality_batch(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyKey,
+        values: &[DbPropertyValue],
+        unique: bool,
+    ) -> Result<roaring::RoaringTreemap> {
         let identity = match secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,
@@ -139,6 +150,7 @@ impl<'db> ExecutionContext<'db> {
                 &active.txn,
                 handle,
                 values,
+                unique,
                 crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
             )
             .await;
@@ -152,6 +164,7 @@ impl<'db> ExecutionContext<'db> {
                     view,
                     handle,
                     values,
+                    unique,
                     view.storage_compatibility(),
                 )
                 .await;
@@ -176,6 +189,7 @@ impl<'db> ExecutionContext<'db> {
                 view,
                 &handle,
                 values,
+                unique,
                 view.storage_compatibility(),
             )
             .await;
@@ -703,8 +717,15 @@ async fn lookup_managed_active_literal_batch(
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
+    unique: bool,
     compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<roaring::RoaringTreemap> {
+    if unique {
+        return crate::index_lifecycle::secondary::lookup_active_unique_equality_batch(
+            reader, active, values,
+        )
+        .await;
+    }
     crate::index_lifecycle::secondary::lookup_active_equality_literal_batch_with_compatibility(
         reader,
         active,

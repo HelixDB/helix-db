@@ -13,11 +13,10 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::memory_registry::{VectorCacheHydration, VectorCacheRegistry};
-use super::memory_store::{
+use super::registry::{VectorCacheHydration, VectorCacheRegistry};
+use super::store::{
     VectorMemoryAdmissionBudget, VectorMemoryStore, VectorMemoryStoreLoadCompletion,
 };
-use super::ValidatedVectorGenerationHandle;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 #[cfg(test)]
 use crate::encoding::v2::keys::{DataKey, DataKeyKind};
@@ -25,6 +24,7 @@ use crate::encoding::v2::keys::{RecordKind, ScopedKey};
 use crate::encoding::v2::values::decode_partition_mapping;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{ActiveIndexHandle, VectorPhysicalLayout};
+use crate::search::vector::ValidatedVectorGenerationHandle;
 
 /// Runtime share assigned to one scope after the configured global budget is split.
 ///
@@ -268,7 +268,7 @@ pub(crate) async fn hydrate_active_generations(
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/hydration.rs"]
+#[path = "../../../../tests/production_support/vector/hydration.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]

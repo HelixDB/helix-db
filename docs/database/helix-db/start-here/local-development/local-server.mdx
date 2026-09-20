@@ -1,13 +1,14 @@
 ---
 title: "Local server"
-description: "Start HelixDB locally with ephemeral memory or persistent object storage"
+description: "Start HelixDB locally with memory, a persistent directory, or S3-compatible storage"
 sidebarTitle: "Local server"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The `ghcr.io/helixdb/helixdb:v0.0.4` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.6` image runs the standalone HelixDB server.
+It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
 
@@ -15,8 +16,9 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 
 | Mode | Persistence | Use when |
 | --- | --- | --- |
-| Memory | Lost when the container is replaced | Fast local iteration and tests |
-| Disk (`--disk`) | Preserved in a MinIO volume | Testing restart and persistence behavior |
+| Memory | Lost when the server stops | Fast local iteration and tests |
+| Native directory (`HELIX_DATA_DIR`) | Preserved in a mounted volume or directory | Running the image directly with local persistence |
+| CLI disk (`--disk`) | Preserved in a CLI-managed MinIO volume | Testing restart and persistence through the CLI |
 | Existing S3-compatible store | Owned outside Helix | Reusing MinIO, LocalStack, Ceph, or AWS S3 |
 
 ## Start with the CLI
@@ -42,7 +44,10 @@ helix init local --name dev # add --disk to make persistence the project default
 helix start dev             # add --disk to persist this instance
 ```
 
-The gateway listens at `http://localhost:6969/v2/query`.
+The standalone server accepts queries at `http://localhost:6969/v2/query`.
+
+For an existing project, set `tag = "v0.0.6"` in its `[local.dev]` block in
+`helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
 
 ```bash
 helix query dev \
@@ -96,12 +101,12 @@ externally managed object-store data during stop, restart, or prune.
 
 ## Run the image directly
 
-Memory mode is selected by leaving `S3_BUCKET` unset:
+Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 
 ```bash
 docker run --rm --name helixdb \
   -p 6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.4
+  ghcr.io/helixdb/helixdb:v0.0.6
 ```
 
 The standalone server exposes liveness and readiness checks:
@@ -113,8 +118,31 @@ curl -fsS http://127.0.0.1:6969/readyz
 
 <Warning>
 Do not set `S3_BUCKET=IN_MEMORY`. Every defined `S3_BUCKET` value selects
-S3-compatible storage and is interpreted as a real bucket name.
+S3-compatible storage and is interpreted as a real bucket name. Setting
+`HELIX_DATA_DIR` and `S3_BUCKET` together causes startup to fail.
 </Warning>
+
+## Run with native directory persistence
+
+Set `HELIX_DATA_DIR` to a mounted directory inside the container:
+
+```bash
+docker volume create helixdb-data
+docker run --rm --name helixdb \
+  -p 6969:8080 \
+  -e HELIX_DATA_DIR=/var/lib/helix \
+  --mount type=volume,source=helixdb-data,target=/var/lib/helix \
+  ghcr.io/helixdb/helixdb:v0.0.6
+```
+
+Stop the server with `docker stop helixdb`. Starting a new container with the
+same volume preserves its database. Removing the volume deletes the data.
+This mode does not require MinIO; the CLI's `--disk` mode still uses MinIO.
+
+The image runs as user and group `65532:65532`. Its `/var/lib/helix` directory
+is prepared for that user, including when initializing a new Docker named volume.
+If you use a bind mount or an existing volume, its directory must be writable by
+that user.
 
 ## Run with MinIO persistence
 
@@ -124,7 +152,7 @@ This Compose configuration creates a bucket and stores HelixDB objects in the
 ```yaml docker-compose.yaml expandable
 services:
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     restart: unless-stopped
     environment:
@@ -134,7 +162,7 @@ services:
       - minio-data:/data
 
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     restart: "no"
     depends_on:
       - minio
@@ -146,7 +174,7 @@ services:
         mc mb --ignore-existing local/helix-db
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.4
+    image: ghcr.io/helixdb/helixdb:v0.0.6
     restart: unless-stopped
     depends_on:
       minio-init:
@@ -174,9 +202,10 @@ omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
 
 | Variable | Purpose |
 | --- | --- |
-| `S3_BUCKET` | Selects S3 mode and names the object-store bucket; omit it for memory mode |
+| `HELIX_DATA_DIR` | Selects native disk storage and names its container directory; mount a volume there for persistence |
+| `S3_BUCKET` | Selects S3 mode and names the object-store bucket; omit both storage selectors for memory mode |
 | `S3_REGION` | Region supplied to the S3 client; falls back to `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1` |
-| `DB_PATH` | Logical database prefix inside the object store; defaults to `db/` |
+| `DB_PATH` | Logical database prefix inside the selected store, including under `HELIX_DATA_DIR`; defaults to `db/` |
 | `AWS_ACCESS_KEY_ID` | Access key |
 | `AWS_SECRET_ACCESS_KEY` | Secret key |
 | `AWS_SESSION_TOKEN` | Optional temporary-credential token |
@@ -184,9 +213,8 @@ omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
-the host machine. `DB_PATH` is not a host filesystem path, and mounting a volume at
-that path does not enable native directory persistence. The standalone image does not
-expose native directory storage; the CLI's `--disk` mode uses MinIO.
+the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use
+native directory persistence, set `HELIX_DATA_DIR` and mount the directory there.
 
 ## Stop or inspect
 

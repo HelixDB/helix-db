@@ -50,15 +50,17 @@ pub(super) fn access_set_contract(
             children
                 .iter()
                 .all(|child| child.batchable_equality_identity() == Some(first))
-                .then_some(())
+                .then_some(first.2)
         })
-        .flatten()
-        .is_some();
-    let id_cost = if batchable_equality {
-        storage.bitmap_equality_batch(
-            properties::PositiveUsize::at_least_one(children.len()),
-            rows,
-        )
+        .flatten();
+    let id_cost = if let Some(uniqueness) = batchable_equality {
+        let values = properties::PositiveUsize::at_least_one(children.len());
+        match uniqueness {
+            crate::catalog::IndexUniqueness::Unique => storage.unique_equality_batch(values, rows),
+            crate::catalog::IndexUniqueness::NonUnique => {
+                storage.bitmap_equality_batch(values, rows)
+            }
+        }
     } else {
         let driver = (access == physical::PhysicalAccess::SetIntersection)
             .then(|| {

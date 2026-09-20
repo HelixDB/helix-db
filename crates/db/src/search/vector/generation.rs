@@ -18,7 +18,7 @@ use crate::index_lifecycle::{
     VectorPhysicalLayout, VectorRoutingLayoutV2,
 };
 use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
-use crate::search::vector::simhash_registry::SimHashIdentity;
+use crate::search::vector::simhash::SimHashIdentity;
 use crate::search::vector::{VectorDimension, VectorDimensionError, VectorDistanceMetric};
 
 /// Seed used by every currently supported persisted SimHash row.
@@ -134,7 +134,7 @@ pub(crate) struct ValidatedVectorGenerationHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedVectorBuildGenerationHandle {
     generation: ValidatedVectorGenerationHandle,
-    fresh_insert: super::mutation::FreshVectorBuildProof,
+    fresh_insert: super::hnsw::mutation::FreshVectorBuildProof,
 }
 
 /// Canonical authority for one vector generation already committed to cleanup.
@@ -295,7 +295,7 @@ impl ValidatedVectorBuildGenerationHandle {
         )?;
         Ok(Self {
             generation,
-            fresh_insert: super::mutation::FreshVectorBuildProof::for_building_generation(),
+            fresh_insert: super::hnsw::mutation::FreshVectorBuildProof::for_building_generation(),
         })
     }
 
@@ -305,7 +305,7 @@ impl ValidatedVectorBuildGenerationHandle {
     }
 
     /// Returns the freshness proof consumed by deterministic source scanning.
-    pub(crate) const fn fresh_insert_proof(&self) -> super::mutation::FreshVectorBuildProof {
+    pub(crate) const fn fresh_insert_proof(&self) -> super::hnsw::mutation::FreshVectorBuildProof {
         self.fresh_insert
     }
 }

@@ -195,6 +195,23 @@ impl StorageCostProfile {
             .serial(self.authoritative_verification(estimated_rows))
     }
 
+    /// Cost a unique owner multi-get and same-snapshot authoritative checks.
+    ///
+    /// ```
+    /// use helix_planner::{cost, properties};
+    /// let profile = cost::StorageCostProfile::default();
+    /// let batch = profile.unique_equality_batch(
+    ///     properties::PositiveUsize::at_least_one(5), cost::EstimatedRows::rows(5));
+    /// assert_eq!(batch.multi_get_calls, 1);
+    /// assert_eq!(batch.authoritative_graph_reads, 5);
+    /// assert_eq!(batch.object_reads, 10);
+    /// ```
+    pub fn unique_equality_batch(&self, values: PositiveUsize, rows: EstimatedRows) -> CostVector {
+        self.multi_get(values, KeyLocality::Close)
+            .serial(self.authoritative_verification(rows))
+            .serial(self.secondary_set_operation(rows))
+    }
+
     /// Cost an authoritative graph scan used for null equality.
     pub fn null_equality_scan(&self, scanned_rows: EstimatedRows) -> CostVector {
         self.range_scan(scanned_rows)

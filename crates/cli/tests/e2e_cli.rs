@@ -102,7 +102,7 @@ fn init_and_add_generate_expected_project_files() {
         config["local"]["dev"]["image"].as_str(),
         Some("ghcr.io/helixdb/helixdb")
     );
-    assert_eq!(config["local"]["dev"]["tag"].as_str(), Some("v0.0.4"));
+    assert_eq!(config["local"]["dev"]["tag"].as_str(), Some("v0.0.6"));
 
     let gitignore = fs::read_to_string(project.join(".gitignore")).unwrap();
     assert!(gitignore.lines().any(|line| line == ".helix/"));

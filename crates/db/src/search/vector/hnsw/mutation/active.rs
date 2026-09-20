@@ -18,18 +18,18 @@ use crate::encoding::v2::keys::indexes::vector::{
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 
-use super::super::distance::{Cosine, Distance, Euclidean, Manhattan};
 use super::super::neighbor_set::NeighborSet;
-use super::super::unaligned_vector::UnalignedVector;
-use super::super::{
-    managed_vector_write_index, MeasuredVectorTransaction, ValidatedMetricVector,
-    ValidatedVectorGenerationHandle, VectorCacheWriteSet, VectorDistanceMetric,
-    VectorGenerationIdentity, VectorIndex, VectorIndexConfig, VectorIndexMetadata,
-};
 use super::{
     CacheSequence, CachedNeighbor, MutationDegreeLimits, MutationOpCache, NeighborRowId,
     NeighborRowValue, SessionCacheKind, VectorInsertContract, VECTOR_BUILD_ITEM_CACHE_LIMIT,
     VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT, VECTOR_BUILD_SIMHASH_CACHE_LIMIT,
+};
+use crate::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
+use crate::search::vector::unaligned_vector::UnalignedVector;
+use crate::search::vector::{
+    managed_vector_write_index, MeasuredVectorTransaction, ValidatedMetricVector,
+    ValidatedVectorGenerationHandle, VectorCacheWriteSet, VectorDistanceMetric,
+    VectorGenerationIdentity, VectorIndex, VectorIndexConfig, VectorIndexMetadata,
 };
 
 /// Closed request-local lifecycle for Active vector mutation state.
@@ -590,7 +590,7 @@ impl<D: Distance> ActiveMetricSession<D> {
                 .await?;
         }
         #[cfg(feature = "production-coverage")]
-        super::super::record_benchmark_cache_stats(entry.cache.stats);
+        crate::search::vector::record_benchmark_cache_stats(entry.cache.stats);
         Ok(())
     }
 }
@@ -662,7 +662,7 @@ impl OpenActiveVectorMutations {
             let simhash_pressure = self.simhash_count() > self.max_simhashes;
             if !payload_pressure && !item_pressure && !neighbor_pressure && !simhash_pressure {
                 #[cfg(feature = "production-coverage")]
-                super::super::observe_benchmark_retained_payload(
+                crate::search::vector::observe_benchmark_retained_payload(
                     u64::try_from(payload_bytes).unwrap_or(u64::MAX),
                 );
                 return Ok(());
@@ -862,7 +862,7 @@ impl OpenActiveVectorMutations {
                     .map(|entry| entry.cache.stats),
             )
         {
-            super::super::record_benchmark_cache_stats(stats);
+            crate::search::vector::record_benchmark_cache_stats(stats);
         }
     }
 }

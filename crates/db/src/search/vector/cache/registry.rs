@@ -22,12 +22,12 @@ use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 
-use super::memory_store::{
+use super::store::{
     VectorMemoryDirtyRows, VectorMemoryPendingDirtyGuard, VectorMemoryPendingDirtyRows,
     VectorMemoryStore,
 };
-use super::{ValidatedVectorCleanupAuthority, ValidatedVectorGenerationHandle};
 use crate::encoding::keys::scope::DataScope;
+use crate::search::vector::{ValidatedVectorCleanupAuthority, ValidatedVectorGenerationHandle};
 
 /// Complete canonical-record identity for one vector cache generation.
 ///
@@ -709,7 +709,7 @@ impl VectorCacheRegistry {
     /// after a conflict or abort publishes nothing.
     pub(crate) fn prepare_commit(
         &self,
-        write: &super::write_cache::VectorCacheWriteEntry,
+        write: &super::commit::VectorCacheWriteEntry,
     ) -> Option<VectorCachePendingCommit> {
         let dirty_rows = write.dirty_rows()?;
         if dirty_rows.is_empty() {
@@ -872,7 +872,7 @@ impl VectorCacheRegistry {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/memory_registry.rs"]
+#[path = "../../../../tests/production_support/vector/memory_registry.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
@@ -1157,7 +1157,7 @@ mod tests {
         assert!(owns_hydration);
         assert!(entry.finish_hydration(Arc::clone(&store)));
 
-        let writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let writes = super::super::commit::VectorCacheWriteSet::default();
         writes.dirty_rows_for(&handle).mark_node_dirty(7);
         let write = writes.entries().pop().unwrap();
         let aborted = registry.prepare_commit(&write).unwrap();

@@ -1197,6 +1197,7 @@ async fn run_database() -> Result<()> {
             None,
             false,
             Default::default(),
+            Default::default(),
             false,
         )
     })

@@ -220,6 +220,16 @@ fn node_secondary_set_cost(
             (cost::CostVector::ZERO, cost::EstimatedRows::ZERO)
         }
         exec::ExecNodeSecondarySetPlan::Bitmap(bitmap) => node_bitmap_cost(bitmap, profile),
+        exec::ExecNodeSecondarySetPlan::UniqueUnion { values, .. } => {
+            let rows = cost::EstimatedRows::rows(values.len() as u64);
+            (
+                profile.unique_equality_batch(
+                    properties::PositiveUsize::at_least_one(values.len()),
+                    rows,
+                ),
+                rows,
+            )
+        }
         exec::ExecNodeSecondarySetPlan::Unique { .. } => {
             let rows = profile.unique_equality_rows(None);
             (profile.unique_equality_lookup(rows), rows)

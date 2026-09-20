@@ -6,6 +6,7 @@ pub mod config;
 pub mod errors;
 pub(crate) mod external_tools;
 pub(crate) mod host_actions;
+pub mod image;
 pub mod local_runtime;
 pub use helix_metrics::cli as metrics_sender;
 pub mod output;

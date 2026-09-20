@@ -9,11 +9,11 @@ pub async fn run(instance: Option<String>) -> Result<()> {
     let project = ProjectContext::find_and_load(None)?;
     let _ = dotenvy::from_path(project.root.join(".env"));
     let instance = resolve_local_instance(&project, instance)?;
-    let InstanceInfo::Local(config) = project.config.get_instance(&instance)? else {
+    let InstanceInfo::Local(_) = project.config.get_instance(&instance)? else {
         return Err(eyre!("'{instance}' is not a local v2 instance"));
     };
     let op = Operation::new("Restarting", &instance);
-    LocalRuntime::new(&project).restart(&instance, config)?;
+    LocalRuntime::new(&project).restart(&instance)?;
     op.success();
     Ok(())
 }

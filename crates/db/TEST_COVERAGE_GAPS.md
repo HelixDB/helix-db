@@ -34,8 +34,8 @@ ignored. The five measured migration/runtime source files covered
 - `migrations.rs`: 4,782/5,379 (88.90%);
 - `migrations/vector_properties.rs`: 719/775 (92.77%);
 - `migrations/vector_retirement.rs`: 613/870 (70.46%);
-- `search/vector/index.rs`: 2,795/2,870 (97.39%);
-- `search/vector/storage.rs`: 1,221/1,401 (87.15%).
+- `search/vector/hnsw/index.rs`: 2,795/2,870 (97.39%);
+- `search/vector/storage/mod.rs`: 1,221/1,401 (87.15%).
 
 The complete report covered 122,971/130,746 lines (94.05%). This meets the
 accepted approximately-90% gate. See
@@ -181,7 +181,7 @@ Completed sections:
   paths, cache snapshots and warming, scoped planner/runtime state, catalog
   persistence rejection, vector-memory discovery/admission/shutdown behavior,
   malformed metadata, and public query delegation.
-- `db/src/search/vector/index.rs`: public create/search/stats/delete/drop
+- `db/src/search/vector/hnsw/index.rs`: public create/search/stats/delete/drop
   lifecycle, metadata and dimension errors, cache attachment modes, tenant key
   isolation, and layer-0 search in Off, Always, and Adaptive SimHash modes.
 - `db/src/search/text/{bundle_storage,storage_directory,storage_with_cache,overlay_directory,debug_proxy_directory,debounced_storage,caching_directory,hot_directory}.rs`:
@@ -197,13 +197,13 @@ Completed sections:
   coverage-tool-marked retain closure lines remain uncovered.
 - `db/src/encoding/v1/keys/tenant.rs`: malformed ULID, Crockford alias,
   tenant prefix, legacy scope, and strip-key negative contract coverage.
-- `db/src/search/vector/simhash.rs`: statistics formatting, neutral rate,
+- `db/src/search/vector/simhash/mod.rs`: statistics formatting, neutral rate,
   shared/custom hasher reuse, tenant-scoped SimHash key contracts, transactional
   miss/read/compute/delete behavior, cached fallback behavior, and malformed
   persisted-value rejection. The only remaining production misses are the
   `SimHash::from_bytes` error-mapping closure, which cannot execute after the
   preceding exact eight-byte length check.
-- `db/src/search/vector/memory_store.rs`: dirty-row tracking, pending-row
+- `db/src/search/vector/cache/store.rs`: dirty-row tracking, pending-row
   reference counts, publish generation/locking, whole-store eviction, identity
   accessors, and clear behavior. The 12 remaining misses are watch-channel
   scheduling branches and an out-of-scope prefix-scan invariant that cannot be
@@ -438,7 +438,7 @@ Notable submodules:
 
 ## Highest priority gaps
 
-1. `search/vector/index.rs` - 89.85%, 441 uncovered all-target lines.
+1. `search/vector/hnsw/index.rs` - 89.85%, 441 uncovered all-target lines.
    Public lifecycle and all three SimHash search modes now have direct tests.
    Remaining production clusters are deeper relink/pruning combinations,
    mutation-cache pressure and injected missing/corrupt graph rows. Broadening
@@ -583,16 +583,16 @@ before implementing tests.
 
 | Cluster | Missing | Plan |
 |---|---:|---|
-| `search/vector/index.rs::search_layer0_with_simhash` | 154 | Add scenario tests with and without simhash cache hits, missing simhash rows, sampled neighbor deferral, exact fallback, empty frontier, and adaptive threshold transitions. |
+| `search/vector/hnsw/index.rs::search_layer0_with_simhash` | 154 | Add scenario tests with and without simhash cache hits, missing simhash rows, sampled neighbor deferral, exact fallback, empty frontier, and adaptive threshold transitions. |
 | `search/mod.rs::edge_range_scan_bounds_with_direction` | 126 | Add pure/unit tests for out/in directions, asc/desc physical direction, inclusive/exclusive lower and upper bounds, unbounded bounds, source/target filters, and prefix-end caps. |
-| `search/vector/index.rs::relink_neighbor` | 96 | Add delete/relink scenarios where replacement candidates are present, missing, stale, duplicated, or self-referential, including upper-layer and layer-0 variants. |
-| `search/vector/index.rs::add_bidirectional_link` | 49 | Add insertion tests that force neighbor pruning, mutual reverse updates, duplicate links, and saturated neighbor sets. |
+| `search/vector/hnsw/index.rs::relink_neighbor` | 96 | Add delete/relink scenarios where replacement candidates are present, missing, stale, duplicated, or self-referential, including upper-layer and layer-0 variants. |
+| `search/vector/hnsw/index.rs::add_bidirectional_link` | 49 | Add insertion tests that force neighbor pruning, mutual reverse updates, duplicate links, and saturated neighbor sets. |
 | `search/text/cache.rs::open_remote_split_generation` | 49 | Add object-store-backed cache tests for valid remote split open, bad footer, missing blob, wrong digest/size, multiple splits, and analyzer/field lookup failure. |
 | `search/text/cache.rs::get_or_load_generation` | 48 | Cover memory hit, in-flight dedupe, disk hit, remote fallback, load-error stats, and concurrent callers. |
 | `search/text/mod.rs::migrate_legacy_manifest_to_split_set_scoped` | 47 | Add manifest migration tests for legacy v1, already-v2 no-op, tenant scope, persisted replacement, and malformed persisted manifest. |
 | `config/runtime_catalog.rs::dynamic_index_definition_from_drop_spec` | 16 | Reachable create/drop variants, uniqueness mismatches, exact semantic-definition recovery, and missing indexes are covered; remaining lines propagate constructor errors blocked by typed planner/catalog inputs. |
 | `execution/interpreter/mutation/node.rs::set_node_property` | 37 | Add mutation tests for setting `$label`, replacing indexed properties, missing node rows, empty property sets, and index maintenance failures. |
-| `search/vector/index.rs::search_with_stats` | 35 | Cover `k == 0`, missing metadata, empty index, exact search fallback, stats fields, and read-only memory-store interactions. |
+| `search/vector/hnsw/index.rs::search_with_stats` | 35 | Cover `k == 0`, missing metadata, empty index, exact search fallback, stats fields, and read-only memory-store interactions. |
 | `lib.rs::open_reader_inner` | 30 | Add reader-open tests for configured storage, cache setup, runtime catalog loading, warm modes, and writer-only error surfaces. |
 | `encoding/v1/keys/tenant.rs::decode_crockford_base32` | 28 | Add malformed ULID/base32 tests for invalid characters, lowercase handling if intended, overflow, length mismatch, and boundary values. |
 | `search/text/cache.rs::after_successful_search` | 22 | Cover no disk cache, multi-split skip, local artifact metadata update, existing artifact metadata update, and background hydration path. |
@@ -610,7 +610,7 @@ to build realistic storage state.
 | Text union directory | No tests; file is 0% covered | Add inline tests to `db/src/search/text/union_directory.rs`. |
 | Text cache | Existing tests in `db/src/search/text/cache.rs` cover generation key, validation, eviction, warm dedupe, and cleanup | Extend the same module for cache state, remote/disk load, open generation, after-search metadata, and error stats. |
 | Text split/storage/compaction | Existing tests in `split.rs`, `storage_directory.rs`, `byte_range_cache.rs`, `compaction.rs`, `warmup.rs` are narrow | Extend each owning module; use object-store memory fixtures for range and footer errors. |
-| Vector index | Large inline test module in `db/src/search/vector/index.rs` | Extend inline tests; prefer scenario tests that force private helper paths rather than testing helpers through artificial visibility. |
+| Vector index | Large inline test module in `db/src/search/vector/hnsw/index.rs` | Extend inline tests; prefer scenario tests that force private helper paths rather than testing helpers through artificial visibility. |
 | Config | `db/src/config/tests.rs` centralizes config tests | Extend this file for constructors, serde, runtime catalog projection, and dynamic catalog drop keys. |
 | Secondary DDL integration | `db/src/execution/interpreter/ddl/tests/secondary.rs` and `secondary_scoped.rs` | Extend integration-style tests for planner/interpreter-visible behavior; add inline tests in `ddl/secondary.rs` only if private helper branches cannot be reached cleanly. |
 | Secondary backfill contracts | Inline tests in `db/src/secondary_backfill.rs` | Extend inline tests for persisted job JSON, status transitions, scan bounds, and batch row helpers. |
@@ -800,13 +800,13 @@ integration harness is fixed and coverage is rerun.
 
 ### Search vector backlog
 
-- `search/vector/index.rs`: add scenario tests for layer-0 simhash search,
+- `search/vector/hnsw/index.rs`: add scenario tests for layer-0 simhash search,
   greedy/beam upper-layer search, live entry candidate lookup, HNSW insertion
   with saturated neighbors, bidirectional link repair, deletion/relink paths,
   cached-neighbor flush/eviction, stale metadata entry points, pending dirty
   rows, read-only memory-store behavior, `k == 0`, missing metadata, and stats
   fields.
-- `search/vector/memory_store.rs`: cover dirty-row tracking accessors, clear,
+- `search/vector/cache/store.rs`: cover dirty-row tracking accessors, clear,
   lock publish/acquire-all, scope/index-id accessors, load from reader with
   unsupported rows, budget admission, shutdown during scan, and remove-node
   paths that leave no rows behind.
@@ -814,7 +814,7 @@ integration harness is fixed and coverage is rerun.
   decoding, layer-selection, diversity fallback, and local codec contracts.
   The five remaining lines are assertion-only `let ... else` panics in typed
   key round-trip tests.
-- `search/vector/simhash.rs`: cover counted lookup stats, cache
+- `search/vector/simhash/mod.rs`: cover counted lookup stats, cache
   `get_or_compute`, explicit get/delete behavior, custom hasher construction,
   display formatting, and merge/reset of filter stats.
 - `search/vector/spaces/simple.rs`: cover scalar fallback for binary-quantized
@@ -967,7 +967,7 @@ slightly between focused coverage passes.
 
 | File | Lines | Covered | Missing | Notes |
 |---|---:|---:|---:|---|
-| `search/vector/index.rs` | 83.67% | 3439/4110 | 671 | high-value vector scenario gaps |
+| `search/vector/hnsw/index.rs` | 83.67% | 3439/4110 | 671 | high-value vector scenario gaps |
 | `search/text/mod.rs` | 64.82% | 1124/1734 | 610 | text indexing/search orchestration |
 | `search/text/cache.rs` | 63.46% | 1056/1664 | 608 | FTS cache warm/disk/remote branches |
 | `lib.rs` | 67.64% | 880/1301 | 421 | facade/open/runtime branches |

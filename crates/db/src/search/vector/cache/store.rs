@@ -25,8 +25,6 @@ use tokio::sync::{watch, Mutex, MutexGuard};
 
 use slatedb::DbReadOps;
 
-use super::simhash::SimHash;
-use super::storage::{SimHashRow, VectorRowKeyspace, VectorRows};
 #[cfg(feature = "production-coverage")]
 use crate::encoding::error::EncodingError;
 use crate::encoding::keys::{scope::DataScope, DataKey, DataKeyKind};
@@ -42,6 +40,8 @@ use crate::encoding::v2::values::indexes::vector::simhash::decode_simhash;
 use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
+use crate::search::vector::simhash::SimHash;
+use crate::search::vector::storage::{SimHashRow, VectorRowKeyspace, VectorRows};
 
 const VECTOR_MEMORY_LOAD_MAX_FETCH_TASKS: usize = 4;
 const VECTOR_MEMORY_ENTRY_OVERHEAD_BYTES: u64 = 64;
@@ -129,13 +129,13 @@ pub(crate) struct VectorMemoryPendingDirtyGuard {
 
 /// Physical read accounting for resident-snapshot-aware SimHash lookup.
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct SimHashReadStats {
+pub(in crate::search::vector) struct SimHashReadStats {
     /// Number of logical SimHash row reads.
-    pub(super) reads: usize,
+    pub(in crate::search::vector) reads: usize,
     /// Number of physical batch calls used by those reads.
-    pub(super) multi_get_calls: usize,
+    pub(in crate::search::vector) multi_get_calls: usize,
     /// Time spent fetching SimHash rows from the stable read view.
-    pub(super) fetch_ns: u64,
+    pub(in crate::search::vector) fetch_ns: u64,
 }
 
 /// Complete resident-memory capability attached to one vector-index handle.
@@ -313,7 +313,7 @@ impl VectorMemoryAccess {
     ///
     /// The method reports exact stable-view reads. Corrupt deployed rows fail
     /// closed with index and operation context before entering either cache.
-    pub(super) async fn fill_simhash_cache<const COLLECT_TIMING: bool, R>(
+    pub(in crate::search::vector) async fn fill_simhash_cache<const COLLECT_TIMING: bool, R>(
         &self,
         read: &R,
         keyspace: &VectorRowKeyspace,
@@ -374,7 +374,10 @@ impl VectorMemoryAccess {
     }
 
     /// Reads caller-ordered SimHash rows without allocating an operation-local map.
-    pub(super) async fn read_simhash_rows_counted<const COLLECT_TIMING: bool, R>(
+    pub(in crate::search::vector) async fn read_simhash_rows_counted<
+        const COLLECT_TIMING: bool,
+        R,
+    >(
         &self,
         read: &R,
         keyspace: &VectorRowKeyspace,
@@ -940,7 +943,7 @@ impl VectorMemoryHydrationRow {
 }
 
 #[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/memory_store.rs"]
+#[path = "../../../../tests/production_support/vector/memory_store.rs"]
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
@@ -1014,7 +1017,7 @@ mod tests {
     #[tokio::test]
     async fn descriptor_bound_load_hydrates_supported_rows() {
         let db = test_db("memory_store_hydrates_rows").await;
-        let index_id = super::super::index_id_from_name("memory_store_hydrates_rows_idx");
+        let index_id = crate::search::vector::index_id_from_name("memory_store_hydrates_rows_idx");
         let other_index_id = index_id.wrapping_add(1);
 
         let upper_neighbors_key =
@@ -1089,7 +1092,8 @@ mod tests {
     #[tokio::test]
     async fn descriptor_bound_load_rejects_malformed_rows() {
         let db = test_db("memory_store_skips_invalid_rows").await;
-        let index_id = super::super::index_id_from_name("memory_store_skips_invalid_rows_idx");
+        let index_id =
+            crate::search::vector::index_id_from_name("memory_store_skips_invalid_rows_idx");
 
         let valid_upper_neighbors_key =
             VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(index_id, 2, 55)).to_bytes();
@@ -1152,7 +1156,8 @@ mod tests {
     #[tokio::test]
     async fn descriptor_bound_load_exits_before_scan_when_shutdown_is_signaled() {
         let db = test_db("memory_store_shutdown_short_circuit").await;
-        let index_id = super::super::index_id_from_name("memory_store_shutdown_short_circuit_idx");
+        let index_id =
+            crate::search::vector::index_id_from_name("memory_store_shutdown_short_circuit_idx");
 
         let simhash_key = VectorKey::SimHash(VectorSimHashKey::new(index_id, 77)).to_bytes();
         let raw = db
@@ -1191,7 +1196,8 @@ mod tests {
     #[tokio::test]
     async fn bounded_load_stops_before_the_first_row_that_exceeds_admission() {
         let db = test_db("memory_store_incremental_admission").await;
-        let index_id = super::super::index_id_from_name("memory_store_incremental_admission_idx");
+        let index_id =
+            crate::search::vector::index_id_from_name("memory_store_incremental_admission_idx");
         let first_key =
             VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(index_id, 1, 7)).to_bytes();
         let second_key =

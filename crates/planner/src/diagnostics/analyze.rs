@@ -404,6 +404,14 @@ impl<'a> Analyzer<'a> {
 
     fn analyze_node_secondary_set(&mut self, set: &exec::ExecNodeSecondarySetPlan) {
         match set {
+            exec::ExecNodeSecondarySetPlan::UniqueUnion { values, .. } => {
+                self.statistics.unions = self.statistics.unions.saturating_add(1);
+                self.statistics.node_accesses.equality_index_lookups = self
+                    .statistics
+                    .node_accesses
+                    .equality_index_lookups
+                    .saturating_add(values.len());
+            }
             exec::ExecNodeSecondarySetPlan::Empty => {}
             exec::ExecNodeSecondarySetPlan::Bitmap(bitmap) => {
                 self.statistics.node_accesses.equality_index_lookups = self
@@ -1071,7 +1079,8 @@ fn node_secondary_set_label(set: &exec::ExecNodeSecondarySetPlan) -> Option<&ir:
             exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => Some(&key.label),
             exec::ExecNodeAuthoritativeScanPredicate::Predicate(_) => None,
         },
-        exec::ExecNodeSecondarySetPlan::DynamicEquality { key, .. }
+        exec::ExecNodeSecondarySetPlan::UniqueUnion { key, .. }
+        | exec::ExecNodeSecondarySetPlan::DynamicEquality { key, .. }
         | exec::ExecNodeSecondarySetPlan::DynamicMembership { key, .. } => Some(&key.label),
         exec::ExecNodeSecondarySetPlan::Range(range)
         | exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver: range, .. } => {

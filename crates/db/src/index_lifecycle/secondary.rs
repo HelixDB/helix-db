@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::ops::Bound;
 #[cfg(any(test, feature = "production-coverage"))]
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{self, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -99,14 +99,14 @@ pub(crate) use exact::{
     lookup_active_equality_literal_batch, lookup_active_equality_point_literal,
 };
 
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_POINT_READS: AtomicU64 = AtomicU64::new(0);
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_MULTI_GETS: AtomicU64 = AtomicU64::new(0);
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_SCANS: AtomicU64 = AtomicU64::new(0);
-#[cfg(any(test, feature = "production-coverage"))]
-static BENCHMARK_GRAPH_READS: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_POINT_READS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_MULTI_GETS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_SCANS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+#[cfg(all(not(test), feature = "production-coverage"))]
+static BENCHMARK_GRAPH_READS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// Exact storage operations issued by managed equality serving while the
 /// production-coverage benchmark is measuring it.
@@ -2944,6 +2944,90 @@ async fn lookup_active_equality_generation_with_compatibility(
         .await
 }
 
+/// Read unique owner keys in one batch, then verify their authoritative rows
+/// using the same request reader. This does not change keys, values, or writes.
+pub(crate) async fn lookup_active_unique_equality_batch(
+    reader: &(impl DbReadOps + Sync),
+    handle: &ActiveIndexHandle,
+    values: &[PropertyValue],
+) -> Result<roaring::RoaringTreemap> {
+    let Some(definition @ ValidatedSecondaryIndexDefinition::NodeEquality { unique: true, .. }) =
+        handle.secondary_definition()
+    else {
+        return Err(corruption(
+            "unique equality batch requires an Active unique node index",
+        ));
+    };
+    if values.len() < 2 {
+        return Err(corruption(
+            "unique equality batch requires at least two values",
+        ));
+    }
+    let keys = values
+        .iter()
+        .map(|value| {
+            let canonical = match project_equality_value(value) {
+                EqualityValueProjection::Indexed(value) => CanonicalSecondaryValue::equality(value),
+                EqualityValueProjection::Oversized {
+                    encoded_len,
+                    maximum,
+                } => {
+                    return Err(SecondaryIndexValueError::EncodedKeyTooLarge {
+                        encoded_len,
+                        maximum,
+                    }
+                    .into());
+                }
+                EqualityValueProjection::AuthoritativeNull
+                | EqualityValueProjection::NonReflexive
+                | EqualityValueProjection::Unsupported(_) => {
+                    return Err(corruption(
+                        "unique equality batch requires indexed literals",
+                    ));
+                }
+            };
+            secondary_entry_key(
+                handle.scope(),
+                handle.index_id(),
+                handle.generation(),
+                definition,
+                canonical,
+                IndexEntityId::initial(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    keys.iter().for_each(|_| record_equality_point_read());
+    #[cfg(any(test, feature = "production-coverage"))]
+    BENCHMARK_MULTI_GETS.fetch_add(1, AtomicOrdering::Relaxed);
+    let entries = reader.multi_get(&keys).await?;
+    if entries.len() != values.len() {
+        return Err(corruption(
+            "unique equality multi-get returned the wrong number of entries",
+        ));
+    }
+    let mut owners = roaring::RoaringTreemap::new();
+    for (entry, value) in entries.into_iter().zip(values) {
+        let Some(bytes) = entry else {
+            continue;
+        };
+        let owner = decode_secondary_entry_value(
+            handle.index_id(),
+            handle.generation(),
+            definition_lane(definition),
+            &bytes,
+        )?;
+        record_equality_graph_read();
+        if !authoritative_equality_matches(reader, handle.scope(), definition, owner, value).await?
+        {
+            return Err(corruption(
+                "unique equality owner disagrees with its authoritative node",
+            ));
+        }
+        owners.insert(owner.get());
+    }
+    Ok(owners)
+}
+
 /// Reads and unions equality values from one exact Active generation.
 ///
 /// Non-unique indexed values use one `multi_get` over their V4 bitmap rows.
@@ -3776,6 +3860,7 @@ mod tests {
     enum ExactReadFailure {
         Get,
         MultiGet,
+        ShortMultiGet,
         Scan,
         Next,
     }
@@ -3808,6 +3893,9 @@ mod tests {
         where
             K: AsRef<[u8]> + Send + Sync,
         {
+            if matches!(self.failure, ExactReadFailure::ShortMultiGet) {
+                return Ok(Vec::new());
+            }
             if matches!(self.failure, ExactReadFailure::MultiGet) {
                 return Err(slatedb::Error::unavailable(
                     "injected exact multi-get failure".to_string(),
@@ -3843,6 +3931,31 @@ mod tests {
             }
             Ok(rows)
         }
+    }
+
+    #[tokio::test]
+    async fn unique_batch_rejects_failed_and_truncated_multi_gets() {
+        let db = test_db("unique-batch-storage-failures").await;
+        let handle = active_read_handle(
+            &db,
+            crate::config::SecondaryIndexDefinition::node_unique_equality("Fixture", "key")
+                .unwrap(),
+        )
+        .await;
+        let values = [
+            PropertyValue::String("first".into()),
+            PropertyValue::String("second".into()),
+        ];
+        for failure in [ExactReadFailure::MultiGet, ExactReadFailure::ShortMultiGet] {
+            assert!(lookup_active_unique_equality_batch(
+                &FailingExactRead { db: &db, failure },
+                &handle,
+                &values
+            )
+            .await
+            .is_err());
+        }
+        db.close().await.unwrap();
     }
 
     #[async_trait::async_trait]
@@ -7618,3 +7731,12 @@ pub(crate) use exact::RangeScanCounters;
 
 #[cfg(test)]
 mod ordered_tests;
+
+#[cfg(test)]
+mod test_read_counters;
+
+#[cfg(test)]
+use test_read_counters::{
+    ThreadLocalCounter, BENCHMARK_GRAPH_READS, BENCHMARK_MULTI_GETS, BENCHMARK_POINT_READS,
+    BENCHMARK_SCANS,
+};

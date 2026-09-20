@@ -211,7 +211,15 @@ class DateTime:
 
     @classmethod
     def parse_rfc3339(cls, value: str) -> "DateTime":
-        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        if (
+            re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)",
+                value,
+            )
+            is None
+        ):
+            raise TypeError(f"invalid RFC3339 datetime: {value}")
+        text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
         try:
             return cls.from_datetime(datetime.fromisoformat(text))
         except ValueError as exc:
@@ -746,7 +754,10 @@ class StreamBound:
 
     @classmethod
     def literal(cls, value: int) -> "StreamBound":
-        return cls("Literal", _int_to_json(value))
+        safe = _int_to_json(value)
+        if safe < 0:
+            raise ValueError("Stream bound literal must be non-negative")
+        return cls("Literal", safe)
 
     @classmethod
     def expr(cls, expr: "Expr | ParamRef") -> "StreamBound":

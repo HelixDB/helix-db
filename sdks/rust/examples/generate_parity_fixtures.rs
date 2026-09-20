@@ -155,7 +155,7 @@ async fn execute_embedded_fixtures(
             .send()
             .await
             .expect_err("search after index DROP must fail");
-        if !error.to_string().contains("index_not_found") {
+        if error.error_code() != Some("index_not_found") {
             return Err(format!(
                 "{} returned the wrong post-DROP error: {error}",
                 search.name

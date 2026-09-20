@@ -33,11 +33,16 @@ helix start [INSTANCE] [OPTIONS]
 | `--foreground` | Boolean | Run attached and stop the container on Ctrl-C. Useful for streaming startup logs. | `false` |
 | `--port` | Number | Override the host port for this run. The container always listens on `8080` internally. | Value from `[local.<instance>] port` (default `6969`) |
 | `--disk` | Boolean | Use on-disk storage backed by a CLI-managed MinIO container for this run. | `false` |
-| `--persist` | Boolean | Write the resolved port and storage settings for this run back to `[local.<instance>]` in `helix.toml`, so future runs reuse them. | `false` |
+| `--image-version` | String | Override the image tag or `sha256:<64 lowercase hex digits>` for this run. | Configured tag |
+| `--pull` | String | `always`, `missing`, or `never`. Explicit policies also apply to disk-mode MinIO images. | Configured policy, otherwise `always` for `latest`, `missing` for other versions |
+| `--persist` | Boolean | Write the resolved port, storage, image, and pull settings for this run back to `[local.<instance>]` in `helix.toml`, so future runs reuse them. | `false` |
 
 ## Behavior
 
-- Pulls `ghcr.io/helixdb/helixdb:v0.0.4` (or the image/tag set in `[local.<instance>]`).
+- Defaults to `ghcr.io/helixdb/helixdb:v0.0.6`. Flags override the image tag and pull policy in `[local.<instance>]`.
+- `always` requires a successful pull; `missing` uses a cached image when available; `never` fails if the image is not cached. A failed pull never silently selects an older cached image.
+- Resolves all required images before saving overrides or replacing containers. Failed image resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
+- Disk-mode MinIO images default to `missing` unless a pull policy is explicitly configured.
 - Names the container `helix-<project>-<instance>` and publishes the configured port to container port `8080`.
 - Uses Docker or Podman based on `[project] container_runtime` in `helix.toml`.
 - Default storage is in-memory. Passing `--disk` starts a MinIO sidecar, creates the `helix-db` bucket, and runs `helixdb` with S3-compatible storage environment variables.
@@ -67,6 +72,15 @@ helix start dev --port 9090
 
 # Start with persistent local storage for this run
 helix start dev --disk
+
+# Track the latest image explicitly
+helix start dev --image-version latest
+
+# Save a specific image version
+helix start dev --image-version v0.0.6 --persist
+
+# Start using cached images only
+helix start dev --pull never
 
 # Start on a new port and save it to helix.toml for future runs
 helix start dev --port 9090 --persist

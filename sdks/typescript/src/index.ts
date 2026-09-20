@@ -161,7 +161,7 @@ function remoteError(body: string, fallback: string, statusCode: number): HelixE
   return HelixError.remote(statusCode, body, fallback);
 }
 
-type ClientBackend = { kind: "server"; url: URL; apiKey?: string } | { kind: "embedded"; native: NativeHelixDB };
+type ClientBackend = { kind: "server"; url: URL; apiKey?: string; databaseId?: string } | { kind: "embedded"; native: NativeHelixDB };
 
 /** Complete query request handed from {@link QueryBuilder} to {@link QueryExecutionRequest}. */
 interface RequestParts {
@@ -306,6 +306,12 @@ export class Client {
     return this;
   }
 
+  /** Set (or, with `null`/`undefined`, clear) the database ID header sent on every request. */
+  withDatabaseId(databaseId?: string | null): Client {
+    if (this.backend.kind === "server") this.backend.databaseId = databaseId ?? undefined;
+    return this;
+  }
+
   /** Execute an SDK-built query. */
   query<R = unknown>(request: QueryRequest): QueryExecutionRequest<R> {
     return new QueryBuilder<R>(this.backend).query(request);
@@ -411,6 +417,7 @@ export class QueryExecutionRequest<R = unknown> {
 
     const requestHeaders: Record<string, string> = { ...headers };
     if (backend.apiKey !== undefined) requestHeaders["Authorization"] = `Bearer ${backend.apiKey}`;
+    if (backend.databaseId !== undefined) requestHeaders["x-helix-database-id"] = backend.databaseId;
 
     let response: Response;
     try {

@@ -134,17 +134,21 @@ pub(super) fn equality_index_contract(
         access_delivered_with(input.element, cardinality),
         properties::KeyLocality::Close,
     );
-    if input.kind == EqualityIndexKind::NonUnique
-        && input.semantics == ir::EqualityIndexValueSemantics::Indexed
-    {
-        AccessPhysicalContract::new_batchable_equality(
+    if input.semantics == ir::EqualityIndexValueSemantics::Indexed {
+        AccessPhysicalContract::new_secondary(
             input.access,
             delivered,
             id_cost,
             storage.secondary_row_materialization(rows),
             rows,
+        )
+        .with_batchable_equality(
             input.index_id.clone(),
             input.key.clone(),
+            match input.kind {
+                EqualityIndexKind::Unique => catalog::IndexUniqueness::Unique,
+                EqualityIndexKind::NonUnique => catalog::IndexUniqueness::NonUnique,
+            },
         )
     } else {
         AccessPhysicalContract::new_secondary(

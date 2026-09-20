@@ -18,7 +18,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 };
 use crate::encoding::v2::values::indexes::vector::entry_candidate::encode_entry_candidate_layer;
 use crate::search::vector::distance::{Cosine, Distance};
-use crate::search::vector::mutation::VectorInsertContract;
+use crate::search::vector::hnsw::mutation::VectorInsertContract;
 use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};
 use crate::search::vector::storage::{VectorRows, VectorWriteRows};
 use crate::search::vector::{

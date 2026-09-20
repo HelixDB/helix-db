@@ -1,10 +1,12 @@
 use crate::config::{ContainerRuntime, LocalInstanceConfig};
 use crate::errors::CliError;
+use crate::image;
 use crate::output::Step;
 use crate::project::ProjectContext;
 use crate::utils::command_exists;
 use eyre::{eyre, Result};
 use helix_metrics::cli::{load_metrics_config, MetricsConfig, MetricsLevel};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -14,6 +16,10 @@ use std::time::{Duration, Instant};
 use tokio::process::Command as TokioCommand;
 
 pub const CONTAINER_PORT: u16 = 8080;
+const IDENTITY_LABEL: &str = "helixdb.identity";
+const CONTAINER_OWNER_FORMAT: &str =
+    r#"{{if .Config.Labels}}{{index .Config.Labels "helixdb.identity"}}{{end}}"#;
+const RESOURCE_OWNER_FORMAT: &str = r#"{{if .Labels}}{{index .Labels "helixdb.identity"}}{{end}}"#;
 /// How long to wait for a runtime daemon to become ready after we start it.
 /// Docker Desktop cold-boot can take 30–60s, so we allow generous headroom.
 const RUNTIME_START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -23,8 +29,8 @@ const RUNTIME_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const RUNTIME_INFO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Poll cadence for the bounded advisory daemon probe.
 const RUNTIME_INFO_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const MINIO_IMAGE: &str = "minio/minio:latest";
-const MINIO_MC_IMAGE: &str = "minio/mc:latest";
+const MINIO_IMAGE: &str = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
+const MINIO_MC_IMAGE: &str = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727";
 const MINIO_ACCESS_KEY: &str = "minioadmin";
 const MINIO_SECRET_KEY: &str = "minioadmin";
 const LOCAL_S3_BUCKET: &str = "helix-db";
@@ -44,6 +50,21 @@ pub struct LocalStatus {
     pub container_name: String,
     pub status: String,
     pub ports: String,
+}
+
+/// A start configuration whose required images have all been resolved.
+/// Private fields keep image selection tied to the configuration used to resolve it.
+#[derive(Debug)]
+pub struct PreparedStart {
+    config: LocalInstanceConfig,
+    image: String,
+    disk_images: Option<DiskImages>,
+}
+
+#[derive(Debug)]
+struct DiskImages {
+    minio: String,
+    mc: String,
 }
 
 #[derive(Debug, Clone)]
@@ -88,16 +109,7 @@ impl LocalRuntime {
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(CliError::new(format!("{} is not running", runtime.label()))
-            .with_context(stderr.trim().to_string())
-            .with_hint(
-                "Start the daemon, then retry. macOS: `open -a Docker`, `colima start`, or \
-                 `podman machine start`. Linux/headless (CI, sandboxes): `sudo systemctl start \
-                 docker`, or run `sudo dockerd &` where there is no init system. Rootless Podman \
-                 needs newuidmap/subuid setup and often fails in restricted containers — install \
-                 Docker or use a privileged container there.",
-            )
-            .into())
+        Err(daemon_not_running_error(runtime, &stderr).into())
     }
 
     /// Returns `true` if the runtime daemon answers a bounded `info` probe.
@@ -176,62 +188,155 @@ impl LocalRuntime {
     }
 
     pub fn container_name(&self, instance_name: &str) -> String {
-        format!("helix-{}-{}", self.project_name, instance_name)
+        let name = format!("{}-{}", self.project_name, instance_name);
+        let identity = self.instance_identity(instance_name);
+        let sanitized = sanitize_docker_name(&name);
+        let adopts = sanitized == name
+            && ends_with_hash_suffix(&sanitized)
+            && self.adopts_legacy_name(&format!("helix-{name}"), &identity);
+        compose_resource_name(&name, &identity, adopts)
     }
 
-    pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
-        self.pull_image_ref(&config.image_ref())
+    fn instance_identity(&self, instance_name: &str) -> String {
+        format!(
+            "{}:{}/{}",
+            self.project_name.len(),
+            self.project_name,
+            instance_name
+        )
     }
 
-    fn pull_image_ref(&self, image: &str) -> Result<()> {
+    fn adopts_legacy_name(&self, legacy: &str, identity: &str) -> bool {
+        let minio = format!("{legacy}-minio");
+        let network = format!("{legacy}-net");
+        let volume = format!("{legacy}-minio-data");
+        let mut found = false;
+        for (kind, owner_format, resource) in [
+            ("container", CONTAINER_OWNER_FORMAT, legacy),
+            ("container", CONTAINER_OWNER_FORMAT, &minio),
+            ("network", RESOURCE_OWNER_FORMAT, &network),
+            ("volume", RESOURCE_OWNER_FORMAT, &volume),
+        ] {
+            let Some(owner) =
+                self.resource_label(&[kind, "inspect", "--format", owner_format, resource])
+            else {
+                continue;
+            };
+            if !owner.is_empty() && owner != identity {
+                return false;
+            }
+            found = true;
+        }
+        found
+    }
+
+    fn resource_label(&self, args: &[&str]) -> Option<String> {
+        let mut command = self.runtime_command();
+        command.args(args);
+        command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
+    }
+
+    /// Resolve all required images before replacing any running containers.
+    /// Run Helix by immutable image ID so a concurrent tag update cannot change it.
+    pub fn prepare_start(&self, config: &LocalInstanceConfig) -> Result<PreparedStart> {
+        Self::check_available(self.runtime)?;
+        let reference = config.image_ref();
+        let policy = config
+            .pull
+            .unwrap_or_else(|| config.tag.default_pull_policy());
+        let id = self.pull_image_ref(&reference, policy)?;
+        let disk_images = if config.storage.is_disk() {
+            let dependency_policy = config.pull.unwrap_or(image::PullPolicy::Missing);
+            Some(DiskImages {
+                minio: self.pull_image_ref(MINIO_IMAGE, dependency_policy)?,
+                mc: self.pull_image_ref(MINIO_MC_IMAGE, dependency_policy)?,
+            })
+        } else {
+            None
+        };
+        crate::output::info(&format!("Image: {reference} ({id})"));
+        Ok(PreparedStart {
+            config: config.clone(),
+            image: id,
+            disk_images,
+        })
+    }
+
+    fn pull_image_ref(&self, image: &str, policy: image::PullPolicy) -> Result<String> {
+        if policy != image::PullPolicy::Always {
+            match self.inspect_image(image) {
+                Ok(id) => return Ok(id),
+                Err(error) if policy == image::PullPolicy::Never => {
+                    return Err(error.wrap_err(format!("Cannot use {image} with --pull never")));
+                }
+                Err(_) => {}
+            }
+        }
         Step::verbose_substep(&format!("Pulling {image}"));
         let output = self
             .runtime_command()
             .args(["pull", image])
             .output()
             .map_err(|e| eyre!("Failed to pull {image}: {e}"))?;
-
         if !output.status.success() {
-            if self.image_exists(image) {
-                Step::verbose_substep(&format!("Using local image {image}"));
-                return Ok(());
-            }
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(eyre!("Failed to pull {image}:\n{stderr}"));
         }
-
-        Ok(())
+        self.inspect_image(image)
     }
 
-    fn image_exists(&self, image: &str) -> bool {
-        self.runtime_command()
-            .args(["image", "inspect", image])
+    fn inspect_image(&self, image: &str) -> Result<String> {
+        let output = self
+            .runtime_command()
+            .args(["image", "inspect", "--format", "{{.Id}}", image])
             .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+            .map_err(|e| eyre!("Failed to inspect image {image}: {e}"))?;
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || id.is_empty() {
+            return Err(eyre!(
+                "Cannot inspect local image {image}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(id)
     }
 
-    pub fn run_detached(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
-        Self::check_available(self.runtime)?;
-        self.pull_image(config)?;
+    pub fn run_detached(&self, instance_name: &str, prepared: PreparedStart) -> Result<()> {
+        let PreparedStart {
+            config,
+            image,
+            disk_images,
+        } = prepared;
 
         let name = self.container_name(instance_name);
-        let image = config.image_ref();
         let _ = self.remove_container(&name);
-        let (network, mut env) = if config.storage.is_disk() {
-            let resources = self.start_disk_dependencies(instance_name)?;
-            let env = disk_env(&resources);
-            (Some(resources.network), env)
-        } else if config.storage.is_s3() {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, s3_env(config)?)
-        } else {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, Vec::new())
+        let (network, mut env) = match disk_images {
+            Some(images) => {
+                let resources = self.start_disk_dependencies(instance_name, &images)?;
+                let env = disk_env(&resources);
+                (Some(resources.network), env)
+            }
+            None => {
+                let _ = self.remove_disk_resources(instance_name, false);
+                let env = if config.storage.is_s3() {
+                    s3_env(&config)?
+                } else {
+                    Vec::new()
+                };
+                (None, env)
+            }
         };
         env.extend(telemetry_env());
 
-        let args = helix_run_args(&name, &image, config.port, true, network.as_deref(), &env);
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            true,
+            network.as_deref(),
+            &env,
+            &self.instance_identity(instance_name),
+        );
         let output = self
             .runtime_command()
             .args(&args)
@@ -247,30 +352,41 @@ impl LocalRuntime {
         Ok(())
     }
 
-    pub async fn run_foreground(
-        &self,
-        instance_name: &str,
-        config: &LocalInstanceConfig,
-    ) -> Result<()> {
-        Self::check_available(self.runtime)?;
-        self.pull_image(config)?;
+    pub async fn run_foreground(&self, instance_name: &str, prepared: PreparedStart) -> Result<()> {
+        let PreparedStart {
+            config,
+            image,
+            disk_images,
+        } = prepared;
 
         let name = self.container_name(instance_name);
-        let image = config.image_ref();
         let _ = self.remove_container(&name);
-        let (network, mut env) = if config.storage.is_disk() {
-            let resources = self.start_disk_dependencies(instance_name)?;
-            let env = disk_env(&resources);
-            (Some(resources.network), env)
-        } else if config.storage.is_s3() {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, s3_env(config)?)
-        } else {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, Vec::new())
+        let (network, mut env) = match disk_images {
+            Some(images) => {
+                let resources = self.start_disk_dependencies(instance_name, &images)?;
+                let env = disk_env(&resources);
+                (Some(resources.network), env)
+            }
+            None => {
+                let _ = self.remove_disk_resources(instance_name, false);
+                let env = if config.storage.is_s3() {
+                    s3_env(&config)?
+                } else {
+                    Vec::new()
+                };
+                (None, env)
+            }
         };
         env.extend(telemetry_env());
-        let args = helix_run_args(&name, &image, config.port, false, network.as_deref(), &env);
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            false,
+            network.as_deref(),
+            &env,
+            &self.instance_identity(instance_name),
+        );
 
         let mut child = self
             .runtime_tokio_command()
@@ -322,11 +438,7 @@ impl LocalRuntime {
         Ok(removed_helix || removed_disk_resources)
     }
 
-    pub fn restart(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
-        if config.storage.is_disk() || config.storage.is_s3() {
-            return self.run_detached(instance_name, config);
-        }
-
+    pub fn restart(&self, instance_name: &str) -> Result<()> {
         Self::check_available(self.runtime)?;
         let name = self.container_name(instance_name);
         let output = self
@@ -336,11 +448,30 @@ impl LocalRuntime {
             .map_err(|e| eyre!("Failed to restart {name}: {e}"))?;
 
         if output.status.success() {
-            self.wait_ready(config.port)?;
+            let published = self
+                .runtime_command()
+                .args(["port", &name, "8080/tcp"])
+                .output()
+                .map_err(|e| eyre!("Failed to inspect published port for {name}: {e}"))?;
+            if !published.status.success() {
+                return Err(eyre!(
+                    "Failed to inspect published port for {name}: {}",
+                    String::from_utf8_lossy(&published.stderr)
+                ));
+            }
+            let ports = String::from_utf8_lossy(&published.stdout);
+            let port = ports
+                .lines()
+                .next()
+                .and_then(|line| line.rsplit_once(':'))
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .filter(|port| *port != 0)
+                .ok_or_else(|| eyre!("No valid published port for {name} on 8080/tcp"))?;
+            self.wait_ready(port)?;
             return Ok(());
         }
 
-        self.run_detached(instance_name, config)
+        Err(eyre!("Failed to restart {name}: {}\nUse 'helix start {instance_name}' to create a container.", String::from_utf8_lossy(&output.stderr)))
     }
 
     // No upfront `is_installed`-style preflight here: `spawn_failed_because_runtime_missing`
@@ -448,15 +579,18 @@ impl LocalRuntime {
         }
     }
 
-    fn start_disk_dependencies(&self, instance_name: &str) -> Result<DiskRuntimeResources> {
+    fn start_disk_dependencies(
+        &self,
+        instance_name: &str,
+        images: &DiskImages,
+    ) -> Result<DiskRuntimeResources> {
         let resources = self.disk_resources(instance_name);
-        self.pull_image_ref(MINIO_IMAGE)?;
-        self.pull_image_ref(MINIO_MC_IMAGE)?;
-        self.ensure_network(&resources.network)?;
-        self.ensure_volume(&resources.volume)?;
+        let identity = self.instance_identity(instance_name);
+        self.ensure_network(&resources.network, &identity)?;
+        self.ensure_volume(&resources.volume, &identity)?;
         let _ = self.remove_container(&resources.minio_container);
 
-        let args = minio_run_args(&resources);
+        let args = minio_run_args(&resources, &images.minio, &identity);
         let output = self
             .runtime_command()
             .args(&args)
@@ -471,18 +605,21 @@ impl LocalRuntime {
             ));
         }
 
-        self.ensure_minio_bucket(&resources)?;
+        self.ensure_minio_bucket(&resources, &images.mc)?;
         Ok(resources)
     }
 
-    fn ensure_network(&self, network: &str) -> Result<()> {
+    fn ensure_network(&self, network: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["network", "inspect", network]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["network", "create", network])
+            .args(["network", "create", "--label"])
+            .arg(&label)
+            .arg(network)
             .output()
             .map_err(|e| eyre!("Failed to create network {network}: {e}"))?;
 
@@ -496,14 +633,17 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn ensure_volume(&self, volume: &str) -> Result<()> {
+    fn ensure_volume(&self, volume: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["volume", "inspect", volume]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["volume", "create", volume])
+            .args(["volume", "create", "--label"])
+            .arg(&label)
+            .arg(volume)
             .output()
             .map_err(|e| eyre!("Failed to create volume {volume}: {e}"))?;
 
@@ -517,9 +657,9 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn ensure_minio_bucket(&self, resources: &DiskRuntimeResources) -> Result<()> {
+    fn ensure_minio_bucket(&self, resources: &DiskRuntimeResources, image: &str) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(30);
-        let args = minio_bucket_init_args(resources);
+        let args = minio_bucket_init_args(resources, image);
         let mut last_stderr = String::new();
 
         while Instant::now() < deadline {
@@ -909,22 +1049,56 @@ fn classify_docker_endpoint(endpoint: &str) -> Option<DockerBackend> {
 
 /// The backend the Docker CLI would actually talk to right now.
 ///
-/// `DOCKER_HOST` wins when it is set, the same way the CLI treats it; otherwise
-/// the active context's endpoint is read. Bounded by `RUNTIME_INFO_TIMEOUT`
-/// because this also runs on the advisory path, which must not stall `init`.
+/// Bounded by `RUNTIME_INFO_TIMEOUT` because this also runs on the advisory
+/// path, which must not stall `init`.
 fn active_docker_backend() -> Option<DockerBackend> {
-    if let Some(host) = std::env::var_os("DOCKER_HOST") {
-        return classify_docker_endpoint(&host.to_string_lossy());
+    if let Some(context) = nonempty_env("DOCKER_CONTEXT") {
+        let endpoint = docker_context_endpoint(Some(&context));
+        return select_docker_backend(Some(endpoint.as_deref()), None, None);
     }
 
+    if let Some(host) = nonempty_env("DOCKER_HOST") {
+        return select_docker_backend(None, Some(&host), None);
+    }
+
+    let endpoint = docker_context_endpoint(None);
+    select_docker_backend(None, None, endpoint.as_deref())
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    let value = std::env::var_os(key)?.to_string_lossy().into_owned();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn docker_context_endpoint(name: Option<&str>) -> Option<String> {
     let mut command = Command::new("docker");
-    command.args([
-        "context",
-        "inspect",
-        "--format",
-        "{{.Endpoints.docker.Host}}",
-    ]);
-    classify_docker_endpoint(&command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)?)
+    command.arg("context").arg("inspect");
+    if let Some(name) = name {
+        command.arg(name);
+    }
+    command.args(["--format", "{{.Endpoints.docker.Host}}"]);
+    command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
+}
+
+/// The outer Option says whether DOCKER_CONTEXT was set; the inner one is the
+/// inspect result, so a set-but-unresolved context stays authoritative instead
+/// of falling back to the host.
+fn select_docker_backend(
+    explicit_context_endpoint: Option<Option<&str>>,
+    docker_host_endpoint: Option<&str>,
+    configured_context_endpoint: Option<&str>,
+) -> Option<DockerBackend> {
+    if let Some(endpoint) = explicit_context_endpoint {
+        return endpoint.and_then(classify_docker_endpoint);
+    }
+    if let Some(endpoint) = docker_host_endpoint {
+        return classify_docker_endpoint(endpoint);
+    }
+    configured_context_endpoint.and_then(classify_docker_endpoint)
 }
 
 /// Resolve the active backend only where it can change the answer, so Podman
@@ -1027,6 +1201,22 @@ fn runtime_unavailable_hint_for(
     }
 }
 
+fn daemon_not_running_error(runtime: ContainerRuntime, stderr: &str) -> CliError {
+    let os = std::env::consts::OS;
+    daemon_not_running_error_for(os, runtime, stderr, detected_docker_backend(os, runtime))
+}
+
+fn daemon_not_running_error_for(
+    os: &str,
+    runtime: ContainerRuntime,
+    stderr: &str,
+    docker_backend: Option<DockerBackend>,
+) -> CliError {
+    CliError::new(format!("{} is not running", runtime.label()))
+        .with_context(stderr.trim().to_string())
+        .with_hint(runtime_unavailable_hint_for(os, runtime, docker_backend))
+}
+
 fn helix_run_args(
     name: &str,
     image: &str,
@@ -1034,6 +1224,7 @@ fn helix_run_args(
     detached: bool,
     network: Option<&str>,
     env: &[ContainerEnv],
+    identity: &str,
 ) -> Vec<String> {
     let mut args = vec!["run".to_string()];
     if detached {
@@ -1051,6 +1242,8 @@ fn helix_run_args(
         name.to_string(),
         "-p".to_string(),
         format!("{port}:{CONTAINER_PORT}"),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
     ]);
 
     if let Some(network) = network {
@@ -1064,7 +1257,7 @@ fn helix_run_args(
     args
 }
 
-fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
+fn minio_run_args(resources: &DiskRuntimeResources, image: &str, identity: &str) -> Vec<String> {
     vec![
         "run".to_string(),
         "-d".to_string(),
@@ -1072,6 +1265,8 @@ fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
         "unless-stopped".to_string(),
         "--name".to_string(),
         resources.minio_container.clone(),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
         "--network".to_string(),
         resources.network.clone(),
         "-e".to_string(),
@@ -1080,7 +1275,7 @@ fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
         format!("MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}"),
         "-v".to_string(),
         format!("{}:/data", resources.volume),
-        MINIO_IMAGE.to_string(),
+        image.to_string(),
         "server".to_string(),
         "/data".to_string(),
         "--console-address".to_string(),
@@ -1088,7 +1283,7 @@ fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
     ]
 }
 
-fn minio_bucket_init_args(resources: &DiskRuntimeResources) -> Vec<String> {
+fn minio_bucket_init_args(resources: &DiskRuntimeResources, image: &str) -> Vec<String> {
     let endpoint = format!("http://{}:9000", resources.minio_container);
     let command = format!(
         "mc alias set local {} {} {} && mc mb --ignore-existing local/{}",
@@ -1105,7 +1300,7 @@ fn minio_bucket_init_args(resources: &DiskRuntimeResources) -> Vec<String> {
         resources.network.clone(),
         "--entrypoint".to_string(),
         "/bin/sh".to_string(),
-        MINIO_MC_IMAGE.to_string(),
+        image.to_string(),
         "-c".to_string(),
         command,
     ]
@@ -1222,9 +1417,119 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn sanitize_docker_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn compose_resource_name(name: &str, identity: &str, adopts_legacy: bool) -> String {
+    let sanitized = sanitize_docker_name(name);
+    if sanitized == name && (!ends_with_hash_suffix(&sanitized) || adopts_legacy) {
+        return format!("helix-{name}");
+    }
+    format!("helix-{sanitized}-{}", identity_suffix(identity))
+}
+
+const HASH_SUFFIX_LEN: usize = 32;
+
+fn ends_with_hash_suffix(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > HASH_SUFFIX_LEN + 1
+        && bytes[bytes.len() - HASH_SUFFIX_LEN - 1] == b'-'
+        && bytes[bytes.len() - HASH_SUFFIX_LEN..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn identity_suffix(identity: &str) -> String {
+    Sha256::digest(identity.as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_for(project_name: &str) -> LocalRuntime {
+        LocalRuntime {
+            runtime: ContainerRuntime::Docker,
+            project_name: project_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn container_name_keeps_legacy_names_byte_identical() {
+        assert_eq!(runtime_for("demo").container_name("dev"), "helix-demo-dev");
+        assert_eq!(
+            compose_resource_name("demo-my-dev", "5:demo/my dev", false),
+            "helix-demo-my-dev"
+        );
+    }
+
+    #[test]
+    fn suffixed_names_carry_a_sha256_of_the_length_delimited_identity() {
+        assert_eq!(
+            runtime_for("My Project").container_name("dev"),
+            "helix-My-Project-dev-028ad0a3ea24fa42ed85d7f07ce24d71"
+        );
+        assert_eq!(
+            runtime_for("a b").container_name("dev"),
+            "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+        assert_eq!(
+            runtime_for("hélix (wörld)!").container_name("dev"),
+            "helix-h-lix--w-rld---dev-9d350e8e981617b49c69ea2afed0cfcb"
+        );
+    }
+
+    #[test]
+    fn hash_suffixed_legacy_names_are_displaced_only_when_not_adopted() {
+        let identity = "4:demo/dev-14527b3cbdf37376ceb9eda41d2afac4";
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, false),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4-9333c32b4742394d43c85929472329bf"
+        );
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, true),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+    }
+
+    #[test]
+    fn crafted_valid_names_do_not_collide_with_suffixed_names() {
+        let suffixed = compose_resource_name("a b-dev", "3:a b/dev", false);
+        let crafted = suffixed.strip_prefix("helix-a-b-").unwrap();
+        assert_ne!(
+            suffixed,
+            compose_resource_name(crafted, &format!("3:a-b/{crafted}"), false)
+        );
+    }
+
+    #[test]
+    fn container_name_stays_valid_when_every_character_is_rejected() {
+        assert!(runtime_for("!!!")
+            .container_name("dev")
+            .starts_with("helix-----dev-"));
+    }
+
+    #[test]
+    fn disk_resources_inherit_the_sanitized_base_name() {
+        let base = runtime_for("My Project").container_name("dev");
+        let resources = runtime_for("My Project").disk_resources("dev");
+        assert_eq!(resources.minio_container, format!("{base}-minio"));
+        assert_eq!(resources.network, format!("{base}-net"));
+        assert_eq!(resources.volume, format!("{base}-minio-data"));
+    }
 
     /// The launcher table and the advisory must never disagree about which
     /// runtime is in play. Before this was wired to `runtime_start_command`, a
@@ -1331,6 +1636,79 @@ mod tests {
         assert!(!hint.contains("Start it"));
         assert!(!hint.to_lowercase().contains("docker"));
     }
+
+    #[test]
+    fn explicit_docker_context_wins_over_docker_host() {
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(Some(desktop)), Some(colima), None),
+            Some(DockerBackend::DockerDesktop)
+        );
+        assert_eq!(
+            select_docker_backend(Some(Some(colima)), Some(desktop), None),
+            Some(DockerBackend::Colima)
+        );
+    }
+
+    #[test]
+    fn docker_host_wins_over_configured_context_without_explicit_context() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        assert_eq!(
+            select_docker_backend(None, Some(colima), Some(desktop)),
+            Some(DockerBackend::Colima)
+        );
+        assert_eq!(
+            select_docker_backend(None, None, Some(desktop)),
+            Some(DockerBackend::DockerDesktop)
+        );
+    }
+
+    #[test]
+    fn unknown_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(
+                Some(Some("unix:///var/run/docker.sock")),
+                Some(colima),
+                None
+            ),
+            None
+        );
+    }
+
+    /// A context that fails inspection is still authoritative. Docker errors on
+    /// a missing context rather than falling back to DOCKER_HOST, so auto-start
+    /// must not launch the host's backend either.
+    #[test]
+    fn unresolved_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(None), Some(colima), Some(colima)),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_failure_path_uses_runtime_aware_hint_and_keeps_stderr() {
+        let unknown_docker =
+            daemon_not_running_error_for("macos", ContainerRuntime::Docker, "boom", None);
+        let hint = unknown_docker.hint.expect("hint should be set");
+        assert!(hint.contains("docker info"));
+        for named in ["colima", "open -a"] {
+            assert!(!hint.contains(named), "unproven hint named {named}: {hint}");
+        }
+        assert_eq!(unknown_docker.context.as_deref(), Some("boom"));
+
+        let linux_podman =
+            daemon_not_running_error_for("linux", ContainerRuntime::Podman, "boom", None);
+        let hint = linux_podman.hint.expect("hint should be set");
+        assert!(hint.contains("podman info"));
+        assert!(!hint.to_lowercase().contains("docker"));
+        assert!(!hint.contains("colima"));
+        assert_eq!(linux_podman.context.as_deref(), Some("boom"));
+    }
     #[cfg(unix)]
     #[test]
     fn status_command_timeout_kills_a_wedged_probe() {
@@ -1396,11 +1774,12 @@ mod tests {
     fn memory_helix_args_match_existing_run_shape() {
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.4",
+            "ghcr.io/helixdb/helixdb:v0.0.6",
             9090,
             true,
             None,
             &[],
+            "4:demo/dev",
         );
 
         assert_eq!(
@@ -1414,7 +1793,9 @@ mod tests {
                 "helix-demo-dev",
                 "-p",
                 "9090:8080",
-                "ghcr.io/helixdb/helixdb:v0.0.4",
+                "--label",
+                "helixdb.identity=4:demo/dev",
+                "ghcr.io/helixdb/helixdb:v0.0.6",
             ]
             .into_iter()
             .map(String::from)
@@ -1427,11 +1808,12 @@ mod tests {
         let resources = disk_resources();
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.4",
+            "ghcr.io/helixdb/helixdb:v0.0.6",
             8080,
             true,
             Some(&resources.network),
             &disk_env(&resources),
+            "4:demo/dev",
         );
 
         assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
@@ -1460,11 +1842,12 @@ mod tests {
         let env = s3_env(&config).unwrap();
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.4",
+            "ghcr.io/helixdb/helixdb:v0.0.6",
             8080,
             true,
             None,
             &env,
+            "4:demo/dev",
         );
 
         assert!(!args.contains(&"--network".to_string()));
@@ -1527,9 +1910,11 @@ mod tests {
     #[test]
     fn minio_args_include_persistent_volume() {
         let resources = disk_resources();
-        let args = minio_run_args(&resources);
+        let args = minio_run_args(&resources, "sha256:minio", "4:demo/dev");
 
         assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
+        assert!(has_pair(&args, "--label", "helixdb.identity=4:demo/dev"));
+        assert!(args.contains(&"sha256:minio".to_string()));
         assert!(args.contains(&"MINIO_ROOT_USER=minioadmin".to_string()));
         assert!(args.contains(&"MINIO_ROOT_PASSWORD=minioadmin".to_string()));
         assert!(args.contains(&"helix-demo-dev-minio-data:/data".to_string()));
@@ -1538,10 +1923,10 @@ mod tests {
     #[test]
     fn minio_bucket_init_uses_shell_entrypoint() {
         let resources = disk_resources();
-        let args = minio_bucket_init_args(&resources);
+        let args = minio_bucket_init_args(&resources, "sha256:mc");
 
         assert!(has_pair(&args, "--entrypoint", "/bin/sh"));
-        assert!(args.contains(&"minio/mc:latest".to_string()));
+        assert!(args.contains(&"sha256:mc".to_string()));
         assert!(args.iter().any(|arg| arg.contains("mc alias set local")));
     }
 

@@ -68,6 +68,26 @@ impl<'db> ExecutionContext<'db> {
                 exec::ExecNodeSecondarySetPlan::Bitmap(bitmap) => {
                     self.node_bitmap(bitmap).await.map(SecondaryIds::Unordered)
                 }
+                exec::ExecNodeSecondarySetPlan::UniqueUnion { index, key, values } => {
+                    super::super::count::validate_node_equality_index(
+                        &index.metadata().index_id,
+                        key,
+                    )?;
+                    let values = values
+                        .iter()
+                        .map(super::super::count::indexed_value)
+                        .collect::<Vec<_>>();
+                    let ids = self
+                        .lookup_managed_equality_batch(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            &values,
+                            true,
+                        )
+                        .await?;
+                    self.check_execution_deadline()?;
+                    Ok(SecondaryIds::Unordered(ids))
+                }
                 exec::ExecNodeSecondarySetPlan::Unique {
                     lookup,
                     verification,
