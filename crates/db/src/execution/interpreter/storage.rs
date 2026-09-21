@@ -4,6 +4,8 @@
 //! interpreter boundary that turns those physical read requests into SlateDB
 //! raw `get`/`scan` calls and enforces writer-only execution modes.
 
+pub(in crate::execution::interpreter) mod read_cache;
+
 #[cfg(test)]
 mod read_admission_tests;
 
@@ -39,45 +41,95 @@ impl<'db> ExecutionContext<'db> {
         key: &[u8],
     ) -> Result<Option<Bytes>> {
         self.check_execution_deadline()?;
-        let _request_memory = self
-            .row_memory
-            .as_ref()
-            .map(|budget| budget.reserve(key.len().saturating_add(size_of::<Bytes>())))
-            .transpose()?;
-        if let Some(budget) = &self.row_memory {
-            budget.record_reads(crate::cypher::StorageReadUsage {
-                point_gets: 1,
-                ..Default::default()
-            });
-        }
-        let key = Bytes::copy_from_slice(key);
-        let value = match (
-            self.active_write_tx(),
-            self.request_read_view(),
-            self.db.storage(),
-        ) {
-            (Some(active), _, _) => active.txn.get(&key).await?,
-            (None, Some(view), _) => view.get(&key).await?,
-            #[cfg(test)]
-            (None, None, HelixStorage::Reader(reader)) => reader.get(&key).await?,
-            #[cfg(test)]
-            (None, None, HelixStorage::Writer(writer)) => writer.get(&key).await?,
-            #[cfg(not(test))]
-            (None, None, _) => {
-                return Err(HelixDbError::InvariantViolation(
-                    "storage read escaped its request read view".to_string(),
-                ))
+        let cache = self.request_read_cache();
+        let Some(cached) = cache.and_then(|cache| cache.get(key)) else {
+            let _request_memory = self
+                .row_memory
+                .as_ref()
+                .map(|budget| budget.reserve(key.len().saturating_add(size_of::<Bytes>())))
+                .transpose()?;
+            if let Some(budget) = &self.row_memory {
+                budget.record_reads(crate::cypher::StorageReadUsage {
+                    point_gets: 1,
+                    ..Default::default()
+                });
             }
+            let key = Bytes::copy_from_slice(key);
+            let value = match (
+                self.active_write_tx(),
+                self.request_read_view(),
+                self.db.storage(),
+            ) {
+                (Some(active), _, _) => active.txn.get(&key).await?,
+                (None, Some(view), _) => view.get(&key).await?,
+                #[cfg(test)]
+                (None, None, HelixStorage::Reader(reader)) => reader.get(&key).await?,
+                #[cfg(test)]
+                (None, None, HelixStorage::Writer(writer)) => writer.get(&key).await?,
+                #[cfg(not(test))]
+                (None, None, _) => {
+                    return Err(HelixDbError::InvariantViolation(
+                        "storage read escaped its request read view".to_string(),
+                    ))
+                }
+            };
+            let value = value
+                .map(|bytes| retain_read(bytes, self.row_memory.as_ref()))
+                .transpose()?;
+            let Some(cache) = cache else {
+                return Ok(value);
+            };
+            cache.insert(&key, &value);
+            return Ok(value);
         };
-        value
-            .map(|bytes| retain_read(bytes, self.row_memory.as_ref()))
-            .transpose()
+        Ok(cached)
     }
 
     pub(in crate::execution::interpreter) async fn multi_get_raw<K>(
         &self,
         keys: &[K],
     ) -> Result<Vec<Option<Bytes>>>
+    where
+        K: AsRef<[u8]> + Send + Sync,
+    {
+        self.check_execution_deadline()?;
+        let Some(cache) = self.request_read_cache() else {
+            return self.multi_get_uncached(keys).await;
+        };
+        let budget = self.row_budget();
+        let _scratch = budget.reserve(keys.len().saturating_mul(
+            2 * size_of::<Option<Bytes>>() + size_of::<&K>() + size_of::<usize>(),
+        ))?;
+        let mut output = Vec::with_capacity(keys.len());
+        let mut missing = Vec::with_capacity(keys.len());
+        let mut positions = Vec::with_capacity(keys.len());
+        for (position, key) in keys.iter().enumerate() {
+            match cache.get(key.as_ref()) {
+                Some(value) => output.push(value),
+                None => {
+                    output.push(None);
+                    missing.push(key);
+                    positions.push(position);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(output);
+        }
+        let values = self.multi_get_uncached(&missing).await?;
+        assert_eq!(
+            values.len(),
+            positions.len(),
+            "one raw result per requested key"
+        );
+        for (position, value) in positions.into_iter().zip(values) {
+            cache.insert(keys[position].as_ref(), &value);
+            output[position] = value;
+        }
+        Ok(output)
+    }
+
+    async fn multi_get_uncached<K>(&self, keys: &[K]) -> Result<Vec<Option<Bytes>>>
     where
         K: AsRef<[u8]> + Send + Sync,
     {

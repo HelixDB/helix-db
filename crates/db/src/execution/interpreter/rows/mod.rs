@@ -60,7 +60,25 @@ impl Interpreter<'_> {
             .row_budget()
             .reserve(plan.program().retained_layout_bytes())?;
         match plan.query().effect() {
-            r::Effect::Read => self.ctx.enable_request_read_view().await?,
+            r::Effect::Read => {
+                self.ctx.enable_request_read_view().await?;
+                // Repeated multi-hop expansion can revisit the same endpoints.
+                // Keep simple scans and correlated streams on their existing
+                // batch bounds instead of retaining each visited property.
+                if plan.program().matches().values().any(|pattern| {
+                    pattern.incoming.is_empty()
+                        && pattern
+                            .steps
+                            .iter()
+                            .filter(|step| matches!(step, r::MatchStep::Expand { .. }))
+                            .take(2)
+                            .count()
+                            == 2
+                }) {
+                    self.ctx
+                        .enable_request_read_cache((limits.memory_bytes / 8).min(32 * 1024 * 1024));
+                }
+            }
             r::Effect::Write => {
                 self.ensure_writer()?;
                 self.ctx.enable_request_write_scope().await?;

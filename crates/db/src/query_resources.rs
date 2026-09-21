@@ -27,6 +27,11 @@ use std::sync::{
 
 #[derive(Clone)]
 pub(crate) struct Budget(Arc<State>);
+/// Optional request-owned buffers may release their references under pressure.
+/// Implementations must never block on a lock held by the allocating operation.
+pub(crate) trait Reclaim: Send + Sync {
+    fn reclaim(&self);
+}
 struct State {
     limit: usize,
     used: AtomicUsize,
@@ -36,6 +41,7 @@ struct State {
     multi_get_keys: AtomicUsize,
     scans: AtomicUsize,
     scan_rows: AtomicUsize,
+    reclaim: parking_lot::Mutex<Option<std::sync::Weak<dyn Reclaim>>>,
 }
 impl Budget {
     pub fn new(limit: usize) -> Self {
@@ -48,6 +54,7 @@ impl Budget {
             multi_get_keys: AtomicUsize::new(0),
             scans: AtomicUsize::new(0),
             scan_rows: AtomicUsize::new(0),
+            reclaim: parking_lot::Mutex::new(None),
         }))
     }
     pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation> {
@@ -77,6 +84,15 @@ impl Budget {
         self.0
             .limit
             .saturating_sub(self.0.used.load(Ordering::Relaxed))
+    }
+    /// Keep only a weak callback: retained buffers themselves own budget guards.
+    pub(crate) fn set_reclaimer(&self, reclaim: std::sync::Weak<dyn Reclaim>) {
+        let mut current = self.0.reclaim.lock();
+        assert!(current
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_none());
+        *current = Some(reclaim);
     }
     pub(crate) fn peak(&self) -> usize {
         self.0.peak.load(Ordering::Relaxed)
@@ -207,13 +223,29 @@ impl Reservation {
             return Ok(());
         }
         let additional = bytes - self.bytes;
-        let previous = self
-            .budget
-            .0
-            .used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(additional)
-                    .filter(|total| *total <= self.budget.0.limit)
+        let admit = || {
+            self.budget
+                .0
+                .used
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    used.checked_add(additional)
+                        .filter(|total| *total <= self.budget.0.limit)
+                })
+        };
+        let previous = admit()
+            .or_else(|used| {
+                let reclaim = self
+                    .budget
+                    .0
+                    .reclaim
+                    .lock()
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade);
+                let Some(reclaim) = reclaim else {
+                    return Err(used);
+                };
+                reclaim.reclaim();
+                admit()
             })
             .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)?;
         self.budget
@@ -249,18 +281,26 @@ impl Budget {
     /// The storage engine's shared caches and internal I/O buffers are separate
     /// from these request-owned references.
     pub(crate) fn retain_read(&self, bytes: Bytes) -> Result<Bytes> {
+        self.read_owner(bytes.len(), || bytes)
+    }
+
+    /// Copy long-lived cached payloads after admission, so a small cached value
+    /// cannot pin an arbitrarily larger shared storage block or I/O buffer.
+    pub(crate) fn copy_read(&self, bytes: &[u8]) -> Result<Bytes> {
+        self.read_owner(bytes.len(), || Bytes::copy_from_slice(bytes))
+    }
+
+    fn read_owner(&self, len: usize, bytes: impl FnOnce() -> Bytes) -> Result<Bytes> {
         // Besides the owner/refcount, reserve room for byte handles in a growing
         // read-result vector. Sharing or slicing the admitted Bytes keeps the
         // entire original read charged until its final reference is released.
         let reservation = self.reserve(
-            bytes
-                .len()
-                .saturating_add(size_of::<ReadOwner>())
+            len.saturating_add(size_of::<ReadOwner>())
                 .saturating_add(size_of::<std::sync::atomic::AtomicUsize>())
                 .saturating_add(2 * size_of::<Bytes>()),
         )?;
         Ok(Bytes::from_owner(ReadOwner {
-            bytes,
+            bytes: bytes(),
             _reservation: reservation,
         }))
     }

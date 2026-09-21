@@ -250,6 +250,13 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
+Read-only queries with uncorrelated multi-hop patterns may reuse raw values
+within their pinned storage snapshot. The cache owns compact copies and caps
+retained entries at one eighth of the query budget (at most 32 MiB). Its header
+is charged separately. It releases optional entries under memory pressure.
+Outstanding result references remain charged until dropped. Small query budgets
+skip reuse; writes always bypass it. Reported peak admission includes retained
+cache entries, so it is not the minimum memory needed to execute the query.
 Nonaggregate `DISTINCT` without `ORDER BY` consumes batches and retains one row
 per distinct projected value. Its retained state scales with unique results;
 all input is still evaluated before `SKIP` and `LIMIT`, preserving late errors.

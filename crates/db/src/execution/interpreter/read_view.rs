@@ -17,7 +17,13 @@ pub(in crate::execution::interpreter) enum RequestReadScopeState {
     /// No read request is active.
     Disabled,
     /// The request owns one complete storage/catalog authority.
-    Active(Box<ActiveRequestReadView>),
+    Active(Box<ReadScope>),
+}
+
+/// Optional reuse is owned by the same scope as its exact storage snapshot.
+pub(in crate::execution::interpreter) struct ReadScope {
+    view: ActiveRequestReadView,
+    cache: Option<Arc<super::storage::read_cache::Cache>>,
 }
 
 /// Catalog authority that cannot be detached from its matching storage snapshot.
@@ -92,7 +98,7 @@ impl RequestReadScopeState {
     fn active(&self) -> Option<&ActiveRequestReadView> {
         match self {
             Self::Disabled => None,
-            Self::Active(active) => Some(active),
+            Self::Active(active) => Some(&active.view),
         }
     }
 
@@ -100,7 +106,13 @@ impl RequestReadScopeState {
         let state = std::mem::replace(self, Self::Disabled);
         *self = match state {
             Self::Disabled => Self::Disabled,
-            Self::Active(active) => Self::Active(Box::new((*active).release_catalog_permit())),
+            Self::Active(active) => {
+                let ReadScope { view, cache } = *active;
+                Self::Active(Box::new(ReadScope {
+                    view: view.release_catalog_permit(),
+                    cache,
+                }))
+            }
         };
     }
 }
@@ -309,7 +321,10 @@ impl<'db> ExecutionContext<'db> {
                 ActiveRequestReadView::Unprepared(StableRequestReadView::open(self.db).await?)
             }
         };
-        self.request_read_scope = RequestReadScopeState::Active(Box::new(active));
+        self.request_read_scope = RequestReadScopeState::Active(Box::new(ReadScope {
+            view: active,
+            cache: None,
+        }));
         Ok(())
     }
 
@@ -334,7 +349,7 @@ impl<'db> ExecutionContext<'db> {
                 "read plan completed without a request read view".to_string(),
             ));
         };
-        (*view).close();
+        view.view.close();
         Ok(())
     }
 
@@ -345,6 +360,29 @@ impl<'db> ExecutionContext<'db> {
         self.request_read_scope
             .active()
             .map(ActiveRequestReadView::view)
+    }
+
+    /// Only read-only row execution opts in. A write transaction always bypasses
+    /// reuse, even in an internal context that also retains an old read view.
+    pub(in crate::execution::interpreter) fn request_read_cache(
+        &self,
+    ) -> Option<&super::storage::read_cache::Cache> {
+        if self.active_write_tx().is_some() {
+            return None;
+        }
+        let RequestReadScopeState::Active(active) = &self.request_read_scope else {
+            return None;
+        };
+        active.cache.as_deref()
+    }
+
+    pub(in crate::execution::interpreter) fn enable_request_read_cache(&mut self, limit: usize) {
+        let budget = self.row_budget().clone();
+        let RequestReadScopeState::Active(active) = &mut self.request_read_scope else {
+            unreachable!("read reuse requires its exact storage view");
+        };
+        assert!(active.cache.is_none(), "read reuse is initialized once");
+        active.cache = super::storage::read_cache::Cache::new(&budget, limit);
     }
 
     /// Returns the catalog decoded from the exact active read snapshot.
@@ -374,7 +412,10 @@ impl<'db> ExecutionContext<'db> {
         &self,
     ) -> RequestReadScopeState {
         match self.request_read_scope.active() {
-            Some(active) => RequestReadScopeState::Active(Box::new(active.clone_reader_snapshot())),
+            Some(active) => RequestReadScopeState::Active(Box::new(ReadScope {
+                view: active.clone_reader_snapshot(),
+                cache: None,
+            })),
             None => RequestReadScopeState::Disabled,
         }
     }
