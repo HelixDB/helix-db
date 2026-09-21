@@ -9,7 +9,7 @@ use helix_planner::{exec, ir, properties};
 
 use super::super::{ExecutionContext, ExecutionValue};
 use super::indexes::limited_index_ids;
-use super::search::SearchReadLimit;
+use super::search::{SearchReadLimit, TextSearchAccess};
 use crate::config::{TextElementType, VectorElementType};
 use crate::error::Result;
 
@@ -191,14 +191,18 @@ impl<'db> ExecutionContext<'db> {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => {
                 let results = self
                     .text_search_hits(
-                        TextElementType::Node,
-                        &key.label,
-                        &key.property,
-                        index,
-                        query_text,
+                        TextSearchAccess::new(
+                            TextElementType::Node,
+                            &key.label,
+                            &key.property,
+                            index,
+                            query_text,
+                            *fuzzy_distance,
+                        ),
                         SearchReadLimit::new(k, limit),
                     )
                     .await?;
@@ -322,13 +326,17 @@ impl<'db> ExecutionContext<'db> {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } => {
                 let read = self.text_search_hits(
-                    TextElementType::Edge,
-                    &key.label,
-                    &key.property,
-                    index,
-                    query_text,
+                    TextSearchAccess::new(
+                        TextElementType::Edge,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_text,
+                        *fuzzy_distance,
+                    ),
                     SearchReadLimit::new(k, limit),
                 );
                 let results = read.await?;
@@ -1190,6 +1198,7 @@ pub(super) mod tests {
                 index: search.clone(),
                 query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
                 k: search_limit.clone(),
+                fuzzy_distance: 0,
             },
         ];
         for plan in node_plans {
@@ -1232,6 +1241,7 @@ pub(super) mod tests {
                 index: search,
                 query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
                 k: search_limit,
+                fuzzy_distance: 0,
             },
         ];
         for plan in edge_plans {

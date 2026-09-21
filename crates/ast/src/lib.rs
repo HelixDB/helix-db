@@ -75,6 +75,71 @@ mod tests {
         assert!(!json.contains("steps"));
     }
 
+    fn node_search_distance(traversal: Traversal<OnNodes>) -> u8 {
+        match traversal.into_ast() {
+            AstNode::TextSearchNodes { fuzzy_distance, .. } => fuzzy_distance,
+            other => panic!("expected a node text search, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuzzy_widens_the_search_it_follows() {
+        assert_eq!(
+            node_search_distance(g().text_search_nodes("Doc", "body", "helox", 10usize, None)),
+            0,
+            "a search that never asks for latitude does not get any"
+        );
+        assert_eq!(
+            node_search_distance(
+                g().text_search_nodes("Doc", "body", "helox", 10usize, None)
+                    .fuzzy(1)
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn fuzzy_is_capped_at_what_the_index_can_be_walked_with() {
+        assert_eq!(
+            node_search_distance(
+                g().text_search_nodes("Doc", "body", "helox", 10usize, None)
+                    .fuzzy(9)
+            ),
+            MAX_FUZZY_DISTANCE
+        );
+    }
+
+    #[test]
+    fn an_exact_search_serialises_the_way_it_always_did() {
+        let exact = read_batch()
+            .var_as(
+                "hits",
+                g().text_search_nodes("Doc", "body", "helox", 10usize, None),
+            )
+            .returning(["hits"]);
+        let json = sonic_rs::to_string(&QueryRequest::read(exact)).unwrap();
+        assert!(
+            !json.contains("fuzzy_distance"),
+            "an older reader has to see exactly the document it saw before: {json}"
+        );
+
+        let widened = read_batch()
+            .var_as(
+                "hits",
+                g().text_search_nodes("Doc", "body", "helox", 10usize, None)
+                    .fuzzy(1),
+            )
+            .returning(["hits"]);
+        let json = sonic_rs::to_string(&QueryRequest::read(widened)).unwrap();
+        assert!(json.contains(r#""fuzzy_distance":1"#), "{json}");
+    }
+
+    #[test]
+    #[should_panic(expected = "fuzzy can only follow a text search step")]
+    fn fuzzy_refuses_a_step_that_has_no_edit_distance() {
+        let _ = g().n_with_label("User").fuzzy(1);
+    }
+
     #[test]
     fn sub_traversal_starts_from_context() {
         let traversal = g()

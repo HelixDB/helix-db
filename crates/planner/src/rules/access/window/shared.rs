@@ -21,6 +21,7 @@ pub(super) enum AccessSearchParts<'a, K> {
         index: &'a ir::SearchIndexPlan,
         query_text: &'a ir::TextQueryInputPlan,
         k: &'a ir::SearchLimitPlan,
+        fuzzy_distance: u8,
     },
 }
 
@@ -44,6 +45,7 @@ pub(super) trait AccessWindowFamily {
         index: ir::SearchIndexPlan,
         query_text: ir::TextQueryInputPlan,
         k: ir::SearchLimitPlan,
+        fuzzy_distance: u8,
     ) -> Self::Source;
 }
 
@@ -154,8 +156,15 @@ where
             key,
             index,
             query_text,
+            fuzzy_distance,
             ..
-        } => F::text_search_source(key.clone(), index.clone(), query_text.clone(), k),
+        } => F::text_search_source(
+            key.clone(),
+            index.clone(),
+            query_text.clone(),
+            k,
+            fuzzy_distance,
+        ),
     }
 }
 
