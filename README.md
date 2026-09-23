@@ -74,6 +74,9 @@ embedded clients, and `helix cypher`. See the [Cypher reference](docs/cypher.md)
 for the supported language profile, SDK calls, parameters, lossless results,
 and transaction rules. Use SDK and server builds from this checkout for Cypher.
 
+For implementation work, the [codebase map](docs/codebase-map.md) covers package
+dependencies, query execution, storage ownership and correctness gates.
+
 ## Writing queries with the SDKs
 
 Queries are authored with the Rust, TypeScript, Go, or Python DSL and sent straight to a running instance through `POST /v2/query` — no build or deploy step. The SDKs produce the same JSON AST. The examples below talk to a local instance on `http://localhost:6969` (the default `helix start dev` port). See the [Querying Guide](https://docs.helix-db.com/database/querying-guide/overview) for the full builder catalog and query wire format.

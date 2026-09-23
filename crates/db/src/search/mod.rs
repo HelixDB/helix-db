@@ -6,18 +6,10 @@
 //! - Vector indexes: ANN (Approximate Nearest Neighbor) search on vector properties
 //! - Text indexes: BM25 full-text search on string properties
 //!
-//! # Index Storage
-//!
-//! ## Equality Index
-//! Key: `[0x03][0x00][prop_hash:4][value_hash:8]`
-//! Value: RoaringTreemap of NodeIds
-//!
-//! ## Range Index
-//! Key: `[0x03][0x01][prop_hash:4][value:var][node_id:8]`
-//! Value: empty (presence = membership)
-//!
-//! ## Vector Index
-//! See the `hnsw` module for details on vector index storage layout
+//! Persistence is defined by [`crate::encoding::v2::keys`] and
+//! [`crate::encoding::v2::values`], including tenant scopes and index generations.
+//! Use those typed codecs rather than constructing keys from layout sketches.
+//! [`crate::index_lifecycle`] owns catalog and generation validity.
 
 pub mod text;
 pub mod vector;

@@ -34,16 +34,9 @@ impl ExecutionContext<'_> {
         } = projection;
         let empty = GraphBatch::default();
         let evaluation = self.evaluate(&[], parameters, &empty, limits);
-        let skip = skip
-            .map(|e| evaluation.eval(e).and_then(|v| r::nonnegative(&v)))
-            .transpose()?
-            .unwrap_or(0);
-        let limit = limit
-            .map(|e| evaluation.eval(e).and_then(|v| r::nonnegative(&v)))
-            .transpose()?
-            .unwrap_or(usize::MAX);
+        let window = r::Window::evaluate(skip, limit, |expression| evaluation.eval(expression))?;
         let inputs = projection.input_slots(self, width)?;
-        let mut top_k = TopK::new(self.row_budget(), skip.saturating_add(limit))?;
+        let mut top_k = TopK::new(self.row_budget(), window.retained_rows())?;
         let mut ordinal = 0_usize;
         while let Some(batch) = batches.next().await {
             let batch = batch?;
@@ -93,7 +86,7 @@ impl ExecutionContext<'_> {
                 top_k.push(candidate)?;
             }
         }
-        Ok(top_k.into_rows(skip))
+        Ok(top_k.into_rows(window.skip()))
     }
 }
 

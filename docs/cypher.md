@@ -258,8 +258,11 @@ Outstanding result references remain charged until dropped. Small query budgets
 skip reuse; writes always bypass it. Reported peak admission includes retained
 cache entries, so it is not the minimum memory needed to execute the query.
 Nonaggregate `DISTINCT` without `ORDER BY` consumes batches and retains one row
-per distinct projected value. Its retained state scales with unique results;
-all input is still evaluated before `SKIP` and `LIMIT`, preserving late errors.
+per distinct projected value. With `LIMIT`, it retains at most `SKIP + LIMIT`
+values in its deterministic value order; `LIMIT 0` retains none. Without a limit,
+retention scales with unique results. All input is still evaluated, preserving
+late errors and the same subset as materialised execution. This bounds retained
+state, not path enumeration or storage work.
 Initial fixed-length matches with literal or parameter property constraints can
 stop at a downstream limit when intervening projections preserve rows and cannot
 fail. The engine evaluates enough input to validate those constraints even for

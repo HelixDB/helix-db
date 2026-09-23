@@ -1,5 +1,5 @@
-//! Incremental DISTINCT retains one projected row per equality class. Input
-//! batches are drained before applying the window, preserving expression errors.
+//! Incremental DISTINCT retains the smallest SKIP + LIMIT equality classes (or
+//! all classes without LIMIT). Input still drains, preserving expression errors.
 use super::{memory, projection, row_bytes, ExecutionContext, Limits, Result, RowBuffer};
 use helix_planner::relational as r;
 use std::{
@@ -56,24 +56,10 @@ impl ExecutionContext<'_> {
             .all(|item| !item.expression.has_aggregate()));
         let empty = super::GraphBatch::default();
         let evaluation = self.evaluate(&[], parameters, &empty, limits);
-        let skip = projection
-            .skip
-            .map(|expression| {
-                evaluation
-                    .eval(expression)
-                    .and_then(|value| r::nonnegative(&value))
-            })
-            .transpose()?
-            .unwrap_or(0);
-        let limit = projection
-            .limit
-            .map(|expression| {
-                evaluation
-                    .eval(expression)
-                    .and_then(|value| r::nonnegative(&value))
-            })
-            .transpose()?
-            .unwrap_or(usize::MAX);
+        let window = r::Window::evaluate(projection.skip, projection.limit, |expression| {
+            evaluation.eval(expression)
+        })?;
+        let keep = window.retained_rows();
         let mut entries = BTreeSet::new();
         let mut memory = self.row_budget().reserve(0)?;
         let mut payload = 0_usize;
@@ -101,8 +87,18 @@ impl ExecutionContext<'_> {
                     row,
                     items: projection.items,
                 };
-                if entries.contains(&entry) {
+                // The cutoff only decreases, so an evicted equality class can
+                // never become eligible again. Keep the first representative
+                // of every retained class, including numerically equal values.
+                if keep == 0
+                    || (entries.len() == keep && entries.last().is_some_and(|last| &entry >= last))
+                    || entries.contains(&entry)
+                {
                     continue;
+                }
+                if entries.len() == keep {
+                    let removed = entries.pop_last().expect("nonzero full distinct set");
+                    payload -= row_bytes(&removed.row);
                 }
                 payload = payload.saturating_add(row_bytes(&entry.row));
                 memory.resize(payload.saturating_add(r::allocation::btree_bytes::<
@@ -121,7 +117,7 @@ impl ExecutionContext<'_> {
         for (index, entry) in entries.into_iter().enumerate() {
             self.check_execution_deadline()?;
             let bytes = row_bytes(&entry.row);
-            if index < skip || output.len() >= limit {
+            if index < window.skip() || output.len() >= window.limit() {
                 drop(entry);
                 memory.release(bytes);
             } else {

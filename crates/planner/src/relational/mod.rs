@@ -32,7 +32,9 @@ pub use projection::*;
 mod query;
 mod types;
 mod value;
+mod window;
 pub use types::ValueType;
+pub use window::Window;
 
 pub use evaluation::*;
 pub use expression::*;

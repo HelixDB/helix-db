@@ -239,19 +239,15 @@ impl ExecutionContext<'_> {
                             && ordering.is_empty()
                             && items.iter().all(|item| !item.expression.has_aggregate())
                     );
+                    let window =
+                        r::Window::evaluate(skip.as_ref(), limit.as_ref(), |expression| {
+                            evaluation.eval(expression)
+                        })?;
                     Stage::Project {
                         items,
                         predicate: predicate.as_ref(),
-                        skip: skip
-                            .as_ref()
-                            .map(|e| evaluation.eval(e).and_then(|v| r::nonnegative(&v)))
-                            .transpose()?
-                            .unwrap_or(0),
-                        remaining: limit
-                            .as_ref()
-                            .map(|e| evaluation.eval(e).and_then(|v| r::nonnegative(&v)))
-                            .transpose()?
-                            .unwrap_or(usize::MAX),
+                        skip: window.skip(),
+                        remaining: window.limit(),
                     }
                 }
                 r::Operator::Filter(predicate) => Stage::Filter(predicate),

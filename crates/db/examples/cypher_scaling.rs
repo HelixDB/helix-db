@@ -399,6 +399,21 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[size - 1], [size - 2], [size - 3]]),
         ),
         (
+            "distinct_window",
+            "MATCH (a:Left) RETURN DISTINCT a.key AS key SKIP 1 LIMIT 2".into(),
+            json!([[1], [2]]),
+        ),
+        (
+            "distinct_empty_window",
+            "MATCH (a:Left) RETURN DISTINCT a.key AS key SKIP 2147483647 LIMIT 0".into(),
+            json!([]),
+        ),
+        (
+            "top_k_empty_window",
+            "MATCH (a:Left) RETURN a.key AS key ORDER BY key DESC SKIP 2147483647 LIMIT 0".into(),
+            json!([]),
+        ),
+        (
             "projection_chain",
             "MATCH (a:Left) WITH a.key AS key WITH key+1 AS value RETURN sum(value),avg(value)".into(),
             json!([[size * (size + 1) / 2, (size + 1) as f64 / 2.0]]),
@@ -504,6 +519,17 @@ async fn measure_cases(
             if case == "projection_chain_limit" && response.resources.reads.multi_get_keys > 8 {
                 return Err(format!(
                     "downstream limit failed to bound property reads at size {size}"
+                )
+                .into());
+            }
+            if matches!(
+                case,
+                "distinct_window" | "distinct_empty_window" | "top_k_empty_window"
+            ) && response.resources.peak_memory_bytes > 2 * 1024 * 1024
+            {
+                return Err(format!(
+                    "{case} exceeded its constant retained-state guard at size {size}: peak={}",
+                    response.resources.peak_memory_bytes,
                 )
                 .into());
             }

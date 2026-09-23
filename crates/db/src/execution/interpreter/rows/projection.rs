@@ -182,24 +182,11 @@ impl ExecutionContext<'_> {
             .all(|item| !item.expression.has_aggregate()));
         let empty = GraphBatch::default();
         let evaluation = self.evaluate(&[], parameters, &empty, limits);
-        let mut skip = projection
-            .skip
-            .map(|expression| {
-                evaluation
-                    .eval(expression)
-                    .and_then(|value| r::nonnegative(&value))
-            })
-            .transpose()?
-            .unwrap_or(0);
-        let limit = projection
-            .limit
-            .map(|expression| {
-                evaluation
-                    .eval(expression)
-                    .and_then(|value| r::nonnegative(&value))
-            })
-            .transpose()?
-            .unwrap_or(usize::MAX);
+        let window = r::Window::evaluate(projection.skip, projection.limit, |expression| {
+            evaluation.eval(expression)
+        })?;
+        let mut skip = window.skip();
+        let limit = window.limit();
         let mut output = RowBuffer::new(self.row_budget())?;
         let mut input_started = false;
         loop {
@@ -257,14 +244,9 @@ impl ExecutionContext<'_> {
         } = projection;
         let empty = GraphBatch::default();
         let evaluation = self.evaluate(&[], parameters, &empty, limits);
-        let skip = skip
-            .map(|e| evaluation.eval(e).and_then(|v| r::nonnegative(&v)))
-            .transpose()?
-            .unwrap_or(0);
-        let limit = limit
-            .map(|e| evaluation.eval(e).and_then(|v| r::nonnegative(&v)))
-            .transpose()?
-            .unwrap_or(usize::MAX);
+        let window = r::Window::evaluate(skip, limit, |expression| evaluation.eval(expression))?;
+        let skip = window.skip();
+        let limit = window.limit();
         let aggregated = items.iter().any(|item| item.expression.has_aggregate());
         if !aggregated && !distinct && !ordering.is_empty() && limit != usize::MAX {
             // The parent Rows owner retains admission while these slices are
