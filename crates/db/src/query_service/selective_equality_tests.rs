@@ -455,114 +455,129 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
                 )
                 .returning(["result"]),
         ] {
-            let prepared = db
-                .planner_context_scoped_prepared(params.clone(), scope)
-                .await
-                .unwrap();
-            assert_eq!(prepared.context().stats, context::StatsSnapshot::default());
-            let (plan, diagnostics) =
-                planning::plan_read_batch_with_diagnostics(&read, prepared.context())
-                    .unwrap()
-                    .into_parts();
-            assert!(diagnostics
-                .insights
-                .iter()
-                .all(|insight| !matches!(insight, diagnostics::PlannerInsight::UnboundedScan(_))));
-            // Advance storage after planning. The prepared read must retain the
-            // original graph and bitmap snapshot, including all four matches.
-            let literal = expr::Predicate::and(vec![
-                expr::Predicate::eq("tenant", "one"),
-                expr::Predicate::eq("type", "pod"),
-                expr::Predicate::eq("deleted", true),
-            ]);
-            db.query_scoped(
-                query::QueryRequest::write(
-                    batch::write_batch()
-                        .var_as(
-                            "nodes",
-                            traversal::g()
-                                .n_with_label_where("Resource", literal.clone())
-                                .set_property("deleted", false),
+            for stale_statistics in [false, true] {
+                let prepared = db
+                    .planner_context_scoped_prepared(params.clone(), scope)
+                    .await
+                    .unwrap();
+                assert_eq!(prepared.context().stats, context::StatsSnapshot::default());
+                let mut planner_context = prepared.context().clone();
+                if stale_statistics {
+                    for property in ["tenant", "type", "deleted", "zone", "category"] {
+                        let key = helix_planner::catalog::ScopedPropertyKey::try_new(
+                            "Resource", property,
                         )
-                        .var_as(
-                            "edges",
-                            traversal::g()
-                                .e_with_label_where("Resource", literal)
-                                .set_property("deleted", false),
-                        ),
-                ),
-                scope,
-            )
-            .await
-            .unwrap();
-            index_lifecycle::secondary::reset_equality_read_metrics();
-            let result = db
-                .execute_prepared_scoped_controlled(
-                    &plan,
-                    params.clone(),
+                        .unwrap();
+                        planner_context.stats = planner_context
+                            .stats
+                            .with_node_eq_cardinality(key.clone(), 0)
+                            .with_edge_eq_cardinality(key, 0);
+                    }
+                }
+                let (plan, diagnostics) =
+                    planning::plan_read_batch_with_diagnostics(&read, &planner_context)
+                        .unwrap()
+                        .into_parts();
+                assert!(diagnostics.insights.iter().all(|insight| !matches!(
+                    insight,
+                    diagnostics::PlannerInsight::UnboundedScan(_)
+                )));
+                // Advance storage after planning. The prepared read must retain the
+                // original graph and bitmap snapshot, including all four matches.
+                let literal = expr::Predicate::and(vec![
+                    expr::Predicate::eq("tenant", "one"),
+                    expr::Predicate::eq("type", "pod"),
+                    expr::Predicate::eq("deleted", true),
+                ]);
+                db.query_scoped(
+                    query::QueryRequest::write(
+                        batch::write_batch()
+                            .var_as(
+                                "nodes",
+                                traversal::g()
+                                    .n_with_label_where("Resource", literal.clone())
+                                    .set_property("deleted", false),
+                            )
+                            .var_as(
+                                "edges",
+                                traversal::g()
+                                    .e_with_label_where("Resource", literal)
+                                    .set_property("deleted", false),
+                            ),
+                    ),
                     scope,
-                    execution_control::ExecutionControl::unlimited(),
-                    prepared.into_catalog_proof(),
                 )
                 .await
                 .unwrap();
-            let metrics = index_lifecycle::secondary::equality_read_metrics();
-            assert_eq!(metrics.scans, 0);
-            assert_eq!(metrics.graph_reads, 0);
-            assert_eq!(metrics.point_reads, 1);
-            let response = super::QueryResponse::from_execution_result(result).unwrap();
-            let expected = [0, 10, 20, 30]
-                .map(|ordinal| serde_json::json!({"ordinal": ordinal + scope_index * 100}));
-            assert_eq!(response.returns()["result"], serde_json::json!(expected));
-            let fresh = db
-                .execute_scoped(&plan, params.clone(), scope)
+                index_lifecycle::secondary::reset_equality_read_metrics();
+                let result = db
+                    .execute_prepared_scoped_controlled(
+                        &plan,
+                        params.clone(),
+                        scope,
+                        execution_control::ExecutionControl::unlimited(),
+                        prepared.into_catalog_proof(),
+                    )
+                    .await
+                    .unwrap();
+                let metrics = index_lifecycle::secondary::equality_read_metrics();
+                assert_eq!(metrics.scans, 0);
+                assert_eq!(metrics.graph_reads, 0);
+                assert_eq!(metrics.point_reads, 1);
+                let response = super::QueryResponse::from_execution_result(result).unwrap();
+                let expected = [0, 10, 20, 30]
+                    .map(|ordinal| serde_json::json!({"ordinal": ordinal + scope_index * 100}));
+                assert_eq!(response.returns()["result"], serde_json::json!(expected));
+                let fresh = db
+                    .execute_scoped(&plan, params.clone(), scope)
+                    .await
+                    .unwrap();
+                let fresh = super::QueryResponse::from_execution_result(fresh).unwrap();
+                assert_eq!(fresh.returns()["result"], serde_json::json!([]));
+                // Reinsert matching membership for the next node/edge iteration.
+                db.query_scoped(
+                    query::QueryRequest::write(
+                        batch::write_batch()
+                            .var_as(
+                                "nodes",
+                                traversal::g()
+                                    .n_with_label_where(
+                                        "Resource",
+                                        expr::Predicate::is_in(
+                                            "ordinal",
+                                            value::PropertyValue::I64Array(
+                                                vec![0, 10, 20, 30]
+                                                    .into_iter()
+                                                    .map(|n| n + scope_index as i64 * 100)
+                                                    .collect(),
+                                            ),
+                                        ),
+                                    )
+                                    .set_property("deleted", true),
+                            )
+                            .var_as(
+                                "edges",
+                                traversal::g()
+                                    .e_with_label_where(
+                                        "Resource",
+                                        expr::Predicate::is_in(
+                                            "ordinal",
+                                            value::PropertyValue::I64Array(
+                                                vec![0, 10, 20, 30]
+                                                    .into_iter()
+                                                    .map(|n| n + scope_index as i64 * 100)
+                                                    .collect(),
+                                            ),
+                                        ),
+                                    )
+                                    .set_property("deleted", true),
+                            ),
+                    ),
+                    scope,
+                )
                 .await
                 .unwrap();
-            let fresh = super::QueryResponse::from_execution_result(fresh).unwrap();
-            assert_eq!(fresh.returns()["result"], serde_json::json!([]));
-            // Reinsert matching membership for the next node/edge iteration.
-            db.query_scoped(
-                query::QueryRequest::write(
-                    batch::write_batch()
-                        .var_as(
-                            "nodes",
-                            traversal::g()
-                                .n_with_label_where(
-                                    "Resource",
-                                    expr::Predicate::is_in(
-                                        "ordinal",
-                                        value::PropertyValue::I64Array(
-                                            vec![0, 10, 20, 30]
-                                                .into_iter()
-                                                .map(|n| n + scope_index as i64 * 100)
-                                                .collect(),
-                                        ),
-                                    ),
-                                )
-                                .set_property("deleted", true),
-                        )
-                        .var_as(
-                            "edges",
-                            traversal::g()
-                                .e_with_label_where(
-                                    "Resource",
-                                    expr::Predicate::is_in(
-                                        "ordinal",
-                                        value::PropertyValue::I64Array(
-                                            vec![0, 10, 20, 30]
-                                                .into_iter()
-                                                .map(|n| n + scope_index as i64 * 100)
-                                                .collect(),
-                                        ),
-                                    ),
-                                )
-                                .set_property("deleted", true),
-                        ),
-                ),
-                scope,
-            )
-            .await
-            .unwrap();
+            }
         }
     }
     db.close().await.unwrap();

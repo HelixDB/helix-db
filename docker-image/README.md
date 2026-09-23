@@ -110,6 +110,26 @@ python3 -m unittest discover -s docker-image/tests -p 'test_*.py'
 Pull requests and main-branch pushes build and run this suite natively for both amd64 and arm64. Automatic CI runs do not log in to GHCR or publish an image.
 
 
+## Indexed equality benchmark
+
+Build and load the baseline and candidate images, then compare them locally:
+
+```bash
+python3 docker-image/tests/indexed_equality_benchmark.py \
+  --baseline-image helixdb:baseline \
+  --candidate-image helixdb:candidate \
+  --rows 50000 --samples 30 --output /absolute/path/results.json
+```
+
+This Linux arm64 benchmark tests 1–5 equalities on sparse, skewed, broad, and
+small synthetic fixtures. Each response must match an independent source-data
+oracle. It also checks bound parameters, nested conjunctions, reordered terms,
+unindexed residuals, missing values, and reopened durable data. The JSON records
+paired HTTP p50/p95 measurements, raw samples, result hashes, and image IDs.
+HTTP timings include planning, execution, and serialization. Reopened reads
+have cold process caches, not cold host disks. Disposable loopback containers
+and volumes are removed on exit; images remain available to the caller.
+
 ## Release
 
 Run the `Docker image` workflow manually from `main` with `release_version`
