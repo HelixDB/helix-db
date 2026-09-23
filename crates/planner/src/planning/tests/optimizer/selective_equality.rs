@@ -574,3 +574,39 @@ fn broad_equality_seeds_can_lose_to_full_intersection_or_a_cheap_scan() {
         }
     }
 }
+
+#[test]
+fn seed_pruning_keeps_row_estimates_needed_by_downstream_sorting() {
+    let mut context = PlannerContext::default();
+    for (property, rows) in [("nullable", 100), ("selective", 1)] {
+        let key = ScopedPropertyKey::try_new("Fixture", property).unwrap();
+        context.indexes = context.indexes.with_node_eq(key.clone());
+        context.stats = context.stats.with_node_eq_cardinality(key, rows);
+    }
+    context.storage = crate::cost::StorageCostProfile {
+        object_get_latency: crate::cost::LatencyEstimate::micros(2),
+        sstable_filter_probe: crate::cost::LatencyEstimate::ZERO,
+        range_seek: crate::cost::LatencyEstimate::micros(1),
+        range_next: crate::cost::LatencyEstimate::ZERO,
+        cpu_predicate_eval: crate::cost::LatencyEstimate::ZERO,
+        bitmap_decode_per_id: crate::cost::LatencyEstimate::ZERO,
+        authoritative_verify_per_id: crate::cost::LatencyEstimate::ZERO,
+        secondary_row_materialization_per_id: crate::cost::LatencyEstimate::ZERO,
+        sort_per_row: crate::cost::LatencyEstimate::micros(1_000),
+        ..Default::default()
+    };
+    let plan = executable_traversal(
+        g().n_with_label_where(
+            "Fixture",
+            Predicate::and(vec![
+                Predicate::eq("nullable", PropertyValue::Null),
+                Predicate::eq("selective", 7),
+            ]),
+        )
+        .order_by("ordinal", Order::Asc),
+        context,
+    );
+    assert!(matches!(first_exec_access(&plan),
+        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
+        if key.property.as_ref() == "selective"));
+}

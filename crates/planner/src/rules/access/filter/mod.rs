@@ -27,10 +27,10 @@ pub(in crate::rules) fn access_filter_alternatives(
     let simplified = simplify_access_filter(filter);
     let rewrites = if simplified == AccessFilterRewrite::NotApplicable {
         // All equality seeds have the same complete predicate semantics. Keep
-        // the cheapest for each delivered-property contract before inserting
-        // them into the memo. This considers every usable equality without
-        // spending the alternative budget on equivalent seeds or subsets.
-        let mut seeds = Vec::<(crate::properties::DeliveredProperties, _, _)>::new();
+        // non-dominated costs and row estimates for each delivery contract.
+        // A cheaper seed with more rows may still lose after a sort/projection.
+        // This considers every equality without enumerating predicate subsets.
+        let mut seeds = Vec::<(crate::properties::DeliveredProperties, _, _, _)>::new();
         index::visit_equality_seed_rewrites(
             filter,
             input.indexes,
@@ -56,21 +56,21 @@ pub(in crate::rules) fn access_filter_alternatives(
                     cost,
                 );
                 let rank = (crate::optimizer::cost_key(cost), alternative.digest.get());
-                match seeds
-                    .iter_mut()
-                    .find(|(properties, _, _)| properties == &delivered)
-                {
-                    Some((_, best_rank, best)) if rank < *best_rank => {
-                        *best_rank = rank;
-                        *best = AccessFilterRewrite::RewrittenPipeline(pipeline);
-                    }
-                    Some(_) => {}
-                    None => seeds.push((
-                        delivered,
-                        rank,
-                        AccessFilterRewrite::RewrittenPipeline(pipeline),
-                    )),
+                let rows = access.estimated_rows;
+                if seeds.iter().any(|(properties, best_rows, best_rank, _)| {
+                    properties == &delivered && *best_rows <= rows && *best_rank <= rank
+                }) {
+                    return;
                 }
+                seeds.retain(|(properties, best_rows, best_rank, _)| {
+                    properties != &delivered || *best_rows < rows || *best_rank < rank
+                });
+                seeds.push((
+                    delivered,
+                    rows,
+                    rank,
+                    AccessFilterRewrite::RewrittenPipeline(pipeline),
+                ));
             },
         );
         std::iter::once(index_access_filter(
@@ -78,7 +78,7 @@ pub(in crate::rules) fn access_filter_alternatives(
             input.indexes,
             input.planner_limits,
         ))
-        .chain(seeds.into_iter().map(|(_, _, rewrite)| rewrite))
+        .chain(seeds.into_iter().map(|(_, _, _, rewrite)| rewrite))
         .collect()
     } else {
         vec![simplified]
