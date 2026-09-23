@@ -120,6 +120,7 @@ fn access_path_rule_covers_scan_runtime_search_and_filtered_costs() {
         filtered.cost,
         storage
             .point_gets(properties::PositiveUsize::new(1).unwrap())
+            .serial(storage.authoritative_verification(cost::EstimatedRows::rows(1)))
             .serial(storage.predicate_eval(cost::EstimatedRows::rows(1)))
     );
 }

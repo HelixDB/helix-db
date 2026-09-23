@@ -49,6 +49,7 @@ fn stream_project_implementation_rule_appends_typed_terminal_pipeline() {
         alternative.cost,
         storage
             .element_scan(rows)
+            .serial(storage.authoritative_verification(rows))
             .serial(storage.predicate_eval(rows))
             .serial(storage.stream_operator(rows))
     );

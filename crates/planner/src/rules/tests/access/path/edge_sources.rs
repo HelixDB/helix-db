@@ -174,6 +174,7 @@ fn access_path_contract_covers_edge_source_families() {
         filtered.cost,
         storage
             .label_scan(cost::EstimatedRows::rows(4))
+            .serial(storage.authoritative_verification(cost::EstimatedRows::rows(4)))
             .serial(storage.predicate_eval(cost::EstimatedRows::rows(4)))
     );
 }

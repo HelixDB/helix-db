@@ -17,6 +17,93 @@ pub(crate) use self::diagnostics::{missing_index_candidates, CandidateIndexKind}
 pub(in crate::rules) use index::{index_access_filter, label_domain_has_candidate};
 pub(in crate::rules) use simplify::simplify_access_filter;
 
+/// Explore complete index coverage plus a linear number of equality seeds,
+/// preserving every residual and any caller-owned pipeline suffix.
+pub(in crate::rules) fn access_filter_alternatives(
+    filter: &logical::AccessFilter,
+    input: &optimizer::RuleInput<'_>,
+    suffix: &[logical::StreamPipelineOp],
+) -> Vec<logical::AccessStream> {
+    let simplified = simplify_access_filter(filter);
+    let rewrites = if simplified == AccessFilterRewrite::NotApplicable {
+        // All equality seeds have the same complete predicate semantics. Keep
+        // the cheapest for each delivered-property contract before inserting
+        // them into the memo. This considers every usable equality without
+        // spending the alternative budget on equivalent seeds or subsets.
+        let mut seeds = Vec::<(crate::properties::DeliveredProperties, _, _)>::new();
+        index::visit_equality_seed_rewrites(
+            filter,
+            input.indexes,
+            input.planner_limits,
+            |pipeline| {
+                let (_, delivered, cost) =
+                    crate::rules::physical_contracts::access_pipeline_physical_contract(
+                        &pipeline,
+                        input.storage,
+                        input.stats,
+                    );
+                let access = crate::rules::physical_contracts::access_path_contract(
+                    pipeline.access(),
+                    input.storage,
+                    input.stats,
+                );
+                let alternative = crate::physical::PhysicalAlternative::new(
+                    crate::physical::PhysicalExpr::Access {
+                        element: pipeline.access().element(),
+                        access: access.access,
+                    },
+                    delivered.clone(),
+                    cost,
+                );
+                let rank = (crate::optimizer::cost_key(cost), alternative.digest.get());
+                match seeds
+                    .iter_mut()
+                    .find(|(properties, _, _)| properties == &delivered)
+                {
+                    Some((_, best_rank, best)) if rank < *best_rank => {
+                        *best_rank = rank;
+                        *best = AccessFilterRewrite::RewrittenPipeline(pipeline);
+                    }
+                    Some(_) => {}
+                    None => seeds.push((
+                        delivered,
+                        rank,
+                        AccessFilterRewrite::RewrittenPipeline(pipeline),
+                    )),
+                }
+            },
+        );
+        std::iter::once(index_access_filter(
+            filter,
+            input.indexes,
+            input.planner_limits,
+        ))
+        .chain(seeds.into_iter().map(|(_, _, rewrite)| rewrite))
+        .collect()
+    } else {
+        vec![simplified]
+    };
+    rewrites
+        .into_iter()
+        .filter_map(|rewrite| {
+            let (access, mut ops) = match rewrite {
+                AccessFilterRewrite::NotApplicable => return None,
+                AccessFilterRewrite::Rewritten(access) => (access, Vec::new()),
+                AccessFilterRewrite::RewrittenPipeline(pipeline) => {
+                    (pipeline.access().clone(), pipeline.ops().to_vec())
+                }
+            };
+            ops.extend_from_slice(suffix);
+            match ir::AtLeast::<_, 1>::try_from_vec(ops) {
+                Some(ops) => {
+                    logical::AccessPipeline::new(access, ops).map(logical::AccessStream::Pipeline)
+                }
+                None => Some(logical::AccessStream::Path(access)),
+            }
+        })
+        .collect()
+}
+
 /// Access-filter rewrite outcome at the rule boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::rules) enum AccessFilterRewrite {

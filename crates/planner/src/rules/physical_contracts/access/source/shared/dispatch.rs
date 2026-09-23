@@ -71,9 +71,9 @@ where
             storage,
             stats,
         ),
-        family::AccessSourceParts::ScanThenFilter { source } => {
+        family::AccessSourceParts::ScanThenFilter { source, residual } => {
             let child = access_contract::<F>(source, storage, stats);
-            filter::scan_then_filter_contract(child, storage)
+            filter::scan_then_filter_contract(child, residual, storage)
         }
     }
 }

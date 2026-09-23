@@ -299,7 +299,7 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
     let scopes = ["00000000000000000000000001", "00000000000000000000000002"]
         .map(|id| DataScope::Tenant(TenantId::from_ulid_str(id).unwrap()));
     for (scope_index, scope) in scopes.into_iter().enumerate() {
-        for property in ["tenant", "type", "deleted"] {
+        for property in ["tenant", "type", "deleted", "zone", "category"] {
             for spec in [
                 index::IndexSpec::node_equality("Resource", property),
                 index::IndexSpec::edge_equality("Resource", property),
@@ -360,6 +360,8 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
                     value::PropertyInput::from(if ordinal % 2 == 0 { "pod" } else { "service" }),
                 ),
                 ("deleted", value::PropertyInput::from(ordinal % 5 == 0)),
+                ("zone", value::PropertyInput::from("zone-a")),
+                ("category", value::PropertyInput::from("synthetic")),
                 (
                     "ordinal",
                     value::PropertyInput::from(ordinal + scope_index as i64 * 100),
@@ -425,6 +427,10 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
         expr::Predicate::eq("tenant", "one"),
         expr::Predicate::eq("type", "pod"),
         expr::Predicate::eq_param("deleted", "deleted"),
+        expr::Predicate::and(vec![
+            expr::Predicate::eq("zone", "zone-a"),
+            expr::Predicate::eq("category", "synthetic"),
+        ]),
     ]);
     let params = context::ParamBindings::default().with_value(
         helix_planner::ir::NonEmptyString::new("deleted").unwrap(),
@@ -503,7 +509,7 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
             let metrics = index_lifecycle::secondary::equality_read_metrics();
             assert_eq!(metrics.scans, 0);
             assert_eq!(metrics.graph_reads, 0);
-            assert_eq!(metrics.point_reads, 3);
+            assert_eq!(metrics.point_reads, 1);
             let response = super::QueryResponse::from_execution_result(result).unwrap();
             let expected = [0, 10, 20, 30]
                 .map(|ordinal| serde_json::json!({"ordinal": ordinal + scope_index * 100}));

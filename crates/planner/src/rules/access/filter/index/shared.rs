@@ -168,6 +168,78 @@ where
     }
 }
 
+/// Enumerate one equality seed per conjunct, never predicate subsets. Only
+/// broad sources can seed this exploration: residuals on the resulting narrow
+/// accesses must not recursively enumerate more combinations.
+pub(super) fn visit_equality_seed_filters<F>(
+    path: &F::Path,
+    predicate: &helix_ast::expr::Predicate,
+    predicate_label: &analysis::FeasibleLabelScope,
+    indexes: &catalog::IndexCatalogSnapshot,
+    planner_limits: &context::PlannerLimits,
+    mut emit: impl FnMut(F::Source, ir::PredicatePlan),
+) where
+    F: AccessFilterIndexFamily,
+{
+    if !F::is_broad_source(F::path_source(path)) {
+        return;
+    }
+    let Some(label) = access_filter_label(
+        F::source_common_label(F::path_source(path)),
+        predicate_label,
+    ) else {
+        return;
+    };
+    fn conjuncts<'a>(
+        predicate: &'a helix_ast::expr::Predicate,
+        terms: &mut Vec<&'a helix_ast::expr::Predicate>,
+    ) {
+        match predicate {
+            helix_ast::expr::Predicate::And { predicates } => {
+                for predicate in predicates {
+                    conjuncts(predicate, terms);
+                }
+            }
+            predicate => terms.push(predicate),
+        }
+    }
+    let mut terms = Vec::new();
+    conjuncts(predicate, &mut terms);
+    if terms.len() < 2 {
+        return;
+    }
+    terms
+        .iter()
+        .enumerate()
+        .filter_map(|(seed, predicate)| {
+            let AccessFilterIndexPlanMatch::Planned(AccessFilterIndexPlan::Conjunction(atoms)) =
+                super::index_plan(predicate, &label, planner_limits)
+            else {
+                return None;
+            };
+            let [atom @ AccessFilterIndexAtom::Equality {
+                domain: AccessEqualityDomain::One(_),
+                ..
+            }] = atoms.as_ref()
+            else {
+                return None;
+            };
+            let source = index_source_for_atom::<F>(&label, atom, indexes).ok()?;
+            let residual = terms
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != seed)
+                .map(|(_, predicate)| (*predicate).clone())
+                .collect::<Vec<_>>();
+            Some((
+                source,
+                ir::PredicatePlan::new(helix_ast::expr::Predicate::and(residual))
+                    .expect("conjuncts of a validated predicate remain valid"),
+            ))
+        })
+        .for_each(|(source, residual)| emit(source, residual));
+}
+
 pub(super) fn index_source_for_plan<F>(
     label: &ir::NonEmptyString,
     plan: &AccessFilterIndexPlan,

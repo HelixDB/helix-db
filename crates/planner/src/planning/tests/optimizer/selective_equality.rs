@@ -87,9 +87,12 @@ fn selective_equality_type_union_preserves_unindexed_residuals() {
             assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
             assert_eq!(
                 plan.metrics().selected_cost.object_reads,
-                if indexed_property == "tenant" { 1 } else { 2 }
+                if indexed_property == "tenant" { 11 } else { 22 }
             );
-            assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 0);
+            assert_eq!(
+                plan.metrics().selected_cost.authoritative_graph_reads,
+                if indexed_property == "tenant" { 10 } else { 20 }
+            );
         }
     }
 }
@@ -156,10 +159,11 @@ fn selective_equality_type_union_keeps_the_tenant_intersection() {
                     }
                 })
                 .collect::<Vec<_>>();
-            let context = PlannerContext {
+            let mut context = PlannerContext {
                 params,
                 ..ctx(indexes.clone())
             };
+            context.storage.default_equality_index_rows = crate::cost::EstimatedRows::rows(200);
             for union_first in [false, true] {
                 let tenant = if parameterized {
                     Predicate::eq_param("tenant", "tenant")
@@ -179,6 +183,16 @@ fn selective_equality_type_union_keeps_the_tenant_intersection() {
                         .values(vec!["id"]),
                 ] {
                     let plan = executable_traversal(traversal, context.clone());
+                    if type_count == 8 {
+                        assert!(matches!(
+                            first_exec_access(&plan),
+                            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { .. })
+                                | ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { .. })
+                        ));
+                        assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
+                        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 200);
+                        continue;
+                    }
                     assert!(
                         matches!(
                             first_exec_access(&plan),
@@ -207,7 +221,7 @@ fn selective_equality_type_union_keeps_the_tenant_intersection() {
 }
 
 #[test]
-fn selective_equality_uses_three_bitmaps_with_empty_or_populated_statistics() {
+fn selective_equality_keeps_an_index_seed_with_absent_or_stale_statistics() {
     let indexes = ["tenant", "type", "deleted"].into_iter().fold(
         IndexCatalogSnapshot::default(),
         |indexes, property| {
@@ -263,22 +277,20 @@ fn selective_equality_uses_three_bitmaps_with_empty_or_populated_statistics() {
                 ] {
                     let plan = executable_traversal(traversal, context.clone());
                     assert!(
-                        matches!(first_exec_access(&plan),
-                            ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet { set: crate::exec::ExecNodeSecondarySetPlan::Intersect { rest, .. } }) if rest.len() == 2
-                        ) || matches!(first_exec_access(&plan),
-                            ExecAccessPlan::Edge(ExecEdgeAccessPlan::SecondarySet { set: crate::exec::ExecEdgeSecondarySetPlan::Intersect { rest, .. } }) if rest.len() == 2
+                        matches!(
+                            first_exec_access(&plan),
+                            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { .. })
+                                | ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { .. })
                         ),
-                        "{deletion_rows:?}, parameterized={parameterized}, nested={nested}: {:#?}",
-                        plan.steps()
+                        "{plan:#?}"
                     );
-                    assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
-                    assert_eq!(plan.metrics().selected_cost.object_reads, 3);
+                    assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
                     assert_eq!(plan.metrics().selected_cost.range_nexts, 0);
                     assert_eq!(plan.metrics().selected_cost.parallel_width, 1);
-                    if deletion_rows.is_none() {
-                        // Full selected plan: serial memberships plus projection.
-                        assert_eq!(plan.metrics().selected_cost.latency.as_micros(), 16_220);
-                    }
+                    assert_eq!(
+                        plan.metrics().selected_cost.authoritative_graph_reads,
+                        deletion_rows.unwrap_or(10)
+                    );
                     let diagnostics = crate::diagnostics::analyze(&plan, &context);
                     assert!(diagnostics.insights.iter().all(|insight| !matches!(
                         insight,
@@ -299,10 +311,6 @@ fn selective_equality_costing_still_allows_measurably_small_label_scans() {
             .indexes
             .with_node_eq(key.clone())
             .with_edge_eq(key.clone());
-        context.stats = context
-            .stats
-            .with_node_eq_cardinality(key.clone(), 1)
-            .with_edge_eq_cardinality(key, 1);
     }
     context.stats = context
         .stats
@@ -329,13 +337,13 @@ fn selective_equality_costing_still_allows_measurably_small_label_scans() {
             "{:#?}",
             plan.steps()
         );
-        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 1);
+        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 2);
         assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
     }
 }
 
 #[test]
-fn indexed_conjunction_main_head_probe() {
+fn indexed_conjunction_avoids_the_scan_cliff() {
     let properties = ["kind", "name", "namespace", "group_id", "tenant_id"];
     let indexes =
         properties
@@ -411,4 +419,158 @@ fn indexed_conjunction_main_head_probe() {
         unbounded_cases.is_empty(),
         "indexed conjunctions selected unbounded scans: {unbounded_cases:?}"
     );
+}
+
+#[test]
+fn equality_seeds_are_permutation_invariant_and_preserve_every_residual() {
+    let properties = ["p0", "p1", "p2", "p3", "p4"];
+    let indexes =
+        properties
+            .into_iter()
+            .fold(IndexCatalogSnapshot::default(), |indexes, property| {
+                let key = ScopedPropertyKey::try_new("Fixture", property).unwrap();
+                indexes.with_node_eq(key.clone()).with_edge_eq(key)
+            });
+    let mut permutations = vec![Vec::new()];
+    for property in properties {
+        permutations = permutations
+            .into_iter()
+            .flat_map(|prefix| {
+                (0..=prefix.len()).map(move |position| {
+                    let mut next = prefix.clone();
+                    next.insert(position, property);
+                    next
+                })
+            })
+            .collect();
+    }
+    assert_eq!(permutations.len(), 120);
+    for selective_rows in [None, Some(0), Some(3)] {
+        let mut context = ctx(indexes.clone());
+        if let Some(rows) = selective_rows {
+            for property in properties {
+                let key = ScopedPropertyKey::try_new("Fixture", property).unwrap();
+                let count = if property == "p4" { rows } else { 20_000 };
+                context.stats = context
+                    .stats
+                    .with_node_eq_cardinality(key.clone(), count)
+                    .with_edge_eq_cardinality(key, count);
+            }
+        }
+        let mut chosen = [None, None];
+        for permutation in &permutations {
+            for parameterized in [false, true] {
+                for nested in [false, true] {
+                    let terms = permutation
+                        .iter()
+                        .map(|property| {
+                            context.params = context.params.clone().with_value(
+                                NonEmptyString::new(*property).unwrap(),
+                                PropertyValue::from(7),
+                            );
+                            if parameterized {
+                                Predicate::eq_param(*property, *property)
+                            } else {
+                                Predicate::eq(*property, 7)
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let predicate = if nested {
+                        Predicate::and(vec![
+                            Predicate::and(terms[..2].to_vec()),
+                            Predicate::and(terms[2..].to_vec()),
+                        ])
+                    } else {
+                        Predicate::and(terms)
+                    };
+                    for (element, traversal) in [
+                        g().n_with_label_where("Fixture", predicate.clone())
+                            .values(vec!["p0"]),
+                        g().e_with_label_where("Fixture", predicate)
+                            .values(vec!["p0"]),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let plan = executable_traversal(traversal, context.clone());
+                        assert!(!plan.metrics().guardrail_hit);
+                        let key = match first_exec_access(&plan) {
+                            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap {
+                                bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. },
+                            })
+                            | ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap {
+                                bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. },
+                            }) => key,
+                            other => panic!("expected one equality seed, got {other:?}"),
+                        };
+                        if selective_rows.is_some() {
+                            assert_eq!(key.property.as_ref(), "p4");
+                        }
+                        let previous = chosen[element].get_or_insert_with(|| key.property.clone());
+                        assert_eq!(previous, &key.property);
+                        let expected = Predicate::and(
+                            permutation
+                                .iter()
+                                .filter(|property| **property != key.property.as_ref())
+                                .map(|property| Predicate::eq(*property, 7))
+                                .collect(),
+                        );
+                        assert!(
+                            matches!(first_exec_op(&plan, |op| matches!(op, ExecOp::Filter { .. })),
+                            ExecOp::Filter { predicate } if predicate.as_ref() == &expected)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn broad_equality_seeds_can_lose_to_full_intersection_or_a_cheap_scan() {
+    let mut context = PlannerContext::default();
+    for property in ["p0", "p1", "p2", "p3", "p4"] {
+        let key = ScopedPropertyKey::try_new("Fixture", property).unwrap();
+        context.indexes = context
+            .indexes
+            .with_node_eq(key.clone())
+            .with_edge_eq(key.clone());
+        context.stats = context
+            .stats
+            .with_node_eq_cardinality(key.clone(), 10_000)
+            .with_edge_eq_cardinality(key, 10_000);
+    }
+    for label_rows in [1, 100_000] {
+        context.stats = context
+            .stats
+            .with_node_label_cardinality(NonEmptyString::new("Fixture").unwrap(), label_rows)
+            .with_edge_label_cardinality(NonEmptyString::new("Fixture").unwrap(), label_rows);
+        let predicate = Predicate::and(
+            ["p0", "p1", "p2", "p3", "p4"]
+                .into_iter()
+                .map(|property| Predicate::eq(property, 7))
+                .collect(),
+        );
+        for traversal in [
+            g().n_with_label_where("Fixture", predicate.clone())
+                .values(vec!["p0"]),
+            g().e_with_label_where("Fixture", predicate)
+                .values(vec!["p0"]),
+        ] {
+            let plan = executable_traversal(traversal, context.clone());
+            match (label_rows, first_exec_access(&plan)) {
+                (
+                    1,
+                    ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { .. })
+                    | ExecAccessPlan::Edge(ExecEdgeAccessPlan::LabelScan { .. }),
+                ) => {}
+                (
+                    100_000,
+                    ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet { .. })
+                    | ExecAccessPlan::Edge(ExecEdgeAccessPlan::SecondarySet { .. }),
+                ) => {}
+                (_, other) => panic!("unexpected choice for {label_rows} label rows: {other:?}"),
+            }
+        }
+    }
 }

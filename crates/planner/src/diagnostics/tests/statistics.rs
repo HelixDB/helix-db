@@ -290,13 +290,14 @@ fn residual_filter_and_index_set_plans_count_selected_operators_exactly() {
     );
     assert_eq!(union.diagnostics().statistics.residual_filters, 0);
 
-    let intersect_ctx = context::PlannerContext {
+    let mut intersect_ctx = context::PlannerContext {
         indexes: union_ctx.indexes.clone().with_node_range(
             catalog::ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc)
                 .unwrap(),
         ),
         ..context::PlannerContext::default()
     };
+    intersect_ctx.storage.default_equality_index_rows = crate::cost::EstimatedRows::rows(2_000);
     let intersection = plan(
         g().n_with_label_where(
             "User",
