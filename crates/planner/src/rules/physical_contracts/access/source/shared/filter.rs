@@ -5,6 +5,7 @@ use crate::cost;
 
 pub(super) fn scan_then_filter_contract(
     contract: AccessPhysicalContract,
+    residual: &crate::ir::PredicatePlan,
     storage: &cost::StorageCostProfile,
 ) -> AccessPhysicalContract {
     AccessPhysicalContract::new(
@@ -12,7 +13,7 @@ pub(super) fn scan_then_filter_contract(
         contract.delivered,
         contract
             .cost
-            .serial(storage.predicate_eval(contract.estimated_rows)),
+            .serial(storage.residual_filter(residual.as_ref(), contract.estimated_rows)),
         contract.estimated_rows,
     )
 }

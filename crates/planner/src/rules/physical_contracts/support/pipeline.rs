@@ -59,12 +59,12 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
     cost::CostVector,
 ) {
     match op {
-        logical::StreamPipelineOp::Filter { .. } => {
+        logical::StreamPipelineOp::Filter { predicate } => {
             let upper = delivered.cardinality.upper();
             (
                 physical::PhysicalPipelineOp::ResidualFilter,
                 with_cardinality(delivered, upper),
-                storage.predicate_eval(rows),
+                storage.residual_filter(predicate.as_ref(), rows),
             )
         }
         logical::StreamPipelineOp::Window { window } => {

@@ -51,6 +51,62 @@ pub(in crate::rules) fn index_access_filter(
     .or_else(|| label_domain::rewrite(filter.access(), &predicate, planner_limits))
 }
 
+/// Keep full index coverage and individual equality seeds in the same memo
+/// group. The scan alternative is retained by the implementation rule.
+pub(in crate::rules) fn visit_equality_seed_rewrites(
+    filter: &logical::AccessFilter,
+    indexes: &catalog::IndexCatalogSnapshot,
+    planner_limits: &context::PlannerLimits,
+    mut emit: impl FnMut(logical::AccessPipeline),
+) {
+    let Ok(analysis::PrunedPredicate::Feasible { predicate, label }) =
+        analysis::prune_statically_impossible_branches(filter.predicate().as_ref())
+    else {
+        return;
+    };
+    let mut emit_pipeline = |access, predicate| {
+        emit(
+            logical::AccessPipeline::new(
+                access,
+                ir::AtLeast::<_, 1>::from_one(logical::StreamPipelineOp::Filter { predicate }),
+            )
+            .expect("single residual filter is a valid access pipeline"),
+        );
+    };
+    match filter.access() {
+        logical::AccessPath::Node(path) => {
+            shared::visit_equality_seed_filters::<node::NodeIndexFamily>(
+                path,
+                &predicate,
+                &label,
+                indexes,
+                planner_limits,
+                |source, residual| {
+                    emit_pipeline(
+                        logical::AccessPath::Node(logical::NodeAccessPath::new(source)),
+                        residual,
+                    )
+                },
+            )
+        }
+        logical::AccessPath::Edge(path) => {
+            shared::visit_equality_seed_filters::<edge::EdgeIndexFamily>(
+                path,
+                &predicate,
+                &label,
+                indexes,
+                planner_limits,
+                |source, residual| {
+                    emit_pipeline(
+                        logical::AccessPath::Edge(logical::EdgeAccessPath::new(source)),
+                        residual,
+                    )
+                },
+            )
+        }
+    }
+}
+
 fn index_application_rewrite<T>(
     application: AccessFilterIndexApplication<T>,
     access_path: impl FnOnce(T) -> logical::AccessPath,

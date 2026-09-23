@@ -20,7 +20,8 @@ pub(in crate::rules) fn access_filter_pipeline_contract(
         access.delivered.clone(),
         access.delivered.cardinality.upper(),
     );
-    let predicate_cost = storage.predicate_eval(access.estimated_rows);
+    let predicate_cost =
+        storage.residual_filter(filter.predicate().as_ref(), access.estimated_rows);
     let pipeline = physical::PhysicalPipeline::new(ir::AtLeast::<_, 1>::from_one_and_rest(
         access_pipeline_op(filter.access(), access.access),
         vec![physical::PhysicalPipelineOp::ResidualFilter],

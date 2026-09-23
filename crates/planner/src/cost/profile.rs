@@ -9,6 +9,7 @@ mod defaults;
 mod formulas;
 mod overrides;
 mod parallel;
+mod residual;
 
 use serde::{Deserialize, Serialize};
 

@@ -70,7 +70,10 @@ impl AccessSourceFamily for TestFamily {
             TestPlan::Search(k) => AccessSourceParts::VectorSearch { k },
             TestPlan::Intersect(plans) => AccessSourceParts::Intersect(plans.iter().collect()),
             TestPlan::Union(plans) => AccessSourceParts::Union(plans.iter().collect()),
-            TestPlan::Filtered(source) => AccessSourceParts::ScanThenFilter { source },
+            TestPlan::Filtered(source) => AccessSourceParts::ScanThenFilter {
+                source,
+                residual: test_residual(),
+            },
         }
     }
 
@@ -217,7 +220,7 @@ fn set_and_filter_contracts_reuse_shared_child_costs() {
         storage
             .secondary_range_lookup(range_rows)
             .serial(storage.secondary_row_materialization(range_rows))
-            .serial(storage.predicate_eval(range_rows))
+            .serial(storage.residual_filter(test_residual().as_ref(), range_rows))
     );
     assert_eq!(
         intersection.delivered.cardinality,
@@ -297,4 +300,11 @@ fn selective_equality_intersection_charges_all_memberships_and_materializes_once
         assert_eq!(nested.estimated_rows, cost::EstimatedRows::ZERO);
         assert_eq!(nested.cost, expected_ids);
     }
+}
+
+fn test_residual() -> &'static ir::PredicatePlan {
+    static PREDICATE: std::sync::OnceLock<ir::PredicatePlan> = std::sync::OnceLock::new();
+    PREDICATE.get_or_init(|| {
+        ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("active", true)).unwrap()
+    })
 }
