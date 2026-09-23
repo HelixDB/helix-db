@@ -306,3 +306,77 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_unions() {
         )
     ));
 }
+
+#[test]
+fn indexed_conjunction_candidate_cost_probe() {
+    let rules = SeedRuleSet::default();
+    let indexes = ["kind", "name", "namespace", "group_id", "tenant_id"]
+        .into_iter()
+        .fold(
+            catalog::IndexCatalogSnapshot::default(),
+            |indexes, property| {
+                indexes
+                    .with_node_eq(catalog::ScopedPropertyKey::try_new("Fixture", property).unwrap())
+            },
+        );
+    let config = optimizer::OptimizerConfig::from_context(&crate::context::PlannerContext {
+        indexes,
+        ..Default::default()
+    });
+    let expr = node_access_filter_expr(
+        ir::NodeAccessPlan::LabelScan {
+            label: name("Fixture"),
+        },
+        ir::PredicatePlan::new(helix_ast::expr::Predicate::and(vec![
+            helix_ast::expr::Predicate::eq("kind", "fixture-value"),
+            helix_ast::expr::Predicate::eq("name", "fixture-value"),
+            helix_ast::expr::Predicate::eq("namespace", "fixture-value"),
+            helix_ast::expr::Predicate::eq("group_id", "fixture-value"),
+            helix_ast::expr::Predicate::eq("tenant_id", "fixture-value"),
+        ]))
+        .unwrap(),
+    );
+    let result = optimize(&rules.optimizer(), expr, &config);
+    assert_eq!(result.guardrail(), None);
+    for group in result.physical() {
+        for entry in &group.alternatives {
+            eprintln!(
+                "candidate {:?}: {:?} cost={:?}",
+                entry.id, entry.alternative.expr, entry.alternative.cost
+            );
+        }
+    }
+    let candidates = result
+        .physical()
+        .iter()
+        .flat_map(|group| &group.alternatives)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candidates.len(),
+        2,
+        "both scan and intersection must survive exploration"
+    );
+    let scan = candidates
+        .iter()
+        .find(|entry| matches!(entry.alternative.expr, physical::PhysicalExpr::Pipeline(_)))
+        .unwrap();
+    let indexed = candidates
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.alternative.expr,
+                physical::PhysicalExpr::Access { .. }
+            )
+        })
+        .unwrap();
+    assert_eq!(scan.alternative.cost.latency.as_micros(), 18_050);
+    assert_eq!(scan.alternative.cost.authoritative_graph_reads, 1000);
+    assert_eq!(indexed.alternative.cost.latency.as_micros(), 25_360);
+    assert_eq!(indexed.alternative.cost.object_reads, 5);
+    assert_eq!(indexed.alternative.cost.cpu_units, 110);
+    assert_eq!(indexed.alternative.cost.parallel_width, 1);
+    assert_eq!(
+        result.best_alternative(result.root()).unwrap(),
+        &scan.alternative
+    );
+}

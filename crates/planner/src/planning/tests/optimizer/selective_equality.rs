@@ -333,3 +333,82 @@ fn selective_equality_costing_still_allows_measurably_small_label_scans() {
         assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
     }
 }
+
+#[test]
+fn indexed_conjunction_main_head_probe() {
+    let properties = ["kind", "name", "namespace", "group_id", "tenant_id"];
+    let indexes =
+        properties
+            .into_iter()
+            .fold(IndexCatalogSnapshot::default(), |indexes, property| {
+                indexes.with_node_eq(ScopedPropertyKey::try_new("Fixture", property).unwrap())
+            });
+    let mut unbounded_cases = Vec::new();
+    for count in [1, 2, 3, 4, 5] {
+        for populated_stats in [false, true] {
+            for parameterized in [false, true] {
+                for nested in [false, true] {
+                    let mut context = ctx(indexes.clone());
+                    if populated_stats {
+                        context.stats = context.stats.with_node_label_cardinality(
+                            NonEmptyString::new("Fixture").unwrap(),
+                            100_000,
+                        );
+                        for (property, rows) in properties
+                            .into_iter()
+                            .zip([3_000, 1, 5_000, 10_000, 50_000])
+                        {
+                            context.stats = context.stats.with_node_eq_cardinality(
+                                ScopedPropertyKey::try_new("Fixture", property).unwrap(),
+                                rows,
+                            );
+                        }
+                    }
+                    let terms = properties
+                        .iter()
+                        .take(count)
+                        .map(|property| {
+                            context.params = context.params.clone().with_value(
+                                NonEmptyString::new(*property).unwrap(),
+                                PropertyValue::from("fixture-value"),
+                            );
+                            if parameterized {
+                                Predicate::eq_param(*property, *property)
+                            } else {
+                                Predicate::eq(*property, "fixture-value")
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let predicate = if nested {
+                        Predicate::and(vec![Predicate::and(terms)])
+                    } else {
+                        Predicate::and(terms)
+                    };
+                    let plan = executable_traversal(
+                        g().n_with_label_where("Fixture", predicate)
+                            .values(vec!["name"]),
+                        context.clone(),
+                    );
+                    let diagnostics = crate::diagnostics::analyze(&plan, &context);
+                    let unbounded = diagnostics.insights.iter().any(|insight| {
+                        matches!(
+                            insight,
+                            crate::diagnostics::PlannerInsight::UnboundedScan(_)
+                        )
+                    });
+                    println!("PROBE count={count} stats={populated_stats} params={parameterized} nested={nested} unbounded={unbounded} label_scans={} equality_lookups={} estimated_us={}",
+                        diagnostics.statistics.node_accesses.label_scans,
+                        diagnostics.statistics.node_accesses.equality_index_lookups,
+                        plan.metrics().selected_cost.latency.as_micros());
+                    if unbounded {
+                        unbounded_cases.push((count, populated_stats, parameterized, nested));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        unbounded_cases.is_empty(),
+        "indexed conjunctions selected unbounded scans: {unbounded_cases:?}"
+    );
+}
