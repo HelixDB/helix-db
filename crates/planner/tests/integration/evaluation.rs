@@ -306,3 +306,187 @@ fn expression_sequences_share_live_memory_and_preserve_error_order() {
         "MemoryLimit"
     );
 }
+
+#[test]
+fn string_transforms_admit_outputs_before_allocating_them() {
+    use r::{Expression as E, Function as F, Value as V};
+    let source = "aλ猫Z".repeat(8192);
+    let parameters = BTreeMap::from([("value".into(), V::String(source.clone()))]);
+    let input = parameters["value"].allocated_bytes();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: source.len() * 3 / 2,
+    };
+    for function in [F::Trim, F::Ltrim, F::Rtrim, F::Reverse, F::Substring] {
+        let mut args = vec![E::Parameter("value".into())];
+        if function == F::Substring {
+            args.push(E::Literal(V::Integer(0)));
+        }
+        let input_bytes = input + (args.len() - 1) * size_of::<V>();
+        let expression = E::Function(function, args);
+        let expected = if function == F::Reverse {
+            source.chars().rev().collect::<String>()
+        } else {
+            source.clone()
+        };
+        let exact = input_bytes + size_of::<V>() + expected.len();
+        for allowance in [evaluation.max_value_bytes, exact - 1, exact] {
+            let bounded = r::Evaluation {
+                max_value_bytes: allowance,
+                ..evaluation
+            };
+            let (result, allocated) = crate::allocations::observe(|| bounded.eval(&expression));
+            if allowance < exact {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    (&*error.category, &*error.detail),
+                    ("ResourceLimit", "MemoryLimit"),
+                    "{function:?}"
+                );
+                assert!(
+                    allocated.bytes < source.len() + 1024,
+                    "{function:?}: rejected output was allocated: {allocated:?}"
+                );
+            } else {
+                assert_eq!(result.unwrap(), V::String(expected.clone()), "{function:?}");
+                assert!(
+                    allocated.bytes <= exact,
+                    "{function:?}: {allocated:?} exceeds {exact}"
+                );
+            }
+        }
+        assert_eq!(parameters["value"], V::String(source.clone()));
+    }
+}
+
+#[test]
+fn string_selection_preserves_unicode_boundaries_and_argument_errors() {
+    use r::{Expression as E, Function as F, Value as V};
+    let parameters = BTreeMap::new();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: 16_384,
+    };
+    let integer = |n| E::Literal(V::Integer(n));
+    for (function, source, trailing, expected) in [
+        (F::Trim, "\u{2003} λ猫 \t", vec![], "λ猫"),
+        (F::Ltrim, "\u{2003} λ猫 \t", vec![], "λ猫 \t"),
+        (F::Rtrim, "\u{2003} λ猫 \t", vec![], "\u{2003} λ猫"),
+        (F::Trim, " \u{2003}\t", vec![], ""),
+        (F::Reverse, "aλ猫😀", vec![], "😀猫λa"),
+        (F::Reverse, "e\u{301}", vec![], "\u{301}e"),
+        (F::Reverse, "", vec![], ""),
+        (
+            F::Substring,
+            "aλ猫😀z",
+            vec![integer(1), integer(3)],
+            "λ猫😀",
+        ),
+        (F::Substring, "aλ猫😀z", vec![integer(2)], "猫😀z"),
+        (F::Substring, "aλ猫😀z", vec![integer(1), integer(0)], ""),
+        (F::Substring, "aλ猫😀z", vec![integer(5)], ""),
+        (F::Substring, "aλ猫😀z", vec![integer(i64::MAX)], ""),
+        (
+            F::Substring,
+            "aλ猫😀z",
+            vec![integer(2), integer(i64::MAX)],
+            "猫😀z",
+        ),
+        (F::Substring, "", vec![integer(0)], ""),
+    ] {
+        let mut args = vec![E::Literal(V::String(source.into()))];
+        args.extend(trailing);
+        let expression = E::Function(function, args);
+        expression.validate_shape().unwrap();
+        assert_eq!(
+            evaluation.eval(&expression).unwrap(),
+            V::String(expected.into()),
+            "{expression:?}"
+        );
+    }
+    for function in [
+        F::Trim,
+        F::Ltrim,
+        F::Rtrim,
+        F::Reverse,
+        F::Substring,
+        F::ToLower,
+        F::ToUpper,
+    ] {
+        for first in [V::Null, V::Boolean(true)] {
+            let mut args = vec![E::Literal(first.clone())];
+            if function == F::Substring {
+                args.push(integer(0));
+            }
+            let result = evaluation.eval(&E::Function(function, args));
+            if first == V::Null {
+                assert_eq!(result.unwrap(), V::Null);
+            } else {
+                assert_eq!(result.unwrap_err().category, "TypeError");
+            }
+        }
+    }
+    for offset in [V::Integer(-1), V::Float(1.0), V::Null] {
+        for position in [1, 2] {
+            let mut args = vec![E::Literal(V::String("λ猫".into())), integer(0), integer(1)];
+            args[position] = E::Literal(offset.clone());
+            let error = evaluation
+                .eval(&E::Function(F::Substring, args))
+                .unwrap_err();
+            assert_eq!(
+                error.detail,
+                if offset == V::Integer(-1) {
+                    "NegativeIntegerArgument"
+                } else {
+                    "InvalidArgumentType"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn string_scalar_conversions_reuse_admitted_arguments() {
+    use r::{Expression as E, Function as F, Value as V};
+    let source = "λ猫".repeat(8192);
+    let parameters = BTreeMap::from([("value".into(), V::String(source.clone()))]);
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: source.len() + 2 * size_of::<V>(),
+    };
+    for (function, expected) in [
+        (F::ToString, V::String(source.clone())),
+        (F::ToBoolean, V::Null),
+    ] {
+        let expression = E::Function(function, vec![E::Parameter("value".into())]);
+        let (result, allocated) = crate::allocations::observe(|| evaluation.eval(&expression));
+        assert_eq!(result.unwrap(), expected);
+        assert!(
+            allocated.bytes <= evaluation.max_value_bytes,
+            "{function:?} copied its owned string: {allocated:?}"
+        );
+    }
+    for (text, expected) in [
+        (" true ", V::Boolean(true)),
+        ("\u{2003}FaLsE\t", V::Boolean(false)),
+        ("TrUe", V::Boolean(true)),
+        ("truе", V::Null),
+        ("", V::Null),
+    ] {
+        let expression = E::Function(F::ToBoolean, vec![E::Literal(V::String(text.into()))]);
+        assert_eq!(evaluation.eval(&expression).unwrap(), expected);
+    }
+    assert_eq!(parameters["value"], V::String(source));
+}

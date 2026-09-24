@@ -470,7 +470,10 @@ impl Evaluation<'_> {
                 .unwrap_or(Value::Null),
                 _ => return Err(type_error("head and last require a list")),
             },
-            F::ToString => Value::String(scalar_string(&first)?),
+            F::ToString => match first {
+                Value::String(_) => first,
+                _ => Value::String(scalar_string(&first)?),
+            },
             F::ToInteger => match first {
                 Value::Integer(_) => first,
                 Value::Float(f) => finite_integer(f).map(Value::Integer).unwrap_or(Value::Null),
@@ -496,9 +499,9 @@ impl Evaluation<'_> {
             },
             F::ToBoolean => match first {
                 Value::Boolean(_) => first,
-                Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
-                    "true" => Value::Boolean(true),
-                    "false" => Value::Boolean(false),
+                Value::String(s) => match s.trim() {
+                    text if text.eq_ignore_ascii_case("true") => Value::Boolean(true),
+                    text if text.eq_ignore_ascii_case("false") => Value::Boolean(false),
                     _ => Value::Null,
                 },
                 _ => return Err(type_error("toBoolean requires a string or boolean")),
@@ -535,20 +538,35 @@ impl Evaluation<'_> {
                     xs.reverse();
                     Value::List(xs)
                 }
-                Value::String(s) => Value::String(s.chars().rev().collect()),
+                Value::String(s) => {
+                    self.remaining(size_of::<Value>().saturating_add(s.len()))?;
+                    let mut reversed = String::with_capacity(s.len());
+                    reversed.extend(s.chars().rev());
+                    Value::String(reversed)
+                }
                 _ => return Err(type_error("reverse requires a string or list")),
             },
-            F::Trim | F::Ltrim | F::Rtrim | F::ToLower | F::ToUpper => {
+            F::Trim | F::Ltrim | F::Rtrim => {
                 let Value::String(s) = first else {
                     return Err(type_error("string function requires a string"));
                 };
-                Value::String(match function {
-                    F::Trim => s.trim().to_owned(),
-                    F::Ltrim => s.trim_start().to_owned(),
-                    F::Rtrim => s.trim_end().to_owned(),
-                    F::ToLower => s.to_lowercase(),
-                    F::ToUpper => s.to_uppercase(),
+                let trimmed = match function {
+                    F::Trim => s.trim(),
+                    F::Ltrim => s.trim_start(),
+                    F::Rtrim => s.trim_end(),
                     _ => unreachable!(),
+                };
+                self.remaining(size_of::<Value>().saturating_add(trimmed.len()))?;
+                Value::String(trimmed.to_owned())
+            }
+            F::ToLower | F::ToUpper => {
+                let Value::String(s) = first else {
+                    return Err(type_error("string function requires a string"));
+                };
+                Value::String(if function == F::ToLower {
+                    s.to_lowercase()
+                } else {
+                    s.to_uppercase()
                 })
             }
             F::Substring => {
@@ -564,7 +582,19 @@ impl Evaluation<'_> {
                     .map(nonnegative)
                     .transpose()?
                     .unwrap_or(usize::MAX);
-                Value::String(s.chars().skip(start).take(len).collect())
+                // Resolve character offsets into a borrowed UTF-8 slice before
+                // admitting and copying its exact bytes. No temporary character
+                // collection or geometrically growing output buffer is needed.
+                let start = s
+                    .char_indices()
+                    .nth(start)
+                    .map_or(s.len(), |(offset, _)| offset);
+                let bytes = s[start..]
+                    .char_indices()
+                    .nth(len)
+                    .map_or(s.len() - start, |(offset, _)| offset);
+                self.remaining(size_of::<Value>().saturating_add(bytes))?;
+                Value::String(s[start..start + bytes].to_owned())
             }
             F::Coalesce | F::Exists => unreachable!("handled before strict function evaluation"),
         })

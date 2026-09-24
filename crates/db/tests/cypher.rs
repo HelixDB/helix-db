@@ -872,3 +872,78 @@ async fn generated_rows_feed_grouped_aggregates_in_bounded_batches() {
 
 #[path = "cypher/wildcard_identity.rs"]
 mod wildcard_identity;
+
+#[tokio::test]
+async fn string_temporaries_share_the_query_budget_and_failures_roll_back() {
+    let db = database().await;
+    let text = "λ猫".repeat(100_000);
+    let budget = text.len() * 9 / 2 + 64 * 1024;
+    let execute = |query: String, memory_bytes| {
+        let mut request = cypher::Request::new(query);
+        request.parameters.insert(
+            "text".into(),
+            helix_ast::query::QueryValue::String(text.clone()),
+        );
+        cypher::execute(
+            &db,
+            request,
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::query_service::QueryMode::Execute,
+            db::execution_control::ExecutionControl::default(),
+            cypher::Limits {
+                memory_bytes,
+                ..Default::default()
+            },
+        )
+    };
+    // The parameters, mutation, and scalar result fit before requiring a second
+    // full string. A later expression failure must roll back that mutation.
+    let control = execute("CREATE (:StringBudget) RETURN size($text)".into(), budget)
+        .await
+        .unwrap();
+    assert_eq!(control.rows, vec![vec![json!(200_000)]]);
+    let mut committed = 1;
+    for expression in [
+        "trim($text)",
+        "ltrim($text)",
+        "rtrim($text)",
+        "reverse($text)",
+        "substring($text,0)",
+    ] {
+        let query = format!("CREATE (:StringBudget) RETURN size({expression})");
+        let error = execute(query.clone(), budget).await.unwrap_err();
+        assert!(
+            matches!(error, cypher::Error::Query(ref error)
+            if error.category == "ResourceLimit" && error.detail == "MemoryLimit"
+                && error.phase == helix_planner::relational::ErrorPhase::Runtime
+                && error.message == "expression temporaries exceed the query memory budget"),
+            "{expression}: {error:?}"
+        );
+        assert_eq!(
+            run(&db, "MATCH (n:StringBudget) RETURN count(*)")
+                .await
+                .rows,
+            vec![vec![json!(committed)]]
+        );
+        let result = execute(query, budget + 2 * text.len()).await.unwrap();
+        assert_eq!(result.rows, vec![vec![json!(200_000)]]);
+        committed += 1;
+    }
+    assert_eq!(
+        run(&db, "MATCH (n:StringBudget) RETURN count(*)")
+            .await
+            .rows,
+        vec![vec![json!(committed)]]
+    );
+    assert_eq!(
+        execute(
+            "RETURN size(toString($text)),toBoolean($text)".into(),
+            budget
+        )
+        .await
+        .unwrap()
+        .rows,
+        vec![vec![json!(200_000), json!(null)]]
+    );
+    db.close().await.unwrap();
+}
