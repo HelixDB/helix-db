@@ -1,6 +1,5 @@
+use crate::allocations;
 use helix_planner::relational as r;
-#[path = "../../planner/src/analysis/tests/allocations.rs"]
-mod allocations;
 
 #[test]
 fn bound_match_resolution_does_not_copy_unrelated_visible_names() {

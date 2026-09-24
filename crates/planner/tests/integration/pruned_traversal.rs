@@ -1,6 +1,5 @@
+use crate::allocations as allocation;
 use helix_planner::relational as r;
-#[path = "../src/analysis/tests/allocations.rs"]
-mod allocation;
 use r::TraversalControl;
 
 struct NonClone(u8);

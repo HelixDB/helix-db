@@ -1,6 +1,5 @@
+use crate::allocations;
 use helix_planner::relational as r;
-#[path = "../src/analysis/tests/allocations.rs"]
-mod allocations;
 use std::ops::ControlFlow;
 
 struct NonClone(u8, std::rc::Rc<std::cell::Cell<usize>>);

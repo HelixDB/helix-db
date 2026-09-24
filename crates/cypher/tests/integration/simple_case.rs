@@ -1,7 +1,6 @@
+use crate::allocations;
 use helix_planner::relational as r;
 use std::collections::BTreeMap;
-#[path = "../../planner/src/analysis/tests/allocations.rs"]
-mod allocations;
 
 struct NoGraph;
 impl r::GraphValues for NoGraph {

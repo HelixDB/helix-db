@@ -1,7 +1,6 @@
 //! Construction budgets exclude parsing and measure allocation requests, not RSS.
+use crate::allocations;
 use helix_planner::relational as r;
-#[path = "../../planner/src/analysis/tests/allocations.rs"]
-mod allocations;
 
 #[test]
 fn growing_and_shadowed_scopes_stay_within_compilation_allocation_budgets() {

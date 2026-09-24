@@ -268,6 +268,15 @@ edition and its existing style edition. Other settings come from the pinned
 stable toolchain, avoiding a copied defaults dump containing unsupported nightly
 options. Effective stable settings and formatted source remain unchanged.
 
+The [frontend integration suite](../crates/cypher/tests/integration/main.rs) and
+[planner integration suite](../crates/planner/tests/integration/main.rs) share
+one executable per crate while keeping their domain modules and fixtures.
+Allocation-request observations remain local to each test thread. The planner's
+[live-allocation tests](../crates/planner/tests/allocation_bounds.rs) keep a
+separate executable because they require a different global allocator. This
+reduces 27 integration executables to three without removing tests or combining
+the two allocation contracts.
+
 Limited DISTINCT keeps a bounded ordered set while preserving the same first
 representative of each retained equality class. Its cutoff only decreases; an
 evicted class can never enter the final smallest set later. This keeps the

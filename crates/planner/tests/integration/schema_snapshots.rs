@@ -1,9 +1,7 @@
 //! Logical schema snapshots preserve column facts while sharing immutable maps.
+use crate::allocations;
 use helix_planner::relational as r;
 use std::{collections::BTreeSet, ptr};
-
-#[path = "../src/analysis/tests/allocations.rs"]
-mod allocations;
 
 fn transition_query() -> r::Query {
     let bindings = [

@@ -1,6 +1,5 @@
+use crate::allocations;
 use helix_planner::relational as r;
-#[path = "../../planner/src/analysis/tests/allocations.rs"]
-mod allocations;
 
 #[test]
 fn ordering_one_new_alias_does_not_index_every_projection() {

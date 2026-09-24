@@ -1,3 +1,4 @@
+use crate::allocations;
 use helix_cypher::compile;
 use helix_planner::relational as r;
 
@@ -45,9 +46,6 @@ fn recognized_keys_and_aggregate_arguments_retain_valid_dependencies() {
         compile(query).unwrap_or_else(|error| panic!("{query}: {error}"));
     }
 }
-
-#[path = "../../planner/src/analysis/tests/allocations.rs"]
-mod allocations;
 
 #[test]
 fn aggregation_validation_does_not_clone_owned_literal_payloads() {

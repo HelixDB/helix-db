@@ -1,6 +1,5 @@
+use crate::allocations;
 use helix_planner::relational as r;
-#[path = "../../planner/src/analysis/tests/allocations.rs"]
-mod allocations;
 
 #[test]
 fn plain_wildcards_add_no_binding_or_projection_allocation() {
