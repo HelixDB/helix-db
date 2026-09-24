@@ -28,45 +28,38 @@ async fn invalid_configuration_and_missing_executables_never_produce_passes() {
 #[cfg(unix)]
 mod processes {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    async fn executable(script: &str) -> tempfile::TempDir {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("worker");
+    fn fixture(script: &str) -> tempfile::TempDir {
+        let directory = tempfile::Builder::new()
+            .prefix("tck worker ")
+            .tempdir()
+            .unwrap();
         std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --fixture-ready ]; then exit 0; fi\n{script}\nexec cat >/dev/null\n"
-            ),
+            directory.path().join("worker"),
+            format!("{script}\nexec cat >/dev/null\n"),
         )
         .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // A new executable can undergo a slow first-start platform inspection.
-        // Prepare the fixture before measuring protocol deadlines; this branch
-        // emits no frames and never touches scenario markers or failure scripts.
-        let mut child = Command::new(&path)
-            .arg("--fixture-ready")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let status = match tokio::time::timeout(Duration::from_secs(60), child.wait()).await {
-            Ok(status) => status.unwrap(),
-            Err(error) => {
-                tokio::time::timeout(CLEANUP_TIMEOUT, child.kill())
-                    .await
-                    .expect("fixture cleanup deadline")
-                    .expect("fixture cleanup");
-                panic!("fixture startup deadline: {error}");
-            }
-        };
-        assert!(status.success(), "fixture preparation failed: {status}");
-        assert!(
-            !path.with_extension("marker").exists(),
-            "fixture preparation must not execute the worker body"
-        );
         directory
+    }
+
+    async fn run(
+        corpus: &[corpus::Scenario],
+        parallelism: usize,
+        script: &Path,
+        timeout: Duration,
+    ) -> corpus::Result<report::Report> {
+        super::super::run_with(
+            corpus,
+            parallelism,
+            || {
+                // Interpret fixture data with the platform shell. Production
+                // workers still launch their binary directly through run().
+                let mut command = Command::new("/bin/sh");
+                command.arg(script).arg("--worker");
+                command
+            },
+            timeout,
+        )
+        .await
     }
 
     async fn output(replies: &[Reply]) -> String {
@@ -84,6 +77,31 @@ mod processes {
     }
 
     #[tokio::test]
+    async fn interpreted_fixtures_preserve_arguments_and_start_only_when_requested() {
+        use std::os::unix::fs::PermissionsExt;
+        let scenario =
+            crate::test_support::scenario("fixture-contract", "    Given an empty graph");
+        let completed = output(&[Reply::Finished {
+            id: scenario.id.clone(),
+            planned: false,
+            result: Ok(()),
+        }])
+        .await;
+        let directory = fixture(&format!("if [ \"$1\" != --worker ] || [ \"$#\" != 1 ]; then exit 9; fi\n: >\"$0.marker\"\n{completed}"));
+        let script = directory.path().join("worker");
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        assert!(!script.with_extension("marker").exists());
+        let report = run(&[scenario], 1, &script, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(report.counts.get("passed"), Some(&1));
+        assert!(script.with_extension("marker").exists());
+    }
+
+    #[tokio::test]
     async fn progress_failure_categories_and_protocol_faults_are_independently_checked() {
         let scenario = crate::test_support::scenario("protocol", "    Given an empty graph");
         let id = scenario.id.clone();
@@ -96,7 +114,7 @@ mod processes {
             },
         ])
         .await;
-        let directory = executable(&good).await;
+        let directory = fixture(&good);
         let report = run(
             std::slice::from_ref(&scenario),
             1,
@@ -141,7 +159,7 @@ mod processes {
             }],
         ];
         for replies in variants {
-            let directory = executable(&output(&replies).await).await;
+            let directory = fixture(&output(&replies).await);
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,
@@ -169,7 +187,7 @@ mod processes {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            let directory = executable(
+            let directory = fixture(
                 &output(&[Reply::Finished {
                     id: id.clone(),
                     planned: false,
@@ -179,8 +197,7 @@ mod processes {
                     }),
                 }])
                 .await,
-            )
-            .await;
+            );
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,
@@ -202,7 +219,7 @@ mod processes {
             "printf '\\000\\000\\000\\002{'",
             "printf '\\377\\377\\377\\377'",
         ] {
-            let directory = executable(script).await;
+            let directory = fixture(script);
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,
@@ -234,7 +251,7 @@ mod processes {
             result: Ok(()),
         }])
         .await;
-        let directory = executable(&format!("if [ ! -f \"$0.marker\" ]; then\n: >\"$0.marker\"\n{progress}\nexec sleep 60\nfi\n{completed}")).await;
+        let directory = fixture(&format!("if [ ! -f \"$0.marker\" ]; then\n: >\"$0.marker\"\n{progress}\nexec sleep 60\nfi\n{completed}"));
         let report = run(
             &scenarios,
             1,
@@ -272,7 +289,7 @@ mod processes {
         }])
         .await;
         for suffix in ["read -r discard || :\nexit 9", "exec sleep 60"] {
-            let directory = executable(&format!("{completed}\n{suffix}")).await;
+            let directory = fixture(&format!("{completed}\n{suffix}"));
             let report = run(
                 std::slice::from_ref(&scenario),
                 1,

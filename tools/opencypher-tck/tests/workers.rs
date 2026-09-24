@@ -45,24 +45,20 @@ async fn one_worker_uses_fresh_databases_and_reports_production_progress_and_err
                 let mut bytes = vec![0; length];
                 output.read_exact(&mut bytes).await.unwrap();
                 let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                match reply.get("Planned") {
-                    Some(progress) => {
-                        assert_eq!(progress["id"],id);
-                        assert!(!observed_progress);
-                        observed_progress = true;
-                        continue;
-                    },
-                    None => {},
-                }
-                let finished = &reply["Finished"];
-                assert_eq!(finished["id"],id);
-                assert_eq!(finished["planned"],planned);
-                assert!(!observed_progress || planned);
-                assert_eq!(finished["result"].get("Ok").is_some(),passes,"{reply}");
-                if !passes {
-                    assert_eq!(finished["result"]["Err"]["status"],"failed");
-                }
-                break;
+                let Some(progress) = reply.get("Planned") else {
+                    let finished = &reply["Finished"];
+                    assert_eq!(finished["id"],id);
+                    assert_eq!(finished["planned"],planned);
+                    assert!(!observed_progress || planned);
+                    assert_eq!(finished["result"].get("Ok").is_some(),passes,"{reply}");
+                    if !passes {
+                        assert_eq!(finished["result"]["Err"]["status"],"failed");
+                    }
+                    break;
+                };
+                assert_eq!(progress["id"],id);
+                assert!(!observed_progress);
+                observed_progress = true;
             }
         }
         drop(input);

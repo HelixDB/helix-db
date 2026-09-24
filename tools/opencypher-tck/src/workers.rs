@@ -34,9 +34,8 @@ struct Worker {
 }
 
 impl Worker {
-    fn start(executable: &Path) -> corpus::Result<Self> {
-        let mut child = Command::new(executable)
-            .arg("--worker")
+    fn start(mut command: Command) -> corpus::Result<Self> {
+        let mut child = command
             .env("HELIX_TELEMETRY_LEVEL", "off")
             .env("HELIX_NO_UPDATE_CHECK", "1")
             .stdin(Stdio::piped())
@@ -123,6 +122,27 @@ pub(crate) async fn run(
     executable: &Path,
     timeout: Duration,
 ) -> corpus::Result<report::Report> {
+    run_with(
+        corpus,
+        parallelism,
+        || {
+            let mut command = Command::new(executable);
+            command.arg("--worker");
+            command
+        },
+        timeout,
+    )
+    .await
+}
+
+/// Create a fresh process command for every start or replacement. The worker
+/// owns its pipes, environment and bounded cleanup regardless of the launcher.
+async fn run_with(
+    corpus: &[corpus::Scenario],
+    parallelism: usize,
+    command: impl Fn() -> Command,
+    timeout: Duration,
+) -> corpus::Result<report::Report> {
     if !(1..=32).contains(&parallelism) {
         return Err("parallelism must be between 1 and 32".into());
     }
@@ -141,7 +161,7 @@ pub(crate) async fn run(
                 };
                 let execution = tokio::time::timeout(timeout, async {
                     if worker.is_none() {
-                        worker = Some(Worker::start(executable)?);
+                        worker = Some(Worker::start(command())?);
                     }
                     worker
                         .as_mut()
