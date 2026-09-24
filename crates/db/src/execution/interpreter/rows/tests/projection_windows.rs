@@ -18,6 +18,22 @@ async fn downstream_limits_stop_total_prefixes_without_hiding_source_errors() {
             "UNWIND range(1,1000000000) AS x WITH x SKIP 999999999 RETURN x LIMIT 0",
             json!([]),
         ),
+        (
+            "UNWIND range(1,1000000000) AS x WITH x LIMIT 1000000 WITH x SKIP 5 LIMIT 200 RETURN x SKIP 6 LIMIT 2",
+            json!([[12], [13]]),
+        ),
+        (
+            "UNWIND range(1,1000000000) AS x WITH x LIMIT 1 RETURN x SKIP 2 LIMIT 2",
+            json!([]),
+        ),
+        (
+            "UNWIND range(1,1000000000) AS x WITH x LIMIT 0 RETURN x LIMIT 1",
+            json!([]),
+        ),
+        (
+            "UNWIND range(1,1000000000) AS x WITH x LIMIT 1000000 WITH x LIMIT 2 UNWIND [x,x] AS y RETURN sum(y)",
+            json!([[6]]),
+        ),
         ("MATCH (n:Absent) WITH n AS a RETURN a LIMIT 0", json!([])),
         (
             "OPTIONAL MATCH (n:Absent) WITH n AS a RETURN a LIMIT 1",
@@ -60,6 +76,9 @@ async fn downstream_limits_stop_total_prefixes_without_hiding_source_errors() {
         "UNWIND [1/0] AS x WITH x AS a RETURN a LIMIT 0",
         "UNWIND [1,2,0] AS x WITH 1/x AS a WITH a AS b RETURN b LIMIT 1",
         "UNWIND [1,0] AS x WITH x SKIP 1 LIMIT 1 WITH 1/x AS y RETURN y",
+        "UNWIND [1/0] AS x WITH x LIMIT 1 RETURN x LIMIT 0",
+        "UNWIND [1,2,0] AS x WITH x LIMIT 3 WITH 1/x AS y RETURN y LIMIT 1",
+        "UNWIND [1,2,0] AS x WITH x LIMIT 3 WITH x AS y WHERE 1/y>0 RETURN y LIMIT 1",
     ] {
         let plan = r::plan(
             helix_cypher::compile(query).unwrap(),
@@ -317,6 +336,190 @@ async fn immutable_match_constraints_bound_work_after_the_first_complete_match()
             .await
             .unwrap();
         assert_eq!(result.rows, expected.rows, "{query}");
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn composed_windows_match_sequence_model_across_batch_boundaries() {
+    let db = crate::execution::interpreter::test_support::open_db("cypher-composed-windows").await;
+    let input = [
+        json!(3),
+        json!(1),
+        json!(3),
+        json!(2),
+        json!(0),
+        json!(null),
+    ];
+    for skip in [0, 2, 8] {
+        for limit in [0, 1, 20] {
+            for next_skip in [0, 3, 8] {
+                for next_limit in [0, 2, 20] {
+                    let query = format!("UNWIND [3,1,3,2,0,null] AS x WITH x SKIP {skip} LIMIT {limit} RETURN x SKIP {next_skip} LIMIT {next_limit}");
+                    let plan = r::plan(
+                        helix_cypher::compile(&query).unwrap(),
+                        &db.planner_context(context::ParamBindings::default()),
+                    )
+                    .unwrap();
+                    let expected: Vec<_> = input
+                        .iter()
+                        .skip(skip)
+                        .take(limit)
+                        .skip(next_skip)
+                        .take(next_limit)
+                        .map(|value| vec![value.clone()])
+                        .collect();
+                    for (execution, batch_rows) in [
+                        (r::RowExecution::Materialized, 7),
+                        (r::RowExecution::Batched, 1),
+                        (r::RowExecution::Batched, 2),
+                        (r::RowExecution::Batched, 7),
+                    ] {
+                        let result = Interpreter::new(&db, context::ParamBindings::default())
+                            .execute_rows(
+                                &plan.clone().with_execution(execution),
+                                &BTreeMap::new(),
+                                Limits {
+                                    batch_rows,
+                                    ..Limits::default()
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            result.rows, expected,
+                            "{query}: {execution:?}, batch {batch_rows}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Parameterized later windows stop through their consumer counters; they
+    // must not need a literal source bound or drain the billion-row source.
+    // The middle window exhausts before the final window: checking only the
+    // final counter would keep pulling the million-row first window.
+    for first_limit in [0, 1, 1_000_000] {
+        for (skip, limit) in [(0, 0), (0, 2), (5, 2), (5, 0)] {
+            let query = format!("UNWIND range(1,1000000000) AS x WITH x LIMIT {first_limit} WITH x SKIP $skip LIMIT $limit RETURN x SKIP 1 LIMIT 2");
+            let plan = r::plan(
+                helix_cypher::compile(&query).unwrap(),
+                &db.planner_context(context::ParamBindings::default()),
+            )
+            .unwrap();
+            let parameters = BTreeMap::from([
+                ("skip".into(), r::Value::Integer(skip)),
+                ("limit".into(), r::Value::Integer(limit)),
+            ]);
+            let interpreter = Interpreter::new(&db, context::ParamBindings::default());
+            interpreter.ctx.fail_deadline_after(500);
+            let result = interpreter
+                .execute_rows(
+                    &plan,
+                    &parameters,
+                    Limits {
+                        batch_rows: 2,
+                        memory_bytes: 128 * 1024,
+                        ..Limits::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let expected: Vec<_> = (1..100)
+                .take(first_limit)
+                .skip(skip as usize)
+                .take(limit as usize)
+                .skip(1)
+                .take(2)
+                .map(|x| vec![json!(x)])
+                .collect();
+            assert_eq!(result.rows, expected, "{query}, {parameters:?}");
+        }
+    }
+    for query in [
+        "UNWIND [1,2,3] AS x WITH x LIMIT 0 RETURN x LIMIT -1",
+        "UNWIND [] AS x WITH x LIMIT 1 RETURN x SKIP -1 LIMIT 0",
+    ] {
+        let error = db
+            .cypher(crate::cypher::Request::new(query))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Query(ref error) if error.detail=="NegativeIntegerArgument"),
+            "{query}: {error}"
+        );
+    }
+    let error = db
+        .cypher(crate::cypher::Request::new(
+            "MATCH(n:Absent) WITH n LIMIT 10 RETURN $missing LIMIT 0",
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Query(ref error) if error.detail=="MissingParameter"),
+        "{error}"
+    );
+    db.cypher(crate::cypher::Request::new(
+        "UNWIND [1,2,3] AS x WITH x LIMIT 3 CREATE (:WindowMarker {x:x}) RETURN x LIMIT 1",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        db.cypher(crate::cypher::Request::new(
+            "MATCH(n:WindowMarker) RETURN count(*)"
+        ))
+        .await
+        .unwrap()
+        .rows,
+        vec![vec![json!(3)]]
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn composed_windows_bound_storage_reads_as_the_graph_grows() {
+    let db =
+        crate::execution::interpreter::test_support::open_db("cypher-composed-window-reads").await;
+    let mut previous_size = 0;
+    for size in [64, 4096] {
+        db.cypher(crate::cypher::Request::new(format!(
+            "UNWIND range({previous_size},{}) AS x CREATE (:WindowInput)",
+            size - 1
+        )))
+        .await
+        .unwrap();
+        previous_size = size;
+        let query = "MATCH(n:WindowInput) WITH n LIMIT 1000000 WITH n SKIP 2 LIMIT 10000 RETURN 1 AS found LIMIT 3";
+        let plan = r::plan(
+            helix_cypher::compile(query).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        let reference = Interpreter::new(&db, context::ParamBindings::default())
+            .execute_rows(
+                &plan.clone().with_execution(r::RowExecution::Materialized),
+                &BTreeMap::new(),
+                Limits::default(),
+            )
+            .await
+            .unwrap();
+        let optimized = Interpreter::new(&db, context::ParamBindings::default())
+            .execute_rows(&plan, &BTreeMap::new(), Limits::default())
+            .await
+            .unwrap();
+        assert_eq!(optimized.rows, vec![vec![json!(1)]; 3]);
+        assert_eq!(optimized.rows, reference.rows);
+        assert!(reference.resources.reads.multi_get_keys >= size);
+        assert!(
+            optimized.resources.reads.multi_get_keys <= 16,
+            "{:?}",
+            optimized.resources.reads
+        );
+        assert!(optimized.resources.peak_memory_bytes <= 256 * 1024);
+        eprintln!(
+            "composed window at {size} nodes: optimized={:?}, materialized={:?}",
+            optimized.resources.reads, reference.resources.reads
+        );
     }
     db.close().await.unwrap();
 }

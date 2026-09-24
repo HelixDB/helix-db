@@ -434,6 +434,21 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[1]]),
         ),
         (
+            "composed_window_limit",
+            "MATCH (a:Left) WITH a LIMIT 1000000 WITH a SKIP 2 LIMIT 10000 RETURN 1 AS found LIMIT 3".into(),
+            json!([[1], [1], [1]]),
+        ),
+        (
+            "composed_window_exhausted",
+            "MATCH (a:Left) WITH a LIMIT 2 WITH a SKIP 3 LIMIT 5 RETURN count(*)".into(),
+            json!([[0]]),
+        ),
+        (
+            "composed_window_range",
+            "UNWIND range(1,1000000000) AS x WITH x LIMIT 1000000 WITH x SKIP 5 LIMIT 200 RETURN x SKIP 6 LIMIT 2".into(),
+            json!([[12], [13]]),
+        ),
+        (
             "mixed_unwind_aggregation",
             format!("{mixed_prefix} RETURN count(*),sum(value)"),
             json!([[mixed_values.len(), mixed_values.iter().sum::<usize>()]]),
@@ -519,6 +534,16 @@ async fn measure_cases(
             if case == "projection_chain_limit" && response.resources.reads.multi_get_keys > 8 {
                 return Err(format!(
                     "downstream limit failed to bound property reads at size {size}"
+                )
+                .into());
+            }
+            if case.starts_with("composed_window_")
+                && (response.resources.reads.multi_get_keys > 16
+                    || response.resources.peak_memory_bytes > 256 * 1024)
+            {
+                return Err(format!(
+                    "{case} exceeded its composed demand guard at size {size}: peak={}, reads={:?}",
+                    response.resources.peak_memory_bytes, response.resources.reads
                 )
                 .into());
             }

@@ -267,6 +267,13 @@ Initial fixed-length matches with literal or parameter property constraints can
 stop at a downstream limit when intervening projections preserve rows and cannot
 fail. The engine evaluates enough input to validate those constraints even for
 `LIMIT 0`; correlated inputs and potentially failing expressions remain barriers.
+Consecutive total `WITH`/`RETURN` windows can stop when any earlier or later
+limit is exhausted. Literal windows compose their skips and caps into a tighter
+source bound. Later parameterized windows keep their existing validation point
+and stop at batch boundaries; they are not evaluated early during source setup.
+For example, `WITH n LIMIT 1000000 RETURN n LIMIT 5` needs only the smaller
+window when the projections satisfy that proof. Filters, ordering, aggregation
+and mutations still end the proof.
 Rows reuse execution cells after bindings leave scope, so successive `WITH`
 aliases do not widen every retained row. Logical binding IDs remain stable in
 validation and explain output. Simultaneous inputs, outputs and sort expressions

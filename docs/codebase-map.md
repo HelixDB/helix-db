@@ -255,6 +255,11 @@ The window consumers now use one evaluated `Window` contract for offset
 validation and retention bounds. This removes repeated evaluation code from
 plain projection, pipeline projection, DISTINCT and top-k. `InputWindow` remains
 separate: it proves legal early termination, which is a different responsibility.
+Its consecutive-projection proof composes literal window bounds and permits any
+validated window in the prefix to stop the source. Dynamic downstream windows
+stop through consumer counters without moving their validation ahead of source
+setup. Earlier exhausted windows still stop even when a later skip produces no
+rows; downstream expansion continuations finish before stopping upstream input.
 
 The [formatter configuration](../rustfmt.toml) records only the workspace parsing
 edition and its existing style edition. Other settings come from the pinned

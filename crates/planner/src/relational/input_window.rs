@@ -1,6 +1,7 @@
 //! A validated bound on source demand through consecutive total projections.
-//! This proof stops at the first window with LIMIT. All preceding projections
-//! preserve one row per input except for SKIP, whose offsets compose by addition.
+//! Every window in the proven prefix can stop its source. Literal downstream
+//! windows also tighten source demand; dynamic windows retain their existing
+//! consumer-side evaluation order.
 
 use super::{pipeline::Termination, Expression, Operator, Query, Result, Value};
 
@@ -9,8 +10,10 @@ use super::{pipeline::Termination, Expression, Operator, Query, Result, Value};
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct InputWindow {
     projection: usize,
+    last_projection: usize,
     skips: Vec<Expression>,
     limit: Expression,
+    downstream_demand: usize,
     termination: Termination,
 }
 
@@ -27,8 +30,10 @@ impl InputWindow {
     pub(super) fn map_expressions(&self, map: impl Fn(&Expression) -> Expression) -> Self {
         Self {
             projection: self.projection,
+            last_projection: self.last_projection,
             skips: self.skips.iter().map(&map).collect(),
             limit: map(&self.limit),
+            downstream_demand: self.downstream_demand,
             termination: self.termination,
         }
     }
@@ -77,30 +82,67 @@ impl InputWindow {
             | Operator::Delete { .. } => return None,
         };
         let mut skips = Vec::new();
+        let mut window: Option<Self> = None;
+        let mut downstream_skips = Some(0_usize);
         for (projection, operator) in query.operators().iter().enumerate().skip(1) {
             let Operator::Project { skip, limit, .. } = operator else {
-                return None;
+                break;
             };
             if !query.contracts()[projection].is_total_projection() {
-                return None;
+                break;
             }
-            skips.extend(skip.iter().cloned());
-            let Some(limit) = limit else {
+            let Some(window) = &mut window else {
+                skips.extend(skip.iter().cloned());
+                let Some(limit) = limit else {
+                    continue;
+                };
+                window = Some(Self {
+                    projection,
+                    last_projection: projection,
+                    skips: std::mem::take(&mut skips),
+                    limit: limit.clone(),
+                    downstream_demand: usize::MAX,
+                    termination,
+                });
                 continue;
             };
-            return Some(Self {
-                projection,
-                skips,
-                limit: limit.clone(),
-                termination,
-            });
+            if limit.is_some() {
+                window.last_projection = projection;
+            }
+            // Do not evaluate later parameters or failing expressions ahead
+            // of their existing consumer boundary. Once such a window is
+            // reached, only the consumer's remaining counters may stop us.
+            let Some(skipped) = downstream_skips else {
+                continue;
+            };
+            let literal = |expression: &Option<Expression>, default| match expression {
+                None => Some(default),
+                Some(Expression::Literal(Value::Integer(value))) => usize::try_from(*value).ok(),
+                _ => None,
+            };
+            let Some((skip, limit)) = literal(skip, 0).zip(literal(limit, usize::MAX)) else {
+                downstream_skips = None;
+                continue;
+            };
+            let skipped = skipped.saturating_add(skip);
+            downstream_skips = Some(skipped);
+            // Each tail window caps its input at cumulative SKIP + LIMIT. An
+            // earlier cap still wins when a later skip exhausts that output.
+            window.downstream_demand = window.downstream_demand.min(skipped.saturating_add(limit));
         }
-        None
+        window
     }
 
-    /// Absolute operator index whose remaining output allowance bounds input.
+    /// Absolute index of the first bounded projection and its validation point.
     pub fn projection(&self) -> usize {
         self.projection
+    }
+
+    /// Last bounded projection in the consecutive total prefix. Exhausting any
+    /// window through this index permits stopping after downstream continuations
+    /// finish; an earlier window may run out before this one receives a row.
+    pub fn last_projection(&self) -> usize {
+        self.last_projection
     }
 
     pub fn termination(&self) -> Termination {
@@ -116,7 +158,8 @@ impl InputWindow {
                 offset.saturating_add(super::nonnegative(&evaluate(expression)?)?),
             )
         })?;
-        let demand = skip.saturating_add(super::nonnegative(&evaluate(&self.limit)?)?);
+        let limit = super::nonnegative(&evaluate(&self.limit)?)?;
+        let demand = skip.saturating_add(limit.min(self.downstream_demand));
         Ok(match self.termination {
             Termination::AfterFirstBatch => demand.max(1),
             Termination::Drain | Termination::BeforeInput => demand,
@@ -126,18 +169,23 @@ impl InputWindow {
     /// A constant upper bound for costing, without evaluating parameters or
     /// admitting expression errors during optimizer exploration.
     pub(super) fn literal_demand(&self) -> Option<u64> {
-        self.skips
-            .iter()
-            .chain(std::iter::once(&self.limit))
-            .try_fold(0_u64, |offset, expression| {
-                let Expression::Literal(Value::Integer(value)) = expression else {
-                    return None;
-                };
-                Some(offset.saturating_add(u64::try_from(*value).ok()?))
-            })
-            .map(|demand| match self.termination {
-                Termination::AfterFirstBatch => demand.max(1),
-                Termination::Drain | Termination::BeforeInput => demand,
-            })
+        let skip = self.skips.iter().try_fold(0_u64, |offset, expression| {
+            let Expression::Literal(Value::Integer(value)) = expression else {
+                return None;
+            };
+            Some(offset.saturating_add(u64::try_from(*value).ok()?))
+        })?;
+        let Expression::Literal(Value::Integer(limit)) = &self.limit else {
+            return None;
+        };
+        let demand = skip.saturating_add(
+            u64::try_from(*limit)
+                .ok()?
+                .min(self.downstream_demand as u64),
+        );
+        Some(match self.termination {
+            Termination::AfterFirstBatch => demand.max(1),
+            Termination::Drain | Termination::BeforeInput => demand,
+        })
     }
 }

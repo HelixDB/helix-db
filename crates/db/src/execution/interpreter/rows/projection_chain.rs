@@ -208,8 +208,11 @@ impl ExecutionContext<'_> {
         let operators = &query.operators()[start..end + usize::from(projected_terminal)];
         assert!(!operators.is_empty(), "a pipeline has intermediate stages");
         let stop = window.map(|window| {
-            assert!(window.projection() >= start && window.projection() < start + operators.len());
-            (window.projection() - start, window.termination())
+            assert!(
+                window.last_projection() >= start
+                    && window.last_projection() < start + operators.len()
+            );
+            (window.last_projection() - start, window.termination())
         });
         let expansions = operators
             .iter()
@@ -331,8 +334,9 @@ impl ExecutionContext<'_> {
                             // Drain downstream continuations before stopping the
                             // upstream source; a limited row may still expand.
                             if stop.is_some_and(|(stage, termination)| {
-                                matches!(stages[stage], Stage::Project { remaining: 0, .. })
-                                    && termination.may_stop(input_started)
+                                stages[..stage + 1].iter().any(|stage| {
+                                    matches!(stage, Stage::Project { remaining: 0, .. })
+                                }) && termination.may_stop(input_started)
                             }) {
                                 return Ok(None);
                             }
