@@ -134,6 +134,10 @@ impl OpenedTextSplit {
         self.fields
     }
 
+    pub(crate) const fn reader(&self) -> &IndexReader {
+        &self.reader
+    }
+
     pub(crate) fn total_docs(&self) -> usize {
         self.reader.searcher().num_docs() as usize
     }

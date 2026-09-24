@@ -3935,6 +3935,142 @@ async fn a_fuzzy_query_reaches_across_every_split() {
         .expect("multi split fixture closes");
 }
 
+/// An index built from `built` under explicit scheduling. Every later write
+/// publishes a split of its own, and nothing compacts them back together
+/// behind the test.
+async fn open_explicit_text_fixture(source: HelixDbSource, built: &[&str]) -> (HelixDB, Vec<u64>) {
+    let db = HelixDB::open_for_index_lifecycle_testing(
+        source,
+        DbConfig::new(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("explicit text fixture opens");
+    let mut ids = Vec::with_capacity(built.len());
+    for text in built {
+        ids.push(insert_node(&db, text).await);
+    }
+    let definition: ValidatedDynamicIndexDefinition =
+        TextIndexDefinition::new_node(LABEL, PROPERTY)
+            .expect("explicit text definition validates")
+            .try_into()
+            .expect("explicit text definition converts");
+    activate_drop_race_index(&db, &LifecycleTestController::new(), &definition).await;
+    (db, ids)
+}
+
+#[tokio::test]
+async fn a_fuzzy_query_warms_what_it_chose_across_splits_on_a_cold_reader() {
+    const DATABASE: &str = "fts-fuzzy-cold-cross-split";
+    let root = tempfile::tempdir().expect("cold reader root is created");
+    let source = || HelixDbSource::Disk {
+        root: root.path().to_path_buf(),
+        database: DATABASE.to_string(),
+    };
+    let (writer, built) = open_explicit_text_fixture(source(), &["helox", "helix"]).await;
+    let later = insert_node(&writer, "helix").await;
+    delete_node(&writer, built[0], "the stale spelling is deleted").await;
+    writer
+        .flush_writer()
+        .await
+        .expect("the deletion becomes reader-visible");
+    writer
+        .close()
+        .await
+        .expect("the cold fixture writer closes");
+
+    // The first split still holds helox, so on its own it keeps the typed
+    // spelling and warms only that. Across the corpus helox is dead and helix
+    // is chosen, which that split was never asked to warm.
+    let reader = HelixDB::open_reader(source())
+        .await
+        .expect("a cold reader opens");
+    let response = reader
+        .query(fuzzy_node_text_ids_request("helox", 1))
+        .await
+        .expect("a fuzzy search on a cold reader reads only what it warmed");
+    let mut hits = query_node_ids(&response, "ids");
+    hits.sort_unstable();
+    assert_eq!(
+        hits,
+        [built[1], later],
+        "both live documents hold helix, one in each split"
+    );
+
+    let warm = reader
+        .warm_fts_cache()
+        .await
+        .expect("the cold reader warms afterwards");
+    assert!(
+        warm.split_count >= 2,
+        "this fixture is only worth anything while it holds more than one split"
+    );
+    reader.close().await.expect("the cold reader closes");
+}
+
+#[tokio::test]
+async fn a_deleted_spelling_does_not_stop_a_fuzzy_query_expanding() {
+    let (db, built) = open_explicit_text_fixture(
+        HelixDbSource::InMemory {
+            database: "fts-fuzzy-deleted-exact".to_string(),
+        },
+        &["helox", "helix"],
+    )
+    .await;
+    delete_node(
+        &db,
+        built[0],
+        "the typed spelling's only document is deleted",
+    )
+    .await;
+
+    // One split holds both words, so its dictionary still has helox. Only the
+    // live frequency says nothing matches it any more.
+    let response = db
+        .query(fuzzy_node_text_ids_request("helox", 1))
+        .await
+        .expect("a fuzzy search for a deleted spelling runs");
+    assert_eq!(
+        query_node_ids(&response, "ids"),
+        [built[1]],
+        "with the typed spelling gone, one edit reaches the live neighbour"
+    );
+
+    db.close()
+        .await
+        .expect("the deleted spelling fixture closes");
+}
+
+#[tokio::test]
+async fn a_deleted_neighbour_does_not_hide_a_live_one_further_out() {
+    let (db, built) = open_explicit_text_fixture(
+        HelixDbSource::InMemory {
+            database: "fts-fuzzy-deleted-neighbour".to_string(),
+        },
+        &["abcdeg"],
+    )
+    .await;
+    let further = insert_node(&db, "abxyef").await;
+    delete_node(&db, built[0], "the nearer neighbour is deleted").await;
+
+    // abcdeg is one edit from abcdef and abxyef is two, in another split. The
+    // nearer one is dead, so the search has to go on to the next distance
+    // rather than settle on a word nothing holds.
+    let response = db
+        .query(fuzzy_node_text_ids_request("abcdef", 2))
+        .await
+        .expect("a fuzzy search past a deleted neighbour runs");
+    assert_eq!(
+        query_node_ids(&response, "ids"),
+        [further],
+        "the live neighbour two edits out is reached"
+    );
+
+    db.close()
+        .await
+        .expect("the deleted neighbour fixture closes");
+}
+
 #[tokio::test]
 async fn a_typed_word_outweighs_a_guessed_word_of_the_same_frequency() {
     const EACH: usize = 20;

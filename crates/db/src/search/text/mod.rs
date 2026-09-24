@@ -4,7 +4,7 @@
 //! SlateDB transaction atomically attaches their durable references.
 
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -260,12 +260,36 @@ impl Automaton for FuzzyAutomaton {
     }
 }
 
-/// Every indexed term within exactly `distance` edits of `term`, paired with
-/// the edit distance that matched it.
+/// Every indexed term within `distance` edits of `term`, paired with the edit
+/// distance that matched it, keeping the closest [`MAX_EXPANDED_TERMS`].
+fn expand_term_at(
+    searcher: &tantivy::Searcher,
+    field: tantivy::schema::Field,
+    term: &str,
+    distance: u8,
+) -> Result<BTreeMap<String, u8>, HelixDbError> {
+    let matches = dictionary_matches(searcher, field, term, distance)?;
+
+    if matches.len() > MAX_EXPANDED_TERMS {
+        // Keep the closest matches. Ties break on the term itself so the result
+        // does not depend on which segment happened to be read first.
+        let mut ranked: Vec<(String, u8)> = matches.into_iter().collect();
+        ranked.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        ranked.truncate(MAX_EXPANDED_TERMS);
+        return Ok(ranked.into_iter().collect());
+    }
+
+    Ok(matches)
+}
+
+/// Every word in the dictionary within `distance` edits of `term`, with the
+/// edits that reached it, bounded only by the per segment scan budget.
 ///
 /// Term dictionaries are per segment, so each segment is swept and the results
 /// unioned. A term reachable from several segments keeps its smallest distance.
-fn expand_term_at(
+/// Uncapped because a caller that filters on live frequencies has to filter
+/// before it caps, or the cap spends its places on words nothing holds.
+fn dictionary_matches(
     searcher: &tantivy::Searcher,
     field: tantivy::schema::Field,
     term: &str,
@@ -313,15 +337,6 @@ fn expand_term_at(
         }
     }
 
-    if matches.len() > MAX_EXPANDED_TERMS {
-        // Keep the closest matches. Ties break on the term itself so the result
-        // does not depend on which segment happened to be read first.
-        let mut ranked: Vec<(String, u8)> = matches.into_iter().collect();
-        ranked.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
-        ranked.truncate(MAX_EXPANDED_TERMS);
-        return Ok(ranked.into_iter().collect());
-    }
-
     Ok(matches)
 }
 
@@ -357,10 +372,10 @@ fn expand_term(
 /// Boost applied to a term found at `edits` distance from what was typed.
 ///
 /// This cannot order one group. Expansion runs only for a term the index does
-/// not have and stops at the first tier that finds anything, so every term in a
-/// group sits at the same distance and shares one boost. What it decides is the
-/// weight between groups: a query word reached only at two edits counts for
-/// less than one reached at a single edit.
+/// not have and stops at the first tier that finds a word it can use, so every
+/// term in a group sits at the same distance and shares one boost. What it
+/// decides is the weight between groups: a query word reached only at two
+/// edits counts for less than one reached at a single edit.
 fn fuzzy_boost(edits: u8) -> f32 {
     1.0 / f32::from(edits + 1)
 }
@@ -816,9 +831,9 @@ async fn search_manifest_with_state_source(
         split_ref: TextSplitRef,
         reader: Arc<SplitSearchReader>,
         /// Resolved when this split was warmed, and again across every split
-        /// once corpus statistics for what they reached are loaded. The loop
-        /// below can search a split several times, and none of those rounds
-        /// should walk it or resolve it again.
+        /// against live corpus frequencies. The loop below can search a split
+        /// several times, and none of those rounds should walk it or resolve it
+        /// again.
         fuzzy: Option<Arc<FuzzyClauses>>,
         total_docs: usize,
         candidate_limit: usize,
@@ -853,41 +868,71 @@ async fn search_manifest_with_state_source(
 
     // Production scores against corpus statistics, and those only know the
     // typed query terms, so every term a dictionary reached would score as if
-    // no document held it and outrank the words that were actually typed. Load
-    // the reached terms' corpus frequencies, then resolve once so every split
-    // scores the same term with the same boost against the same numbers. Boxed
-    // so an exact query's search future carries none of it.
+    // no document held it and outrank the words that were actually typed.
+    // Resolve once across every split against live corpus frequencies, so every
+    // split scores the same term with the same boost against the same numbers.
+    // Boxed so an exact query's search future carries none of it.
     if fuzzy_distance > 0
         && let (Some(corpus), TextLiveStateSource::V2(root)) = (statistics, state_source)
     {
         Box::pin(async {
-            let mut merged = FuzzyExpansion::default();
-            for split in &splits {
-                if let Some(fuzzy) = &split.fuzzy {
-                    merged.merge(fuzzy.reached.clone());
-                }
-            }
-            merged.settle();
-            let unknown = merged
-                .absent_candidates(corpus)
-                .filter(|candidate| corpus.document_frequency(candidate.as_bytes()).is_none())
-                .map(|candidate| Bytes::copy_from_slice(candidate.as_bytes()))
-                .collect::<BTreeSet<_>>();
-            let reached = crate::index_lifecycle::text::statistics::load_term_frequencies(
-                reader,
-                root.scope(),
-                root.index_id(),
-                root.generation(),
-                root.partition(),
-                corpus.total_document_count(),
-                unknown,
-            )
-            .await?;
-            let extended = corpus.with_frequencies(reached);
             let Some(field) = splits.first().map(|split| split.reader.fields().body) else {
                 return Ok(());
             };
-            let resolved = Arc::new(resolve_across_splits(&merged, field, extended)?);
+            let searchers = splits
+                .iter()
+                .map(|split| split.reader.index_reader().searcher())
+                .collect::<Vec<_>>();
+            let terms = analyze_query_terms(manifest.analyzer, query);
+            let mut frequencies = LiveFrequencies::new(reader, root, corpus);
+            let mut reached = BTreeMap::new();
+            for term in &terms {
+                if frequencies.of(term) > 0 || reached.contains_key(term) {
+                    continue;
+                }
+                let group =
+                    nearest_live_tier(&mut frequencies, &searchers, field, term, fuzzy_distance)
+                        .await?;
+                reached.insert(term.clone(), group);
+            }
+            let resolved = Arc::new(resolve_across_splits(
+                &terms,
+                &reached,
+                field,
+                frequencies.into_statistics(),
+            )?);
+
+            // Each split warmed what its own dictionary chose, which is usually
+            // what was chosen here, so the common case costs no extra round
+            // trip. The rest are words a split never reached, or passed over
+            // because a deleted document still held the typed spelling, and a
+            // split's storage fails a read it was not warmed for rather than
+            // fetching it. So they are warmed before any search.
+            let warming = splits
+                .iter()
+                .map(|split| {
+                    let missing = resolved
+                        .boosts
+                        .keys()
+                        .filter(|candidate| {
+                            !terms.contains(*candidate)
+                                && split
+                                    .fuzzy
+                                    .as_ref()
+                                    .is_none_or(|own| !own.boosts.contains_key(*candidate))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let reader = Arc::clone(&split.reader);
+                    async move { warm_term_postings(reader.index_reader(), field, &missing).await }
+                })
+                .collect::<Vec<_>>();
+            futures::stream::iter(warming)
+                .buffer_unordered(SPLIT_READ_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<(), HelixDbError>>()?;
             for split in &mut splits {
                 split.fuzzy = Some(Arc::clone(&resolved));
             }
@@ -1088,6 +1133,13 @@ impl SplitSearchReader {
         match self {
             Self::Cached(split) => split.fields(),
             Self::Direct { fields, .. } => *fields,
+        }
+    }
+
+    fn index_reader(&self) -> &IndexReader {
+        match self {
+            Self::Cached(split) => split.reader(),
+            Self::Direct { reader, .. } => reader,
         }
     }
 
@@ -1890,23 +1942,30 @@ async fn warm_fuzzy_searcher(
     let searcher = reader.searcher();
     let terms = analyze_query_terms(analyzer, query);
     let resolved = resolve_fuzzy_clauses(&searcher, fields.body, &terms, fuzzy_distance)?;
-    if resolved.is_empty() {
-        return Ok(resolved);
+    warm_term_postings(reader, fields.body, resolved.boosts.keys()).await?;
+
+    Ok(resolved)
+}
+
+/// Make the postings of `terms` resident, without positions: a fuzzy clause is
+/// a single term, so nothing reads them.
+async fn warm_term_postings<'a>(
+    reader: &IndexReader,
+    field: tantivy::schema::Field,
+    terms: impl IntoIterator<Item = &'a String>,
+) -> Result<(), HelixDbError> {
+    let terms = terms
+        .into_iter()
+        .map(|term| (Term::from_field_text(field, term), false))
+        .collect::<HashMap<_, _>>();
+    if terms.is_empty() {
+        return Ok(());
     }
 
     let mut postings = WarmupInfo::default();
-    postings.terms_grouped_by_field.insert(
-        fields.body,
-        resolved
-            .boosts
-            .keys()
-            .map(|candidate| (Term::from_field_text(fields.body, candidate), false))
-            .collect(),
-    );
+    postings.terms_grouped_by_field.insert(field, terms);
     postings.simplify();
-    execute_warmup(reader, postings).await?;
-
-    Ok(resolved)
+    execute_warmup(reader, postings).await
 }
 
 fn query_warmup_info(
@@ -2191,76 +2250,127 @@ pub(crate) fn search_reader_candidates(
 /// Warmup has to know this set to make the right postings resident, and the
 /// clause builder has to know it to build the query, so it is worked out once
 /// and handed down rather than derived twice. A search with corpus statistics
-/// then resolves every split's reach together, and carries the statistics it
+/// then resolves it again across every split, and carries the statistics it
 /// resolved against so the search scores with the same numbers.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FuzzyClauses {
     boosts: BTreeMap<String, f32>,
-    /// What this split's dictionary reached, kept so a search with corpus
-    /// statistics can resolve every split at once.
-    reached: FuzzyExpansion,
     /// Corpus statistics extended with the reached terms. Present only once
     /// the clauses have been resolved across splits.
     statistics: Option<crate::index_lifecycle::text::statistics::TextBm25Statistics>,
 }
 
-impl FuzzyClauses {
-    fn is_empty(&self) -> bool {
-        self.boosts.is_empty()
-    }
+/// Live corpus frequencies for the words a fuzzy query reaches, loaded as they
+/// are needed and kept for the rest of the request.
+struct LiveFrequencies<'a, R> {
+    reader: &'a R,
+    root: &'a crate::index_lifecycle::text::serving::ValidatedActiveTextManifestRoot,
+    corpus: &'a crate::index_lifecycle::text::statistics::TextBm25Statistics,
+    loaded: BTreeMap<Bytes, u64>,
 }
 
-/// The analysed query terms, and for each one a split's dictionary lacks, the
-/// indexed words within reach with the edits that found each.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FuzzyExpansion {
-    terms: Vec<String>,
-    reached: BTreeMap<String, BTreeMap<String, u8>>,
-}
-
-impl FuzzyExpansion {
-    /// Fold in another split's reach for the same query.
-    fn merge(&mut self, other: Self) {
-        if self.terms.is_empty() {
-            self.terms = other.terms;
-        }
-        for (term, group) in other.reached {
-            let mine = self.reached.entry(term).or_default();
-            for (candidate, edits) in group {
-                mine.entry(candidate)
-                    .and_modify(|best| *best = (*best).min(edits))
-                    .or_insert(edits);
-            }
-        }
-    }
-
-    /// Reduce a union of splits to what one index holding the whole corpus
-    /// would have kept: only the closest tier any split reached, and at most
-    /// [`MAX_EXPANDED_TERMS`] of it, ties broken on the term the way a single
-    /// split breaks them.
-    fn settle(&mut self) {
-        for group in self.reached.values_mut() {
-            let Some(closest) = group.values().copied().min() else {
-                continue;
-            };
-            group.retain(|_, edits| *edits == closest);
-            while group.len() > MAX_EXPANDED_TERMS {
-                group.pop_last();
-            }
-        }
-    }
-
-    /// Every word reached for a query term the corpus does not have.
-    fn absent_candidates<'a>(
-        &'a self,
+impl<'a, R: DbReadOps + Send + Sync> LiveFrequencies<'a, R> {
+    fn new(
+        reader: &'a R,
+        root: &'a crate::index_lifecycle::text::serving::ValidatedActiveTextManifestRoot,
         corpus: &'a crate::index_lifecycle::text::statistics::TextBm25Statistics,
-    ) -> impl Iterator<Item = &'a str> + 'a {
-        self.terms
-            .iter()
-            .filter(move |term| corpus.document_frequency(term.as_bytes()).unwrap_or(0) == 0)
-            .filter_map(move |term| self.reached.get(term))
-            .flat_map(|group| group.keys().map(String::as_str))
+    ) -> Self {
+        Self {
+            reader,
+            root,
+            corpus,
+            loaded: BTreeMap::new(),
+        }
     }
+
+    /// How many live documents hold `term`. A word that neither the query nor
+    /// [`Self::load`] brought in reads as zero.
+    fn of(&self, term: &str) -> u64 {
+        self.corpus
+            .document_frequency(term.as_bytes())
+            .or_else(|| self.loaded.get(term.as_bytes()).copied())
+            .unwrap_or(0)
+    }
+
+    async fn load(&mut self, terms: &[String]) -> Result<(), HelixDbError> {
+        let unknown = terms
+            .iter()
+            .filter(|term| {
+                self.corpus.document_frequency(term.as_bytes()).is_none()
+                    && !self.loaded.contains_key(term.as_bytes())
+            })
+            .map(|term| Bytes::copy_from_slice(term.as_bytes()))
+            .collect::<Vec<_>>();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let loaded = crate::index_lifecycle::text::statistics::load_term_frequencies(
+            self.reader,
+            self.root.scope(),
+            self.root.index_id(),
+            self.root.generation(),
+            self.root.partition(),
+            self.corpus.total_document_count(),
+            unknown,
+        )
+        .await?;
+        self.loaded.extend(loaded);
+        Ok(())
+    }
+
+    fn into_statistics(self) -> crate::index_lifecycle::text::statistics::TextBm25Statistics {
+        self.corpus.with_frequencies(self.loaded)
+    }
+}
+
+/// The closest words to `term` that a live document still holds, looked up in
+/// every split's dictionary, with the edits that reached them.
+///
+/// A split's dictionary keeps the words of documents deleted or rewritten since
+/// it was built, so it can say what is within reach but not what still matches
+/// anything. Each tier is checked against live frequencies before it is chosen
+/// or capped: a dead word one edit away must not hide a live one two edits
+/// away, and the cap must not spend its places on words no document holds.
+/// Frequencies load a cap's worth at a time in the order the cap keeps them, so
+/// a wide tier is read only as far as it has to be.
+async fn nearest_live_tier<R: DbReadOps + Send + Sync>(
+    frequencies: &mut LiveFrequencies<'_, R>,
+    searchers: &[tantivy::Searcher],
+    field: tantivy::schema::Field,
+    term: &str,
+    max_distance: u8,
+) -> Result<BTreeMap<String, u8>, HelixDbError> {
+    for distance in 1..=effective_distance(term, max_distance) {
+        let mut tier = BTreeSet::new();
+        for searcher in searchers {
+            for (candidate, edits) in dictionary_matches(searcher, field, term, distance)? {
+                // A sweep also returns the closer tiers, already ruled out.
+                if edits == distance {
+                    tier.insert(candidate);
+                }
+            }
+        }
+
+        let tier = tier.into_iter().collect::<Vec<_>>();
+        let mut live = BTreeMap::new();
+        for chunk in tier.chunks(MAX_EXPANDED_TERMS) {
+            frequencies.load(chunk).await?;
+            for candidate in chunk {
+                if frequencies.of(candidate) == 0 {
+                    continue;
+                }
+                live.insert(candidate.clone(), distance);
+                if live.len() == MAX_EXPANDED_TERMS {
+                    return Ok(live);
+                }
+            }
+        }
+        if !live.is_empty() {
+            return Ok(live);
+        }
+    }
+
+    Ok(BTreeMap::new())
 }
 
 fn keep_strongest(boosts: &mut BTreeMap<String, f32>, term: String, boost: f32) {
@@ -2292,8 +2402,9 @@ fn keep_strongest(boosts: &mut BTreeMap<String, f32>, term: String, boost: f32) 
 /// match more than once.
 ///
 /// The boosts here are against this split's own counts, which is what a search
-/// without corpus statistics scores with. A search with them re-resolves the
-/// reach across every split in [`resolve_across_splits`].
+/// without corpus statistics scores with. A search with them decides again
+/// across every split from live frequencies, in [`nearest_live_tier`] and
+/// [`resolve_across_splits`], and keeps this only for what it warmed.
 fn resolve_fuzzy_clauses(
     searcher: &tantivy::Searcher,
     field: tantivy::schema::Field,
@@ -2301,7 +2412,6 @@ fn resolve_fuzzy_clauses(
     fuzzy_distance: u8,
 ) -> Result<FuzzyClauses, HelixDbError> {
     let mut boosts: BTreeMap<String, f32> = BTreeMap::new();
-    let mut reached = BTreeMap::new();
     for term in terms {
         if provider_doc_freq(searcher, field, term)? > 0 {
             keep_strongest(&mut boosts, term.clone(), 1.0);
@@ -2311,34 +2421,30 @@ fn resolve_fuzzy_clauses(
         for (candidate, boost) in blended_boosts(searcher, field, &group)? {
             keep_strongest(&mut boosts, candidate, boost);
         }
-        reached.insert(term.clone(), group);
     }
     Ok(FuzzyClauses {
         boosts,
-        reached: FuzzyExpansion {
-            terms: terms.to_vec(),
-            reached,
-        },
         statistics: None,
     })
 }
 
-/// Resolve every split's reach at once against corpus statistics that know the
-/// reached terms. A term then scores the same wherever it lives, and a guessed
-/// word is weighed on how common it really is rather than on a count that was
-/// never loaded for it.
+/// Resolve the query once for every split against corpus statistics that know
+/// the reached terms. A term then scores the same wherever it lives, and a
+/// guessed word is weighed on how common it really is rather than on a count
+/// that was never loaded for it.
 fn resolve_across_splits(
-    expansion: &FuzzyExpansion,
+    terms: &[String],
+    reached: &BTreeMap<String, BTreeMap<String, u8>>,
     field: tantivy::schema::Field,
     corpus: crate::index_lifecycle::text::statistics::TextBm25Statistics,
 ) -> Result<FuzzyClauses, HelixDbError> {
     let mut boosts: BTreeMap<String, f32> = BTreeMap::new();
-    for term in &expansion.terms {
+    for term in terms {
         if provider_doc_freq(&corpus, field, term)? > 0 {
             keep_strongest(&mut boosts, term.clone(), 1.0);
             continue;
         }
-        let Some(group) = expansion.reached.get(term) else {
+        let Some(group) = reached.get(term) else {
             continue;
         };
         for (candidate, boost) in blended_boosts(&corpus, field, group)? {
@@ -2347,7 +2453,6 @@ fn resolve_across_splits(
     }
     Ok(FuzzyClauses {
         boosts,
-        reached: FuzzyExpansion::default(),
         statistics: Some(corpus),
     })
 }
