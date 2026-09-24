@@ -1308,3 +1308,54 @@ fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
         [i64::MIN, i64::MIN + 1, i64::MIN + 2].map(r::Value::Integer)
     );
 }
+
+#[test]
+fn decimal_integer_conversion_allocates_only_its_owned_argument() {
+    let parameters = BTreeMap::new();
+    for (text, expected) in [
+        (
+            "0".repeat(100_000) + "9007199254740993.0",
+            r::Value::Integer(9_007_199_254_740_993),
+        ),
+        (
+            "9223372036854775807.".to_owned() + &"0".repeat(100_000),
+            r::Value::Integer(i64::MAX),
+        ),
+        (
+            "-9223372036854775808.".to_owned() + &"0".repeat(100_000) + "1",
+            r::Value::Null,
+        ),
+        ("1e".to_owned() + &"9".repeat(100_000), r::Value::Null),
+        (
+            "1e-".to_owned() + &"9".repeat(100_000),
+            r::Value::Integer(0),
+        ),
+        ("0".repeat(100_000) + "!", r::Value::Null),
+    ] {
+        // Match the exact capacity of the evaluator's cloned argument.
+        let text = text.clone();
+        let bytes = text.len();
+        let expression = r::Expression::Function(
+            r::Function::ToInteger,
+            vec![r::Expression::Literal(r::Value::String(text))],
+        );
+        let evaluation = r::Evaluation {
+            row: &[],
+            parameters: &parameters,
+            graph: &NoGraph,
+            group: None,
+            max_collection_items: 100,
+            max_value_bytes: 2 * size_of::<r::Value>() + bytes,
+        };
+        let ((result, peak), _) = observe(|| {
+            let result = evaluation.eval(&expression);
+            (result, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(
+            peak,
+            size_of::<r::Value>() + bytes,
+            "conversion allocated beyond the argument slots and string"
+        );
+    }
+}

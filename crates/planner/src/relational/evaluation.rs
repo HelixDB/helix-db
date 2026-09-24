@@ -5,6 +5,7 @@ use super::{
 use std::{cmp::Ordering, collections::BTreeMap};
 
 mod formatting;
+mod integer;
 
 pub type Row = Vec<Value>;
 
@@ -571,12 +572,14 @@ impl Evaluation<'_> {
             },
             F::ToInteger => match first {
                 Value::Integer(_) => first,
-                Value::Float(f) => finite_integer(f).map(Value::Integer).unwrap_or(Value::Null),
+                Value::Float(f) => integer::from_float(f)
+                    .map(Value::Integer)
+                    .unwrap_or(Value::Null),
                 Value::String(s) => s
                     .trim()
                     .parse::<i64>()
                     .ok()
-                    .or_else(|| s.trim().parse::<f64>().ok().and_then(finite_integer))
+                    .or_else(|| integer::from_decimal(&s))
                     .map(Value::Integer)
                     .unwrap_or(Value::Null),
                 _ => return Err(type_error("toInteger requires a string or number")),
@@ -824,10 +827,6 @@ pub(super) fn overflow() -> QueryError {
         "integer result is outside the signed 64-bit range",
     )
 }
-fn finite_integer(f: f64) -> Option<i64> {
-    (f.is_finite() && f >= i64::MIN as f64 && f < 9_223_372_036_854_775_808.0).then_some(f as i64)
-}
-
 pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
     use Binary as B;
     if matches!(op, B::And | B::Or | B::Xor) {

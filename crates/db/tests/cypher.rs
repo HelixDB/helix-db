@@ -27,6 +27,9 @@ mod maps;
 #[path = "cypher/membership.rs"]
 mod membership;
 
+#[path = "cypher/conversions.rs"]
+mod conversions;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

@@ -112,6 +112,15 @@ profile. Unsupported syntax receives a specific error. Use the existing native
 index-management API to create indexes; Cypher planning can select existing
 compatible indexes.
 
+## Numeric conversions
+
+`toInteger()` and its `toInt()` alias convert decimal strings exactly, including
+scientific notation, and truncate fractions toward zero. For example,
+`toInteger('9007199254740993.0')` returns `9007199254740993`. Invalid text and
+values outside the signed 64-bit range return null, including a fractional
+amount beyond either boundary. Floating-point inputs retain their existing
+binary precision; conversion cannot recover digits already lost in a float.
+
 ## Grouping expressions
 
 Projected expressions without aggregates define the groups. Inside an expression

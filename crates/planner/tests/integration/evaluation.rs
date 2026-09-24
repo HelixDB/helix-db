@@ -490,3 +490,159 @@ fn string_scalar_conversions_reuse_admitted_arguments() {
     }
     assert_eq!(parameters["value"], V::String(source));
 }
+
+#[test]
+fn decimal_integer_conversion_preserves_precision_and_checks_exact_bounds() {
+    let parameters = BTreeMap::new();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: 64 * 1024,
+    };
+    for (text, expected) in [
+        ("9007199254740993.0", Some(9_007_199_254_740_993)),
+        ("-9007199254740993.0", Some(-9_007_199_254_740_993)),
+        ("9.007199254740993e15", Some(9_007_199_254_740_993)),
+        ("9223372036854775807.0", Some(i64::MAX)),
+        ("-9223372036854775807.0", Some(i64::MIN + 1)),
+        ("9223372036854775806.9", Some(i64::MAX - 1)),
+        ("-9223372036854775807.9", Some(i64::MIN + 1)),
+        ("-9223372036854775808.0", Some(i64::MIN)),
+        ("999999999999999999999999999e-20", Some(9_999_999)),
+        ("9223372036854775808", None),
+        ("-9223372036854775809", None),
+        ("9223372036854775807.00000000000000001", None),
+        ("-9223372036854775808.00000000000000001", None),
+        ("+0001.99", Some(1)),
+        ("-0001.99", Some(-1)),
+        ("\t -.9e+1\u{2003}", Some(-9)),
+        ("1.", Some(1)),
+        ("1.e2", Some(100)),
+        (".1", Some(0)),
+        ("000.000e100000", Some(0)),
+        ("1e100000", None),
+        ("-1e100000", None),
+        ("1e-100000", Some(0)),
+        ("-1e-100000", Some(0)),
+        ("1e170141183460469231731687303715884105728", None),
+        ("1e-170141183460469231731687303715884105728", Some(0)),
+        ("0e170141183460469231731687303715884105728", Some(0)),
+    ] {
+        let expression = r::Expression::Function(
+            r::Function::ToInteger,
+            vec![r::Expression::Literal(r::Value::String(text.into()))],
+        );
+        assert_eq!(
+            evaluation.eval(&expression).unwrap(),
+            expected.map_or(r::Value::Null, r::Value::Integer),
+            "{text}"
+        );
+    }
+    for text in [
+        "",
+        "+",
+        "-",
+        ".",
+        "e1",
+        "1e",
+        "1e+",
+        "1e-",
+        "1e+-2",
+        "1e 2",
+        "1.2.3",
+        "1e2e3",
+        "1E2E3",
+        "1_0",
+        "0x10",
+        "1 2",
+        "+-1",
+        "--1",
+        "NaN",
+        "Infinity",
+        "-inf",
+        "١٢٣",
+        "１２３",
+        "猫",
+        "0\0",
+    ] {
+        let expression = r::Expression::Function(
+            r::Function::ToInteger,
+            vec![r::Expression::Literal(r::Value::String(text.into()))],
+        );
+        assert_eq!(
+            evaluation.eval(&expression).unwrap(),
+            r::Value::Null,
+            "{text:?}"
+        );
+    }
+    // Floating values have already been rounded: their existing conversion
+    // rule is intentionally distinct from exact decimal-string conversion.
+    for (value, expected) in [
+        (r::Value::Float(1.9), r::Value::Integer(1)),
+        (r::Value::Float(-1.9), r::Value::Integer(-1)),
+        (
+            r::Value::Float(i64::MIN as f64),
+            r::Value::Integer(i64::MIN),
+        ),
+        (r::Value::Float(i64::MAX as f64), r::Value::Null),
+        (r::Value::Float(f64::INFINITY), r::Value::Null),
+        (r::Value::Float(f64::NAN), r::Value::Null),
+        (r::Value::Integer(i64::MAX), r::Value::Integer(i64::MAX)),
+        (r::Value::Null, r::Value::Null),
+    ] {
+        let expression =
+            r::Expression::Function(r::Function::ToInteger, vec![r::Expression::Literal(value)]);
+        assert_eq!(evaluation.eval(&expression).unwrap(), expected);
+    }
+}
+
+#[test]
+fn decimal_integer_conversion_matches_scaled_integer_oracles() {
+    let parameters = BTreeMap::new();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: 16 * 1024,
+    };
+    let mut bits = 0x6a09e667f3bcc909_u64;
+    for _ in 0..4096 {
+        bits ^= bits << 13;
+        bits ^= bits >> 7;
+        bits ^= bits << 17;
+        let integer = bits as i64;
+        // Each representation has exactly the same mathematical value, with
+        // nonzero trailing integer digits well beyond floating precision.
+        for text in [
+            format!("{integer}.0"),
+            format!("{integer}000000000000000000000e-21"),
+            format!("{integer}e+0"),
+        ] {
+            let expression = r::Expression::Function(
+                r::Function::ToInteger,
+                vec![r::Expression::Literal(r::Value::String(text))],
+            );
+            assert_eq!(
+                evaluation.eval(&expression).unwrap(),
+                r::Value::Integer(integer)
+            );
+        }
+        for scale in [1_u32, 3, 9, 18] {
+            let divisor = 10_i64.pow(scale);
+            let text = format!("{integer}e-{scale}");
+            let expression = r::Expression::Function(
+                r::Function::ToInteger,
+                vec![r::Expression::Literal(r::Value::String(text))],
+            );
+            assert_eq!(
+                evaluation.eval(&expression).unwrap(),
+                r::Value::Integer(integer / divisor)
+            );
+        }
+    }
+}
