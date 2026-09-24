@@ -260,6 +260,8 @@ validated window in the prefix to stop the source. Dynamic downstream windows
 stop through consumer counters without moving their validation ahead of source
 setup. Earlier exhausted windows still stop even when a later skip produces no
 rows; downstream expansion continuations finish before stopping upstream input.
+Proven empty windows ignore preceding skips in their demand and costing bounds,
+while retaining offset validation and any required initial source evaluation.
 
 The [formatter configuration](../rustfmt.toml) records only the workspace parsing
 edition and its existing style edition. Other settings come from the pinned

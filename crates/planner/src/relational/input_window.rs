@@ -126,9 +126,14 @@ impl InputWindow {
             };
             let skipped = skipped.saturating_add(skip);
             downstream_skips = Some(skipped);
-            // Each tail window caps its input at cumulative SKIP + LIMIT. An
-            // earlier cap still wins when a later skip exhausts that output.
-            window.downstream_demand = window.downstream_demand.min(skipped.saturating_add(limit));
+            // Empty windows need no candidates, regardless of preceding skips.
+            // Other windows cap input at cumulative SKIP + LIMIT; an earlier
+            // cap still wins when a later skip exhausts that output.
+            window.downstream_demand = window.downstream_demand.min(if limit == 0 {
+                0
+            } else {
+                skipped.saturating_add(limit)
+            });
         }
         window
     }
@@ -158,8 +163,13 @@ impl InputWindow {
                 offset.saturating_add(super::nonnegative(&evaluate(expression)?)?),
             )
         })?;
-        let limit = super::nonnegative(&evaluate(&self.limit)?)?;
-        let demand = skip.saturating_add(limit.min(self.downstream_demand));
+        let limit = super::nonnegative(&evaluate(&self.limit)?)?.min(self.downstream_demand);
+        // Validate all offsets above even when the proven output is empty.
+        let demand = if limit == 0 {
+            0
+        } else {
+            skip.saturating_add(limit)
+        };
         Ok(match self.termination {
             Termination::AfterFirstBatch => demand.max(1),
             Termination::Drain | Termination::BeforeInput => demand,
@@ -178,11 +188,14 @@ impl InputWindow {
         let Expression::Literal(Value::Integer(limit)) = &self.limit else {
             return None;
         };
-        let demand = skip.saturating_add(
-            u64::try_from(*limit)
-                .ok()?
-                .min(self.downstream_demand as u64),
-        );
+        let limit = u64::try_from(*limit)
+            .ok()?
+            .min(self.downstream_demand as u64);
+        let demand = if limit == 0 {
+            0
+        } else {
+            skip.saturating_add(limit)
+        };
         Some(match self.termination {
             Termination::AfterFirstBatch => demand.max(1),
             Termination::Drain | Termination::BeforeInput => demand,

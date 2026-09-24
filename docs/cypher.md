@@ -272,7 +272,9 @@ limit is exhausted. Literal windows compose their skips and caps into a tighter
 source bound. Later parameterized windows keep their existing validation point
 and stop at batch boundaries; they are not evaluated early during source setup.
 For example, `WITH n LIMIT 1000000 RETURN n LIMIT 5` needs only the smaller
-window when the projections satisfy that proof. Filters, ordering, aggregation
+window when the projections satisfy that proof. A proven zero limit needs no
+candidate rows regardless of preceding skips; sources that require initial
+validation still run, and invalid offsets still fail. Filters, ordering, aggregation
 and mutations still end the proof.
 Rows reuse execution cells after bindings leave scope, so successive `WITH`
 aliases do not widen every retained row. Logical binding IDs remain stable in

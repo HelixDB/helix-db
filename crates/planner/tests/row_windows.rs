@@ -146,6 +146,10 @@ fn composed_source_demand_preserves_an_independent_sequence_model() {
                     let expected = model(256);
                     assert_eq!(model(demand), expected);
                     assert!(demand <= (skip + limit).max(1) as usize);
+                    if limit == 0 || next_limit == 0 {
+                        // UNWIND still validates its initial source expression.
+                        assert_eq!(demand, 1);
+                    }
                     if !expected.is_empty() {
                         assert_ne!(model(demand - 1), expected);
                     }
@@ -157,6 +161,24 @@ fn composed_source_demand_preserves_an_independent_sequence_model() {
     let limited = pipeline(vec![(None, literal(1_000_000)), (literal(2), literal(3))]);
     let context = helix_planner::context::PlannerContext::default();
     assert!(limited.cost(&context.storage).peak_memory < full.cost(&context.storage).peak_memory);
+    let empty = pipeline(vec![(None, literal(0))]).cost(&context.storage);
+    for windows in [
+        vec![(literal(i64::MAX), literal(0))],
+        vec![(literal(i64::MAX), None), (literal(i64::MAX), literal(0))],
+        vec![
+            (literal(i64::MAX), literal(100)),
+            (literal(i64::MAX), literal(0)),
+        ],
+        vec![
+            (literal(i64::MAX), literal(0)),
+            (literal(i64::MAX), literal(100)),
+        ],
+    ] {
+        assert_eq!(
+            pipeline(windows).cost(&context.storage).peak_memory,
+            empty.peak_memory
+        );
+    }
 }
 
 #[test]

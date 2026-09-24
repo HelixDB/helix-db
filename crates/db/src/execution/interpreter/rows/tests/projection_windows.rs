@@ -523,3 +523,95 @@ async fn composed_windows_bound_storage_reads_as_the_graph_grows() {
     }
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn empty_windows_ignore_skips_without_skipping_validation() {
+    let db =
+        crate::execution::interpreter::test_support::open_db("cypher-empty-window-reads").await;
+    db.cypher(crate::cypher::Request::new(
+        "UNWIND range(1,1024) AS x CREATE (:EmptyWindowInput {k:1})",
+    ))
+    .await
+    .unwrap();
+    let parameters = BTreeMap::from([("key".into(), r::Value::Integer(1))]);
+    for source in [
+        "MATCH(n:EmptyWindowInput)",
+        "MATCH(n:EmptyWindowInput {k:$key})",
+    ] {
+        for tail in [
+            "RETURN n SKIP 1000000 LIMIT 0",
+            "WITH n SKIP 1000000 RETURN n SKIP 1000000 LIMIT 0",
+            "WITH n SKIP 1000000 LIMIT 1000000 RETURN n SKIP 1000000 LIMIT 0",
+            "WITH n SKIP 1000000 LIMIT 0 RETURN n SKIP 1000000 LIMIT 1000000",
+        ] {
+            let query = format!("{source} {tail}");
+            let plan = r::plan(
+                helix_cypher::compile(&query).unwrap(),
+                &db.planner_context(context::ParamBindings::default()),
+            )
+            .unwrap();
+            let reference = Interpreter::new(&db, context::ParamBindings::default())
+                .execute_rows(
+                    &plan.clone().with_execution(r::RowExecution::Materialized),
+                    &parameters,
+                    Limits::default(),
+                )
+                .await
+                .unwrap();
+            assert!(reference.rows.is_empty());
+            for batch_rows in [1, 512] {
+                let result = Interpreter::new(&db, context::ParamBindings::default())
+                    .execute_rows(
+                        &plan,
+                        &parameters,
+                        Limits {
+                            batch_rows,
+                            ..Limits::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.rows, reference.rows, "{query}");
+                // The constrained source validates one candidate; the plain
+                // scan need not hydrate any. Neither depends on batch width.
+                assert!(
+                    result.resources.reads.multi_get_keys
+                        <= if source.contains("$key") { 2 } else { 0 },
+                    "{query}, batch {batch_rows}: {:?}",
+                    result.resources.reads
+                );
+            }
+        }
+    }
+    for (query, detail) in [
+        ("UNWIND [1/0] AS n RETURN n SKIP 1000000 LIMIT 0", "DivisionByZero"),
+        ("MATCH(n:EmptyWindowInput {k:$missing}) WITH n SKIP 1000000 LIMIT 1000000 RETURN n SKIP 1000000 LIMIT 0", "MissingParameter"),
+        ("MATCH(n:EmptyWindowInput) WITH n SKIP $negative LIMIT 1000000 RETURN n SKIP 1000000 LIMIT 0", "NegativeIntegerArgument"),
+        ("MATCH(n:EmptyWindowInput) WITH n SKIP 1000000 LIMIT 0 RETURN n SKIP $negative LIMIT 0", "NegativeIntegerArgument"),
+        ("MATCH(n:EmptyWindowInput) WITH n SKIP 1000000 LIMIT 0 RETURN n LIMIT $fraction", "InvalidArgumentType"),
+    ] {
+        let plan = r::plan(
+            helix_cypher::compile(query).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        for strategy in [r::RowExecution::Batched, r::RowExecution::Materialized] {
+            let error = Interpreter::new(&db, context::ParamBindings::default())
+                .execute_rows(
+                    &plan.clone().with_execution(strategy),
+                    &BTreeMap::from([
+                        ("negative".into(), r::Value::Integer(-1)),
+                        ("fraction".into(), r::Value::Float(1.0)),
+                    ]),
+                    Limits::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::Query(ref error) if error.detail == detail && error.phase == r::ErrorPhase::Runtime),
+                "{query}: {error}"
+            );
+        }
+    }
+    db.close().await.unwrap();
+}

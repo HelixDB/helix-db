@@ -449,6 +449,16 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[12], [13]]),
         ),
         (
+            "empty_window_skips",
+            "MATCH (a:Left) WITH a SKIP 1000000 LIMIT 1000000 RETURN a SKIP 1000000 LIMIT 0".into(),
+            json!([]),
+        ),
+        (
+            "empty_window_range",
+            "UNWIND range(1,1000000000) AS x WITH x SKIP 1000000 LIMIT 1000000 RETURN x SKIP 1000000 LIMIT 0".into(),
+            json!([]),
+        ),
+        (
             "mixed_unwind_aggregation",
             format!("{mixed_prefix} RETURN count(*),sum(value)"),
             json!([[mixed_values.len(), mixed_values.iter().sum::<usize>()]]),
@@ -543,6 +553,16 @@ async fn measure_cases(
             {
                 return Err(format!(
                     "{case} exceeded its composed demand guard at size {size}: peak={}, reads={:?}",
+                    response.resources.peak_memory_bytes, response.resources.reads
+                )
+                .into());
+            }
+            if case.starts_with("empty_window_")
+                && (response.resources.reads.multi_get_keys != 0
+                    || response.resources.peak_memory_bytes > 128 * 1024)
+            {
+                return Err(format!(
+                    "{case} exceeded its empty-source demand guard at size {size}: peak={}, reads={:?}",
                     response.resources.peak_memory_bytes, response.resources.reads
                 )
                 .into());
