@@ -404,23 +404,31 @@ impl Evaluation<'_> {
                 Value::Entity(entity) => Value::Map(self.properties(entity)?),
                 _ => return Err(type_error("properties requires a map or graph entity")),
             },
-            F::Keys => {
-                let keys = match first {
-                    Value::Map(map) => map.into_keys().collect(),
-                    Value::Entity(entity) => {
-                        let keys = self.graph.keys(entity)?;
-                        let bytes = keys.clone().fold(size_of::<Value>(), |bytes, key| {
-                            bytes
-                                .saturating_add(size_of::<Value>())
-                                .saturating_add(key.len())
-                        });
-                        self.remaining(bytes)?;
-                        keys.cloned().collect::<Vec<_>>()
-                    }
-                    _ => return Err(type_error("keys requires a map or graph entity")),
-                };
-                Value::List(keys.into_iter().map(Value::String).collect())
-            }
+            F::Keys => match first {
+                Value::Map(map) => {
+                    self.remaining(
+                        size_of::<Value>()
+                            .saturating_add(map.len().saturating_mul(size_of::<Value>())),
+                    )?;
+                    // Move owned keys directly into the admitted output slots.
+                    let mut keys = Vec::with_capacity(map.len());
+                    keys.extend(map.into_keys().map(Value::String));
+                    Value::List(keys)
+                }
+                Value::Entity(entity) => {
+                    let keys = self.graph.keys(entity)?;
+                    let bytes = keys.clone().fold(size_of::<Value>(), |bytes, key| {
+                        bytes
+                            .saturating_add(size_of::<Value>())
+                            .saturating_add(key.len())
+                    });
+                    self.remaining(bytes)?;
+                    let mut values = Vec::with_capacity(keys.len());
+                    values.extend(keys.cloned().map(Value::String));
+                    Value::List(values)
+                }
+                _ => return Err(type_error("keys requires a map or graph entity")),
+            },
             F::Size | F::Length => Value::Integer(match first {
                 Value::String(s) => s.chars().count(),
                 Value::List(xs) => xs.len(),
@@ -560,14 +568,43 @@ impl Evaluation<'_> {
                 Value::String(trimmed.to_owned())
             }
             F::ToLower | F::ToUpper => {
-                let Value::String(s) = first else {
+                let Value::String(mut s) = first else {
                     return Err(type_error("string function requires a string"));
                 };
-                Value::String(if function == F::ToLower {
-                    s.to_lowercase()
+                if s.is_ascii() {
+                    if function == F::ToLower {
+                        s.make_ascii_lowercase();
+                    } else {
+                        s.make_ascii_uppercase();
+                    }
+                    Value::String(s)
                 } else {
-                    s.to_uppercase()
-                })
+                    // Keep contextual Unicode mapping in the standard library.
+                    // Its output initially reserves the input's byte length.
+                    // allocation_bounds guards these pinned-toolchain capacity
+                    // assumptions independently of this evaluator.
+                    self.remaining(size_of::<Value>().saturating_add(s.len()))?;
+                    let bytes = s.chars().fold(0_usize, |bytes, c| {
+                        bytes.saturating_add(if function == F::ToLower {
+                            c.to_lowercase().map(char::len_utf8).sum::<usize>()
+                        } else {
+                            c.to_uppercase().map(char::len_utf8).sum::<usize>()
+                        })
+                    });
+                    // The contextual sigma forms have equal UTF-8 length.
+                    // If conversion grows, admit geometric buffer growth and
+                    // the minimum byte-vector capacity before allocating it.
+                    if bytes > s.len() {
+                        self.remaining(
+                            size_of::<Value>().saturating_add(bytes.saturating_mul(2).max(8)),
+                        )?;
+                    }
+                    Value::String(if function == F::ToLower {
+                        s.to_lowercase()
+                    } else {
+                        s.to_uppercase()
+                    })
+                }
             }
             F::Substring => {
                 let Value::String(s) = first else {

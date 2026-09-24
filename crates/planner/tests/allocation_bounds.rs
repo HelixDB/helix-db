@@ -317,15 +317,6 @@ fn shape_validation_has_no_heap_frontier_for_scalar_wide_or_deep_values() {
 
 #[test]
 fn runtime_depth_rejection_allocates_only_the_error_before_borrowed_value_cloning() {
-    struct NoGraph;
-    impl r::GraphValues for NoGraph {
-        fn properties(&self, _: r::Entity) -> r::Result<&r::GraphProperties> {
-            panic!("scalar value requested graph data")
-        }
-        fn label(&self, _: r::Entity) -> r::Result<Option<&str>> {
-            panic!("scalar value requested graph data")
-        }
-    }
     let value = (0..96).fold(r::Value::String("x".repeat(1024 * 1024)), |value, _| {
         r::Value::List(vec![value])
     });
@@ -353,5 +344,304 @@ fn runtime_depth_rejection_allocates_only_the_error_before_borrowed_value_clonin
         let error_bytes =
             error.category.capacity() + error.detail.capacity() + error.message.capacity();
         assert_eq!((peak, live), (error_bytes, error_bytes));
+    }
+}
+
+struct NoGraph;
+impl r::GraphValues for NoGraph {
+    fn properties(&self, _: r::Entity) -> r::Result<&r::GraphProperties> {
+        panic!("scalar value requested graph data")
+    }
+    fn label(&self, _: r::Entity) -> r::Result<Option<&str>> {
+        panic!("scalar value requested graph data")
+    }
+}
+
+#[test]
+fn case_conversion_admission_covers_live_buffers_and_rejection() {
+    for fragment in ["", "aBc", "Σ", "ΟΣ", "AΣ'", "İ", "K", "ΐ", "ﬃ", "猫😀"] {
+        let source = fragment.repeat(4096);
+        let parameters = BTreeMap::from([("text".into(), r::Value::String(source.clone()))]);
+        for function in [r::Function::ToLower, r::Function::ToUpper] {
+            let expected = if function == r::Function::ToLower {
+                source.to_lowercase()
+            } else {
+                source.to_uppercase()
+            };
+            let expression =
+                r::Expression::Function(function, vec![r::Expression::Parameter("text".into())]);
+            let mut succeeded = false;
+            for allowance in [
+                source.len(),
+                source.len() * 3 / 2,
+                source.len() * 2,
+                source.len() * 3,
+                source.len() * 4,
+                source.len() * 8,
+            ] {
+                let budget = allowance + 256;
+                let evaluation = r::Evaluation {
+                    row: &[],
+                    parameters: &parameters,
+                    graph: &NoGraph,
+                    group: None,
+                    max_collection_items: 10,
+                    max_value_bytes: budget,
+                };
+                let ((result, peak), _) = observe(|| {
+                    let result = evaluation.eval(&expression);
+                    (result, OBSERVATION.with(Cell::get).peak)
+                });
+                assert!(
+                    peak <= budget,
+                    "{fragment:?} {function:?}: live allocation peak {peak} exceeds {budget}"
+                );
+                match result {
+                    Ok(result) => {
+                        assert_eq!(result, r::Value::String(expected.clone()));
+                        succeeded = true;
+                        if source.is_ascii() {
+                            assert!(
+                                peak <= source.len() + 2 * size_of::<r::Value>(),
+                                "ASCII conversion copied its argument: {peak}"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        assert!(
+                            !source.is_ascii(),
+                            "owned ASCII conversion needs no new buffer"
+                        );
+                        assert_eq!(
+                            (&*error.category, &*error.detail),
+                            ("ResourceLimit", "MemoryLimit")
+                        );
+                        assert!(
+                            peak < source.len() + 256,
+                            "rejected Unicode output was allocated: {peak}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                succeeded,
+                "{fragment:?} {function:?}: larger budget must succeed"
+            );
+        }
+        assert_eq!(parameters["text"], r::Value::String(source));
+    }
+}
+
+#[test]
+fn case_conversion_matches_all_unicode_scalars_and_contextual_mapping() {
+    let parameters = BTreeMap::new();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 10,
+        max_value_bytes: 4 * 1024 * 1024,
+    };
+    let check = |source: &str| {
+        for function in [r::Function::ToLower, r::Function::ToUpper] {
+            let expected = if function == r::Function::ToLower {
+                source.to_lowercase()
+            } else {
+                source.to_uppercase()
+            };
+            // Guard the standard-library capacity assumption independently of
+            // the evaluator's implementation and memory-limit decisions.
+            let mapped = source
+                .chars()
+                .map(|c| {
+                    if function == r::Function::ToLower {
+                        c.to_lowercase().map(char::len_utf8).sum::<usize>()
+                    } else {
+                        c.to_uppercase().map(char::len_utf8).sum::<usize>()
+                    }
+                })
+                .sum::<usize>();
+            assert_eq!(expected.len(), mapped);
+            let bound = if mapped > source.len() {
+                mapped.saturating_mul(2).max(8)
+            } else {
+                source.len()
+            };
+            assert!(
+                expected.capacity() <= bound,
+                "case conversion grew beyond the admitted capacity"
+            );
+            let expression = r::Expression::Function(
+                function,
+                vec![r::Expression::Literal(r::Value::String(source.into()))],
+            );
+            assert_eq!(
+                evaluation.eval(&expression).unwrap(),
+                r::Value::String(expected),
+                "{source:?} {function:?}"
+            );
+        }
+    };
+    let mut bytes = [0_u8; 4];
+    for c in (0..=0x10ffff).filter_map(char::from_u32) {
+        check(c.encode_utf8(&mut bytes));
+    }
+    let fragments = [
+        "",
+        "A",
+        "Σ",
+        "ΟΣ",
+        "ΣΣ",
+        "Ο\u{301}Σ",
+        "Σ\u{301}Ο",
+        "\u{200d}",
+        "'",
+        "İ",
+        "K",
+        "ΐ",
+        "ﬃ",
+        "猫😀",
+        "aBcDeFgHiJkLmNoPqRsTuVwXyZ",
+    ];
+    for before in fragments {
+        for middle in fragments {
+            for after in fragments {
+                check(&format!("{before}{middle}{after}"));
+            }
+        }
+    }
+    for source in fragments {
+        for count in [1, 2, 3, 7, 8, 15, 16, 31, 32, 255, 4096] {
+            check(&source.repeat(count));
+        }
+    }
+}
+
+#[test]
+fn property_keys_admit_one_output_buffer_and_do_not_evaluate_values() {
+    struct Graph(r::GraphProperties);
+    impl r::GraphValues for Graph {
+        fn properties(&self, _: r::Entity) -> r::Result<&r::GraphProperties> {
+            Ok(&self.0)
+        }
+        fn label(&self, _: r::Entity) -> r::Result<Option<&str>> {
+            panic!("keys requested a label")
+        }
+    }
+    let parameters = BTreeMap::new();
+    for count in [0, 1, 3, 4, 12, 257] {
+        let graph = Graph(
+            (0..count)
+                .map(|i| {
+                    (
+                        format!("key{i:04}😀"),
+                        Err(r::QueryError::unsupported("StoredValue")),
+                    )
+                })
+                .collect(),
+        );
+        let budget = 2 * size_of::<r::Value>()
+            + count * size_of::<r::Value>()
+            + graph.0.keys().map(String::len).sum::<usize>();
+        for entity in [r::Entity::Node(1), r::Entity::Relationship(1)] {
+            let expression = r::Expression::Function(
+                r::Function::Keys,
+                vec![r::Expression::Literal(r::Value::Entity(entity))],
+            );
+            for (max_value_bytes, fits) in [(budget, true), (budget - 1, false)] {
+                let evaluation = r::Evaluation {
+                    row: &[],
+                    parameters: &parameters,
+                    graph: &graph,
+                    group: None,
+                    max_collection_items: 1024,
+                    max_value_bytes,
+                };
+                let ((result, peak), _) = observe(|| {
+                    let result = evaluation.eval(&expression);
+                    (result, OBSERVATION.with(Cell::get).peak)
+                });
+                if fits {
+                    assert!(
+                        peak <= max_value_bytes,
+                        "{count} keys: live allocation peak {peak} exceeds {max_value_bytes}"
+                    );
+                    assert_eq!(
+                        result.unwrap(),
+                        r::Value::List(graph.0.keys().cloned().map(r::Value::String).collect())
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(
+                        (&*error.category, &*error.detail),
+                        ("ResourceLimit", "MemoryLimit")
+                    );
+                    let error_bytes = error.category.capacity()
+                        + error.detail.capacity()
+                        + error.message.capacity();
+                    assert_eq!(
+                        peak,
+                        size_of::<r::Value>() + error_bytes,
+                        "rejection allocated output keys"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn map_keys_admit_output_slots_while_the_owned_map_is_live() {
+    let parameters = BTreeMap::new();
+    for count in [0, 1, 3, 4, 12, 257] {
+        let map = r::Value::Map(
+            (0..count)
+                .map(|i| {
+                    (
+                        format!("key{i:04}😀"),
+                        r::Value::String("payload".repeat(128)),
+                    )
+                })
+                .collect(),
+        );
+        // Match the exact key capacities of the evaluated argument clone.
+        let map = map.clone();
+        let budget = map.allocated_bytes() + (count + 1) * size_of::<r::Value>();
+        let expected = match &map {
+            r::Value::Map(values) => {
+                r::Value::List(values.keys().cloned().map(r::Value::String).collect())
+            }
+            _ => unreachable!(),
+        };
+        let expression =
+            r::Expression::Function(r::Function::Keys, vec![r::Expression::Literal(map)]);
+        for (max_value_bytes, fits) in [(budget, true), (budget - 1, false)] {
+            let evaluation = r::Evaluation {
+                row: &[],
+                parameters: &parameters,
+                graph: &NoGraph,
+                group: None,
+                max_collection_items: 1024,
+                max_value_bytes,
+            };
+            let ((result, peak), _) = observe(|| {
+                let result = evaluation.eval(&expression);
+                (result, OBSERVATION.with(Cell::get).peak)
+            });
+            assert!(
+                peak <= max_value_bytes,
+                "{count} map keys exceeded live allocation allowance"
+            );
+            if fits {
+                assert_eq!(result.unwrap(), expected);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    (&*error.category, &*error.detail),
+                    ("ResourceLimit", "MemoryLimit")
+                );
+            }
+        }
     }
 }

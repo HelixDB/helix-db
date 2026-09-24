@@ -909,6 +909,8 @@ async fn string_temporaries_share_the_query_budget_and_failures_roll_back() {
         "rtrim($text)",
         "reverse($text)",
         "substring($text,0)",
+        "toLower($text)",
+        "toUpper($text)",
     ] {
         let query = format!("CREATE (:StringBudget) RETURN size({expression})");
         let error = execute(query.clone(), budget).await.unwrap_err();
