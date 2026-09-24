@@ -24,7 +24,7 @@ pub(super) enum ProjectionInputs {
     },
 }
 impl ProjectionInputs {
-    /// Add grouping dependencies to an admitted incoming-value mask. Allocate
+    /// Add expression dependencies to an admitted incoming-value mask. Allocate
     /// only when an expression actually references an input binding.
     pub(super) fn include_references<'e>(
         &mut self,
@@ -51,6 +51,7 @@ impl ProjectionInputs {
                 let Self::Keep { slots, .. } = self else {
                     unreachable!("referenced input has an admitted mask");
                 };
+                // Query validation proves every reference fits the row schema.
                 slots[slot.0 as usize] = true;
                 Ok(())
             })?;
@@ -76,31 +77,16 @@ impl Projection<'_> {
         if self.ordering.is_empty() && self.predicate.is_none() {
             return Ok(ProjectionInputs::Discard);
         }
-        let memory = ctx
-            .row_budget()
-            .reserve(width.saturating_mul(size_of::<bool>()))?;
-        let mut slots = vec![false; width];
-        for expression in self
-            .ordering
-            .iter()
-            .map(|order| &order.expression)
-            .chain(self.predicate.map(r::SelectionProgram::expression))
-        {
-            ctx.check_execution_deadline()?;
-            expression.visit(&mut |expression| {
-                let (r::Expression::Slot(slot) | r::Expression::HasLabel(slot, _)) = expression
-                else {
-                    return;
-                };
-                // Query validation proves every reference fits the row schema.
-                slots[slot.0 as usize] = true;
-            });
-        }
-        ctx.check_execution_deadline()?;
-        Ok(ProjectionInputs::Keep {
-            slots,
-            _memory: memory,
-        })
+        let mut inputs = ProjectionInputs::Discard;
+        inputs.include_references(
+            ctx,
+            width,
+            self.ordering
+                .iter()
+                .map(|order| &order.expression)
+                .chain(self.predicate.map(r::SelectionProgram::expression)),
+        )?;
+        Ok(inputs)
     }
 }
 

@@ -164,3 +164,71 @@ async fn sorting_admits_live_keys_cumulatively_before_evaluating_later_keys() {
     }
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn projection_input_masks_allocate_only_for_referenced_bindings() {
+    let db = test_support::open_db("projection-input-mask").await;
+    let items = r::ProjectionProgram::new(vec![r::Projection {
+        slot: r::Slot(0),
+        expression: r::Expression::Literal(r::Value::Integer(1)),
+    }])
+    .unwrap();
+    for references in [false, true] {
+        let ordering = [r::Ordering {
+            expression: if references {
+                r::Expression::Slot(r::Slot(1))
+            } else {
+                r::Expression::Literal(r::Value::Integer(0))
+            },
+            descending: false,
+        }];
+        let predicate = r::SelectionProgram::new(if references {
+            r::Expression::HasLabel(r::Slot(2), "N".into())
+        } else {
+            r::Expression::Literal(r::Value::Boolean(true))
+        })
+        .unwrap();
+        let projection = projection::Projection {
+            items: &items,
+            distinct: false,
+            ordering: &ordering,
+            predicate: Some(&predicate),
+            skip: None,
+            limit: None,
+        };
+        for memory_bytes in [0, 2, 3] {
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.row_memory = Some(memory::Budget::new(memory_bytes));
+            let (result, allocated) =
+                crate::allocation_testing::observe(|| projection.input_slots(&ctx, 3));
+            if !references {
+                assert_eq!(
+                    allocated.bytes, 0,
+                    "constant expressions need no input mask"
+                );
+            }
+            match result {
+                Ok(inputs) => {
+                    assert!(!references || memory_bytes >= 3);
+                    assert!(!inputs.keeps(0));
+                    assert_eq!(inputs.keeps(1), references);
+                    assert_eq!(inputs.keeps(2), references);
+                    assert_eq!(
+                        ctx.row_budget().available(),
+                        memory_bytes - if references { 3 } else { 0 }
+                    );
+                    drop(inputs);
+                }
+                Err(error) => {
+                    assert!(references && memory_bytes < 3);
+                    assert!(
+                        matches!(error, Error::Query(ref error) if error.detail == "MemoryLimit"),
+                        "{error}"
+                    );
+                }
+            }
+            assert_eq!(ctx.row_budget().available(), memory_bytes);
+        }
+    }
+    db.close().await.unwrap();
+}
