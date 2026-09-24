@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 impl ExecutionContext<'_> {
     /// Property expressions share one remaining budget. Keep both the evaluated
     /// map and its storage conversion admitted until the write consumes them.
-    fn create_properties(
-        &self,
+    fn create_properties<'a>(
+        &'a self,
         fields: &[(String, r::Expression)],
-        mut evaluation: r::Evaluation<'_>,
+        mut evaluation: r::Evaluation<'a>,
     ) -> Result<(
         Vec<crate::encoding::v2::values::property::Property>,
         super::memory::Reservation,
@@ -28,7 +28,8 @@ impl ExecutionContext<'_> {
             self.check_execution_deadline()?;
             // Typed list conversion may retain source and destination buffers
             // together. Admission for both precedes their construction.
-            evaluation.max_value_bytes = self.row_budget().available() / 2;
+            let allowance = self.row_budget().evaluation_memory();
+            evaluation.memory = allowance.capped(allowance.available() / 2);
             let value = evaluation.eval(expression)?;
             bytes = bytes.saturating_add(value.allocated_bytes().saturating_mul(2));
             memory.resize(bytes)?;

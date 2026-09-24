@@ -259,6 +259,10 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
+Peak admission includes temporary expression buffers alongside retained rows
+and operator state. Consuming a large intermediate value can raise the peak even
+when a query returns one number. Scalar aggregation accounts for an incoming
+value while retained state grows, including `DISTINCT` key copies.
 Scalar `range()` checks its complete collection size before reserving output.
 After its arguments are evaluated, an excessive item count returns
 `CollectionLimit` before output-memory admission; otherwise an oversized buffer

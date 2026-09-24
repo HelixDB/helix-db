@@ -164,6 +164,12 @@ flowchart TD
 | Resource ownership | [query_resources](../crates/db/src/query_resources.rs), [row memory](../crates/db/src/execution/interpreter/rows/memory.rs), [execution_control](../crates/db/src/execution_control.rs) | Admission follows live owners; cancellation and deadline checks bound execution. The memory estimate is not an RSS cap. |
 | Snapshot reads | [read_view](../crates/db/src/execution/interpreter/read_view.rs), [storage](../crates/db/src/execution/interpreter/storage.rs), [read_cache](../crates/db/src/execution/interpreter/storage/read_cache.rs) | Reuse raw values only inside the same eligible pinned read scope. Optional cache entries are bounded and reclaimable; writes bypass reuse. |
 
+The [scalar memory allowance](../crates/planner/src/relational/evaluation/memory.rs)
+tracks nested temporary bounds and borrows the request's peak counter. It carries
+no storage handle. Evaluation and row aggregation share the same accumulator
+admission boundary, including the overlap between an input and retained state.
+Private allowance tests live separately from production coverage.
+
 Materialisation depends on the selected pipeline:
 
 | Operation | Retained state | May consume all input? |

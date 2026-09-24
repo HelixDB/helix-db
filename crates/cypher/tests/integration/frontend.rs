@@ -21,7 +21,7 @@ fn scalar(text: &str) -> r::Value {
         parameters: &BTreeMap::new(),
         graph: &EmptyGraph,
         group: None,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
         max_collection_items: 1000,
     }
     .eval(&items[0].expression)

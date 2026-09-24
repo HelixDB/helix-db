@@ -20,6 +20,8 @@ pub struct StorageReadUsage {
     pub scan_rows: usize,
 }
 
+use helix_planner::relational as r;
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -80,6 +82,18 @@ impl Budget {
             result
         })
     }
+    /// Borrow the request peak while scalar evaluation tracks live temporaries.
+    /// Existing owners retain their guards; evaluation only records high-water
+    /// admission and never retains a reservation after its values are consumed.
+    pub(crate) fn evaluation_memory(&self) -> r::EvaluationMemory<'_> {
+        r::EvaluationMemory::observed(
+            self.0.limit,
+            self.0.used.load(Ordering::Relaxed),
+            &self.0.peak,
+        )
+        .expect("request reservations remain within their budget")
+    }
+
     pub(crate) fn available(&self) -> usize {
         self.0
             .limit

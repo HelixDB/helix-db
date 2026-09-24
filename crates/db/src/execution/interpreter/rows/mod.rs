@@ -485,7 +485,7 @@ impl ExecutionContext<'_> {
 
 impl ExecutionContext<'_> {
     fn evaluate<'a>(
-        &self,
+        &'a self,
         row: &'a [r::Value],
         parameters: &'a BTreeMap<String, r::Value>,
         graph: &'a GraphBatch,
@@ -497,7 +497,7 @@ impl ExecutionContext<'_> {
             graph,
             group: None,
             max_collection_items: limits.collection_items,
-            max_value_bytes: self.row_budget().available(),
+            memory: self.row_budget().evaluation_memory(),
         }
     }
 }

@@ -32,7 +32,7 @@ fn operand_is_evaluated_once_even_when_every_alternative_misses() {
         graph: &graph,
         group: None,
         max_collection_items: usize::MAX,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
     };
     for count in [1, 4, 16, 64] {
         let expression = r::Expression::SimpleCase(Box::new(r::SimpleCase {
@@ -81,14 +81,14 @@ fn live_operand_is_charged_during_comparison_and_released_before_results() {
             graph: &graph,
             group: None,
             max_collection_items: usize::MAX,
-            max_value_bytes: 2000,
+            memory: r::EvaluationMemory::new(2000),
         };
         assert_eq!(
             evaluation.eval(&expression).unwrap(),
             r::Value::String("z".repeat(1500))
         );
         let constrained = r::Evaluation {
-            max_value_bytes: 1000,
+            memory: r::EvaluationMemory::new(1000),
             ..evaluation
         };
         let error = constrained.eval(&expression).unwrap_err();

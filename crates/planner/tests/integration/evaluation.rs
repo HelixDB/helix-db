@@ -24,7 +24,7 @@ fn owned_expression_temporaries_preserve_inputs_and_function_arguments() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 16_384,
+        memory: r::EvaluationMemory::new(16_384),
     };
     let integer = |n| E::Literal(V::Integer(n));
     for (expression, expected) in [
@@ -99,7 +99,7 @@ fn unwind_range_admits_live_arguments_and_keeps_argument_errors_visible() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 1200,
+        memory: r::EvaluationMemory::new(1200),
     };
     let range = E::Function(
         F::Range,
@@ -115,7 +115,7 @@ fn unwind_range_admits_live_arguments_and_keeps_argument_errors_visible() {
         matches!(evaluation.unwind(&null_with_missing), Err(error) if error.detail == "MissingParameter")
     );
     let too_small = r::Evaluation {
-        max_value_bytes: 1,
+        memory: r::EvaluationMemory::new(1),
         ..evaluation
     };
     assert!(matches!(too_small.unwind(&range), Err(error) if error.detail == "MemoryLimit"));
@@ -134,7 +134,7 @@ fn overlapping_index_and_slice_operands_are_admitted_together() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 1600,
+        memory: r::EvaluationMemory::new(1600),
     };
     let index = E::Function(F::Size, vec![E::Parameter("large".into())]);
     // Either operand fits alone. The index expression still needs its large
@@ -161,7 +161,7 @@ fn overlapping_index_and_slice_operands_are_admitted_together() {
         );
     }
     let small = r::Evaluation {
-        max_value_bytes: 512,
+        memory: r::EvaluationMemory::new(512),
         ..evaluation
     };
     for expression in [E::Slot(r::Slot(0)), E::Parameter("large".into())] {
@@ -199,7 +199,7 @@ fn graph_outputs_and_path_expansion_are_admitted_before_materialization() {
         graph: &graph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 1024,
+        memory: r::EvaluationMemory::new(1024),
     };
     let node = E::Literal(V::Entity(Entity::Node(1)));
     assert_eq!(
@@ -231,7 +231,7 @@ fn graph_outputs_and_path_expansion_are_admitted_before_materialization() {
         r::Path::new((0..100).collect(), (100..199).collect()).unwrap(),
     ));
     let evaluation = r::Evaluation {
-        max_value_bytes: 5000,
+        memory: r::EvaluationMemory::new(5000),
         ..evaluation
     };
     assert!(evaluation.eval(&path).is_ok());
@@ -257,7 +257,7 @@ fn expression_sequences_share_live_memory_and_preserve_error_order() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 1600,
+        memory: r::EvaluationMemory::new(1600),
     };
     let large = E::Parameter("large".into());
     let missing = E::Parameter("missing".into());
@@ -286,7 +286,7 @@ fn expression_sequences_share_live_memory_and_preserve_error_order() {
     assert_eq!(row, vec![V::Integer(7)]);
     assert_eq!(parameters["large"], V::String("x".repeat(1024)));
     let no_memory = r::Evaluation {
-        max_value_bytes: 0,
+        memory: r::EvaluationMemory::new(0),
         ..evaluation
     };
     assert!(no_memory
@@ -319,7 +319,7 @@ fn string_transforms_admit_outputs_before_allocating_them() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: source.len() * 3 / 2,
+        memory: r::EvaluationMemory::new(source.len() * 3 / 2),
     };
     for function in [F::Trim, F::Ltrim, F::Rtrim, F::Reverse, F::Substring] {
         let mut args = vec![E::Parameter("value".into())];
@@ -334,9 +334,9 @@ fn string_transforms_admit_outputs_before_allocating_them() {
             source.clone()
         };
         let exact = input_bytes + size_of::<V>() + expected.len();
-        for allowance in [evaluation.max_value_bytes, exact - 1, exact] {
+        for allowance in [evaluation.memory.available(), exact - 1, exact] {
             let bounded = r::Evaluation {
-                max_value_bytes: allowance,
+                memory: r::EvaluationMemory::new(allowance),
                 ..evaluation
             };
             let (result, allocated) = crate::allocations::observe(|| bounded.eval(&expression));
@@ -373,7 +373,7 @@ fn string_selection_preserves_unicode_boundaries_and_argument_errors() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 16_384,
+        memory: r::EvaluationMemory::new(16_384),
     };
     let integer = |n| E::Literal(V::Integer(n));
     for (function, source, trailing, expected) in [
@@ -464,7 +464,7 @@ fn string_scalar_conversions_reuse_admitted_arguments() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: source.len() + 2 * size_of::<V>(),
+        memory: r::EvaluationMemory::new(source.len() + 2 * size_of::<V>()),
     };
     for (function, expected) in [
         (F::ToString, V::String(source.clone())),
@@ -474,7 +474,7 @@ fn string_scalar_conversions_reuse_admitted_arguments() {
         let (result, allocated) = crate::allocations::observe(|| evaluation.eval(&expression));
         assert_eq!(result.unwrap(), expected);
         assert!(
-            allocated.bytes <= evaluation.max_value_bytes,
+            allocated.bytes <= evaluation.memory.available(),
             "{function:?} copied its owned string: {allocated:?}"
         );
     }
@@ -500,7 +500,7 @@ fn decimal_integer_conversion_preserves_precision_and_checks_exact_bounds() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 64 * 1024,
+        memory: r::EvaluationMemory::new(64 * 1024),
     };
     for (text, expected) in [
         ("9007199254740993.0", Some(9_007_199_254_740_993)),
@@ -608,7 +608,7 @@ fn decimal_integer_conversion_matches_scaled_integer_oracles() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 16 * 1024,
+        memory: r::EvaluationMemory::new(16 * 1024),
     };
     let mut bits = 0x6a09e667f3bcc909_u64;
     for _ in 0..4096 {
@@ -657,7 +657,7 @@ fn collection_limits_bound_values_instead_of_function_arity() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 1,
-        max_value_bytes: 64 * 1024,
+        memory: r::EvaluationMemory::new(64 * 1024),
     };
     let integer = |n| E::Literal(V::Integer(n));
     for (expression, expected) in [
@@ -761,7 +761,7 @@ fn collection_limits_validate_nested_borrowed_inputs_before_selected_results() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 1,
-        max_value_bytes: 64 * 1024,
+        memory: r::EvaluationMemory::new(64 * 1024),
     };
     for expression in [
         E::Literal(nested.clone()),
@@ -837,7 +837,7 @@ fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
         graph: &graph,
         group: None,
         max_collection_items: 1,
-        max_value_bytes: 64 * 1024,
+        memory: r::EvaluationMemory::new(64 * 1024),
     };
     let node = E::Literal(V::Entity(r::Entity::Node(1)));
     let path = E::Literal(V::Path(r::Path::new(vec![1, 2, 3], vec![1, 2]).unwrap()));
@@ -997,7 +997,7 @@ fn nested_collection_limits_match_an_independent_stack_walk() {
                 graph: &NoGraph,
                 group: None,
                 max_collection_items: limit,
-                max_value_bytes: usize::MAX,
+                memory: r::EvaluationMemory::new(usize::MAX),
             };
             let result = evaluation.eval(&r::Expression::Literal(value.clone()));
             match expected {
@@ -1027,7 +1027,7 @@ fn collection_growth_checks_cardinality_even_with_spare_capacity() {
         graph: &NoGraph,
         group: Some(&group),
         max_collection_items: 2,
-        max_value_bytes: 64 * 1024,
+        memory: r::EvaluationMemory::new(64 * 1024),
     };
     let collect = E::Aggregate {
         function: r::Aggregate::Collect,

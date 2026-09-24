@@ -6,6 +6,8 @@ use std::{cmp::Ordering, collections::BTreeMap};
 
 mod formatting;
 mod integer;
+mod memory;
+pub use memory::Memory as EvaluationMemory;
 
 pub type Row = Vec<Value>;
 
@@ -17,7 +19,7 @@ pub struct Evaluation<'a> {
     pub graph: &'a dyn GraphValues,
     pub group: Option<&'a [Row]>,
     pub max_collection_items: usize,
-    pub max_value_bytes: usize,
+    pub memory: EvaluationMemory<'a>,
 }
 
 impl Evaluation<'_> {
@@ -383,21 +385,8 @@ impl Evaluation<'_> {
     }
 
     fn remaining(&self, bytes: usize) -> Result<Self> {
-        // Saturated estimates and unaddressable buffers must fail even when
-        // an embedded caller provides an effectively unlimited allowance.
-        let max_value_bytes = self
-            .max_value_bytes
-            .checked_sub(bytes)
-            .filter(|_| bytes <= isize::MAX as usize)
-            .ok_or_else(|| {
-                QueryError::runtime(
-                    "ResourceLimit",
-                    "MemoryLimit",
-                    "expression temporaries exceed the query memory budget",
-                )
-            })?;
         Ok(Self {
-            max_value_bytes,
+            memory: self.memory.remaining(bytes)?,
             ..*self
         })
     }
@@ -770,7 +759,15 @@ impl Evaluation<'_> {
                 }
                 .eval(expression)?,
             };
-            accumulator.push(value, self.max_collection_items, self.max_value_bytes)?;
+            // The incoming value remains live while aggregate state grows.
+            // Reuse the same transition-admission boundary as row execution.
+            let input = self.remaining(value.allocated_bytes())?;
+            accumulator.push_with_admission::<QueryError>(
+                value,
+                self.max_collection_items,
+                input.memory.available(),
+                |bytes| input.remaining(bytes).map(|_| ()),
+            )?;
         }
         accumulator.finish()
     }

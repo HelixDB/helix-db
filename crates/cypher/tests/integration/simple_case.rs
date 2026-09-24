@@ -21,7 +21,7 @@ fn simple_case_preserves_equality_and_branch_laziness() {
         graph: &NoGraph,
         group: None,
         max_collection_items: usize::MAX,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
     };
     for (text, expected) in [
         (

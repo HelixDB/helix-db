@@ -26,7 +26,7 @@ fn evaluate(
         graph: &NoGraph,
         group: None,
         max_collection_items: 1000,
-        max_value_bytes: budget,
+        memory: r::EvaluationMemory::new(budget),
     };
     let future = program.evaluate(&mut evaluator);
     let Poll::Ready(result) = std::pin::pin!(future)

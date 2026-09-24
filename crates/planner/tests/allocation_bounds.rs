@@ -328,7 +328,7 @@ fn runtime_depth_rejection_allocates_only_the_error_before_borrowed_value_clonin
         graph: &NoGraph,
         group: None,
         max_collection_items: usize::MAX,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
     };
     for expression in [
         r::Expression::Literal(value),
@@ -386,7 +386,7 @@ fn case_conversion_admission_covers_live_buffers_and_rejection() {
                     graph: &NoGraph,
                     group: None,
                     max_collection_items: 10,
-                    max_value_bytes: budget,
+                    memory: r::EvaluationMemory::new(budget),
                 };
                 let ((result, peak), _) = observe(|| {
                     let result = evaluation.eval(&expression);
@@ -441,7 +441,7 @@ fn case_conversion_matches_all_unicode_scalars_and_contextual_mapping() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 10,
-        max_value_bytes: 4 * 1024 * 1024,
+        memory: r::EvaluationMemory::new(4 * 1024 * 1024),
     };
     let check = |source: &str| {
         for function in [r::Function::ToLower, r::Function::ToUpper] {
@@ -556,7 +556,7 @@ fn property_keys_admit_one_output_buffer_and_do_not_evaluate_values() {
                     graph: &graph,
                     group: None,
                     max_collection_items: 1024,
-                    max_value_bytes,
+                    memory: r::EvaluationMemory::new(max_value_bytes),
                 };
                 let ((result, peak), _) = observe(|| {
                     let result = evaluation.eval(&expression);
@@ -623,7 +623,7 @@ fn map_keys_admit_output_slots_while_the_owned_map_is_live() {
                 graph: &NoGraph,
                 group: None,
                 max_collection_items: 1024,
-                max_value_bytes,
+                memory: r::EvaluationMemory::new(max_value_bytes),
             };
             let ((result, peak), _) = observe(|| {
                 let result = evaluation.eval(&expression);
@@ -708,7 +708,7 @@ fn concatenation_moves_owned_payloads_and_preserves_parameters() {
             graph: &NoGraph,
             group: None,
             max_collection_items: 100,
-            max_value_bytes: 4 * input_bytes,
+            memory: r::EvaluationMemory::new(4 * input_bytes),
         };
         let expression = r::Expression::Binary(
             r::Binary::Add,
@@ -726,7 +726,7 @@ fn concatenation_moves_owned_payloads_and_preserves_parameters() {
         );
         let (_, live_inputs) = observe(|| (left.clone(), right.clone()));
         let limited = r::Evaluation {
-            max_value_bytes: input_bytes,
+            memory: r::EvaluationMemory::new(input_bytes),
             ..evaluation
         };
         let ((error, peak), _) = observe(|| {
@@ -769,7 +769,7 @@ fn concatenation_reuses_empty_operands_and_retained_capacity() {
                 graph: &NoGraph,
                 group: None,
                 max_collection_items: 100,
-                max_value_bytes: budget,
+                memory: r::EvaluationMemory::new(budget),
             };
             let expression = r::Expression::Binary(
                 r::Binary::Add,
@@ -805,7 +805,7 @@ fn concatenation_reuses_empty_operands_and_retained_capacity() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: budget,
+        memory: r::EvaluationMemory::new(budget),
     };
     let ((result, peak), _) = observe(|| {
         let result = evaluation.eval(&expression);
@@ -827,7 +827,7 @@ fn concatenation_reuses_empty_operands_and_retained_capacity() {
         Box::new(r::Expression::Literal(r::Value::String("x".repeat(count)))),
     );
     let evaluation = r::Evaluation {
-        max_value_bytes: 6 * count + 256,
+        memory: r::EvaluationMemory::new(6 * count + 256),
         ..evaluation
     };
     let ((result, peak), _) = observe(|| {
@@ -838,7 +838,7 @@ fn concatenation_reuses_empty_operands_and_retained_capacity() {
         result.unwrap(),
         r::Value::String("k".repeat(count) + &"x".repeat(count))
     );
-    assert!(peak <= evaluation.max_value_bytes);
+    assert!(peak <= evaluation.memory.available());
 }
 
 #[test]
@@ -890,7 +890,7 @@ fn primitive_binary_evaluation_needs_only_live_operands() {
             graph: &NoGraph,
             group: None,
             max_collection_items: 100,
-            max_value_bytes: budget,
+            memory: r::EvaluationMemory::new(budget),
         };
         let expression = r::Expression::Binary(
             op,
@@ -915,7 +915,7 @@ fn addition_preserves_nulls_errors_and_operand_order() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 100,
-        max_value_bytes: 16 * 1024,
+        memory: r::EvaluationMemory::new(16 * 1024),
     };
     for value in [
         r::Value::List(vec![r::Value::Integer(1)]),
@@ -1035,7 +1035,7 @@ fn numeric_text_uses_exact_buffers_and_rejects_before_formatting_output() {
                     graph: &NoGraph,
                     group: None,
                     max_collection_items: 10,
-                    max_value_bytes: budget,
+                    memory: r::EvaluationMemory::new(budget),
                 };
                 let ((result, peak), _) = observe(|| {
                     let result = evaluation.eval(&expression);
@@ -1107,7 +1107,7 @@ fn numeric_text_uses_exact_buffers_and_rejects_before_formatting_output() {
             graph: &NoGraph,
             group: None,
             max_collection_items: 100,
-            max_value_bytes: 16 * 1024,
+            memory: r::EvaluationMemory::new(16 * 1024),
         };
         let expression =
             r::Expression::Function(r::Function::ToString, vec![r::Expression::Literal(value)]);
@@ -1129,7 +1129,7 @@ fn impossible_expression_sequence_capacity_is_a_resource_error() {
         graph: &NoGraph,
         group: None,
         max_collection_items: usize::MAX,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
     };
     let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         evaluation.eval_sequence(std::iter::repeat_n(&expression, usize::MAX))
@@ -1190,7 +1190,7 @@ fn scalar_ranges_admit_exact_outputs_at_integer_boundaries() {
                 graph: &NoGraph,
                 group: None,
                 max_collection_items: 128,
-                max_value_bytes,
+                memory: r::EvaluationMemory::new(max_value_bytes),
             };
             let ((result, peak), _) = observe(|| {
                 let result = evaluation.eval(&expression);
@@ -1269,7 +1269,7 @@ fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
             graph: &NoGraph,
             group: None,
             max_collection_items: items,
-            max_value_bytes: memory,
+            memory: r::EvaluationMemory::new(memory),
         };
         let ((error, peak), _) = observe(|| {
             let error = evaluation.eval(&expression).unwrap_err();
@@ -1296,7 +1296,7 @@ fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 3,
-        max_value_bytes: 6 * size_of::<r::Value>(),
+        memory: r::EvaluationMemory::new(6 * size_of::<r::Value>()),
     };
     let ((range, peak), _) = observe(|| {
         let range = evaluation.unwind(&expression).unwrap();
@@ -1345,7 +1345,7 @@ fn decimal_integer_conversion_allocates_only_its_owned_argument() {
             graph: &NoGraph,
             group: None,
             max_collection_items: 100,
-            max_value_bytes: 2 * size_of::<r::Value>() + bytes,
+            memory: r::EvaluationMemory::new(2 * size_of::<r::Value>() + bytes),
         };
         let ((result, peak), _) = observe(|| {
             let result = evaluation.eval(&expression);
@@ -1376,7 +1376,7 @@ fn collection_rejection_does_not_clone_borrowed_payloads() {
         graph: &NoGraph,
         group: None,
         max_collection_items: 1,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
     };
     for expression in [
         E::Literal(wide.clone()),
@@ -1435,7 +1435,7 @@ fn graph_collection_rejection_does_not_allocate_output_buffers() {
         graph: &graph,
         group: None,
         max_collection_items: 1,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
     };
     let node = E::Literal(V::Entity(r::Entity::Node(1)));
     for (expression, argument_bytes) in [
@@ -1462,5 +1462,235 @@ fn graph_collection_rejection_does_not_allocate_output_buffers() {
             argument_bytes + error_bytes,
             "graph output was copied before collection admission"
         );
+    }
+}
+
+#[test]
+fn scalar_memory_peaks_cover_transient_allocations() {
+    use r::{Binary as B, Expression as E, Function as F, Value as V};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let parameters = BTreeMap::new();
+    let integer = |n| E::Literal(V::Integer(n));
+    let range = |from, to| E::Function(F::Range, vec![integer(from), integer(to)]);
+    let size = |value| E::Function(F::Size, vec![value]);
+    let input = "straße猫".repeat(1024);
+    let string = || E::Literal(V::String(input.clone()));
+    let expressions = [
+        size(range(1, 10000)),
+        size(E::Function(F::Reverse, vec![range(1, 10000)])),
+        size(E::Function(F::ToUpper, vec![string()])),
+        size(E::Binary(B::Add, Box::new(string()), Box::new(string()))),
+        size(E::Binary(
+            B::Add,
+            Box::new(range(1, 1000)),
+            Box::new(range(1001, 2000)),
+        )),
+        size(E::Function(
+            F::Keys,
+            vec![E::Map(
+                (0..1000).map(|i| (format!("key{i}"), integer(i))).collect(),
+            )],
+        )),
+        E::Index(Box::new(range(1, 10000)), Box::new(integer(9999))),
+        E::Function(F::Substring, vec![string(), integer(100), integer(200)]),
+    ];
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 20000,
+        memory: r::EvaluationMemory::new(16 * 1024 * 1024),
+    };
+    for expression in expressions {
+        let expected = evaluation.eval(&expression).unwrap();
+        let reported = AtomicUsize::new(0);
+        let observed = r::Evaluation {
+            memory: r::EvaluationMemory::observed(16 * 1024 * 1024, 4096, &reported).unwrap(),
+            ..evaluation
+        };
+        let ((value, actual), _) = observe(|| {
+            let value = observed.eval(&expression).unwrap();
+            (value, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(value, expected);
+        let peak = reported.load(Ordering::Relaxed);
+        assert!(
+            peak >= 4096 + actual,
+            "reported {peak} misses {actual} transient bytes for {expression:?}"
+        );
+        assert!(peak <= 16 * 1024 * 1024);
+        assert_eq!(
+            r::Evaluation {
+                memory: r::EvaluationMemory::new(peak - 4096),
+                ..evaluation
+            }
+            .eval(&expression)
+            .unwrap(),
+            expected
+        );
+    }
+    struct Graph(r::GraphProperties);
+    impl r::GraphValues for Graph {
+        fn properties(&self, _: r::Entity) -> r::Result<&r::GraphProperties> {
+            Ok(&self.0)
+        }
+        fn label(&self, _: r::Entity) -> r::Result<Option<&str>> {
+            Ok(Some("N"))
+        }
+    }
+    let graph = Graph(BTreeMap::from([
+        ("text".into(), Ok(V::String(input))),
+        (
+            "unused".into(),
+            Err(r::QueryError::unsupported("DormantProperty")),
+        ),
+    ]));
+    let expression = size(E::Function(
+        F::ToUpper,
+        vec![E::Property(
+            Box::new(E::Literal(V::Entity(r::Entity::Node(1)))),
+            "text".into(),
+        )],
+    ));
+    let reported = AtomicUsize::new(0);
+    let observed = r::Evaluation {
+        graph: &graph,
+        memory: r::EvaluationMemory::observed(16 * 1024 * 1024, 4096, &reported).unwrap(),
+        ..evaluation
+    };
+    let ((value, actual), _) = observe(|| {
+        let value = observed.eval(&expression).unwrap();
+        (value, OBSERVATION.with(Cell::get).peak)
+    });
+    assert_eq!(value, V::Integer(8 * 1024));
+    assert!(reported.load(Ordering::Relaxed) >= 4096 + actual);
+}
+
+#[test]
+fn scalar_sequence_peak_includes_earlier_owned_outputs() {
+    use r::{Expression as E, Function as F, Value as V};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let parameters = BTreeMap::new();
+    let reported = AtomicUsize::new(0);
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 20000,
+        memory: r::EvaluationMemory::observed(16 * 1024 * 1024, 4096, &reported).unwrap(),
+    };
+    let expressions = [
+        E::Literal(V::String("x".repeat(10000))),
+        E::Function(
+            F::Range,
+            vec![E::Literal(V::Integer(1)), E::Literal(V::Integer(10000))],
+        ),
+        E::Function(F::Size, vec![E::Literal(V::String("y".repeat(20000)))]),
+    ];
+    let ((values, actual), _) = observe(|| {
+        let values = evaluation.eval_sequence(expressions.iter()).unwrap();
+        (values, OBSERVATION.with(Cell::get).peak)
+    });
+    assert_eq!(values[2], V::Integer(20000));
+    assert!(reported.load(Ordering::Relaxed) >= 4096 + actual);
+}
+
+#[test]
+fn scalar_distinct_count_admits_input_and_key_copy_together() {
+    use r::{Expression as E, Value as V};
+    let parameters = BTreeMap::new();
+    for bytes in [1024, 4096, 16384] {
+        let rows = vec![vec![V::String("x".repeat(bytes))]];
+        let expression = E::Aggregate {
+            function: r::Aggregate::Count,
+            argument: Some(Box::new(E::Slot(r::Slot(0)))),
+            distinct: true,
+        };
+        let budget = bytes + 2048;
+        let evaluation = r::Evaluation {
+            row: &[],
+            parameters: &parameters,
+            graph: &NoGraph,
+            group: Some(&rows),
+            max_collection_items: 10,
+            memory: r::EvaluationMemory::new(budget),
+        };
+        let ((result, actual), _) = observe(|| {
+            let result = evaluation.eval(&expression);
+            (result, OBSERVATION.with(Cell::get).peak)
+        });
+        assert!(
+            actual <= budget,
+            "input={bytes}, allocation peak={actual}, budget={budget}"
+        );
+        if bytes >= 4096 {
+            let error = result.unwrap_err();
+            assert_eq!(error.category, "ResourceLimit");
+            assert_eq!(error.detail, "MemoryLimit");
+        } else {
+            assert_eq!(result.unwrap(), V::Integer(1));
+        }
+        assert_eq!(
+            r::Evaluation {
+                memory: r::EvaluationMemory::new(4 * bytes + 4096),
+                ..evaluation
+            }
+            .eval(&expression)
+            .unwrap(),
+            V::Integer(1)
+        );
+        assert_eq!(rows[0][0], V::String("x".repeat(bytes)));
+    }
+}
+
+#[test]
+fn scalar_aggregate_peak_covers_input_and_retained_state() {
+    use r::{Aggregate as A, Expression as E, Value as V};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let parameters = BTreeMap::new();
+    let rows = (0..64)
+        .map(|i| vec![V::String(format!("{i:02}{}", "x".repeat(4096)))])
+        .collect::<Vec<_>>();
+    for count in [1, 2, 3, 4, 8, 64] {
+        for (function, distinct) in [
+            (A::Collect, false),
+            (A::Collect, true),
+            (A::Count, true),
+            (A::Min, false),
+            (A::Max, false),
+        ] {
+            let reported = AtomicUsize::new(0);
+            let evaluation = r::Evaluation {
+                row: &[],
+                parameters: &parameters,
+                graph: &NoGraph,
+                group: Some(&rows[..count]),
+                max_collection_items: 20000,
+                memory: r::EvaluationMemory::observed(16 * 1024 * 1024, 4096, &reported).unwrap(),
+            };
+            let expression = E::Aggregate {
+                function,
+                argument: Some(Box::new(E::Slot(r::Slot(0)))),
+                distinct,
+            };
+            let ((value, actual), _) = observe(|| {
+                let value = evaluation.eval(&expression).unwrap();
+                (value, OBSERVATION.with(Cell::get).peak)
+            });
+            assert!(
+                reported.load(Ordering::Relaxed) >= 4096 + actual,
+                "aggregate {function:?}, distinct={distinct}: reported {}, actual {}",
+                reported.load(Ordering::Relaxed),
+                4096 + actual
+            );
+            assert!(match value {
+                V::List(values) => values.len() == count,
+                V::Integer(n) => n == count as i64,
+                V::String(_) => true,
+                _ => false,
+            });
+        }
     }
 }

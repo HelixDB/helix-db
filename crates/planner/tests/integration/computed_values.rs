@@ -46,7 +46,7 @@ fn computed_containers_enforce_depth_across_independent_evaluations() {
                 graph: &graph,
                 group: None,
                 max_collection_items: usize::MAX,
-                max_value_bytes: usize::MAX,
+                memory: r::EvaluationMemory::new(usize::MAX),
             };
             let result = evaluation.eval(&wrapper);
             if depth == r::MAX_EXPRESSION_DEPTH {
@@ -74,7 +74,7 @@ fn borrowed_values_are_checked_before_use_and_short_circuits_stay_lazy() {
                 graph: &graph,
                 group: None,
                 max_collection_items: usize::MAX,
-                max_value_bytes: usize::MAX,
+                memory: r::EvaluationMemory::new(usize::MAX),
             };
             for expression in [
                 E::Literal(value.clone()),
@@ -213,7 +213,7 @@ fn runtime_depth_does_not_apply_the_literal_cardinality_limit() {
         graph: &graph,
         group: None,
         max_collection_items: usize::MAX,
-        max_value_bytes: usize::MAX,
+        memory: r::EvaluationMemory::new(usize::MAX),
     };
     assert_eq!(
         evaluation.eval(&r::Expression::Slot(r::Slot(0))).unwrap(),
