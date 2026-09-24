@@ -81,7 +81,7 @@ impl Evaluation<'_> {
         use Expression as E;
         let value = match expression {
             E::Literal(v) => {
-                v.validate_depth()?;
+                v.validate_collections(0, self.max_collection_items)?;
                 self.remaining(v.allocated_bytes())?;
                 v.clone()
             }
@@ -93,7 +93,7 @@ impl Evaluation<'_> {
                         "row schema does not contain a referenced slot",
                     )
                 })?;
-                value.validate_depth()?;
+                value.validate_collections(0, self.max_collection_items)?;
                 self.remaining(value.allocated_bytes())?;
                 value.clone()
             }
@@ -105,7 +105,7 @@ impl Evaluation<'_> {
                         format!("missing parameter ${name}"),
                     )
                 })?;
-                value.validate_depth()?;
+                value.validate_collections(0, self.max_collection_items)?;
                 self.remaining(value.allocated_bytes())?;
                 value.clone()
             }
@@ -114,7 +114,7 @@ impl Evaluation<'_> {
                 Value::Map(mut map) => map.remove(key).unwrap_or(Value::Null),
                 Value::Entity(entity) => {
                     let value = self.graph.property(entity, key)?;
-                    value.validate_depth()?;
+                    value.validate_collections(0, self.max_collection_items)?;
                     self.remaining(value.allocated_bytes())?;
                     value.clone()
                 }
@@ -148,7 +148,7 @@ impl Evaluation<'_> {
                     }
                     (Value::Entity(entity), Value::String(key)) => {
                         let value = self.graph.property(entity, &key)?;
-                        value.validate_depth()?;
+                        value.validate_collections(0, self.max_collection_items)?;
                         self.remaining(key.capacity().saturating_add(value.allocated_bytes()))?;
                         value.clone()
                     }
@@ -230,7 +230,10 @@ impl Evaluation<'_> {
                     binary(*op, left, right)?
                 }
             }
-            E::List(xs) => Value::List(self.arguments(xs)?),
+            E::List(xs) => {
+                self.collection(xs.len())?;
+                Value::List(self.arguments(xs)?)
+            }
             E::Map(xs) => {
                 let mut bytes = size_of::<Value>()
                     .saturating_add(super::allocation::btree_bytes::<String, Value>(xs.len()));
@@ -303,7 +306,7 @@ impl Evaluation<'_> {
         };
         // Inputs can be individually valid while a new list/map adds a level.
         // Enforce the runtime contract across clause boundaries as well as ASTs.
-        value.validate_depth()?;
+        value.validate_collections(0, self.max_collection_items)?;
         self.remaining(value.allocated_bytes())?;
         Ok(value)
     }
@@ -360,6 +363,7 @@ impl Evaluation<'_> {
 
     fn grow_list(&self, values: &mut Vec<Value>, additional: usize) -> Result<()> {
         let count = values.len().saturating_add(additional);
+        self.collection(count)?;
         if count > values.capacity() {
             self.remaining(
                 size_of::<Value>().saturating_add(count.saturating_mul(size_of::<Value>())),
@@ -398,14 +402,20 @@ impl Evaluation<'_> {
         })
     }
 
-    fn arguments(&self, expressions: &[Expression]) -> Result<Vec<Value>> {
-        if expressions.len() > self.max_collection_items {
+    fn collection(&self, count: usize) -> Result<()> {
+        if count > self.max_collection_items {
             return Err(QueryError::runtime(
                 "ResourceLimit",
                 "CollectionLimit",
                 "expression exceeds collection budget",
             ));
         }
+        Ok(())
+    }
+
+    // Private argument slots are bounded by expression validation and memory,
+    // independently of how many items an evaluated list may contain.
+    fn arguments(&self, expressions: &[Expression]) -> Result<Vec<Value>> {
         let mut bytes = expressions.len().saturating_mul(size_of::<Value>());
         self.remaining(bytes)?;
         let mut values = Vec::with_capacity(expressions.len());
@@ -430,7 +440,7 @@ impl Evaluation<'_> {
         self.remaining(bytes)?;
         for (key, value) in properties {
             let value = value.as_ref().map_err(Clone::clone)?;
-            value.validate_runtime_shape(1, usize::MAX)?;
+            value.validate_collections(1, self.max_collection_items)?;
             bytes = bytes
                 .saturating_add(key.len())
                 .saturating_add(value.allocated_bytes().saturating_sub(size_of::<Value>()));
@@ -474,6 +484,7 @@ impl Evaluation<'_> {
             F::Labels => match first {
                 Value::Entity(entity @ Entity::Node(_)) => {
                     let label = self.graph.label(entity)?;
+                    self.collection(usize::from(label.is_some()))?;
                     self.remaining(size_of::<Value>().saturating_add(
                         label.map_or(0, |s| size_of::<Value>().saturating_add(s.len())),
                     ))?;
@@ -488,6 +499,7 @@ impl Evaluation<'_> {
             },
             F::Keys => match first {
                 Value::Map(map) => {
+                    self.collection(map.len())?;
                     self.remaining(
                         size_of::<Value>()
                             .saturating_add(map.len().saturating_mul(size_of::<Value>())),
@@ -499,6 +511,7 @@ impl Evaluation<'_> {
                 }
                 Value::Entity(entity) => {
                     let keys = self.graph.keys(entity)?;
+                    self.collection(keys.len())?;
                     let bytes = keys.clone().fold(size_of::<Value>(), |bytes, key| {
                         bytes
                             .saturating_add(size_of::<Value>())
@@ -519,6 +532,7 @@ impl Evaluation<'_> {
             } as i64),
             F::Nodes => match first {
                 Value::Path(p) => {
+                    self.collection(p.nodes().len())?;
                     self.remaining(
                         p.nodes()
                             .len()
@@ -536,6 +550,7 @@ impl Evaluation<'_> {
             },
             F::Relationships => match first {
                 Value::Path(p) => {
+                    self.collection(p.relationships().len())?;
                     self.remaining(
                         p.relationships()
                             .len()

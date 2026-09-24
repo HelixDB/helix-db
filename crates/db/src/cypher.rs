@@ -54,6 +54,9 @@ pub struct Limits {
     pub memory_bytes: usize,
     pub result_bytes: usize,
     pub batch_rows: usize,
+    /// Maximum items in each materialized expression list and retained
+    /// DISTINCT aggregate set. Map entries, function arguments, and streamed
+    /// rows use separate validation and memory bounds.
     pub collection_items: usize,
 }
 impl Default for Limits {

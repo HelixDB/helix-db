@@ -1359,3 +1359,108 @@ fn decimal_integer_conversion_allocates_only_its_owned_argument() {
         );
     }
 }
+
+#[test]
+fn collection_rejection_does_not_clone_borrowed_payloads() {
+    use r::{Expression as E, Value as V};
+    let wide = V::List((0..128).map(|_| V::String("x".repeat(1024))).collect());
+    let nested = V::Map(BTreeMap::from([("nested".into(), wide.clone())]));
+    let row = vec![wide.clone(), nested.clone()];
+    let parameters = BTreeMap::from([
+        ("wide".into(), wide.clone()),
+        ("nested".into(), nested.clone()),
+    ]);
+    let evaluation = r::Evaluation {
+        row: &row,
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 1,
+        max_value_bytes: usize::MAX,
+    };
+    for expression in [
+        E::Literal(wide.clone()),
+        E::Literal(nested.clone()),
+        E::Slot(r::Slot(0)),
+        E::Slot(r::Slot(1)),
+        E::Parameter("wide".into()),
+        E::Parameter("nested".into()),
+    ] {
+        let ((error, peak), _) = observe(|| {
+            let error = evaluation.eval(&expression).unwrap_err();
+            (error, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(error.detail, "CollectionLimit");
+        let error_bytes =
+            error.category.capacity() + error.detail.capacity() + error.message.capacity();
+        assert_eq!(
+            peak, error_bytes,
+            "rejection cloned a borrowed value before checking its cardinality"
+        );
+    }
+    assert_eq!(row[0], wide);
+    assert_eq!(row[1], nested);
+    assert_eq!(parameters["wide"], wide);
+    assert_eq!(parameters["nested"], nested);
+}
+
+#[test]
+fn graph_collection_rejection_does_not_allocate_output_buffers() {
+    use r::{Expression as E, Function as F, Value as V};
+    struct Graph(r::GraphProperties);
+    impl r::GraphValues for Graph {
+        fn properties(&self, _: r::Entity) -> r::Result<&r::GraphProperties> {
+            Ok(&self.0)
+        }
+        fn label(&self, _: r::Entity) -> r::Result<Option<&str>> {
+            Ok(Some("N"))
+        }
+    }
+    let parameters = BTreeMap::new();
+    let graph = Graph(BTreeMap::from([
+        (
+            "large".into(),
+            Ok(V::List(
+                (0..128).map(|_| V::String("x".repeat(1024))).collect(),
+            )),
+        ),
+        (
+            "unsupported".into(),
+            Err(r::QueryError::unsupported("StoredValue")),
+        ),
+    ]));
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &graph,
+        group: None,
+        max_collection_items: 1,
+        max_value_bytes: usize::MAX,
+    };
+    let node = E::Literal(V::Entity(r::Entity::Node(1)));
+    for (expression, argument_bytes) in [
+        (E::Property(Box::new(node.clone()), "large".into()), 0),
+        (
+            E::Index(
+                Box::new(node.clone()),
+                Box::new(E::Literal(V::String("large".into()))),
+            ),
+            5,
+        ),
+        (E::Function(F::Keys, vec![node.clone()]), size_of::<V>()),
+        (E::Function(F::Properties, vec![node]), size_of::<V>()),
+    ] {
+        let ((error, peak), _) = observe(|| {
+            let error = evaluation.eval(&expression).unwrap_err();
+            (error, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(error.detail, "CollectionLimit");
+        let error_bytes =
+            error.category.capacity() + error.detail.capacity() + error.message.capacity();
+        assert_eq!(
+            peak,
+            argument_bytes + error_bytes,
+            "graph output was copied before collection admission"
+        );
+    }
+}

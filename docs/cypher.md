@@ -264,6 +264,15 @@ After its arguments are evaluated, an excessive item count returns
 `CollectionLimit` before output-memory admission; otherwise an oversized buffer
 returns `MemoryLimit`. Direct `UNWIND range(...)` remains a streaming generator
 and can consume a bounded prefix without materialising the full range.
+`collection_items` bounds each materialized expression list, including lists
+nested in maps, and retained `DISTINCT` aggregate sets. It does not count map
+entries, function arguments, or streamed rows. The evaluator checks parameter
+and property lists before copying them; lazy branches that are not
+evaluated do not consume this limit. For example, a cap of one permits
+`substring('abc',0,1)` and `range(7,7)`, but rejects `[1] + [2]`. Raising this cap
+does not raise the independent memory budget.
+Graph and path result snapshots use the memory and result-byte budgets.
+
 Read-only queries with uncorrelated multi-hop patterns may reuse raw values
 within their pinned storage snapshot. The cache owns compact copies and caps
 retained entries at one eighth of the query budget (at most 32 MiB). Its header

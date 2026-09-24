@@ -91,10 +91,15 @@ mod float_bits {
     }
 }
 
+enum ShapeViolation {
+    Structure,
+    Collection,
+}
+
 impl Value {
     /// Validate externally constructed nested literals before recursive use.
     pub fn validate_shape(&self) -> Result<()> {
-        if self.within_limits(0, &mut 200_000) {
+        if self.check_shape(0, &mut 200_000, usize::MAX).is_ok() {
             return Ok(());
         }
         Err(QueryError::compile(
@@ -117,7 +122,7 @@ impl Value {
     }
 
     pub(super) fn validate_runtime_shape(&self, depth: usize, mut max_items: usize) -> Result<()> {
-        if self.within_limits(depth, &mut max_items) {
+        if self.check_shape(depth, &mut max_items, usize::MAX).is_ok() {
             return Ok(());
         }
         Err(QueryError::runtime(
@@ -127,27 +132,54 @@ impl Value {
         ))
     }
 
-    // Check depth before descending. Borrowed traversal keeps stack use bounded
-    // without an unadmitted heap frontier proportional to collection width.
-    fn within_limits(&self, depth: usize, remaining: &mut usize) -> bool {
+    /// Validate each materialized list without imposing a total literal-size
+    /// limit. Maps contribute nesting and contain lists, but their entry count
+    /// is governed by memory admission rather than list cardinality.
+    pub(super) fn validate_collections(&self, depth: usize, max_items: usize) -> Result<()> {
+        let mut remaining = usize::MAX;
+        self.check_shape(depth, &mut remaining, max_items)
+            .map_err(|violation| {
+                let (detail, message) = match violation {
+                    ShapeViolation::Structure => ("ValueDepth", "value exceeds structural limits"),
+                    ShapeViolation::Collection => {
+                        ("CollectionLimit", "expression exceeds collection budget")
+                    }
+                };
+                QueryError::runtime("ResourceLimit", detail, message)
+            })
+    }
+
+    // Check before descending. Borrowed traversal keeps stack use bounded and
+    // checks depth/cardinality together, without a width-proportional frontier.
+    fn check_shape(
+        &self,
+        depth: usize,
+        remaining: &mut usize,
+        max_list_items: usize,
+    ) -> std::result::Result<(), ShapeViolation> {
         if depth >= super::MAX_EXPRESSION_DEPTH || *remaining == 0 {
-            return false;
+            return Err(ShapeViolation::Structure);
         }
         *remaining -= 1;
         match self {
-            Self::List(values) => values
-                .iter()
-                .all(|value| value.within_limits(depth + 1, remaining)),
+            Self::List(values) => {
+                if values.len() > max_list_items {
+                    return Err(ShapeViolation::Collection);
+                }
+                values
+                    .iter()
+                    .try_for_each(|value| value.check_shape(depth + 1, remaining, max_list_items))
+            }
             Self::Map(values) => values
                 .values()
-                .all(|value| value.within_limits(depth + 1, remaining)),
+                .try_for_each(|value| value.check_shape(depth + 1, remaining, max_list_items)),
             Self::Null
             | Self::Boolean(_)
             | Self::Integer(_)
             | Self::Float(_)
             | Self::String(_)
             | Self::Entity(_)
-            | Self::Path(_) => true,
+            | Self::Path(_) => Ok(()),
         }
     }
     pub fn truth(&self) -> Result<Option<bool>> {
@@ -317,7 +349,7 @@ impl GroupingKey {
         let mut remaining = 200_000 - 1;
         if !values
             .iter()
-            .all(|value| value.within_limits(0, &mut remaining))
+            .all(|value| value.check_shape(0, &mut remaining, usize::MAX).is_ok())
         {
             return Err(QueryError::runtime(
                 "ResourceLimit",

@@ -646,3 +646,418 @@ fn decimal_integer_conversion_matches_scaled_integer_oracles() {
         }
     }
 }
+
+#[test]
+fn collection_limits_bound_values_instead_of_function_arity() {
+    use r::{Binary as B, Expression as E, Function as F, Value as V};
+    let parameters = BTreeMap::new();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 1,
+        max_value_bytes: 64 * 1024,
+    };
+    let integer = |n| E::Literal(V::Integer(n));
+    for (expression, expected) in [
+        (
+            E::Function(
+                F::Substring,
+                vec![E::Literal(V::String("a猫z".into())), integer(1), integer(1)],
+            ),
+            V::String("猫".into()),
+        ),
+        (
+            E::Function(F::Range, vec![integer(4), integer(4)]),
+            V::List(vec![V::Integer(4)]),
+        ),
+        (
+            E::Function(F::Range, vec![integer(4), integer(4), integer(-1)]),
+            V::List(vec![V::Integer(4)]),
+        ),
+        (
+            E::Function(F::Range, vec![integer(4), integer(1)]),
+            V::List(vec![]),
+        ),
+        (
+            E::Function(
+                F::Coalesce,
+                vec![E::Literal(V::Null), E::Literal(V::Null), integer(7)],
+            ),
+            V::Integer(7),
+        ),
+    ] {
+        assert_eq!(evaluation.eval(&expression).unwrap(), expected);
+    }
+    for (expression, category, detail) in [
+        (
+            E::Function(
+                F::Substring,
+                vec![
+                    E::Literal(V::String("abc".into())),
+                    E::Binary(B::Divide, Box::new(integer(1)), Box::new(integer(0))),
+                    integer(1),
+                ],
+            ),
+            "ArithmeticError",
+            "DivisionByZero",
+        ),
+        (
+            E::Function(F::Range, vec![integer(1), integer(2), integer(0)]),
+            "ArgumentError",
+            "NumberOutOfRange",
+        ),
+    ] {
+        let error = evaluation.eval(&expression).unwrap_err();
+        assert_eq!(error.category, category);
+        assert_eq!(error.detail, detail);
+        assert_eq!(error.phase, r::ErrorPhase::Runtime);
+    }
+    let singleton = |n| E::List(vec![integer(n)]);
+    for (left, right) in [
+        (singleton(1), singleton(2)),
+        (singleton(1), integer(2)),
+        (integer(1), singleton(2)),
+    ] {
+        let expression = E::Binary(B::Add, Box::new(left), Box::new(right));
+        let error = evaluation.eval(&expression).unwrap_err();
+        assert_eq!(error.category, "ResourceLimit");
+        assert_eq!(error.detail, "CollectionLimit");
+        assert_eq!(error.phase, r::ErrorPhase::Runtime);
+        assert_eq!(
+            r::Evaluation {
+                max_collection_items: 2,
+                ..evaluation
+            }
+            .eval(&expression)
+            .unwrap(),
+            V::List(vec![V::Integer(1), V::Integer(2)])
+        );
+    }
+    // Row demand and range cardinality are independent: the direct UNWIND
+    // generator can produce a prefix even when a scalar list could not fit.
+    let streamed = evaluation
+        .unwind(&E::Function(F::Range, vec![integer(1), integer(100)]))
+        .unwrap();
+    assert_eq!(
+        streamed.take(3).collect::<Vec<_>>(),
+        vec![V::Integer(1), V::Integer(2), V::Integer(3)]
+    );
+}
+
+#[test]
+fn collection_limits_validate_nested_borrowed_inputs_before_selected_results() {
+    use r::{Expression as E, Function as F, Value as V};
+    let nested = V::Map(BTreeMap::from([(
+        "values".into(),
+        V::List(vec![V::Integer(1), V::Integer(2)]),
+    )]));
+    let row = vec![nested.clone()];
+    let parameters = BTreeMap::from([("input".into(), nested.clone())]);
+    let evaluation = r::Evaluation {
+        row: &row,
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 1,
+        max_value_bytes: 64 * 1024,
+    };
+    for expression in [
+        E::Literal(nested.clone()),
+        E::Slot(r::Slot(0)),
+        E::Parameter("input".into()),
+    ] {
+        let error = evaluation.eval(&expression).unwrap_err();
+        assert_eq!(error.detail, "CollectionLimit");
+        assert_eq!(
+            r::Evaluation {
+                max_collection_items: 2,
+                ..evaluation
+            }
+            .eval(&expression)
+            .unwrap(),
+            nested
+        );
+        for lazy in [
+            E::Case {
+                branches: vec![(E::Literal(V::Boolean(false)), expression.clone())],
+                otherwise: Box::new(E::Literal(V::Integer(7))),
+            },
+            E::Function(F::Coalesce, vec![E::Literal(V::Integer(7)), expression]),
+        ] {
+            assert_eq!(evaluation.eval(&lazy).unwrap(), V::Integer(7));
+        }
+    }
+    assert_eq!(row[0], nested);
+    assert_eq!(parameters["input"], nested);
+    let individually_bounded = V::List(vec![
+        V::List(vec![V::Integer(1), V::Integer(2)]),
+        V::List(vec![V::Integer(3), V::Integer(4)]),
+    ]);
+    assert_eq!(
+        r::Evaluation {
+            max_collection_items: 2,
+            ..evaluation
+        }
+        .eval(&E::Literal(individually_bounded.clone()))
+        .unwrap(),
+        individually_bounded
+    );
+
+    // Map entry count does not consume list cardinality. Its nested lists and
+    // allocated bytes remain independently bounded.
+    let map = V::Map(BTreeMap::from([
+        ("a".into(), V::Integer(1)),
+        ("b".into(), V::Integer(2)),
+    ]));
+    assert_eq!(evaluation.eval(&E::Literal(map.clone())).unwrap(), map);
+}
+
+#[test]
+fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
+    use r::{Expression as E, Function as F, Value as V};
+    struct Graph(r::GraphProperties);
+    impl r::GraphValues for Graph {
+        fn properties(&self, _: r::Entity) -> r::Result<&r::GraphProperties> {
+            Ok(&self.0)
+        }
+        fn label(&self, _: r::Entity) -> r::Result<Option<&str>> {
+            Ok(Some("N"))
+        }
+    }
+    let graph = Graph(BTreeMap::from([
+        ("a".into(), Ok(V::List(vec![V::Integer(1), V::Integer(2)]))),
+        ("b".into(), Err(r::QueryError::unsupported("StoredValue"))),
+    ]));
+    let parameters = BTreeMap::new();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &graph,
+        group: None,
+        max_collection_items: 1,
+        max_value_bytes: 64 * 1024,
+    };
+    let node = E::Literal(V::Entity(r::Entity::Node(1)));
+    let path = E::Literal(V::Path(r::Path::new(vec![1, 2, 3], vec![1, 2]).unwrap()));
+    for expression in [
+        E::Property(Box::new(node.clone()), "a".into()),
+        E::Index(
+            Box::new(node.clone()),
+            Box::new(E::Literal(V::String("a".into()))),
+        ),
+        E::Function(F::Keys, vec![node.clone()]),
+        E::Function(F::Nodes, vec![path.clone()]),
+        E::Function(F::Relationships, vec![path]),
+    ] {
+        assert_eq!(
+            evaluation.eval(&expression).unwrap_err().detail,
+            "CollectionLimit"
+        );
+    }
+    assert_eq!(
+        evaluation
+            .eval(&E::Function(F::Labels, vec![node.clone()]))
+            .unwrap(),
+        V::List(vec![V::String("N".into())])
+    );
+    assert_eq!(
+        r::Evaluation {
+            max_collection_items: 2,
+            ..evaluation
+        }
+        .eval(&E::Function(F::Keys, vec![node]))
+        .unwrap(),
+        V::List(vec![V::String("a".into()), V::String("b".into())])
+    );
+    for (function, argument, limit, expected) in [
+        (F::Keys, V::Map(BTreeMap::new()), 0, V::List(vec![])),
+        (
+            F::Nodes,
+            V::Path(r::Path::new(vec![1], vec![]).unwrap()),
+            1,
+            V::List(vec![V::Entity(r::Entity::Node(1))]),
+        ),
+        (
+            F::Relationships,
+            V::Path(r::Path::new(vec![1], vec![]).unwrap()),
+            0,
+            V::List(vec![]),
+        ),
+        (
+            F::Nodes,
+            V::Path(r::Path::new(vec![1, 2, 3], vec![1, 2]).unwrap()),
+            3,
+            V::List(vec![
+                V::Entity(r::Entity::Node(1)),
+                V::Entity(r::Entity::Node(2)),
+                V::Entity(r::Entity::Node(3)),
+            ]),
+        ),
+        (
+            F::Relationships,
+            V::Path(r::Path::new(vec![1, 2, 3], vec![1, 2]).unwrap()),
+            2,
+            V::List(vec![
+                V::Entity(r::Entity::Relationship(1)),
+                V::Entity(r::Entity::Relationship(2)),
+            ]),
+        ),
+    ] {
+        let expression = E::Function(function, vec![E::Literal(argument)]);
+        assert_eq!(
+            r::Evaluation {
+                max_collection_items: limit,
+                ..evaluation
+            }
+            .eval(&expression)
+            .unwrap(),
+            expected
+        );
+        if limit > 0 {
+            assert_eq!(
+                r::Evaluation {
+                    max_collection_items: limit - 1,
+                    ..evaluation
+                }
+                .eval(&expression)
+                .unwrap_err()
+                .detail,
+                "CollectionLimit"
+            );
+        }
+    }
+    assert_eq!(
+        r::Evaluation {
+            max_collection_items: 0,
+            ..evaluation
+        }
+        .eval(&E::Function(
+            F::Labels,
+            vec![E::Literal(V::Entity(r::Entity::Node(1)))]
+        ))
+        .unwrap_err()
+        .detail,
+        "CollectionLimit"
+    );
+    // Property-map materialization must validate a nested collection before its
+    // copy, while enumerating keys continues to ignore dormant value errors.
+    assert_eq!(
+        evaluation
+            .properties(r::Entity::Node(1))
+            .unwrap_err()
+            .detail,
+        "CollectionLimit"
+    );
+}
+
+#[test]
+fn nested_collection_limits_match_an_independent_stack_walk() {
+    use r::Value as V;
+    let parameters = BTreeMap::new();
+    for seed in 0..256 {
+        let mut value = V::Integer(seed);
+        for depth in 0..seed % 53 {
+            value = if (seed + depth) % 3 == 0 {
+                V::Map(BTreeMap::from([
+                    ("a".into(), V::Integer(depth)),
+                    ("b".into(), value),
+                    ("c".into(), V::Boolean(true)),
+                ]))
+            } else {
+                let mut children = vec![V::Null; ((seed + depth) % 4) as usize];
+                children.insert(children.len() / 2, value);
+                V::List(children)
+            };
+        }
+        for limit in [0, 1, 2, 3, 4, usize::MAX] {
+            // The oracle uses an explicit stack, independently of the engine's
+            // bounded recursive traversal. Both visit children in value order.
+            let mut pending = vec![(&value, 0)];
+            let mut expected = None;
+            while let Some((value, depth)) = pending.pop() {
+                if depth >= r::MAX_EXPRESSION_DEPTH {
+                    expected = Some("ValueDepth");
+                    break;
+                }
+                match value {
+                    V::List(values) if values.len() > limit => {
+                        expected = Some("CollectionLimit");
+                        break;
+                    }
+                    V::List(values) => pending.extend(values.iter().rev().map(|v| (v, depth + 1))),
+                    V::Map(values) => pending.extend(values.values().rev().map(|v| (v, depth + 1))),
+                    _ => {}
+                }
+            }
+            let evaluation = r::Evaluation {
+                row: &[],
+                parameters: &parameters,
+                graph: &NoGraph,
+                group: None,
+                max_collection_items: limit,
+                max_value_bytes: usize::MAX,
+            };
+            let result = evaluation.eval(&r::Expression::Literal(value.clone()));
+            match expected {
+                None => assert_eq!(result.unwrap(), value),
+                Some(detail) => {
+                    let error = result.unwrap_err();
+                    assert_eq!(
+                        error.category, "ResourceLimit",
+                        "seed={seed}, limit={limit}"
+                    );
+                    assert_eq!(error.detail, detail, "seed={seed}, limit={limit}");
+                    assert_eq!(error.phase, r::ErrorPhase::Runtime);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn collection_growth_checks_cardinality_even_with_spare_capacity() {
+    use r::{Expression as E, Value as V};
+    let parameters = BTreeMap::new();
+    let group = vec![vec![V::Integer(1)], vec![V::Integer(2)]];
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: Some(&group),
+        max_collection_items: 2,
+        max_value_bytes: 64 * 1024,
+    };
+    let collect = E::Aggregate {
+        function: r::Aggregate::Collect,
+        argument: Some(Box::new(E::Slot(r::Slot(0)))),
+        distinct: false,
+    };
+    let V::List(values) = evaluation.eval(&collect).unwrap() else {
+        panic!("collect must return a list")
+    };
+    assert_eq!(values, vec![V::Integer(1), V::Integer(2)]);
+    assert!(
+        values.capacity() > values.len(),
+        "exercise growth that does not need another allocation"
+    );
+    let expression = E::Binary(
+        r::Binary::Add,
+        Box::new(collect),
+        Box::new(E::Literal(V::Integer(3))),
+    );
+    assert_eq!(
+        evaluation.eval(&expression).unwrap_err().detail,
+        "CollectionLimit"
+    );
+    assert_eq!(
+        r::Evaluation {
+            max_collection_items: 3,
+            ..evaluation
+        }
+        .eval(&expression)
+        .unwrap(),
+        V::List(vec![V::Integer(1), V::Integer(2), V::Integer(3)])
+    );
+}
