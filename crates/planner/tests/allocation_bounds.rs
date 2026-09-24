@@ -645,3 +645,666 @@ fn map_keys_admit_output_slots_while_the_owned_map_is_live() {
         }
     }
 }
+
+#[test]
+fn concatenation_moves_owned_payloads_and_preserves_parameters() {
+    let payload = "λ猫".repeat(16_384);
+    let text = r::Value::String(payload.clone());
+    let nested = r::Value::Map(BTreeMap::from([(
+        "p".into(),
+        r::Value::List(vec![text.clone()]),
+    )]));
+    let list = r::Value::List(vec![nested.clone()]);
+    for (left, right, expected) in [
+        (
+            list.clone(),
+            list.clone(),
+            r::Value::List(vec![nested.clone(), nested.clone()]),
+        ),
+        (
+            list.clone(),
+            text.clone(),
+            r::Value::List(vec![nested.clone(), text.clone()]),
+        ),
+        (
+            text.clone(),
+            list.clone(),
+            r::Value::List(vec![text.clone(), nested.clone()]),
+        ),
+        (
+            text.clone(),
+            r::Value::String("!".into()),
+            r::Value::String(format!("{payload}!")),
+        ),
+        (
+            text.clone(),
+            r::Value::Integer(i64::MIN),
+            r::Value::String(format!("{payload}{}", i64::MIN)),
+        ),
+        (
+            r::Value::Integer(i64::MIN),
+            text.clone(),
+            r::Value::String(format!("{}{payload}", i64::MIN)),
+        ),
+        (
+            text.clone(),
+            r::Value::Float(1.5),
+            r::Value::String(format!("{payload}1.5")),
+        ),
+        (
+            r::Value::Float(1.5),
+            text.clone(),
+            r::Value::String(format!("1.5{payload}")),
+        ),
+    ] {
+        let input_bytes = left.allocated_bytes() + right.allocated_bytes();
+        let parameters = BTreeMap::from([
+            ("left".into(), left.clone()),
+            ("right".into(), right.clone()),
+        ]);
+        let evaluation = r::Evaluation {
+            row: &[],
+            parameters: &parameters,
+            graph: &NoGraph,
+            group: None,
+            max_collection_items: 100,
+            max_value_bytes: 4 * input_bytes,
+        };
+        let expression = r::Expression::Binary(
+            r::Binary::Add,
+            Box::new(r::Expression::Parameter("left".into())),
+            Box::new(r::Expression::Parameter("right".into())),
+        );
+        let ((result, peak), _) = observe(|| {
+            let result = evaluation.eval(&expression);
+            (result, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(result.unwrap(), expected);
+        assert!(
+            peak <= input_bytes + 4096,
+            "concatenation duplicated payloads: {peak} vs {input_bytes}"
+        );
+        let (_, live_inputs) = observe(|| (left.clone(), right.clone()));
+        let limited = r::Evaluation {
+            max_value_bytes: input_bytes,
+            ..evaluation
+        };
+        let ((error, peak), _) = observe(|| {
+            let error = limited.eval(&expression).unwrap_err();
+            (error, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(error.detail, "MemoryLimit");
+        let error_bytes =
+            error.category.capacity() + error.detail.capacity() + error.message.capacity();
+        assert!(
+            peak <= live_inputs + error_bytes,
+            "rejected concatenation allocated output before admission"
+        );
+        assert_eq!(parameters["left"], left);
+        assert_eq!(parameters["right"], right);
+    }
+}
+
+#[test]
+fn concatenation_reuses_empty_operands_and_retained_capacity() {
+    let parameters = BTreeMap::new();
+    for (empty, value) in [
+        (
+            r::Value::String(String::new()),
+            r::Value::String("x".repeat(8192)),
+        ),
+        (
+            r::Value::List(vec![]),
+            r::Value::List(vec![r::Value::String("x".repeat(8192))]),
+        ),
+    ] {
+        for (left, right) in [
+            (empty.clone(), value.clone()),
+            (value.clone(), empty.clone()),
+        ] {
+            let budget = left.allocated_bytes() + right.allocated_bytes();
+            let evaluation = r::Evaluation {
+                row: &[],
+                parameters: &parameters,
+                graph: &NoGraph,
+                group: None,
+                max_collection_items: 100,
+                max_value_bytes: budget,
+            };
+            let expression = r::Expression::Binary(
+                r::Binary::Add,
+                Box::new(r::Expression::Literal(left)),
+                Box::new(r::Expression::Literal(right)),
+            );
+            let ((result, peak), _) = observe(|| {
+                let result = evaluation.eval(&expression);
+                (result, OBSERVATION.with(Cell::get).peak)
+            });
+            assert_eq!(result.unwrap(), value);
+            assert!(peak <= budget);
+        }
+    }
+    let list = r::Expression::Slice {
+        value: Box::new(r::Expression::Literal(r::Value::List(
+            (0..16).map(r::Value::Integer).collect(),
+        ))),
+        start: None,
+        end: Some(Box::new(r::Expression::Literal(r::Value::Integer(1)))),
+    };
+    let expression = r::Expression::Binary(
+        r::Binary::Add,
+        Box::new(list),
+        Box::new(r::Expression::Literal(r::Value::List(vec![
+            r::Value::Integer(2),
+        ]))),
+    );
+    let budget = 19 * size_of::<r::Value>();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: budget,
+    };
+    let ((result, peak), _) = observe(|| {
+        let result = evaluation.eval(&expression);
+        (result, OBSERVATION.with(Cell::get).peak)
+    });
+    assert_eq!(
+        result.unwrap(),
+        r::Value::List(vec![r::Value::Integer(0), r::Value::Integer(2)])
+    );
+    assert!(peak <= budget);
+    let count = 4096;
+    let left = r::Expression::Function(
+        r::Function::ToLower,
+        vec![r::Expression::Literal(r::Value::String("K".repeat(count)))],
+    );
+    let expression = r::Expression::Binary(
+        r::Binary::Add,
+        Box::new(left),
+        Box::new(r::Expression::Literal(r::Value::String("x".repeat(count)))),
+    );
+    let evaluation = r::Evaluation {
+        max_value_bytes: 6 * count + 256,
+        ..evaluation
+    };
+    let ((result, peak), _) = observe(|| {
+        let result = evaluation.eval(&expression);
+        (result, OBSERVATION.with(Cell::get).peak)
+    });
+    assert_eq!(
+        result.unwrap(),
+        r::Value::String("k".repeat(count) + &"x".repeat(count))
+    );
+    assert!(peak <= evaluation.max_value_bytes);
+}
+
+#[test]
+fn primitive_binary_evaluation_needs_only_live_operands() {
+    let parameters = BTreeMap::new();
+    let large = r::Value::String("λ猫".repeat(8192));
+    for (op, left, right, expected) in [
+        (
+            r::Binary::Equal,
+            large.clone(),
+            large.clone(),
+            r::Value::Boolean(true),
+        ),
+        (
+            r::Binary::Contains,
+            large.clone(),
+            r::Value::String("λ猫".into()),
+            r::Value::Boolean(true),
+        ),
+        (
+            r::Binary::StartsWith,
+            large.clone(),
+            r::Value::String("λ".into()),
+            r::Value::Boolean(true),
+        ),
+        (
+            r::Binary::EndsWith,
+            large.clone(),
+            r::Value::String("猫".into()),
+            r::Value::Boolean(true),
+        ),
+        (
+            r::Binary::In,
+            large.clone(),
+            r::Value::List(vec![large.clone()]),
+            r::Value::Boolean(true),
+        ),
+        (
+            r::Binary::Add,
+            r::Value::Integer(7),
+            r::Value::Integer(5),
+            r::Value::Integer(12),
+        ),
+    ] {
+        let budget = left.allocated_bytes() + right.allocated_bytes();
+        let evaluation = r::Evaluation {
+            row: &[],
+            parameters: &parameters,
+            graph: &NoGraph,
+            group: None,
+            max_collection_items: 100,
+            max_value_bytes: budget,
+        };
+        let expression = r::Expression::Binary(
+            op,
+            Box::new(r::Expression::Literal(left)),
+            Box::new(r::Expression::Literal(right)),
+        );
+        let ((result, peak), _) = observe(|| {
+            let result = evaluation.eval(&expression);
+            (result, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(result.unwrap(), expected, "{op:?}");
+        assert!(peak <= budget);
+    }
+}
+
+#[test]
+fn addition_preserves_nulls_errors_and_operand_order() {
+    let parameters = BTreeMap::new();
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        max_value_bytes: 16 * 1024,
+    };
+    for value in [
+        r::Value::List(vec![r::Value::Integer(1)]),
+        r::Value::String("x".into()),
+        r::Value::Integer(7),
+    ] {
+        for (left, right) in [(r::Value::Null, value.clone()), (value, r::Value::Null)] {
+            let expression = r::Expression::Binary(
+                r::Binary::Add,
+                Box::new(r::Expression::Literal(left)),
+                Box::new(r::Expression::Literal(right)),
+            );
+            assert_eq!(evaluation.eval(&expression).unwrap(), r::Value::Null);
+        }
+    }
+    for (left, right) in [
+        (r::Value::Boolean(true), r::Value::String("x".into())),
+        (r::Value::String("x".into()), r::Value::Boolean(true)),
+    ] {
+        let expression = r::Expression::Binary(
+            r::Binary::Add,
+            Box::new(r::Expression::Literal(left)),
+            Box::new(r::Expression::Literal(right)),
+        );
+        assert_eq!(
+            evaluation.eval(&expression).unwrap_err().category,
+            "TypeError"
+        );
+    }
+    let overflow = r::Expression::Binary(
+        r::Binary::Add,
+        Box::new(r::Expression::Literal(r::Value::Integer(i64::MAX))),
+        Box::new(r::Expression::Literal(r::Value::Integer(1))),
+    );
+    assert_eq!(
+        evaluation.eval(&overflow).unwrap_err().detail,
+        "NumberOutOfRange"
+    );
+    for (left, right, detail) in [
+        (
+            overflow.clone(),
+            r::Expression::Parameter("missing".into()),
+            "NumberOutOfRange",
+        ),
+        (
+            r::Expression::Parameter("missing".into()),
+            overflow,
+            "MissingParameter",
+        ),
+        (
+            r::Expression::Literal(r::Value::Null),
+            r::Expression::Parameter("missing".into()),
+            "MissingParameter",
+        ),
+    ] {
+        let expression = r::Expression::Binary(r::Binary::Add, Box::new(left), Box::new(right));
+        assert_eq!(evaluation.eval(&expression).unwrap_err().detail, detail);
+    }
+    for (op, left) in [(r::Binary::And, false), (r::Binary::Or, true)] {
+        let expression = r::Expression::Binary(
+            op,
+            Box::new(r::Expression::Literal(r::Value::Boolean(left))),
+            Box::new(r::Expression::Parameter("missing".into())),
+        );
+        assert_eq!(
+            evaluation.eval(&expression).unwrap(),
+            r::Value::Boolean(left)
+        );
+    }
+}
+
+#[test]
+fn numeric_text_uses_exact_buffers_and_rejects_before_formatting_output() {
+    let parameters = BTreeMap::new();
+    let check = |value: r::Value| {
+        let expected = match &value {
+            r::Value::Integer(value) => value.to_string(),
+            r::Value::Boolean(value) => value.to_string(),
+            r::Value::Float(value) => {
+                let mut text = value.to_string();
+                if value.is_finite() && !text.contains(['.', 'e', 'E']) {
+                    text.push_str(".0");
+                }
+                text
+            }
+            _ => unreachable!(),
+        };
+        let literal = r::Expression::Literal(value.clone());
+        let empty = r::Expression::Literal(r::Value::String(String::new()));
+        let mut expressions = vec![(
+            r::Expression::Function(r::Function::ToString, vec![literal.clone()]),
+            size_of::<r::Value>(),
+            size_of::<r::Value>(),
+        )];
+        if matches!(value, r::Value::Integer(_) | r::Value::Float(_)) {
+            expressions.push((
+                r::Expression::Binary(
+                    r::Binary::Add,
+                    Box::new(literal.clone()),
+                    Box::new(empty.clone()),
+                ),
+                2 * size_of::<r::Value>(),
+                0,
+            ));
+            expressions.push((
+                r::Expression::Binary(r::Binary::Add, Box::new(empty), Box::new(literal)),
+                2 * size_of::<r::Value>(),
+                0,
+            ));
+        }
+        for (expression, input_bytes, argument_heap) in expressions {
+            let exact = input_bytes + size_of::<r::Value>() + expected.len();
+            for budget in [exact, exact - 1] {
+                let evaluation = r::Evaluation {
+                    row: &[],
+                    parameters: &parameters,
+                    graph: &NoGraph,
+                    group: None,
+                    max_collection_items: 10,
+                    max_value_bytes: budget,
+                };
+                let ((result, peak), _) = observe(|| {
+                    let result = evaluation.eval(&expression);
+                    (result, OBSERVATION.with(Cell::get).peak)
+                });
+                if budget == exact {
+                    let r::Value::String(text) = result.unwrap() else {
+                        panic!("expected scalar text")
+                    };
+                    assert_eq!(text, expected, "{expression:?}");
+                    assert_eq!(text.capacity(), expected.len());
+                    assert!(peak <= budget, "{peak} > {budget}");
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.detail, "MemoryLimit");
+                    let error_bytes = error.category.capacity()
+                        + error.detail.capacity()
+                        + error.message.capacity();
+                    assert_eq!(
+                        peak,
+                        argument_heap + error_bytes,
+                        "rejection allocated formatted text for {expression:?}"
+                    );
+                }
+            }
+        }
+    };
+    for value in [i64::MIN, -1, 0, 1, i64::MAX] {
+        check(r::Value::Integer(value));
+    }
+    for value in [true, false] {
+        check(r::Value::Boolean(value));
+    }
+    for value in [
+        f64::MIN,
+        f64::MAX,
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.1,
+        1.0 / 3.0,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::from_bits((1_u64 << 52) - 1),
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        check(r::Value::Float(value));
+    }
+    let mut bits = 0x6a09e667f3bcc909_u64;
+    for _ in 0..2048 {
+        bits ^= bits << 13;
+        bits ^= bits >> 7;
+        bits ^= bits << 17;
+        check(r::Value::Float(f64::from_bits(bits)));
+    }
+    for value in [
+        r::Value::List(vec![]),
+        r::Value::Map(BTreeMap::new()),
+        r::Value::Entity(r::Entity::Node(1)),
+        r::Value::Entity(r::Entity::Relationship(1)),
+        r::Value::Path(r::Path::new(vec![1], vec![]).unwrap()),
+    ] {
+        let evaluation = r::Evaluation {
+            row: &[],
+            parameters: &parameters,
+            graph: &NoGraph,
+            group: None,
+            max_collection_items: 100,
+            max_value_bytes: 16 * 1024,
+        };
+        let expression =
+            r::Expression::Function(r::Function::ToString, vec![r::Expression::Literal(value)]);
+        let error = evaluation.eval(&expression).unwrap_err();
+        assert_eq!(error.category, "TypeError");
+        assert_eq!(error.detail, "InvalidArgumentType");
+        assert_eq!(error.phase, r::ErrorPhase::Runtime);
+        assert_eq!(error.message, "value cannot be converted to a string");
+    }
+}
+
+#[test]
+fn impossible_expression_sequence_capacity_is_a_resource_error() {
+    let parameters = BTreeMap::new();
+    let expression = r::Expression::Literal(r::Value::Integer(1));
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: usize::MAX,
+        max_value_bytes: usize::MAX,
+    };
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        evaluation.eval_sequence(std::iter::repeat_n(&expression, usize::MAX))
+    }));
+    assert!(
+        attempt.is_ok(),
+        "an impossible capacity must be rejected before Vec allocation"
+    );
+    assert_eq!(attempt.unwrap().unwrap_err().detail, "MemoryLimit");
+}
+
+#[test]
+fn scalar_ranges_admit_exact_outputs_at_integer_boundaries() {
+    let parameters = BTreeMap::new();
+    // An incrementing model independently checks the closed-form allocation
+    // bound for every small endpoint/step combination in both directions.
+    let small_ranges = (-8_i64..=8).flat_map(|start| {
+        (-8_i64..=8).flat_map(move |end| {
+            [-4_i64, -3, -2, -1, 1, 2, 3, 4].map(move |step| {
+                let expected = std::iter::successors(Some(start), |n| n.checked_add(step))
+                    .take_while(|&n| if step > 0 { n <= end } else { n >= end })
+                    .collect();
+                (vec![start, end, step], expected)
+            })
+        })
+    });
+    for (arguments, expected) in [
+        (vec![0, -1], vec![]),
+        (vec![0, 0], vec![0]),
+        (vec![0, 3], vec![0, 1, 2, 3]),
+        (vec![3, 0, -1], vec![3, 2, 1, 0]),
+        (vec![0, 3, -1], vec![]),
+        (vec![i64::MAX, i64::MAX], vec![i64::MAX]),
+        (vec![i64::MIN, i64::MIN, -1], vec![i64::MIN]),
+        (vec![0, i64::MIN, i64::MIN], vec![0, i64::MIN]),
+        (vec![i64::MAX, i64::MIN, i64::MIN], vec![i64::MAX, -1]),
+        (
+            vec![i64::MIN, i64::MAX, i64::MAX],
+            vec![i64::MIN, -1, i64::MAX - 1],
+        ),
+    ]
+    .into_iter()
+    .chain(small_ranges)
+    {
+        let input_bytes = arguments.len() * size_of::<r::Value>();
+        let budget = input_bytes + (expected.len() + 1) * size_of::<r::Value>();
+        let expression = r::Expression::Function(
+            r::Function::Range,
+            arguments
+                .iter()
+                .map(|&i| r::Expression::Literal(r::Value::Integer(i)))
+                .collect(),
+        );
+        for (max_value_bytes, fits) in [(budget, true), (budget - 1, false)] {
+            let evaluation = r::Evaluation {
+                row: &[],
+                parameters: &parameters,
+                graph: &NoGraph,
+                group: None,
+                max_collection_items: 128,
+                max_value_bytes,
+            };
+            let ((result, peak), _) = observe(|| {
+                let result = evaluation.eval(&expression);
+                (result, OBSERVATION.with(Cell::get).peak)
+            });
+            if fits {
+                assert_eq!(
+                    result.unwrap(),
+                    r::Value::List(expected.iter().copied().map(r::Value::Integer).collect()),
+                    "{arguments:?}"
+                );
+                assert!(peak <= budget, "{arguments:?}: {peak} > {budget}");
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.detail, "MemoryLimit");
+                let error_bytes =
+                    error.category.capacity() + error.detail.capacity() + error.message.capacity();
+                assert!(
+                    peak <= input_bytes + error_bytes,
+                    "rejected range allocated an output: {arguments:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
+    let parameters = BTreeMap::new();
+    for (arguments, items, memory, detail) in [
+        (
+            vec![i64::MIN, i64::MAX],
+            usize::MAX,
+            usize::MAX,
+            "CollectionLimit",
+        ),
+        (
+            vec![i64::MIN, i64::MAX - 1],
+            usize::MAX,
+            usize::MAX,
+            if usize::BITS == 64 {
+                "MemoryLimit"
+            } else {
+                "CollectionLimit"
+            },
+        ),
+        (
+            vec![
+                0,
+                i64::try_from(isize::MAX as usize / size_of::<r::Value>()).unwrap(),
+            ],
+            usize::MAX,
+            usize::MAX,
+            "MemoryLimit",
+        ),
+        (
+            vec![0, 1000],
+            3,
+            6 * size_of::<r::Value>(),
+            "CollectionLimit",
+        ),
+        (vec![10, 0, -1], 3, usize::MAX, "CollectionLimit"),
+        (vec![0, 1000], 3, 0, "MemoryLimit"),
+    ] {
+        let input_bytes = arguments.len() * size_of::<r::Value>();
+        let expression = r::Expression::Function(
+            r::Function::Range,
+            arguments
+                .into_iter()
+                .map(|i| r::Expression::Literal(r::Value::Integer(i)))
+                .collect(),
+        );
+        let evaluation = r::Evaluation {
+            row: &[],
+            parameters: &parameters,
+            graph: &NoGraph,
+            group: None,
+            max_collection_items: items,
+            max_value_bytes: memory,
+        };
+        let ((error, peak), _) = observe(|| {
+            let error = evaluation.eval(&expression).unwrap_err();
+            (error, OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(error.detail, detail);
+        let error_bytes =
+            error.category.capacity() + error.detail.capacity() + error.message.capacity();
+        assert!(
+            peak <= input_bytes + error_bytes,
+            "range rejection materialized values"
+        );
+    }
+    let expression = r::Expression::Function(
+        r::Function::Range,
+        vec![
+            r::Expression::Literal(r::Value::Integer(i64::MIN)),
+            r::Expression::Literal(r::Value::Integer(i64::MAX)),
+        ],
+    );
+    let evaluation = r::Evaluation {
+        row: &[],
+        parameters: &parameters,
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 3,
+        max_value_bytes: 6 * size_of::<r::Value>(),
+    };
+    let ((range, peak), _) = observe(|| {
+        let range = evaluation.unwind(&expression).unwrap();
+        (range, OBSERVATION.with(Cell::get).peak)
+    });
+    assert!(peak <= 2 * size_of::<r::Value>());
+    assert_eq!(
+        range.take(3).collect::<Vec<_>>(),
+        [i64::MIN, i64::MIN + 1, i64::MIN + 2].map(r::Value::Integer)
+    );
+}

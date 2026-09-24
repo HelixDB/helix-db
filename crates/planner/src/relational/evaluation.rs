@@ -4,6 +4,8 @@ use super::{
 };
 use std::{cmp::Ordering, collections::BTreeMap};
 
+mod formatting;
+
 pub type Row = Vec<Value>;
 
 /// Immutable evaluation context; aggregate arguments use the same scalar rules.
@@ -220,9 +222,12 @@ impl Evaluation<'_> {
                 let input_bytes = left
                     .allocated_bytes()
                     .saturating_add(right.allocated_bytes());
-                // Concatenation owns a new value while its inputs are live.
-                self.remaining(input_bytes.saturating_mul(2))?;
-                binary(*op, left, right)?
+                let remaining = self.remaining(input_bytes)?;
+                if *op == Binary::Add {
+                    remaining.add(left, right)?
+                } else {
+                    binary(*op, left, right)?
+                }
             }
             E::List(xs) => Value::List(self.arguments(xs)?),
             E::Map(xs) => {
@@ -302,14 +307,90 @@ impl Evaluation<'_> {
         Ok(value)
     }
 
+    /// Both operands are already owned and admitted. Only a growing buffer or
+    /// a new output needs additional space; payloads move without cloning.
+    fn add(&self, left: Value, right: Value) -> Result<Value> {
+        Ok(match (left, right) {
+            (Value::Null, _) | (_, Value::Null) => Value::Null,
+            (Value::List(left), Value::List(right)) if left.is_empty() => Value::List(right),
+            (Value::List(mut left), Value::List(right)) => {
+                self.grow_list(&mut left, right.len())?;
+                left.extend(right);
+                Value::List(left)
+            }
+            (Value::List(mut values), value) => {
+                self.grow_list(&mut values, 1)?;
+                values.push(value);
+                Value::List(values)
+            }
+            (value, Value::List(mut values)) => {
+                self.grow_list(&mut values, 1)?;
+                values.insert(0, value);
+                Value::List(values)
+            }
+            (Value::String(left), Value::String(right)) if left.is_empty() => Value::String(right),
+            (Value::String(mut left), Value::String(right)) => {
+                self.grow_string(&mut left, right.len())?;
+                left.push_str(&right);
+                Value::String(left)
+            }
+            (Value::String(mut text), number @ (Value::Integer(_) | Value::Float(_))) => {
+                let formatted = formatting::ScalarText::new(&number)?;
+                self.grow_string(&mut text, formatted.bytes())?;
+                formatted.write_to(&mut text);
+                Value::String(text)
+            }
+            (number @ (Value::Integer(_) | Value::Float(_)), Value::String(mut text)) => {
+                let formatted = formatting::ScalarText::new(&number)?;
+                self.grow_string(&mut text, formatted.bytes())?;
+                formatted.write_to(&mut text);
+                // Move the complete formatted suffix to the front without
+                // allocating a second string. Both rotation boundaries are
+                // UTF-8 boundaries; checked reconstruction keeps this safe.
+                let mut bytes = text.into_bytes();
+                bytes.rotate_right(formatted.bytes());
+                Value::String(
+                    String::from_utf8(bytes).expect("rotation preserves complete strings"),
+                )
+            }
+            (left, right) => return binary(Binary::Add, left, right),
+        })
+    }
+
+    fn grow_list(&self, values: &mut Vec<Value>, additional: usize) -> Result<()> {
+        let count = values.len().saturating_add(additional);
+        if count > values.capacity() {
+            self.remaining(
+                size_of::<Value>().saturating_add(count.saturating_mul(size_of::<Value>())),
+            )?;
+            values.reserve_exact(additional);
+        }
+        Ok(())
+    }
+
+    fn grow_string(&self, text: &mut String, additional: usize) -> Result<()> {
+        let bytes = text.len().saturating_add(additional);
+        if bytes > text.capacity() {
+            self.remaining(size_of::<Value>().saturating_add(bytes))?;
+            text.reserve_exact(additional);
+        }
+        Ok(())
+    }
+
     fn remaining(&self, bytes: usize) -> Result<Self> {
-        let max_value_bytes = self.max_value_bytes.checked_sub(bytes).ok_or_else(|| {
-            QueryError::runtime(
-                "ResourceLimit",
-                "MemoryLimit",
-                "expression temporaries exceed the query memory budget",
-            )
-        })?;
+        // Saturated estimates and unaddressable buffers must fail even when
+        // an embedded caller provides an effectively unlimited allowance.
+        let max_value_bytes = self
+            .max_value_bytes
+            .checked_sub(bytes)
+            .filter(|_| bytes <= isize::MAX as usize)
+            .ok_or_else(|| {
+                QueryError::runtime(
+                    "ResourceLimit",
+                    "MemoryLimit",
+                    "expression temporaries exceed the query memory budget",
+                )
+            })?;
         Ok(Self {
             max_value_bytes,
             ..*self
@@ -480,7 +561,13 @@ impl Evaluation<'_> {
             },
             F::ToString => match first {
                 Value::String(_) => first,
-                _ => Value::String(scalar_string(&first)?),
+                _ => {
+                    let formatted = formatting::ScalarText::new(&first)?;
+                    self.remaining(size_of::<Value>().saturating_add(formatted.bytes()))?;
+                    let mut output = String::with_capacity(formatted.bytes());
+                    formatted.write_to(&mut output);
+                    Value::String(output)
+                }
             },
             F::ToInteger => match first {
                 Value::Integer(_) => first,
@@ -522,23 +609,31 @@ impl Evaluation<'_> {
             F::Range => {
                 args[0] = first;
                 let range = IntegerRange::new(&args)?;
-                let mut values = Vec::new();
+                let start = range.next.expect("a new range has its initial candidate");
+                let step = i128::from(range.step.get());
+                let distance = (i128::from(range.end) - i128::from(start)) * step.signum();
+                let count = if distance < 0 {
+                    0
+                } else {
+                    distance / step.abs() + 1
+                };
+                // Reject oversized collections before reserving their exact
+                // output. UNWIND retains the allocation-free generator path.
+                if count as u128 > self.max_collection_items as u128 {
+                    return Err(QueryError::runtime(
+                        "ResourceLimit",
+                        "CollectionLimit",
+                        "range exceeds the collection budget",
+                    ));
+                }
+                let count = usize::try_from(count).expect("count fits the collection limit");
+                self.remaining(count.saturating_add(1).saturating_mul(size_of::<Value>()))?;
+                let mut values = Vec::with_capacity(count);
                 for value in range {
-                    if values.len() == self.max_collection_items {
-                        return Err(QueryError::runtime(
-                            "ResourceLimit",
-                            "CollectionLimit",
-                            "range exceeds the collection budget",
-                        ));
-                    }
-                    self.remaining(
-                        values
-                            .len()
-                            .saturating_add(1)
-                            .saturating_mul(2 * size_of::<Value>()),
-                    )?;
+                    assert!(values.len() < count, "validated range cardinality");
                     values.push(value);
                 }
+                assert_eq!(values.len(), count, "validated range cardinality");
                 Value::List(values)
             }
             F::Reverse => match first {
@@ -732,22 +827,6 @@ pub(super) fn overflow() -> QueryError {
 fn finite_integer(f: f64) -> Option<i64> {
     (f.is_finite() && f >= i64::MIN as f64 && f < 9_223_372_036_854_775_808.0).then_some(f as i64)
 }
-fn scalar_string(v: &Value) -> Result<String> {
-    Ok(match v {
-        Value::String(s) => s.clone(),
-        Value::Integer(i) => i.to_string(),
-        Value::Float(f) => {
-            let s = f.to_string();
-            if f.is_finite() && !s.contains(['.', 'e', 'E']) {
-                format!("{s}.0")
-            } else {
-                s
-            }
-        }
-        Value::Boolean(b) => b.to_string(),
-        _ => return Err(type_error("value cannot be converted to a string")),
-    })
-}
 
 pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
     use Binary as B;
@@ -821,28 +900,6 @@ pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
             B::GreaterEqual => o != Ordering::Less,
             _ => unreachable!(),
         })));
-    }
-    if op == B::Add {
-        match (&a, &b) {
-            (Value::List(a), Value::List(b)) => {
-                return Ok(Value::List(a.iter().chain(b).cloned().collect()))
-            }
-            (Value::List(xs), _) => {
-                return Ok(Value::List(
-                    xs.iter().cloned().chain(std::iter::once(b)).collect(),
-                ))
-            }
-            (_, Value::List(xs)) => {
-                return Ok(Value::List(
-                    std::iter::once(a).chain(xs.iter().cloned()).collect(),
-                ))
-            }
-            (Value::String(_), Value::String(_) | Value::Integer(_) | Value::Float(_))
-            | (Value::Integer(_) | Value::Float(_), Value::String(_)) => {
-                return Ok(Value::String(scalar_string(&a)? + &scalar_string(&b)?))
-            }
-            _ => {}
-        }
     }
     if matches!(op, B::StartsWith | B::EndsWith | B::Contains) {
         return Ok(match (&a, &b) {

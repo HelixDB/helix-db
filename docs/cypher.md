@@ -250,6 +250,11 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
+Scalar `range()` checks its complete collection size before reserving output.
+After its arguments are evaluated, an excessive item count returns
+`CollectionLimit` before output-memory admission; otherwise an oversized buffer
+returns `MemoryLimit`. Direct `UNWIND range(...)` remains a streaming generator
+and can consume a bounded prefix without materialising the full range.
 Read-only queries with uncorrelated multi-hop patterns may reuse raw values
 within their pinned storage snapshot. The cache owns compact copies and caps
 retained entries at one eighth of the query budget (at most 32 MiB). Its header

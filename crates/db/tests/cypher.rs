@@ -240,21 +240,26 @@ async fn bounded_generators_parameters_and_rollback() {
     .await
     .unwrap();
     assert_eq!(response.rows, vec![vec![json!(3_004_498_500_i64)]]);
-    let error = cypher::execute(
-        &db,
-        cypher::Request::new("CREATE (n:N) RETURN range(0,10)"),
-        DataScope::LegacyUnscoped,
-        QueryMode::Execute,
-        ExecutionControl::unlimited(),
-        limits,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error,cypher::Error::Query(e) if e.detail == "CollectionLimit"));
-    assert_eq!(
-        run(&db, "MATCH (n:N) RETURN count(*)").await.rows,
-        vec![vec![json!(0)]]
-    );
+    for query in [
+        "CREATE (n:N) RETURN range(0,10)",
+        "CREATE (n:N) RETURN range(0,9223372036854775807)",
+    ] {
+        let error = cypher::execute(
+            &db,
+            cypher::Request::new(query),
+            DataScope::LegacyUnscoped,
+            QueryMode::Execute,
+            ExecutionControl::unlimited(),
+            limits,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error,cypher::Error::Query(e) if e.detail == "CollectionLimit"));
+        assert_eq!(
+            run(&db, "MATCH (n:N) RETURN count(*)").await.rows,
+            vec![vec![json!(0)]]
+        );
+    }
     let error = db
         .cypher(cypher::Request::new("MATCH (n) RETURN $missing"))
         .await
@@ -570,6 +575,8 @@ async fn expression_memory_limits_do_not_truncate_values_or_limit_streaming_coun
             ExecutionControl::unlimited(),
             cypher::Limits {
                 memory_bytes: 32 * 1024,
+                // Isolate memory admission from the separate collection limit.
+                collection_items: usize::MAX,
                 ..Default::default()
             },
         )
@@ -903,14 +910,17 @@ async fn string_temporaries_share_the_query_budget_and_failures_roll_back() {
         .unwrap();
     assert_eq!(control.rows, vec![vec![json!(200_000)]]);
     let mut committed = 1;
-    for expression in [
-        "trim($text)",
-        "ltrim($text)",
-        "rtrim($text)",
-        "reverse($text)",
-        "substring($text,0)",
-        "toLower($text)",
-        "toUpper($text)",
+    for (expression, characters) in [
+        ("trim($text)", 200_000),
+        ("ltrim($text)", 200_000),
+        ("rtrim($text)", 200_000),
+        ("reverse($text)", 200_000),
+        ("substring($text,0)", 200_000),
+        ("toLower($text)", 200_000),
+        ("toUpper($text)", 200_000),
+        ("$text + $text", 400_000),
+        ("$text + 1", 200_001),
+        ("1 + $text", 200_001),
     ] {
         let query = format!("CREATE (:StringBudget) RETURN size({expression})");
         let error = execute(query.clone(), budget).await.unwrap_err();
@@ -927,8 +937,11 @@ async fn string_temporaries_share_the_query_budget_and_failures_roll_back() {
                 .rows,
             vec![vec![json!(committed)]]
         );
-        let result = execute(query, budget + 2 * text.len()).await.unwrap();
-        assert_eq!(result.rows, vec![vec![json!(200_000)]]);
+        // Concatenation can double the payload while both operands are live.
+        let result = execute(query, budget + 4 * text.len())
+            .await
+            .unwrap_or_else(|error| panic!("{expression}: {error:?}"));
+        assert_eq!(result.rows, vec![vec![json!(characters)]]);
         committed += 1;
     }
     assert_eq!(
@@ -939,13 +952,19 @@ async fn string_temporaries_share_the_query_budget_and_failures_roll_back() {
     );
     assert_eq!(
         execute(
-            "RETURN size(toString($text)),toBoolean($text)".into(),
+            "RETURN size(toString($text)),toBoolean($text),size($text + ''),size('' + $text)"
+                .into(),
             budget
         )
         .await
         .unwrap()
         .rows,
-        vec![vec![json!(200_000), json!(null)]]
+        vec![vec![
+            json!(200_000),
+            json!(null),
+            json!(200_000),
+            json!(200_000)
+        ]]
     );
     db.close().await.unwrap();
 }
