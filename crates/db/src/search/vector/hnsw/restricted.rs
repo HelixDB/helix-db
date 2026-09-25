@@ -3,8 +3,7 @@
 //! Small candidate sets use a locality-sorted exact scan. Larger sets combine
 //! deterministic exact samples, the generation-complete SimHash directory, and
 //! the existing upper-layer HNSW route before a bounded ACORN-style layer-zero
-//! walk that stops once scoring rounds no longer move the k-th result closer.
-//! SimHash affects seed priority only: the exact bitmap remains the sole
+//! walk. SimHash affects seed priority only: the exact bitmap remains the sole
 //! admission authority for vector fetches, scoring, and returned entities.
 
 use std::cmp::Reverse;
@@ -35,13 +34,13 @@ use crate::search::vector::storage::{CanonicalVectorRowKey, SimHashDirectoryEntr
 use crate::search::vector::unaligned_vector::UnalignedVector;
 use crate::search::vector::{
     decode_item_borrowed, ResultCount, SearchParams, SearchResult, ValidatedMetricVector,
-    VectorDimension, VectorDistanceMetric, VectorParameterError, SIMHASH_BITS,
+    VectorDimension, VectorParameterError, SIMHASH_BITS,
 };
 
 const MAX_RESTRICTED_CANDIDATES: u64 = 1_000_000;
 /// Largest candidate set scanned exactly, bounding per-candidate read overhead
 /// for low-dimensional indexes.
-const EXACT_CARDINALITY_THRESHOLD: u64 = 16_384;
+const EXACT_CARDINALITY_THRESHOLD: u64 = 8_192;
 /// Largest candidate vector footprint scanned exactly (8,192 vectors at 768-d).
 ///
 /// The bounded walk cannot rank near-tie bands wider than its payload budget:
@@ -72,14 +71,7 @@ const BRIDGE_RANK_WINDOW: usize = 2;
 const BRIDGE_HOP_PENALTY_BITS: u32 = 1;
 /// Inherited rank when the discovering row has no known rank (uncorrelated).
 const BRIDGE_UNKNOWN_HAMMING: u32 = (SIMHASH_BITS / 2) as u32;
-/// Hamming noise allowance above the worst beam angle before bridges are
-/// abandoned; 64-bit SimHash Hamming has a standard deviation of at most 4.
-const BRIDGE_ANGULAR_MARGIN_BITS: u32 = 8;
 const FILTERED_VECTOR_PAYLOAD_LIMIT: usize = MAX_RESTRICTED_RESULT_COUNT;
-/// Consecutive scoring rounds that leave the k-th best distance unchanged
-/// before the walk is considered converged. Rounds that score nothing (pure
-/// bridge hops across rejected regions) do not count.
-const FILTERED_STALE_ROUNDS: usize = 3;
 
 #[cfg(feature = "production-scale")]
 static FILTERED_BEAM_PERCENT_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
@@ -160,9 +152,6 @@ pub(crate) enum RestrictedSearchTermination {
     Exhausted,
     /// The full allowed beam proved that the remaining frontier was worse.
     BeamComplete,
-    /// `FILTERED_STALE_ROUNDS` scoring rounds left the k-th best distance
-    /// unchanged.
-    Converged,
     /// The total layer-zero routing-row budget was exhausted.
     RoutingBudget,
     /// The rejected-neighbor bridge-row budget was exhausted.
@@ -338,16 +327,6 @@ struct BridgeEntry {
     hamming: u32,
     source: BridgeRankSource,
     node_id: NodeId,
-}
-
-/// When the filtered walk may stop while rejected bridges remain queued.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BridgeCutoff {
-    /// Only an empty bridge frontier proves no closer allowed node remains.
-    FrontierExhausted,
-    /// Cosine SimHash Hamming estimates angle, so bridges whose rank exceeds
-    /// the worst beam angle (plus a noise margin) are abandoned.
-    AngularBound,
 }
 
 struct RestrictedBridgeState {
@@ -1078,14 +1057,6 @@ impl<D: Distance> VectorIndex<D> {
         directory_seeds.sort_unstable_by_key(|(hamming, node_id, _)| (*hamming, *node_id));
         directory_seeds.truncate(budgets.directory_seeds);
 
-        let cutoff = match ActiveVectorSemantics::for_distance::<D>()
-            .map(ActiveVectorSemantics::distance_metric)
-        {
-            Some(VectorDistanceMetric::Cosine) => BridgeCutoff::AngularBound,
-            Some(VectorDistanceMetric::Euclidean | VectorDistanceMetric::Manhattan) | None => {
-                BridgeCutoff::FrontierExhausted
-            }
-        };
         // Order codes interleave SimHash bits, so their XOR popcount is the
         // node's exact query Hamming rank.
         let mut bridge_state = RestrictedBridgeState {
@@ -1151,87 +1122,18 @@ impl<D: Distance> VectorIndex<D> {
             bridge_state.enqueue(query_hash, [(entry_point, 0)], stats);
         }
 
-        let mut best_kth = None;
-        let mut stale_rounds = 0_usize;
-        let mut scored_before_round = stats.vector_payload_requests;
         loop {
             if stats.vector_payload_requests >= budgets.vector_payloads {
                 stats.termination = Some(RestrictedSearchTermination::VectorBudget);
                 break;
             }
-            // A candidate entering the top-k displaces the k-th, so an unchanged
-            // k-th after a scoring round means the round left the answer
-            // untouched. Several such rounds in a row end the walk: later rounds
-            // expand ever farther frontier nodes. Selecting the k-th is O(beam)
-            // per round, negligible next to the round's storage reads.
-            let kth = (top.len() >= k).then(|| {
-                let mut beam = top.iter().copied().collect::<Vec<_>>();
-                *beam.select_nth_unstable(k - 1).1
-            });
-            let scored_last_round = stats.vector_payload_requests > scored_before_round;
-            scored_before_round = stats.vector_payload_requests;
-            match kth {
-                Some(_) if kth != best_kth => {
-                    best_kth = kth;
-                    stale_rounds = 0;
-                }
-                Some(_) if scored_last_round => stale_rounds += 1,
-                Some(_) | None => {}
-            }
-            if stale_rounds >= FILTERED_STALE_ROUNDS {
-                stats.termination = Some(RestrictedSearchTermination::Converged);
-                break;
-            }
-            let worst = top.peek().filter(|_| top.len() >= budgets.ef_filtered);
-            // An inherited rank only estimates a bridge from its discovering
-            // row, so the angular cutoff first resolves every inherited bridge
-            // at the head of the queue and compares only SimHash-exact ranks.
-            if cutoff == BridgeCutoff::AngularBound && worst.is_some() {
-                loop {
-                    let inherited = (0..BRIDGE_BATCH_SIZE)
-                        .map_while(|_| match bridge_state.frontier.peek() {
-                            Some(Reverse(entry)) if entry.source == BridgeRankSource::Inherited => {
-                                bridge_state.frontier.pop().map(|Reverse(entry)| entry)
-                            }
-                            Some(_) | None => None,
-                        })
-                        .collect::<Vec<_>>();
-                    if inherited.is_empty() {
-                        break;
-                    }
-                    let resolved = self
-                        .restricted_resolve_bridges(
-                            read,
-                            query_hash,
-                            inherited,
-                            &mut bridge_state,
-                            stats,
-                        )
-                        .await?;
-                    bridge_state
-                        .frontier
-                        .extend(resolved.into_iter().map(Reverse));
-                }
-            }
-            let beam_complete = match (cutoff, worst) {
-                (_, None) => false,
-                (BridgeCutoff::FrontierExhausted, Some(worst)) => {
-                    bridge_state.frontier.is_empty()
-                        && frontier.peek().is_some_and(|Reverse(next)| next > worst)
-                }
-                (BridgeCutoff::AngularBound, Some(worst)) => {
-                    // Cosine distance here is (1 - cos) / 2; SimHash Hamming
-                    // over `SIMHASH_BITS` estimates angle / pi.
-                    let angle = (1.0 - 2.0 * worst.distance().get()).clamp(-1.0, 1.0).acos();
-                    let bound = (SIMHASH_BITS as f32 * angle / std::f32::consts::PI) as u32
-                        + BRIDGE_ANGULAR_MARGIN_BITS;
-                    frontier.peek().is_none_or(|Reverse(next)| next > worst)
-                        && bridge_state
-                            .frontier
-                            .peek()
-                            .is_none_or(|Reverse(bridge)| bridge.hamming > bound)
-                }
-            };
+            // SimHash ranks only order bridges; none is a bound on distance, so
+            // only an empty bridge queue proves no closer allowed node remains.
+            let beam_complete = bridge_state.frontier.is_empty()
+                && top
+                    .peek()
+                    .filter(|_| top.len() >= budgets.ef_filtered)
+                    .is_some_and(|worst| frontier.peek().is_some_and(|Reverse(next)| next > worst));
             if beam_complete {
                 stats.termination = Some(RestrictedSearchTermination::BeamComplete);
                 break;

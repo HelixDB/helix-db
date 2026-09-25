@@ -430,7 +430,9 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         .unwrap();
     assert_eq!(exact_results.len(), 2);
 
-    let filtered = RestrictedVectorCandidates::from_ids(1..=257).unwrap();
+    // One past the restricted exact-scan cardinality cap (8,192) routes the
+    // request view through the filtered graph walk.
+    let filtered = RestrictedVectorCandidates::from_ids(1..=8_193).unwrap();
     let filtered_results = index
         .search_restricted(
             &view,
