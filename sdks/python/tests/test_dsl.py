@@ -4,6 +4,7 @@ import json
 import math
 import unittest
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timezone
 
 from helixdb import (
     BatchCondition,
@@ -403,6 +404,29 @@ class DslAstTests(unittest.TestCase):
             BindingProjection.coalesce([], "workload_id")
         with self.assertRaises(ValueError):
             g().n_with_label("Service").project_bindings([])
+
+    def test_datetime_millis_are_exact_for_millisecond_inputs(self) -> None:
+        # Binary floating point cannot hold these instants in seconds exactly, so
+        # `timestamp() * 1000` lands just below the millisecond and truncates.
+        for text, millis in [
+            ("2004-08-03T14:44:13.199Z", 1_091_544_253_199),
+            ("1987-05-10T10:40:21.915Z", 547_641_621_915),
+            ("2039-01-12T23:59:04.595Z", 2_178_489_544_595),
+        ]:
+            self.assertEqual(DateTime.parse_rfc3339(text).millis(), millis)
+            self.assertEqual(DateTime.parse_rfc3339(text).to_rfc3339(), text)
+            self.assertEqual(
+                DateTime.from_datetime(
+                    datetime.fromisoformat(text.replace("Z", "+00:00"))
+                ).millis(),
+                millis,
+            )
+        self.assertEqual(
+            DateTime.from_datetime(
+                datetime(1969, 12, 31, 23, 59, 59, 999_500, tzinfo=timezone.utc)
+            ).millis(),
+            -1,
+        )
 
     def test_batches_emit_entries_and_nested_roots(self) -> None:
         read = (
