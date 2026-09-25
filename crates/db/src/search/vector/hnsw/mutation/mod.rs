@@ -3991,6 +3991,249 @@ mod tests {
         assert!(stats.simhash_hits() > 0);
     }
 
+    #[test]
+    fn targeted_invalidation_removes_every_layer_of_exactly_one_node() {
+        type Cache = MutationOpCache<crate::search::vector::distance::Cosine>;
+        let mut cache = Cache::default();
+        for (layer, node_id) in [(0, 1), (3, 1), (5, 1), (0, 2), (5, 2), (3, 3)] {
+            cache.put_item(layer, node_id, None, 8);
+            cache.install_loaded_neighbor(
+                Cache::node_row_id(layer, node_id),
+                NeighborRowValue::KnownAbsent,
+            );
+        }
+        cache.record_neighbor_change(Cache::node_row_id(3, 1), NeighborRowValue::KnownAbsent);
+        cache.record_neighbor_change(Cache::node_row_id(0, 2), NeighborRowValue::KnownAbsent);
+
+        cache.invalidate_items(1);
+        cache.invalidate_neighbors(1);
+
+        for layer in 0..=5 {
+            assert!(!cache.items.contains_key(&(layer, 1)));
+            assert!(!cache.contains_neighbor(Cache::node_row_id(layer, 1)));
+        }
+        for (layer, node_id) in [(0, 2), (5, 2), (3, 3)] {
+            assert!(cache.item_is_known_absent(layer, node_id));
+            assert!(cache.contains_neighbor(Cache::node_row_id(layer, node_id)));
+        }
+        assert_eq!(cache.item_count(), 3);
+        assert_eq!(cache.item_recency.len(), 3);
+        assert_eq!(cache.neighbor_count(), 3);
+        assert_eq!(cache.clean_neighbor_recency.len(), 3);
+        assert_eq!(cache.retained_payload_bytes().unwrap(), 3 * 8);
+        assert_eq!(
+            cache
+                .finish_entity_changes()
+                .into_keys()
+                .collect::<Vec<_>>(),
+            vec![Cache::node_row_id(0, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn build_session_discard_removes_only_the_unadmitted_entity() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+        type Cache = MutationOpCache<Cosine>;
+
+        let existing = session_identity(DataScope::LegacyUnscoped, 71);
+        let created = session_identity(DataScope::LegacyUnscoped, 72);
+        let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+
+        // An admitted entity leaves clean state for nodes 1 and 2.
+        let mut cache = session.take_cache(&existing, 8, 4).unwrap();
+        cache.put_item(0, 1, None, 8);
+        cache.put_simhash(1, None);
+        cache.install_loaded_neighbor(Cache::node_row_id(0, 1), neighbors(1, vec![2]));
+        cache.install_loaded_neighbor(Cache::node_row_id(0, 2), neighbors(2, vec![1]));
+        session.restore_cache(existing.clone(), cache);
+        session.record_entity_changes(&existing, 1, []);
+        session.admit_entity();
+
+        // The unadmitted entity inserts node 3, relinks node 2, and creates a namespace.
+        let row_2 = Cache::node_row_id(0, 2);
+        let row_3 = Cache::node_row_id(0, 3);
+        let mut cache = session.take_cache(&existing, 8, 4).unwrap();
+        cache.begin_entity();
+        cache.put_item(0, 3, None, 8);
+        cache.put_item(1, 3, None, 8);
+        cache.put_simhash(3, None);
+        let proof = cache.prove_new_neighbor_row(row_3).unwrap();
+        cache.stage_new_neighbor(proof, neighbors(3, vec![2]));
+        cache
+            .stage_loaded_neighbor(row_2, neighbors(2, vec![1, 3]))
+            .unwrap();
+        cache.mark_neighbor_flushed(row_3);
+        cache.mark_neighbor_flushed(row_2);
+        let changed = cache.finish_entity_changes();
+        session.restore_cache(existing.clone(), cache);
+        session.record_entity_changes(&existing, 3, changed.into_keys());
+        let mut created_cache = session.take_cache(&created, 8, 4).unwrap();
+        created_cache.put_item(0, 3, None, 8);
+        session.restore_cache(created.clone(), created_cache);
+        session.record_entity_changes(&created, 3, []);
+        assert!(!session.has_dirty_neighbors());
+
+        session.discard_entity();
+
+        assert!(!session.caches.contains_key(&created));
+        let cache = session.caches.get(&existing).unwrap();
+        assert!(!cache.items.contains_key(&(0, 3)));
+        assert!(!cache.items.contains_key(&(1, 3)));
+        assert!(!cache.simhashes.contains_key(&3));
+        assert!(!cache.contains_neighbor(row_3));
+        assert!(!cache.contains_neighbor(row_2));
+        assert!(cache.item_is_known_absent(0, 1));
+        assert!(cache.simhashes.contains_key(&1));
+        assert_eq!(
+            cache
+                .neighbor(Cache::node_row_id(0, 1))
+                .map(CachedNeighbor::current),
+            Some(&neighbors(1, vec![2]))
+        );
+
+        // An empty journal discards nothing.
+        let retained = session.retained_bytes().unwrap();
+        session.discard_entity();
+        assert_eq!(session.retained_bytes().unwrap(), retained);
+    }
+
+    #[tokio::test]
+    async fn build_session_budget_charges_entry_overhead_and_evicts_least_recent() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+
+        let identity = session_identity(DataScope::LegacyUnscoped, 81);
+        let per_simhash = VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES + core::mem::size_of::<u64>();
+        let mut session = VectorBuildSession::<Cosine>::new(
+            NonZeroU64::new(u64::try_from(per_simhash * 3).unwrap()).unwrap(),
+        );
+        let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+        for node_id in 1..=5 {
+            cache.put_simhash(
+                node_id,
+                Some(crate::search::vector::SimHash::from_bits(node_id)),
+            );
+        }
+        // Touching node 1 leaves nodes 2 and 3 as the least recently used.
+        assert!(cache.simhash(1).is_some());
+        session.restore_cache(identity.clone(), cache);
+        assert_eq!(session.retained_bytes().unwrap(), per_simhash * 5);
+        assert_eq!(
+            session.retained_payload_bytes().unwrap(),
+            5 * core::mem::size_of::<u64>()
+        );
+
+        let db = session_test_db("vector-build-session-byte-budget").await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        session
+            .enforce_limits(&MeasuredVectorTransaction::new(&transaction))
+            .unwrap();
+
+        assert_eq!(session.retained_bytes().unwrap(), per_simhash * 3);
+        let cache = session.caches.get(&identity).unwrap();
+        for evicted in [2, 3] {
+            assert!(!cache.simhashes.contains_key(&evicted));
+        }
+        for kept in [1, 4, 5] {
+            assert!(cache.simhashes.contains_key(&kept));
+        }
+        assert_eq!(session.stats().simhash_evictions(), 2);
+    }
+
+    #[tokio::test]
+    async fn build_session_counts_are_bounded_only_by_bytes() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+
+        let identity = session_identity(DataScope::LegacyUnscoped, 82);
+        let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+        let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+        let entries = VECTOR_BUILD_SIMHASH_CACHE_LIMIT + VECTOR_BUILD_ITEM_CACHE_LIMIT;
+        for node_id in 0..u64::try_from(entries).unwrap() {
+            cache.put_simhash(
+                node_id,
+                Some(crate::search::vector::SimHash::from_bits(node_id)),
+            );
+        }
+        session.restore_cache(identity, cache);
+        let db = session_test_db("vector-build-session-uncapped-counts").await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        session
+            .enforce_limits(&MeasuredVectorTransaction::new(&transaction))
+            .unwrap();
+        assert_eq!(session.simhash_count(), entries);
+        assert_eq!(session.stats().simhash_evictions(), 0);
+    }
+
+    #[test]
+    fn build_session_stats_reset_without_dropping_state() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+
+        let identity = session_identity(DataScope::LegacyUnscoped, 83);
+        let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+        let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+        cache.put_item(0, 1, None, 8);
+        assert!(cache.item(0, 1).is_some());
+        assert!(cache.item(0, 2).is_none());
+        session.restore_cache(identity, cache);
+        assert_eq!(session.stats().item_hits(), 1);
+        assert_eq!(session.stats().item_misses(), 1);
+
+        session.reset_stats();
+
+        assert_eq!(session.stats(), VectorBuildSessionStats::default());
+        assert_eq!(session.item_count(), 1);
+    }
+
+    proptest! {
+        #[test]
+        fn targeted_invalidation_matches_a_full_scan_model(
+            entries in prop::collection::vec((0_u16..6, 1_u64..6, any::<bool>()), 0..48),
+            victim in 1_u64..6,
+        ) {
+            type Cache = MutationOpCache<crate::search::vector::distance::Cosine>;
+            let mut cache = Cache::default();
+            let mut items = BTreeSet::new();
+            let mut rows = BTreeSet::new();
+            for (layer, node_id, neighbor) in entries {
+                if neighbor {
+                    cache.install_loaded_neighbor(
+                        Cache::node_row_id(layer, node_id),
+                        NeighborRowValue::KnownAbsent,
+                    );
+                    rows.insert((layer, node_id));
+                } else {
+                    cache.put_item(layer, node_id, None, 1);
+                    items.insert((layer, node_id));
+                }
+            }
+            cache.invalidate_items(victim);
+            cache.invalidate_neighbors(victim);
+            items.retain(|(_, node_id)| *node_id != victim);
+            rows.retain(|(_, node_id)| *node_id != victim);
+            for layer in 0..6 {
+                for node_id in 1..6 {
+                    prop_assert_eq!(
+                        cache.items.contains_key(&(layer, node_id)),
+                        items.contains(&(layer, node_id))
+                    );
+                    prop_assert_eq!(
+                        cache.contains_neighbor(Cache::node_row_id(layer, node_id)),
+                        rows.contains(&(layer, node_id))
+                    );
+                }
+            }
+            prop_assert_eq!(cache.item_recency.len(), items.len());
+            prop_assert_eq!(
+                cache.clean_neighbor_recency.len() + cache.dirty_neighbor_recency.len(),
+                rows.len()
+            );
+            prop_assert_eq!(cache.retained_payload_bytes().unwrap(), items.len());
+        }
+    }
+
     proptest! {
         #[test]
         fn random_neighbor_operations_match_the_reference_model(

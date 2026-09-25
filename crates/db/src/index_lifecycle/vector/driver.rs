@@ -6,6 +6,11 @@
 //! transaction also owns tenant mappings, builder-applied state,
 //! delta deletion, and the next durable checkpoint.
 //!
+//! The decoded rows planning reads are kept in one bounded
+//! [`VectorBuildSession`] that outlives its step only after that step commits:
+//! see [`RetainedVectorBuild`] for why a matching checkpoint proves the cached
+//! rows still equal the committed builder-exclusive generation.
+//!
 //! No vector row codec is defined here. Physical reads and writes remain behind
 //! [`crate::search::vector::VectorIndex`] and the typed `encoding/v2` boundary.
 

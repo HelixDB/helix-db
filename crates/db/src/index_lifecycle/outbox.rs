@@ -344,6 +344,12 @@ impl IndexOperationStepExecution {
         self.committed_state = state;
         self
     }
+
+    /// Borrows the driver state released to `after_commit` on commit.
+    #[cfg(test)]
+    pub(crate) const fn committed_state(&self) -> Option<&CommittedStepState> {
+        self.committed_state.as_ref()
+    }
 }
 
 /// Family-specific physical work contract.
