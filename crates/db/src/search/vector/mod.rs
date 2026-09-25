@@ -177,7 +177,7 @@ pub use benchmarks::{
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::commit::production_contracts::run as run_write_cache_contracts;
-pub(crate) use cache::commit::VectorCacheWriteSet;
+pub(crate) use cache::commit::{commit_fenced, VectorCacheWriteSet};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::hydration::production_contracts::run as run_hydration_contracts;
 pub(crate) use cache::hydration::{
@@ -185,7 +185,7 @@ pub(crate) use cache::hydration::{
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
-pub(crate) use cache::registry::VectorCacheRegistry;
+pub(crate) use cache::registry::{VectorCacheRegistry, VectorCacheVisibility};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::store::production_contracts::run as run_memory_store_contracts;
 #[cfg(any(test, feature = "production-coverage"))]

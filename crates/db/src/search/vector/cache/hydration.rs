@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::registry::{VectorCacheHydration, VectorCacheIdentity, VectorCacheRegistry};
+use super::registry::{
+    VectorCacheHydration, VectorCacheIdentity, VectorCacheRegistry, VectorCacheSweep,
+};
 use super::store::{
     VectorMemoryAdmissionBudget, VectorMemoryStore, VectorMemoryStoreLoadCompletion,
 };
@@ -200,18 +202,19 @@ pub(crate) async fn hydrate_active_generations(
             "vector cache hydration target count exceeds u64".to_string(),
         ));
     };
-    match source {
-        // Writer entries are released only by retirement, whose tombstones
-        // outlive the Active inventory until physical cleanup completes.
-        VectorCacheSnapshotSource::Writer(_) => {}
-        VectorCacheSnapshotSource::Reader(_) => registry.retain_active(
-            scope,
-            &targets
-                .iter()
-                .map(VectorCacheIdentity::from_validated)
-                .collect(),
-        ),
-    }
+    registry.sweep(
+        scope,
+        &targets
+            .iter()
+            .map(VectorCacheIdentity::from_validated)
+            .collect(),
+        match source {
+            // Writer entries are released only by retirement, whose tombstones
+            // outlive the Active inventory until physical cleanup completes.
+            VectorCacheSnapshotSource::Writer(_) => VectorCacheSweep::OrphanFences,
+            VectorCacheSnapshotSource::Reader(_) => VectorCacheSweep::InactiveEntries,
+        },
+    );
     if target_count == 0 {
         return Ok(());
     }
@@ -270,15 +273,11 @@ pub(crate) async fn hydrate_active_generations(
                     .await;
                 let summary = match loaded {
                     Ok(summary) => summary,
-                    Err(error) => {
-                        drop(hydration);
-                        registry.forget_validated_closed(&handle);
-                        return Err(error);
-                    }
+                    // Dropping the reservation returns an initial entry to
+                    // `Vacant` or keeps a refreshed entry's published store.
+                    Err(error) => return Err(error),
                 };
                 if summary.completion == VectorMemoryStoreLoadCompletion::Shutdown {
-                    drop(hydration);
-                    registry.forget_validated_closed(&handle);
                     break;
                 }
                 (summary.estimated_bytes, Some((hydration, store)))
@@ -434,7 +433,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let first_guard = registry.read_guard_for(&handle).unwrap();
+        let first_guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(first_guard.store().visible_seq(), first_snapshot.seq());
         assert_eq!(
             first_guard.store().get_upper_vector(1).as_deref(),
@@ -465,7 +464,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let second_guard = registry.read_guard_for(&handle).unwrap();
+        let second_guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(second_guard.store().visible_seq(), second_snapshot.seq());
         assert!(second_guard.store().get_upper_vector(2).is_some());
         assert!(first_guard.store().get_upper_vector(2).is_none());
@@ -480,7 +479,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let empty_guard = registry.read_guard_for(&handle).unwrap();
+        let empty_guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(empty_guard.store().estimated_bytes(), 0);
         assert!(empty_guard.store().get_upper_vector(1).is_none());
         assert!(empty_guard.store().get_upper_vector(2).is_none());
@@ -541,13 +540,13 @@ mod tests {
         .await
         .unwrap();
         let first_seq = reader.snapshot().await.unwrap().seq();
-        let first = registry.read_guard_for(&handle).unwrap();
+        let first = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(first.store().visible_seq(), first_seq);
         assert_eq!(
             first.store().get_upper_vector(1).as_deref(),
             Some(b"first".as_slice())
         );
-        assert!(registry.read_guard_for(&inactive_handle).is_ok());
+        assert!(registry.resident_guard_for(&inactive_handle).is_ok());
         hydrate_active_generations(
             VectorCacheSnapshotSource::Reader(&reader),
             scope,
@@ -561,7 +560,7 @@ mod tests {
         assert!(
             Arc::ptr_eq(
                 first.store(),
-                registry.read_guard_for(&handle).unwrap().store()
+                registry.resident_guard_for(&handle).unwrap().store()
             ),
             "an unchanged reader sequence retains the published store"
         );
@@ -590,7 +589,7 @@ mod tests {
         .await
         .unwrap();
 
-        let second = registry.read_guard_for(&handle).unwrap();
+        let second = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(
             second.store().visible_seq(),
             reader.snapshot().await.unwrap().seq()
@@ -606,13 +605,87 @@ mod tests {
         );
         assert!(
             matches!(
-                registry.read_guard_for(&inactive_handle),
+                registry.resident_guard_for(&inactive_handle),
                 Err(super::super::registry::VectorCacheReadGuardError::Absent)
             ),
             "readers release generations that left the Active inventory"
         );
         drop((first, second));
         reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_fenced_hydration_retains_across_unfenced_sequences_and_rescans_after_commits() {
+        let db = raw_db("vector-cache-commit-fenced-hydration").await;
+        let scope = DataScope::LegacyUnscoped;
+        let (active, handle) = active_vector(scope, 7, 71, false);
+        let upper_vector = |node_id| {
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
+                    71, node_id,
+                ))),
+            }
+            .to_bytes()
+        };
+        db.put(upper_vector(1), Bytes::from_static(b"first"))
+            .await
+            .unwrap();
+        let registry =
+            VectorCacheRegistry::new(super::super::registry::VectorCacheVisibility::CommitFenced);
+        let hydrate = || {
+            hydrate_active_generations(
+                VectorCacheSnapshotSource::Writer(&db),
+                scope,
+                vec![active.clone()],
+                &registry,
+                VectorCacheHydrationBudget::Unbounded,
+                None,
+            )
+        };
+        hydrate().await.unwrap();
+        let first = registry.resident_guard_for(&handle).unwrap();
+
+        db.put(b"unrelated-graph-row", Bytes::from_static(b"row"))
+            .await
+            .unwrap();
+        let newer_seq = db.snapshot().await.unwrap().seq();
+        assert!(newer_seq > first.store().visible_seq());
+        hydrate().await.unwrap();
+        assert!(
+            Arc::ptr_eq(
+                first.store(),
+                registry.resident_guard_for(&handle).unwrap().store()
+            ),
+            "an unfenced sequence advance does not rescan a commit-fenced store"
+        );
+        assert!(registry.read_guard_for(&handle, newer_seq).is_ok());
+
+        let writes = super::super::commit::VectorCacheWriteSet::default();
+        writes.dirty_rows_for(&handle).mark_node_dirty(2);
+        let fences = writes
+            .entries()
+            .iter()
+            .filter_map(|write| registry.prepare_commit(write))
+            .collect::<Vec<_>>();
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .put(upper_vector(2), Bytes::from_static(b"second"))
+            .unwrap();
+        super::super::commit::commit_fenced(transaction, fences)
+            .await
+            .unwrap();
+        hydrate().await.unwrap();
+
+        let rescanned = registry.resident_guard_for(&handle).unwrap();
+        assert!(!Arc::ptr_eq(first.store(), rescanned.store()));
+        assert_eq!(
+            rescanned.store().get_upper_vector(2).as_deref(),
+            Some(b"second".as_slice())
+        );
+        assert!(first.store().get_upper_vector(2).is_none());
+        drop((first, rescanned));
         db.close().await.unwrap();
     }
 
@@ -635,7 +708,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, HelixDbError::InvariantViolation(_)));
-        assert!(registry.read_guard_for(&handle).is_err());
+        assert!(registry.resident_guard_for(&handle).is_err());
     }
 
     #[tokio::test]
@@ -687,7 +760,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let guard = registry.read_guard_for(&handle).unwrap();
+        let guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(
             guard.store().get_upper_vector(3).as_deref(),
             Some(b"partitioned".as_slice())
@@ -740,12 +813,12 @@ mod tests {
         .await
         .unwrap();
 
-        let low = registry.read_guard_for(&low_handle).unwrap();
+        let low = registry.resident_guard_for(&low_handle).unwrap();
         assert_eq!(low.store().estimated_bytes(), row_bytes);
         assert_eq!(low.store().get_upper_vector(1).as_deref(), Some(&value[..]));
         assert_eq!(
             registry
-                .read_guard_for(&high_handle)
+                .resident_guard_for(&high_handle)
                 .unwrap()
                 .store()
                 .estimated_bytes(),
@@ -801,8 +874,8 @@ mod tests {
             .unwrap();
         }
 
-        let first = registry.read_guard_for(&first_handle).unwrap();
-        let second = registry.read_guard_for(&second_handle).unwrap();
+        let first = registry.resident_guard_for(&first_handle).unwrap();
+        let second = registry.resident_guard_for(&second_handle).unwrap();
         assert_eq!(
             first.store().get_upper_vector(1).as_deref(),
             Some(b"first-scope".as_slice())
@@ -833,8 +906,8 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, HelixDbError::IndexCatalogCorruption(_)));
-        assert!(registry.read_guard_for(&first_handle).is_err());
-        assert!(registry.read_guard_for(&second_handle).is_err());
+        assert!(registry.resident_guard_for(&first_handle).is_err());
+        assert!(registry.resident_guard_for(&second_handle).is_err());
     }
 
     #[tokio::test]
@@ -880,7 +953,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, HelixDbError::IndexCatalogCorruption(_)));
-        assert!(registry.read_guard_for(&handle).is_err());
+        assert!(registry.resident_guard_for(&handle).is_err());
     }
 
     #[tokio::test]
@@ -902,6 +975,6 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(registry.read_guard_for(&handle).is_err());
+        assert!(registry.resident_guard_for(&handle).is_err());
     }
 }

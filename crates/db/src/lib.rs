@@ -535,9 +535,12 @@ struct VectorMemoryCache {
 
 impl VectorMemoryCache {
     /// Builds all vector runtime caches from one validated, non-persisted policy.
-    fn new(settings: config::VectorMemorySettings) -> Self {
+    fn new(
+        settings: config::VectorMemorySettings,
+        visibility: search::vector::VectorCacheVisibility,
+    ) -> Self {
         Self {
-            registry: Arc::new(search::vector::VectorCacheRegistry::default()),
+            registry: Arc::new(search::vector::VectorCacheRegistry::new(visibility)),
             simhasher_registry: Arc::new(search::vector::SimHasherRegistry::new(
                 search::vector::SimHasherRegistryLimits::from_config(settings.simhasher_cache()),
             )),
@@ -1422,7 +1425,15 @@ impl HelixDB {
         index_scheduling: IndexLifecycleScheduling,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
-        let vector_memory = VectorMemoryCache::new(*config.db().cache().vector_memory());
+        // Every vector commit on a writer passes the registry fence, while
+        // readers observe commits without one and attach only exact sequences.
+        let vector_memory = VectorMemoryCache::new(
+            *config.db().cache().vector_memory(),
+            match storage.handle() {
+                HelixStorage::Writer(_) => search::vector::VectorCacheVisibility::CommitFenced,
+                HelixStorage::Reader(_) => search::vector::VectorCacheVisibility::ExactSequence,
+            },
+        );
         let index_scope_gates = Arc::new(index_lifecycle::IndexScopeGates::default());
         let secondary_tuning = config.db().secondary_index_lifecycle();
         let lifecycle_throughput = config.db().index_lifecycle_throughput();
@@ -4323,7 +4334,10 @@ mod tests {
             config::SimHasherCacheSettings::try_new(3 * 64 * core::mem::size_of::<f32>(), 2)
                 .unwrap(),
         );
-        let cache = VectorMemoryCache::new(settings);
+        let cache = VectorMemoryCache::new(
+            settings,
+            search::vector::VectorCacheVisibility::ExactSequence,
+        );
         assert!(cache.simhasher_registry.validate_dimension(3).is_ok());
         assert!(cache.simhasher_registry.validate_dimension(4).is_err());
     }
@@ -4419,7 +4433,7 @@ mod tests {
 
         let guard = db
             .vector_cache_registry()
-            .read_guard_for(&generation)
+            .resident_guard_for(&generation)
             .unwrap();
         assert_eq!(
             guard.store().get_upper_vector(7).as_deref(),

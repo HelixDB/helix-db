@@ -325,7 +325,7 @@ async fn run_empty_contracts() {
     .expect("empty unbounded hydration completes");
     assert_eq!(
         registry
-            .read_guard_for(&physical)
+            .resident_guard_for(&physical)
             .unwrap()
             .store()
             .estimated_bytes(),
@@ -343,7 +343,7 @@ async fn run_empty_contracts() {
     .expect("zero-budget hydration publishes an empty store");
     assert_eq!(
         registry
-            .read_guard_for(&physical)
+            .resident_guard_for(&physical)
             .unwrap()
             .store()
             .estimated_bytes(),
@@ -392,7 +392,7 @@ async fn run_refresh_and_budget_contracts() {
     .await
     .expect("initial hydration publishes");
     let first = registry
-        .read_guard_for(&physical)
+        .resident_guard_for(&physical)
         .expect("initial store has a read guard");
 
     let second_key = upper_vector_key(scope, 21, 2);
@@ -412,7 +412,7 @@ async fn run_refresh_and_budget_contracts() {
     .await
     .expect("refresh hydration publishes");
     let refreshed = registry
-        .read_guard_for(&physical)
+        .resident_guard_for(&physical)
         .expect("refreshed store has a read guard");
     assert!(refreshed.store().get_upper_vector(2).is_some());
     assert!(first.store().get_upper_vector(2).is_none());
@@ -428,7 +428,7 @@ async fn run_refresh_and_budget_contracts() {
     .expect("zero-budget refresh publishes an exact empty snapshot");
     assert_eq!(
         registry
-            .read_guard_for(&physical)
+            .resident_guard_for(&physical)
             .expect("empty refresh remains a valid store")
             .store()
             .estimated_bytes(),
@@ -460,7 +460,7 @@ async fn run_refresh_and_budget_contracts() {
     .expect("sorted deterministic budget hydration completes");
     assert_eq!(
         registry
-            .read_guard_for(&low)
+            .resident_guard_for(&low)
             .expect("lower sorted target receives remainder")
             .store()
             .estimated_bytes(),
@@ -468,14 +468,14 @@ async fn run_refresh_and_budget_contracts() {
     );
     assert_eq!(
         registry
-            .read_guard_for(&high)
+            .resident_guard_for(&high)
             .unwrap()
             .store()
             .estimated_bytes(),
         0
     );
-    let low_before = registry.read_guard_for(&low).unwrap();
-    let high_before = registry.read_guard_for(&high).unwrap();
+    let low_before = registry.resident_guard_for(&low).unwrap();
+    let high_before = registry.resident_guard_for(&high).unwrap();
     hydrate_active_generations(
         VectorCacheSnapshotSource::Writer(&db),
         scope,
@@ -488,11 +488,11 @@ async fn run_refresh_and_budget_contracts() {
     .unwrap();
     assert!(Arc::ptr_eq(
         low_before.store(),
-        registry.read_guard_for(&low).unwrap().store()
+        registry.resident_guard_for(&low).unwrap().store()
     ));
     assert!(Arc::ptr_eq(
         high_before.store(),
-        registry.read_guard_for(&high).unwrap().store()
+        registry.resident_guard_for(&high).unwrap().store()
     ));
     // Inventory changes redistribute admission even without a storage commit.
     hydrate_active_generations(
@@ -505,7 +505,7 @@ async fn run_refresh_and_budget_contracts() {
     )
     .await
     .unwrap();
-    let high_grown = registry.read_guard_for(&high).unwrap();
+    let high_grown = registry.resident_guard_for(&high).unwrap();
     assert!(!Arc::ptr_eq(high_before.store(), high_grown.store()));
     assert!(high_grown.store().get_upper_vector(1).is_some());
     hydrate_active_generations(
@@ -520,7 +520,7 @@ async fn run_refresh_and_budget_contracts() {
     .unwrap();
     assert_eq!(
         registry
-            .read_guard_for(&high)
+            .resident_guard_for(&high)
             .unwrap()
             .store()
             .estimated_bytes(),
@@ -565,8 +565,8 @@ async fn run_partition_contracts() {
     )
     .await
     .expect("valid partition mapping hydrates");
-    assert!(registry.read_guard_for(&physical).is_ok());
-    let before = registry.read_guard_for(&physical).unwrap();
+    assert!(registry.resident_guard_for(&physical).is_ok());
+    let before = registry.resident_guard_for(&physical).unwrap();
     hydrate_active_generations(
         VectorCacheSnapshotSource::Writer(&db),
         scope,
@@ -579,7 +579,7 @@ async fn run_partition_contracts() {
     .unwrap();
     assert!(Arc::ptr_eq(
         before.store(),
-        registry.read_guard_for(&physical).unwrap().store()
+        registry.resident_guard_for(&physical).unwrap().store()
     ));
     let added_partition = VectorTenantPartition::try_new(Bytes::from_static(b"tenant-b")).unwrap();
     let added_id = VectorPhysicalIndexId::new(52).unwrap();
@@ -604,10 +604,10 @@ async fn run_partition_contracts() {
     )
     .await
     .unwrap();
-    assert!(registry.read_guard_for(&added).is_ok());
+    assert!(registry.resident_guard_for(&added).is_ok());
     assert!(!Arc::ptr_eq(
         before.store(),
-        registry.read_guard_for(&physical).unwrap().store()
+        registry.resident_guard_for(&physical).unwrap().store()
     ));
     db.close()
         .await
@@ -669,7 +669,7 @@ async fn run_partition_contracts() {
     )
     .await
     .is_err());
-    assert!(registry.read_guard_for(&physical).is_err());
+    assert!(registry.resident_guard_for(&physical).is_err());
     db.close()
         .await
         .expect("mismatch hydration database closes");
@@ -763,8 +763,8 @@ async fn run_partition_contracts() {
     )
     .await
     .is_err());
-    assert!(duplicate_registry.read_guard_for(&first).is_err());
-    assert!(duplicate_registry.read_guard_for(&second).is_err());
+    assert!(duplicate_registry.resident_guard_for(&first).is_err());
+    assert!(duplicate_registry.resident_guard_for(&second).is_err());
 
     let first_scope = DataScope::Tenant(TenantId::from_u128(1));
     let second_scope = DataScope::Tenant(TenantId::from_u128(2));
@@ -808,8 +808,8 @@ async fn run_partition_contracts() {
         .await,
         Err(HelixDbError::InvariantViolation(_))
     ));
-    assert!(duplicate_registry.read_guard_for(&first).is_ok());
-    assert!(duplicate_registry.read_guard_for(&second).is_ok());
+    assert!(duplicate_registry.resident_guard_for(&first).is_ok());
+    assert!(duplicate_registry.resident_guard_for(&second).is_ok());
     db.close()
         .await
         .expect("duplicate hydration database closes");
@@ -832,7 +832,7 @@ async fn run_shutdown_and_corruption_contracts() {
     )
     .await
     .expect("pre-signalled shutdown cancels hydration");
-    assert!(registry.read_guard_for(&physical).is_err());
+    assert!(registry.resident_guard_for(&physical).is_err());
     db.close()
         .await
         .expect("shutdown hydration database closes");
@@ -859,7 +859,7 @@ async fn run_shutdown_and_corruption_contracts() {
     )
     .await
     .expect("closed shutdown channel cancels an active load");
-    assert!(registry.read_guard_for(&physical).is_err());
+    assert!(registry.resident_guard_for(&physical).is_err());
     db.close()
         .await
         .expect("closed-shutdown hydration database closes");
@@ -888,7 +888,7 @@ async fn run_shutdown_and_corruption_contracts() {
     )
     .await
     .is_err());
-    assert!(registry.read_guard_for(&physical).is_err());
+    assert!(registry.resident_guard_for(&physical).is_err());
     db.close().await.expect("corrupt hydration database closes");
 }
 
@@ -945,7 +945,7 @@ async fn run_idle_refresh_contracts() {
         )
         .await
         .unwrap();
-        let first = registry.read_guard_for(&handle).unwrap();
+        let first = registry.resident_guard_for(&handle).unwrap();
         assert!(
             object_store.snapshot().0 > 0,
             "changed admission must load uncached SST data"
@@ -965,7 +965,7 @@ async fn run_idle_refresh_contracts() {
             )
             .await
             .unwrap();
-            let next = registry.read_guard_for(&handle).unwrap();
+            let next = registry.resident_guard_for(&handle).unwrap();
             assert!(Arc::ptr_eq(first.store(), next.store()));
             assert_eq!(
                 object_store.snapshot().0,
@@ -974,7 +974,7 @@ async fn run_idle_refresh_contracts() {
             );
         }
     }
-    let before = registry.read_guard_for(&handle).unwrap();
+    let before = registry.resident_guard_for(&handle).unwrap();
     // An aborted transaction must not invalidate the snapshot.
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     transaction
@@ -996,7 +996,7 @@ async fn run_idle_refresh_contracts() {
     .unwrap();
     assert!(Arc::ptr_eq(
         before.store(),
-        registry.read_guard_for(&handle).unwrap().store()
+        registry.resident_guard_for(&handle).unwrap().store()
     ));
     // An unrelated index write still changes exact snapshot eligibility.
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -1017,7 +1017,7 @@ async fn run_idle_refresh_contracts() {
     )
     .await
     .unwrap();
-    let unrelated = registry.read_guard_for(&handle).unwrap();
+    let unrelated = registry.resident_guard_for(&handle).unwrap();
     assert!(!Arc::ptr_eq(before.store(), unrelated.store()));
     assert_eq!(
         unrelated.store().visible_seq(),
@@ -1041,7 +1041,7 @@ async fn run_idle_refresh_contracts() {
     )
     .await
     .unwrap();
-    let updated = registry.read_guard_for(&handle).unwrap();
+    let updated = registry.resident_guard_for(&handle).unwrap();
     assert_eq!(
         updated.store().get_upper_vector(1).unwrap().as_ref(),
         b"updated"
@@ -1062,7 +1062,7 @@ async fn run_idle_refresh_contracts() {
     )
     .await
     .unwrap();
-    let empty = registry.read_guard_for(&empty_handle).unwrap();
+    let empty = registry.resident_guard_for(&empty_handle).unwrap();
     assert_eq!(empty.store().estimated_bytes(), 0);
     for _ in 0..3 {
         hydrate_active_generations(
@@ -1077,7 +1077,7 @@ async fn run_idle_refresh_contracts() {
         .unwrap();
         assert!(Arc::ptr_eq(
             empty.store(),
-            registry.read_guard_for(&empty_handle).unwrap().store()
+            registry.resident_guard_for(&empty_handle).unwrap().store()
         ));
     }
     db.close().await.unwrap();

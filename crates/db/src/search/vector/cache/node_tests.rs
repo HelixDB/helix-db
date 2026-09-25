@@ -182,6 +182,101 @@ async fn refresh_until_published(db: &HelixDB) {
     .expect("vector cache refresh completes");
 }
 
+/// Returns the resident store of the node's only Active vector generation.
+fn resident_store(db: &HelixDB) -> std::sync::Arc<crate::search::vector::VectorMemoryStore> {
+    let active = db
+        .active_index_handles_loaded(crate::encoding::keys::scope::DataScope::LegacyUnscoped)
+        .into_iter()
+        .find(|handle| {
+            matches!(
+                handle,
+                crate::index_lifecycle::ActiveIndexHandle::Vector { .. }
+            )
+        })
+        .expect("the fixture owns one Active vector generation");
+    let crate::index_lifecycle::ActiveIndexHandle::Vector {
+        layout: crate::index_lifecycle::VectorPhysicalLayout::Unpartitioned { physical_index_id },
+        ..
+    } = &active
+    else {
+        panic!("the fixture vector index is unpartitioned");
+    };
+    let generation =
+        crate::search::vector::ValidatedVectorGenerationHandle::try_from_active_current(
+            &active,
+            *physical_index_id,
+        )
+        .expect("the Active generation validates");
+    std::sync::Arc::clone(
+        db.vector_cache_registry()
+            .resident_guard_for(&generation)
+            .expect("the Active generation is hydrated")
+            .store(),
+    )
+}
+
+#[tokio::test]
+async fn writer_cache_stays_attached_across_commits_and_evicts_only_vector_rows() {
+    let token = ProcessLocalDatabaseToken::new("writer-vector-cache").unwrap();
+    let writer = HelixDB::open(HelixDbSource::InMemoryToken { token })
+        .await
+        .expect("writer opens");
+    create_vector_index(&writer).await;
+    create_group(&writer).await;
+    for (name, embedding) in [
+        ("far", [0.0, 0.0, 1.0]),
+        ("mid", [0.5, 1.0, 0.0]),
+        ("near", [1.0, 0.2, 0.0]),
+    ] {
+        add_doc(&writer, name, embedding).await;
+    }
+    stop_background_refresh(&writer).await;
+    refresh_until_published(&writer).await;
+    let hydrated = resident_store(&writer);
+    let (names, stats) = scoped_search(&writer).await;
+    assert_eq!(names, ["near", "mid", "far"]);
+    assert_eq!(stats.simhash_row_requests, 0);
+
+    // A commit that touches no vector row advances the snapshot but keeps the
+    // store attached, and the next refresh retains it without rescanning.
+    writer
+        .query(QueryRequest::write(write_batch().var_as(
+            "unrelated",
+            g().add_n("Unrelated", vec![("name", PropertyValue::from("other"))]),
+        )))
+        .await
+        .expect("unrelated write commits");
+    let (names, stats) = scoped_search(&writer).await;
+    assert_eq!(names, ["near", "mid", "far"]);
+    assert_eq!(
+        stats.simhash_row_requests, 0,
+        "a newer writer snapshot still attaches the commit-fenced store"
+    );
+    refresh_until_published(&writer).await;
+    assert!(std::sync::Arc::ptr_eq(&hydrated, &resident_store(&writer)));
+
+    // A vector commit evicts only its dirty rows; the store stays attached and
+    // the new row falls back to storage until the next refresh rescans.
+    add_doc(&writer, "nearest", [1.0, 0.0, 0.0]).await;
+    let (names, stats) = scoped_search(&writer).await;
+    assert_eq!(names, ["nearest", "near", "mid"]);
+    assert!(
+        (1..4).contains(&stats.simhash_row_requests),
+        "only rows the commit changed are read from storage, got {}",
+        stats.simhash_row_requests
+    );
+    refresh_until_published(&writer).await;
+    assert!(
+        !std::sync::Arc::ptr_eq(&hydrated, &resident_store(&writer)),
+        "a resolved vector commit forces a rescan that caches its rows"
+    );
+    let (names, stats) = scoped_search(&writer).await;
+    assert_eq!(names, ["nearest", "near", "mid"]);
+    assert_eq!(stats.simhash_row_requests, 0);
+
+    writer.close().await.expect("writer closes");
+}
+
 #[tokio::test]
 async fn reader_cache_serves_scoped_search_and_follows_writer_commits() {
     let token = ProcessLocalDatabaseToken::new("reader-vector-cache").unwrap();
