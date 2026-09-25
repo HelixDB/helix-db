@@ -15,6 +15,7 @@ to images built from your checkout.
 - HTTP listens on `0.0.0.0:8080`; internal gRPC listens on `127.0.0.1:8081` and is not exposed.
 - `GET /healthz`, `GET /readyz`, and `POST /v2/query` are the supported container probes and query endpoint.
 - Storage is in memory unless local-disk or S3-compatible configuration is supplied.
+- `/var/lib/helix` (data) and `/var/cache/helix` (optional disk cache) are owned by the runtime user, so new named volumes mounted there are writable.
 - Docker sends `SIGTERM`; the server drains both listeners and closes storage before exiting.
 
 ## Build
@@ -76,6 +77,39 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 Leave both variables unset for memory storage. Bind mounts and existing volumes
 must be writable by the container's `65532:65532` user and group.
 
+### Disk cache
+
+By default the server caches SlateDB blocks and full-text splits in memory only,
+so every cold read goes to the object store. Set `HELIX_DISK_CACHE_DIR` with S3 or
+`HELIX_DATA_DIR` storage to add memory-plus-disk caches on local disk, ideally
+NVMe:
+
+```bash
+sudo mkdir -p /data/helix-cache
+sudo chown 65532:65532 /data/helix-cache
+docker run --rm -p 8080:8080 \
+  -e S3_BUCKET=my-bucket -e S3_REGION=us-east-1 \
+  -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
+  -e HELIX_DISK_CACHE_BYTES=107374182400 \
+  -v /data/helix-cache:/var/cache/helix \
+  ghcr.io/helixdb/helixdb:local-amd64
+```
+
+A named volume (`--mount type=volume,source=helixdb-cache,target=/var/cache/helix`)
+needs no `chown`. The cache survives restarts, so a restarted server reads recently
+used data from local disk instead of the object store. Use one cache directory per
+running server.
+
+| Variable | Purpose |
+| --- | --- |
+| `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it if needed; unset keeps memory-only caches. Rejected with memory storage. |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, at least 64 MiB; defaults to 32 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). |
+| `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the SlateDB block cache in bytes; defaults to 640 MiB, the memory-only default. |
+
+Startup fails with a message naming the variable when a size is not a positive
+integer, the disk budget is below 64 MiB, a size is set without `HELIX_DISK_CACHE_DIR`,
+or the directory cannot be created or written.
+
 ## Test
 
 After loading a native image, run the full packaging and runtime suite:
@@ -86,7 +120,7 @@ docker-image/test.sh \
   --image ghcr.io/helixdb/helixdb:local-amd64
 ```
 
-The suite inspects the saved image metadata and filesystem, scans it for credential material, exercises memory and native-volume behavior, rejects invalid configuration, checks clean `SIGTERM` shutdown, and verifies S3-compatible persistence with digest-pinned MinIO images. It creates only `helixdb-image-*` Docker resources and removes them on exit. The MinIO test also seeds a vector index, reopens flushed data, and checks that three idle refresh intervals produce no vector-data SST GETs (catalog polling is measured separately) while search remains correct before and after a write.
+The suite inspects the saved image metadata and filesystem, scans it for credential material, exercises memory, native-volume, and disk-cache behavior, rejects invalid configuration, checks clean `SIGTERM` shutdown, and verifies S3-compatible persistence with digest-pinned MinIO images. It creates only `helixdb-image-*` Docker resources and removes them on exit. The MinIO test also seeds a vector index, reopens flushed data, and checks that three idle refresh intervals produce no vector-data SST GETs (catalog polling is measured separately) while search remains correct before and after a write.
 
 MinIO and `mc` use the upstream `quay.io/minio` repositories. The server
 `RELEASE.2025-09-07T16-13-09Z` and client `RELEASE.2025-08-13T08-35-41Z`

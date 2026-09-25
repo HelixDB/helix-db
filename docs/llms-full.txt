@@ -497,6 +497,41 @@ The endpoint must be reachable from inside the container; container `localhost` 
 the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use
 native directory persistence, set `HELIX_DATA_DIR` and mount the directory there.
 
+## Add a local disk cache
+
+By default the server caches data in memory only, so cold reads go to the object
+store. Set `HELIX_DISK_CACHE_DIR` to keep recently read data on local disk, ideally NVMe.
+The cache survives restarts. It requires `S3_BUCKET` or `HELIX_DATA_DIR`; memory
+storage rejects it.
+
+```bash
+sudo mkdir -p /data/helix-cache
+sudo chown 65532:65532 /data/helix-cache
+docker run --rm --name helixdb \
+  -p 6969:8080 \
+  -e S3_BUCKET=my-bucket \
+  -e S3_REGION=eu-west-2 \
+  -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
+  -e HELIX_DISK_CACHE_BYTES=107374182400 \
+  -v /data/helix-cache:/var/cache/helix \
+  ghcr.io/helixdb/helixdb:v0.0.6
+```
+
+In Compose, add the same variables and a volume to the `helix` service. A new
+named volume mounted at `/var/cache/helix` is already writable; a bind mount must be
+owned by `65532:65532`. Use one cache directory per running server.
+
+| Variable | Purpose |
+| --- | --- |
+| `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it if needed; unset keeps memory-only caches |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, at least 64 MiB; defaults to 32 GiB |
+| `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
+
+Half of the disk budget caches object-store files, 3/8 caches database blocks,
+and the rest caches full-text search data. Startup fails with a message naming
+the variable when a size is invalid, a size is set without `HELIX_DISK_CACHE_DIR`, or
+the directory is not writable.
+
 ## Stop or inspect
 
 ```bash
