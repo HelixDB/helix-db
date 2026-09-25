@@ -753,6 +753,25 @@ mod tests {
                 PhysicalCardinality::FilterStream,
             ),
             (
+                exec::ExecCountCursorPlan::IndexMembership {
+                    input: Box::new(direct()),
+                    plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                        &ir::NodeIndexMembershipPlan::new(
+                            ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                                index: catalog::NodeEqualityIndexMeta::new(name("node-equality")),
+                                key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+                                value: ir::IndexValue::Param(name("status")),
+                            })
+                            .unwrap(),
+                            ir::PredicatePlan::new(Predicate::eq_param("status", "status"))
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    )),
+                },
+                PhysicalCardinality::IndexMembershipStream,
+            ),
+            (
                 exec::ExecCountCursorPlan::Window {
                     input: Box::new(exec::ExecCountCursorPlan::NodeLabelBitmap(name("User"))),
                     window: exec::ExecCountWindowPlan::identity(),

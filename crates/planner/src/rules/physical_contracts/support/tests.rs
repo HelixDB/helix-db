@@ -302,3 +302,132 @@ fn stream_pipeline_contract_preserves_literal_window_lower_bounds() {
         properties::CardinalityBounds::new(1, Some(3)).unwrap()
     );
 }
+
+fn membership_op(predicate: helix_ast::expr::Predicate) -> logical::StreamPipelineOp {
+    let key = crate::catalog::ScopedPropertyKey::try_new("Attribute", "kind").unwrap();
+    logical::StreamPipelineOp::IndexMembership {
+        plan: Box::new(
+            ir::NodeIndexMembershipPlan::new(
+                ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                    index: crate::catalog::IndexCatalogSnapshot::default()
+                        .with_node_eq(key.clone())
+                        .node_eq[&key]
+                        .clone(),
+                    key,
+                    value: ir::IndexValue::Literal(
+                        ir::SecondaryIndexLiteral::new("B".into()).unwrap(),
+                    ),
+                })
+                .unwrap(),
+                ir::PredicatePlan::new(predicate).unwrap(),
+            )
+            .unwrap(),
+        ),
+    }
+}
+
+#[test]
+fn membership_contract_prices_set_and_label_reads_against_record_reads() {
+    let storage = cost::StorageCostProfile::default();
+    let stats = crate::context::StatsSnapshot::default();
+    let delivered = with_cardinality(access_delivered(properties::ElementKind::Node), Some(40));
+    let rows = cost::EstimatedRows::rows(1_000);
+    let unscoped = membership_op(helix_ast::expr::Predicate::eq("kind", "B"));
+    let scoped = membership_op(helix_ast::expr::Predicate::and(vec![
+        helix_ast::expr::Predicate::eq("$label", "Attribute"),
+        helix_ast::expr::Predicate::eq("kind", "B"),
+    ]));
+
+    let (op, membership_delivered, evaluate) =
+        stream_pipeline_op_contract(&unscoped, delivered.clone(), rows, &storage, &stats);
+    let (_, _, reject) =
+        stream_pipeline_op_contract(&scoped, delivered.clone(), rows, &storage, &stats);
+    let (_, _, per_row) = stream_pipeline_op_contract(
+        &logical::StreamPipelineOp::Filter {
+            predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B")).unwrap(),
+        },
+        delivered,
+        rows,
+        &storage,
+        &stats,
+    );
+
+    assert_eq!(
+        op,
+        crate::physical::PhysicalPipelineOp::Stream(
+            crate::physical::PhysicalStreamOp::IndexMembership
+        )
+    );
+    assert_eq!(
+        membership_delivered.cardinality,
+        properties::CardinalityBounds::zero_to(Some(40))
+    );
+    assert_eq!(evaluate.object_reads, 2);
+    assert_eq!(evaluate.authoritative_graph_reads, 0);
+    assert_eq!(reject.object_reads, 1);
+    assert!(reject.latency < evaluate.latency);
+    assert!(evaluate.latency < per_row.latency);
+    assert_eq!(per_row.authoritative_graph_reads, 1_000);
+
+    // A huge label bitmap makes membership lose to the same stream.
+    let huge_label = crate::context::StatsSnapshot::default()
+        .with_node_label_cardinality(ir::NonEmptyString::new("Attribute").unwrap(), 10_000_000);
+    let (_, _, huge) = stream_pipeline_op_contract(
+        &unscoped,
+        access_delivered(properties::ElementKind::Node),
+        rows,
+        &storage,
+        &huge_label,
+    );
+    assert!(huge.latency > per_row.latency);
+}
+
+#[test]
+fn row_estimates_fan_out_after_expansion_and_shrink_after_membership() {
+    let storage = cost::StorageCostProfile::default();
+    let stats = crate::context::StatsSnapshot::default();
+    let unknown = access_delivered(properties::ElementKind::Node);
+    let expand = logical::StreamPipelineOp::Expand {
+        plan: ir::ExpandPlan {
+            direction: ir::ExpandDirection::Out,
+            output: ir::ExpandOutput::Nodes,
+            label: ir::ExpandLabelPlan::Any,
+        },
+    };
+    let after =
+        |op: &logical::StreamPipelineOp, delivered: &properties::DeliveredProperties, rows: u64| {
+            estimated_rows_after_op(
+                op,
+                delivered,
+                cost::EstimatedRows::rows(rows),
+                &storage,
+                &stats,
+            )
+        };
+
+    assert_eq!(
+        after(&expand, &unknown, 1),
+        storage.default_unknown_scan_rows
+    );
+    assert_eq!(
+        after(&expand, &unknown, 50_000),
+        cost::EstimatedRows::rows(50_000)
+    );
+    assert_eq!(
+        after(&expand, &with_cardinality(unknown.clone(), Some(3)), 1),
+        cost::EstimatedRows::rows(3)
+    );
+    let membership = membership_op(helix_ast::expr::Predicate::eq("kind", "B"));
+    assert_eq!(
+        after(&membership, &unknown, 1_000),
+        storage.default_equality_index_rows
+    );
+    assert_eq!(
+        after(&membership, &unknown, 2),
+        cost::EstimatedRows::rows(2)
+    );
+    assert_eq!(
+        after(&logical::StreamPipelineOp::Distinct, &unknown, 7),
+        cost::EstimatedRows::rows(7)
+    );
+}

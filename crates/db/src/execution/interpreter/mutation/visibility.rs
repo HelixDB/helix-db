@@ -260,6 +260,46 @@ mod tests {
     }
 
     #[test]
+    fn index_membership_requires_secondary_and_label_topology() {
+        let key = helix_planner::catalog::ScopedPropertyKey::try_new("Item", "kind").unwrap();
+        let plan = helix_planner::ir::NodeIndexMembershipPlan::new(
+            helix_planner::ir::NodeAccessSourcePlan::new(
+                helix_planner::ir::NodeAccessPlan::EqualityIndex {
+                    index: helix_planner::catalog::IndexCatalogSnapshot::default()
+                        .with_node_eq(key.clone())
+                        .node_eq[&key]
+                        .clone(),
+                    key,
+                    value: helix_planner::ir::IndexValue::Literal(
+                        helix_planner::ir::SecondaryIndexLiteral::new(
+                            helix_ast::value::PropertyValue::from("B"),
+                        )
+                        .unwrap(),
+                    ),
+                },
+            )
+            .unwrap(),
+            helix_planner::ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B"))
+                .unwrap(),
+        )
+        .unwrap();
+        let required = required_for(&exec::ExecOp::IndexMembership {
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(&plan)),
+        });
+
+        assert!(required.contains(DeferredMutationFamily::Secondary));
+        assert!(required.contains(DeferredMutationFamily::Topology));
+        assert!(!required.contains(DeferredMutationFamily::Vector));
+        assert!(!required.contains(DeferredMutationFamily::Text));
+        assert_eq!(
+            required_for(&exec::ExecOp::Filter {
+                predicate: plan.predicate().clone(),
+            }),
+            RequiredMutationVisibility::NONE
+        );
+    }
+
+    #[test]
     fn explicit_barrier_requires_every_deferred_family() {
         let required = required_for(&exec::ExecOp::Barrier {
             name: helix_planner::ir::NonEmptyString::new("visible").unwrap(),
