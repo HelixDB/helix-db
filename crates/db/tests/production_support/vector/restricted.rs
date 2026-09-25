@@ -488,9 +488,17 @@ fn admission_scans_exactly_by_candidate_cardinality_and_bytes() {
     assert_eq!(EXACT_VECTOR_BYTES_THRESHOLD / vector_bytes, 8_192);
     assert!(is_exact(8_192, 768));
     assert!(!is_exact(8_193, 768));
-    // The cardinality cap binds for low-dimensional vectors.
-    assert!(is_exact(EXACT_CARDINALITY_THRESHOLD, 2));
-    assert!(!is_exact(EXACT_CARDINALITY_THRESHOLD + 1, 2));
+    // Higher dimensions reach the byte budget sooner.
+    assert!(is_exact(4_096, 1_536));
+    assert!(!is_exact(4_097, 1_536));
+    // The cardinality cap binds before the byte budget for low dimensions.
+    let low_dimension_bytes =
+        EXACT_CARDINALITY_THRESHOLD * 128 * core::mem::size_of::<f32>() as u64;
+    assert!(low_dimension_bytes < EXACT_VECTOR_BYTES_THRESHOLD);
+    for dimension in [2, 128] {
+        assert!(is_exact(EXACT_CARDINALITY_THRESHOLD, dimension));
+        assert!(!is_exact(EXACT_CARDINALITY_THRESHOLD + 1, dimension));
+    }
 
     let benchmark = candidates(20_000);
     assert_eq!(params.ef(), 100);
