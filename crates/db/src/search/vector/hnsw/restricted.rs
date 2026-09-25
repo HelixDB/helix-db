@@ -39,12 +39,18 @@ use crate::search::vector::{
 };
 
 const MAX_RESTRICTED_CANDIDATES: u64 = 1_000_000;
-/// Candidate sets that fit the filtered vector-payload budget are scanned
-/// exactly: the filtered walk could read every one of their vectors anyway,
-/// while the exact scan needs no directory, neighbor, or bridge rows and
-/// returns the true top-k.
-const EXACT_CARDINALITY_THRESHOLD: u64 = FILTERED_VECTOR_PAYLOAD_LIMIT as u64;
-const FETCH_BATCH_SIZE: usize = 256;
+/// Largest candidate set scanned exactly, bounding per-candidate read overhead
+/// for low-dimensional indexes.
+const EXACT_CARDINALITY_THRESHOLD: u64 = 16_384;
+/// Largest candidate vector footprint scanned exactly (8,192 vectors at 768-d).
+///
+/// The bounded walk cannot rank near-tie bands wider than its payload budget:
+/// on 312k 768-d vectors a 5.5k-candidate scope reached 0.69 recall@50 by
+/// walking and 1.0 by exact scan, which was also faster with object-store
+/// latency. Sets that fit the walk's payload budget are always scanned exactly.
+const EXACT_VECTOR_BYTES_THRESHOLD: u64 = 24 * 1024 * 1024;
+/// Candidates resolved and fetched per exact-scan round trip.
+const FETCH_BATCH_SIZE: usize = 1_024;
 const DIRECTORY_PREFIX_BITS: u32 = 16;
 const DIRECTORY_MAX_PROBES: usize = 64;
 const DIRECTORY_MAX_ROWS: usize = 65_536;
@@ -138,7 +144,7 @@ fn effective_filtered_beam_percent() -> usize {
     FILTERED_BEAM_PERCENT
 }
 
-/// Restricted-search execution selected by exact candidate cardinality.
+/// Restricted-search execution selected by exact candidate cardinality and bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestrictedSearchStrategy {
     /// Locality-sorted exact vector scan.
@@ -483,16 +489,24 @@ impl RestrictedVectorCandidates {
 #[cfg(any(test, feature = "production-coverage"))]
 fn restricted_execution_plan<'a>(
     candidates: &'a NonEmptyCandidateSet,
+    dimension: usize,
     params: &SearchParams,
 ) -> RestrictedExecutionPlan<'a> {
     let k = RestrictedResultCount::try_new(params.k(), candidates.len())
         .expect("test restricted result count is bounded");
-    restricted_execution_plan_with_beam_percent(candidates, params, k, FILTERED_BEAM_PERCENT)
+    restricted_execution_plan_with_beam_percent(
+        candidates,
+        dimension,
+        params,
+        k,
+        FILTERED_BEAM_PERCENT,
+    )
 }
 
 #[cfg(any(test, feature = "production-coverage"))]
 fn restricted_execution_plan_with_beam_multiplier<'a>(
     candidates: &'a NonEmptyCandidateSet,
+    dimension: usize,
     params: &SearchParams,
     beam_multiplier: usize,
 ) -> RestrictedExecutionPlan<'a> {
@@ -500,6 +514,7 @@ fn restricted_execution_plan_with_beam_multiplier<'a>(
         .expect("test restricted result count is bounded");
     restricted_execution_plan_with_beam_percent(
         candidates,
+        dimension,
         params,
         k,
         beam_multiplier.saturating_mul(FILTERED_BEAM_PERCENT_DENOMINATOR),
@@ -508,11 +523,19 @@ fn restricted_execution_plan_with_beam_multiplier<'a>(
 
 fn restricted_execution_plan_with_beam_percent<'a>(
     candidates: &'a NonEmptyCandidateSet,
+    dimension: usize,
     params: &SearchParams,
     k: RestrictedResultCount,
     beam_percent: usize,
 ) -> RestrictedExecutionPlan<'a> {
-    if candidates.len() <= EXACT_CARDINALITY_THRESHOLD {
+    let estimated_vector_bytes = candidates
+        .len()
+        .saturating_mul(dimension as u64)
+        .saturating_mul(core::mem::size_of::<f32>() as u64);
+    if candidates.len() <= FILTERED_VECTOR_PAYLOAD_LIMIT as u64
+        || (candidates.len() <= EXACT_CARDINALITY_THRESHOLD
+            && estimated_vector_bytes <= EXACT_VECTOR_BYTES_THRESHOLD)
+    {
         RestrictedExecutionPlan::Exact { candidates, k }
     } else {
         RestrictedExecutionPlan::FilteredGraph {
@@ -663,7 +686,13 @@ impl<D: Distance> VectorIndex<D> {
             vector: std::borrow::Cow::Borrowed(query_vector.values()),
         };
 
-        match restricted_execution_plan_with_beam_percent(allowed, params, k, beam_percent) {
+        match restricted_execution_plan_with_beam_percent(
+            allowed,
+            metadata.config.dimension,
+            params,
+            k,
+            beam_percent,
+        ) {
             RestrictedExecutionPlan::Exact { candidates, k } => {
                 stats.strategy = Some(RestrictedSearchStrategy::Exact);
                 let results = self
@@ -1154,6 +1183,36 @@ impl<D: Distance> VectorIndex<D> {
                 break;
             }
             let worst = top.peek().filter(|_| top.len() >= budgets.ef_filtered);
+            // An inherited rank only estimates a bridge from its discovering
+            // row, so the angular cutoff first resolves every inherited bridge
+            // at the head of the queue and compares only SimHash-exact ranks.
+            if cutoff == BridgeCutoff::AngularBound && worst.is_some() {
+                loop {
+                    let inherited = (0..BRIDGE_BATCH_SIZE)
+                        .map_while(|_| match bridge_state.frontier.peek() {
+                            Some(Reverse(entry)) if entry.source == BridgeRankSource::Inherited => {
+                                bridge_state.frontier.pop().map(|Reverse(entry)| entry)
+                            }
+                            Some(_) | None => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if inherited.is_empty() {
+                        break;
+                    }
+                    let resolved = self
+                        .restricted_resolve_bridges(
+                            read,
+                            query_hash,
+                            inherited,
+                            &mut bridge_state,
+                            stats,
+                        )
+                        .await?;
+                    bridge_state
+                        .frontier
+                        .extend(resolved.into_iter().map(Reverse));
+                }
+            }
             let beam_complete = match (cutoff, worst) {
                 (_, None) => false,
                 (BridgeCutoff::FrontierExhausted, Some(worst)) => {

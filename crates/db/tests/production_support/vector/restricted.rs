@@ -380,6 +380,54 @@ async fn seed_three_edge_filtered_gulf<D: Distance>(
     .await
 }
 
+/// Runs the production filtered walk over `allowed`, bypassing exact admission.
+async fn filtered_search<D: Distance>(
+    index: &VectorIndex<D>,
+    read: &(impl DbReadOps + Send + Sync),
+    query: &[f32],
+    params: &SearchParams,
+    allowed: &RestrictedVectorCandidates,
+) -> Result<(Vec<SearchResult>, RestrictedSearchStats), HelixDbError> {
+    let RestrictedVectorCandidates::NonEmpty(allowed) = allowed else {
+        panic!("filtered walks run over non-empty candidates");
+    };
+    let metadata = index
+        .get_metadata(read)
+        .await?
+        .expect("seeded index has metadata");
+    let k = RestrictedResultCount::try_new(params.k(), allowed.len()).unwrap();
+    let budgets =
+        FilteredGraphBudgets::with_beam_percent(params, k, allowed.len(), FILTERED_BEAM_PERCENT);
+    let vector = UnalignedVector::<D::VectorCodec>::from_slice(query);
+    let item = Item::<D> {
+        header: D::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats {
+        strategy: Some(RestrictedSearchStrategy::FilteredGraph),
+        ef_filtered: budgets.ef_filtered,
+        ..RestrictedSearchStats::default()
+    };
+    let results = index
+        .restricted_filter_aware_search(
+            read,
+            RestrictedQuery {
+                vector: query,
+                item: &item,
+                dimension: VectorDimension::try_new(metadata.config.dimension).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: metadata.validated_state()?,
+                k,
+                budgets,
+                allowed,
+            },
+            &mut stats,
+        )
+        .await?;
+    Ok((results, stats))
+}
+
 fn exact_ids(
     query: &[f32],
     entity_count: u64,
@@ -415,40 +463,41 @@ fn exact_ids(
 }
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), test)]
-fn admission_scans_exactly_within_the_filtered_vector_payload_budget() {
-    // An exact scan never reads more vectors than the filtered walk may.
-    assert_eq!(
-        EXACT_CARDINALITY_THRESHOLD,
-        FILTERED_VECTOR_PAYLOAD_LIMIT as u64
-    );
+fn admission_scans_exactly_by_candidate_cardinality_and_bytes() {
     let params = SearchParams::new(10).unwrap();
-    let exact = RestrictedVectorCandidates::from_ids(1..=EXACT_CARDINALITY_THRESHOLD).unwrap();
-    let RestrictedVectorCandidates::NonEmpty(exact) = exact else {
-        panic!("non-empty input must produce a non-empty candidate set");
+    let candidates = |count: u64| {
+        let RestrictedVectorCandidates::NonEmpty(candidates) =
+            RestrictedVectorCandidates::from_ids(1..=count).unwrap()
+        else {
+            panic!("non-empty input must produce a non-empty candidate set");
+        };
+        candidates
     };
-    assert!(matches!(
-        restricted_execution_plan(&exact, &params),
-        RestrictedExecutionPlan::Exact { .. }
-    ));
-    let filtered =
-        RestrictedVectorCandidates::from_ids(1..=EXACT_CARDINALITY_THRESHOLD + 1).unwrap();
-    let RestrictedVectorCandidates::NonEmpty(filtered) = filtered else {
-        panic!("non-empty input must produce a non-empty candidate set");
+    let is_exact = |count: u64, dimension: usize| {
+        matches!(
+            restricted_execution_plan(&candidates(count), dimension, &params),
+            RestrictedExecutionPlan::Exact { .. }
+        )
     };
-    assert!(matches!(
-        restricted_execution_plan(&filtered, &params),
-        RestrictedExecutionPlan::FilteredGraph { .. }
-    ));
+    // Sets the walk could read entirely are exact at any dimension.
+    let payload_sized = FILTERED_VECTOR_PAYLOAD_LIMIT as u64;
+    assert!(is_exact(payload_sized, 16_384));
+    assert!(!is_exact(payload_sized + 1, 16_384));
+    // The byte budget binds at 768-d: 8,192 vectors fill 24 MiB exactly.
+    let vector_bytes = 768 * core::mem::size_of::<f32>() as u64;
+    assert_eq!(EXACT_VECTOR_BYTES_THRESHOLD / vector_bytes, 8_192);
+    assert!(is_exact(8_192, 768));
+    assert!(!is_exact(8_193, 768));
+    // The cardinality cap binds for low-dimensional vectors.
+    assert!(is_exact(EXACT_CARDINALITY_THRESHOLD, 2));
+    assert!(!is_exact(EXACT_CARDINALITY_THRESHOLD + 1, 2));
 
-    let benchmark = RestrictedVectorCandidates::from_ids(1..=1_000).unwrap();
-    let RestrictedVectorCandidates::NonEmpty(benchmark) = benchmark else {
-        panic!("non-empty input must produce a non-empty candidate set");
-    };
+    let benchmark = candidates(20_000);
     assert_eq!(params.ef(), 100);
     let RestrictedExecutionPlan::FilteredGraph { budgets, .. } =
-        restricted_execution_plan(&benchmark, &params)
+        restricted_execution_plan(&benchmark, 1_536, &params)
     else {
-        panic!("1,000 DBpedia vectors use the bounded filtered graph");
+        panic!("20,000 DBpedia vectors use the bounded filtered graph");
     };
     assert_eq!(budgets.ef_filtered, 150);
     assert_eq!(budgets.sampled_seeds, FILTERED_SAMPLED_SEEDS);
@@ -457,9 +506,14 @@ fn admission_scans_exactly_within_the_filtered_vector_payload_budget() {
 
     for (beam_multiplier, expected_ef) in [(2, 200), (4, 400)] {
         let RestrictedExecutionPlan::FilteredGraph { budgets, .. } =
-            restricted_execution_plan_with_beam_multiplier(&benchmark, &params, beam_multiplier)
+            restricted_execution_plan_with_beam_multiplier(
+                &benchmark,
+                1_536,
+                &params,
+                beam_multiplier,
+            )
         else {
-            panic!("1,000 DBpedia vectors use the bounded filtered graph");
+            panic!("20,000 DBpedia vectors use the bounded filtered graph");
         };
         assert_eq!(budgets.ef_filtered, expected_ef);
         assert_eq!(budgets.sampled_seeds, FILTERED_SAMPLED_SEEDS);
@@ -469,9 +523,15 @@ fn admission_scans_exactly_within_the_filtered_vector_payload_budget() {
     for (beam_percent, expected_ef) in [(100, 100), (150, 150), (200, 200)] {
         let k = RestrictedResultCount::try_new(params.k(), benchmark.len()).unwrap();
         let RestrictedExecutionPlan::FilteredGraph { budgets, .. } =
-            restricted_execution_plan_with_beam_percent(&benchmark, &params, k, beam_percent)
+            restricted_execution_plan_with_beam_percent(
+                &benchmark,
+                1_536,
+                &params,
+                k,
+                beam_percent,
+            )
         else {
-            panic!("1,000 DBpedia vectors use the bounded filtered graph");
+            panic!("20,000 DBpedia vectors use the bounded filtered graph");
         };
         assert_eq!(budgets.ef_filtered, expected_ef);
         assert_eq!(budgets.sampled_seeds, FILTERED_SAMPLED_SEEDS);
@@ -525,14 +585,14 @@ fn restricted_result_count_clamps_before_enforcing_the_payload_limit() {
     );
 
     let params = SearchParams::new(MAX_RESTRICTED_RESULT_COUNT).unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1..=1_000).unwrap();
+    let candidates = RestrictedVectorCandidates::from_ids(1..=20_000).unwrap();
     let RestrictedVectorCandidates::NonEmpty(candidates) = candidates else {
         panic!("non-empty input must produce a non-empty candidate set");
     };
     let RestrictedExecutionPlan::FilteredGraph { k, budgets, .. } =
-        restricted_execution_plan(&candidates, &params)
+        restricted_execution_plan(&candidates, 1_536, &params)
     else {
-        panic!("1,000 candidates use the bounded filtered graph");
+        panic!("20,000 candidates use the bounded filtered graph");
     };
     assert_eq!(k.get(), MAX_RESTRICTED_RESULT_COUNT);
     assert_eq!(budgets.vector_payloads, MAX_RESTRICTED_RESULT_COUNT);
@@ -883,20 +943,20 @@ async fn directory_lifecycle_tracks_insert_upsert_and_delete() {
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() {
-    const ENTITY_COUNT: u64 = EXACT_CARDINALITY_THRESHOLD + 100;
+    const ENTITY_COUNT: u64 = 300;
     let (db, index) =
         seed_empty_graph_directory("restricted-directory-direct-token", ENTITY_COUNT, 8).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let candidates = RestrictedVectorCandidates::from_ids(1..=ENTITY_COUNT).unwrap();
-    let (results, stats) = index
-        .search_restricted_with_stats(
-            &txn,
-            &vector_for(7, ENTITY_COUNT, 8),
-            &SearchParams::new(10).unwrap(),
-            &candidates,
-        )
-        .await
-        .unwrap();
+    let (results, stats) = filtered_search(
+        &index,
+        &txn,
+        &vector_for(7, ENTITY_COUNT, 8),
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .unwrap();
 
     assert!(!results.is_empty());
     assert!(stats.directory_hits >= FILTERED_DIRECTORY_SEEDS);
@@ -914,17 +974,16 @@ async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() 
 async fn directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors() {
     let (db, index) = seed_three_edge_filtered_gulf::<Cosine>("restricted-three-edge-gulf").await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates =
-        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
-    let (results, stats) = index
-        .search_restricted_with_stats(
-            &txn,
-            &[1.0, 0.0],
-            &SearchParams::new(10).unwrap(),
-            &candidates,
-        )
-        .await
-        .unwrap();
+    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    let (results, stats) = filtered_search(
+        &index,
+        &txn,
+        &[1.0, 0.0],
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].entity_id(), 1_001);
@@ -957,34 +1016,32 @@ async fn directoryless_bridge_missing_simhash_fails_closed() {
     transaction.commit().await.unwrap();
 
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates =
-        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
-    let error = index
-        .search_restricted_with_stats(
-            &transaction,
-            &[1.0, 0.0],
-            &SearchParams::new(10).unwrap(),
-            &candidates,
-        )
-        .await
-        .expect_err("a bridge neighbor without its SimHash must fail closed");
+    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    let error = filtered_search(
+        &index,
+        &transaction,
+        &[1.0, 0.0],
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .expect_err("a bridge neighbor without its SimHash must fail closed");
     assert!(error.to_string().contains("missing simhash for node 2"));
 }
 
 async fn assert_directoryless_filtered_metric<D: Distance>(name: &str) {
     let (db, index) = seed_three_edge_filtered_gulf::<D>(name).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates =
-        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
-    let (results, stats) = index
-        .search_restricted_with_stats(
-            &txn,
-            &[1.0, 0.0],
-            &SearchParams::new(10).unwrap(),
-            &candidates,
-        )
-        .await
-        .unwrap();
+    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    let (results, stats) = filtered_search(
+        &index,
+        &txn,
+        &[1.0, 0.0],
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].entity_id(), 1_001);
     assert_eq!(
@@ -1135,19 +1192,19 @@ async fn simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id() {
 async fn bridge_simhash_reads_stay_within_the_rank_window() {
     // Every seventh ring node is allowed and no power-of-two skip is a
     // multiple of seven, so allowed nodes are only reachable through bridges.
-    let entity_count = 8_192;
+    let entity_count = 2_048;
     let (db, index) = seed_index("restricted-bridge-read-bound", entity_count, 8).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let candidates = RestrictedVectorCandidates::from_ids((1..=entity_count).step_by(7)).unwrap();
-    let (results, stats) = index
-        .search_restricted_with_stats(
-            &txn,
-            &vector_for(1_000, entity_count, 8),
-            &SearchParams::new(10).unwrap(),
-            &candidates,
-        )
-        .await
-        .unwrap();
+    let (results, stats) = filtered_search(
+        &index,
+        &txn,
+        &vector_for(1_000, entity_count, 8),
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         stats.strategy,
@@ -1259,6 +1316,81 @@ async fn cosine_beam_completes_while_only_distant_bridges_remain() {
         Some(RestrictedSearchTermination::Exhausted)
     );
     assert_eq!(stats.bridge_rows, 3);
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn angular_cutoff_resolves_inherited_bridge_ranks_before_abandoning_them() {
+    // Bridge 7 is discovered from the opposite-facing entry point, so its
+    // inherited rank is far outside the beam angle, yet its own SimHash is
+    // close to the query and it leads to the best allowed node.
+    let (db, index) = seed_filtered_graph::<Cosine>(
+        "restricted-inherited-rank-cutoff",
+        5,
+        &[
+            (5, vec![-1.0, 0.0], vec![7]),
+            (7, vec![1.0, 0.05], vec![1_002]),
+            (1_001, vec![0.9, 0.3], Vec::new()),
+            (1_002, vec![1.0, 0.0], Vec::new()),
+            (1_003, vec![0.8, 0.4], Vec::new()),
+        ],
+    )
+    .await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids([1_001, 1_002, 1_003]).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    // Two sampled seeds are the first and last candidate, filling the beam
+    // without the hidden best node.
+    assert_eq!(candidates.deterministic_sample_ids(2), vec![1_001, 1_003]);
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<Cosine> {
+        header: Cosine::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point: 5,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets: FilteredGraphBudgets {
+                    ef_filtered: 2,
+                    routing_rows: 100,
+                    bridge_rows: 100,
+                    vector_payloads: 10,
+                    sampled_seeds: 2,
+                    directory_seeds: 0,
+                },
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![1_002]
+    );
+    assert_eq!(stats.bridge_rows, 2);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::BeamComplete)
+    );
 }
 
 /// Runs a directoryless k=1 walk with budgets that never bind.
@@ -1539,8 +1671,7 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
     let mut observed = 0_usize;
     for query_id in [1, 43, 87, 129, 211, 307, 401, 509] {
         let query = vector_for(query_id, ENTITY_COUNT, DIMENSION);
-        let (results, stats) = index
-            .search_restricted_with_stats(&txn, &query, &params, &allowed)
+        let (results, stats) = filtered_search(&index, &txn, &query, &params, &allowed)
             .await
             .unwrap();
         let exact = exact_ids(&query, ENTITY_COUNT, DIMENSION, &allowed, K);
@@ -1571,7 +1702,7 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
 
 #[cfg(feature = "production-coverage")]
 pub(crate) async fn run() {
-    admission_scans_exactly_within_the_filtered_vector_payload_budget();
+    admission_scans_exactly_by_candidate_cardinality_and_bytes();
     restricted_result_count_clamps_before_enforcing_the_payload_limit();
     candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit();
     oversized_result_count_rejects_before_index_metadata_io().await;
@@ -1587,6 +1718,7 @@ pub(crate) async fn run() {
     simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id().await;
     bridge_simhash_reads_stay_within_the_rank_window().await;
     cosine_beam_completes_while_only_distant_bridges_remain().await;
+    angular_cutoff_resolves_inherited_bridge_ranks_before_abandoning_them().await;
     walk_converges_once_scoring_rounds_stop_improving_the_kth_result().await;
     bridge_only_rounds_do_not_count_towards_convergence().await;
     explicit_filtered_budgets_record_the_exact_termination_reason().await;
@@ -1934,6 +2066,7 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                     let mut scored_candidates = 0_usize;
                     let mut vector_payload_requests = 0_usize;
                     let mut termination_counts = [0_usize; 7];
+                    let mut strategy = None;
                     for query_index in 0..query_count {
                         let query_id = shape.query_id(query_index, query_count, candidate_count);
                         let query = vector_for(query_id, entity_count, dimension);
@@ -2049,6 +2182,7 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                         };
                         termination_counts[termination_index] =
                             termination_counts[termination_index].saturating_add(1);
+                        strategy = stats.strategy;
                         assert!(stats.directory_scan_calls <= DIRECTORY_MAX_PROBES);
                         assert!(stats.directory_rows <= DIRECTORY_MAX_ROWS);
                         assert!(stats.directory_decoded_bytes <= DIRECTORY_MAX_DECODED_BYTES);
@@ -2070,7 +2204,11 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                         candidate_count,
                         shape.name()
                     );
-                    if candidate_count >= 10_000 && !skip_performance_gates {
+                    // Exact admission makes the comparison with an exact scan moot.
+                    if candidate_count >= 10_000
+                        && !skip_performance_gates
+                        && strategy == Some(RestrictedSearchStrategy::FilteredGraph)
+                    {
                         assert!(
                             filtered_p95.saturating_mul(2) <= exact_p95,
                             "filtered p95 must be at least 2x faster than exact scan"

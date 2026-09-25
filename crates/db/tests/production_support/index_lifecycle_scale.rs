@@ -2007,22 +2007,32 @@ pub(super) async fn run_traversal_vector_prefilter_1m() {
                     ..u64::try_from(shape.candidate_end()).expect("candidate end fits u64"))
                     .contains(entity_id)
             }));
+            // Mirrors restricted admission: payload-sized sets, or at most
+            // 16,384 candidates whose vectors fit 24 MiB, are scanned exactly.
+            let exact_admission = shape.candidate_count <= 800
+                || (shape.candidate_count <= 16_384
+                    && shape.candidate_count
+                        * TRAVERSAL_VECTOR_DIMENSION
+                        * core::mem::size_of::<f32>()
+                        <= 24 * 1024 * 1024);
             assert!(
-                stats.distance_computations <= 800,
+                stats.distance_computations
+                    <= if exact_admission {
+                        shape.candidate_count
+                    } else {
+                        800
+                    },
                 "restricted vector scoring must remain bounded"
             );
             assert!(stats.directory_rows <= 65_536);
-            if shape.candidate_count <= 800 {
-                assert_eq!(
-                    stats.strategy,
-                    Some(crate::search::vector::RestrictedSearchStrategy::Exact)
-                );
-            } else {
-                assert_eq!(
-                    stats.strategy,
-                    Some(crate::search::vector::RestrictedSearchStrategy::FilteredGraph)
-                );
-            }
+            assert_eq!(
+                stats.strategy,
+                Some(if exact_admission {
+                    crate::search::vector::RestrictedSearchStrategy::Exact
+                } else {
+                    crate::search::vector::RestrictedSearchStrategy::FilteredGraph
+                })
+            );
             matched = matched.saturating_add(
                 actual
                     .iter()
