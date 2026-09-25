@@ -150,7 +150,8 @@ pub(crate) enum RestrictedSearchStrategy {
 pub(crate) enum RestrictedSearchTermination {
     /// No scored candidate or global routing anchor remained to expand.
     Exhausted,
-    /// The full allowed beam proved that the remaining frontier was worse.
+    /// The full allowed beam proved that the remaining frontier was worse and
+    /// no queued bridge could still be expanded.
     BeamComplete,
     /// The total layer-zero routing-row budget was exhausted.
     RoutingBudget,
@@ -1128,8 +1129,10 @@ impl<D: Distance> VectorIndex<D> {
                 break;
             }
             // SimHash ranks only order bridges; none is a bound on distance, so
-            // only an empty bridge queue proves no closer allowed node remains.
-            let beam_complete = bridge_state.frontier.is_empty()
+            // the beam is complete only once no queued bridge can be expanded.
+            let bridges_pending =
+                !bridge_state.frontier.is_empty() && stats.bridge_rows < budgets.bridge_rows;
+            let beam_complete = !bridges_pending
                 && top
                     .peek()
                     .filter(|_| top.len() >= budgets.ef_filtered)
@@ -1138,17 +1141,7 @@ impl<D: Distance> VectorIndex<D> {
                 stats.termination = Some(RestrictedSearchTermination::BeamComplete);
                 break;
             }
-
-            let mut routing_batch = Vec::with_capacity(FRONTIER_BATCH_SIZE + 1);
-            while routing_batch.len() < FRONTIER_BATCH_SIZE {
-                let Some(Reverse(candidate)) = frontier.pop() else {
-                    break;
-                };
-                if expanded.insert(candidate.node_id) {
-                    routing_batch.push(candidate.node_id);
-                }
-            }
-            if routing_batch.is_empty() && bridge_state.frontier.is_empty() {
+            if frontier.is_empty() && bridge_state.frontier.is_empty() {
                 stats.termination = Some(RestrictedSearchTermination::Exhausted);
                 break;
             }
@@ -1157,7 +1150,18 @@ impl<D: Distance> VectorIndex<D> {
                 stats.termination = Some(RestrictedSearchTermination::RoutingBudget);
                 break;
             }
-            routing_batch.truncate(routing_remaining);
+
+            // Pops only what the routing budget can read, so every popped
+            // candidate is expanded and none is silently dropped.
+            let mut routing_batch = Vec::with_capacity(FRONTIER_BATCH_SIZE);
+            while routing_batch.len() < FRONTIER_BATCH_SIZE.min(routing_remaining) {
+                let Some(Reverse(candidate)) = frontier.pop() else {
+                    break;
+                };
+                if expanded.insert(candidate.node_id) {
+                    routing_batch.push(candidate.node_id);
+                }
+            }
             let mut eligible = Vec::new();
             let mut eligible_seen = HashSet::new();
             let mut rejected = Vec::new();
@@ -1225,13 +1229,12 @@ impl<D: Distance> VectorIndex<D> {
                 break;
             }
 
+            // The loop-top guard left payload budget, and routing and bridge
+            // reads never score vectors.
+            debug_assert!(stats.vector_payload_requests < budgets.vector_payloads);
             let vector_remaining = budgets
                 .vector_payloads
                 .saturating_sub(stats.vector_payload_requests);
-            if vector_remaining == 0 {
-                stats.termination = Some(RestrictedSearchTermination::VectorBudget);
-                break;
-            }
             eligible.truncate(vector_remaining.min(budgets.ef_filtered));
             if eligible.is_empty() {
                 continue;
