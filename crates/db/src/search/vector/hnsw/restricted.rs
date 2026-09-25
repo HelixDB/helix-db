@@ -548,11 +548,29 @@ impl<D: Distance> VectorIndex<D> {
         params: &SearchParams,
         allowed: &RestrictedVectorCandidates,
     ) -> Result<Vec<SearchResult>, HelixDbError> {
-        let (results, _stats) = self
+        let started = std::time::Instant::now();
+        let (results, stats) = self
             .search_restricted_observed(read, query, params, allowed)
             .await?;
+        tracing::debug!(
+            target: "helix::vector::restricted",
+            index = self.id(),
+            elapsed_us = started.elapsed().as_micros() as u64,
+            strategy = ?stats.strategy,
+            termination = ?stats.termination,
+            ef_filtered = stats.ef_filtered,
+            directory_scan_calls = stats.directory_scan_calls,
+            directory_hits = stats.directory_hits,
+            simhash_row_requests = stats.simhash_row_requests,
+            routing_rows = stats.routing_rows,
+            bridge_rows = stats.bridge_rows,
+            bridge_frontier_pushes = stats.bridge_frontier_pushes,
+            vector_payload_requests = stats.vector_payload_requests,
+            vector_bytes = stats.vector_bytes,
+            "restricted vector search"
+        );
         #[cfg(any(test, feature = "production-coverage"))]
-        record_restricted_search(&_stats);
+        record_restricted_search(&stats);
         Ok(results)
     }
 
