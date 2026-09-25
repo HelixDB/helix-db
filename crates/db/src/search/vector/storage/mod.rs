@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroU64;
 use std::ops::Bound;
 
+use futures::future::try_join_all;
+
 use bytes::Bytes;
 use slatedb::DbReadOps;
 
@@ -700,10 +702,44 @@ impl<'a, R: ?Sized> VectorRows<'a, R> {
     }
 }
 
+/// Keys per concurrent `multi_get` chunk for random vector-row batches.
+const CONCURRENT_MULTI_GET_CHUNK_KEYS: usize = 32;
+/// Chunks in flight at once, bounding one batch to 512 outstanding keys.
+const CONCURRENT_MULTI_GET_MAX_CHUNKS: usize = 16;
+
 impl<R> VectorRows<'_, R>
 where
     R: DbReadOps + Send + Sync + ?Sized,
 {
+    /// Batch-reads caller-ordered keys with bounded fetch overlap.
+    ///
+    /// SlateDB resolves one `multi_get` by awaiting each non-adjacent block
+    /// range in turn. HNSW row batches are random by construction (neighbor
+    /// IDs, SimHash-ordered payloads), so one large call pays one serial
+    /// round trip per block on a cache miss. Issuing bounded chunks
+    /// concurrently overlaps those fetches; results keep caller order.
+    async fn multi_get_concurrent<K>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<Bytes>>, slatedb::Error>
+    where
+        K: AsRef<[u8]> + Send + Sync,
+    {
+        if keys.len() <= CONCURRENT_MULTI_GET_CHUNK_KEYS {
+            return self.read.multi_get(keys).await;
+        }
+        let mut rows = Vec::with_capacity(keys.len());
+        for wave in keys.chunks(CONCURRENT_MULTI_GET_CHUNK_KEYS * CONCURRENT_MULTI_GET_MAX_CHUNKS) {
+            let fetched = try_join_all(
+                wave.chunks(CONCURRENT_MULTI_GET_CHUNK_KEYS)
+                    .map(|chunk| self.read.multi_get(chunk)),
+            )
+            .await?;
+            rows.extend(fetched.into_iter().flatten());
+        }
+        Ok(rows)
+    }
+
     /// Reads one legacy payload and accounts every typed point-read byte.
     ///
     /// This is the only migration boundary that combines frozen legacy
@@ -1809,8 +1845,7 @@ where
                     )))
             })
             .collect::<Vec<_>>();
-        self.read
-            .multi_get(&keys)
+        self.multi_get_concurrent(&keys)
             .await?
             .into_iter()
             .map(|row| {
@@ -1910,8 +1945,7 @@ where
             })
             .collect::<Vec<_>>();
         Ok(self
-            .read
-            .multi_get(&keys)
+            .multi_get_concurrent(&keys)
             .await?
             .into_iter()
             .map(|row| match row {
@@ -1965,14 +1999,22 @@ where
         let mut upper = Vec::with_capacity(core::mem::size_of::<u64>() * 2);
         upper.extend_from_slice(&max_order_code.to_be_bytes());
         upper.extend_from_slice(&NodeId::MAX.to_be_bytes());
+        // Restricted search probes up to 64 of these windows per query. SlateDB
+        // scans default to `cache_blocks: false`, which would refetch every
+        // directory block from object storage on every query.
+        let options = slatedb::config::ScanOptions {
+            cache_blocks: true,
+            ..slatedb::config::ScanOptions::default()
+        };
         let mut rows = self
             .read
-            .scan_prefix(
+            .scan_prefix_with_options(
                 &prefix,
                 (
                     Bound::Included(Bytes::from(lower)),
                     Bound::Included(Bytes::from(upper)),
                 ),
+                &options,
             )
             .await?;
         let mut entries = Vec::with_capacity(max_rows.min(256));
@@ -2063,8 +2105,7 @@ where
             .iter()
             .map(|key| key.physical_key.clone())
             .collect::<Vec<_>>();
-        self.read
-            .multi_get(&physical_keys)
+        self.multi_get_concurrent(&physical_keys)
             .await
             .map_err(Into::into)
     }
@@ -3077,6 +3118,50 @@ mod tests {
         assert_eq!(
             rows.upper_vector_row(7).await.unwrap(),
             Some(Bytes::from_static(b"item-payload"))
+        );
+        txn.rollback();
+    }
+
+    /// Proves concurrent chunked batches keep caller order and absence across
+    /// chunk and wave boundaries.
+    #[tokio::test]
+    async fn concurrent_batches_preserve_caller_order_across_chunks() {
+        let db = slatedb::Db::open("concurrent-vector-rows", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        let keyspace =
+            VectorRowKeyspace::new("concurrent-vector-rows".into(), DataScope::LegacyUnscoped);
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let batch_len = CONCURRENT_MULTI_GET_CHUNK_KEYS * CONCURRENT_MULTI_GET_MAX_CHUNKS * 2 + 7;
+        let present = |node_id: NodeId| !node_id.is_multiple_of(3);
+        (1..=batch_len as NodeId)
+            .filter(|node_id| present(*node_id))
+            .for_each(|node_id| {
+                txn.put(
+                    keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+                        keyspace.index_id(),
+                        node_id,
+                    ))),
+                    encode_simhash(node_id),
+                )
+                .unwrap();
+            });
+
+        // Descending order is the opposite of physical key order.
+        let node_ids = (1..=batch_len as NodeId).rev().collect::<Vec<_>>();
+        let rows = VectorRows::new(&txn, &keyspace)
+            .simhash_rows(&node_ids)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows,
+            node_ids
+                .iter()
+                .map(|node_id| match present(*node_id) {
+                    true => SimHashRow::Present(SimHash::from_bits(*node_id)),
+                    false => SimHashRow::Missing,
+                })
+                .collect::<Vec<_>>()
         );
         txn.rollback();
     }
