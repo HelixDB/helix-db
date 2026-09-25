@@ -1978,7 +1978,7 @@ pub(super) async fn run_traversal_vector_prefilter_1m() {
         let mut directory_hits = 0_usize;
         let mut bridge_rows = 0_usize;
         let mut multi_get_calls = 0_usize;
-        let mut termination_counts = [0_usize; 6];
+        let mut termination_counts = [0_usize; 7];
         for (query, exact) in &queries {
             let prefilter_started = Instant::now();
             let observed_prefilter = projected_node_ids(
@@ -2012,7 +2012,7 @@ pub(super) async fn run_traversal_vector_prefilter_1m() {
                 "restricted vector scoring must remain bounded"
             );
             assert!(stats.directory_rows <= 65_536);
-            if shape.candidate_count <= 256 {
+            if shape.candidate_count <= 800 {
                 assert_eq!(
                     stats.strategy,
                     Some(crate::search::vector::RestrictedSearchStrategy::Exact)
@@ -2061,6 +2061,10 @@ pub(super) async fn run_traversal_vector_prefilter_1m() {
                     Some(crate::search::vector::RestrictedSearchStrategy::FilteredGraph),
                     Some(crate::search::vector::RestrictedSearchTermination::VectorBudget),
                 ) => 4,
+                (
+                    Some(crate::search::vector::RestrictedSearchStrategy::FilteredGraph),
+                    Some(crate::search::vector::RestrictedSearchTermination::Converged),
+                ) => 6,
                 _ => panic!("million-row restricted search records a valid termination"),
             };
             termination_counts[termination_index] =
@@ -2076,7 +2080,7 @@ pub(super) async fn run_traversal_vector_prefilter_1m() {
         let p95_index = (QUERY_COUNT - 1) * 95 / 100;
         let recall = matched as f64 / (QUERY_COUNT * 10) as f64;
         eprintln!(
-            "TRAVERSAL_VECTOR_PREFILTER_1M phase=query dataset=dbpedia-openai3-large entities={TRAVERSAL_1M_ENTITY_COUNT} dimension={TRAVERSAL_VECTOR_DIMENSION} m=16 m0=32 ef_construction=200 ef_search=100 filtered_beam=150 hop_count=1 group={} prefilter_rows={} held_out_queries={QUERY_COUNT} recall_at_10={recall:.6} prefilter_p50_us={} prefilter_p95_us={} end_to_end_p50_us={} end_to_end_p95_us={} vector_increment_p95_us={} scored_candidates_total={scored_candidates} scored_candidates_max={max_scored_candidates} vector_bytes={vector_bytes} directory_rows={directory_rows} directory_hits={directory_hits} bridge_rows={bridge_rows} multi_get_calls={multi_get_calls} terminations_exhausted_beam_routing_bridge_vector_exact={termination_counts:?}",
+            "TRAVERSAL_VECTOR_PREFILTER_1M phase=query dataset=dbpedia-openai3-large entities={TRAVERSAL_1M_ENTITY_COUNT} dimension={TRAVERSAL_VECTOR_DIMENSION} m=16 m0=32 ef_construction=200 ef_search=100 filtered_beam=150 hop_count=1 group={} prefilter_rows={} held_out_queries={QUERY_COUNT} recall_at_10={recall:.6} prefilter_p50_us={} prefilter_p95_us={} end_to_end_p50_us={} end_to_end_p95_us={} vector_increment_p95_us={} scored_candidates_total={scored_candidates} scored_candidates_max={max_scored_candidates} vector_bytes={vector_bytes} directory_rows={directory_rows} directory_hits={directory_hits} bridge_rows={bridge_rows} multi_get_calls={multi_get_calls} terminations_exhausted_beam_routing_bridge_vector_exact_converged={termination_counts:?}",
             shape.group,
             shape.candidate_count,
             prefilter_latencies[p50_index].as_micros(),

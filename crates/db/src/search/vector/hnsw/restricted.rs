@@ -3,7 +3,8 @@
 //! Small candidate sets use a locality-sorted exact scan. Larger sets combine
 //! deterministic exact samples, the generation-complete SimHash directory, and
 //! the existing upper-layer HNSW route before a bounded ACORN-style layer-zero
-//! walk. SimHash affects seed priority only: the exact bitmap remains the sole
+//! walk that stops once scoring rounds no longer move the k-th result closer.
+//! SimHash affects seed priority only: the exact bitmap remains the sole
 //! admission authority for vector fetches, scoring, and returned entities.
 
 use std::cmp::Reverse;
@@ -38,8 +39,11 @@ use crate::search::vector::{
 };
 
 const MAX_RESTRICTED_CANDIDATES: u64 = 1_000_000;
-const EXACT_CARDINALITY_THRESHOLD: u64 = 256;
-const EXACT_VECTOR_BYTES_THRESHOLD: u64 = 4 * 1024 * 1024;
+/// Candidate sets that fit the filtered vector-payload budget are scanned
+/// exactly: the filtered walk could read every one of their vectors anyway,
+/// while the exact scan needs no directory, neighbor, or bridge rows and
+/// returns the true top-k.
+const EXACT_CARDINALITY_THRESHOLD: u64 = FILTERED_VECTOR_PAYLOAD_LIMIT as u64;
 const FETCH_BATCH_SIZE: usize = 256;
 const DIRECTORY_PREFIX_BITS: u32 = 16;
 const DIRECTORY_MAX_PROBES: usize = 64;
@@ -47,7 +51,10 @@ const DIRECTORY_MAX_ROWS: usize = 65_536;
 const DIRECTORY_MAX_DECODED_BYTES: usize = 4 * 1024 * 1024;
 const DIRECTORY_MAX_CONCURRENT_SCANS: usize = 8;
 const FRONTIER_BATCH_SIZE: usize = 16;
-const BRIDGE_BATCH_SIZE: usize = 256;
+/// Rejected bridges expanded per round. Dense filters rarely need them and
+/// sparse filters reach new allowed regions within a few rounds, so a small
+/// batch keeps layer-zero row reads proportional to useful work.
+const BRIDGE_BATCH_SIZE: usize = 32;
 const FILTERED_BEAM_PERCENT: usize = 150;
 const FILTERED_BEAM_PERCENT_DENOMINATOR: usize = 100;
 const FILTERED_SAMPLED_SEEDS: usize = 64;
@@ -63,6 +70,10 @@ const BRIDGE_UNKNOWN_HAMMING: u32 = (SIMHASH_BITS / 2) as u32;
 /// abandoned; 64-bit SimHash Hamming has a standard deviation of at most 4.
 const BRIDGE_ANGULAR_MARGIN_BITS: u32 = 8;
 const FILTERED_VECTOR_PAYLOAD_LIMIT: usize = MAX_RESTRICTED_RESULT_COUNT;
+/// Consecutive scoring rounds that leave the k-th best distance unchanged
+/// before the walk is considered converged. Rounds that score nothing (pure
+/// bridge hops across rejected regions) do not count.
+const FILTERED_STALE_ROUNDS: usize = 3;
 
 #[cfg(feature = "production-scale")]
 static FILTERED_BEAM_PERCENT_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
@@ -127,7 +138,7 @@ fn effective_filtered_beam_percent() -> usize {
     FILTERED_BEAM_PERCENT
 }
 
-/// Restricted-search execution selected after exact cardinality/byte admission.
+/// Restricted-search execution selected by exact candidate cardinality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestrictedSearchStrategy {
     /// Locality-sorted exact vector scan.
@@ -143,6 +154,9 @@ pub(crate) enum RestrictedSearchTermination {
     Exhausted,
     /// The full allowed beam proved that the remaining frontier was worse.
     BeamComplete,
+    /// `FILTERED_STALE_ROUNDS` scoring rounds left the k-th best distance
+    /// unchanged.
+    Converged,
     /// The total layer-zero routing-row budget was exhausted.
     RoutingBudget,
     /// The rejected-neighbor bridge-row budget was exhausted.
@@ -469,24 +483,16 @@ impl RestrictedVectorCandidates {
 #[cfg(any(test, feature = "production-coverage"))]
 fn restricted_execution_plan<'a>(
     candidates: &'a NonEmptyCandidateSet,
-    dimension: usize,
     params: &SearchParams,
 ) -> RestrictedExecutionPlan<'a> {
     let k = RestrictedResultCount::try_new(params.k(), candidates.len())
         .expect("test restricted result count is bounded");
-    restricted_execution_plan_with_beam_percent(
-        candidates,
-        dimension,
-        params,
-        k,
-        FILTERED_BEAM_PERCENT,
-    )
+    restricted_execution_plan_with_beam_percent(candidates, params, k, FILTERED_BEAM_PERCENT)
 }
 
 #[cfg(any(test, feature = "production-coverage"))]
 fn restricted_execution_plan_with_beam_multiplier<'a>(
     candidates: &'a NonEmptyCandidateSet,
-    dimension: usize,
     params: &SearchParams,
     beam_multiplier: usize,
 ) -> RestrictedExecutionPlan<'a> {
@@ -494,7 +500,6 @@ fn restricted_execution_plan_with_beam_multiplier<'a>(
         .expect("test restricted result count is bounded");
     restricted_execution_plan_with_beam_percent(
         candidates,
-        dimension,
         params,
         k,
         beam_multiplier.saturating_mul(FILTERED_BEAM_PERCENT_DENOMINATOR),
@@ -503,18 +508,11 @@ fn restricted_execution_plan_with_beam_multiplier<'a>(
 
 fn restricted_execution_plan_with_beam_percent<'a>(
     candidates: &'a NonEmptyCandidateSet,
-    dimension: usize,
     params: &SearchParams,
     k: RestrictedResultCount,
     beam_percent: usize,
 ) -> RestrictedExecutionPlan<'a> {
-    let estimated_vector_bytes = candidates
-        .len()
-        .saturating_mul(dimension as u64)
-        .saturating_mul(core::mem::size_of::<f32>() as u64);
-    if candidates.len() <= EXACT_CARDINALITY_THRESHOLD
-        && estimated_vector_bytes <= EXACT_VECTOR_BYTES_THRESHOLD
-    {
+    if candidates.len() <= EXACT_CARDINALITY_THRESHOLD {
         RestrictedExecutionPlan::Exact { candidates, k }
     } else {
         RestrictedExecutionPlan::FilteredGraph {
@@ -665,13 +663,7 @@ impl<D: Distance> VectorIndex<D> {
             vector: std::borrow::Cow::Borrowed(query_vector.values()),
         };
 
-        match restricted_execution_plan_with_beam_percent(
-            allowed,
-            metadata.config.dimension,
-            params,
-            k,
-            beam_percent,
-        ) {
+        match restricted_execution_plan_with_beam_percent(allowed, params, k, beam_percent) {
             RestrictedExecutionPlan::Exact { candidates, k } => {
                 stats.strategy = Some(RestrictedSearchStrategy::Exact);
                 let results = self
@@ -1130,9 +1122,35 @@ impl<D: Distance> VectorIndex<D> {
             bridge_state.enqueue(query_hash, [(entry_point, 0)], stats);
         }
 
+        let mut best_kth = None;
+        let mut stale_rounds = 0_usize;
+        let mut scored_before_round = stats.vector_payload_requests;
         loop {
             if stats.vector_payload_requests >= budgets.vector_payloads {
                 stats.termination = Some(RestrictedSearchTermination::VectorBudget);
+                break;
+            }
+            // A candidate entering the top-k displaces the k-th, so an unchanged
+            // k-th after a scoring round means the round left the answer
+            // untouched. Several such rounds in a row end the walk: later rounds
+            // expand ever farther frontier nodes. Selecting the k-th is O(beam)
+            // per round, negligible next to the round's storage reads.
+            let kth = (top.len() >= k).then(|| {
+                let mut beam = top.iter().copied().collect::<Vec<_>>();
+                *beam.select_nth_unstable(k - 1).1
+            });
+            let scored_last_round = stats.vector_payload_requests > scored_before_round;
+            scored_before_round = stats.vector_payload_requests;
+            match kth {
+                Some(_) if kth != best_kth => {
+                    best_kth = kth;
+                    stale_rounds = 0;
+                }
+                Some(_) if scored_last_round => stale_rounds += 1,
+                Some(_) | None => {}
+            }
+            if stale_rounds >= FILTERED_STALE_ROUNDS {
+                stats.termination = Some(RestrictedSearchTermination::Converged);
                 break;
             }
             let worst = top.peek().filter(|_| top.len() >= budgets.ef_filtered);

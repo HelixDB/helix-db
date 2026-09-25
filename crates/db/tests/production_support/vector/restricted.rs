@@ -415,26 +415,28 @@ fn exact_ids(
 }
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), test)]
-fn admission_bounds_exact_work_by_cardinality_or_bytes() {
+fn admission_scans_exactly_within_the_filtered_vector_payload_budget() {
+    // An exact scan never reads more vectors than the filtered walk may.
+    assert_eq!(
+        EXACT_CARDINALITY_THRESHOLD,
+        FILTERED_VECTOR_PAYLOAD_LIMIT as u64
+    );
     let params = SearchParams::new(10).unwrap();
-    let exact = RestrictedVectorCandidates::from_ids(1..=256).unwrap();
+    let exact = RestrictedVectorCandidates::from_ids(1..=EXACT_CARDINALITY_THRESHOLD).unwrap();
     let RestrictedVectorCandidates::NonEmpty(exact) = exact else {
         panic!("non-empty input must produce a non-empty candidate set");
     };
     assert!(matches!(
-        restricted_execution_plan(&exact, 1_536, &params),
+        restricted_execution_plan(&exact, &params),
         RestrictedExecutionPlan::Exact { .. }
     ));
-    assert!(matches!(
-        restricted_execution_plan(&exact, 5_000, &params),
-        RestrictedExecutionPlan::FilteredGraph { .. }
-    ));
-    let filtered = RestrictedVectorCandidates::from_ids(1..=257).unwrap();
+    let filtered =
+        RestrictedVectorCandidates::from_ids(1..=EXACT_CARDINALITY_THRESHOLD + 1).unwrap();
     let RestrictedVectorCandidates::NonEmpty(filtered) = filtered else {
         panic!("non-empty input must produce a non-empty candidate set");
     };
     assert!(matches!(
-        restricted_execution_plan(&filtered, 2, &params),
+        restricted_execution_plan(&filtered, &params),
         RestrictedExecutionPlan::FilteredGraph { .. }
     ));
 
@@ -444,7 +446,7 @@ fn admission_bounds_exact_work_by_cardinality_or_bytes() {
     };
     assert_eq!(params.ef(), 100);
     let RestrictedExecutionPlan::FilteredGraph { budgets, .. } =
-        restricted_execution_plan(&benchmark, 1_536, &params)
+        restricted_execution_plan(&benchmark, &params)
     else {
         panic!("1,000 DBpedia vectors use the bounded filtered graph");
     };
@@ -455,12 +457,7 @@ fn admission_bounds_exact_work_by_cardinality_or_bytes() {
 
     for (beam_multiplier, expected_ef) in [(2, 200), (4, 400)] {
         let RestrictedExecutionPlan::FilteredGraph { budgets, .. } =
-            restricted_execution_plan_with_beam_multiplier(
-                &benchmark,
-                1_536,
-                &params,
-                beam_multiplier,
-            )
+            restricted_execution_plan_with_beam_multiplier(&benchmark, &params, beam_multiplier)
         else {
             panic!("1,000 DBpedia vectors use the bounded filtered graph");
         };
@@ -472,13 +469,7 @@ fn admission_bounds_exact_work_by_cardinality_or_bytes() {
     for (beam_percent, expected_ef) in [(100, 100), (150, 150), (200, 200)] {
         let k = RestrictedResultCount::try_new(params.k(), benchmark.len()).unwrap();
         let RestrictedExecutionPlan::FilteredGraph { budgets, .. } =
-            restricted_execution_plan_with_beam_percent(
-                &benchmark,
-                1_536,
-                &params,
-                k,
-                beam_percent,
-            )
+            restricted_execution_plan_with_beam_percent(&benchmark, &params, k, beam_percent)
         else {
             panic!("1,000 DBpedia vectors use the bounded filtered graph");
         };
@@ -539,7 +530,7 @@ fn restricted_result_count_clamps_before_enforcing_the_payload_limit() {
         panic!("non-empty input must produce a non-empty candidate set");
     };
     let RestrictedExecutionPlan::FilteredGraph { k, budgets, .. } =
-        restricted_execution_plan(&candidates, 1_536, &params)
+        restricted_execution_plan(&candidates, &params)
     else {
         panic!("1,000 candidates use the bounded filtered graph");
     };
@@ -892,7 +883,7 @@ async fn directory_lifecycle_tracks_insert_upsert_and_delete() {
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() {
-    const ENTITY_COUNT: u64 = 300;
+    const ENTITY_COUNT: u64 = EXACT_CARDINALITY_THRESHOLD + 100;
     let (db, index) =
         seed_empty_graph_directory("restricted-directory-direct-token", ENTITY_COUNT, 8).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -923,7 +914,8 @@ async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() 
 async fn directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors() {
     let (db, index) = seed_three_edge_filtered_gulf::<Cosine>("restricted-three-edge-gulf").await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
     let (results, stats) = index
         .search_restricted_with_stats(
             &txn,
@@ -965,7 +957,8 @@ async fn directoryless_bridge_missing_simhash_fails_closed() {
     transaction.commit().await.unwrap();
 
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
     let error = index
         .search_restricted_with_stats(
             &transaction,
@@ -981,7 +974,8 @@ async fn directoryless_bridge_missing_simhash_fails_closed() {
 async fn assert_directoryless_filtered_metric<D: Distance>(name: &str) {
     let (db, index) = seed_three_edge_filtered_gulf::<D>(name).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
     let (results, stats) = index
         .search_restricted_with_stats(
             &txn,
@@ -1139,7 +1133,9 @@ async fn simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id() {
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn bridge_simhash_reads_stay_within_the_rank_window() {
-    let entity_count = 2_048;
+    // Every seventh ring node is allowed and no power-of-two skip is a
+    // multiple of seven, so allowed nodes are only reachable through bridges.
+    let entity_count = 8_192;
     let (db, index) = seed_index("restricted-bridge-read-bound", entity_count, 8).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let candidates = RestrictedVectorCandidates::from_ids((1..=entity_count).step_by(7)).unwrap();
@@ -1263,6 +1259,125 @@ async fn cosine_beam_completes_while_only_distant_bridges_remain() {
         Some(RestrictedSearchTermination::Exhausted)
     );
     assert_eq!(stats.bridge_rows, 3);
+}
+
+/// Runs a directoryless k=1 walk with budgets that never bind.
+async fn unbounded_single_result_search(
+    name: &str,
+    entry_point: NodeId,
+    rows: &[(NodeId, Vec<f32>, Vec<NodeId>)],
+    allowed: impl IntoIterator<Item = u64>,
+) -> (Vec<SearchResult>, RestrictedSearchStats) {
+    let (db, index) = seed_filtered_graph::<Cosine>(name, entry_point, rows).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids(allowed).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<Cosine> {
+        header: Cosine::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets: FilteredGraphBudgets {
+                    ef_filtered: 16,
+                    routing_rows: 100,
+                    bridge_rows: 100,
+                    vector_payloads: 100,
+                    sampled_seeds: 0,
+                    directory_seeds: 0,
+                },
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+    (results, stats)
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn walk_converges_once_scoring_rounds_stop_improving_the_kth_result() {
+    // An allowed chain that only moves away from the query: every round scores
+    // one farther node, so the answer is final after the entry point.
+    let chain = (1..=8_u64)
+        .map(|node_id| {
+            let angle = (node_id - 1) as f32 * 0.15;
+            let neighbors = if node_id < 8 {
+                vec![node_id + 1]
+            } else {
+                Vec::new()
+            };
+            (node_id, vec![angle.cos(), angle.sin()], neighbors)
+        })
+        .collect::<Vec<_>>();
+    let (results, stats) =
+        unbounded_single_result_search("restricted-converged-chain", 1, &chain, 1..=8).await;
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::Converged)
+    );
+    // The entry point plus one farther node per stale round.
+    assert_eq!(stats.vector_payload_requests, 1 + FILTERED_STALE_ROUNDS);
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn bridge_only_rounds_do_not_count_towards_convergence() {
+    // The closest allowed node sits behind more rejected hops than the stale
+    // round limit; only rounds that score candidates may end the walk.
+    const CLOSEST: NodeId = 1_000;
+    let hops = FILTERED_STALE_ROUNDS as u64 + 2;
+    let rows = std::iter::once((1, vec![0.0, 1.0], vec![2]))
+        .chain((2..2 + hops).map(|node_id| {
+            let next = if node_id + 1 < 2 + hops {
+                node_id + 1
+            } else {
+                CLOSEST
+            };
+            (node_id, vec![0.1 * node_id as f32, 1.0], vec![next])
+        }))
+        .chain(std::iter::once((CLOSEST, vec![1.0, 0.0], Vec::new())))
+        .collect::<Vec<_>>();
+    let (results, stats) =
+        unbounded_single_result_search("restricted-converged-bridges", 1, &rows, [1, CLOSEST])
+            .await;
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![CLOSEST]
+    );
+    assert_eq!(stats.bridge_rows as u64, hops);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::Exhausted)
+    );
 }
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
@@ -1390,7 +1505,7 @@ async fn explicit_filtered_budgets_record_the_exact_termination_reason() {
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
-    const ENTITY_COUNT: u64 = 512;
+    const ENTITY_COUNT: u64 = 2_048;
     const DIMENSION: usize = 8;
     const K: usize = 10;
     let (db, index) =
@@ -1438,12 +1553,16 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
         assert!(results
             .iter()
             .all(|result| allowed.contains(result.entity_id())));
+        assert_eq!(
+            stats.strategy,
+            Some(RestrictedSearchStrategy::FilteredGraph)
+        );
         assert!(stats.directory_scan_calls <= DIRECTORY_MAX_PROBES);
         assert!(stats.directory_rows <= DIRECTORY_MAX_ROWS);
         assert!(stats.directory_decoded_bytes <= DIRECTORY_MAX_DECODED_BYTES);
         assert!(stats.routing_rows <= stats.ef_filtered * 16);
         assert!(stats.bridge_rows <= stats.ef_filtered * 8);
-        assert!(stats.vector_payload_requests <= stats.ef_filtered * 8);
+        assert!(stats.vector_payload_requests <= FILTERED_VECTOR_PAYLOAD_LIMIT);
         assert_eq!(stats.distance_computations, stats.vector_payload_requests);
     }
     let recall_at_10 = matched as f64 / observed as f64;
@@ -1452,7 +1571,7 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
 
 #[cfg(feature = "production-coverage")]
 pub(crate) async fn run() {
-    admission_bounds_exact_work_by_cardinality_or_bytes();
+    admission_scans_exactly_within_the_filtered_vector_payload_budget();
     restricted_result_count_clamps_before_enforcing_the_payload_limit();
     candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit();
     oversized_result_count_rejects_before_index_metadata_io().await;
@@ -1468,6 +1587,8 @@ pub(crate) async fn run() {
     simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id().await;
     bridge_simhash_reads_stay_within_the_rank_window().await;
     cosine_beam_completes_while_only_distant_bridges_remain().await;
+    walk_converges_once_scoring_rounds_stop_improving_the_kth_result().await;
+    bridge_only_rounds_do_not_count_towards_convergence().await;
     explicit_filtered_budgets_record_the_exact_termination_reason().await;
     exact_and_filter_aware_paths_enforce_membership_and_recall_budgets().await;
     let (exact_db, exact_index) =
@@ -1812,7 +1933,7 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                     let mut bridge_frontier_pushes = 0_usize;
                     let mut scored_candidates = 0_usize;
                     let mut vector_payload_requests = 0_usize;
-                    let mut termination_counts = [0_usize; 6];
+                    let mut termination_counts = [0_usize; 7];
                     for query_index in 0..query_count {
                         let query_id = shape.query_id(query_index, query_count, candidate_count);
                         let query = vector_for(query_id, entity_count, dimension);
@@ -1920,6 +2041,10 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                                 Some(RestrictedSearchStrategy::FilteredGraph),
                                 Some(RestrictedSearchTermination::VectorBudget),
                             ) => 4,
+                            (
+                                Some(RestrictedSearchStrategy::FilteredGraph),
+                                Some(RestrictedSearchTermination::Converged),
+                            ) => 6,
                             _ => panic!("restricted search records a valid strategy termination"),
                         };
                         termination_counts[termination_index] =
@@ -1956,7 +2081,7 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                         );
                     }
                     eprintln!(
-                    "RESTRICTED_VECTOR_SCALE candidates={candidate_count} dimension={dimension} shape={} beam_multiplier={beam_multiplier} recall_at_10={recall:.6} filtered_p50_us={} filtered_p95_us={} filtered_p99_us={} exact_p95_us={} scored_candidates={scored_candidates} vector_payload_requests={vector_payload_requests} filtered_vector_bytes={filtered_vector_bytes} exact_vector_bytes={exact_vector_bytes} logical_rows={logical_rows} multi_get_calls={multi_get_calls} scan_calls={scan_calls} directory_rows={directory_rows} directory_hits={directory_hits} routing_rows={routing_rows} bridge_rows={bridge_rows} bridge_frontier_pushes={bridge_frontier_pushes} terminations_exhausted_beam_routing_bridge_vector_exact={termination_counts:?} cold_object_gets={cold_gets} cold_object_bytes={cold_bytes} warm_object_gets={warm_gets} warm_object_bytes={warm_bytes}",
+                    "RESTRICTED_VECTOR_SCALE candidates={candidate_count} dimension={dimension} shape={} beam_multiplier={beam_multiplier} recall_at_10={recall:.6} filtered_p50_us={} filtered_p95_us={} filtered_p99_us={} exact_p95_us={} scored_candidates={scored_candidates} vector_payload_requests={vector_payload_requests} filtered_vector_bytes={filtered_vector_bytes} exact_vector_bytes={exact_vector_bytes} logical_rows={logical_rows} multi_get_calls={multi_get_calls} scan_calls={scan_calls} directory_rows={directory_rows} directory_hits={directory_hits} routing_rows={routing_rows} bridge_rows={bridge_rows} bridge_frontier_pushes={bridge_frontier_pushes} terminations_exhausted_beam_routing_bridge_vector_exact_converged={termination_counts:?} cold_object_gets={cold_gets} cold_object_bytes={cold_bytes} warm_object_gets={warm_gets} warm_object_bytes={warm_bytes}",
                     shape.name(),
                     percentile(filtered_latencies.clone(), 50).as_micros(),
                     filtered_p95.as_micros(),
