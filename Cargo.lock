@@ -4570,6 +4570,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "rustix",
  "serde",
  "serde_json",
  "slatedb",

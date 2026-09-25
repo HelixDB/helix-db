@@ -113,7 +113,7 @@ impl ServerConfig {
     ///     db_path: "db/".to_string(),
     ///     storage: StorageConfig::Disk {
     ///         root: directory.path().join("data"),
-    ///         cache: CacheConfig::Hybrid(cache),
+    ///         cache: CacheConfig::Hybrid(Box::new(cache)),
     ///     },
     /// };
     /// assert!(matches!(
@@ -227,7 +227,7 @@ pub enum CacheConfig {
     /// Bounded in-memory SlateDB block/metadata and FTS split caches.
     Memory,
     /// Memory-plus-disk caches rooted in one local directory.
-    Hybrid(HybridCache),
+    Hybrid(Box<HybridCache>),
 }
 
 impl CacheConfig {
@@ -246,7 +246,8 @@ impl CacheConfig {
             .unwrap_or(DEFAULT_CACHE_MEMORY_BYTES);
         let disk_bytes = parse_cache_bytes(lookup, "HELIX_DISK_CACHE_BYTES")?
             .unwrap_or(DEFAULT_CACHE_DISK_BYTES);
-        HybridCache::try_new(root, memory_bytes, disk_bytes).map(Self::Hybrid)
+        HybridCache::try_new(root, memory_bytes, disk_bytes)
+            .map(|cache| Self::Hybrid(Box::new(cache)))
     }
 }
 

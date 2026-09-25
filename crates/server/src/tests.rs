@@ -430,7 +430,7 @@ async fn hybrid_disk_cache_serves_queries_and_keeps_cache_files_across_restart()
         db_path: "server-hybrid-cache".to_string(),
         storage: StorageConfig::Disk {
             root: data_root,
-            cache: CacheConfig::Hybrid(cache),
+            cache: CacheConfig::Hybrid(Box::new(cache)),
         },
     };
     let write = query::QueryRequest::write(
@@ -506,6 +506,34 @@ async fn hybrid_disk_cache_serves_queries_and_keeps_cache_files_across_restart()
     reopened.close().await.unwrap();
 
     run_with_shutdown(config, async {}).await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn open_file_limit_is_raised_to_the_hard_limit() {
+    use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+
+    let before = getrlimit(Resource::Nofile);
+    // Drop the soft limit one below a finite hard limit so the raise path runs
+    // without starving tests that share this process.
+    if let (Some(maximum), true) = (before.maximum, before.current == before.maximum) {
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(maximum - 1),
+                maximum: before.maximum,
+            },
+        )
+        .unwrap();
+    }
+
+    raise_open_file_limit();
+    let after = getrlimit(Resource::Nofile);
+    assert_eq!(after.current, after.maximum);
+    assert_eq!(after.maximum, before.maximum);
+
+    raise_open_file_limit();
+    assert_eq!(getrlimit(Resource::Nofile), after);
 }
 
 #[test]

@@ -21,6 +21,9 @@ tonic-prost = "0.14.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [build-dependencies]
 prost-build = "0.14"
 protoc-bin-vendored = "3.2"

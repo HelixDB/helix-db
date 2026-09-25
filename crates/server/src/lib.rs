@@ -47,7 +47,51 @@ pub fn init_tracing_from_env() {
 pub async fn run_from_env() -> ServerResult<()> {
     init_tracing_from_env();
     let config = ServerConfig::from_env()?;
+    #[cfg(unix)]
+    if matches!(
+        &config.storage,
+        StorageConfig::Disk {
+            cache: CacheConfig::Hybrid(_),
+            ..
+        } | StorageConfig::S3 {
+            cache: CacheConfig::Hybrid(_),
+            ..
+        }
+    ) {
+        raise_open_file_limit();
+    }
     run_with_shutdown(config, shutdown_signal()).await
+}
+
+/// Raises the soft open-file limit to the hard limit.
+///
+/// The hybrid cache's disk tier keeps one descriptor open per partition,
+/// about 25,000 at the default budget, while container runtimes commonly
+/// default the soft limit to 1024. Failure is logged rather than fatal: the
+/// cache open reports its own error if descriptors run out.
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    if limit.current == limit.maximum {
+        return;
+    }
+    let raised = rustix::process::Rlimit {
+        current: limit.maximum,
+        maximum: limit.maximum,
+    };
+    match rustix::process::setrlimit(rustix::process::Resource::Nofile, raised) {
+        Ok(()) => tracing::info!(
+            from = ?limit.current,
+            to = ?limit.maximum,
+            "raised the open-file limit for the disk cache"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            soft = ?limit.current,
+            hard = ?limit.maximum,
+            "could not raise the open-file limit for the disk cache"
+        ),
+    }
 }
 
 async fn shutdown_signal() {

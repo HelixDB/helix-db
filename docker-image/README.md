@@ -98,7 +98,9 @@ docker run --rm -p 8080:8080 \
 A named volume (`--mount type=volume,source=helixdb-cache,target=/var/cache/helix`)
 needs no `chown`. The cache survives restarts, so a restarted server reads recently
 used data from local disk instead of the object store. Use one cache directory per
-running server.
+running server. The block cache keeps each of its cache files open, about 25,000 at
+the default budget, so the server raises its soft open-file limit to the hard limit;
+if the hard limit is low, add `--ulimit nofile=65536:65536`.
 
 | Variable | Purpose |
 | --- | --- |
