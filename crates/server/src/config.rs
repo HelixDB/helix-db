@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::net::{AddrParseError, SocketAddr};
 use std::num::{NonZeroUsize, ParseIntError};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,12 @@ const DEFAULT_CACHE_DISK_BYTES: NonZeroUsize =
 /// Smallest disk budget that still leaves every tier several 4 MiB
 /// object-store cache parts.
 const MIN_CACHE_DISK_BYTES: usize = 64 * 1024 * 1024;
+/// Largest disk budget (1 TiB). Its 3/8 block-cache share keeps the block
+/// cache within 32Ki partition files, each held open while the server runs.
+const MAX_CACHE_DISK_BYTES: usize = 1024 * 1024 * 1024 * 1024;
+/// Open files the server needs besides the two disk-cache tiers: listeners,
+/// connections, WAL and SST reads, and full-text split files.
+const OPEN_FILE_HEADROOM: u64 = 1024;
 
 /// Runtime configuration for the standalone server.
 #[derive(Debug, Clone)]
@@ -36,24 +43,25 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// Load server configuration from environment variables.
+    ///
+    /// Paths may be any bytes; every other variable must be UTF-8.
     pub fn from_env() -> Result<Self, ServerConfigError> {
-        Self::from_lookup(|name| env::var(name).ok())
+        Self::from_lookup(|name| env::var_os(name))
     }
 
     fn from_lookup(
-        mut lookup: impl FnMut(&str) -> Option<String>,
+        mut lookup: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ServerConfigError> {
         let http_addr = parse_addr(
-            lookup("HELIX_HTTP_ADDR")
-                .or_else(|| lookup("HTTP_ADDR"))
-                .unwrap_or_else(|| "0.0.0.0:8080".to_string()),
+            text(&mut lookup, &["HELIX_HTTP_ADDR", "HTTP_ADDR"])?
+                .unwrap_or(("HELIX_HTTP_ADDR", "0.0.0.0:8080".to_string())),
         )?;
         let grpc_addr = parse_addr(
-            lookup("HELIX_GRPC_ADDR")
-                .or_else(|| lookup("GRPC_ADDR"))
-                .unwrap_or_else(|| "0.0.0.0:8081".to_string()),
+            text(&mut lookup, &["HELIX_GRPC_ADDR", "GRPC_ADDR"])?
+                .unwrap_or(("HELIX_GRPC_ADDR", "0.0.0.0:8081".to_string())),
         )?;
-        let db_path = lookup("DB_PATH").unwrap_or_else(|| "db/".to_string());
+        let db_path =
+            text(&mut lookup, &["DB_PATH"])?.map_or_else(|| "db/".to_string(), |(_, path)| path);
         let storage = StorageConfig::from_lookup(&mut lookup)?;
 
         Ok(Self {
@@ -142,6 +150,44 @@ impl ServerConfig {
             } => cache.db_config(),
         }
     }
+
+    /// Open files the server must be allowed before opening storage, or
+    /// `None` when only memory caches run and the process limit is left alone.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use server::{ServerConfig, StorageConfig};
+    ///
+    /// let config = ServerConfig {
+    ///     http_addr: "127.0.0.1:0".parse().unwrap(),
+    ///     grpc_addr: "127.0.0.1:0".parse().unwrap(),
+    ///     db_path: "db/".to_string(),
+    ///     storage: StorageConfig::Memory,
+    /// };
+    /// assert_eq!(config.required_open_files(), None);
+    /// ```
+    pub fn required_open_files(&self) -> Option<u64> {
+        match &self.storage {
+            StorageConfig::Memory
+            | StorageConfig::Disk {
+                cache: CacheConfig::Memory,
+                ..
+            }
+            | StorageConfig::S3 {
+                cache: CacheConfig::Memory,
+                ..
+            } => None,
+            StorageConfig::Disk {
+                cache: CacheConfig::Hybrid(cache),
+                ..
+            }
+            | StorageConfig::S3 {
+                cache: CacheConfig::Hybrid(cache),
+                ..
+            } => Some(cache.required_open_files()),
+        }
+    }
 }
 
 /// Supported storage backends.
@@ -176,22 +222,16 @@ pub enum StorageConfig {
 
 impl StorageConfig {
     fn from_lookup(
-        lookup: &mut impl FnMut(&str) -> Option<String>,
+        lookup: &mut impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ServerConfigError> {
-        let data_dir = lookup("HELIX_DATA_DIR");
-        let bucket = lookup("S3_BUCKET");
-        if data_dir.is_some() && bucket.is_some() {
-            return Err(ServerConfigError::ConflictingStorageConfiguration);
-        }
-        if let Some(root) = data_dir {
-            return Ok(Self::Disk {
+        match (lookup("HELIX_DATA_DIR"), text(lookup, &["S3_BUCKET"])?) {
+            (Some(_), Some(_)) => Err(ServerConfigError::ConflictingStorageConfiguration),
+            (Some(root), None) => Ok(Self::Disk {
                 root: PathBuf::from(root),
                 cache: CacheConfig::from_lookup(lookup)?,
-            });
-        }
-        let Some(bucket) = bucket else {
+            }),
             // Reject before any cache directory is created.
-            return [
+            (None, None) => [
                 "HELIX_DISK_CACHE_DIR",
                 "HELIX_DISK_CACHE_MEMORY_BYTES",
                 "HELIX_DISK_CACHE_BYTES",
@@ -200,24 +240,18 @@ impl StorageConfig {
             .find(|&variable| lookup(variable).is_some())
             .map_or(Ok(Self::Memory), |variable| {
                 Err(ServerConfigError::CacheWithMemoryStorage { variable })
-            });
-        };
-        let region = lookup("S3_REGION")
-            .or_else(|| lookup("AWS_REGION"))
-            .or_else(|| lookup("AWS_DEFAULT_REGION"))
-            .unwrap_or_else(|| "us-east-1".to_string());
-        let endpoint = lookup("AWS_ENDPOINT").or_else(|| lookup("AWS_ENDPOINT_URL_S3"));
-        let allow_http = lookup("AWS_ALLOW_HTTP")
-            .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
-            .unwrap_or(false);
-
-        Ok(Self::S3 {
-            bucket,
-            region,
-            endpoint,
-            allow_http,
-            cache: CacheConfig::from_lookup(lookup)?,
-        })
+            }),
+            (None, Some((_, bucket))) => Ok(Self::S3 {
+                bucket,
+                region: text(lookup, &["S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"])?
+                    .map_or_else(|| "us-east-1".to_string(), |(_, region)| region),
+                endpoint: text(lookup, &["AWS_ENDPOINT", "AWS_ENDPOINT_URL_S3"])?
+                    .map(|(_, endpoint)| endpoint),
+                allow_http: text(lookup, &["AWS_ALLOW_HTTP"])?
+                    .is_some_and(|(_, value)| value.eq_ignore_ascii_case("true") || value == "1"),
+                cache: CacheConfig::from_lookup(lookup)?,
+            }),
+        }
     }
 }
 
@@ -232,7 +266,7 @@ pub enum CacheConfig {
 
 impl CacheConfig {
     fn from_lookup(
-        lookup: &mut impl FnMut(&str) -> Option<String>,
+        lookup: &mut impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ServerConfigError> {
         let Some(root) = lookup("HELIX_DISK_CACHE_DIR") else {
             return ["HELIX_DISK_CACHE_MEMORY_BYTES", "HELIX_DISK_CACHE_BYTES"]
@@ -246,7 +280,7 @@ impl CacheConfig {
             .unwrap_or(DEFAULT_CACHE_MEMORY_BYTES);
         let disk_bytes = parse_cache_bytes(lookup, "HELIX_DISK_CACHE_BYTES")?
             .unwrap_or(DEFAULT_CACHE_DISK_BYTES);
-        HybridCache::try_new(root, memory_bytes, disk_bytes)
+        HybridCache::try_new(PathBuf::from(root), memory_bytes, disk_bytes)
             .map(|cache| Self::Hybrid(Box::new(cache)))
     }
 }
@@ -267,15 +301,18 @@ impl CacheConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HybridCache {
     root: PathBuf,
-    mode: db::config::CacheMode,
+    slate_db: db::config::SlateHybridCacheConfig,
+    object_store: db::config::SlateObjectStoreCacheSettings,
+    fts: db::config::FtsHybridCacheConfig,
 }
 
 impl HybridCache {
-    /// Validate the cache budgets and prove `root` is a writable directory.
+    /// Validate the cache budgets and prove every tier directory is writable.
     ///
-    /// `root` is created when missing. `memory_bytes` bounds the SlateDB
-    /// block/metadata cache's memory tier; `disk_bytes` is split across the
-    /// disk tiers and must be at least 64 MiB.
+    /// `root` and its tier subdirectories are created when missing.
+    /// `memory_bytes` bounds the SlateDB block/metadata cache's memory tier;
+    /// `disk_bytes` is split across the disk tiers and must be within
+    /// 64 MiB..=1 TiB.
     ///
     /// # Examples
     ///
@@ -291,10 +328,10 @@ impl HybridCache {
     ///     HybridCache::try_new(&root, memory, NonZeroUsize::new(1024 * 1024 * 1024).unwrap())
     ///         .unwrap();
     /// assert_eq!(cache.root(), root);
-    /// assert!(root.is_dir());
+    /// assert!(root.join("slate").is_dir());
     ///
     /// let too_small = HybridCache::try_new(&root, memory, NonZeroUsize::new(1024).unwrap());
-    /// assert!(matches!(too_small, Err(ServerConfigError::CacheDiskTooSmall { .. })));
+    /// assert!(matches!(too_small, Err(ServerConfigError::CacheDiskOutOfRange { .. })));
     /// ```
     pub fn try_new(
         root: impl Into<PathBuf>,
@@ -305,10 +342,11 @@ impl HybridCache {
         if root.as_os_str().is_empty() {
             return Err(ServerConfigError::EmptyCacheDirectory);
         }
-        if disk_bytes.get() < MIN_CACHE_DISK_BYTES {
-            return Err(ServerConfigError::CacheDiskTooSmall {
+        if !(MIN_CACHE_DISK_BYTES..=MAX_CACHE_DISK_BYTES).contains(&disk_bytes.get()) {
+            return Err(ServerConfigError::CacheDiskOutOfRange {
                 bytes: disk_bytes.get(),
                 minimum: MIN_CACHE_DISK_BYTES,
+                maximum: MAX_CACHE_DISK_BYTES,
             });
         }
         let object_store_bytes = disk_bytes.get() / 2;
@@ -316,7 +354,7 @@ impl HybridCache {
         let fts_disk_bytes = disk_bytes.get() - object_store_bytes - slate_disk_bytes;
         let object_store_defaults = slatedb::config::ObjectStoreCacheOptions::default();
         let fts_defaults = db::config::FtsMemoryCacheConfig::default();
-        let mode = db::config::CacheMode::Hybrid {
+        let cache = Self {
             slate_db: db::config::SlateHybridCacheConfig::try_new(
                 memory_bytes.get(),
                 root.join("slate"),
@@ -331,24 +369,33 @@ impl HybridCache {
                 object_store_defaults.scan_interval,
                 object_store_defaults.max_open_file_handles,
             )?,
-            slate_warm: db::config::SlateWarmConfig::default(),
-            fts: Some(db::config::FtsHybridCacheConfig::try_new(
+            fts: db::config::FtsHybridCacheConfig::try_new(
                 fts_defaults.memory_bytes(),
                 root.join("fts"),
                 fts_disk_bytes,
                 fts_defaults.warm().clone(),
                 fts_defaults.generation_grace_period().as_secs(),
-            )?),
+            )?,
+            root,
         };
-        let probe = root.join(".helix-cache-write-check");
-        std::fs::create_dir_all(&root)
-            .and_then(|()| std::fs::write(&probe, b""))
-            .and_then(|()| std::fs::remove_file(&probe))
-            .map_err(|source| ServerConfigError::CacheDirectory {
-                path: root.clone(),
-                source,
-            })?;
-        Ok(Self { root, mode })
+        [
+            cache.root.as_path(),
+            cache.slate_db.disk().root(),
+            cache.object_store.root(),
+            cache.fts.disk().root(),
+        ]
+        .into_iter()
+        .try_for_each(|directory| {
+            let probe = directory.join(".helix-cache-write-check");
+            std::fs::create_dir_all(directory)
+                .and_then(|()| std::fs::write(&probe, b""))
+                .and_then(|()| std::fs::remove_file(&probe))
+                .map_err(|source| ServerConfigError::CacheDirectory {
+                    path: directory.to_path_buf(),
+                    source,
+                })
+        })?;
+        Ok(cache)
     }
 
     /// Cache root directory.
@@ -356,26 +403,62 @@ impl HybridCache {
         &self.root
     }
 
+    /// Open files a server with this cache needs: one per block-cache
+    /// partition (at most 32Ki), the object-store tier's handle cache, and
+    /// headroom for everything else.
+    pub fn required_open_files(&self) -> u64 {
+        (self.slate_db.disk_partitions() + self.object_store.max_open_file_handles()) as u64
+            + OPEN_FILE_HEADROOM
+    }
+
     /// Build the DB runtime config with these caches and every other default.
     pub fn db_config(&self) -> db::DbConfig {
         let config = db::DbConfig::new();
-        let cache = config.cache().clone().with_mode(self.mode.clone());
+        let cache = config
+            .cache()
+            .clone()
+            .with_mode(db::config::CacheMode::Hybrid {
+                slate_db: self.slate_db.clone(),
+                object_store: self.object_store.clone(),
+                slate_warm: db::config::SlateWarmConfig::default(),
+                fts: Some(self.fts.clone()),
+            });
         config.with_cache(cache)
     }
 }
 
-fn parse_addr(value: String) -> Result<SocketAddr, ServerConfigError> {
-    value
-        .parse()
-        .map_err(|source| ServerConfigError::Addr { value, source })
+/// Reads the first set variable among `variables`, which must be UTF-8.
+fn text(
+    lookup: &mut impl FnMut(&str) -> Option<OsString>,
+    variables: &[&'static str],
+) -> Result<Option<(&'static str, String)>, ServerConfigError> {
+    variables
+        .iter()
+        .find_map(|&variable| {
+            lookup(variable).map(|value| {
+                value
+                    .into_string()
+                    .map(|value| (variable, value))
+                    .map_err(|_| ServerConfigError::NotUnicode { variable })
+            })
+        })
+        .transpose()
+}
+
+fn parse_addr((variable, value): (&'static str, String)) -> Result<SocketAddr, ServerConfigError> {
+    value.parse().map_err(|source| ServerConfigError::Addr {
+        variable,
+        value,
+        source,
+    })
 }
 
 fn parse_cache_bytes(
-    lookup: &mut impl FnMut(&str) -> Option<String>,
+    lookup: &mut impl FnMut(&str) -> Option<OsString>,
     variable: &'static str,
 ) -> Result<Option<NonZeroUsize>, ServerConfigError> {
-    lookup(variable)
-        .map(|value| {
+    text(lookup, &[variable])?
+        .map(|(_, value)| {
             value
                 .parse()
                 .map_err(|source| ServerConfigError::CacheBytes {
@@ -387,16 +470,24 @@ fn parse_cache_bytes(
         .transpose()
 }
 
-/// Server configuration errors.
+/// Server configuration errors. Every message names the variable to fix.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerConfigError {
     /// Listener address could not be parsed.
-    #[error("invalid listener address `{value}`: {source}")]
+    #[error("invalid {variable} `{value}`: {source}")]
     Addr {
+        /// Address variable.
+        variable: &'static str,
         /// Raw address value.
         value: String,
         /// Parse error.
         source: AddrParseError,
+    },
+    /// A variable that must be text was not valid UTF-8.
+    #[error("{variable} is not valid UTF-8")]
+    NotUnicode {
+        /// Variable found.
+        variable: &'static str,
     },
     /// Two mutually exclusive storage backends were configured.
     #[error("HELIX_DATA_DIR and S3_BUCKET cannot be set together")]
@@ -425,28 +516,54 @@ pub enum ServerConfigError {
         /// Parse error.
         source: ParseIntError,
     },
-    /// The disk budget cannot give every tier a usable share.
-    #[error("HELIX_DISK_CACHE_BYTES must be at least {minimum} bytes, got {bytes}")]
-    CacheDiskTooSmall {
+    /// The disk budget is too small to give every tier a usable share, or so
+    /// large the block cache would need an unbounded number of open files.
+    #[error("HELIX_DISK_CACHE_BYTES must be between {minimum} and {maximum} bytes, got {bytes}")]
+    CacheDiskOutOfRange {
         /// Requested disk budget.
         bytes: usize,
         /// Smallest accepted disk budget.
         minimum: usize,
+        /// Largest accepted disk budget.
+        maximum: usize,
     },
     /// The cache directory was empty.
     #[error("HELIX_DISK_CACHE_DIR must not be empty")]
     EmptyCacheDirectory,
-    /// The cache directory could not be created or written.
-    #[error("HELIX_DISK_CACHE_DIR `{}` is not a writable directory: {source}", .path.display())]
+    /// The cache directory or one of its tier subdirectories could not be
+    /// created or written.
+    #[error("HELIX_DISK_CACHE_DIR: `{}` is not a writable directory: {source}", .path.display())]
     CacheDirectory {
-        /// Cache directory.
+        /// Unwritable directory.
         path: PathBuf,
         /// Filesystem error.
         source: std::io::Error,
     },
     /// The DB crate rejected a derived cache tier.
-    #[error("invalid cache configuration: {0}")]
+    #[error(
+        "invalid HELIX_DISK_CACHE_DIR, HELIX_DISK_CACHE_BYTES or HELIX_DISK_CACHE_MEMORY_BYTES: {0}"
+    )]
     Cache(#[from] db::config::ConfigError),
+    /// The hard open-file limit is below what the disk cache needs.
+    #[error(
+        "HELIX_DISK_CACHE_BYTES needs {required} open files but the hard open-file limit is {limit}; lower HELIX_DISK_CACHE_BYTES or raise the limit (docker run --ulimit nofile={required}:{required})"
+    )]
+    OpenFileLimit {
+        /// Open files the cache needs.
+        required: u64,
+        /// Hard open-file limit.
+        limit: u64,
+    },
+    /// Raising the soft open-file limit failed.
+    #[error(
+        "could not raise the open-file limit to the {required} files HELIX_DISK_CACHE_BYTES needs: {source}"
+    )]
+    RaiseOpenFileLimit {
+        /// Open files the cache needs.
+        required: u64,
+        /// Operating-system error.
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
@@ -471,6 +588,7 @@ mod tests {
         assert_eq!(config.db_path, "db/");
         assert_eq!(config.storage, StorageConfig::Memory);
         assert_eq!(config.db_config().cache(), db::DbConfig::new().cache());
+        assert_eq!(config.required_open_files(), None);
     }
 
     #[test]
@@ -482,8 +600,7 @@ mod tests {
             ("DB_PATH", "tenant/db"),
         ]);
         let config =
-            ServerConfig::from_lookup(|name| values.get(name).map(|value| (*value).to_string()))
-                .unwrap();
+            ServerConfig::from_lookup(|name| values.get(name).map(OsString::from)).unwrap();
         assert_eq!(
             config.http_addr,
             "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
@@ -494,13 +611,20 @@ mod tests {
         );
         assert_eq!(config.db_path, "tenant/db");
 
-        let error = ServerConfig::from_lookup(|name| {
-            (name == "HELIX_HTTP_ADDR").then(|| "not-an-address".to_string())
-        })
-        .unwrap_err();
-        assert!(
-            matches!(error, ServerConfigError::Addr { value, .. } if value == "not-an-address")
-        );
+        for variable in ["HELIX_HTTP_ADDR", "HTTP_ADDR", "GRPC_ADDR"] {
+            let error = ServerConfig::from_lookup(|name| {
+                (name == variable).then(|| OsString::from("not-an-address"))
+            })
+            .unwrap_err();
+            assert!(matches!(
+                &error,
+                ServerConfigError::Addr { variable: found, value, .. }
+                    if *found == variable && value == "not-an-address"
+            ));
+            assert!(error
+                .to_string()
+                .starts_with(&format!("invalid {variable}")));
+        }
     }
 
     #[test]
@@ -513,8 +637,7 @@ mod tests {
             ("AWS_ALLOW_HTTP", "TRUE"),
         ]);
         let config =
-            ServerConfig::from_lookup(|name| values.get(name).map(|value| (*value).to_string()))
-                .unwrap();
+            ServerConfig::from_lookup(|name| values.get(name).map(OsString::from)).unwrap();
         assert_eq!(
             config.storage,
             StorageConfig::S3 {
@@ -526,9 +649,10 @@ mod tests {
             }
         );
         assert_eq!(config.db_config().cache(), db::DbConfig::new().cache());
+        assert_eq!(config.required_open_files(), None);
 
         let default_region = ServerConfig::from_lookup(|name| {
-            (name == "S3_BUCKET").then(|| "launch-bucket".to_string())
+            (name == "S3_BUCKET").then(|| OsString::from("launch-bucket"))
         })
         .unwrap();
         assert!(matches!(
@@ -549,8 +673,7 @@ mod tests {
             ("DB_PATH", "tenant/db"),
         ]);
         let config =
-            ServerConfig::from_lookup(|name| values.get(name).map(|value| (*value).to_string()))
-                .unwrap();
+            ServerConfig::from_lookup(|name| values.get(name).map(OsString::from)).unwrap();
         assert_eq!(
             config.storage,
             StorageConfig::Disk {
@@ -564,13 +687,14 @@ mod tests {
                 if root == *"/var/lib/helix" && database == "tenant/db"
         ));
         assert_eq!(config.db_config().cache(), db::DbConfig::new().cache());
+        assert_eq!(config.required_open_files(), None);
     }
 
     #[test]
     fn data_directory_and_s3_bucket_are_rejected_together() {
         let error = ServerConfig::from_lookup(|name| match name {
-            "HELIX_DATA_DIR" => Some("/var/lib/helix".to_string()),
-            "S3_BUCKET" => Some("bucket".to_string()),
+            "HELIX_DATA_DIR" => Some("/var/lib/helix".into()),
+            "S3_BUCKET" => Some("bucket".into()),
             _ => None,
         })
         .unwrap_err();
@@ -585,8 +709,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("nested").join("cache");
         let values = BTreeMap::from([
-            ("S3_BUCKET", "bucket".to_string()),
-            ("HELIX_DISK_CACHE_DIR", root.display().to_string()),
+            ("S3_BUCKET", OsString::from("bucket")),
+            ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
         ]);
         let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
 
@@ -598,12 +722,23 @@ mod tests {
             panic!("S3 storage with a cache directory selects the hybrid cache");
         };
         assert_eq!(cache.root(), root);
-        assert!(root.is_dir(), "startup creates the cache directory");
-        assert_eq!(
-            std::fs::read_dir(&root).unwrap().count(),
-            0,
-            "the write probe is removed"
-        );
+        let mut tiers = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                assert!(path.is_dir(), "{} is a tier directory", path.display());
+                assert_eq!(
+                    std::fs::read_dir(&path).unwrap().count(),
+                    0,
+                    "the write probe is removed from {}",
+                    path.display()
+                );
+                path.file_name().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+        tiers.sort();
+        assert_eq!(tiers, ["fts", "object-store", "slate"]);
+
         let db::config::CacheMode::Hybrid {
             slate_db,
             object_store,
@@ -616,6 +751,7 @@ mod tests {
         assert_eq!(slate_db.memory_bytes(), 640 * MIB);
         assert_eq!(slate_db.disk().root(), root.join("slate"));
         assert_eq!(slate_db.disk().bytes(), 12 * 1024 * MIB);
+        assert_eq!(slate_db.disk_partitions(), 24_576);
         assert_eq!(object_store.root(), root.join("object-store"));
         assert_eq!(object_store.warm(), db::config::ObjectStoreWarmLevel::Off);
         let options = object_store.to_slate_options();
@@ -626,6 +762,7 @@ mod tests {
             "the object-store tier keeps SlateDB's default capacity"
         );
         assert_eq!(options.part_size_bytes, 4 * MIB);
+        assert_eq!(options.max_open_file_handles, 1000);
         assert!(options.cache_puts);
         assert_eq!(slate_warm, db::config::SlateWarmConfig::default());
         assert_eq!(fts.disk_root(), root.join("fts"));
@@ -638,6 +775,7 @@ mod tests {
             config.db_config().cache().vector_memory(),
             db::DbConfig::new().cache().vector_memory()
         );
+        assert_eq!(config.required_open_files(), Some(24_576 + 1000 + 1024));
     }
 
     #[test]
@@ -647,14 +785,17 @@ mod tests {
         let values = BTreeMap::from([
             (
                 "HELIX_DATA_DIR",
-                directory.path().join("data").display().to_string(),
+                directory.path().join("data").into_os_string(),
             ),
             (
                 "HELIX_DISK_CACHE_DIR",
-                directory.path().join("cache").display().to_string(),
+                directory.path().join("cache").into_os_string(),
             ),
-            ("HELIX_DISK_CACHE_MEMORY_BYTES", (128 * MIB).to_string()),
-            ("HELIX_DISK_CACHE_BYTES", disk_bytes.to_string()),
+            (
+                "HELIX_DISK_CACHE_MEMORY_BYTES",
+                (128 * MIB).to_string().into(),
+            ),
+            ("HELIX_DISK_CACHE_BYTES", disk_bytes.to_string().into()),
         ]);
         let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
         assert!(matches!(
@@ -685,16 +826,31 @@ mod tests {
             disk_bytes,
             "the remainder goes to the FTS tier"
         );
+        assert_eq!(
+            config.required_open_files(),
+            Some(slate_db.disk_partitions() as u64 + 1000 + 1024)
+        );
 
-        let minimum = BTreeMap::from([
-            ("S3_BUCKET", "bucket".to_string()),
-            (
-                "HELIX_DISK_CACHE_DIR",
-                directory.path().join("minimum").display().to_string(),
-            ),
-            ("HELIX_DISK_CACHE_BYTES", MIN_CACHE_DISK_BYTES.to_string()),
-        ]);
-        assert!(ServerConfig::from_lookup(|name| minimum.get(name).cloned()).is_ok());
+        for (label, bytes) in [
+            ("minimum", MIN_CACHE_DISK_BYTES),
+            ("maximum", MAX_CACHE_DISK_BYTES),
+        ] {
+            let values = BTreeMap::from([
+                ("S3_BUCKET", OsString::from("bucket")),
+                (
+                    "HELIX_DISK_CACHE_DIR",
+                    directory.path().join(label).into_os_string(),
+                ),
+                ("HELIX_DISK_CACHE_BYTES", bytes.to_string().into()),
+            ]);
+            let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+            assert!(
+                config
+                    .required_open_files()
+                    .is_some_and(|files| files <= 32_768 + 1000 + 1024),
+                "the block cache stays within 32Ki partitions at the {label} budget"
+            );
+        }
     }
 
     #[test]
@@ -709,12 +865,9 @@ mod tests {
             ("HELIX_DISK_CACHE_BYTES", "99999999999999999999999"),
         ] {
             let values = BTreeMap::from([
-                ("S3_BUCKET", "bucket".to_string()),
-                (
-                    "HELIX_DISK_CACHE_DIR",
-                    directory.path().display().to_string(),
-                ),
-                (variable, value.to_string()),
+                ("S3_BUCKET", OsString::from("bucket")),
+                ("HELIX_DISK_CACHE_DIR", directory.path().into()),
+                (variable, value.into()),
             ]);
             let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
             assert!(
@@ -730,43 +883,41 @@ mod tests {
                 .starts_with(&format!("invalid {variable}")));
         }
 
-        let values = BTreeMap::from([
-            ("S3_BUCKET", "bucket".to_string()),
-            (
-                "HELIX_DISK_CACHE_DIR",
-                directory.path().display().to_string(),
-            ),
-            (
-                "HELIX_DISK_CACHE_BYTES",
-                (MIN_CACHE_DISK_BYTES - 1).to_string(),
-            ),
-        ]);
-        let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
-        assert!(matches!(
-            error,
-            ServerConfigError::CacheDiskTooSmall { bytes, minimum }
-                if bytes == MIN_CACHE_DISK_BYTES - 1 && minimum == MIN_CACHE_DISK_BYTES
-        ));
+        for bytes in [MIN_CACHE_DISK_BYTES - 1, MAX_CACHE_DISK_BYTES + 1] {
+            let values = BTreeMap::from([
+                ("S3_BUCKET", OsString::from("bucket")),
+                ("HELIX_DISK_CACHE_DIR", directory.path().into()),
+                ("HELIX_DISK_CACHE_BYTES", bytes.to_string().into()),
+            ]);
+            let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
+            assert!(matches!(
+                error,
+                ServerConfigError::CacheDiskOutOfRange { bytes: found, minimum, maximum }
+                    if found == bytes
+                        && minimum == MIN_CACHE_DISK_BYTES
+                        && maximum == MAX_CACHE_DISK_BYTES
+            ));
+            assert!(error.to_string().starts_with("HELIX_DISK_CACHE_BYTES"));
+        }
     }
 
     #[test]
-    fn empty_or_unwritable_cache_directory_fails_startup() {
+    fn empty_or_uncreatable_cache_directory_fails_startup() {
         let empty = BTreeMap::from([
-            ("S3_BUCKET", "bucket".to_string()),
-            ("HELIX_DISK_CACHE_DIR", String::new()),
+            ("S3_BUCKET", OsString::from("bucket")),
+            ("HELIX_DISK_CACHE_DIR", OsString::new()),
         ]);
-        assert!(matches!(
-            ServerConfig::from_lookup(|name| empty.get(name).cloned()).unwrap_err(),
-            ServerConfigError::EmptyCacheDirectory
-        ));
+        let error = ServerConfig::from_lookup(|name| empty.get(name).cloned()).unwrap_err();
+        assert!(matches!(error, ServerConfigError::EmptyCacheDirectory));
+        assert!(error.to_string().starts_with("HELIX_DISK_CACHE_DIR"));
 
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("not-a-directory");
         std::fs::write(&file, b"occupied").unwrap();
         for root in [file.clone(), file.join("cache")] {
             let values = BTreeMap::from([
-                ("HELIX_DATA_DIR", directory.path().display().to_string()),
-                ("HELIX_DISK_CACHE_DIR", root.display().to_string()),
+                ("HELIX_DATA_DIR", directory.path().as_os_str().to_owned()),
+                ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
             ]);
             let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
             assert!(
@@ -774,7 +925,44 @@ mod tests {
                 "{} produced {error:?}",
                 root.display()
             );
-            assert!(error.to_string().contains("is not a writable directory"));
+            assert!(error.to_string().starts_with("HELIX_DISK_CACHE_DIR"));
+        }
+    }
+
+    /// Covers the write probe itself: the directories exist, so creating
+    /// them succeeds and only the write fails. Root bypasses permissions.
+    #[cfg(unix)]
+    #[test]
+    fn read_only_cache_or_tier_directory_fails_the_write_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        for read_only in ["", "slate", "object-store", "fts"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("cache");
+            let target = root.join(read_only);
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let values = BTreeMap::from([
+                ("S3_BUCKET", OsString::from("bucket")),
+                ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+            ]);
+
+            let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ServerConfigError::CacheDirectory { path, source }
+                        if *path == target
+                            && source.kind() == std::io::ErrorKind::PermissionDenied
+                ),
+                "{} produced {error:?}",
+                target.display()
+            );
+            assert!(error.to_string().starts_with("HELIX_DISK_CACHE_DIR"));
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 
@@ -782,8 +970,8 @@ mod tests {
     fn cache_sizes_without_a_cache_directory_are_rejected() {
         for variable in ["HELIX_DISK_CACHE_MEMORY_BYTES", "HELIX_DISK_CACHE_BYTES"] {
             let values = BTreeMap::from([
-                ("S3_BUCKET", "bucket".to_string()),
-                (variable, (128 * MIB).to_string()),
+                ("S3_BUCKET", OsString::from("bucket")),
+                (variable, (128 * MIB).to_string().into()),
             ]);
             let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
             assert!(matches!(
@@ -803,9 +991,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("cache");
         for (variable, value) in [
-            ("HELIX_DISK_CACHE_DIR", root.display().to_string()),
-            ("HELIX_DISK_CACHE_MEMORY_BYTES", (128 * MIB).to_string()),
-            ("HELIX_DISK_CACHE_BYTES", "not-a-number".to_string()),
+            ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+            (
+                "HELIX_DISK_CACHE_MEMORY_BYTES",
+                (128 * MIB).to_string().into(),
+            ),
+            ("HELIX_DISK_CACHE_BYTES", "not-a-number".into()),
         ] {
             let values = BTreeMap::from([(variable, value)]);
             let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
@@ -813,11 +1004,72 @@ mod tests {
                 error,
                 ServerConfigError::CacheWithMemoryStorage { variable: found } if found == variable
             ));
-            assert!(error.to_string().contains("in-memory storage"));
+            assert!(error.to_string().starts_with(variable));
         }
         assert!(
             !root.exists(),
             "memory storage never creates a cache directory"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_values_are_rejected_by_name_or_kept_as_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let latin1 = || OsString::from_vec(b"caf\xe9".to_vec());
+        for (storage, variable) in [
+            ("HELIX_DATA_DIR", "HELIX_DISK_CACHE_BYTES"),
+            ("HELIX_DATA_DIR", "HELIX_DISK_CACHE_MEMORY_BYTES"),
+            ("S3_BUCKET", "S3_BUCKET"),
+            ("S3_BUCKET", "S3_REGION"),
+            ("S3_BUCKET", "AWS_ALLOW_HTTP"),
+            ("DB_PATH", "HELIX_HTTP_ADDR"),
+        ] {
+            let values = BTreeMap::from([
+                (storage, OsString::from("value")),
+                (
+                    "HELIX_DISK_CACHE_DIR",
+                    std::env::temp_dir().into_os_string(),
+                ),
+                (variable, latin1()),
+            ]);
+            let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
+            assert!(
+                matches!(error, ServerConfigError::NotUnicode { variable: found } if found == variable),
+                "{variable} produced {error:?}"
+            );
+            assert_eq!(error.to_string(), format!("{variable} is not valid UTF-8"));
+        }
+
+        let memory = BTreeMap::from([("HELIX_DISK_CACHE_DIR", latin1())]);
+        assert!(matches!(
+            ServerConfig::from_lookup(|name| memory.get(name).cloned()).unwrap_err(),
+            ServerConfigError::CacheWithMemoryStorage {
+                variable: "HELIX_DISK_CACHE_DIR"
+            }
+        ));
+    }
+
+    /// Linux filesystems accept any path bytes; macOS APFS requires UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_cache_directory_is_used_verbatim() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut root = directory.path().as_os_str().to_owned().into_vec();
+        root.extend_from_slice(b"/caf\xe9");
+        let root = PathBuf::from(OsString::from_vec(root));
+        let values = BTreeMap::from([
+            ("S3_BUCKET", OsString::from("bucket")),
+            ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+        ]);
+        let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+        assert!(matches!(
+            &config.storage,
+            StorageConfig::S3 { cache: CacheConfig::Hybrid(cache), .. } if cache.root() == root
+        ));
+        assert!(root.join("slate").is_dir());
     }
 }

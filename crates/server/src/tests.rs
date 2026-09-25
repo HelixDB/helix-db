@@ -1,6 +1,7 @@
+use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::body::{to_bytes, Body};
@@ -402,22 +403,38 @@ async fn post_query(router: axum::Router, request: &query::QueryRequest) -> serd
     .unwrap()
 }
 
-/// Counts regular files below `path`, recursing through subdirectories.
-fn file_count(path: &Path) -> usize {
+/// Serializes tests that read or change the process-wide open-file limit.
+#[cfg(unix)]
+static OPEN_FILE_LIMIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Regular files below `path` and their sizes, recursing through subdirectories.
+fn files_below(path: &Path) -> BTreeMap<PathBuf, u64> {
     std::fs::read_dir(path)
         .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .map(|path| if path.is_dir() { file_count(&path) } else { 1 })
-        .sum()
+        .flat_map(|entry| {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                files_below(&path)
+            } else {
+                BTreeMap::from([(path, entry.metadata().unwrap().len())])
+            }
+        })
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn hybrid_disk_cache_serves_queries_and_keeps_cache_files_across_restart() {
+async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
     const MIB: usize = 1024 * 1024;
+    #[cfg(unix)]
+    let _limit = OPEN_FILE_LIMIT.lock().await;
+    #[cfg(unix)]
+    let original_limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     let directory = tempfile::tempdir().unwrap();
     let data_root = directory.path().join("data");
     std::fs::create_dir_all(&data_root).unwrap();
     let cache_root = directory.path().join("cache");
+    // The minimum budget keeps the block cache at 384 partition files.
     let cache = HybridCache::try_new(
         &cache_root,
         NonZeroUsize::new(16 * MIB).unwrap(),
@@ -429,7 +446,7 @@ async fn hybrid_disk_cache_serves_queries_and_keeps_cache_files_across_restart()
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
         db_path: "server-hybrid-cache".to_string(),
         storage: StorageConfig::Disk {
-            root: data_root,
+            root: data_root.clone(),
             cache: CacheConfig::Hybrid(Box::new(cache)),
         },
     };
@@ -450,11 +467,7 @@ async fn hybrid_disk_cache_serves_queries_and_keeps_cache_files_across_restart()
             .returning(["count"]),
     );
 
-    let db = Arc::new(
-        HelixDB::open_for_server(config.db_source(), config.db_config())
-            .await
-            .unwrap(),
-    );
+    let db = open_database(&config).await.unwrap();
     let stats = db.cache_stats();
     assert!(matches!(
         stats.foyer_hybrid_disk.state,
@@ -474,66 +487,88 @@ async fn hybrid_disk_cache_serves_queries_and_keeps_cache_files_across_restart()
     post_query(router.clone(), &write).await;
     assert_eq!(post_query(router, &read).await["count"], 1);
     db.close().await.unwrap();
+    drop(db);
 
     // 24 MiB of Foyer disk tier in its minimum 64 KiB partitions.
-    assert_eq!(
-        std::fs::read_dir(cache_root.join("slate"))
-            .unwrap()
-            .filter(|entry| {
-                entry
-                    .as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("foyer-storage-direct-fs-")
-            })
-            .count(),
-        384
-    );
+    assert_eq!(files_below(&cache_root.join("slate")).len(), 384);
+    let cached = files_below(&cache_root.join("object-store"));
     assert!(
-        file_count(&cache_root.join("object-store")) > 0,
+        !cached.is_empty(),
         "the SST flushed on close is cached on local disk"
     );
     assert!(cache_root.join("fts").is_dir());
 
-    let reopened = Arc::new(
-        HelixDB::open_for_server(config.db_source(), config.db_config())
-            .await
-            .unwrap(),
-    );
+    // With every SST gone from durable storage, the reopened server can
+    // only answer from the disk caches.
+    let durable_ssts = files_below(&data_root.join("server-hybrid-cache").join("compacted"));
+    assert!(!durable_ssts.is_empty());
+    durable_ssts
+        .keys()
+        .for_each(|sst| std::fs::remove_file(sst).unwrap());
+
+    let reopened = open_database(&config).await.unwrap();
     let router = http::router(ServerState::new(Arc::clone(&reopened), None));
     assert_eq!(post_query(router, &read).await["count"], 1);
     reopened.close().await.unwrap();
+    drop(reopened);
+    let after_restart = files_below(&cache_root.join("object-store"));
+    assert!(
+        cached
+            .iter()
+            .all(|(path, size)| after_restart.get(path) == Some(size)),
+        "cached files survive the restart unchanged"
+    );
 
     run_with_shutdown(config, async {}).await.unwrap();
+    #[cfg(unix)]
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, original_limit).unwrap();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
-fn open_file_limit_is_raised_to_the_hard_limit() {
+fn open_file_limit_rises_to_what_is_required_within_the_hard_limit() {
     use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
 
-    let before = getrlimit(Resource::Nofile);
-    // Drop the soft limit one below a finite hard limit so the raise path runs
-    // without starving tests that share this process.
-    if let (Some(maximum), true) = (before.maximum, before.current == before.maximum) {
-        setrlimit(
-            Resource::Nofile,
-            Rlimit {
-                current: Some(maximum - 1),
-                maximum: before.maximum,
-            },
-        )
-        .unwrap();
-    }
+    let _limit = OPEN_FILE_LIMIT.blocking_lock();
+    let original = getrlimit(Resource::Nofile);
+    // An unlimited soft limit never needs raising.
+    let Some(soft) = original.current else {
+        return;
+    };
+    // One below the current soft limit runs the raise path without
+    // starving tests that share this process.
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(soft - 1),
+            maximum: original.maximum,
+        },
+    )
+    .unwrap();
 
-    raise_open_file_limit();
-    let after = getrlimit(Resource::Nofile);
-    assert_eq!(after.current, after.maximum);
-    assert_eq!(after.maximum, before.maximum);
+    ensure_open_file_limit(soft - 1).unwrap();
+    assert_eq!(
+        getrlimit(Resource::Nofile).current,
+        Some(soft - 1),
+        "a sufficient soft limit is left alone"
+    );
+    ensure_open_file_limit(soft).unwrap();
+    assert_eq!(
+        getrlimit(Resource::Nofile),
+        original,
+        "the soft limit rises to exactly what is required"
+    );
 
-    raise_open_file_limit();
-    assert_eq!(getrlimit(Resource::Nofile), after);
+    let Some(hard) = original.maximum else {
+        return;
+    };
+    let error = ensure_open_file_limit(hard + 1).unwrap_err();
+    assert!(matches!(
+        error,
+        ServerConfigError::OpenFileLimit { required, limit } if required == hard + 1 && limit == hard
+    ));
+    assert!(error.to_string().starts_with("HELIX_DISK_CACHE_BYTES"));
+    assert_eq!(getrlimit(Resource::Nofile), original);
 }
 
 #[test]

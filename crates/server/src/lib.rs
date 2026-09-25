@@ -47,51 +47,59 @@ pub fn init_tracing_from_env() {
 pub async fn run_from_env() -> ServerResult<()> {
     init_tracing_from_env();
     let config = ServerConfig::from_env()?;
-    #[cfg(unix)]
-    if matches!(
-        &config.storage,
-        StorageConfig::Disk {
-            cache: CacheConfig::Hybrid(_),
-            ..
-        } | StorageConfig::S3 {
-            cache: CacheConfig::Hybrid(_),
-            ..
-        }
-    ) {
-        raise_open_file_limit();
-    }
     run_with_shutdown(config, shutdown_signal()).await
 }
 
-/// Raises the soft open-file limit to the hard limit.
+/// Opens the configured database, first allowing the open files a hybrid
+/// disk cache needs. Every runner opens storage through here.
+async fn open_database(config: &ServerConfig) -> ServerResult<Arc<HelixDB>> {
+    #[cfg(unix)]
+    config
+        .required_open_files()
+        .map(ensure_open_file_limit)
+        .transpose()?;
+    Ok(Arc::new(
+        HelixDB::open_for_server(config.db_source(), config.db_config()).await?,
+    ))
+}
+
+/// Raises the soft open-file limit to `required` when it is lower.
 ///
-/// The hybrid cache's disk tier keeps one descriptor open per partition,
-/// about 25,000 at the default budget, while container runtimes commonly
-/// default the soft limit to 1024. Failure is logged rather than fatal: the
-/// cache open reports its own error if descriptors run out.
+/// The hybrid cache's block tier holds one descriptor per partition (up to
+/// 32Ki) while container runtimes commonly default the soft limit to 1024.
+/// A hard limit below `required` fails startup with an error naming
+/// `HELIX_DISK_CACHE_BYTES` instead of a later `EMFILE` inside the cache.
 #[cfg(unix)]
-fn raise_open_file_limit() {
+fn ensure_open_file_limit(required: u64) -> Result<(), ServerConfigError> {
     let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
-    if limit.current == limit.maximum {
-        return;
+    // `None` is unlimited.
+    if limit.current.is_none_or(|current| current >= required) {
+        return Ok(());
     }
-    let raised = rustix::process::Rlimit {
-        current: limit.maximum,
-        maximum: limit.maximum,
-    };
-    match rustix::process::setrlimit(rustix::process::Resource::Nofile, raised) {
-        Ok(()) => tracing::info!(
-            from = ?limit.current,
-            to = ?limit.maximum,
-            "raised the open-file limit for the disk cache"
-        ),
-        Err(error) => tracing::warn!(
-            %error,
-            soft = ?limit.current,
-            hard = ?limit.maximum,
-            "could not raise the open-file limit for the disk cache"
-        ),
+    let hard = limit.maximum.unwrap_or(u64::MAX);
+    if hard < required {
+        return Err(ServerConfigError::OpenFileLimit {
+            required,
+            limit: hard,
+        });
     }
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(required),
+            maximum: limit.maximum,
+        },
+    )
+    .map_err(|source| ServerConfigError::RaiseOpenFileLimit {
+        required,
+        source: source.into(),
+    })?;
+    tracing::info!(
+        from = ?limit.current,
+        to = required,
+        "raised the soft open-file limit for the disk cache"
+    );
+    Ok(())
 }
 
 async fn shutdown_signal() {
@@ -126,7 +134,7 @@ where
 
 /// Open the configured database and run all transports until Ctrl-C.
 pub async fn run_until_ctrl_c(config: ServerConfig) -> ServerResult<()> {
-    let db = Arc::new(HelixDB::open_for_server(config.db_source(), config.db_config()).await?);
+    let db = open_database(&config).await?;
     run_open_database_until_shutdown(config, db, async {
         tokio::signal::ctrl_c().await?;
         Ok(())
@@ -158,7 +166,7 @@ pub async fn run_with_shutdown(
     config: ServerConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> ServerResult<()> {
-    let db = Arc::new(HelixDB::open_for_server(config.db_source(), config.db_config()).await?);
+    let db = open_database(&config).await?;
     run_open_database_until_shutdown(config, db, async move {
         shutdown.await;
         Ok(())
