@@ -289,6 +289,27 @@ class DslAstTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "invalid RFC3339 datetime"):
                 DateTime.parse_rfc3339(value)
 
+        # Python datetimes cover years 1 through 9999. The edges render exactly, and
+        # the first millisecond past either edge is the SDK's datetime QueryError.
+        self.assertEqual(
+            DateTime.from_millis(253_402_300_799_999).to_rfc3339(), "9999-12-31T23:59:59.999Z"
+        )
+        self.assertEqual(
+            DateTime.from_millis(-62_135_596_800_000).to_rfc3339(), "0001-01-01T00:00:00.000Z"
+        )
+        self.assertEqual(
+            DateTime.from_millis(-29_776_524_133_441).to_rfc3339(), "1026-06-03T07:17:46.559Z"
+        )
+        for millis in [253_402_300_800_000, -62_135_596_800_001]:
+            with self.assertRaises(QueryError) as raised:
+                DateTime.from_millis(millis).to_rfc3339()
+            self.assertEqual(raised.exception.kind, "InvalidDateTimeParameter")
+            self.assertEqual(raised.exception.millis, millis)
+            with self.assertRaises(QueryError):
+                read_batch().to_query_json(
+                    define_params({"at": param.date_time()}), {"at": DateTime.from_millis(millis)}
+                )
+
         self.assertEqual(
             parsed(Expr.prop("a").add(Expr.val(1)).neg()),
             {
