@@ -5873,4 +5873,6 @@ mod tests {
         ));
         db.close().await.expect("active adoption closes");
     }
+
+    mod build_cache;
 }
