@@ -180,7 +180,9 @@ pub(crate) use cache::commit::production_contracts::run as run_write_cache_contr
 pub(crate) use cache::commit::VectorCacheWriteSet;
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::hydration::production_contracts::run as run_hydration_contracts;
-pub(crate) use cache::hydration::{hydrate_active_generations, VectorCacheHydrationBudget};
+pub(crate) use cache::hydration::{
+    hydrate_active_generations, VectorCacheHydrationBudget, VectorCacheSnapshotSource,
+};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
 pub(crate) use cache::registry::VectorCacheRegistry;

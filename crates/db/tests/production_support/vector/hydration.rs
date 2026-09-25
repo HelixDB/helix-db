@@ -284,10 +284,12 @@ async fn run_empty_contracts() {
         VectorCacheHydrationBudget::from_optional_bytes(None).bytes(),
         None
     );
+    let scope = DataScope::LegacyUnscoped;
     let db = raw_db("production-vector-hydration-empty").await;
     let registry = VectorCacheRegistry::default();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active_secondary(DataScope::LegacyUnscoped)],
         &registry,
         VectorCacheHydrationBudget::Bounded(1),
@@ -299,7 +301,8 @@ async fn run_empty_contracts() {
     let (mismatched, _) = active_vector(DataScope::LegacyUnscoped, 16, 161, false);
     assert!(matches!(
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![with_mismatched_descriptor(mismatched)],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -311,7 +314,8 @@ async fn run_empty_contracts() {
 
     let (active, physical) = active_vector(DataScope::LegacyUnscoped, 1, 11, false);
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -328,7 +332,8 @@ async fn run_empty_contracts() {
         0
     );
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Bounded(0),
@@ -350,7 +355,8 @@ async fn run_empty_contracts() {
     let reservation =
         registry.prepare_hydration(&reserved_physical, VectorMemoryAdmissionBudget::Unbounded);
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![reserved_active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -376,7 +382,8 @@ async fn run_refresh_and_budget_contracts() {
     transaction.commit().await.unwrap();
     let registry = VectorCacheRegistry::default();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -395,7 +402,8 @@ async fn run_refresh_and_budget_contracts() {
         .unwrap();
     transaction.commit().await.unwrap();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -409,7 +417,8 @@ async fn run_refresh_and_budget_contracts() {
     assert!(refreshed.store().get_upper_vector(2).is_some());
     assert!(first.store().get_upper_vector(2).is_none());
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Bounded(0),
@@ -440,7 +449,8 @@ async fn run_refresh_and_budget_contracts() {
     transaction.put(high_key, value).unwrap();
     transaction.commit().await.unwrap();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![high_active.clone(), low_active.clone()],
         &registry,
         VectorCacheHydrationBudget::Bounded(row_bytes * 2 - 1),
@@ -467,7 +477,8 @@ async fn run_refresh_and_budget_contracts() {
     let low_before = registry.read_guard_for(&low).unwrap();
     let high_before = registry.read_guard_for(&high).unwrap();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![high_active.clone(), low_active.clone()],
         &registry,
         VectorCacheHydrationBudget::Bounded(row_bytes * 2 - 1),
@@ -485,7 +496,8 @@ async fn run_refresh_and_budget_contracts() {
     ));
     // Inventory changes redistribute admission even without a storage commit.
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![high_active.clone()],
         &registry,
         VectorCacheHydrationBudget::Bounded(row_bytes * 2 - 1),
@@ -497,7 +509,8 @@ async fn run_refresh_and_budget_contracts() {
     assert!(!Arc::ptr_eq(high_before.store(), high_grown.store()));
     assert!(high_grown.store().get_upper_vector(1).is_some());
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![low_active, high_active],
         &registry,
         VectorCacheHydrationBudget::Bounded(row_bytes * 2 - 1),
@@ -543,7 +556,8 @@ async fn run_partition_contracts() {
     transaction.commit().await.unwrap();
     let registry = VectorCacheRegistry::default();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -554,7 +568,8 @@ async fn run_partition_contracts() {
     assert!(registry.read_guard_for(&physical).is_ok());
     let before = registry.read_guard_for(&physical).unwrap();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -580,7 +595,8 @@ async fn run_partition_contracts() {
     let added =
         ValidatedVectorGenerationHandle::try_from_active_current(&active, added_id).unwrap();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -613,7 +629,8 @@ async fn run_partition_contracts() {
     .await;
     assert!(matches!(
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![with_mismatched_descriptor(active)],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -643,7 +660,8 @@ async fn run_partition_contracts() {
     )
     .await;
     assert!(hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -680,7 +698,8 @@ async fn run_partition_contracts() {
     transaction.put(key, value).unwrap();
     transaction.commit().await.unwrap();
     assert!(hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -717,7 +736,8 @@ async fn run_partition_contracts() {
     )
     .await;
     assert!(hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -734,7 +754,8 @@ async fn run_partition_contracts() {
     let (second_active, second) = active_vector(scope, 8, 71, false);
     let duplicate_registry = VectorCacheRegistry::default();
     assert!(hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![first_active, second_active],
         &duplicate_registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -763,15 +784,30 @@ async fn run_partition_contracts() {
         )
         .unwrap();
     transaction.commit().await.unwrap();
-    hydrate_active_generations(
-        &db,
-        vec![second_active, first_active],
-        &duplicate_registry,
-        VectorCacheHydrationBudget::Unbounded,
-        None,
-    )
-    .await
-    .expect("same physical ID in distinct scopes hydrates");
+    for (scope, active) in [(second_scope, second_active), (first_scope, first_active)] {
+        hydrate_active_generations(
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
+            vec![active],
+            &duplicate_registry,
+            VectorCacheHydrationBudget::Unbounded,
+            None,
+        )
+        .await
+        .expect("same physical ID in distinct scopes hydrates");
+    }
+    assert!(matches!(
+        hydrate_active_generations(
+            VectorCacheSnapshotSource::Writer(&db),
+            first_scope,
+            vec![active_vector(second_scope, 10, 82, false).0],
+            &duplicate_registry,
+            VectorCacheHydrationBudget::Unbounded,
+            None,
+        )
+        .await,
+        Err(HelixDbError::InvariantViolation(_))
+    ));
     assert!(duplicate_registry.read_guard_for(&first).is_ok());
     assert!(duplicate_registry.read_guard_for(&second).is_ok());
     db.close()
@@ -787,7 +823,8 @@ async fn run_shutdown_and_corruption_contracts() {
     let registry = VectorCacheRegistry::default();
     let (_shutdown_tx, mut shutdown_rx) = watch::channel(true);
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -813,7 +850,8 @@ async fn run_shutdown_and_corruption_contracts() {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     drop(shutdown_tx);
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -841,7 +879,8 @@ async fn run_shutdown_and_corruption_contracts() {
         .unwrap();
     transaction.commit().await.unwrap();
     assert!(hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -896,9 +935,16 @@ async fn run_idle_refresh_contracts() {
         VectorCacheHydrationBudget::Unbounded,
     ] {
         object_store.reset();
-        hydrate_active_generations(&db, vec![active.clone()], &registry, budget, None)
-            .await
-            .unwrap();
+        hydrate_active_generations(
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
+            vec![active.clone()],
+            &registry,
+            budget,
+            None,
+        )
+        .await
+        .unwrap();
         let first = registry.read_guard_for(&handle).unwrap();
         assert!(
             object_store.snapshot().0 > 0,
@@ -909,9 +955,16 @@ async fn run_idle_refresh_contracts() {
             .is_none_or(|limit| first.store().estimated_bytes() <= limit));
         let reads = object_store.snapshot().0;
         for _ in 0..3 {
-            hydrate_active_generations(&db, vec![active.clone()], &registry, budget, None)
-                .await
-                .unwrap();
+            hydrate_active_generations(
+                VectorCacheSnapshotSource::Writer(&db),
+                scope,
+                vec![active.clone()],
+                &registry,
+                budget,
+                None,
+            )
+            .await
+            .unwrap();
             let next = registry.read_guard_for(&handle).unwrap();
             assert!(Arc::ptr_eq(first.store(), next.store()));
             assert_eq!(
@@ -932,7 +985,8 @@ async fn run_idle_refresh_contracts() {
         .unwrap();
     drop(transaction);
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -954,7 +1008,8 @@ async fn run_idle_refresh_contracts() {
         .unwrap();
     transaction.commit().await.unwrap();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -977,7 +1032,8 @@ async fn run_idle_refresh_contracts() {
         .unwrap();
     transaction.commit().await.unwrap();
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -997,7 +1053,8 @@ async fn run_idle_refresh_contracts() {
     // Empty indexes retain their successfully published empty snapshot too.
     let (empty_active, empty_handle) = active_vector(scope, 22, 221, false);
     hydrate_active_generations(
-        &db,
+        VectorCacheSnapshotSource::Writer(&db),
+        scope,
         vec![empty_active.clone()],
         &registry,
         VectorCacheHydrationBudget::Unbounded,
@@ -1009,7 +1066,8 @@ async fn run_idle_refresh_contracts() {
     assert_eq!(empty.store().estimated_bytes(), 0);
     for _ in 0..3 {
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![empty_active.clone()],
             &registry,
             VectorCacheHydrationBudget::Unbounded,

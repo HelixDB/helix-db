@@ -2264,9 +2264,9 @@ impl HelixDB {
 
     /// Refresh descriptor-bound vector caches from canonical Active generations.
     ///
-    /// Writer storage supplies the exact snapshot sequence required by cache
-    /// visibility checks. Standalone readers expose no comparable WAL-inclusive
-    /// sequence and therefore remain on durable-storage fallback.
+    /// Writer and reader storage both hydrate from SlateDB snapshots whose
+    /// sequence is the one request read views report, so a published store is
+    /// attached only to request snapshots it is proven current for.
     pub async fn refresh_vector_memory_cache(&self) -> Result<()> {
         self.refresh_loaded_vector_memory_caches(
             self.inner.config.db().cache().vector_memory().budget(),
@@ -2572,20 +2572,26 @@ impl HelixDB {
         Ok(())
     }
 
-    /// Hydrates one scope from exact Active handles and one stable writer snapshot.
+    /// Hydrates one scope from exact Active handles and this node's snapshots.
     async fn refresh_one_vector_memory_scope(
         &self,
         scope: DataScope,
         budget: search::vector::VectorCacheHydrationBudget,
         shutdown: Option<&mut watch::Receiver<bool>>,
     ) -> Result<()> {
-        let HelixStorage::Writer(writer) = self.storage() else {
-            return Ok(());
-        };
         self.refresh_runtime_catalog(scope).await?;
         let active = self.active_index_handles_loaded(scope);
+        let source = match self.storage() {
+            HelixStorage::Reader(reader) => {
+                search::vector::VectorCacheSnapshotSource::Reader(reader.as_ref())
+            }
+            HelixStorage::Writer(writer) => {
+                search::vector::VectorCacheSnapshotSource::Writer(writer.db())
+            }
+        };
         search::vector::hydrate_active_generations(
-            writer.db(),
+            source,
+            scope,
             active,
             &self.inner.caches.vector_memory.registry,
             budget,
@@ -2599,12 +2605,17 @@ impl HelixDB {
         settings: config::VectorMemorySettings,
         allow_blocking: bool,
     ) -> Result<()> {
-        if matches!(self.storage(), HelixStorage::Reader(_)) {
-            return Ok(());
-        }
         match settings.hydration() {
             config::VectorMemoryHydrationMode::BlockingThenBackground { .. } if allow_blocking => {
-                self.refresh_vector_memory_cache().await?;
+                match self.refresh_vector_memory_cache().await {
+                    Ok(()) => {}
+                    // A reader poller advanced during the catalog read; the
+                    // background loop retries on the next status change.
+                    Err(HelixDbError::RequestReadViewChanged) => {
+                        tracing::debug!("reader advanced during blocking vector memory warm");
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             config::VectorMemoryHydrationMode::BlockingThenBackground { .. }
             | config::VectorMemoryHydrationMode::Background { .. } => {}
@@ -2613,6 +2624,13 @@ impl HelixDB {
         let runtime = Arc::downgrade(&self.inner);
         let budget = settings.budget();
         let interval = Duration::from_secs(settings.poll_interval_secs());
+        // Reader snapshots advance only when the poller applies new WAL or
+        // manifest state, and exact-sequence stores are attachable only at that
+        // state, so readers also refresh as soon as their status changes.
+        let mut reader_status = match self.storage() {
+            HelixStorage::Reader(reader) => Some(reader.subscribe()),
+            HelixStorage::Writer(_) => None,
+        };
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let (initial_refresh_tx, initial_refresh) = watch::channel(false);
         let handle = tokio::spawn(async move {
@@ -2629,13 +2647,19 @@ impl HelixDB {
                     .refresh_loaded_vector_memory_caches(budget, Some(&mut shutdown_rx))
                     .await;
                 drop(database);
-                if let Err(err) = result {
-                    tracing::warn!(error = %err, "failed to refresh vector memory stores");
+                match result {
+                    Ok(()) => {}
+                    Err(HelixDbError::RequestReadViewChanged) => {
+                        tracing::debug!("reader advanced during vector memory refresh");
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to refresh vector memory stores");
+                    }
                 }
                 if let Some(initial_refresh_tx) = initial_refresh_tx.take() {
                     let _ = initial_refresh_tx.send(true);
                 }
-                tokio::select! {
+                let reader_status_closed = tokio::select! {
                     changed = shutdown_rx.changed() => {
                         match changed {
                             Ok(()) => {
@@ -2645,8 +2669,18 @@ impl HelixDB {
                             }
                             Err(_) => break,
                         }
+                        false
                     }
-                    _ = tokio::time::sleep(interval) => {}
+                    _ = tokio::time::sleep(interval) => false,
+                    changed = async {
+                        match reader_status.as_mut() {
+                            Some(status) => status.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => changed.is_err(),
+                };
+                if reader_status_closed {
+                    reader_status = None;
                 }
             }
         });

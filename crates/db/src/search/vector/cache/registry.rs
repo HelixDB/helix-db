@@ -884,6 +884,25 @@ impl VectorCacheRegistry {
         count
     }
 
+    /// Releases entries of `scope` whose generations left the Active inventory.
+    ///
+    /// Reader nodes never run drop or partition retirement, so this sweep is
+    /// their only release path; writers release entries only through
+    /// retirement. `Retiring` and `Closed` entries are retirement tombstones
+    /// owned by physical cleanup and are always kept. Removing any other entry
+    /// only causes storage fallback: a retained read guard keeps its own entry
+    /// and store alive until it is dropped.
+    pub(crate) fn retain_active(&self, scope: DataScope, active: &HashSet<VectorCacheIdentity>) {
+        self.state.write().entries.retain(|identity, entry| {
+            identity.scope() != scope
+                || active.contains(identity)
+                || matches!(
+                    entry.lifecycle(),
+                    VectorCacheLifecycle::Retiring | VectorCacheLifecycle::Closed
+                )
+        });
+    }
+
     /// Removes a generation fence after its terminal durable cleanup commit.
     ///
     /// The caller invokes this only from the outbox post-commit hook. Every
@@ -1188,6 +1207,55 @@ mod tests {
         assert_ne!(first_entry.identity(), successor_entry.identity());
         assert_eq!(first_entry.lifecycle(), VectorCacheLifecycle::Closed);
         assert_eq!(successor_entry.lifecycle(), VectorCacheLifecycle::Hydrating);
+    }
+
+    #[tokio::test]
+    async fn inactive_sweep_releases_entries_but_keeps_retirement_tombstones() {
+        let registry = VectorCacheRegistry::default();
+        let kept = validated(1);
+        let released = validated(2);
+        let retired = validated(3);
+        let other_scope = validated_exact(
+            DataScope::Tenant(crate::encoding::keys::scope::TenantId::from_u128(1)),
+            7,
+            1,
+            70,
+            1,
+        );
+        for handle in [&kept, &released, &other_scope] {
+            let (entry, owns_hydration) = registry.entry_for(handle);
+            assert!(owns_hydration);
+            assert!(entry.finish_hydration(store(entry.identity())));
+        }
+        assert_eq!(
+            registry.retire(&retired).await,
+            VectorCacheRetirement::ClosedEmpty
+        );
+        let released_guard = registry.read_guard_for(&released).unwrap();
+
+        registry.retain_active(
+            DataScope::LegacyUnscoped,
+            &HashSet::from([VectorCacheIdentity::from_validated(&kept)]),
+        );
+
+        assert!(registry.read_guard_for(&kept).is_ok());
+        assert!(matches!(
+            registry.read_guard_for(&released),
+            Err(VectorCacheReadGuardError::Absent)
+        ));
+        assert!(
+            registry.read_guard_for(&other_scope).is_ok(),
+            "the sweep is bounded to its own scope"
+        );
+        let (tombstone, owns_hydration) = registry.entry_for(&retired);
+        assert!(!owns_hydration, "retirement tombstones survive the sweep");
+        assert_eq!(tombstone.lifecycle(), VectorCacheLifecycle::Closed);
+        assert_eq!(
+            released_guard.store().visible_seq(),
+            0,
+            "a retained guard keeps its released store usable"
+        );
+        drop(released_guard);
     }
 
     #[tokio::test]
