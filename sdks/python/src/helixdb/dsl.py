@@ -13,7 +13,7 @@ import re
 import struct
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal, TypeAlias
 
@@ -193,6 +193,9 @@ def _normalize_f32(value: float, *, name: str = "f32") -> float:
         raise TypeError(f"{name} is outside the f32 range") from exc
 
 
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 @dataclass(frozen=True)
 class DateTime:
     """Millisecond timestamp rendered as RFC3339 UTC for query parameters."""
@@ -207,7 +210,7 @@ class DateTime:
     def from_datetime(cls, value: datetime) -> "DateTime":
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
-        return cls.from_millis(int(value.astimezone(timezone.utc).timestamp() * 1000))
+        return cls.from_millis((value - _UNIX_EPOCH) // timedelta(milliseconds=1))
 
     @classmethod
     def parse_rfc3339(cls, value: str) -> "DateTime":
