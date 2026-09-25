@@ -552,7 +552,18 @@ async fn load(backend: &Backend) {
                 attributes += 1;
             }
         }
-        backend.query(QueryRequest::write(batch)).await.unwrap();
+        // Background index maintenance can conflict with a load batch; a
+        // conflicted transaction is rolled back, so retrying is safe.
+        let request = QueryRequest::write(batch);
+        for attempt in 1.. {
+            match backend.query(request.clone()).await {
+                Ok(_) => break,
+                Err(error) if error.contains("transaction conflict") && attempt < 20 => {
+                    tokio::time::sleep(Duration::from_millis(25 * attempt)).await;
+                }
+                Err(error) => panic!("load batch {chunk_index} failed: {error}"),
+            }
+        }
         if chunk_index % 50 == 0 {
             let elapsed = started.elapsed().as_secs_f64();
             println!(
