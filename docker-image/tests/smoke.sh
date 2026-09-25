@@ -134,6 +134,19 @@ assert_nonzero_exit() {
   fi
 }
 
+# Startup errors print their message, which names the variable to fix.
+assert_error_names() {
+  local container=$1
+  local variable=$2
+  local logs
+  logs=$(docker logs "$container" 2>&1)
+  if ! grep -Eq "^Error: .*$variable" <<<"$logs"; then
+    printf '%s\n' "$logs" >&2
+    printf 'expected %s to report an error naming %s\n' "$container" "$variable" >&2
+    exit 1
+  fi
+}
+
 post_json() {
   local port=$1
   local fixture=$2
@@ -291,6 +304,7 @@ run_invalid_configuration_tests() {
   start_container "$memory_cache" "$((base_port + 9))" -e HELIX_DISK_CACHE_DIR=/var/cache/helix
   wait_for_exit "$memory_cache"
   assert_nonzero_exit "$memory_cache"
+  assert_error_names "$memory_cache" HELIX_DISK_CACHE_DIR
 
   start_container "$bad_cache_size" "$((base_port + 10))" \
     -e HELIX_DATA_DIR=/var/lib/helix \
@@ -298,6 +312,7 @@ run_invalid_configuration_tests() {
     -e HELIX_DISK_CACHE_BYTES=not-a-number
   wait_for_exit "$bad_cache_size"
   assert_nonzero_exit "$bad_cache_size"
+  assert_error_names "$bad_cache_size" HELIX_DISK_CACHE_BYTES
 }
 
 run_signal_test() {

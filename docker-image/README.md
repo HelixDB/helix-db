@@ -82,7 +82,8 @@ must be writable by the container's `65532:65532` user and group.
 By default the server caches SlateDB blocks and full-text splits in memory only,
 so every cold read goes to the object store. Set `HELIX_DISK_CACHE_DIR` with S3 or
 `HELIX_DATA_DIR` storage to add memory-plus-disk caches on local disk, ideally
-NVMe:
+NVMe. Published images up to and including v0.0.6 predate this and ignore these
+variables; use an image built from this checkout or a later release.
 
 ```bash
 sudo mkdir -p /data/helix-cache
@@ -97,20 +98,26 @@ docker run --rm -p 8080:8080 \
 
 A named volume (`--mount type=volume,source=helixdb-cache,target=/var/cache/helix`)
 needs no `chown`. The cache survives restarts, so a restarted server reads recently
-used data from local disk instead of the object store. Use one cache directory per
-running server. The block cache keeps each of its cache files open, about 25,000 at
-the default budget, so the server raises its soft open-file limit to the hard limit;
-if the hard limit is low, add `--ulimit nofile=65536:65536`.
+used data from local disk instead of the object store; a smaller budget on restart
+trims the existing cache. Use one cache directory per running server.
 
 | Variable | Purpose |
 | --- | --- |
-| `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it if needed; unset keeps memory-only caches. Rejected with memory storage. |
-| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, at least 64 MiB; defaults to 32 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). |
+| `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it and its `slate/`, `object-store/` and `fts/` subdirectories if needed; unset keeps memory-only caches. Rejected with memory storage. |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 32 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the SlateDB block cache in bytes; defaults to 640 MiB, the memory-only default. |
 
-Startup fails with a message naming the variable when a size is not a positive
-integer, the disk budget is below 64 MiB, a size is set without `HELIX_DISK_CACHE_DIR`,
-or the directory cannot be created or written.
+The block cache holds one file open per partition: its 3/8 share divided by a
+power-of-two block of 64 KiB to 16 MiB, at most 32,768 files. With 2,024 more for
+the object-store tier and the rest of the server, it needs 26,600 open files at the
+default budget and never more than 34,792. The server raises its soft open-file
+limit to that number at startup. If the hard limit is lower, startup fails naming
+`HELIX_DISK_CACHE_BYTES`; lower the budget or add `--ulimit nofile=34792:34792`.
+
+Startup also fails with a message naming the variable when a size is not a positive
+integer (including non-UTF-8 text) or is out of range, a size is set without
+`HELIX_DISK_CACHE_DIR`, or the directory or a tier subdirectory cannot be created or
+written.
 
 ## Test
 

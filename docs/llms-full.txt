@@ -504,6 +504,9 @@ store. Set `HELIX_DISK_CACHE_DIR` to keep recently read data on local disk, idea
 The cache survives restarts. It requires `S3_BUCKET` or `HELIX_DATA_DIR`; memory
 storage rejects it.
 
+The disk cache needs an image released after v0.0.6. The v0.0.6 image and earlier
+ignore the `HELIX_DISK_CACHE_*` variables and keep memory-only caches, so replace
+`<version>` below with a later release.
 ```bash
 sudo mkdir -p /data/helix-cache
 sudo chown 65532:65532 /data/helix-cache
@@ -514,7 +517,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.6
+  ghcr.io/helixdb/helixdb:<version>
 ```
 
 In Compose, add the same variables and a volume to the `helix` service. A new
@@ -524,13 +527,21 @@ owned by `65532:65532`. Use one cache directory per running server.
 | Variable | Purpose |
 | --- | --- |
 | `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it if needed; unset keeps memory-only caches |
-| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, at least 64 MiB; defaults to 32 GiB |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 32 GiB |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
 
 Half of the disk budget caches object-store files, 3/8 caches database blocks,
-and the rest caches full-text search data. Startup fails with a message naming
-the variable when a size is invalid, a size is set without `HELIX_DISK_CACHE_DIR`, or
-the directory is not writable.
+and the rest caches full-text search data. A smaller budget on restart trims the
+existing cache.
+
+The block cache keeps up to 32,768 files open, so the server needs up to 34,792
+open files (26,600 at the default budget). It raises its soft open-file limit at
+startup. If the container's hard limit is lower, startup fails naming
+`HELIX_DISK_CACHE_BYTES`; lower the budget or add `--ulimit nofile=34792:34792`.
+
+Startup also fails with a message naming the variable when a size is invalid or
+out of range, a size is set without `HELIX_DISK_CACHE_DIR`, or the cache directory
+is not writable.
 
 ## Stop or inspect
 
