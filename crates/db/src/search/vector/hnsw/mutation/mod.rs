@@ -51,6 +51,13 @@ const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_MUTATION: usize = 8;
 pub(in crate::search::vector) const VECTOR_BUILD_ITEM_CACHE_LIMIT: usize = 4_096;
 pub(in crate::search::vector) const VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT: usize = 2_048;
 pub(in crate::search::vector) const VECTOR_BUILD_SIMHASH_CACHE_LIMIT: usize = 4_096;
+/// Conservative per-entry bookkeeping charged against a build session budget.
+///
+/// Covers the hash-map slot, recency-index entry, and allocation headers that
+/// accompany every retained item, neighbor row, or SimHash, so a session's
+/// resident memory stays near its configured byte budget even when entries
+/// carry tiny payloads such as 8-byte SimHashes.
+const VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES: usize = 96;
 
 /// Aggregate observable behavior of one reusable vector build session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -632,8 +639,9 @@ impl<D: Distance> VectorIndex<D> {
                 false,
             )
             .await;
-        mutation_cache.finish_entity_changes();
-        session.restore_cache(identity, mutation_cache);
+        let changed = mutation_cache.finish_entity_changes();
+        session.restore_cache(identity.clone(), mutation_cache);
+        session.record_entity_changes(&identity, node_id, changed.into_keys());
         result
     }
 
@@ -1636,8 +1644,9 @@ impl<D: Distance> VectorIndex<D> {
             .stage_delete_with_metadata(txn, node_id, &mut metadata, &mut mutation_cache)
             .await
             .map(|_| ());
-        mutation_cache.finish_entity_changes();
-        session.restore_cache(identity, mutation_cache);
+        let changed = mutation_cache.finish_entity_changes();
+        session.restore_cache(identity.clone(), mutation_cache);
+        session.record_entity_changes(&identity, node_id, changed.into_keys());
         result
     }
 
@@ -2942,34 +2951,56 @@ impl<D: Distance> MutationOpCache<D> {
     }
 }
 
-/// One bounded cache session shared by a vector Scan or CatchUp planning transaction.
+/// One bounded cache session shared by vector Scan and CatchUp planning.
 ///
 /// Entries are nested under the complete generation identity, so equal physical
 /// node/layer numbers from another scope, logical generation, record revision,
 /// or physical partition cannot alias. The session owns no database or resident
-/// vector-memory handle and is dropped with the disposable planning transaction.
+/// vector-memory handle. A lifecycle driver may retain it across committed
+/// steps of one builder-exclusive generation; the entity journal lets the
+/// driver discard exactly the state of an entity it planned but did not admit.
 #[derive(Debug)]
 pub(crate) struct VectorBuildSession<D: Distance> {
     caches: HashMap<VectorGenerationIdentity, MutationOpCache<D>>,
     next_touch: CacheSequence,
+    /// Budget for retained payload plus per-entry bookkeeping.
     max_payload_bytes: usize,
     max_items: usize,
     max_neighbors: usize,
     max_simhashes: usize,
     session_stats: VectorBuildSessionStats,
+    /// Cache state changed by the entity currently being planned.
+    entity_changes: BTreeMap<VectorGenerationIdentity, EntityCacheChanges>,
+}
+
+/// Cache state one planned entity changed inside one generation namespace.
+#[derive(Debug, Default)]
+struct EntityCacheChanges {
+    /// Planning this entity created the namespace, so none of it predates it.
+    created_namespace: bool,
+    /// Mutated graph nodes whose items, SimHash, and neighbor rows changed.
+    nodes: BTreeSet<NodeId>,
+    /// Other neighbor rows whose logical value changed.
+    rows: BTreeSet<NeighborRowId>,
 }
 
 impl<D: Distance> VectorBuildSession<D> {
-    /// Creates one session with the batch input-byte ceiling as retained payload budget.
-    pub(crate) fn new(max_input_bytes: NonZeroU64) -> Self {
+    /// Creates one session bounded only by its retained byte budget.
+    ///
+    /// The budget charges every entry its encoded payload plus
+    /// [`VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES`]. Class counts are not
+    /// separately capped, so 8-byte SimHashes stay resident for as long as the
+    /// byte budget allows and eviction remains deterministic global LRU.
+    pub(crate) fn new(max_retained_bytes: NonZeroU64) -> Self {
         Self {
             caches: HashMap::new(),
             next_touch: CacheSequence::initial(),
-            max_payload_bytes: usize::try_from(max_input_bytes.get()).unwrap_or(usize::MAX),
-            max_items: VECTOR_BUILD_ITEM_CACHE_LIMIT,
-            max_neighbors: VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT,
-            max_simhashes: VECTOR_BUILD_SIMHASH_CACHE_LIMIT,
+            max_payload_bytes: usize::try_from(max_retained_bytes.get()).unwrap_or(usize::MAX),
+            max_items: usize::MAX,
+            max_neighbors: usize::MAX,
+            max_simhashes: usize::MAX,
             session_stats: VectorBuildSessionStats::default(),
+            entity_changes: BTreeMap::new(),
         }
     }
 
@@ -3012,8 +3043,15 @@ impl<D: Distance> VectorBuildSession<D> {
                 }
                 cache
             }
-            None => MutationOpCache::with_degree_limits(layer0_degree, upper_degree)?
-                .into_build_session_cache(),
+            None => {
+                let cache = MutationOpCache::with_degree_limits(layer0_degree, upper_degree)?
+                    .into_build_session_cache();
+                self.entity_changes
+                    .entry(identity.clone())
+                    .or_default()
+                    .created_namespace = true;
+                cache
+            }
         };
         cache.next_touch = self.next_touch;
         Ok(cache)
@@ -3030,6 +3068,75 @@ impl<D: Distance> VectorBuildSession<D> {
             self.caches.insert(identity, cache).is_none(),
             "a vector build session cannot restore one identity twice"
         );
+    }
+
+    /// Journals the cache state one entity mutation changed in `identity`.
+    pub(in crate::search::vector) fn record_entity_changes(
+        &mut self,
+        identity: &VectorGenerationIdentity,
+        node_id: NodeId,
+        rows: impl IntoIterator<Item = NeighborRowId>,
+    ) {
+        let changes = self.entity_changes.entry(identity.clone()).or_default();
+        changes.nodes.insert(node_id);
+        changes.rows.extend(rows);
+    }
+
+    /// Accepts every change journaled since the previous entity boundary.
+    ///
+    /// Call after the entity's planned writes were staged in the transaction
+    /// that commits them.
+    pub(crate) fn admit_entity(&mut self) {
+        self.entity_changes.clear();
+    }
+
+    /// Removes all cache state changed by the planned but unadmitted entity.
+    ///
+    /// Namespaces the entity created are dropped whole; otherwise its mutated
+    /// nodes lose every item, SimHash, and neighbor row, and each other changed
+    /// row is removed. Remaining entries were loaded from storage the entity did
+    /// not write, so they still equal the state before the entity. Call only
+    /// after [`Self::flush_all`], because a dirty row of an earlier admitted
+    /// entity cannot be told apart from this entity's change.
+    pub(crate) fn discard_entity(&mut self) {
+        debug_assert!(
+            !self.has_dirty_neighbors(),
+            "vector build entity discard follows a complete flush"
+        );
+        for (identity, changes) in core::mem::take(&mut self.entity_changes) {
+            if changes.created_namespace {
+                if let Some(cache) = self.caches.remove(&identity) {
+                    self.session_stats.merge(cache.stats);
+                }
+                continue;
+            }
+            let Some(cache) = self.caches.get_mut(&identity) else {
+                continue;
+            };
+            for node_id in changes.nodes {
+                cache.invalidate_items(node_id);
+                cache.invalidate_simhash(node_id);
+                cache.invalidate_neighbors(node_id);
+            }
+            for row in changes.rows {
+                cache.remove_neighbor(row);
+            }
+        }
+    }
+
+    /// Returns whether any neighbor row still awaits a flush.
+    pub(crate) fn has_dirty_neighbors(&self) -> bool {
+        self.caches
+            .values()
+            .any(|cache| cache.oldest_dirty_neighbor().is_some())
+    }
+
+    /// Starts per-step telemetry without dropping any cached state.
+    pub(crate) fn reset_stats(&mut self) {
+        self.session_stats = VectorBuildSessionStats::default();
+        for cache in self.caches.values_mut() {
+            cache.stats = VectorBuildSessionStats::default();
+        }
     }
 
     /// Flushes every dirty neighbor in deterministic identity/recency order.
@@ -3077,7 +3184,7 @@ impl<D: Distance> VectorBuildSession<D> {
             let neighbor_count = self.neighbor_count();
             let simhash_count = self.simhash_count();
             let payload_bytes = self.retained_payload_bytes()?;
-            let payload_pressure = payload_bytes > self.max_payload_bytes;
+            let payload_pressure = self.retained_bytes()? > self.max_payload_bytes;
             let item_pressure = item_count > self.max_items;
             let neighbor_pressure = neighbor_count > self.max_neighbors;
             let simhash_pressure = simhash_count > self.max_simhashes;
@@ -3250,6 +3357,23 @@ impl<D: Distance> VectorBuildSession<D> {
             .values()
             .map(MutationOpCache::simhash_count)
             .sum()
+    }
+
+    /// Returns retained payload plus per-entry bookkeeping charged to the budget.
+    pub(crate) fn retained_bytes(&self) -> Result<usize, HelixDbError> {
+        let entries = self
+            .item_count()
+            .saturating_add(self.neighbor_count())
+            .saturating_add(self.simhash_count());
+        let payload_bytes = self.retained_payload_bytes()?;
+        entries
+            .checked_mul(VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES)
+            .and_then(|overhead| overhead.checked_add(payload_bytes))
+            .ok_or_else(|| {
+                HelixDbError::InvariantViolation(
+                    "vector build session byte accounting overflowed".to_string(),
+                )
+            })
     }
 
     /// Returns retained decoded payload bytes across every namespace.

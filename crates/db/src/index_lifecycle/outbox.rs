@@ -267,11 +267,31 @@ impl StepResourceUsage {
     }
 }
 
+/// Process-local driver state released only after its step transaction commits.
+///
+/// The outbox hands this value to [`IndexOperationDriver::after_commit`] only
+/// when the repository transaction that staged the step committed. Every
+/// failure, conflict, or transient release drops it with the step, so a driver
+/// can never observe state derived from uncommitted writes.
+pub(crate) enum CommittedStepState {
+    /// Vector planning cache that mirrors the physical rows this step commits.
+    VectorBuild(Box<super::vector::RetainedVectorBuild>),
+}
+
+impl core::fmt::Debug for CommittedStepState {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::VectorBuild(_) => formatter.write_str("CommittedStepState::VectorBuild"),
+        }
+    }
+}
+
 /// One driver result plus disposable measurements from the same bounded turn.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct IndexOperationStepExecution {
     result: IndexOperationStepResult,
     resources: StepResourceUsage,
+    committed_state: Option<CommittedStepState>,
 }
 
 impl IndexOperationStepExecution {
@@ -309,12 +329,19 @@ impl IndexOperationStepExecution {
                     retained_payload_bytes: 0,
                 },
             },
+            committed_state: None,
         }
     }
 
     /// Attaches family-specific measurements made while preparing the step.
     pub(crate) const fn with_resources(mut self, resources: StepResourceUsage) -> Self {
         self.resources = resources;
+        self
+    }
+
+    /// Attaches driver state that becomes reusable only once this step commits.
+    pub(crate) fn with_committed_state(mut self, state: Option<CommittedStepState>) -> Self {
+        self.committed_state = state;
         self
     }
 }
@@ -475,13 +502,16 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     ///
     /// This hook must not write database state. Its default is intentionally a
     /// no-op; vector cleanup uses it to forget a process-local retirement fence
-    /// only after the canonical `Dropped` transition has committed.
+    /// only after the canonical `Dropped` transition has committed, and vector
+    /// builds use it to retain planning state the committed step returned.
+    /// `operation` is the claimed record the step started from.
     async fn after_commit(
         &self,
         _scope: DataScope,
         _index: &IndexRecordV2,
         _operation: &IndexOperationRecord,
         _committed: CommittedOperationStep,
+        _state: Option<CommittedStepState>,
     ) {
     }
 }
@@ -513,6 +543,7 @@ struct StagedOperationStep {
     before_stage: IndexOperationStage,
     after_stage: IndexOperationStage,
     resources: StepResourceUsage,
+    committed_state: Option<CommittedStepState>,
 }
 
 /// Atomically stores the next canonical state, operation, and runnable pointer.
@@ -1039,6 +1070,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         let IndexOperationStepExecution {
             result: step,
             resources,
+            committed_state,
         } = execution;
         if matches!(step, IndexOperationStepResult::TransientFailure) {
             return Ok(None);
@@ -1167,6 +1199,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                 before_stage,
                 counter_resources.saturating_add(resources),
             ),
+            committed_state,
         }))
     }
     .await;
@@ -1179,6 +1212,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         before_stage,
         after_stage,
         resources,
+        committed_state,
     }) = (match staged {
         Ok(staged) => staged,
         Err(error) => {
@@ -1213,7 +1247,13 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     }
     prepared.after_commit().await;
     driver
-        .after_commit(claimed.scope, &index, &operation, committed)
+        .after_commit(
+            claimed.scope,
+            &index,
+            &operation,
+            committed,
+            committed_state,
+        )
         .await;
     failpoints::trip_for_operation(IndexOutboxFailpoint::CommitAfter, operation.operation_id())?;
     Ok(CommittedOperationStepEvidence {

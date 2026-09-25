@@ -49,7 +49,7 @@ use super::{
 };
 
 mod driver;
-pub(crate) use driver::VectorIndexDriver;
+pub(crate) use driver::{RetainedVectorBuild, VectorIndexDriver};
 
 /// Validated vector and its canonical physical-partition identity.
 #[derive(Debug, Clone, PartialEq)]
