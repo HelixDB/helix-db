@@ -446,17 +446,43 @@ async fn create_indexes(backend: &Backend, names: &[&str], dimension: usize) {
     wait_for_operations(backend, &receipts, names).await;
 }
 
+/// When the vector index is built relative to the graph load (`BENCH_VECTOR`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VectorBuild {
+    /// Incremental HNSW inserts during the load (`before`, default).
+    Before,
+    /// Backfill once the graph is loaded (`after`).
+    After,
+    /// Graph only; build later with the `index` mode (`skip`).
+    Skip,
+}
+
+fn vector_build() -> VectorBuild {
+    match std::env::var("BENCH_VECTOR").as_deref() {
+        Ok("after") => VectorBuild::After,
+        Ok("skip") => VectorBuild::Skip,
+        Ok("before") | Err(_) => VectorBuild::Before,
+        Ok(other) => panic!("BENCH_VECTOR must be before, after or skip, not {other}"),
+    }
+}
+
+async fn build_vector_index(backend: &Backend, dimension: usize) {
+    let started = Instant::now();
+    create_indexes(backend, &["vector"], dimension).await;
+    println!("vector backfill: {:.0}s", started.elapsed().as_secs_f64());
+}
+
 async fn load(backend: &Backend) {
     let scale: f64 = env_or("BENCH_SCALE", 1.0);
     let dimension: usize = env_or("BENCH_DIM", 768);
     let items_per_batch: usize = env_or("BENCH_ITEMS_PER_BATCH", 4);
-    let vector_after = std::env::var_os("BENCH_VECTOR_AFTER").is_some();
+    let vector = vector_build();
     let fixture = Fixture::new(dimension);
     let item_count = (TOTAL_ITEMS * scale).round() as usize;
     let attributes_per_item = TOTAL_ATTRIBUTES / TOTAL_ITEMS;
 
     let mut indexes = vec!["text", "group_name", "kind"];
-    if !vector_after {
+    if vector == VectorBuild::Before {
         indexes.push("vector");
     }
     create_indexes(backend, &indexes, dimension).await;
@@ -576,10 +602,8 @@ async fn load(backend: &Backend) {
         "graph loaded: {item_count} items, {attributes} attributes in {:.0}s",
         started.elapsed().as_secs_f64()
     );
-    if vector_after {
-        let started = Instant::now();
-        create_indexes(backend, &["vector"], dimension).await;
-        println!("vector backfill: {:.0}s", started.elapsed().as_secs_f64());
+    if vector == VectorBuild::After {
+        build_vector_index(backend, dimension).await;
     }
     if let Backend::Embedded { db, .. } = backend {
         db.flush_writer().await.unwrap();
@@ -836,6 +860,7 @@ async fn main() {
         };
         match mode.as_str() {
             "load" => load(&backend).await,
+            "index" => build_vector_index(&backend, env_or("BENCH_DIM", 768)).await,
             _ => run_queries("server", &backend).await,
         }
         return;
@@ -854,8 +879,11 @@ async fn main() {
         db: writer,
         store: Arc::clone(&store),
     };
-    if mode == "load" {
-        load(&backend).await;
+    if mode == "load" || mode == "index" {
+        match mode.as_str() {
+            "load" => load(&backend).await,
+            _ => build_vector_index(&backend, env_or("BENCH_DIM", 768)).await,
+        }
         let Backend::Embedded { db, .. } = backend else {
             unreachable!("embedded backend was constructed above")
         };
