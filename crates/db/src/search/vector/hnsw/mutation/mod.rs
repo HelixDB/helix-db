@@ -1080,16 +1080,14 @@ impl<D: Distance> VectorIndex<D> {
         layer: u16,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<Vec<NodeId>, HelixDbError> {
-        let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
-        for candidate in candidates.iter().take(maximum_neighbors * 2) {
-            let Some(item) = self
-                .get_item_for_layer_cached(txn, layer, candidate.node_id, mutation_cache)
-                .await?
-            else {
-                continue;
-            };
-            items.insert(candidate.node_id, item);
-        }
+        let candidate_ids = candidates
+            .iter()
+            .take(maximum_neighbors * 2)
+            .map(|candidate| candidate.node_id)
+            .collect::<Vec<_>>();
+        let items = self
+            .get_items_for_layer_cached_batch(txn, layer, &candidate_ids, mutation_cache)
+            .await?;
         select_diverse(
             query,
             candidates,
@@ -1516,10 +1514,15 @@ impl<D: Distance> VectorIndex<D> {
         let candidate_neighbors = to_neighbors.clone();
 
         if to_neighbors.len() > maximum_neighbors {
-            let to_item = self
-                .get_item_for_layer_cached(txn, layer, to_node, mutation_cache)
+            // One batched read hydrates the destination and every candidate,
+            // including the inserting node whose cached item feeds selection.
+            let hydrate = core::iter::once(to_node)
+                .chain(to_neighbors.iter().copied())
+                .collect::<Vec<_>>();
+            let items = self
+                .get_items_for_layer_cached_batch(txn, layer, &hydrate, mutation_cache)
                 .await?;
-            match to_item {
+            match items.get(&to_node) {
                 Some(to_item) => {
                     let mut distances = Vec::with_capacity(to_neighbors.len());
                     for &neighbor_id in &to_neighbors {
@@ -1530,10 +1533,7 @@ impl<D: Distance> VectorIndex<D> {
                             )?);
                             continue;
                         }
-                        let Some(neighbor_item) = self
-                            .get_item_for_layer_cached(txn, layer, neighbor_id, mutation_cache)
-                            .await?
-                        else {
+                        let Some(neighbor_item) = items.get(&neighbor_id) else {
                             continue;
                         };
                         distances.push(Candidate::try_new(
@@ -1542,22 +1542,6 @@ impl<D: Distance> VectorIndex<D> {
                         )?);
                     }
                     distances.sort();
-
-                    let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
-                    for candidate in &distances {
-                        let Some(item) = self
-                            .get_item_for_layer_cached(
-                                txn,
-                                layer,
-                                candidate.node_id,
-                                mutation_cache,
-                            )
-                            .await?
-                        else {
-                            continue;
-                        };
-                        items.insert(candidate.node_id, item);
-                    }
                     to_neighbors = select_diverse(
                         to_item.as_ref(),
                         &distances,
@@ -2280,6 +2264,10 @@ pub(in crate::search::vector) struct MutationOpCache<D: Distance> {
     stats: VectorBuildSessionStats,
     enforce_local_limits: bool,
     entity_changed_neighbors: BTreeMap<NeighborRowId, NeighborRowValue>,
+    /// Highest layer ever installed in `items`; bounds targeted invalidation.
+    max_item_layer: u16,
+    /// Highest layer ever installed in `neighbor_rows`; bounds targeted invalidation.
+    max_neighbor_layer: u16,
 }
 
 impl<D: Distance> Default for MutationOpCache<D> {
@@ -2310,6 +2298,8 @@ impl<D: Distance> MutationOpCache<D> {
             stats: VectorBuildSessionStats::default(),
             enforce_local_limits: true,
             entity_changed_neighbors: BTreeMap::new(),
+            max_item_layer: 0,
+            max_neighbor_layer: 0,
         })
     }
 
@@ -2469,6 +2459,7 @@ impl<D: Distance> MutationOpCache<D> {
         self.replace_retained_payload(0, payload_bytes)
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(row, cached).is_none());
+        self.max_neighbor_layer = self.max_neighbor_layer.max(row.layer.number());
         self.insert_neighbor_recency(row, touch, false);
         true
     }
@@ -2541,6 +2532,7 @@ impl<D: Distance> MutationOpCache<D> {
         self.replace_retained_payload(0, payload_bytes)
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(proof.row, cached).is_none());
+        self.max_neighbor_layer = self.max_neighbor_layer.max(proof.row.layer.number());
         self.insert_neighbor_recency(proof.row, touch, true);
     }
 
@@ -2593,16 +2585,20 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes every layer-specific neighbor state for one entity.
+    ///
+    /// Rows are addressed directly for every layer up to the highest one ever
+    /// installed, so the cost is independent of the cache size. Both entity
+    /// identities sharing the local ID are removed, matching the storage-ID
+    /// equality this method has always used.
     pub(in crate::search::vector) fn invalidate_neighbors(&mut self, node_id: NodeId) {
-        let rows = self
-            .neighbor_rows
-            .keys()
-            .copied()
-            .filter(|row| row.storage_parts().1 == node_id)
-            .collect::<Vec<_>>();
-        for row in rows {
-            self.entity_changed_neighbors.remove(&row);
-            self.remove_neighbor(row);
+        for layer in 0..=self.max_neighbor_layer {
+            for entity in [VectorEntityId::Node(node_id), VectorEntityId::Edge(node_id)] {
+                let row = NeighborRowId::new(HnswLayer::from_deployed(layer), entity);
+                if self.neighbor_rows.contains_key(&row) {
+                    self.entity_changed_neighbors.remove(&row);
+                    self.remove_neighbor(row);
+                }
+            }
         }
     }
 
@@ -2663,6 +2659,7 @@ impl<D: Distance> MutationOpCache<D> {
         self.replace_retained_payload(previous_payload, payload_bytes)
             .expect("bounded vector item cache payload cannot overflow");
         let touch = self.take_touch();
+        self.max_item_layer = self.max_item_layer.max(layer);
         let replaced = self.items.insert(
             (layer, node_id),
             CachedItem {
@@ -2685,14 +2682,11 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes every layer-specific item state for one entity.
+    ///
+    /// Items are addressed directly for every layer up to the highest one ever
+    /// installed, so the cost is independent of the cache size.
     pub(in crate::search::vector) fn invalidate_items(&mut self, node_id: NodeId) {
-        let keys = self
-            .items
-            .keys()
-            .copied()
-            .filter(|(_, cached_node_id)| *cached_node_id == node_id)
-            .collect::<Vec<_>>();
-        for (layer, node_id) in keys {
+        for layer in 0..=self.max_item_layer {
             self.remove_item(layer, node_id);
         }
     }
