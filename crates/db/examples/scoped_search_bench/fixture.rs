@@ -571,6 +571,11 @@ pub type Shape = (
 pub fn shapes(query: &[f32]) -> Vec<Shape> {
     let vector = query.to_vec();
     let kind_b = || g().n_with_label_where("Attribute", SourcePredicate::eq("kind", "B"));
+    // The same scope written as a label scan followed by a stored-property filter.
+    let kind_b_where = || {
+        g().n_with_label("Attribute")
+            .where_(Predicate::eq("kind", "B"))
+    };
     let group_kind_b = || group_scope().where_(Predicate::eq("kind", "B"));
     vec![
         ("group traversal count", None, read(group_scope().count())),
@@ -600,6 +605,15 @@ pub fn shapes(query: &[f32]) -> Vec<Shape> {
             Some((kind_b(), 50)),
             read(
                 kind_b()
+                    .vector_search("Attribute", "embedding", vector.clone(), 50, None)
+                    .project(distance_projection()),
+            ),
+        ),
+        (
+            "kind-B where vector within top50",
+            Some((kind_b_where(), 50)),
+            read(
+                kind_b_where()
                     .vector_search("Attribute", "embedding", vector.clone(), 50, None)
                     .project(distance_projection()),
             ),
