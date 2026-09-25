@@ -1,5 +1,12 @@
 use std::net::TcpListener;
+use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, StatusCode};
+use helix_ast::{batch, query, traversal, value};
+use tower::ServiceExt;
 
 use super::*;
 
@@ -372,6 +379,133 @@ async fn simultaneous_transport_completion_is_a_graceful_shutdown_race() {
     .unwrap();
 
     assert!(close_called.load(Ordering::SeqCst));
+}
+
+async fn post_query(router: axum::Router, request: &query::QueryRequest) -> serde_json::Value {
+    let is_write = request.request_type() == query::QueryRequestType::Write;
+    let response = router
+        .oneshot(
+            Request::post("/v2/query")
+                .header("content-type", "application/json")
+                .header("x-helix-await-durable", is_write.to_string())
+                .body(Body::from(sonic_rs::to_vec(request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(
+        &to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
+            .await
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Counts regular files below `path`, recursing through subdirectories.
+fn file_count(path: &Path) -> usize {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .map(|path| if path.is_dir() { file_count(&path) } else { 1 })
+        .sum()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hybrid_disk_cache_serves_queries_and_keeps_cache_files_across_restart() {
+    const MIB: usize = 1024 * 1024;
+    let directory = tempfile::tempdir().unwrap();
+    let data_root = directory.path().join("data");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let cache_root = directory.path().join("cache");
+    let cache = HybridCache::try_new(
+        &cache_root,
+        NonZeroUsize::new(16 * MIB).unwrap(),
+        NonZeroUsize::new(64 * MIB).unwrap(),
+    )
+    .unwrap();
+    let config = ServerConfig {
+        http_addr: "127.0.0.1:0".parse().unwrap(),
+        grpc_addr: "127.0.0.1:0".parse().unwrap(),
+        db_path: "server-hybrid-cache".to_string(),
+        storage: StorageConfig::Disk {
+            root: data_root,
+            cache: CacheConfig::Hybrid(cache),
+        },
+    };
+    let write = query::QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "created",
+                traversal::g().add_n(
+                    "CachedUser",
+                    vec![("name", value::PropertyInput::from("Ada"))],
+                ),
+            )
+            .returning(["created"]),
+    );
+    let read = query::QueryRequest::read(
+        batch::read_batch()
+            .var_as("count", traversal::g().n_with_label("CachedUser").count())
+            .returning(["count"]),
+    );
+
+    let db = Arc::new(
+        HelixDB::open_for_server(config.db_source(), config.db_config())
+            .await
+            .unwrap(),
+    );
+    let stats = db.cache_stats();
+    assert!(matches!(
+        stats.foyer_hybrid_disk.state,
+        db::CacheTierState::Ready { capacity_bytes: Some(bytes), .. } if bytes == 24 * MIB as u64
+    ));
+    assert!(matches!(
+        stats.slate_object_store_disk.state,
+        db::CacheTierState::Ready { capacity_bytes: Some(bytes), .. }
+            | db::CacheTierState::Initializing { capacity_bytes: Some(bytes) }
+            if bytes == 32 * MIB as u64
+    ));
+    assert!(matches!(
+        stats.fts_disk.state,
+        db::CacheTierState::Ready { capacity_bytes: Some(bytes), .. } if bytes == 8 * MIB as u64
+    ));
+    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    post_query(router.clone(), &write).await;
+    assert_eq!(post_query(router, &read).await["count"], 1);
+    db.close().await.unwrap();
+
+    // 24 MiB of Foyer disk tier in its minimum 64 KiB partitions.
+    assert_eq!(
+        std::fs::read_dir(cache_root.join("slate"))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("foyer-storage-direct-fs-")
+            })
+            .count(),
+        384
+    );
+    assert!(
+        file_count(&cache_root.join("object-store")) > 0,
+        "the SST flushed on close is cached on local disk"
+    );
+    assert!(cache_root.join("fts").is_dir());
+
+    let reopened = Arc::new(
+        HelixDB::open_for_server(config.db_source(), config.db_config())
+            .await
+            .unwrap(),
+    );
+    let router = http::router(ServerState::new(Arc::clone(&reopened), None));
+    assert_eq!(post_query(router, &read).await["count"], 1);
+    reopened.close().await.unwrap();
+
+    run_with_shutdown(config, async {}).await.unwrap();
 }
 
 #[test]

@@ -4574,6 +4574,7 @@ dependencies = [
  "serde_json",
  "slatedb",
  "sonic-rs",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-stream",

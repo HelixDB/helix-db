@@ -991,10 +991,31 @@ impl HelixDB {
     }
 
     /// Opens a database for a transport server that owns its metrics recorder.
+    ///
+    /// Unlike [`Self::open_with_config`], no embedded query-metrics recorder is
+    /// attached; `config` selects the server's cache tiers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DbConfig, HelixDB, HelixDbSource};
+    ///
+    /// let db = HelixDB::open_for_server(
+    ///     HelixDbSource::InMemory {
+    ///         database: "server-open".to_string(),
+    ///     },
+    ///     DbConfig::new(),
+    /// )
+    /// .await
+    /// .unwrap();
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
     #[doc(hidden)]
-    pub async fn open_for_server(source: HelixDbSource) -> Result<Self> {
+    pub async fn open_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
         let (path, object_store) = source.into_parts()?;
-        Self::open_writer_inner(path, object_store, DbConfig::new()).await
+        Self::open_writer_inner(path, object_store, config).await
     }
 
     #[cfg(test)]
