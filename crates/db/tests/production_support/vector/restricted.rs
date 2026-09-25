@@ -310,8 +310,11 @@ async fn seed_empty_graph_directory(
     (db, index)
 }
 
-async fn seed_three_edge_filtered_gulf<D: Distance>(
+/// Seeds an explicit directoryless layer-zero graph of `(id, vector, neighbors)` rows.
+async fn seed_filtered_graph<D: Distance>(
     name: &str,
+    entry_point: NodeId,
+    rows: &[(NodeId, Vec<f32>, Vec<NodeId>)],
 ) -> (Arc<slatedb::Db>, VectorIndex<D>) {
     let db = Arc::new(
         slatedb::Db::open(name, Arc::new(InMemory::new()))
@@ -321,22 +324,17 @@ async fn seed_three_edge_filtered_gulf<D: Distance>(
     let index = VectorIndex::<D>::new(name);
     let simhash = SimHashCache::new(index.id(), 2);
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    for (entity_id, vector, neighbors) in [
-        (1, vec![0.0, 1.0], vec![2]),
-        (2, vec![0.0, 1.0], vec![3]),
-        (3, vec![0.0, 1.0], vec![1_001]),
-        (1_001, vec![1.0, 0.0], Vec::new()),
-    ] {
-        let hash = simhash.compute_and_cache(&txn, entity_id, &vector).unwrap();
+    for (entity_id, vector, neighbors) in rows {
+        let hash = simhash.compute_and_cache(&txn, *entity_id, vector).unwrap();
         txn.put(
             index
                 .row_keyspace()
                 .key(VectorKey::Vector(VectorItemKey::new(
                     index.id(),
                     order_code_from_simhash_bits(hash.bits()),
-                    entity_id,
+                    *entity_id,
                 ))),
-            encode_item(&Item::<D>::new(vector)),
+            encode_item(&Item::<D>::new(vector.clone())),
         )
         .unwrap();
         txn.put(
@@ -344,15 +342,15 @@ async fn seed_three_edge_filtered_gulf<D: Distance>(
                 .row_keyspace()
                 .key(VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(
                     index.id(),
-                    entity_id,
+                    *entity_id,
                 ))),
-            encode_layer0_neighbors(&neighbors),
+            encode_layer0_neighbors(neighbors),
         )
         .unwrap();
     }
     let mut metadata = VectorIndexMetadata::new(VectorIndexConfig::new(name, "embedding", 2));
-    metadata.entry_point = Some(1);
-    metadata.count = 4;
+    metadata.entry_point = Some(entry_point);
+    metadata.count = rows.len() as u64;
     txn.put(
         index
             .row_keyspace()
@@ -366,59 +364,20 @@ async fn seed_three_edge_filtered_gulf<D: Distance>(
     (db, index)
 }
 
-async fn seed_competing_filtered_bridges(name: &str) -> (Arc<slatedb::Db>, VectorIndex<Cosine>) {
-    let db = Arc::new(
-        slatedb::Db::open(name, Arc::new(InMemory::new()))
-            .await
-            .unwrap(),
-    );
-    let index = VectorIndex::<Cosine>::new(name);
-    let simhash = SimHashCache::new(index.id(), 2);
-    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    for (entity_id, vector, neighbors) in [
-        (1, vec![0.0, 1.0], vec![2, 3]),
-        (2, vec![1.0, 0.0], vec![1_001]),
-        (3, vec![-1.0, 0.0], vec![1_002]),
-        (1_001, vec![1.0, 0.0], Vec::new()),
-        (1_002, vec![1.0, 0.0], Vec::new()),
-    ] {
-        let hash = simhash.compute_and_cache(&txn, entity_id, &vector).unwrap();
-        txn.put(
-            index
-                .row_keyspace()
-                .key(VectorKey::Vector(VectorItemKey::new(
-                    index.id(),
-                    order_code_from_simhash_bits(hash.bits()),
-                    entity_id,
-                ))),
-            encode_item(&Item::<Cosine>::new(vector)),
-        )
-        .unwrap();
-        txn.put(
-            index
-                .row_keyspace()
-                .key(VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(
-                    index.id(),
-                    entity_id,
-                ))),
-            encode_layer0_neighbors(&neighbors),
-        )
-        .unwrap();
-    }
-    let mut metadata = VectorIndexMetadata::new(VectorIndexConfig::new(name, "embedding", 2));
-    metadata.entry_point = Some(1);
-    metadata.count = 5;
-    txn.put(
-        index
-            .row_keyspace()
-            .key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
-                index.id(),
-            ))),
-        encode_metadata(&metadata),
+async fn seed_three_edge_filtered_gulf<D: Distance>(
+    name: &str,
+) -> (Arc<slatedb::Db>, VectorIndex<D>) {
+    seed_filtered_graph::<D>(
+        name,
+        1,
+        &[
+            (1, vec![0.0, 1.0], vec![2]),
+            (2, vec![0.0, 1.0], vec![3]),
+            (3, vec![0.0, 1.0], vec![1_001]),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+        ],
     )
-    .unwrap();
-    txn.commit().await.unwrap();
-    (db, index)
+    .await
 }
 
 fn exact_ids(
@@ -1045,7 +1004,18 @@ async fn assert_directoryless_filtered_metric<D: Distance>(name: &str) {
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_region() {
-    let (db, index) = seed_competing_filtered_bridges("restricted-guided-bridge").await;
+    let (db, index) = seed_filtered_graph::<Cosine>(
+        "restricted-guided-bridge",
+        1,
+        &[
+            (1, vec![0.0, 1.0], vec![2, 3]),
+            (2, vec![1.0, 0.0], vec![1_001]),
+            (3, vec![-1.0, 0.0], vec![1_002]),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+            (1_002, vec![1.0, 0.0], Vec::new()),
+        ],
+    )
+    .await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let candidates = RestrictedVectorCandidates::from_ids(1_001..=1_257).unwrap();
     let RestrictedVectorCandidates::NonEmpty(candidates) = candidates else {
@@ -1097,6 +1067,202 @@ async fn simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_regi
     assert_eq!(stats.vector_payload_requests, 1);
     assert_eq!(stats.distance_computations, 1);
     assert!(stats.bridge_frontier_pushes >= 3);
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id() {
+    // Both bridges inherit the same rank from node 1; only their own SimHash
+    // rows can put node 3 (towards the query) ahead of node 2.
+    let (db, index) = seed_filtered_graph::<Cosine>(
+        "restricted-guided-bridge-reversed",
+        1,
+        &[
+            (1, vec![0.0, 1.0], vec![2, 3]),
+            (2, vec![-1.0, 0.0], vec![1_002]),
+            (3, vec![1.0, 0.0], vec![1_001]),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+            (1_002, vec![-1.0, 0.0], Vec::new()),
+        ],
+    )
+    .await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids(1_001..=1_257).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<Cosine> {
+        header: Cosine::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point: 1,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets: FilteredGraphBudgets {
+                    ef_filtered: 1,
+                    routing_rows: 2,
+                    bridge_rows: 2,
+                    vector_payloads: 1,
+                    sampled_seeds: 0,
+                    directory_seeds: 0,
+                },
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![1_001]
+    );
+    assert_eq!(stats.bridge_rows, 2);
+    assert_eq!(stats.vector_payload_requests, 1);
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn bridge_simhash_reads_stay_within_the_rank_window() {
+    let entity_count = 2_048;
+    let (db, index) = seed_index("restricted-bridge-read-bound", entity_count, 8).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let candidates = RestrictedVectorCandidates::from_ids((1..=entity_count).step_by(7)).unwrap();
+    let (results, stats) = index
+        .search_restricted_with_stats(
+            &txn,
+            &vector_for(1_000, entity_count, 8),
+            &SearchParams::new(10).unwrap(),
+            &candidates,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stats.strategy,
+        Some(RestrictedSearchStrategy::FilteredGraph)
+    );
+    assert_eq!(results.len(), 10);
+    assert!(stats.bridge_rows > 0);
+    // Candidate key resolution reads at most one SimHash per scored payload,
+    // sampled seed, and the entry point; bridges read only their rank window.
+    assert!(
+        stats.simhash_row_requests
+            <= (BRIDGE_RANK_WINDOW + 1) * stats.bridge_rows
+                + stats.vector_payload_requests
+                + FILTERED_SAMPLED_SEEDS
+                + 1,
+        "{stats:?}"
+    );
+    assert!(results
+        .iter()
+        .all(|result| candidates.contains(result.entity_id())));
+}
+
+/// Seeds a full cosine-close beam behind a chain of opposite-direction bridges.
+async fn early_exit_search<D: Distance>(name: &str) -> (Vec<SearchResult>, RestrictedSearchStats) {
+    let (db, index) = seed_filtered_graph::<D>(
+        name,
+        5,
+        &[
+            (5, vec![-1.0, 0.0], vec![7]),
+            (7, vec![-1.0, 0.0], vec![9]),
+            (9, vec![-1.0, 0.0], Vec::new()),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+            (1_002, vec![0.9, 0.1], Vec::new()),
+        ],
+    )
+    .await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids([1_001, 1_002]).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<D> {
+        header: D::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point: 5,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets: FilteredGraphBudgets {
+                    ef_filtered: 2,
+                    routing_rows: 100,
+                    bridge_rows: 100,
+                    vector_payloads: 10,
+                    sampled_seeds: 2,
+                    directory_seeds: 0,
+                },
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+    (results, stats)
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn cosine_beam_completes_while_only_distant_bridges_remain() {
+    let (results, stats) = early_exit_search::<Cosine>("restricted-cosine-early-exit").await;
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![1_001]
+    );
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::BeamComplete)
+    );
+    // Node 7 is queued but abandoned: its inherited rank exceeds the bound.
+    assert_eq!(stats.bridge_rows, 1);
+    assert_eq!(stats.bridge_frontier_pushes, 2);
+
+    // Euclidean SimHash ranks do not bound distance, so every bridge is walked.
+    let (results, stats) = early_exit_search::<Euclidean>("restricted-euclidean-no-exit").await;
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![1_001]
+    );
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::Exhausted)
+    );
+    assert_eq!(stats.bridge_rows, 3);
 }
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
@@ -1299,6 +1465,9 @@ pub(crate) async fn run() {
     directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors().await;
     directoryless_bridge_missing_simhash_fails_closed().await;
     simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_region().await;
+    simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id().await;
+    bridge_simhash_reads_stay_within_the_rank_window().await;
+    cosine_beam_completes_while_only_distant_bridges_remain().await;
     explicit_filtered_budgets_record_the_exact_termination_reason().await;
     exact_and_filter_aware_paths_enforce_membership_and_recall_budgets().await;
     let (exact_db, exact_index) =

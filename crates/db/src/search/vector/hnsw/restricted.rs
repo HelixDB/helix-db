@@ -34,7 +34,7 @@ use crate::search::vector::storage::{CanonicalVectorRowKey, SimHashDirectoryEntr
 use crate::search::vector::unaligned_vector::UnalignedVector;
 use crate::search::vector::{
     decode_item_borrowed, ResultCount, SearchParams, SearchResult, ValidatedMetricVector,
-    VectorDimension, VectorParameterError,
+    VectorDimension, VectorDistanceMetric, VectorParameterError, SIMHASH_BITS,
 };
 
 const MAX_RESTRICTED_CANDIDATES: u64 = 1_000_000;
@@ -53,6 +53,15 @@ const FILTERED_BEAM_PERCENT_DENOMINATOR: usize = 100;
 const FILTERED_SAMPLED_SEEDS: usize = 64;
 const FILTERED_DIRECTORY_SEEDS: usize = 256;
 const MAX_RESTRICTED_RESULT_COUNT: usize = 800;
+/// Bridges resolved per selected bridge before ranking a batch.
+const BRIDGE_RANK_WINDOW: usize = 2;
+/// Rank penalty applied to each graph hop an inherited rank crosses.
+const BRIDGE_HOP_PENALTY_BITS: u32 = 1;
+/// Inherited rank when the discovering row has no known rank (uncorrelated).
+const BRIDGE_UNKNOWN_HAMMING: u32 = (SIMHASH_BITS / 2) as u32;
+/// Hamming noise allowance above the worst beam angle before bridges are
+/// abandoned; 64-bit SimHash Hamming has a standard deviation of at most 4.
+const BRIDGE_ANGULAR_MARGIN_BITS: u32 = 8;
 const FILTERED_VECTOR_PAYLOAD_LIMIT: usize = MAX_RESTRICTED_RESULT_COUNT;
 
 #[cfg(feature = "production-scale")]
@@ -292,10 +301,79 @@ struct RestrictedScoringState<'a> {
     stats: &'a mut RestrictedSearchStats,
 }
 
+/// Origin of a bridge's query Hamming rank.
+///
+/// Exact ranks come from the bridge's own SimHash row. Inherited ranks are the
+/// discovering row's rank plus one hop; they cost no read until the bridge is
+/// about to be expanded. Exact ranks win ties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BridgeRankSource {
+    Exact,
+    Inherited,
+}
+
+/// Bridge-frontier entry ordered by query Hamming rank, rank source, then node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct BridgeEntry {
+    hamming: u32,
+    source: BridgeRankSource,
+    node_id: NodeId,
+}
+
+/// When the filtered walk may stop while rejected bridges remain queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeCutoff {
+    /// Only an empty bridge frontier proves no closer allowed node remains.
+    FrontierExhausted,
+    /// Cosine SimHash Hamming estimates angle, so bridges whose rank exceeds
+    /// the worst beam angle (plus a noise margin) are abandoned.
+    AngularBound,
+}
+
 struct RestrictedBridgeState {
     simhash_cache: HashMap<NodeId, Option<crate::search::vector::SimHash>>,
+    /// Query Hamming ranks known without a SimHash row (directory seeds).
+    known_hamming: HashMap<NodeId, u32>,
     queued: HashSet<NodeId>,
-    frontier: BinaryHeap<Reverse<(u32, NodeId)>>,
+    frontier: BinaryHeap<Reverse<BridgeEntry>>,
+}
+
+impl RestrictedBridgeState {
+    /// Query Hamming rank of an already resolved node, if known.
+    fn hamming(&self, node_id: NodeId, query_hash: crate::search::vector::SimHash) -> Option<u32> {
+        match self.simhash_cache.get(&node_id) {
+            Some(Some(simhash)) => Some(simhash.hamming_distance(&query_hash)),
+            Some(None) | None => self.known_hamming.get(&node_id).copied(),
+        }
+    }
+
+    /// Queues unseen rejected nodes without reading their SimHash rows.
+    fn enqueue(
+        &mut self,
+        query_hash: crate::search::vector::SimHash,
+        candidates: impl IntoIterator<Item = (NodeId, u32)>,
+        stats: &mut RestrictedSearchStats,
+    ) {
+        for (node_id, inherited) in candidates {
+            if !self.queued.insert(node_id) {
+                continue;
+            }
+            let entry = match self.hamming(node_id, query_hash) {
+                Some(hamming) => BridgeEntry {
+                    hamming,
+                    source: BridgeRankSource::Exact,
+                    node_id,
+                },
+                None => BridgeEntry {
+                    hamming: inherited,
+                    source: BridgeRankSource::Inherited,
+                    node_id,
+                },
+            };
+            self.frontier.push(Reverse(entry));
+            stats.bridge_frontier_pushes = stats.bridge_frontier_pushes.saturating_add(1);
+        }
+    }
 }
 
 /// A non-empty, exact traversal-membership bitmap.
@@ -703,51 +781,89 @@ impl<D: Distance> VectorIndex<D> {
         Ok(())
     }
 
-    /// Adds unseen rejected graph nodes to the compact query-guided bridge frontier.
+    /// Reads SimHash rows for inherited-rank bridges and returns their exact ranks.
     ///
-    /// Bridge routing never reads or scores vector payloads. A graph neighbor or
-    /// entry point without its mandatory SimHash companion is index corruption,
-    /// not an absent candidate that can be skipped.
-    async fn restricted_enqueue_bridges(
+    /// Bridge routing never reads or scores vector payloads. A bridge without its
+    /// mandatory SimHash companion is index corruption, not an absent candidate
+    /// that can be skipped.
+    async fn restricted_resolve_bridges(
         &self,
         read: &(impl DbReadOps + Send + Sync),
         query_hash: crate::search::vector::SimHash,
-        node_ids: impl IntoIterator<Item = NodeId>,
+        entries: Vec<BridgeEntry>,
         bridge_state: &mut RestrictedBridgeState,
         stats: &mut RestrictedSearchStats,
-    ) -> Result<(), HelixDbError> {
-        let node_ids = node_ids
-            .into_iter()
-            .filter(|node_id| bridge_state.queued.insert(*node_id))
+    ) -> Result<Vec<BridgeEntry>, HelixDbError> {
+        let inherited = entries
+            .iter()
+            .filter(|entry| entry.source == BridgeRankSource::Inherited)
+            .map(|entry| entry.node_id)
             .collect::<Vec<_>>();
-        if node_ids.is_empty() {
-            return Ok(());
-        }
-        let reads = self
-            .fill_simhash_cache_for_nodes_counted::<false>(
-                read,
-                &node_ids,
-                &mut bridge_state.simhash_cache,
-                "ranking traversal-scoped rejected bridge nodes",
-            )
-            .await?;
-        stats.simhash_row_requests = stats.simhash_row_requests.saturating_add(reads.reads);
-        stats.simhash_multi_get_calls = stats
-            .simhash_multi_get_calls
-            .saturating_add(reads.multi_get_calls);
-        for node_id in node_ids {
-            let Some(Some(simhash)) = bridge_state.simhash_cache.get(&node_id).copied() else {
-                return Err(self.missing_simhash_error(
-                    node_id,
+        if !inherited.is_empty() {
+            let reads = self
+                .fill_simhash_cache_for_nodes_counted::<false>(
+                    read,
+                    &inherited,
+                    &mut bridge_state.simhash_cache,
                     "ranking traversal-scoped rejected bridge nodes",
-                ));
-            };
-            bridge_state
-                .frontier
-                .push(Reverse((simhash.hamming_distance(&query_hash), node_id)));
-            stats.bridge_frontier_pushes = stats.bridge_frontier_pushes.saturating_add(1);
+                )
+                .await?;
+            stats.simhash_row_requests = stats.simhash_row_requests.saturating_add(reads.reads);
+            stats.simhash_multi_get_calls = stats
+                .simhash_multi_get_calls
+                .saturating_add(reads.multi_get_calls);
         }
-        Ok(())
+        entries
+            .into_iter()
+            .map(|entry| match entry.source {
+                BridgeRankSource::Exact => Ok(entry),
+                BridgeRankSource::Inherited => {
+                    let Some(Some(simhash)) =
+                        bridge_state.simhash_cache.get(&entry.node_id).copied()
+                    else {
+                        return Err(self.missing_simhash_error(
+                            entry.node_id,
+                            "ranking traversal-scoped rejected bridge nodes",
+                        ));
+                    };
+                    Ok(BridgeEntry {
+                        hamming: simhash.hamming_distance(&query_hash),
+                        source: BridgeRankSource::Exact,
+                        node_id: entry.node_id,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    /// Pops the `count` most promising bridges with exact SimHash ranks.
+    ///
+    /// The top `BRIDGE_RANK_WINDOW * count` entries are resolved and re-queued
+    /// first, so inherited estimates only order the queue; expansion order uses
+    /// each bridge's own SimHash. SimHash reads stay within
+    /// `(BRIDGE_RANK_WINDOW + 1) * count` per batch.
+    async fn restricted_select_bridges(
+        &self,
+        read: &(impl DbReadOps + Send + Sync),
+        query_hash: crate::search::vector::SimHash,
+        count: usize,
+        bridge_state: &mut RestrictedBridgeState,
+        stats: &mut RestrictedSearchStats,
+    ) -> Result<Vec<BridgeEntry>, HelixDbError> {
+        let window = (0..count.saturating_mul(BRIDGE_RANK_WINDOW))
+            .map_while(|_| bridge_state.frontier.pop().map(|Reverse(entry)| entry))
+            .collect::<Vec<_>>();
+        let ranked = self
+            .restricted_resolve_bridges(read, query_hash, window, bridge_state, stats)
+            .await?;
+        bridge_state
+            .frontier
+            .extend(ranked.into_iter().map(Reverse));
+        let selected = (0..count)
+            .map_while(|_| bridge_state.frontier.pop().map(|Reverse(entry)| entry))
+            .collect::<Vec<_>>();
+        self.restricted_resolve_bridges(read, query_hash, selected, bridge_state, stats)
+            .await
     }
 
     async fn restricted_exact_scan(
@@ -923,8 +1039,22 @@ impl<D: Distance> VectorIndex<D> {
         directory_seeds.sort_unstable_by_key(|(hamming, node_id, _)| (*hamming, *node_id));
         directory_seeds.truncate(budgets.directory_seeds);
 
+        let cutoff = match ActiveVectorSemantics::for_distance::<D>()
+            .map(ActiveVectorSemantics::distance_metric)
+        {
+            Some(VectorDistanceMetric::Cosine) => BridgeCutoff::AngularBound,
+            Some(VectorDistanceMetric::Euclidean | VectorDistanceMetric::Manhattan) | None => {
+                BridgeCutoff::FrontierExhausted
+            }
+        };
+        // Order codes interleave SimHash bits, so their XOR popcount is the
+        // node's exact query Hamming rank.
         let mut bridge_state = RestrictedBridgeState {
             simhash_cache: HashMap::new(),
+            known_hamming: directory_seeds
+                .iter()
+                .map(|(hamming, node_id, _)| (*node_id, *hamming))
+                .collect(),
             queued: HashSet::new(),
             frontier: BinaryHeap::new(),
         };
@@ -979,14 +1109,7 @@ impl<D: Distance> VectorIndex<D> {
 
         let mut expanded = HashSet::new();
         if !allowed.contains(entry_point) {
-            self.restricted_enqueue_bridges(
-                read,
-                query_hash,
-                [entry_point],
-                &mut bridge_state,
-                stats,
-            )
-            .await?;
+            bridge_state.enqueue(query_hash, [(entry_point, 0)], stats);
         }
 
         loop {
@@ -994,13 +1117,27 @@ impl<D: Distance> VectorIndex<D> {
                 stats.termination = Some(RestrictedSearchTermination::VectorBudget);
                 break;
             }
-            if bridge_state.frontier.is_empty()
-                && top.len() >= budgets.ef_filtered
-                && frontier
-                    .peek()
-                    .zip(top.peek())
-                    .is_some_and(|(Reverse(next), worst)| next > worst)
-            {
+            let worst = top.peek().filter(|_| top.len() >= budgets.ef_filtered);
+            let beam_complete = match (cutoff, worst) {
+                (_, None) => false,
+                (BridgeCutoff::FrontierExhausted, Some(worst)) => {
+                    bridge_state.frontier.is_empty()
+                        && frontier.peek().is_some_and(|Reverse(next)| next > worst)
+                }
+                (BridgeCutoff::AngularBound, Some(worst)) => {
+                    // Cosine distance here is (1 - cos) / 2; SimHash Hamming
+                    // over `SIMHASH_BITS` estimates angle / pi.
+                    let angle = (1.0 - 2.0 * worst.distance().get()).clamp(-1.0, 1.0).acos();
+                    let bound = (SIMHASH_BITS as f32 * angle / std::f32::consts::PI) as u32
+                        + BRIDGE_ANGULAR_MARGIN_BITS;
+                    frontier.peek().is_none_or(|Reverse(next)| next > worst)
+                        && bridge_state
+                            .frontier
+                            .peek()
+                            .is_none_or(|Reverse(bridge)| bridge.hamming > bound)
+                }
+            };
+            if beam_complete {
                 stats.termination = Some(RestrictedSearchTermination::BeamComplete);
                 break;
             }
@@ -1032,64 +1169,60 @@ impl<D: Distance> VectorIndex<D> {
                 stats.routing_rows = stats.routing_rows.saturating_add(routing_batch.len());
                 stats.neighbor_multi_get_calls = stats.neighbor_multi_get_calls.saturating_add(1);
                 routing_remaining = routing_remaining.saturating_sub(routing_batch.len());
-                for row in direct_rows.into_iter().flatten() {
-                    for node_id in row {
+                for (parent, row) in routing_batch.iter().zip(direct_rows) {
+                    let inherited = bridge_state
+                        .hamming(*parent, query_hash)
+                        .unwrap_or(BRIDGE_UNKNOWN_HAMMING)
+                        .saturating_add(BRIDGE_HOP_PENALTY_BITS);
+                    for node_id in row.into_iter().flatten() {
                         if allowed.contains(node_id) {
                             if !attempted.contains(&node_id) && eligible_seen.insert(node_id) {
                                 eligible.push(node_id);
                             }
                         } else {
-                            rejected.push(node_id);
+                            rejected.push((node_id, inherited));
                         }
                     }
                 }
             }
-            self.restricted_enqueue_bridges(
-                read,
-                query_hash,
-                rejected.drain(..),
-                &mut bridge_state,
-                stats,
-            )
-            .await?;
+            bridge_state.enqueue(query_hash, rejected.drain(..), stats);
 
             let bridge_remaining = budgets.bridge_rows.saturating_sub(stats.bridge_rows);
             let bridge_batch_len = bridge_remaining
                 .min(routing_remaining)
                 .min(BRIDGE_BATCH_SIZE)
                 .min(bridge_state.frontier.len());
-            let bridge_batch = (0..bridge_batch_len)
-                .filter_map(|_| {
-                    bridge_state
-                        .frontier
-                        .pop()
-                        .map(|Reverse((_, node_id))| node_id)
-                })
-                .collect::<Vec<_>>();
+            let bridge_batch = self
+                .restricted_select_bridges(
+                    read,
+                    query_hash,
+                    bridge_batch_len,
+                    &mut bridge_state,
+                    stats,
+                )
+                .await?;
             if !bridge_batch.is_empty() {
-                let bridge_rows = rows.layer0_neighbor_rows(&bridge_batch).await?;
+                let bridge_ids = bridge_batch
+                    .iter()
+                    .map(|bridge| bridge.node_id)
+                    .collect::<Vec<_>>();
+                let bridge_rows = rows.layer0_neighbor_rows(&bridge_ids).await?;
                 stats.routing_rows = stats.routing_rows.saturating_add(bridge_batch.len());
                 stats.bridge_rows = stats.bridge_rows.saturating_add(bridge_batch.len());
                 stats.neighbor_multi_get_calls = stats.neighbor_multi_get_calls.saturating_add(1);
-                for row in bridge_rows.into_iter().flatten() {
-                    for node_id in row {
+                for (bridge, row) in bridge_batch.iter().zip(bridge_rows) {
+                    let inherited = bridge.hamming.saturating_add(BRIDGE_HOP_PENALTY_BITS);
+                    for node_id in row.into_iter().flatten() {
                         if allowed.contains(node_id) {
                             if !attempted.contains(&node_id) && eligible_seen.insert(node_id) {
                                 eligible.push(node_id);
                             }
                         } else {
-                            rejected.push(node_id);
+                            rejected.push((node_id, inherited));
                         }
                     }
                 }
-                self.restricted_enqueue_bridges(
-                    read,
-                    query_hash,
-                    rejected.drain(..),
-                    &mut bridge_state,
-                    stats,
-                )
-                .await?;
+                bridge_state.enqueue(query_hash, rejected.drain(..), stats);
             } else if routing_batch.is_empty() && !bridge_state.frontier.is_empty() {
                 stats.termination = Some(RestrictedSearchTermination::BridgeBudget);
                 break;
