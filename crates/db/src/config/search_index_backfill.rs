@@ -42,7 +42,7 @@ const DEFAULT_TEXT_COMPACTION_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEXT_COMPACTION_TEMP_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_TEXT_COMPACTION_OUTPUT_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEXT_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-const DEFAULT_VECTOR_BUILD_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_VECTOR_BUILD_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Positive common source and transaction limits for text/vector builders.
 ///
@@ -336,6 +336,12 @@ impl SearchIndexBackfillLimits {
     /// amount per in-flight vector build task. The cache is process-local and
     /// never persisted.
     ///
+    /// The 2 GiB default keeps the planning working set of a build of roughly
+    /// half a million 768-dimensional vectors resident; once a build outgrows
+    /// the budget, evicted rows are re-read and decoded from storage on every
+    /// insert and throughput falls steeply. Retention is demand-filled, so
+    /// smaller builds hold only what they touch.
+    ///
     /// ```
     /// use std::num::NonZeroU64;
     ///
@@ -492,7 +498,10 @@ mod tests {
         assert_eq!(limits.batch().max_output_operations().get(), 32_768);
         assert_eq!(limits.batch().max_output_bytes().get(), 8 * 1024 * 1024);
         assert_eq!(limits.edge_property_read_batch(), NonZeroUsize::MIN);
-        assert_eq!(limits.vector_build_cache_bytes().get(), 512 * 1024 * 1024);
+        assert_eq!(
+            limits.vector_build_cache_bytes().get(),
+            2 * 1024 * 1024 * 1024
+        );
         assert!(limits.text_artifacts().max_bytes() <= limits.batch().max_output_bytes());
         assert!(limits.text_compaction().max_manifest_bytes() <= limits.batch().max_output_bytes());
         assert_eq!(
