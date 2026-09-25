@@ -56,9 +56,27 @@ fn object_store() -> Arc<CountingStore> {
     ))
 }
 
+/// Cache config plus `BENCH_BUILD_CACHE_MB`, the vector build planning cache.
+fn bench_config() -> DbConfig {
+    let config = cache_config();
+    let Some(build_cache_mb) = std::env::var("BENCH_BUILD_CACHE_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return config;
+    };
+    let limits = config
+        .search_index_backfill()
+        .with_vector_build_cache_bytes(
+            std::num::NonZeroU64::new(build_cache_mb * 1024 * 1024)
+                .expect("BENCH_BUILD_CACHE_MB is positive"),
+        );
+    config.with_search_index_backfill_limits(limits)
+}
+
 /// Default config; `BENCH_CACHE_DIR` switches to cloud-like hybrid caches on
 /// local disk, `BENCH_BLOCK_CACHE_MB` shrinks the in-memory block cache.
-fn bench_config() -> DbConfig {
+fn cache_config() -> DbConfig {
     if let Ok(dir) = std::env::var("BENCH_CACHE_DIR") {
         let dir = std::path::PathBuf::from(dir);
         return DbConfig::new().with_cache(db::config::CacheConfig::new(
