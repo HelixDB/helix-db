@@ -4566,6 +4566,7 @@ dependencies = [
  "helix-db-testkit",
  "helix-metrics",
  "helix-planner",
+ "libc",
  "object_store 0.14.1",
  "prost",
  "prost-build",

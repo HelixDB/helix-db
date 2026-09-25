@@ -151,7 +151,7 @@ impl ServerConfig {
         }
     }
 
-    /// Open files the server must be allowed before opening storage, or
+    /// Minimum open files the hard limit must allow before storage opens, or
     /// `None` when only memory caches run and the process limit is left alone.
     ///
     /// # Examples
@@ -403,9 +403,11 @@ impl HybridCache {
         &self.root
     }
 
-    /// Open files a server with this cache needs: one per block-cache
-    /// partition (at most 32Ki), the object-store tier's handle cache, and
-    /// headroom for everything else.
+    /// Minimum open files a server with this cache needs: one per
+    /// block-cache partition (at most 32Ki), the object-store tier's handle
+    /// cache, and headroom for everything else. The full-text tier's open
+    /// split files come on top, so the server raises its soft limit to the
+    /// hard limit rather than to this floor.
     pub fn required_open_files(&self) -> u64 {
         (self.slate_db.disk_partitions() + self.object_store.max_open_file_handles()) as u64
             + OPEN_FILE_HEADROOM
@@ -474,7 +476,7 @@ fn parse_cache_bytes(
 #[derive(Debug, thiserror::Error)]
 pub enum ServerConfigError {
     /// Listener address could not be parsed.
-    #[error("invalid {variable} `{value}`: {source}")]
+    #[error("invalid {variable} `{value}`")]
     Addr {
         /// Address variable.
         variable: &'static str,
@@ -507,7 +509,7 @@ pub enum ServerConfigError {
         variable: &'static str,
     },
     /// A cache size was not a positive integer byte count.
-    #[error("invalid {variable} `{value}`: expected a positive byte count ({source})")]
+    #[error("invalid {variable} `{value}`: expected a positive byte count")]
     CacheBytes {
         /// Size variable.
         variable: &'static str,
@@ -532,7 +534,7 @@ pub enum ServerConfigError {
     EmptyCacheDirectory,
     /// The cache directory or one of its tier subdirectories could not be
     /// created or written.
-    #[error("HELIX_DISK_CACHE_DIR: `{}` is not a writable directory: {source}", .path.display())]
+    #[error("HELIX_DISK_CACHE_DIR: `{}` is not a writable directory", .path.display())]
     CacheDirectory {
         /// Unwritable directory.
         path: PathBuf,
@@ -541,12 +543,14 @@ pub enum ServerConfigError {
     },
     /// The DB crate rejected a derived cache tier.
     #[error(
-        "invalid HELIX_DISK_CACHE_DIR, HELIX_DISK_CACHE_BYTES or HELIX_DISK_CACHE_MEMORY_BYTES: {0}"
+        "invalid HELIX_DISK_CACHE_DIR, HELIX_DISK_CACHE_BYTES or HELIX_DISK_CACHE_MEMORY_BYTES setting"
     )]
     Cache(#[from] db::config::ConfigError),
-    /// The hard open-file limit is below what the disk cache needs.
+    /// The hard open-file limit is below the disk cache's minimum. The
+    /// minimum does not fall steadily with the budget, so the remedy is a
+    /// higher limit.
     #[error(
-        "HELIX_DISK_CACHE_BYTES needs {required} open files but the hard open-file limit is {limit}; lower HELIX_DISK_CACHE_BYTES or raise the limit (docker run --ulimit nofile={required}:{required})"
+        "HELIX_DISK_CACHE_BYTES: the disk cache needs at least {required} open files but the hard open-file limit is {limit}; raise the hard limit (docker run --ulimit nofile=65536:65536)"
     )]
     OpenFileLimit {
         /// Open files the cache needs.
@@ -556,7 +560,7 @@ pub enum ServerConfigError {
     },
     /// Raising the soft open-file limit failed.
     #[error(
-        "could not raise the open-file limit to the {required} files HELIX_DISK_CACHE_BYTES needs: {source}"
+        "HELIX_DISK_CACHE_BYTES: could not raise the soft open-file limit for a disk cache that needs at least {required} open files"
     )]
     RaiseOpenFileLimit {
         /// Open files the cache needs.

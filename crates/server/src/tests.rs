@@ -221,6 +221,41 @@ async fn listener_failure_still_closes_the_database_and_peer_transport() {
 }
 
 #[tokio::test]
+async fn grpc_bind_failure_report_keeps_the_os_cause() {
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut config = memory_config("server-grpc-bind-failure");
+    config.grpc_addr = occupied.local_addr().unwrap();
+
+    let error = run_with_shutdown(config, std::future::pending())
+        .await
+        .unwrap_err();
+    let report = error_report(&*error);
+    // tonic's own message is only "transport error"; the cause says why.
+    assert!(
+        report.contains("\ncaused by: Address already in use"),
+        "{report}"
+    );
+}
+
+#[test]
+fn error_report_prints_every_cause_once() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("server failed to start")]
+    struct Startup(#[source] ServerConfigError);
+
+    let error = Startup(ServerConfigError::CacheDirectory {
+        path: PathBuf::from("/cache"),
+        source: std::io::Error::other("disk on fire"),
+    });
+    assert_eq!(
+        error_report(&error),
+        "Error: server failed to start\n\
+         caused by: HELIX_DISK_CACHE_DIR: `/cache` is not a writable directory\n\
+         caused by: disk on fire"
+    );
+}
+
+#[tokio::test]
 async fn shutdown_signal_failure_joins_both_transports_before_close() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let joined = Arc::new(AtomicUsize::new(0));
@@ -526,49 +561,52 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
 
 #[cfg(unix)]
 #[test]
-fn open_file_limit_rises_to_what_is_required_within_the_hard_limit() {
+fn open_file_limit_rises_to_the_hard_limit_or_fails_below_the_minimum() {
     use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
 
     let _limit = OPEN_FILE_LIMIT.blocking_lock();
     let original = getrlimit(Resource::Nofile);
-    // An unlimited soft limit never needs raising.
-    let Some(soft) = original.current else {
+    // With no hard limit anywhere there is nothing to raise to.
+    let Some(hard) = original
+        .maximum
+        .into_iter()
+        .chain(max_files_per_process())
+        .min()
+    else {
         return;
     };
-    // One below the current soft limit runs the raise path without
-    // starving tests that share this process.
+    // One below the hard limit runs the raise path without starving tests
+    // that share this process.
     setrlimit(
         Resource::Nofile,
         Rlimit {
-            current: Some(soft - 1),
+            current: Some(hard - 1),
             maximum: original.maximum,
         },
     )
     .unwrap();
 
-    ensure_open_file_limit(soft - 1).unwrap();
+    ensure_open_file_limit(1).unwrap();
+    let raised = getrlimit(Resource::Nofile);
     assert_eq!(
-        getrlimit(Resource::Nofile).current,
-        Some(soft - 1),
-        "a sufficient soft limit is left alone"
+        raised,
+        Rlimit {
+            current: Some(hard),
+            maximum: original.maximum,
+        },
+        "a minimum far below the hard limit still raises the soft limit to it"
     );
-    ensure_open_file_limit(soft).unwrap();
-    assert_eq!(
-        getrlimit(Resource::Nofile),
-        original,
-        "the soft limit rises to exactly what is required"
-    );
+    ensure_open_file_limit(hard).unwrap();
+    assert_eq!(getrlimit(Resource::Nofile), raised);
 
-    let Some(hard) = original.maximum else {
-        return;
-    };
     let error = ensure_open_file_limit(hard + 1).unwrap_err();
     assert!(matches!(
         error,
         ServerConfigError::OpenFileLimit { required, limit } if required == hard + 1 && limit == hard
     ));
     assert!(error.to_string().starts_with("HELIX_DISK_CACHE_BYTES"));
-    assert_eq!(getrlimit(Resource::Nofile), original);
+    assert_eq!(getrlimit(Resource::Nofile), raised);
+    setrlimit(Resource::Nofile, original).unwrap();
 }
 
 #[test]

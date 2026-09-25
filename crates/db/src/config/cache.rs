@@ -112,8 +112,11 @@ impl SlateHybridCacheConfig {
         &self.disk
     }
 
-    /// Foyer disk block size: the disk capacity split into at most
-    /// 32Ki blocks, rounded up to a power of two within 64 KiB..=16 MiB.
+    /// Foyer disk block size: the disk capacity divided by 32Ki, rounded up
+    /// to a power of two and clamped to 64 KiB..=16 MiB.
+    ///
+    /// Up to 512 GiB this gives at most 32Ki blocks. Above it blocks stay at
+    /// 16 MiB and the count grows linearly; see [`Self::disk_partitions`].
     ///
     /// ```
     /// # use db::config::SlateHybridCacheConfig;

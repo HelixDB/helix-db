@@ -63,30 +63,38 @@ async fn open_database(config: &ServerConfig) -> ServerResult<Arc<HelixDB>> {
     ))
 }
 
-/// Raises the soft open-file limit to `required` when it is lower.
+/// Raises the soft open-file limit to the hard limit for a hybrid disk cache.
 ///
-/// The hybrid cache's block tier holds one descriptor per partition (up to
-/// 32Ki) while container runtimes commonly default the soft limit to 1024.
-/// A hard limit below `required` fails startup with an error naming
-/// `HELIX_DISK_CACHE_BYTES` instead of a later `EMFILE` inside the cache.
+/// `required` is a floor, not an estimate of peak use: the full-text tier
+/// also holds one descriptor per disk-opened split, bounded by bytes rather
+/// than count. So the soft limit goes to the hard limit, as container
+/// runtimes commonly default it to 1024. A hard limit below `required`
+/// fails startup with an error naming `HELIX_DISK_CACHE_BYTES` instead of a
+/// later `EMFILE` inside the cache. macOS also caps descriptors at
+/// `kern.maxfilesperproc`, which counts as part of the hard limit.
 #[cfg(unix)]
 fn ensure_open_file_limit(required: u64) -> Result<(), ServerConfigError> {
     let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     // `None` is unlimited.
-    if limit.current.is_none_or(|current| current >= required) {
+    let hard = limit
+        .maximum
+        .into_iter()
+        .chain(max_files_per_process())
+        .min();
+    hard.filter(|&hard| hard < required)
+        .map_or(Ok(()), |hard| {
+            Err(ServerConfigError::OpenFileLimit {
+                required,
+                limit: hard,
+            })
+        })?;
+    if limit.current == hard {
         return Ok(());
-    }
-    let hard = limit.maximum.unwrap_or(u64::MAX);
-    if hard < required {
-        return Err(ServerConfigError::OpenFileLimit {
-            required,
-            limit: hard,
-        });
     }
     rustix::process::setrlimit(
         rustix::process::Resource::Nofile,
         rustix::process::Rlimit {
-            current: Some(required),
+            current: hard,
             maximum: limit.maximum,
         },
     )
@@ -96,10 +104,55 @@ fn ensure_open_file_limit(required: u64) -> Result<(), ServerConfigError> {
     })?;
     tracing::info!(
         from = ?limit.current,
-        to = required,
+        to = ?hard,
+        required,
         "raised the soft open-file limit for the disk cache"
     );
     Ok(())
+}
+
+/// The per-process descriptor cap macOS enforces on top of `RLIMIT_NOFILE`,
+/// and above which it rejects a soft limit.
+#[cfg(target_os = "macos")]
+fn max_files_per_process() -> Option<u64> {
+    let mut value: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: the name is NUL-terminated, and `value` and `size` describe one
+    // writable `c_int`, the type of `kern.maxfilesperproc`.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfilesperproc".as_ptr(),
+            std::ptr::from_mut(&mut value).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0)
+        .then_some(value)
+        .and_then(|value| u64::try_from(value).ok())
+}
+
+/// Other Unix kernels enforce `RLIMIT_NOFILE` alone.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn max_files_per_process() -> Option<u64> {
+    None
+}
+
+/// Formats an error and every `source()` beneath it, one per line, so a
+/// wrapper whose message is generic still shows its cause.
+///
+/// # Examples
+///
+/// ```
+/// let error = std::io::Error::other("disk on fire");
+/// assert_eq!(server::error_report(&error), "Error: disk on fire");
+/// ```
+pub fn error_report(error: &(dyn Error + 'static)) -> String {
+    std::iter::successors(error.source(), |&cause| cause.source())
+        .fold(format!("Error: {error}"), |report, cause| {
+            format!("{report}\ncaused by: {cause}")
+        })
 }
 
 async fn shutdown_signal() {

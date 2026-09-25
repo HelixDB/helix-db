@@ -24,6 +24,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 prost-build = "0.14"
 protoc-bin-vendored = "3.2"
