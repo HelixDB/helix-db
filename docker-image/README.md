@@ -98,8 +98,14 @@ docker run --rm -p 8080:8080 \
 
 A named volume (`--mount type=volume,source=helixdb-cache,target=/var/cache/helix`)
 needs no `chown`. The cache survives restarts, so a restarted server reads recently
-used data from local disk instead of the object store; a smaller budget on restart
-trims the existing cache. Use one cache directory per running server.
+used data from local disk instead of the object store. Use one cache directory per
+running server and per database: changing `DB_PATH` on the same directory leaves the
+old database's full-text cache behind.
+
+Changing `HELIX_DISK_CACHE_BYTES` usually changes the block cache's block size, and
+then the whole block tier (`slate/`) is discarded at startup and refills from the
+object store; only budgets that keep the block size keep it. The object-store and
+full-text tiers keep their files and evict down to a smaller budget.
 
 | Variable | Purpose |
 | --- | --- |
@@ -109,10 +115,13 @@ trims the existing cache. Use one cache directory per running server.
 
 The block cache holds one file open per partition: its 3/8 share divided by a
 power-of-two block of 64 KiB to 16 MiB, at most 32,768 files. With 2,024 more for
-the object-store tier and the rest of the server, it needs 26,600 open files at the
-default budget and never more than 34,792. The server raises its soft open-file
-limit to that number at startup. If the hard limit is lower, startup fails naming
-`HELIX_DISK_CACHE_BYTES`; lower the budget or add `--ulimit nofile=34792:34792`.
+the object-store tier and the rest of the server, the minimum is 26,600 open files
+at the default budget and never more than 34,792; open full-text split files come
+on top. The server raises its soft open-file limit to the hard limit at startup. If
+the hard limit is below the minimum, startup fails naming `HELIX_DISK_CACHE_BYTES`;
+raise the hard limit with `--ulimit nofile=65536:65536`. Lowering the budget is not
+a reliable fix, since the file count does not fall steadily with it. Run natively on
+macOS, the limit is also capped by `sysctl kern.maxfilesperproc`.
 
 Startup also fails with a message naming the variable when a size is not a positive
 integer (including non-UTF-8 text) or is out of range, a size is set without

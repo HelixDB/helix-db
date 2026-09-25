@@ -244,7 +244,9 @@ docker run --rm --name helixdb \
 
 In Compose, add the same variables and a volume to the `helix` service. A new
 named volume mounted at `/var/cache/helix` is already writable; a bind mount must be
-owned by `65532:65532`. Use one cache directory per running server.
+owned by `65532:65532`. Use one cache directory per running server and per
+database; changing `DB_PATH` on the same directory leaves the old database's
+full-text cache behind.
 
 | Variable | Purpose |
 | --- | --- |
@@ -253,13 +255,18 @@ owned by `65532:65532`. Use one cache directory per running server.
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
 
 Half of the disk budget caches object-store files, 3/8 caches database blocks,
-and the rest caches full-text search data. A smaller budget on restart trims the
-existing cache.
+and the rest caches full-text search data. Changing the budget usually changes the
+block size, which discards the database-block cache at startup so it refills from
+the object store. The other two caches keep their files and evict down to a smaller
+budget.
 
-The block cache keeps up to 32,768 files open, so the server needs up to 34,792
-open files (26,600 at the default budget). It raises its soft open-file limit at
-startup. If the container's hard limit is lower, startup fails naming
-`HELIX_DISK_CACHE_BYTES`; lower the budget or add `--ulimit nofile=34792:34792`.
+The block cache keeps up to 32,768 files open, so the server needs at least 34,792
+open files in the worst case (26,600 at the default budget), plus one per open
+full-text split. It raises its soft open-file limit to the hard limit at startup.
+If the container's hard limit is below that minimum, startup fails naming
+`HELIX_DISK_CACHE_BYTES`; raise the hard limit with `--ulimit nofile=65536:65536`.
+Lowering the budget is not a reliable fix. Run natively on macOS, the limit is also
+capped by `sysctl kern.maxfilesperproc`.
 
 Startup also fails with a message naming the variable when a size is invalid or
 out of range, a size is set without `HELIX_DISK_CACHE_DIR`, or the cache directory
