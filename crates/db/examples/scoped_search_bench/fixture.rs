@@ -1,17 +1,8 @@
-//! Scoped search benchmark over a synthetic `Group <- Item -> Attribute` graph.
+//! Synthetic `Group <- Item -> Attribute` fixture and query shapes shared by
+//! the scoped search benchmark CLI and its regression gate.
 //!
-//! Loads the graph and times global / traversal-scoped vector and BM25 search,
-//! reporting latency, recall@k and (embedded mode) object-store GETs.
-//!
-//! Backends (environment):
-//! - `BENCH_HTTP_URL=http://host:6969`: a running server (`POST /v2/query`).
-//! - `BENCH_DIR=/path`: embedded, local-filesystem object store.
-//! - `BENCH_S3_BUCKET=bucket` (+ `BENCH_S3_REGION`): embedded, S3 object store.
-//!
-//! ```text
-//! BENCH_DIR=/tmp/bench BENCH_SCALE=0.02 cargo run --release -p db --example scoped_search_bench -- load
-//! BENCH_DIR=/tmp/bench cargo run --release -p db --example scoped_search_bench -- query
-//! ```
+//! Each consumer uses a subset (the gate never opens S3 or HTTP backends).
+#![allow(dead_code)]
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -19,24 +10,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use db::{DbConfig, HelixDB};
+use db::HelixDB;
 use futures::stream::BoxStream;
 use helix_ast::prelude::*;
 use serde_json::Value as JsonValue;
 use slatedb::object_store::{
-    aws::AmazonS3Builder, local::LocalFileSystem, path::Path, CopyOptions, GetOptions, GetResult,
-    ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions,
-    PutPayload, PutResult, Result as ObjectStoreResult,
+    path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    Result as ObjectStoreResult,
 };
 
-const TOTAL_ATTRIBUTES: f64 = 312_677.0;
-const TOTAL_ITEMS: f64 = 4_115.0;
-const GROUPS: usize = 25;
-const TARGET_GROUP: usize = 3;
+pub const TOTAL_ATTRIBUTES: f64 = 312_677.0;
+pub const TOTAL_ITEMS: f64 = 4_115.0;
+pub const GROUPS: usize = 25;
+pub const TARGET_GROUP: usize = 3;
 
 /// Object store wrapper counting GETs and optionally injecting per-GET latency.
 #[derive(Debug)]
-struct CountingStore {
+pub struct CountingStore {
     inner: Arc<dyn ObjectStore>,
     gets: AtomicU64,
     bytes: AtomicU64,
@@ -44,6 +35,15 @@ struct CountingStore {
 }
 
 impl CountingStore {
+    pub fn new(inner: Arc<dyn ObjectStore>, latency: Duration) -> Self {
+        Self {
+            inner,
+            gets: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            latency,
+        }
+    }
+
     fn snapshot(&self) -> (u64, u64) {
         (
             self.gets.load(Ordering::Relaxed),
@@ -116,7 +116,7 @@ impl ObjectStore for CountingStore {
 }
 
 /// SplitMix64: deterministic, dependency-free fixture randomness.
-struct Rng(u64);
+pub struct Rng(u64);
 
 impl Rng {
     fn next_u64(&mut self) -> u64 {
@@ -146,13 +146,13 @@ impl Rng {
     }
 }
 
-fn normalized(mut vector: Vec<f32>) -> Vec<f32> {
+pub fn normalized(mut vector: Vec<f32>) -> Vec<f32> {
     let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
     vector.iter_mut().for_each(|value| *value /= norm);
     vector
 }
 
-fn mix(parts: &[(&[f32], f32)], dimension: usize) -> Vec<f32> {
+pub fn mix(parts: &[(&[f32], f32)], dimension: usize) -> Vec<f32> {
     normalized(
         (0..dimension)
             .map(|index| {
@@ -167,7 +167,7 @@ fn mix(parts: &[(&[f32], f32)], dimension: usize) -> Vec<f32> {
 
 /// Attribute kinds with the 72% / 22% / 6% split of the reference workload.
 #[derive(Clone, Copy)]
-enum Kind {
+pub enum Kind {
     A,
     B,
     C,
@@ -183,7 +183,7 @@ impl Kind {
     }
 }
 
-struct Fixture {
+pub struct Fixture {
     dimension: usize,
     kind_centroids: [Vec<f32>; 3],
     group_centroids: Vec<Vec<f32>>,
@@ -242,19 +242,19 @@ impl Fixture {
     }
 }
 
-fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+pub fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
 }
 
-fn group_name(group: usize) -> String {
+pub fn group_name(group: usize) -> String {
     format!("group-{group}")
 }
 
 /// One query target: an embedded database handle or a server URL.
-enum Backend {
+pub enum Backend {
     Embedded {
         db: HelixDB,
         store: Arc<CountingStore>,
@@ -266,7 +266,7 @@ enum Backend {
 }
 
 impl Backend {
-    async fn query(&self, request: QueryRequest) -> Result<JsonValue, String> {
+    pub async fn query(&self, request: QueryRequest) -> Result<JsonValue, String> {
         match self {
             Self::Embedded { db, .. } => db.query(request).await.map_err(|error| error.to_string()),
             Self::Http { client, url } => {
@@ -287,7 +287,7 @@ impl Backend {
         }
     }
 
-    fn gets(&self) -> (u64, u64) {
+    pub fn gets(&self) -> (u64, u64) {
         match self {
             Self::Embedded { store, .. } => store.snapshot(),
             Self::Http { .. } => (0, 0),
@@ -295,88 +295,7 @@ impl Backend {
     }
 }
 
-fn object_store() -> Arc<CountingStore> {
-    let inner: Arc<dyn ObjectStore> = match std::env::var("BENCH_S3_BUCKET") {
-        Ok(bucket) => Arc::new(
-            AmazonS3Builder::from_env()
-                .with_bucket_name(bucket)
-                .with_region(env_or("BENCH_S3_REGION", "us-east-2".to_string()))
-                .build()
-                .unwrap(),
-        ),
-        Err(_) => {
-            let dir = std::env::var("BENCH_DIR").expect("BENCH_DIR or BENCH_S3_BUCKET is set");
-            std::fs::create_dir_all(&dir).unwrap();
-            Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap())
-        }
-    };
-    Arc::new(CountingStore {
-        inner,
-        gets: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-        latency: Duration::from_millis(env_or("BENCH_LATENCY_MS", 0)),
-    })
-}
-
-/// Default config; `BENCH_CACHE_DIR` switches to cloud-like hybrid caches on
-/// local disk, `BENCH_BLOCK_CACHE_MB` shrinks the in-memory block cache.
-fn bench_config() -> DbConfig {
-    if let Ok(dir) = std::env::var("BENCH_CACHE_DIR") {
-        let dir = std::path::PathBuf::from(dir);
-        return DbConfig::new().with_cache(db::config::CacheConfig::new(
-            db::config::VectorMemorySettings::default(),
-            db::config::CacheMode::Hybrid {
-                slate_db: db::config::SlateHybridCacheConfig::try_new(
-                    env_or("BENCH_BLOCK_CACHE_MB", 512usize) * 1024 * 1024,
-                    dir.join("slate"),
-                    32 * 1024 * 1024 * 1024,
-                )
-                .unwrap(),
-                object_store: db::config::SlateObjectStoreCacheSettings::try_new(
-                    dir.join("object-store"),
-                    Some(64 * 1024 * 1024 * 1024),
-                    4 * 1024 * 1024,
-                    true,
-                    db::config::ObjectStoreWarmLevel::Off,
-                    None,
-                    1_024,
-                )
-                .unwrap(),
-                slate_warm: db::config::SlateWarmConfig::default(),
-                fts: Some(
-                    db::config::FtsHybridCacheConfig::try_new(
-                        256 * 1024 * 1024,
-                        dir.join("fts"),
-                        8 * 1024 * 1024 * 1024,
-                        db::config::FtsWarmConfig::Off,
-                        60,
-                    )
-                    .unwrap(),
-                ),
-            },
-        ));
-    }
-    let Some(block_mb) = std::env::var("BENCH_BLOCK_CACHE_MB")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    else {
-        return DbConfig::new();
-    };
-    DbConfig::new().with_cache(db::config::CacheConfig::new(
-        db::config::VectorMemorySettings::default(),
-        db::config::CacheMode::Memory {
-            slate_db: db::config::SlateMemoryCacheConfig::try_new(
-                block_mb * 1024 * 1024,
-                128 * 1024 * 1024,
-            )
-            .unwrap(),
-            slate_warm: db::config::SlateWarmConfig::default(),
-            fts: Some(db::config::FtsMemoryCacheConfig::default()),
-        },
-    ))
-}
-
-async fn wait_for_operations(backend: &Backend, receipts: &JsonValue, names: &[&str]) {
+pub async fn wait_for_operations(backend: &Backend, receipts: &JsonValue, names: &[&str]) {
     for name in names {
         let operation_id = receipts[*name]["operation_id"]
             .as_str()
@@ -413,7 +332,7 @@ async fn wait_for_operations(backend: &Backend, receipts: &JsonValue, names: &[&
     }
 }
 
-async fn create_indexes(backend: &Backend, names: &[&str], dimension: usize) {
+pub async fn create_indexes(backend: &Backend, names: &[&str], dimension: usize) {
     let batch = names.iter().fold(write_batch(), |batch, name| match *name {
         "vector" => batch.var_as(
             "vector",
@@ -448,7 +367,7 @@ async fn create_indexes(backend: &Backend, names: &[&str], dimension: usize) {
 
 /// When the vector index is built relative to the graph load (`BENCH_VECTOR`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum VectorBuild {
+pub enum VectorBuild {
     /// Incremental HNSW inserts during the load (`before`, default).
     Before,
     /// Backfill once the graph is loaded (`after`).
@@ -457,26 +376,29 @@ enum VectorBuild {
     Skip,
 }
 
-fn vector_build() -> VectorBuild {
-    match std::env::var("BENCH_VECTOR").as_deref() {
-        Ok("after") => VectorBuild::After,
-        Ok("skip") => VectorBuild::Skip,
-        Ok("before") | Err(_) => VectorBuild::Before,
-        Ok(other) => panic!("BENCH_VECTOR must be before, after or skip, not {other}"),
-    }
-}
-
-async fn build_vector_index(backend: &Backend, dimension: usize) {
+pub async fn build_vector_index(backend: &Backend, dimension: usize) {
     let started = Instant::now();
     create_indexes(backend, &["vector"], dimension).await;
     println!("vector backfill: {:.0}s", started.elapsed().as_secs_f64());
 }
 
-async fn load(backend: &Backend) {
-    let scale: f64 = env_or("BENCH_SCALE", 1.0);
-    let dimension: usize = env_or("BENCH_DIM", 768);
-    let items_per_batch: usize = env_or("BENCH_ITEMS_PER_BATCH", 4);
-    let vector = vector_build();
+/// Fixture size and vector-index build order for one load.
+#[derive(Clone, Copy)]
+pub struct LoadOptions {
+    /// Fraction of the 312,677-attribute reference graph.
+    pub scale: f64,
+    pub dimension: usize,
+    pub items_per_batch: usize,
+    pub vector: VectorBuild,
+}
+
+pub async fn load(backend: &Backend, options: LoadOptions) {
+    let LoadOptions {
+        scale,
+        dimension,
+        items_per_batch,
+        vector,
+    } = options;
     let fixture = Fixture::new(dimension);
     let item_count = (TOTAL_ITEMS * scale).round() as usize;
     let attributes_per_item = TOTAL_ATTRIBUTES / TOTAL_ITEMS;
@@ -611,7 +533,7 @@ async fn load(backend: &Backend) {
     println!("load complete in {:.0}s", started.elapsed().as_secs_f64());
 }
 
-fn group_scope() -> Traversal<OnNodes> {
+pub fn group_scope() -> Traversal<OnNodes> {
     g().n_with_label_where(
         "Group",
         SourcePredicate::eq("name", group_name(TARGET_GROUP)),
@@ -620,7 +542,7 @@ fn group_scope() -> Traversal<OnNodes> {
     .out(Some("HAS_ATTRIBUTE"))
 }
 
-fn distance_projection() -> Vec<PropertyProjection> {
+pub fn distance_projection() -> Vec<PropertyProjection> {
     vec![
         PropertyProjection::renamed("$id", "id"),
         PropertyProjection::new("owner"),
@@ -628,25 +550,25 @@ fn distance_projection() -> Vec<PropertyProjection> {
     ]
 }
 
-fn score_projection() -> Vec<PropertyProjection> {
+pub fn score_projection() -> Vec<PropertyProjection> {
     vec![
         PropertyProjection::new("owner"),
         PropertyProjection::renamed("$score", "score"),
     ]
 }
 
-fn read(traversal: Traversal<Terminal>) -> QueryRequest {
+pub fn read(traversal: Traversal<Terminal>) -> QueryRequest {
     QueryRequest::read(read_batch().var_as("r", traversal).returning(["r"]))
 }
 
 /// One benchmark shape: name, optional recall scope and k, and the request.
-type Shape = (
+pub type Shape = (
     &'static str,
     Option<(Traversal<OnNodes>, usize)>,
     QueryRequest,
 );
 
-fn shapes(query: &[f32]) -> Vec<Shape> {
+pub fn shapes(query: &[f32]) -> Vec<Shape> {
     let vector = query.to_vec();
     let kind_b = || g().n_with_label_where("Attribute", SourcePredicate::eq("kind", "B"));
     let group_kind_b = || group_scope().where_(Predicate::eq("kind", "B"));
@@ -712,8 +634,8 @@ fn shapes(query: &[f32]) -> Vec<Shape> {
     ]
 }
 
-fn query_vectors(count: usize) -> Vec<Vec<f32>> {
-    let fixture = Fixture::new(env_or("BENCH_DIM", 768));
+pub fn query_vectors(count: usize, dimension: usize) -> Vec<Vec<f32>> {
+    let fixture = Fixture::new(dimension);
     let mut rng = Rng(9_001);
     (0..count)
         .map(|index| {
@@ -726,7 +648,7 @@ fn query_vectors(count: usize) -> Vec<Vec<f32>> {
         .collect()
 }
 
-async fn candidate_embeddings(
+pub async fn candidate_embeddings(
     backend: &Backend,
     scope: Traversal<OnNodes>,
 ) -> Vec<(u64, Vec<f32>)> {
@@ -753,7 +675,7 @@ async fn candidate_embeddings(
         .collect()
 }
 
-fn exact_top_k(candidates: &[(u64, Vec<f32>)], query: &[f32], k: usize) -> Vec<u64> {
+pub fn exact_top_k(candidates: &[(u64, Vec<f32>)], query: &[f32], k: usize) -> Vec<u64> {
     let mut scored = candidates
         .iter()
         .map(|(id, vector)| {
@@ -768,162 +690,4 @@ fn exact_top_k(candidates: &[(u64, Vec<f32>)], query: &[f32], k: usize) -> Vec<u
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| left.partial_cmp(right).unwrap());
     scored.into_iter().take(k).map(|(_, id)| id).collect()
-}
-
-fn percentile(values: &[f64], percentile: usize) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap());
-    sorted[(sorted.len() - 1) * percentile / 100]
-}
-
-async fn run_queries(label: &str, backend: &Backend) {
-    let vectors = query_vectors(env_or("BENCH_QUERIES", 10));
-    let recall = std::env::var_os("BENCH_RECALL").is_some();
-    let filter = std::env::var("BENCH_SHAPES").ok();
-    println!("\n=== {label} ===");
-    let count = shapes(&vectors[0]).len();
-    for shape_index in 0..count {
-        let (name, scope, _) = shapes(&vectors[0]).swap_remove(shape_index);
-        if filter
-            .as_ref()
-            .is_some_and(|filter| !name.contains(filter.as_str()))
-        {
-            continue;
-        }
-        let truth = match scope {
-            Some((scope, k)) if recall => Some((candidate_embeddings(backend, scope).await, k)),
-            _ => None,
-        };
-        let mut latencies = Vec::new();
-        let mut recalls = Vec::new();
-        let mut gets = Vec::new();
-        let mut error = None;
-        for vector in &vectors {
-            let (_, _, request) = shapes(vector).swap_remove(shape_index);
-            let (gets_before, _) = backend.gets();
-            let started = Instant::now();
-            let response = backend.query(request).await;
-            latencies.push(started.elapsed().as_secs_f64() * 1_000.0);
-            gets.push((backend.gets().0 - gets_before) as f64);
-            let response = match response {
-                Ok(response) => response,
-                Err(message) => {
-                    error = Some(message);
-                    break;
-                }
-            };
-            let Some((candidates, k)) = &truth else {
-                continue;
-            };
-            let returned = response["r"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|row| row["id"].as_u64())
-                .collect::<std::collections::HashSet<_>>();
-            let expected = exact_top_k(candidates, vector, *k);
-            let hits = expected.iter().filter(|id| returned.contains(id)).count();
-            recalls.push(hits as f64 / expected.len().max(1) as f64);
-        }
-        if let Some(message) = error {
-            println!("{name:<36} ERROR {message}");
-            continue;
-        }
-        let warm = &latencies[1.min(latencies.len() - 1)..];
-        let recall_text = match recalls.is_empty() {
-            true => String::new(),
-            false => format!(
-                " recall={:.3} candidates={}",
-                recalls.iter().sum::<f64>() / recalls.len() as f64,
-                truth.as_ref().map_or(0, |(candidates, _)| candidates.len())
-            ),
-        };
-        println!(
-            "{name:<36} first={:>8.1}ms p50={:>8.1}ms p95={:>8.1}ms gets_p50={:>6.0}{recall_text}",
-            latencies[0],
-            percentile(warm, 50),
-            percentile(warm, 95),
-            percentile(&gets, 50),
-        );
-    }
-}
-
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
-    let mode = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "query".to_string());
-    if let Ok(url) = std::env::var("BENCH_HTTP_URL") {
-        let backend = Backend::Http {
-            client: reqwest::Client::new(),
-            url,
-        };
-        match mode.as_str() {
-            "load" => load(&backend).await,
-            "index" => build_vector_index(&backend, env_or("BENCH_DIM", 768)).await,
-            _ => run_queries("server", &backend).await,
-        }
-        return;
-    }
-
-    let database = env_or("BENCH_DB", "scoped-search-bench".to_string());
-    let store = object_store();
-    let writer = HelixDB::open_with_object_store_and_config(
-        database.clone(),
-        Arc::clone(&store) as Arc<dyn ObjectStore>,
-        bench_config(),
-    )
-    .await
-    .unwrap();
-    let backend = Backend::Embedded {
-        db: writer,
-        store: Arc::clone(&store),
-    };
-    if mode == "load" || mode == "index" {
-        match mode.as_str() {
-            "load" => load(&backend).await,
-            _ => build_vector_index(&backend, env_or("BENCH_DIM", 768)).await,
-        }
-        let Backend::Embedded { db, .. } = backend else {
-            unreachable!("embedded backend was constructed above")
-        };
-        db.close().await.unwrap();
-        return;
-    }
-
-    let Backend::Embedded { db: writer, .. } = &backend else {
-        unreachable!("embedded backend was constructed above")
-    };
-    writer.wait_for_startup_cache_warm().await;
-    writer.refresh_vector_memory_cache().await.unwrap();
-    run_queries("writer (fresh vector cache)", &backend).await;
-
-    // Any committed write advances the snapshot sequence past the cache's.
-    backend
-        .query(QueryRequest::write(write_batch().var_as(
-            "touch",
-            g().add_n("Unrelated", vec![("x", PropertyValue::from(1i64))]),
-        )))
-        .await
-        .unwrap();
-    run_queries("writer (after one unrelated write)", &backend).await;
-
-    writer.flush_writer().await.unwrap();
-    let reader = HelixDB::open_reader_with_object_store_and_config(
-        database,
-        Arc::clone(&store) as Arc<dyn ObjectStore>,
-        bench_config(),
-    )
-    .await
-    .unwrap();
-    reader.wait_for_startup_cache_warm().await;
-    let reader = Backend::Embedded { db: reader, store };
-    run_queries("reader", &reader).await;
-    let (Backend::Embedded { db: reader, .. }, Backend::Embedded { db: writer, .. }) =
-        (reader, backend)
-    else {
-        unreachable!("embedded backends were constructed above")
-    };
-    reader.close().await.unwrap();
-    writer.close().await.unwrap();
 }
