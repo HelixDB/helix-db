@@ -85,11 +85,20 @@ fn selective_equality_type_union_preserves_unindexed_residuals() {
         ] {
             let plan = executable_traversal(traversal, context.clone());
             assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
+            // Index reads, then one stored-record read per residual candidate.
+            let (index_reads, residual_reads) = if indexed_property == "tenant" {
+                (1, 10)
+            } else {
+                (2, 20)
+            };
             assert_eq!(
                 plan.metrics().selected_cost.object_reads,
-                if indexed_property == "tenant" { 1 } else { 2 }
+                index_reads + residual_reads
             );
-            assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 0);
+            assert_eq!(
+                plan.metrics().selected_cost.authoritative_graph_reads,
+                residual_reads
+            );
         }
     }
 }
@@ -329,7 +338,8 @@ fn selective_equality_costing_still_allows_measurably_small_label_scans() {
             "{:#?}",
             plan.steps()
         );
-        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 1);
+        // One label-scan row verification plus its residual record read.
+        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 2);
         assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
     }
 }

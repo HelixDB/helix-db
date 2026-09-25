@@ -42,6 +42,8 @@ pub enum PhysicalCardinality {
     SetIntersection,
     /// Authoritative predicate filter cursor.
     FilterStream,
+    /// Node secondary-index membership cursor.
+    IndexMembershipStream,
     /// Expansion cursor.
     ExpandStream,
     /// Explicit distinct cursor.
@@ -185,6 +187,9 @@ fn cursor_family(cursor: &exec::ExecCountCursorPlan) -> PhysicalCardinality {
         exec::ExecCountCursorPlan::Union { .. } => PhysicalCardinality::SetUnion,
         exec::ExecCountCursorPlan::Intersect { .. } => PhysicalCardinality::SetIntersection,
         exec::ExecCountCursorPlan::Filter { .. } => PhysicalCardinality::FilterStream,
+        exec::ExecCountCursorPlan::IndexMembership { .. } => {
+            PhysicalCardinality::IndexMembershipStream
+        }
         exec::ExecCountCursorPlan::Window { input, .. } => cursor_family(input),
         exec::ExecCountCursorPlan::Order { .. } => PhysicalCardinality::OrderedStream,
         exec::ExecCountCursorPlan::Expand { .. } => PhysicalCardinality::ExpandStream,

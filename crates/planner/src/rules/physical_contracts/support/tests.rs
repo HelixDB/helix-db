@@ -132,6 +132,7 @@ fn stream_pipeline_contract_tracks_limit_sort_and_variable_write_effects() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(limited.cardinality.upper(), Some(4));
 
@@ -146,6 +147,7 @@ fn stream_pipeline_contract_tracks_limit_sort_and_variable_write_effects() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert!(matches!(
         ordered.ordering,
@@ -163,6 +165,7 @@ fn stream_pipeline_contract_tracks_limit_sort_and_variable_write_effects() {
         delivered,
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(write.effect, properties::EffectKind::Barrier);
 }
@@ -191,6 +194,7 @@ fn restricted_vector_contract_is_pure_order_sensitive_materialized_and_distance_
         },
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
 
     assert_eq!(vector.cardinality.upper(), Some(10));
@@ -230,6 +234,7 @@ fn restricted_text_contract_is_order_sensitive_materialized_and_score_ordered() 
         },
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
 
     assert_eq!(text.cardinality.upper(), Some(10));
@@ -262,6 +267,7 @@ fn stream_pipeline_contract_preserves_literal_window_lower_bounds() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(
         limited.cardinality,
@@ -275,6 +281,7 @@ fn stream_pipeline_contract_preserves_literal_window_lower_bounds() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(
         skipped.cardinality,
@@ -288,6 +295,7 @@ fn stream_pipeline_contract_preserves_literal_window_lower_bounds() {
         delivered,
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(
         ranged.cardinality,

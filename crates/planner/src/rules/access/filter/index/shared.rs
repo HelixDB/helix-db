@@ -60,21 +60,9 @@ where
     ) else {
         return AccessFilterIndexApplication::NotApplicable(AccessFilterIndexRejection::NoLabel);
     };
-    let plan = match super::index_plan(predicate, &label, planner_limits) {
-        AccessFilterIndexPlanMatch::Planned(plan) => plan,
-        AccessFilterIndexPlanMatch::NotIndexable(reason) => {
-            return AccessFilterIndexApplication::NotApplicable(
-                AccessFilterIndexRejection::Predicate(reason),
-            );
-        }
-    };
-    let indexed = match index_source_for_plan::<F>(&label, &plan, indexes) {
+    let indexed = match predicate_index_source::<F>(predicate, &label, indexes, planner_limits) {
         Ok(indexed) => indexed,
-        Err(reason) => {
-            return AccessFilterIndexApplication::NotApplicable(
-                AccessFilterIndexRejection::MissingIndex(reason),
-            );
-        }
+        Err(reason) => return AccessFilterIndexApplication::NotApplicable(reason),
     };
     match combine_indexed_filter_source::<F>(F::path_source(path), indexed) {
         IndexedSourceCombination::Rewritten(source) => {
@@ -102,45 +90,14 @@ where
     ) else {
         return PartialIndexFilterApplication::NotApplicable(PartialIndexFilterRejection::NoLabel);
     };
-    let helix_ast::expr::Predicate::And { predicates } = predicate else {
-        return PartialIndexFilterApplication::NotApplicable(
-            PartialIndexFilterRejection::NotConjunction,
-        );
-    };
-
-    let mut indexed = Vec::new();
-    let mut residual = Vec::new();
-    for predicate in predicates {
-        if analysis::predicate_is_tautological_for_label(predicate, &label) {
-            continue;
-        }
-        match super::index_plan(predicate, &label, planner_limits) {
-            AccessFilterIndexPlanMatch::Planned(plan) => {
-                match index_source_for_plan::<F>(&label, &plan, indexes) {
-                    Ok(source) => indexed.push(source),
-                    Err(_) => residual.push(predicate.clone()),
-                }
-            }
-            AccessFilterIndexPlanMatch::NotIndexable(_) => residual.push(predicate.clone()),
-        }
-    }
-
-    if indexed.is_empty() {
-        return PartialIndexFilterApplication::NotApplicable(
-            PartialIndexFilterRejection::NoIndexedConjunct,
-        );
-    }
-
-    let indexed = if indexed.len() == 1 {
-        indexed
-            .pop()
-            .expect("partial-index rewrite already proved one indexed conjunct")
-    } else {
-        F::intersection_source(indexed)
-    };
-    let source = match combine_indexed_filter_source::<F>(F::path_source(path), indexed) {
+    let split =
+        match conjunct_index_split::<F>(predicate, &label, indexes, planner_limits, |_, _| true) {
+            Ok(split) => split,
+            Err(reason) => return PartialIndexFilterApplication::NotApplicable(reason),
+        };
+    let source = match combine_indexed_filter_source::<F>(F::path_source(path), split.source) {
         IndexedSourceCombination::Rewritten(source) => source,
-        IndexedSourceCombination::Unchanged if residual.is_empty() => {
+        IndexedSourceCombination::Unchanged if split.residual.is_empty() => {
             return PartialIndexFilterApplication::NotApplicable(
                 PartialIndexFilterRejection::SourceUnchanged,
             );
@@ -150,22 +107,108 @@ where
 
     PartialIndexFilterApplication::Rewritten {
         source,
-        residual: match residual.len() {
-            0 => None,
-            1 => Some(
-                ir::PredicatePlan::new(
-                    residual
-                        .pop()
-                        .expect("partial-index residual length was checked"),
-                )
-                .expect("access-filter residual predicate is already validated"),
-            ),
-            _ => Some(
-                ir::PredicatePlan::new(helix_ast::expr::Predicate::and(residual))
-                    .expect("access-filter residual predicate is already validated"),
-            ),
-        },
+        residual: conjunction_plan(split.residual),
     }
+}
+
+/// Index source for one feasible predicate under one proven label.
+///
+/// Unlike [`index_filter`], this does not combine with an access path, so a
+/// predicate anywhere in a stream can be answered by the same index plan.
+pub(super) fn predicate_index_source<F>(
+    predicate: &helix_ast::expr::Predicate,
+    label: &ir::NonEmptyString,
+    indexes: &catalog::IndexCatalogSnapshot,
+    planner_limits: &context::PlannerLimits,
+) -> Result<F::Source, AccessFilterIndexRejection>
+where
+    F: AccessFilterIndexFamily,
+{
+    match super::index_plan(predicate, label, planner_limits) {
+        AccessFilterIndexPlanMatch::Planned(plan) => {
+            index_source_for_plan::<F>(label, &plan, indexes)
+                .map_err(AccessFilterIndexRejection::MissingIndex)
+        }
+        AccessFilterIndexPlanMatch::NotIndexable(reason) => {
+            Err(AccessFilterIndexRejection::Predicate(reason))
+        }
+    }
+}
+
+/// Indexed and residual conjuncts of one feasible conjunction under a label.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ConjunctIndexSplit<S> {
+    /// Intersection of every admitted conjunct source.
+    pub(super) source: S,
+    /// Conjuncts decided by `source` for label rows, including conjuncts that
+    /// are tautological for the label, in predicate order. Never empty.
+    pub(super) decided: Vec<helix_ast::expr::Predicate>,
+    /// Conjuncts `source` cannot decide, in predicate order.
+    pub(super) residual: Vec<helix_ast::expr::Predicate>,
+}
+
+/// Split a conjunction into index-answerable and residual conjuncts.
+///
+/// `admit` may keep an indexable conjunct residual when the caller cannot
+/// serve its source, such as a membership filter and a null equality.
+pub(super) fn conjunct_index_split<F>(
+    predicate: &helix_ast::expr::Predicate,
+    label: &ir::NonEmptyString,
+    indexes: &catalog::IndexCatalogSnapshot,
+    planner_limits: &context::PlannerLimits,
+    admit: impl Fn(&F::Source, &helix_ast::expr::Predicate) -> bool,
+) -> Result<ConjunctIndexSplit<F::Source>, PartialIndexFilterRejection>
+where
+    F: AccessFilterIndexFamily,
+{
+    let helix_ast::expr::Predicate::And { predicates } = predicate else {
+        return Err(PartialIndexFilterRejection::NotConjunction);
+    };
+
+    let mut indexed = Vec::new();
+    let mut decided = Vec::new();
+    let mut residual = Vec::new();
+    for predicate in predicates {
+        if analysis::predicate_is_tautological_for_label(predicate, label) {
+            decided.push(predicate.clone());
+            continue;
+        }
+        match predicate_index_source::<F>(predicate, label, indexes, planner_limits) {
+            Ok(source) if admit(&source, predicate) => {
+                indexed.push(source);
+                decided.push(predicate.clone());
+            }
+            Ok(_) | Err(_) => residual.push(predicate.clone()),
+        }
+    }
+
+    let source = match indexed.len() {
+        0 => return Err(PartialIndexFilterRejection::NoIndexedConjunct),
+        1 => indexed
+            .pop()
+            .expect("partial-index rewrite already proved one indexed conjunct"),
+        _ => F::intersection_source(indexed),
+    };
+    Ok(ConjunctIndexSplit {
+        source,
+        decided,
+        residual,
+    })
+}
+
+/// Validated conjunction of already-validated conjuncts, if any.
+pub(super) fn conjunction_plan(
+    mut predicates: Vec<helix_ast::expr::Predicate>,
+) -> Option<ir::PredicatePlan> {
+    let predicate = match predicates.len() {
+        0 => return None,
+        1 => predicates.pop().expect("conjunction length was checked"),
+        _ => helix_ast::expr::Predicate::and(predicates),
+    };
+    Some(
+        ir::PredicatePlan::new(predicate)
+            .expect("access-filter conjuncts are already validated predicates"),
+    )
 }
 
 pub(super) fn index_source_for_plan<F>(

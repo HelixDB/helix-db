@@ -6106,6 +6106,7 @@ async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
                 | exec::ExecOp::VectorSearch { .. }
                 | exec::ExecOp::TextSearch { .. }
                 | exec::ExecOp::Filter { .. }
+                | exec::ExecOp::IndexMembership { .. }
                 | exec::ExecOp::Limit { .. }
                 | exec::ExecOp::Skip { .. }
                 | exec::ExecOp::Range { .. }

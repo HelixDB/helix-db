@@ -173,6 +173,7 @@ impl<'a> Cursor<'a> {
                             | exec::ExecCountCursorPlan::Union { .. }
                             | exec::ExecCountCursorPlan::Intersect { .. }
                             | exec::ExecCountCursorPlan::Filter { .. }
+                            | exec::ExecCountCursorPlan::IndexMembership { .. }
                             | exec::ExecCountCursorPlan::Window { .. }
                             | exec::ExecCountCursorPlan::Order { .. }
                             | exec::ExecCountCursorPlan::Expand { .. }
@@ -446,6 +447,38 @@ impl<'a> Cursor<'a> {
                         let rows = ctx.stream_rows(item, "filter")?;
                         let row = rows.first().expect("cursor emits one row");
                         if !ctx.eval_predicate(row, predicate.predicate()).await? {
+                            continue;
+                        }
+                        Some(ExecutionValue::Stream(rows))
+                    }
+                    Node::IndexMembership {
+                        plan,
+                        input,
+                        prepared,
+                    } => {
+                        let Some(item) = input.next(ctx).await? else {
+                            return Ok(None);
+                        };
+                        let rows = ctx.stream_rows(item, "index membership")?;
+                        let row = rows.first().expect("cursor emits one row");
+                        let decision = match (row.current.as_ref(), prepared.as_ref()) {
+                            (Some(ElementRef::Node(_)), None) => {
+                                let resolved = ctx.prepare_index_membership(plan).await?;
+                                prepared.insert(resolved).decide(row)
+                            }
+                            (_, Some(prepared)) => prepared.decide(row),
+                            (Some(ElementRef::Edge(_)) | None, None) => {
+                                stream::RowDecision::Evaluate
+                            }
+                        };
+                        let keep = match decision {
+                            stream::RowDecision::Keep => true,
+                            stream::RowDecision::Drop => false,
+                            stream::RowDecision::Evaluate => {
+                                ctx.eval_predicate(row, plan.predicate.predicate()).await?
+                            }
+                        };
+                        if !keep {
                             continue;
                         }
                         Some(ExecutionValue::Stream(rows))

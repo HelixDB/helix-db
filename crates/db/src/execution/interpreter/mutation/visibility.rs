@@ -75,6 +75,11 @@ pub(in crate::execution::interpreter) fn required_for(
         exec::ExecOp::Expand { .. } | exec::ExecOp::ShortestPath { .. } => {
             RequiredMutationVisibility::one(DeferredMutationFamily::Topology)
         }
+        // Membership reads the secondary set and the node-label bitmap.
+        exec::ExecOp::IndexMembership { .. } => RequiredMutationVisibility(
+            RequiredMutationVisibility::one(DeferredMutationFamily::Secondary).0
+                | RequiredMutationVisibility::one(DeferredMutationFamily::Topology).0,
+        ),
         exec::ExecOp::Branch { plan } => {
             let subplan = |plan: &exec::ExecutableSubplan| {
                 plan.steps()

@@ -9,6 +9,7 @@ use futures::FutureExt;
 use helix_planner::{exec, properties};
 
 use super::super::ExecutionContext;
+use crate::encoding::v2::values::property::equality_index_value;
 use crate::error::Result;
 
 enum SecondaryIds {
@@ -42,6 +43,61 @@ impl<'db> ExecutionContext<'db> {
         self.node_secondary_ids(set, limit)
             .await
             .map(|ids| ids.into_vec(limit))
+    }
+
+    /// Resolve a node secondary set to an unordered ID bitmap.
+    pub(in crate::execution::interpreter) async fn node_secondary_set_bitmap(
+        &self,
+        set: &exec::ExecNodeSecondarySetPlan,
+    ) -> Result<roaring::RoaringTreemap> {
+        self.node_secondary_ids(set, None)
+            .await
+            .map(SecondaryIds::into_bitmap)
+    }
+
+    /// Whether `set` resolves from index reads alone in this request.
+    ///
+    /// Literal null equality, runtime parameters that bind null or values
+    /// without an exact index encoding, and runtime domains over their bound
+    /// all require an authoritative keyspace scan, so they return `false`.
+    pub(in crate::execution::interpreter) fn node_secondary_set_is_index_served(
+        &self,
+        set: &exec::ExecNodeSecondarySetPlan,
+    ) -> Result<bool> {
+        match set {
+            exec::ExecNodeSecondarySetPlan::Empty
+            | exec::ExecNodeSecondarySetPlan::Bitmap(_)
+            | exec::ExecNodeSecondarySetPlan::UniqueUnion { .. }
+            | exec::ExecNodeSecondarySetPlan::Unique { .. }
+            | exec::ExecNodeSecondarySetPlan::Range(_) => Ok(true),
+            exec::ExecNodeSecondarySetPlan::AuthoritativeScan(_) => Ok(false),
+            exec::ExecNodeSecondarySetPlan::DynamicEquality { param, .. } => {
+                let value =
+                    self.index_value(&helix_planner::ir::IndexValue::Param(param.clone()))?;
+                Ok(matches!(
+                    equality_index_value::project_equality_value(&value),
+                    equality_index_value::EqualityValueProjection::Indexed(_)
+                        | equality_index_value::EqualityValueProjection::NonReflexive
+                ))
+            }
+            exec::ExecNodeSecondarySetPlan::DynamicMembership { values, .. } => Ok(matches!(
+                self.runtime_equality_domain(values)?,
+                super::membership::RuntimeEqualityDomain::Indexed(_)
+            )),
+            exec::ExecNodeSecondarySetPlan::Intersect { driver, rest }
+            | exec::ExecNodeSecondarySetPlan::Union { driver, rest } => {
+                core::iter::once(driver.as_ref())
+                    .chain(rest.iter())
+                    .try_fold(true, |served, child| {
+                        Ok(served && self.node_secondary_set_is_index_served(child)?)
+                    })
+            }
+            exec::ExecNodeSecondarySetPlan::OrderedIntersect { filters, .. } => {
+                filters.iter().try_fold(true, |served, child| {
+                    Ok(served && self.node_secondary_set_is_index_served(child)?)
+                })
+            }
+        }
     }
 
     pub(in crate::execution::interpreter) async fn edge_secondary_set_ids(

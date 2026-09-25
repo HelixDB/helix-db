@@ -29,7 +29,7 @@ pub(super) fn physical_pipeline_op_contract(
         ),
         logical::PureLogicalOp::Filter { .. } => (
             physical::PhysicalPipelineOp::ResidualFilter,
-            storage.predicate_eval(rows),
+            storage.stored_predicate_filter(rows),
         ),
         logical::PureLogicalOp::Order { .. } => (
             physical::PhysicalPipelineOp::Sort,
