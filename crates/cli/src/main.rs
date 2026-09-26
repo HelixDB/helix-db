@@ -142,10 +142,10 @@ enum Commands {
         /// Query historical logs with time range for Enterprise Cloud
         #[arg(long, short = 'r')]
         range: bool,
-        /// Start time (ISO 8601)
+        /// Start time (RFC 3339, e.g. 2026-01-02T15:04:05Z)
         #[arg(long, requires = "range")]
         start: Option<String>,
-        /// End time (ISO 8601)
+        /// End time (RFC 3339, e.g. 2026-01-02T15:04:05Z)
         #[arg(long, requires = "range")]
         end: Option<String>,
     },

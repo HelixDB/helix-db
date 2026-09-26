@@ -1,13 +1,11 @@
 ---
-title: "Local Development"
+title: "Local development"
 description: "Run a local instance and iterate on dynamic JSON queries"
 icon: "computer"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
-
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
 Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.6` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed MinIO volume.
 
@@ -33,10 +31,12 @@ Use the manual flow below when you want to scaffold and run each step yourself.
     ```bash
     mkdir my-helix-app
     cd my-helix-app
-    helix init
+    helix init local
     ```
 
-    `helix init` creates `helix.toml`, `.helix/`, and `examples/request.json`.
+    `helix init local` creates `helix.toml`, `.helix/`, `AGENTS.md`,
+    `examples/request.json`, and `.gitignore` entries for local state. Bare
+    `helix init` asks whether to set up a local or Cloud project.
   </Step>
 
   <Step title="Start the local runtime">
@@ -147,7 +147,7 @@ A request JSON file must contain:
 Each entry contains one nested operation-tree `root`; source operations appear at the
 innermost input. See [`helix query`](/cli/command-reference/query) for the request shape.
 
-## What next?
+## Next steps
 
 <CardGroup cols={2}>
   <Card title="Helix Cloud workflow" icon="cloud" href="/cli/workflows/helix_cloud">

@@ -22,6 +22,34 @@ Database page paths mirror the sidebar hierarchy under
 `database/helix-db/<group>/` and `database/helix-cloud/<group>/`. Keep redirects
 when moving an existing public route.
 
+`docs.json` also redirects short, guessable paths to their pages: product and SDK
+names (`/helix-ts`, `/helixrs`, `/python`), topics (`/fts`, `/vector-search`,
+`/rate-limits`), and routes of removed pages. When you add a page, add a shortcut for
+any name a reader is likely to type. Shortcut sources must not match a live route.
+
+## Site structure
+
+| Tab | Groups | Covers |
+| --- | --- | --- |
+| HelixDB | Start Here, Core Concepts, Query Guides | The engine in every run mode: setup, SDKs, data model, queries, indexes and search, HTTP API, error codes, troubleshooting |
+| Helix Cloud | Start Here, Connect and automate, Operate | Managed deployments only: account setup, connecting, architecture, MCP, security, tenancy, limits, gateway errors |
+| CLI Reference | Using the helix CLI, CLI Command Reference | The `helix` CLI: workflows, configuration, and one page per command |
+
+Put engine behavior that applies outside Cloud in the HelixDB tab, even when Cloud
+users also need it. Link to it from Cloud pages instead of duplicating it.
+
+## Style conventions
+
+- Use sentence case for titles, sidebar labels, and headings. Keep product names
+  capitalized: HelixDB, Helix Cloud, WorkOS.
+- Give every page a frontmatter `description`; it feeds search, SEO, and `llms.txt`.
+- Badge colors: `Tutorial` green, `Guide` blue, `Concept` purple, `Reference` gray,
+  `Troubleshooting` orange.
+- Open each page with one or two sentences saying what the page covers and when to use
+  it, then show code before long prose.
+- Show SDK behavior in a validated `CodeGroup` instead of describing code in prose.
+- End guides with a `## Next steps` card group.
+
 ## Local checks
 
 ```bash

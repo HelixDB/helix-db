@@ -1,11 +1,10 @@
 ---
 title: 'Architecture'
+description: "How the Helix Cloud gateway, writer, readers, caches, and object storage serve reads and writes"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
-
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
 import { EnterpriseDiagram } from "/snippets/database-diagram.jsx"
 import { architectureDiagram } from "/snippets/diagrams.jsx"
@@ -51,14 +50,14 @@ from object storage.
 Reader scaling is automatic. As query load increases, new readers are provisioned. As load
 decreases, excess readers are removed. This keeps cost proportional to actual query volume.
 
-## Object Storage
+## Object storage
 
 Object storage is the durable system of record. All graph data, vector indexes, text index
 artifacts, and metadata persist here. No data lives exclusively on local disk. This means the
 system can recover from a full cache loss by reading from object storage, and storage capacity is
 effectively unbounded.
 
-## Cache Hierarchy
+## Cache hierarchy
 
 Each process (writer and readers) maintains local cache tiers for the data and indexes it serves.
 
@@ -73,7 +72,7 @@ contend with one another. On cold start, caches warm progressively as queries ex
 predictable latency from the first query, caches (including text index generations) can be
 pre-warmed.
 
-## Read Path
+## Read path
 
 1. A read request arrives at the gateway and is routed to a reader or the writer.
 2. The reader resolves a consistent snapshot from object storage metadata.
@@ -83,7 +82,7 @@ pre-warmed.
 Cache misses transparently fall through to object storage. The same query produces the same result
 regardless of cache state; caching affects latency, not correctness.
 
-## Write Path
+## Write path
 
 1. A write request arrives at the gateway and is routed to the writer.
 2. The writer executes the mutation within a serializable transaction. Multiple write transactions
@@ -92,7 +91,7 @@ regardless of cache state; caching affects latency, not correctness.
 4. Once durable, the write is acknowledged to the client.
 5. Readers observe the new data on their next snapshot refresh.
 
-## Next Steps
+## Next steps
 
 <CardGroup cols={2}>
   <Card title="Data Model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model">

@@ -32,8 +32,8 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [HelixDB AI Catalog](https://www.helix-db.com/.well-known/ai-catalog.json): ARD catalog of HelixDB agent resources.
 
 ## HelixDB — Start Here
-- [Introduction](https://docs.helix-db.com/database/helix-db/start-here/introduction) — Page type: Concept
-- [Get Started](https://docs.helix-db.com/database/helix-db/start-here/quickstart): Initialize HelixDB, start a local instance, run the generated query, and stop it — Page type: Tutorial
+- [Introduction](https://docs.helix-db.com/database/helix-db/start-here/introduction): HelixDB is a graph database with native vector and full-text search, built on object storage — Page type: Concept
+- [Get started](https://docs.helix-db.com/database/helix-db/start-here/quickstart): Initialize HelixDB, start a local instance, run the generated query, and stop it — Page type: Tutorial
 - [Deployment options](https://docs.helix-db.com/database/helix-db/start-here/run-modes): Compare Cloud, local server, and embedded execution — Page type: Concept
 - [Local server](https://docs.helix-db.com/database/helix-db/start-here/local-development/local-server): Start HelixDB locally with memory, a persistent directory, or S3-compatible storage — Page type: Guide
 - [Embedded database](https://docs.helix-db.com/database/helix-db/start-here/local-development/embedded-database): Open HelixDB directly inside your process with explicit storage and cache settings — Page type: Guide
@@ -43,72 +43,73 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Go SDK](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/go-project-setup): Build and execute HelixDB requests with ordinary Go functions — Page type: Guide
 - [Python SDK](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/python-project-setup): Build HelixDB requests with idiomatic synchronous and asynchronous Python clients — Page type: Guide
 - [Roadmap](https://docs.helix-db.com/database/helix-db/start-here/roadmap): What we're building and what's coming next — Page type: Reference
-- [Release Notes](https://docs.helix-db.com/database/helix-db/start-here/release-notes): HelixDB Cloud Release Notes — Page type: Reference
+- [Release notes](https://docs.helix-db.com/database/helix-db/start-here/release-notes): New features and changes in HelixDB, Helix Cloud, the SDKs, and the CLI — Page type: Reference
 
 ## Core Concepts
 - [Data model](https://docs.helix-db.com/database/helix-db/core-concepts/data-model): Understand how HelixDB represents entities, relationships, properties, and indexes — Page type: Concept
-- [Build and run a query](https://docs.helix-db.com/database/helix-db/core-concepts/overview): Take the Get Started query apart operation by operation, then read its request and response — Page type: Tutorial
+- [Build and run a query](https://docs.helix-db.com/database/helix-db/core-concepts/overview): Build a small write query operation by operation, then read its request and response — Page type: Tutorial
 
 ## Query Guides
 - [Writing data](https://docs.helix-db.com/database/helix-db/query-guides/writing-data): Create, update, connect, and remove entities in one typed write batch — Page type: Guide
 - [Reading data](https://docs.helix-db.com/database/helix-db/query-guides/reading-data): Start a traversal from IDs, labels, properties, or previous query results — Page type: Guide
-- [Secondary indexes](https://docs.helix-db.com/database/helix-db/query-guides/secondary-indexes): Accelerate equality, uniqueness, and ordered property lookups — Page type: Guide
-- [Vector indexes](https://docs.helix-db.com/database/helix-db/query-guides/vector-indexes): Create dimensioned vector indexes and run nearest-neighbor search — Page type: Guide
-- [Text indexes](https://docs.helix-db.com/database/helix-db/query-guides/text-indexes): Create BM25 indexes for ranked full-text search — Page type: Guide
 - [Traverse relationships](https://docs.helix-db.com/database/helix-db/query-guides/traversals): Follow edges, retain row-local bindings, and control duplicate paths — Page type: Guide
 - [Filtering](https://docs.helix-db.com/database/helix-db/query-guides/filtering): Narrow traversal streams with predicates and exact search candidate sets — Page type: Guide
 - [Shape query results](https://docs.helix-db.com/database/helix-db/query-guides/projections): Return properties, computed values, aggregates, and correlated binding rows — Page type: Guide
-- [Branch, repeat, and condition queries](https://docs.helix-db.com/database/helix-db/query-guides/advanced): Compose sub-traversals and gate named entries without leaving one transaction — Page type: Guide
 - [Bind typed query parameters](https://docs.helix-db.com/database/helix-db/query-guides/parameters): Keep the operation tree stable while request values change — Page type: Guide
+- [Branch, repeat, and condition queries](https://docs.helix-db.com/database/helix-db/query-guides/advanced): Compose sub-traversals and gate named entries without leaving one transaction — Page type: Guide
+- [Secondary indexes](https://docs.helix-db.com/database/helix-db/query-guides/secondary-indexes): Accelerate equality, uniqueness, and ordered property lookups — Page type: Guide
+- [Vector indexes](https://docs.helix-db.com/database/helix-db/query-guides/vector-indexes): Create vector indexes and run nearest-neighbor search — Page type: Guide
+- [Text indexes](https://docs.helix-db.com/database/helix-db/query-guides/text-indexes): Create BM25 indexes and run ranked full-text search — Page type: Guide
+- [Prefiltered search](https://docs.helix-db.com/database/helix-db/query-guides/prefiltering): Rank only the nodes or edges a traversal reaches with vector or BM25 search — Page type: Guide
 - [HelixDB HTTP API and OpenAPI specification](https://docs.helix-db.com/database/helix-db/query-guides/http-api): Call the HelixDB v2 query endpoint and discover its machine-readable OpenAPI 3.1 contract — Page type: Reference
-- [Handle query errors](https://docs.helix-db.com/database/helix-db/query-guides/error-handling): Branch on stable error codes while retaining diagnostic messages — Page type: Reference
+- [Query error reference](https://docs.helix-db.com/database/helix-db/query-guides/error-handling): Branch on stable error codes, apply retry rules, and look up every HelixDB query error — Page type: Reference
+- [Troubleshoot HelixDB](https://docs.helix-db.com/database/helix-db/query-guides/troubleshooting): Diagnose query, index, vector, embedded, and local runtime failures — Page type: Troubleshooting
 
 ## Helix Cloud — Start Here
-- [Connect to Helix Cloud](https://docs.helix-db.com/database/helix-cloud/start-here/working-with-enterprise): Send dynamic requests through a managed gateway — Page type: Guide
-- [Using the Cloud](https://docs.helix-db.com/database/helix-cloud/start-here/using-the-cloud): Sign in, create a workspace and choose its plan, provision a database, and test the connection — Page type: Tutorial
-- [Architecture](https://docs.helix-db.com/database/helix-cloud/start-here/architecture) — Page type: Concept
+- [Get started with Helix Cloud](https://docs.helix-db.com/database/helix-cloud/start-here/using-the-cloud): Sign in, create a workspace and choose its plan, provision a database, and test the connection — Page type: Tutorial
+- [Connect to Helix Cloud](https://docs.helix-db.com/database/helix-cloud/start-here/working-with-enterprise): Connect an SDK or HTTP client to a Helix Cloud database and control request routing — Page type: Guide
+- [Architecture](https://docs.helix-db.com/database/helix-cloud/start-here/architecture): How the Helix Cloud gateway, writer, readers, caches, and object storage serve reads and writes — Page type: Concept
 
 ## Connect and automate
 - [Helix Cloud MCP](https://docs.helix-db.com/database/helix-cloud/connect/mcp): Connect users and agents to the unified Helix Cloud MCP endpoint — Page type: Reference
 
 ## Operate
-- [Multi-Tenancy](https://docs.helix-db.com/database/helix-cloud/operate/multi-tenancy) — Page type: Guide
-- [Guarantees](https://docs.helix-db.com/database/helix-cloud/operate/guarantees) — Page type: Reference
-- [Security](https://docs.helix-db.com/database/helix-cloud/operate/security) — Page type: Reference
-- [Tradeoffs](https://docs.helix-db.com/database/helix-cloud/operate/tradeoffs) — Page type: Concept
+- [Security](https://docs.helix-db.com/database/helix-cloud/operate/security): Authenticate requests, handle API keys, and review encryption and enterprise security features — Page type: Reference
+- [Multi-tenancy](https://docs.helix-db.com/database/helix-cloud/operate/multi-tenancy): Isolate application tenants with row-level scoping and tenant-partitioned search indexes — Page type: Guide
+- [Guarantees](https://docs.helix-db.com/database/helix-cloud/operate/guarantees): Atomicity, isolation, durability, index activation, and read-after-write behavior — Page type: Reference
 - [Limits](https://docs.helix-db.com/database/helix-cloud/operate/limits): Understand Helix Cloud request rate limits and database constraints — Page type: Reference
-- [Handle query errors](https://docs.helix-db.com/database/helix-cloud/operate/error-handling): Use stable Helix Cloud error codes, HTTP statuses, and SDK error metadata — Page type: Reference
-- [Troubleshoot HelixDB](https://docs.helix-db.com/database/helix-cloud/operate/troubleshooting): Diagnose query, index, vector, embedded, and local runtime failures — Page type: Troubleshooting
+- [Tradeoffs](https://docs.helix-db.com/database/helix-cloud/operate/tradeoffs): What the Helix Cloud architecture is optimized for, and where another system may fit better — Page type: Concept
+- [Helix Cloud gateway errors](https://docs.helix-db.com/database/helix-cloud/operate/error-handling): Use stable Helix Cloud error codes, HTTP statuses, and SDK error metadata — Page type: Reference
 
 ## Using the helix CLI
 - [Getting started with HelixDB CLI](https://docs.helix-db.com/cli/getting-started): Install the CLI, run locally, or link a WorkOS-authenticated Cloud database — Page type: Tutorial
-- [Local Development](https://docs.helix-db.com/cli/workflows/local): Run a local instance and iterate on dynamic JSON queries — Page type: Guide
+- [Local development](https://docs.helix-db.com/cli/workflows/local): Run a local instance and iterate on dynamic JSON queries — Page type: Guide
 - [Helix Cloud CLI workflow](https://docs.helix-db.com/cli/workflows/helix_cloud): Authenticate, link, query, and manage Cloud resources — Page type: Guide
 - [CLI configuration](https://docs.helix-db.com/cli/configuration): Project linkage and WorkOS session files — Page type: Reference
 - [CLI troubleshooting](https://docs.helix-db.com/cli/troubleshooting): Recover local and WorkOS-authenticated Cloud CLI operations — Page type: Troubleshooting
 
 ## CLI Command Reference
-- [CLI command reference](https://docs.helix-db.com/cli/command-reference): Commands supported by the Helix CLI — Page type: Reference
-- [helix add](https://docs.helix-db.com/cli/command-reference/add): Add a local instance or a Cloud database link — Page type: Reference
-- [helix auth](https://docs.helix-db.com/cli/command-reference/auth): Manage the CLI WorkOS session — Page type: Reference
-- [helix api](https://docs.helix-db.com/cli/command-reference/api): Call a Helix Cloud WFE endpoint with the current WorkOS session — Page type: Reference
-- [helix chef](https://docs.helix-db.com/cli/command-reference/chef) — Page type: Reference
-- [helix cluster](https://docs.helix-db.com/cli/command-reference/cluster): Discover dedicated clusters and active indexes — Page type: Reference
+- [CLI command reference](https://docs.helix-db.com/cli/command-reference): Every Helix CLI command, grouped by what it manages — Page type: Reference
+- [helix add](https://docs.helix-db.com/cli/command-reference/add): Add a local instance or a Helix Cloud database link to an existing project — Page type: Reference
+- [helix auth](https://docs.helix-db.com/cli/command-reference/auth): Log in to Helix Cloud, check the session, or log out — Page type: Reference
+- [helix api](https://docs.helix-db.com/cli/command-reference/api): Call a Helix Cloud API endpoint with your CLI login session — Page type: Reference
+- [helix chef](https://docs.helix-db.com/cli/command-reference/chef): Bootstrap a first HelixDB app with a coding agent — Page type: Reference
+- [helix cluster](https://docs.helix-db.com/cli/command-reference/cluster): List and inspect Helix Cloud clusters and their active indexes — Page type: Reference
 - [helix database](https://docs.helix-db.com/cli/command-reference/database): Discover and manage Helix Cloud databases and application keys — Page type: Reference
-- [helix delete](https://docs.helix-db.com/cli/command-reference/delete) — Page type: Reference
-- [helix feedback](https://docs.helix-db.com/cli/command-reference/feedback) — Page type: Reference
+- [helix delete](https://docs.helix-db.com/cli/command-reference/delete): Remove an instance from helix.toml and clean up its local state — Page type: Reference
+- [helix feedback](https://docs.helix-db.com/cli/command-reference/feedback): Open a pre-filled feedback issue for the Helix team — Page type: Reference
 - [helix init](https://docs.helix-db.com/cli/command-reference/init): Create a local project or a WorkOS-authenticated Cloud link — Page type: Reference
 - [helix logs](https://docs.helix-db.com/cli/command-reference/logs): View local logs or recent Cloud query errors — Page type: Reference
-- [helix metrics](https://docs.helix-db.com/cli/command-reference/metrics) — Page type: Reference
+- [helix metrics](https://docs.helix-db.com/cli/command-reference/metrics): Configure CLI telemetry and usage metrics collection — Page type: Reference
 - [helix project](https://docs.helix-db.com/cli/command-reference/project): Discover, manage, and link Helix Cloud projects — Page type: Reference
-- [helix prune](https://docs.helix-db.com/cli/command-reference/prune) — Page type: Reference
-- [helix query](https://docs.helix-db.com/cli/command-reference/query): Execute a direct Helix v3 query locally or through the Cloud broker — Page type: Reference
-- [helix restart](https://docs.helix-db.com/cli/command-reference/restart) — Page type: Reference
-- [helix skills](https://docs.helix-db.com/cli/command-reference/skills) — Page type: Reference
-- [helix start](https://docs.helix-db.com/cli/command-reference/start) — Page type: Reference
+- [helix prune](https://docs.helix-db.com/cli/command-reference/prune): Remove Helix-owned local containers, volumes, and instance state — Page type: Reference
+- [helix query](https://docs.helix-db.com/cli/command-reference/query): Execute a direct Helix v3 query against a local instance or a Cloud database — Page type: Reference
+- [helix restart](https://docs.helix-db.com/cli/command-reference/restart): Restart a background local instance — Page type: Reference
+- [helix skills](https://docs.helix-db.com/cli/command-reference/skills): Install, refresh, and list the Helix agent skills — Page type: Reference
+- [helix start](https://docs.helix-db.com/cli/command-reference/start): Start a local instance in the background or foreground — Page type: Reference
 - [helix status](https://docs.helix-db.com/cli/command-reference/status): Inspect local runtime or current Cloud database state — Page type: Reference
-- [helix stop](https://docs.helix-db.com/cli/command-reference/stop) — Page type: Reference
+- [helix stop](https://docs.helix-db.com/cli/command-reference/stop): Stop a background local instance and remove its containers — Page type: Reference
 - [helix service-credential](https://docs.helix-db.com/cli/command-reference/service-credential): Manage workspace-owned credentials for headless HTTP API and unified MCP clients — Page type: Reference
 - [helix shell](https://docs.helix-db.com/cli/command-reference/shell): Run line-oriented Helix v3 JSON requests — Page type: Reference
-- [helix update](https://docs.helix-db.com/cli/command-reference/update) — Page type: Reference
+- [helix update](https://docs.helix-db.com/cli/command-reference/update): Update the Helix CLI and refresh installed agent skills — Page type: Reference
 - [helix workspace](https://docs.helix-db.com/cli/command-reference/workspace): Discover WorkOS workspace memberships — Page type: Reference

@@ -149,12 +149,144 @@ helix.ReadQuery("friends").
 
 ## Preserve correlated values
 
-Use `bind` when a result row must retain values from multiple points in one traversal:
+A traversal normally forgets where it has been: after `out(...)`, each row holds only
+the node it reached. Use `bind` to name a point in the traversal so each result row
+keeps a value from it. This request returns one row per service and the workload it
+routes to:
 
-Bind the starting service as `service`, traverse `ROUTES_TO`, bind the result as
-`workload`, then project both bindings with `projectDistinctBindings` (or the
-language-equivalent builder). Bindings are row-local. Branches can bind optional
-values and coalesce them during projection without joining unrelated paths.
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "routes",
+        g()
+            .n_with_label("Service")
+            .bind("service")
+            .out(Some("ROUTES_TO"))
+            .project_bindings(vec![
+                BindingProjection::binding("service", "name", "service"),
+                BindingProjection::current("name", "workload"),
+            ]),
+    )
+    .returning(["routes"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs(
+    "routes",
+    g()
+      .nWithLabel("Service")
+      .bind("service")
+      .out("ROUTES_TO")
+      .projectBindings([
+        BindingProjection.binding("service", "name", "service"),
+        BindingProjection.current("name", "workload"),
+      ]),
+  )
+  .returning(["routes"]);
+```
+
+```go Go
+helix.ReadQuery("service_routes").
+	VarAs(
+		"routes",
+		helix.G().
+			NWithLabel("Service").
+			Bind("service").
+			Out("ROUTES_TO").
+			ProjectBindings(
+				helix.ProjectNamedBinding("service", "name", "service"),
+				helix.ProjectCurrentBinding("name", "workload"),
+			),
+	).
+	Returning("routes")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "routes",
+        g()
+        .n_with_label("Service")
+        .bind("service")
+        .out("ROUTES_TO")
+        .project_bindings(
+            [
+                BindingProjection.binding("service", "name", "service"),
+                BindingProjection.current("name", "workload"),
+            ]
+        ),
+    )
+    .returning(["routes"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "service_routes",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "routes",
+          "root": {
+            "project_bindings": {
+              "input": {
+                "out": {
+                  "input": {
+                    "bind": {
+                      "input": {
+                        "nodes_where": {
+                          "predicate": {
+                            "eq": {
+                              "left": { "property": "$label" },
+                              "right": { "constant": { "string": "Service" } }
+                            }
+                          }
+                        }
+                      },
+                      "name": "service"
+                    }
+                  },
+                  "label": "ROUTES_TO"
+                }
+              },
+              "projections": [
+                {
+                  "property": {
+                    "target": { "binding": "service" },
+                    "source": "name",
+                    "alias": "service"
+                  }
+                },
+                {
+                  "property": {
+                    "target": "current",
+                    "source": "name",
+                    "alias": "workload"
+                  }
+                }
+              ],
+              "distinct": false
+            }
+          }
+        }
+      }],
+      "returns": ["routes"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Bindings are row-local, so each row pairs a workload with the service that reached it
+rather than joining unrelated paths. Branches can bind optional values and coalesce
+them during projection; see [Project correlated bindings](/database/helix-db/query-guides/projections#project-correlated-bindings).
 
 ## Avoid accidental path growth
 

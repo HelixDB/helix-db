@@ -104,9 +104,275 @@ g().n_with_label("User").project([
 
 ## Project correlated bindings
 
-`projectDistinctBindings` removes duplicate projected tuples. Missing optional bindings
-remain row-local and can be handled with `coalesce`. Bind each candidate path first,
-then project `BindingProjection` values from those named row-local bindings.
+`projectBindings` / `project_bindings` emits one row per traversal result, reading
+values from names captured earlier with [`bind`](/database/helix-db/query-guides/traversals#preserve-correlated-values).
+`projectDistinctBindings` / `project_distinct_bindings` also removes duplicate
+projected tuples.
+
+When alternative branches bind different names, a row carries only the bindings its
+own path set. Use `coalesce` to take the first binding that is present. This request
+maps each service to a workload ID, whichever branch found it:
+
+<CodeGroup>
+
+```rust Rust [expandable]
+read_batch()
+    .var_as(
+        "workloads",
+        g().n_with_label("Service")
+            .bind("service")
+            .out(Some("ROUTES_TO"))
+            .bind("pod")
+            .optional(sub().in_(Some("CREATES")).bind("deployment"))
+            .union(vec![
+                sub().in_(Some("MANAGES")).bind("owner"),
+                sub().out(Some("ROUTES_TO")).bind("workload"),
+            ])
+            .project_distinct_bindings(vec![
+                BindingProjection::binding("service", "$id", "service_id"),
+                BindingProjection::coalesce(
+                    vec![
+                        BindingValueRef::binding("deployment", "$id"),
+                        BindingValueRef::binding("owner", "$id"),
+                        BindingValueRef::binding("workload", "$id"),
+                    ],
+                    "workload_id",
+                ),
+            ]),
+    )
+    .returning(["workloads"]);
+```
+
+```ts TypeScript [expandable]
+readBatch()
+  .varAs(
+    "workloads",
+    g()
+      .nWithLabel("Service")
+      .bind("service")
+      .out("ROUTES_TO")
+      .bind("pod")
+      .optional(sub().in("CREATES").bind("deployment"))
+      .union([sub().in("MANAGES").bind("owner"), sub().out("ROUTES_TO").bind("workload")])
+      .projectDistinctBindings([
+        BindingProjection.binding("service", "$id", "service_id"),
+        BindingProjection.coalesce(
+          [
+            BindingProjection.bindingRef("deployment", "$id"),
+            BindingProjection.bindingRef("owner", "$id"),
+            BindingProjection.bindingRef("workload", "$id"),
+          ],
+          "workload_id",
+        ),
+      ]),
+  )
+  .returning(["workloads"]);
+```
+
+```go Go [expandable]
+helix.ReadQuery("service_workloads").
+	VarAs(
+		"workloads",
+		helix.G().
+			NWithLabel("Service").
+			Bind("service").
+			Out("ROUTES_TO").
+			Bind("pod").
+			Optional(helix.Sub().In("CREATES").Bind("deployment")).
+			Union(
+				helix.Sub().In("MANAGES").Bind("owner"),
+				helix.Sub().Out("ROUTES_TO").Bind("workload"),
+			).
+			ProjectDistinctBindings(
+				helix.ProjectNamedBinding("service", "$id", "service_id"),
+				helix.ProjectBindingCoalesce([]helix.BindingValueRef{
+					helix.NamedBindingValue("deployment", "$id"),
+					helix.NamedBindingValue("owner", "$id"),
+					helix.NamedBindingValue("workload", "$id"),
+				}, "workload_id"),
+			),
+	).
+	Returning("workloads")
+```
+
+```python Python [expandable]
+(
+    read_batch()
+    .var_as(
+        "workloads",
+        g()
+        .n_with_label("Service")
+        .bind("service")
+        .out("ROUTES_TO")
+        .bind("pod")
+        .optional(sub().in_("CREATES").bind("deployment"))
+        .union(
+            [
+                sub().in_("MANAGES").bind("owner"),
+                sub().out("ROUTES_TO").bind("workload"),
+            ]
+        )
+        .project_distinct_bindings(
+            [
+                BindingProjection.binding("service", "$id", "service_id"),
+                BindingProjection.coalesce(
+                    [
+                        BindingProjection.binding_ref("deployment", "$id"),
+                        BindingProjection.binding_ref("owner", "$id"),
+                        BindingProjection.binding_ref("workload", "$id"),
+                    ],
+                    "workload_id",
+                ),
+            ]
+        ),
+    )
+    .returning(["workloads"])
+)
+```
+
+```json JSON [expandable]
+{
+  "request_type": "read",
+  "query_name": "service_workloads",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "workloads",
+            "root": {
+              "project_bindings": {
+                "input": {
+                  "union": {
+                    "input": {
+                      "optional": {
+                        "input": {
+                          "bind": {
+                            "input": {
+                              "out": {
+                                "input": {
+                                  "bind": {
+                                    "input": {
+                                      "nodes_where": {
+                                        "predicate": {
+                                          "eq": {
+                                            "left": {
+                                              "property": "$label"
+                                            },
+                                            "right": {
+                                              "constant": {
+                                                "string": "Service"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "name": "service"
+                                  }
+                                },
+                                "label": "ROUTES_TO"
+                              }
+                            },
+                            "name": "pod"
+                          }
+                        },
+                        "traversal": {
+                          "root": {
+                            "bind": {
+                              "input": {
+                                "in": {
+                                  "input": "context",
+                                  "label": "CREATES"
+                                }
+                              },
+                              "name": "deployment"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "traversals": [
+                      {
+                        "root": {
+                          "bind": {
+                            "input": {
+                              "in": {
+                                "input": "context",
+                                "label": "MANAGES"
+                              }
+                            },
+                            "name": "owner"
+                          }
+                        }
+                      },
+                      {
+                        "root": {
+                          "bind": {
+                            "input": {
+                              "out": {
+                                "input": "context",
+                                "label": "ROUTES_TO"
+                              }
+                            },
+                            "name": "workload"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "projections": [
+                  {
+                    "property": {
+                      "target": {
+                        "binding": "service"
+                      },
+                      "source": "$id",
+                      "alias": "service_id"
+                    }
+                  },
+                  {
+                    "coalesce": {
+                      "refs": [
+                        {
+                          "target": {
+                            "binding": "deployment"
+                          },
+                          "source": "$id"
+                        },
+                        {
+                          "target": {
+                            "binding": "owner"
+                          },
+                          "source": "$id"
+                        },
+                        {
+                          "target": {
+                            "binding": "workload"
+                          },
+                          "source": "$id"
+                        }
+                      ],
+                      "alias": "workload_id"
+                    }
+                  }
+                ],
+                "distinct": true
+              }
+            }
+          }
+        }
+      ],
+      "returns": [
+        "workloads"
+      ]
+    }
+  }
+}
+```
+
+</CodeGroup>
 
 ## Aggregate
 

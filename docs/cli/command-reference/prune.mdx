@@ -1,22 +1,14 @@
 ---
 title: "helix prune"
 sidebarTitle: "prune"
+description: "Remove Helix-owned local containers, volumes, and instance state"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
 Remove Helix-owned local containers, networks, disk-mode volumes, and per-instance workspace state.
-
-`helix prune` only touches resources the CLI manages:
-
-- The container named `helix-<project>-<instance>`.
-- The disk-mode MinIO sidecar, network, and persistent volume when present.
-- The per-instance directory under `.helix/`.
-
-It never runs a broad `docker system prune` or `podman system prune`.
+Local only; the instance stays in `helix.toml`.
 
 ## Usage
 
@@ -27,26 +19,35 @@ helix prune [INSTANCE] [OPTIONS]
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
+| --- | --- |
 | `INSTANCE` | Local instance to prune. If omitted, the CLI prompts in a TTY or requires `--all`. |
 
-## Available flags
+## Options
 
-| Flag | Type | Description |
-|------|------|-------------|
-| `-a`, `--all` | Boolean | Prune every local instance in the project. |
-| `-y`, `--yes` | Boolean | Skip confirmation prompts. Required with `--all` in non-TTY environments. |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-a`, `--all` | Prune every local instance in the project. | Off |
+| `-y`, `--yes` | Skip confirmation prompts. Required with `--all` in non-TTY environments. | Off |
 
-## Confirmation behavior
+## Behavior
+
+`helix prune` only touches resources the CLI manages:
+
+- The container named `helix-<project>-<instance>`.
+- The disk-mode MinIO sidecar, network, and persistent volume when present.
+- The per-instance directory under `.helix/`.
+
+It never runs a broad `docker system prune` or `podman system prune`, and it never deletes remote S3
+object-store data.
 
 - `helix prune <instance>` removes resources without confirmation, including persisted disk-mode data.
 - `helix prune --all` prints a warning and asks for confirmation in a TTY. In non-TTY environments, it refuses to run without `--yes`:
 
-  ```
+  ```text
   Refusing to prune all instances non-interactively. Re-run with --yes to confirm.
   ```
 
-If nothing was found to prune for an instance, the CLI prints `No local runtime resources found for '<instance>'` and exits successfully.
+- If nothing was found to prune for an instance, the CLI prints `No local runtime resources found for '<instance>'` and exits successfully.
 
 ## Examples
 
@@ -63,3 +64,9 @@ helix prune --all
 # Same, non-interactively
 helix prune --all --yes
 ```
+
+## Related
+
+- [`helix stop`](/cli/command-reference/stop) — stop an instance but keep disk-mode data.
+- [`helix delete`](/cli/command-reference/delete) — also remove the instance from `helix.toml`.
+- [`helix start`](/cli/command-reference/start) — start a fresh instance after pruning.

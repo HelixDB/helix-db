@@ -1,14 +1,11 @@
 ---
-title: 'Release Notes'
-description: 'HelixDB Cloud Release Notes'
-icon: ''
+title: 'Release notes'
+description: 'New features and changes in HelixDB, Helix Cloud, the SDKs, and the CLI'
 rss: true
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
-
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
 <Update
   label="September 2026"
@@ -43,7 +40,7 @@ pageType: "Reference"
 - **Open-source database** — the engine moved out of `helix-hyperscale` into the public, modular `helix-db` workspace.
 - **New query planner** — a dedicated logical and physical planning layer optimizes the typed operation-tree AST before execution.
 - **[Embedded database](/database/helix-db/start-here/local-development/embedded-database)** — run the same engine and queries in process with memory, disk, or object storage.
-- **[Vector prefiltering](/database/helix-db/query-guides/filtering#vector-prefiltering)** — traverse and filter an exact candidate set before vector ranking, so results cannot escape graph or permission boundaries.
+- **[Vector prefiltering](/database/helix-db/query-guides/prefiltering#vector-prefiltering)** — traverse and filter an exact candidate set before vector ranking, so results cannot escape graph or permission boundaries.
 </Update>
 
 <Update
@@ -76,7 +73,7 @@ pageType: "Reference"
   label="April 2026"
   rss={{
     title: "Better, Faster, Stronger",
-    description: "Major performancy improvements and better reliability"
+    description: "Major performance improvements and better reliability"
   }}
 >
 - **Local docker deployment**

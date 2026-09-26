@@ -1,16 +1,59 @@
 ---
 title: "helix workspace"
+sidebarTitle: "workspace"
 description: "Discover WorkOS workspace memberships"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+List and inspect the Helix Cloud workspaces your login can access. Cloud only; these commands are
+read-only.
+
+## Usage
+
 ```bash
 helix workspace list [--format human|json]
 helix workspace get <workspace-id> [--format human|json]
 ```
 
-The WorkOS session hydrates all current memberships. There is no `workspace switch` command and no
-persisted active workspace. Pass `--workspace` or `--workspace-id` to a command that cannot derive an
-unambiguous workspace from its linked project/database.
+## Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `list` | List every workspace you are a member of. |
+| `get` | Show one workspace by ID. |
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `WORKSPACE_ID` | Workspace to show with `get`. Required. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--format <FORMAT>` | Output format: `human` or `json`. | `human` |
+
+## Behavior
+
+- The WorkOS session hydrates all current memberships.
+- There is no `workspace switch` command and no persisted active workspace.
+- Pass `--workspace` or `--workspace-id` to a command that cannot derive an unambiguous workspace from its linked project/database.
+
+## Examples
+
+```bash
+# List your workspaces
+helix workspace list
+
+# Show one workspace as JSON
+helix workspace get <workspace-id> --format json
+```
+
+## Related
+
+- [`helix auth`](/cli/command-reference/auth) — log in before listing workspaces.
+- [`helix project`](/cli/command-reference/project) — list projects in a workspace.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

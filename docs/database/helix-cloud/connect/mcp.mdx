@@ -12,6 +12,21 @@ Helix Cloud exposes one public MCP endpoint:
 Query, observability, and customer administration tools share this endpoint. Tool access depends on
 the authenticated identity and its current permissions; listing a tool does not authorize every target.
 
+## Connect a client
+
+Configure `https://mcp.helix-db.com/mcp` for normal user or agent access and complete the browser
+OAuth flow when prompted. Clients can follow the protected-resource metadata advertised by the
+endpoint at
+`https://mcp.helix-db.com/.well-known/oauth-protected-resource/mcp`.
+
+For headless access, configure a scoped service credential as a bearer token in the client's secure
+credential configuration. Use the unified endpoint, grant only the required project permissions,
+and capture the one-time token in a secrets manager. Service credentials also support HTTP API
+calls; they are not a CLI login method.
+
+Do not put WorkOS tokens, application keys, service-credential tokens, or confirmation tokens in
+source control, agent instruction files, or query payloads.
+
 ## Authentication and tool access
 
 | Identity | Authentication | Available tools |
@@ -178,18 +193,3 @@ returned secrets, or raw tokens.
 Execution atomically changes `prepared` to `consumed` before dispatch. Only one replica can win.
 Expired or consumed confirmations cannot be reused. A crash before dispatch or any timeout, gateway,
 broker, or ambiguous post-dispatch failure leaves it consumed; do not retry the mutation.
-
-## Client configuration
-
-Configure `https://mcp.helix-db.com/mcp` for normal user or agent access and complete the browser
-OAuth flow when prompted. Clients can follow the protected-resource metadata advertised by the
-endpoint at
-`https://mcp.helix-db.com/.well-known/oauth-protected-resource/mcp`.
-
-For headless access, configure a scoped service credential as a bearer token in the client's secure
-credential configuration. Use the unified endpoint, grant only the required project permissions,
-and capture the one-time token in a secrets manager. Service credentials also support HTTP API
-calls; they are not a CLI login method.
-
-Do not put WorkOS tokens, application keys, service-credential tokens, or confirmation tokens in
-source control, agent instruction files, or query payloads.

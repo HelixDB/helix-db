@@ -1,24 +1,20 @@
 ---
 title: "Introduction"
-
+description: "HelixDB is a graph database with native vector and full-text search, built on object storage"
 mode: "wide"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-HelixDB is a graph database built with native vector and full-text search built on object storage.
-It is designed to store and search knowledge and context for applications where explicit structure, and contextual data both matter.
+HelixDB is a graph database with native vector and full-text search, built on object
+storage. It stores and searches knowledge and context for applications where both
+explicit structure and meaning matter.
 
-Keeping these retrieval models in one database lets an application work with connected entities, semantically similar content,
-and exact terms without synchronizing separate graph, vector, and text stores.
-
-We use object storage as the source of truth and NVMe and memory for caching.
-This allows HelixDB to scale to large datasets while keeping the latency and cost low.
-
-
-Our users are using HelixDB to build applications like enterprise company brains, large scale people search, and AI agent swarms.
-
+Because graph, vector, and text retrieval live in one database, an application can
+work with connected entities, semantically similar content, and exact terms without
+synchronizing separate stores. Teams use HelixDB to build enterprise company brains,
+large-scale people search, and AI agent swarms.
 
 ```mermaid
 %%{init: {"themeCSS": ".cluster-label { translate: -140px 0; }"}}%%
@@ -45,46 +41,49 @@ flowchart TB
     context --> apps["Company Brains"]
 ```
 
-Company knowledge arrives as documents, conversations, events, and people.
+## How it works
 
 Everything in HelixDB is one labeled property graph. Nodes are your entities, directed
 edges are the relationships between them, and both carry typed properties.
 
 Search is not a second system bolted on top. A vector, text, or secondary index is an
 access path over a property that already lives on a node or edge: the embedding on a
-chunk, the body text of a document, the `status` field you filter by.
+chunk, the body text of a document, or the `status` field you filter by. That has
+three consequences:
 
-The graph stays the source of truth, so a semantic match and the relationships around it are the same data,
-read in the same transaction, with nothing to synchronize between a graph store, a vector store, and a search cluster.
+- **The graph stays the source of truth.** A semantic match and the relationships
+  around it are the same data, read in the same transaction.
+- **Nothing needs synchronizing.** There is no separate graph store, vector store, or
+  search cluster to keep consistent.
+- **Edges are searchable too.** An index is scoped to a label and a property rather
+  than a special node type, so you can search and filter relationships as well as
+  entities.
 
-Because an index is scoped to a label and a property rather than to a special node type,
-indexes work on edges too, so you can search and filter relationships, not just entities.
+## What you get
 
-
-### What do you get?
-
-- **ACID transactions** across graph, vector, and text data in a single transaction.
-- **Object storage as the source of truth**, so storage scales independently of compute.
-- **Full-text search** for exact terms and keyword relevance.
+- **ACID transactions** across graph, vector, and text data.
 - **Vector search** with prefiltering and over 90% recall.
-- **Equality filtering** on property values.
-- **Range filtering** on ordered properties.
-- **Search and filtering on both nodes and edges**, not just nodes.
-- **Horizontal scaling** across multi-tenant and single-tenant deployments, with BYOC coming soon.
+- **Full-text search** for exact terms and keyword relevance.
+- **Equality and range filtering** on property values.
+- **Search and filtering on nodes and edges**, not just nodes.
+- **Object storage as the source of truth**, so storage scales independently of compute.
+- **Horizontal scaling** across multi-tenant and single-tenant deployments, with BYOC
+  coming soon.
 
-### Object Storage
+## Why object storage
 
-Graph databases are a notoriously challenging database flavour to work with.
-Most graph database providers must store all data on one machine on disk, and in the worst case, all in memory.
-This leads to 2 problems; scaling and cost.
-Given that everything has to fit either in memory or on disk, you are limited by how much data you can physically store without the cost becoming prohibitively large.
-By storing all data on object storage, you can scale the storage layer separately to compute, meaning you can scale the amount of data stored far beyond the capacity of the infrastructure.
-All this means is much lower costs for vastly more amounts of storage.
+Most graph databases keep all data on one machine's disk, and in the worst case
+entirely in memory. That caps how much data you can store and makes large graphs
+expensive.
+
+HelixDB keeps object storage as the source of truth and uses NVMe and memory only as
+caches. Storage scales separately from compute, so a dataset can grow far beyond the
+capacity of the machines that serve it while latency and cost stay low.
 
 ## Next steps
 
 <Columns cols={3}>
-  <Card title="Get Started" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Start building">
+  <Card title="Get started" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Start building">
     Start a local instance and run the generated query.
   </Card>
   <Card title="Understand the data model" icon="diagram-project" href="/database/helix-db/core-concepts/data-model" cta="Explore the model">
