@@ -4,14 +4,13 @@
 use super::{evaluation, Aggregate, Binary, GroupingKey, QueryError, Result, Value};
 use std::collections::HashSet;
 
+mod average;
+
 #[derive(Debug)]
 enum State {
     Count(i64),
     Sum(Value),
-    Average {
-        sum: Value,
-        count: i64,
-    },
+    Average(average::Average),
     Minimum(Value),
     Maximum(Value),
     Collect {
@@ -41,10 +40,7 @@ impl Accumulator {
             state: match function {
                 Aggregate::Count => State::Count(0),
                 Aggregate::Sum => State::Sum(Value::Integer(0)),
-                Aggregate::Avg => State::Average {
-                    sum: Value::Integer(0),
-                    count: 0,
-                },
+                Aggregate::Avg => State::Average(average::Average::new()),
                 Aggregate::Min => State::Minimum(Value::Null),
                 Aggregate::Max => State::Maximum(Value::Null),
                 Aggregate::Collect => State::Collect {
@@ -64,11 +60,10 @@ impl Accumulator {
     }
     pub fn allocated_bytes(&self) -> usize {
         let values = match &self.state {
-            State::Count(_) => 0,
-            State::Sum(value)
-            | State::Minimum(value)
-            | State::Maximum(value)
-            | State::Average { sum: value, .. } => value.allocated_bytes(),
+            State::Count(_) | State::Average(_) => 0,
+            State::Sum(value) | State::Minimum(value) | State::Maximum(value) => {
+                value.allocated_bytes()
+            }
             State::Collect {
                 values,
                 payload_bytes,
@@ -186,7 +181,7 @@ impl Accumulator {
         // Compute fallible numeric transitions before mutating either the
         // accumulator or its distinct-key set. A rejected input leaves it usable.
         let numeric = match &self.state {
-            State::Sum(sum) | State::Average { sum, .. } => {
+            State::Sum(sum) => {
                 if !matches!(value, Value::Integer(_) | Value::Float(_)) {
                     return Err(evaluation::type_error("numeric aggregate requires numbers").into());
                 }
@@ -194,10 +189,12 @@ impl Accumulator {
             }
             _ => None,
         };
+        let next_average = match &self.state {
+            State::Average(average) => Some(average.next(&value)?),
+            _ => None,
+        };
         let next_count = match &self.state {
-            State::Count(count) | State::Average { count, .. } => {
-                Some(count.checked_add(1).ok_or_else(evaluation::overflow)?)
-            }
+            State::Count(count) => Some(count.checked_add(1).ok_or_else(evaluation::overflow)?),
             _ => None,
         };
         if matches!(&self.state,State::Collect { values, .. } if values.len() >= max_items) {
@@ -232,9 +229,8 @@ impl Accumulator {
         match &mut self.state {
             State::Count(count) => *count = next_count.expect("count transition was checked"),
             State::Sum(sum) => *sum = numeric.expect("sum transition was checked"),
-            State::Average { sum, count } => {
-                *sum = numeric.expect("average transition was checked");
-                *count = next_count.expect("count transition was checked");
+            State::Average(average) => {
+                *average = next_average.expect("average transition was checked");
             }
             State::Minimum(current)
                 if *current == Value::Null || value.total_cmp(current).is_lt() =>
@@ -261,10 +257,7 @@ impl Accumulator {
         Ok(match self.state {
             State::Count(count) => Value::Integer(count),
             State::Sum(value) | State::Minimum(value) | State::Maximum(value) => value,
-            State::Average { count: 0, .. } => Value::Null,
-            State::Average { sum, count } => {
-                evaluation::binary(Binary::Divide, sum, Value::Float(count as f64))?
-            }
+            State::Average(average) => average.finish(),
             State::Collect { values, .. } => Value::List(values),
         })
     }

@@ -365,7 +365,14 @@ impl GroupingKey {
 
     /// Recover an owned input after lookup without copying its payload. Row keys
     /// retain their internal tuple wrapper; this does not relax value limits.
-    pub(super) fn into_value(self) -> Value {
+    ///
+    /// ```
+    /// use helix_planner::relational::{GroupingKey, Value};
+    /// let key = GroupingKey::new(Value::Integer(1)).unwrap();
+    /// assert_eq!(key, GroupingKey::new(Value::Float(1.0)).unwrap());
+    /// assert!(matches!(key.into_value(), Value::Integer(1)));
+    /// ```
+    pub fn into_value(self) -> Value {
         self.0
     }
 }

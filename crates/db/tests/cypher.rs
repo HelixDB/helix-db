@@ -36,6 +36,9 @@ mod collections;
 #[path = "cypher/scalar_memory.rs"]
 mod scalar_memory;
 
+#[path = "cypher/averages.rs"]
+mod averages;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

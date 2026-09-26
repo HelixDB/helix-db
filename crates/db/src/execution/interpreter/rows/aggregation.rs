@@ -76,8 +76,8 @@ impl ExecutionContext<'_> {
             Some((*function, argument.as_deref(), *distinct))
         }));
         let mut inputs = projection.input_slots(self, width)?;
-        // Later aliases read the completed output; their incoming values need
-        // retention only when a grouping expression independently reads them.
+        // Later aliases read the completed output. Grouping values are retained
+        // in the lookup key, so only independent downstream inputs need copying.
         match &mut inputs {
             projection::ProjectionInputs::Discard => {}
             projection::ProjectionInputs::Keep { slots, .. } => {
@@ -86,7 +86,6 @@ impl ExecutionContext<'_> {
                 }
             }
         }
-        inputs.include_references(self, width, keys.iter().copied())?;
         let mut groups = groups::GroupBuffer::new(self.row_budget())?;
         while let Some(batch) = batches.next().await {
             let batch = batch?;
@@ -143,9 +142,11 @@ impl ExecutionContext<'_> {
             let memory = self.row_budget().reserve(key.value().allocated_bytes())?;
             groups.insert(key, memory, None, width, &inputs, &specifications)?;
         }
-        // The lookup table is no longer needed. Its keys and table allocation
-        // are released before materializing any result values.
-        let mut groups = groups.into_drain();
+        // Move the first grouping values into their output slots before dropping
+        // the lookup table. Re-evaluation would repeat property reads and copies.
+        let mut groups = groups.into_drain(items, || {
+            self.check_execution_deadline().map_err(Into::into)
+        })?;
         let mut output = RowBuffer::new(self.row_budget())?;
         for Group {
             mut base,
@@ -156,49 +157,22 @@ impl ExecutionContext<'_> {
             let group_bytes = accumulators.iter().fold(row_bytes(&base), |bytes, state| {
                 bytes.saturating_add(state.allocated_bytes())
             });
-            let graph = self
-                .row_budget()
-                .admitted_future(
-                    self.expression_graph_batch(std::slice::from_ref(&base), keys.iter().copied()),
-                )?
-                .await?;
-            let values_memory = self
-                .row_budget()
-                .reserve(items.len().saturating_mul(size_of::<r::Value>()))?;
-            let mut values = Vec::with_capacity(items.len());
             let mut results = accumulators.into_iter();
-            let mut additional = 0_usize;
-            for item in items {
-                let value = if matches!(item.expression, r::Expression::Aggregate { .. }) {
-                    results
-                        .next()
-                        .expect("one state per direct aggregate")
-                        .finish()?
-                } else {
-                    let value = self
-                        .evaluate(&base, parameters, &graph, limits)
-                        .eval(&item.expression)?;
-                    let bytes = value.allocated_bytes();
-                    groups.memory.absorb(self.row_budget().reserve(bytes)?);
-                    additional = additional.saturating_add(bytes);
-                    value
-                };
-                assert!(
-                    values.len() < items.len(),
-                    "fixed aggregate output capacity"
-                );
-                values.push(value);
+            // Keys already occupy their final slots. Finishing an aggregate
+            // reads only its owned state, so no simultaneous-value buffer is needed.
+            for item in items
+                .iter()
+                .filter(|item| matches!(item.expression, r::Expression::Aggregate { .. }))
+            {
+                base[item.slot.0 as usize] = results
+                    .next()
+                    .expect("one state per direct aggregate")
+                    .finish()?;
             }
             assert_eq!(results.len(), 0, "all accumulator states were finalized");
             drop(results);
-            for (item, value) in items.iter().zip(values) {
-                base[item.slot.0 as usize] = value;
-            }
-            drop(graph);
-            drop(values_memory);
             let retained = row_bytes(&base);
             let surplus = group_bytes
-                .saturating_add(additional)
                 .checked_sub(retained)
                 .expect("aggregate result fits its admitted state and values");
             groups.memory.release(surplus);

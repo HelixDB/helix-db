@@ -121,6 +121,14 @@ values outside the signed 64-bit range return null, including a fractional
 amount beyond either boundary. Floating-point inputs retain their existing
 binary precision; conversion cannot recover digits already lost in a float.
 
+## Numeric aggregates
+
+`avg()` ignores nulls and returns null for an empty group. Numeric averages
+return floating-point values. An intermediate total does not cause integer
+overflow or an infinite result when all inputs are finite. Floating-point
+rounding and cancellation still apply. `sum()` retains checked signed-integer
+addition and reports integer overflow.
+
 ## Grouping expressions
 
 Projected expressions without aggregates define the groups. Inside an expression

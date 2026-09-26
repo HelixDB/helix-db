@@ -394,6 +394,21 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[size * (size - 1) / 2, (size - 1) as f64 / 2.0]]),
         ),
         (
+            "average_large_integer",
+            "MATCH (a:Left) RETURN avg(9223372036854775807)".into(),
+            json!([[i64::MAX as f64]]),
+        ),
+        (
+            "average_large_float",
+            "MATCH (a:Left) RETURN avg(1e308)".into(),
+            json!([[1e308]]),
+        ),
+        (
+            "average_grouped_float",
+            "MATCH (a:Left) RETURN a.key % 16 AS bucket,avg(1e308) AS mean ORDER BY bucket".into(),
+            json!((0..size.min(16)).map(|bucket|json!([bucket,1e308])).collect::<Vec<_>>()),
+        ),
+        (
             "top_k",
             "MATCH (a:Left) RETURN a.key AS key ORDER BY key DESC LIMIT 3".into(),
             json!([[size - 1], [size - 2], [size - 3]]),
@@ -577,6 +592,20 @@ async fn measure_cases(
                     response.resources.peak_memory_bytes,
                 )
                 .into());
+            }
+            if case.starts_with("average_")
+                // Numeric state stays bounded per group. These workloads have
+                // one or at most sixteen groups; source/property reads batch.
+                && (response.resources.peak_memory_bytes > 2 * 1024 * 1024
+                    || response.resources.reads.multi_get_keys > 3 * size
+                    || response.resources.reads.multi_get_batches > 3 * size.div_ceil(512)
+                    || response.resources.reads.point_gets > 1
+                    || response.resources.reads.scans != 0)
+            {
+                return Err(format!(
+                    "{case} exceeded its bounded-state/read guard at size {size}: peak={}, reads={:?}",
+                    response.resources.peak_memory_bytes, response.resources.reads,
+                ).into());
             }
             if case.starts_with("mixed_scalar_aggregation")
                 // The existing 512-row graph hydration/validation batch peaks

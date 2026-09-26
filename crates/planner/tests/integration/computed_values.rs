@@ -224,3 +224,99 @@ fn runtime_depth_does_not_apply_the_literal_cardinality_limit() {
         r::GroupingKey::row(vec![r::Value::List(vec![r::Value::Null; 199_999])]).unwrap_err(),
     );
 }
+
+#[test]
+fn averages_use_bounded_numeric_state_without_overflowing_the_sum() {
+    use helix_planner::relational as r;
+    for distinct in [false, true] {
+        for (values, expected) in [
+            (
+                vec![r::Value::Integer(i64::MAX); 2],
+                r::Value::Float(i64::MAX as f64),
+            ),
+            (
+                vec![r::Value::Integer(i64::MIN); 2],
+                r::Value::Float(i64::MIN as f64),
+            ),
+            (vec![r::Value::Float(1e308); 2], r::Value::Float(1e308)),
+            (
+                vec![
+                    r::Value::Integer(i64::MAX),
+                    r::Value::Float(1.0),
+                    r::Value::Integer(-i64::MAX),
+                ],
+                r::Value::Float(1.0 / 3.0),
+            ),
+            (vec![r::Value::Null; 3], r::Value::Null),
+        ] {
+            let mut accumulator = r::Accumulator::new(r::Aggregate::Avg, distinct);
+            for value in values {
+                accumulator.push(value, 10, 1024 * 1024).unwrap();
+            }
+            assert_eq!(accumulator.finish().unwrap(), expected);
+        }
+    }
+    let mut average = r::Accumulator::new(r::Aggregate::Avg, true);
+    average.push(r::Value::Integer(1), 10, 1024 * 1024).unwrap();
+    let before = average.allocated_bytes();
+    let error = average
+        .push_with_admission::<r::QueryError>(r::Value::Integer(3), 10, 1024 * 1024, |_| {
+            Err(r::QueryError::runtime(
+                "ResourceLimit",
+                "MemoryLimit",
+                "test admission rejection",
+            ))
+        })
+        .unwrap_err();
+    assert_eq!(error.detail, "MemoryLimit");
+    assert_eq!(average.allocated_bytes(), before);
+    // Admission failure must not retain the DISTINCT key or numeric transition.
+    average.push(r::Value::Integer(3), 10, 1024 * 1024).unwrap();
+    average.push(r::Value::Float(3.0), 10, 1024 * 1024).unwrap();
+    average.push(r::Value::Null, 10, 1024 * 1024).unwrap();
+    assert_eq!(average.finish().unwrap(), r::Value::Float(2.0));
+    let mut sum = r::Accumulator::new(r::Aggregate::Sum, false);
+    sum.push(r::Value::Integer(i64::MAX), 10, 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        sum.push(r::Value::Integer(1), 10, 1024 * 1024)
+            .unwrap_err()
+            .detail,
+        "NumberOutOfRange"
+    );
+    assert_eq!(sum.finish().unwrap(), r::Value::Integer(i64::MAX));
+}
+
+#[test]
+fn grouped_scalar_average_shares_numeric_and_null_semantics() {
+    let graph = Graph(BTreeMap::new());
+    let parameters = BTreeMap::new();
+    for (values, expected) in [
+        (
+            vec![r::Value::Integer(i64::MAX); 2],
+            r::Value::Float(i64::MAX as f64),
+        ),
+        (vec![r::Value::Float(1e308); 2], r::Value::Float(1e308)),
+        (vec![r::Value::Null; 3], r::Value::Null),
+        (vec![], r::Value::Null),
+    ] {
+        let rows = values
+            .into_iter()
+            .map(|value| vec![value])
+            .collect::<Vec<_>>();
+        let evaluation = r::Evaluation {
+            row: &[],
+            parameters: &parameters,
+            graph: &graph,
+            group: Some(&rows),
+            max_collection_items: 10,
+            memory: r::EvaluationMemory::new(4096),
+        };
+        let expression = r::Expression::Aggregate {
+            function: r::Aggregate::Avg,
+            argument: Some(Box::new(r::Expression::Slot(r::Slot(0)))),
+            distinct: false,
+        };
+        assert_eq!(evaluation.eval(&expression).unwrap(), expected);
+    }
+}

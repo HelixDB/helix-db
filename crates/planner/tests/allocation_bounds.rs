@@ -1694,3 +1694,51 @@ fn scalar_aggregate_peak_covers_input_and_retained_state() {
         }
     }
 }
+
+#[test]
+fn numeric_average_has_constant_state_and_no_per_input_allocation() {
+    use r::Value as V;
+    for (values, expected) in [
+        (
+            [
+                V::Integer(i64::MAX),
+                V::Integer(i64::MAX),
+                V::Integer(-i64::MAX),
+                V::Integer(-i64::MAX),
+            ],
+            0.0,
+        ),
+        (
+            [
+                V::Float(1e308),
+                V::Float(1e308),
+                V::Float(-1e308),
+                V::Float(-1e308),
+            ],
+            0.0,
+        ),
+        (
+            [
+                V::Integer(i64::MAX),
+                V::Float(1.0),
+                V::Integer(-i64::MAX),
+                V::Float(0.0),
+            ],
+            0.25,
+        ),
+    ] {
+        let mut state = r::Accumulator::new(r::Aggregate::Avg, false);
+        let bytes = state.allocated_bytes();
+        let ((result, peak), retained) = observe(|| {
+            for index in 0..100_000 {
+                state
+                    .push(values[index % values.len()].clone(), 1, bytes)
+                    .unwrap();
+                assert_eq!(state.allocated_bytes(), bytes);
+            }
+            (state.finish().unwrap(), OBSERVATION.with(Cell::get).peak)
+        });
+        assert_eq!(result, V::Float(expected));
+        assert_eq!((peak, retained), (0, 0));
+    }
+}

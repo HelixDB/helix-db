@@ -128,6 +128,13 @@ distinct native traversal and relational row programs. The specialised traversal
 vector and text paths have different contracts. Treating all of them as already
 one interchangeable operator interface would hide meaningful differences.
 
+[Numeric averaging](../crates/planner/src/relational/aggregation/average.rs)
+owns checked, fixed-size arithmetic state separately from `DISTINCT` key storage.
+It preserves exact integer totals until floating input is encountered and bounds
+finite floating summation. Final division retains the integer total's rounding
+residue. The shared accumulator admits transitions before
+replacing state; scalar and row aggregation use that same boundary.
+
 ## Execution: pull batches, retained state and ownership
 
 ```mermaid

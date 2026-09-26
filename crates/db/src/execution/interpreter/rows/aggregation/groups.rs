@@ -11,7 +11,6 @@ pub(super) struct GroupBuffer {
     groups: Vec<Group>,
     memory: memory::Reservation,
     payload: usize,
-    key_bytes: usize,
 }
 
 pub(super) struct GroupDrain {
@@ -26,7 +25,6 @@ impl GroupBuffer {
             groups: Vec::new(),
             memory: budget.reserve(0)?,
             payload: 0,
-            key_bytes: 0,
         })
     }
     pub(super) fn is_empty(&self) -> bool {
@@ -138,7 +136,6 @@ impl GroupBuffer {
         self.by_key.insert(key, index);
         self.groups.push(Group { base, accumulators });
         self.payload = payload;
-        self.key_bytes = self.key_bytes.saturating_add(key_bytes);
         self.memory.shrink_to(retained);
         Ok(index)
     }
@@ -176,18 +173,43 @@ impl GroupBuffer {
         Ok(())
     }
 
-    pub(super) fn into_drain(mut self) -> GroupDrain {
-        let lookup_bytes =
-            self.key_bytes
-                .saturating_add(r::allocation::hash_table_retained_bytes::<
-                    r::GroupingKey,
-                    usize,
-                >(self.by_key.len()));
-        drop(self.by_key);
-        self.memory.release(lookup_bytes);
-        GroupDrain {
+    /// Move admitted key payloads into their unique output slots. The group
+    /// vector preserves input order even though hash-table iteration is unordered.
+    /// Cancellation drops every remaining key, representative and reservation.
+    pub(super) fn into_drain(
+        mut self,
+        items: &r::ProjectionProgram,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<GroupDrain> {
+        let mut retained = self.groups.capacity().saturating_mul(size_of::<Group>());
+        for (key, index) in self.by_key {
+            checkpoint()?;
+            let r::Value::List(values) = key.into_value() else {
+                unreachable!("direct aggregation uses framed row keys");
+            };
+            let destinations = items.iter().filter(|item| !item.expression.has_aggregate());
+            assert_eq!(
+                values.len(),
+                destinations.clone().count(),
+                "one retained value per grouping expression"
+            );
+            let group = &mut self.groups[index];
+            for (item, value) in destinations.zip(values) {
+                group.base[item.slot.0 as usize] = value;
+            }
+            retained = group.accumulators.iter().fold(
+                retained.saturating_add(row_bytes(&group.base)),
+                |bytes, state| bytes.saturating_add(state.allocated_bytes()),
+            );
+        }
+        self.memory.shrink_to(retained);
+        Ok(GroupDrain {
             groups: self.groups.into_iter(),
             memory: self.memory,
-        }
+        })
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/direct_group_keys.rs"]
+mod tests;
