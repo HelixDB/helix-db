@@ -51,7 +51,7 @@ fn access_filter_implementation_rule_preserves_residual_filter_pipeline() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
+            .label_scan(rows)
             .serial(storage.predicate_eval(rows))
     );
 

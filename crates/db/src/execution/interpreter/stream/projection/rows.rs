@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::super::values::DistinctKey;
 use super::*;
 use helix_planner::relational as r;
 
@@ -162,6 +163,8 @@ impl<'db> ExecutionContext<'db> {
         dedup: ir::ProjectionDedupMode,
     ) -> Result<ExecutionValue> {
         let mut scalars = Vec::with_capacity(rows.len());
+        // DISTINCT drops duplicates as rows are projected so only the first
+        // occurrence of each object is retained, never every duplicate payload.
         let mut seen = BTreeSet::new();
         for row in rows {
             self.check_execution_deadline()?;
@@ -176,12 +179,13 @@ impl<'db> ExecutionContext<'db> {
                     object.insert(alias, value);
                 }
             }
+            let scalar = ExecutionScalar::Object(object);
             if matches!(dedup, ir::ProjectionDedupMode::Distinct)
-                && !seen.insert(format!("{object:?}"))
+                && !seen.insert(DistinctKey(scalar.clone()))
             {
                 continue;
             }
-            scalars.push(ExecutionScalar::Object(object));
+            scalars.push(scalar);
         }
         Ok(ExecutionValue::Scalars(scalars))
     }

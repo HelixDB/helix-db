@@ -4,6 +4,11 @@ use super::*;
 use crate::encoding::v2::values::property::equality_index_value as equality;
 use crate::query_resources::{self, bitmap};
 
+mod unique;
+#[cfg(any(test, feature = "production-coverage"))]
+pub(crate) use unique::lookup_active_unique_equality_batch;
+pub(crate) use unique::lookup_active_unique_equality_batch_admitted;
+
 mod dynamic;
 #[cfg(any(
     test,
@@ -15,7 +20,8 @@ pub(crate) use dynamic::lookup_active_equality_generations_admitted;
 
 mod ordered;
 pub(crate) use ordered::{
-    scan_active_range_generation_ordered, ExactRangeScanProgress, UnobservedRangeScan,
+    scan_active_range_generation_ordered, ExactRangeScanProgress, OrderedRangeCursor,
+    UnobservedRangeScan,
 };
 
 #[async_trait]
@@ -1310,6 +1316,45 @@ mod tests {
             .unwrap();
             assert_eq!(ids.into_iter().collect::<Vec<_>>(), expected);
             assert_eq!(budget.available(), 1_000_000);
+        }
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unique_batch_rejects_wrong_lanes_invalid_literals_and_short_batches() {
+        let db = super::super::tests::test_db("unique-batch-invalid-contracts").await;
+        let unique = super::super::tests::active_read_handle(
+            &db,
+            crate::config::SecondaryIndexDefinition::node_unique_equality("Fixture", "key")
+                .unwrap(),
+        )
+        .await;
+        let values = [
+            PropertyValue::String("missing".into()),
+            PropertyValue::String("absent".into()),
+        ];
+        assert!(lookup_active_unique_equality_batch(&db, &unique, &values)
+            .await
+            .unwrap()
+            .is_empty());
+        for values in [&[][..], &values[..1]] {
+            assert!(lookup_active_unique_equality_batch(&db, &unique, values)
+                .await
+                .is_err());
+        }
+        for invalid in [PropertyValue::Null, PropertyValue::F64(f64::NAN),
+            PropertyValue::Array(vec![PropertyValue::Null]), PropertyValue::String("x".repeat(
+                crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN + 1))] {
+            assert!(lookup_active_unique_equality_batch(&db, &unique, &[values[0].clone(), invalid]).await.is_err());
+        }
+        for definition in [
+            crate::config::SecondaryIndexDefinition::node_equality("Other", "key").unwrap(),
+            crate::config::SecondaryIndexDefinition::node_range("Other", "rank").unwrap(),
+        ] {
+            let handle = super::super::tests::active_read_handle(&db, definition).await;
+            assert!(lookup_active_unique_equality_batch(&db, &handle, &values)
+                .await
+                .is_err());
         }
         db.close().await.unwrap();
     }

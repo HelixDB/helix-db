@@ -582,9 +582,9 @@ def validate_codec_architecture(root: Path) -> list[str]:
                 "crates/db/src/migrations.rs",
                 "crates/db/src/search/mod.rs",
                 "crates/db/src/search/text/mod.rs",
-                "crates/db/src/search/vector/index.rs",
+                "crates/db/src/search/vector/hnsw/index.rs",
                 "crates/db/src/search/vector/mod.rs",
-                "crates/db/src/search/vector/storage.rs",
+                "crates/db/src/search/vector/storage/mod.rs",
             }
             or relative_path.startswith("crates/db/src/migrations/")
             or relative_path.startswith("crates/db/tests/")

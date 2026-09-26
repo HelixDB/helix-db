@@ -172,7 +172,7 @@ async fn execute_embedded_fixtures(
             .send()
             .await
             .expect_err("search after index DROP must fail");
-        if !error.to_string().contains("index_not_found") {
+        if error.error_code() != Some("index_not_found") {
             return Err(format!(
                 "{} returned the wrong post-DROP error: {error}",
                 search.name
@@ -2437,10 +2437,7 @@ fn runtime_fixtures() -> Vec<Fixture> {
                         g().e_with_label("FOLLOWS")
                             .where_(Predicate::eq("note", "dropitemedge")),
                     )
-                    .var_as(
-                        "edges",
-                        g().drop_edge_by_id(EdgeRef::var("edge_matches")).count(),
-                    )
+                    .var_as("edges", g().e(EdgeRef::var("edge_matches")).drop().count())
                     .var_as(
                         "source",
                         g().n_with_label("ParityUser")

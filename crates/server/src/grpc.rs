@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use db::query_service::{QueryMode, QueryServiceError};
+use db::query_service::{QueryFailureClass, QueryMode, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use tokio::sync::watch;
@@ -233,29 +233,16 @@ fn validate_options_for_request_type(
 }
 
 pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
-    let error_code = error.error_code();
-    let message = error.to_string();
-    let code = if error.is_commit_outcome_unknown() {
-        tonic::Code::Unavailable
-    } else if error.is_transaction_conflict() {
-        tonic::Code::Aborted
-    } else {
-        match error {
-            QueryServiceError::InvalidRequest(_) | QueryServiceError::Planner(_) => {
-                tonic::Code::InvalidArgument
-            }
-            QueryServiceError::Db(error) if error.is_invalid_vector_input() => {
-                tonic::Code::InvalidArgument
-            }
-            QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired { .. }) => {
-                tonic::Code::FailedPrecondition
-            }
-            QueryServiceError::Db(_)
-            | QueryServiceError::JsonSerialize(_)
-            | QueryServiceError::Serialize(_) => tonic::Code::Internal,
+    let code = match error.classify() {
+        QueryFailureClass::CommitOutcomeUnknown => tonic::Code::Unavailable,
+        QueryFailureClass::Conflict => tonic::Code::Aborted,
+        QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => {
+            tonic::Code::InvalidArgument
         }
+        QueryFailureClass::WriterModeRequired => tonic::Code::FailedPrecondition,
+        QueryFailureClass::Execution | QueryFailureClass::Internal => tonic::Code::Internal,
     };
-    status_with_error_code(code, error_code, message)
+    status_with_error_code(code, error.error_code(), error.to_string())
 }
 
 fn status_with_error_code(

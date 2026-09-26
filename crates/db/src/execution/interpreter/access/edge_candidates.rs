@@ -292,6 +292,11 @@ impl Cursor {
                     keys::EdgePairIndexKey::new(from, to),
                 )));
             }
+            #[cfg(test)]
+            context
+                .pull_work
+                .pair_reads
+                .fetch_add(keys.len(), std::sync::atomic::Ordering::Relaxed);
             self.values = context.multi_get_raw(&keys).await?.into_iter();
         }
         Ok((!output.ids.is_empty()).then_some((output, self)))

@@ -1,0 +1,101 @@
+{
+  "request_type": "read",
+  "query_name": null,
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "walked",
+            "root": {
+              "value_map": {
+                "input": {
+                  "dedup": {
+                    "input": {
+                      "union": {
+                        "input": {
+                          "repeat": {
+                            "input": {
+                              "where": {
+                                "input": {
+                                  "nodes_where": {
+                                    "predicate": {
+                                      "eq": {
+                                        "left": {
+                                          "property": "$label"
+                                        },
+                                        "right": {
+                                          "constant": {
+                                            "string": "ParityUser"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "predicate": {
+                                  "eq": {
+                                    "left": {
+                                      "property": "externalId"
+                                    },
+                                    "right": {
+                                      "constant": {
+                                        "string": "user-alice"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "config": {
+                              "traversal": {
+                                "root": {
+                                  "out": {
+                                    "input": "context",
+                                    "label": "FOLLOWS"
+                                  }
+                                }
+                              },
+                              "times": 2,
+                              "emit": "all",
+                              "max_depth": 4
+                            }
+                          }
+                        },
+                        "traversals": [
+                          {
+                            "root": {
+                              "out": {
+                                "input": "context",
+                                "label": "FOLLOWS"
+                              }
+                            }
+                          },
+                          {
+                            "root": {
+                              "in": {
+                                "input": "context",
+                                "label": "FOLLOWS"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "properties": [
+                  "externalId",
+                  "name"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "returns": [
+        "walked"
+      ]
+    }
+  }
+}

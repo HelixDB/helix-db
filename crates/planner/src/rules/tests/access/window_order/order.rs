@@ -384,7 +384,9 @@ fn access_order_implementation_rule_keeps_explicit_sort_in_cascades() {
     let rows = storage.default_unknown_scan_rows;
     assert_eq!(
         alternative.cost,
-        storage.range_scan(rows).serial(storage.property_sort(rows))
+        storage
+            .element_scan(rows)
+            .serial(storage.property_sort(rows))
     );
 
     let already_satisfied = node_access_order_expr(

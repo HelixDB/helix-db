@@ -373,7 +373,9 @@ fn total_cmp_slices(left: &[PropertyValue], right: &[PropertyValue]) -> Ordering
         .unwrap_or_else(|| left.len().cmp(&right.len()))
 }
 
-fn total_cmp_objects(
+/// Entry-wise `total_order` over object values. Shared with the interpreter so projected
+/// objects dedup by the same identity storage uses for `PropertyValue::Object`.
+pub(crate) fn total_cmp_objects(
     left: &BTreeMap<String, PropertyValue>,
     right: &BTreeMap<String, PropertyValue>,
 ) -> Ordering {

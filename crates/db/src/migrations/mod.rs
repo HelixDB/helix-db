@@ -719,6 +719,30 @@ static INJECTED_MIGRATION_FAILPOINT: Mutex<Option<MigrationFailpoint>> = Mutex::
 #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
 static MIGRATION_FAILPOINT_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+impl MigrationFailpoint {
+    /// Driver checkpoints simulate a temporary interruption so cold reopen can
+    /// retry the exact adoption claim. Real configuration errors stay permanent.
+    fn injected_error(self) -> HelixDbError {
+        let message = format!("injected migration failpoint {}", self.as_str());
+        if matches!(
+            self,
+            Self::LegacyVectorValidationCheckpointBefore
+                | Self::LegacyVectorValidationCheckpointAfter
+                | Self::LegacyVectorMetadataPublicationBefore
+                | Self::LegacyVectorMetadataPublicationAfter
+                | Self::LegacyVectorReservationTransitionBefore
+                | Self::LegacyVectorReservationTransitionAfter
+                | Self::LegacyDefinitionRetirementBefore
+                | Self::LegacyDefinitionRetirementAfter
+        ) {
+            HelixDbError::Storage(slatedb::Error::unavailable(message.into()))
+        } else {
+            HelixDbError::Config(message)
+        }
+    }
+}
+
 /// Inject one typed migration error in this process for recovery verification.
 #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
 pub fn inject_migration_failpoint_once(failpoint: MigrationFailpoint) -> Result<()> {
@@ -744,10 +768,7 @@ pub(crate) fn trip_migration_failpoint(failpoint: MigrationFailpoint) -> Result<
     if *injected == Some(failpoint) {
         *injected = None;
         MIGRATION_FAILPOINT_TRIGGERED.store(true, Ordering::SeqCst);
-        return Err(HelixDbError::Config(format!(
-            "injected migration failpoint {}",
-            failpoint.as_str()
-        )));
+        return Err(failpoint.injected_error());
     }
     drop(injected);
     if std::env::var("HELIX_MIGRATION_FAILPOINT").as_deref() != Ok(failpoint.as_str()) {
@@ -756,10 +777,7 @@ pub(crate) fn trip_migration_failpoint(failpoint: MigrationFailpoint) -> Result<
     if std::env::var("HELIX_MIGRATION_FAIL_ACTION").as_deref() == Ok("abort") {
         std::process::abort();
     }
-    Err(HelixDbError::Config(format!(
-        "injected migration failpoint {}",
-        failpoint.as_str()
-    )))
+    Err(failpoint.injected_error())
 }
 
 /// Durable migration identifier.

@@ -97,10 +97,10 @@
 //! use db::search::vector::VectorIndex;
 //! ```
 
+mod access;
 #[cfg(feature = "production-coverage")]
-mod batch_benchmark;
-#[cfg(feature = "production-coverage")]
-mod benchmark_telemetry;
+mod benchmarks;
+mod cache;
 mod configuration;
 pub mod dimension;
 pub mod distance;
@@ -109,8 +109,7 @@ pub mod distance;
 mod distance_neighbor_production_contracts;
 mod domain;
 mod generation;
-mod hydration;
-mod index;
+mod hnsw;
 pub mod item;
 #[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/vector/magnitude_oracle.rs"]
@@ -118,33 +117,18 @@ pub(crate) mod magnitude_oracle;
 #[cfg(feature = "production-coverage")]
 #[path = "../../../tests/production_support/vector/magnitude_regressions.rs"]
 mod magnitude_regressions;
-mod memory_registry;
-mod memory_store;
-mod model;
-mod mutation;
-mod neighbor_set;
 pub mod parameters;
-mod policy;
 #[cfg(feature = "production-coverage")]
 #[path = "../../../tests/production_support/vector/primitives.rs"]
 mod primitive_production_contracts;
-mod randomness;
 #[cfg(any(test, feature = "production-coverage"))]
 #[path = "../../../tests/production_support/vector/read_fault.rs"]
 pub(crate) mod read_fault_production_support;
-mod read_index;
-mod read_view;
-mod restricted;
 mod result;
-mod search;
 pub mod simhash;
-mod simhash_registry;
 pub mod spaces;
 mod storage;
 pub mod unaligned_vector;
-mod write_cache;
-mod write_index;
-mod write_transaction;
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
@@ -171,13 +155,12 @@ use crate::encoding::v2::values::indexes::vector as vector_values;
 use crate::encoding::NodeId;
 
 #[cfg(feature = "production-coverage")]
-#[doc(hidden)]
-pub use batch_benchmark::{
-    VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
-    VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
-};
+pub(crate) use access::read::production_contracts::run as run_read_boundary_contracts;
+pub(crate) use access::read::{ValidatedVectorReadIndex, VectorReadVisibility};
+pub(crate) use access::read_view::VectorReadView;
+pub(crate) use access::write::managed_vector_write_index;
 #[cfg(feature = "production-coverage")]
-pub(crate) use benchmark_telemetry::{
+pub(crate) use benchmarks::{
     observe_retained_payload as observe_benchmark_retained_payload,
     record_cache_stats as record_benchmark_cache_stats, record_delete as record_benchmark_delete,
     record_dirty_neighbor_flush as record_benchmark_dirty_neighbor_flush,
@@ -186,6 +169,25 @@ pub(crate) use benchmark_telemetry::{
     reset as reset_benchmark_telemetry, snapshot as benchmark_telemetry_snapshot,
     VectorMutationBenchmarkTelemetry,
 };
+#[cfg(feature = "production-coverage")]
+#[doc(hidden)]
+pub use benchmarks::{
+    VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
+    VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
+};
+#[cfg(feature = "production-coverage")]
+pub(crate) use cache::commit::production_contracts::run as run_write_cache_contracts;
+pub(crate) use cache::commit::VectorCacheWriteSet;
+#[cfg(feature = "production-coverage")]
+pub(crate) use cache::hydration::production_contracts::run as run_hydration_contracts;
+pub(crate) use cache::hydration::{hydrate_active_generations, VectorCacheHydrationBudget};
+#[cfg(feature = "production-coverage")]
+pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
+pub(crate) use cache::registry::VectorCacheRegistry;
+#[cfg(feature = "production-coverage")]
+pub(crate) use cache::store::production_contracts::run as run_memory_store_contracts;
+#[cfg(any(test, feature = "production-coverage"))]
+pub(crate) use cache::store::VectorMemoryStore;
 pub use configuration::VectorConfigError;
 pub(crate) use configuration::VectorIndexState;
 pub use dimension::{SameDimensionPair, VectorDimension, VectorDimensionError, VectorRef};
@@ -199,11 +201,26 @@ pub(crate) use generation::ValidatedVectorCleanupAuthority;
 pub(crate) use generation::{ValidatedVectorBuildGenerationHandle, VectorGenerationIdentity};
 pub(crate) use generation::{ValidatedVectorGenerationHandle, VectorGenerationValidationError};
 #[cfg(feature = "production-coverage")]
-pub(crate) use hydration::production_contracts::run as run_hydration_contracts;
-pub(crate) use hydration::{hydrate_active_generations, VectorCacheHydrationBudget};
+pub(crate) use hnsw::index::production_contracts::run as run_index_contracts;
+pub(crate) use hnsw::index::VectorIndex;
+pub(crate) use hnsw::model::Candidate;
 #[cfg(feature = "production-coverage")]
-pub(crate) use index::production_contracts::run as run_index_contracts;
-pub(crate) use index::VectorIndex;
+pub(crate) use hnsw::mutation::production_contracts::run as run_mutation_contracts;
+pub(crate) use hnsw::mutation::{
+    ActiveVectorMutationRuntime, VectorBuildSession, VectorBuildSessionStats,
+};
+#[cfg(feature = "production-coverage")]
+pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
+#[cfg(feature = "production-coverage")]
+pub(crate) use hnsw::restricted::run_production_contracts as run_restricted_contracts;
+pub(crate) use hnsw::restricted::RestrictedVectorCandidates;
+#[cfg(feature = "production-scale")]
+pub(crate) use hnsw::restricted::{
+    observe_restricted_search, RestrictedBeamOverrideGuard, RestrictedBeamScale,
+    RestrictedSearchStrategy, RestrictedSearchTermination,
+};
+#[cfg(feature = "production-coverage")]
+pub(crate) use hnsw::search::production_contracts::run as run_search_contracts;
 pub use item::Item;
 #[cfg(feature = "production-coverage")]
 pub(crate) use magnitude_regressions::{
@@ -215,71 +232,38 @@ pub(crate) use magnitude_regressions::{
     run_restricted_search_contracts as run_magnitude_restricted_search_contracts,
     run_search_contracts as run_magnitude_search_contracts,
 };
-#[cfg(feature = "production-coverage")]
-pub(crate) use memory_registry::production_contracts::run as run_memory_registry_contracts;
-pub(crate) use memory_registry::VectorCacheRegistry;
-#[cfg(feature = "production-coverage")]
-pub(crate) use memory_store::production_contracts::run as run_memory_store_contracts;
-#[cfg(any(test, feature = "production-coverage"))]
-pub(crate) use memory_store::VectorMemoryStore;
-pub(crate) use model::Candidate;
-#[cfg(feature = "production-coverage")]
-pub(crate) use mutation::production_contracts::run as run_mutation_contracts;
-pub(crate) use mutation::{
-    ActiveVectorMutationRuntime, VectorBuildSession, VectorBuildSessionStats,
-};
 pub use parameters::{
     CollisionThreshold, Connections, ConstructionBeamWidth, DistanceScore, FailureProbability,
     Layer0Connections, LayerMultiplier, ResultCount, SearchBeamWidth, UnitInterval,
     VectorParameterError,
 };
 #[cfg(feature = "production-coverage")]
-pub(crate) use policy::production_contracts::run as run_policy_contracts;
-#[cfg(feature = "production-coverage")]
 pub(crate) use primitive_production_contracts::run as run_primitive_contracts;
-#[cfg(feature = "production-coverage")]
-pub(crate) use read_index::production_contracts::run as run_read_boundary_contracts;
-pub(crate) use read_index::{ValidatedVectorReadIndex, VectorReadVisibility};
-pub(crate) use read_view::VectorReadView;
-#[cfg(feature = "production-coverage")]
-pub(crate) use restricted::run_production_contracts as run_restricted_contracts;
-pub(crate) use restricted::RestrictedVectorCandidates;
-#[cfg(feature = "production-scale")]
-pub(crate) use restricted::{
-    observe_restricted_search, RestrictedBeamOverrideGuard, RestrictedBeamScale,
-    RestrictedSearchStrategy, RestrictedSearchTermination,
-};
 pub use result::{
     DistanceOutputUnit, DistanceOutputVersion, MaterializedVectorDistance, VectorEntityId,
 };
 pub(crate) use result::{SearchResult, TypedVectorSearchResult};
 #[cfg(feature = "production-coverage")]
-pub(crate) use search::production_contracts::run as run_search_contracts;
-#[cfg(feature = "production-coverage")]
 pub(crate) use simhash::production_contracts::run as run_simhash_contracts;
+#[cfg(feature = "production-coverage")]
+pub(crate) use simhash::registry::production_contracts::run as run_simhash_registry_contracts;
 pub use simhash::{
     SimHash, SimHashCache, SimHasher, DEFAULT_SIMHASH_COLLISION_THRESHOLD, SIMHASH_BITS,
 };
-#[cfg(feature = "production-coverage")]
-pub(crate) use simhash_registry::production_contracts::run as run_simhash_registry_contracts;
-pub(crate) use simhash_registry::{SimHashIdentity, SimHasherRegistry, SimHasherRegistryLimits};
+pub(crate) use simhash::{SimHashIdentity, SimHasherRegistry, SimHasherRegistryLimits};
 #[cfg(feature = "production-coverage")]
 pub(crate) use storage::production_contracts::run as run_storage_contracts;
+#[cfg(feature = "production-coverage")]
+pub(crate) use storage::transaction::production_contracts::run as run_write_transaction_contracts;
+pub(crate) use storage::transaction::{
+    MeasuredVectorTransaction, PlannedVectorMutation, VectorWriteMeasurement, VectorWriteRecorder,
+};
 pub(crate) use storage::{
     CanonicalVectorDirectoryBackfillOutcome, LegacyVectorValidationMode,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
     SimHashDirectoryValidationOutcome, VectorCleanupRow,
 };
 pub(crate) use vector_values::metadata::{VectorIndexConfig, VectorIndexMetadata};
-#[cfg(feature = "production-coverage")]
-pub(crate) use write_cache::production_contracts::run as run_write_cache_contracts;
-pub(crate) use write_cache::VectorCacheWriteSet;
-pub(crate) use write_index::managed_vector_write_index;
-#[cfg(feature = "production-coverage")]
-pub(crate) use write_transaction::production_contracts::run as run_write_transaction_contracts;
-pub(crate) use write_transaction::{
-    MeasuredVectorTransaction, PlannedVectorMutation, VectorWriteMeasurement, VectorWriteRecorder,
-};
 
 /// Supported vector distance metrics
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

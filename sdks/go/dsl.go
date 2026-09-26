@@ -492,7 +492,12 @@ type StreamBound struct {
 	expr    *Expr
 }
 
-func BoundLiteral(value int) StreamBound { return StreamBound{literal: &value} }
+func BoundLiteral(value int) StreamBound {
+	if value < 0 {
+		panic("helix: stream bound literal must be non-negative")
+	}
+	return StreamBound{literal: &value}
+}
 func BoundExpr(expr Expr) StreamBound    { return StreamBound{expr: &expr} }
 
 func streamBoundOf(value any) StreamBound {

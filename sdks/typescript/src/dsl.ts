@@ -231,6 +231,8 @@ export type EdgeId = number | bigint;
 export type ParamValue = PropertyValue;
 export type ParamObject = Record<string, PropertyValue | PropertyValueInput>;
 
+const rfc3339Pattern = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
 function intToJson(value: number | bigint): number | bigint {
   if (typeof value === "bigint") return value;
   if (!Number.isInteger(value)) throw new TypeError(`expected integer, got ${value}`);
@@ -250,6 +252,22 @@ export class DateTime {
   }
 
   static parseRfc3339(input: string): DateTime {
+    const match = rfc3339Pattern.exec(input);
+    if (match === null) throw new TypeError(`invalid RFC3339 datetime: ${input}`);
+    const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+    const date = new Date(0);
+    date.setUTCFullYear(year, month - 1, day);
+    date.setUTCHours(hour, minute, second, 0);
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day ||
+      date.getUTCHours() !== hour ||
+      date.getUTCMinutes() !== minute ||
+      date.getUTCSeconds() !== second
+    ) {
+      throw new TypeError(`invalid RFC3339 datetime: ${input}`);
+    }
     const parsed = Date.parse(input);
     if (Number.isNaN(parsed)) throw new TypeError(`invalid RFC3339 datetime: ${input}`);
     return DateTime.fromMillis(parsed);
@@ -268,7 +286,9 @@ function dateTimeToRfc3339(value: DateTime, path: string): string {
   const millis = value.millis();
   const asNumber = Number(millis);
   if (!Number.isSafeInteger(asNumber)) throw QueryError.invalidDatetime(path, millis);
-  return new Date(asNumber).toISOString();
+  const date = new Date(asNumber);
+  if (Number.isNaN(date.getTime())) throw QueryError.invalidDatetime(path, millis);
+  return date.toISOString();
 }
 
 class I64Literal {
@@ -353,7 +373,13 @@ export class PropertyValue implements Encodable {
     return new PropertyValue("String", value);
   }
   static bytes(value: Uint8Array | number[]): PropertyValue {
-    return new PropertyValue("Bytes", Array.from(value));
+    const normalized = Array.from(value);
+    for (const [index, byte] of normalized.entries()) {
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+        throw new TypeError(`byte at index ${index} must be an integer from 0 to 255: ${byte}`);
+      }
+    }
+    return new PropertyValue("Bytes", normalized);
   }
   static i64Array(values: (number | bigint)[]): PropertyValue {
     return new PropertyValue("I64Array", values.map(intToJson));
@@ -2363,8 +2389,9 @@ export class Traversal<S extends TraversalState = "nodes", M extends MutationMod
   removeProperty(name: string): Traversal<"nodes", "write"> {
     return this.push(Step.removeProperty(name), "nodes", "write") as Traversal<"nodes", "write">;
   }
-  drop(): Traversal<"nodes", "write"> {
-    return this.push(Step.drop(), "nodes", "write") as Traversal<"nodes", "write">;
+  /** Delete current edges, or current nodes and their incident edges. Returns an empty stream. */
+  drop(): Traversal<S, "write"> {
+    return this.push(Step.drop(), this.state, "write") as Traversal<S, "write">;
   }
   dropEdge(to: NodeRef | NodeId | NodeId[] | string): Traversal<"nodes", "write"> {
     return this.push(Step.dropEdge(NodeRef.from(to)), "nodes", "write") as Traversal<"nodes", "write">;

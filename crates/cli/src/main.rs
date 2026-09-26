@@ -107,7 +107,9 @@ enum Commands {
         disk: bool,
         #[command(flatten)]
         s3: S3StorageArgs,
-        /// Persist the resolved port/storage settings back to helix.toml
+        #[command(flatten)]
+        image: helix_cli::image::ImageArgs,
+        /// Persist the resolved port, storage, and image settings back to helix.toml
         #[arg(long)]
         persist: bool,
     },
@@ -684,8 +686,9 @@ async fn main() -> Result<()> {
             port,
             disk,
             s3,
+            image,
             persist,
-        }) => commands::start::run(instance, foreground, port, disk, s3, persist).await,
+        }) => commands::start::run(instance, foreground, port, disk, s3, image, persist).await,
         Some(Commands::Stop { instance }) => commands::stop::run(instance).await,
         Some(Commands::Restart { instance }) => commands::restart::run(instance).await,
         Some(Commands::Status { instance }) => commands::status::run(instance).await,
@@ -775,6 +778,7 @@ mod tests {
                 port,
                 disk,
                 s3,
+                image,
                 persist,
             }) => {
                 assert_eq!(instance.as_deref(), Some("qa"));
@@ -783,6 +787,8 @@ mod tests {
                 assert_eq!(port, None);
                 assert!(!disk);
                 assert!(!s3.has_any());
+                assert!(image.image_version.is_none());
+                assert!(image.pull.is_none());
                 assert!(!persist);
             }
             _ => panic!("expected start command"),

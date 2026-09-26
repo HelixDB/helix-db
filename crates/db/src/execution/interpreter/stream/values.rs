@@ -14,3 +14,5 @@ pub(in crate::execution::interpreter::stream) use self::params::param_value_from
 pub(in crate::execution::interpreter::stream) use self::scalars::{
     distinct_scalars, limit_scalars, scalar_items, skip_scalars, slice_scalars,
 };
+
+pub(in crate::execution::interpreter) use self::scalars::DistinctKey;

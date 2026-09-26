@@ -13,3 +13,4 @@ mod search_limits;
 mod terminal_roots;
 
 mod ordered_range;
+mod selective_equality;

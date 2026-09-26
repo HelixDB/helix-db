@@ -13,3 +13,38 @@ gateway clients; the CLI displays but never stores or uses it. Additional applic
 explicitly managed secrets. `push` and `sync` are removed.
 
 See [the CLI docs](../../docs/cli/command-reference.mdx).
+
+## Local image selection
+
+The CLI defaults to its tested image version. `latest` is opt-in:
+
+```bash
+helix start dev --image-version latest
+helix start dev --image-version v0.0.6 --persist
+helix start dev --pull never
+```
+
+`--image-version` accepts a tag or `sha256:<64 lowercase hex digits>`. The
+repository remains the instance's configured `image`. `--persist` saves the
+resolved image, pull, port, and storage settings to `helix.toml`; otherwise flags
+apply only to that invocation.
+
+```toml
+[local.dev]
+image = "ghcr.io/helixdb/helixdb"
+tag = "v0.0.6"
+pull = "missing"
+```
+
+Flags override configuration. Without a configured policy, `latest` pulls on
+every start and other tags/digests pull only when absent. `--pull always` requires
+a successful pull, `--pull missing` permits cached images, and `--pull never`
+requires cached images. Explicit pull policies also apply to disk-mode MinIO
+images; their default is `missing`.
+
+Start resolves all required images before saving overrides or replacing containers.
+A failed image resolution leaves `helix.toml` unchanged. Helix, MinIO, and the
+bucket initializer start by their resolved immutable image IDs.
+`helix restart dev` restarts the existing container with its existing image and
+settings and checks readiness on the container's published port. It fails if no container exists. Use `helix start dev` to apply new
+image or configuration settings. Restarting in-memory storage clears its data.

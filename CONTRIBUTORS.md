@@ -184,7 +184,7 @@ crates/cli/
 - `helix feedback` - Send feedback to the Helix team
 
 **Runtime Targets:**
-- Local Docker/Podman containers (`helix start`) — image `ghcr.io/helixdb/helixdb:v0.0.4`
+- Local Docker/Podman containers (`helix start`) — image `ghcr.io/helixdb/helixdb:v0.0.5`
 - Linked Helix Cloud databases for brokered `query`, `shell`, `status`, and `logs`
 
 **Build & Deploy Flow:**
@@ -192,7 +192,7 @@ crates/cli/
 The v3 CLI is a runtime orchestrator — there is no `helix compile`/`helix check` step and no `.hx` query files.
 
 1. Scaffold a project with `helix init` (writes `helix.toml` and a `.helix/` workspace).
-2. Start a local instance with `helix start` — a Docker/Podman container running `ghcr.io/helixdb/helixdb:v0.0.4` (in-memory by default, on-disk with `--disk`). The CLI waits for `GET /healthz` before returning.
+2. Start a local instance with `helix start` — a Docker/Podman container running `ghcr.io/helixdb/helixdb:v0.0.5` (in-memory by default, on-disk with `--disk`). The CLI waits for `GET /healthz` before returning.
 3. Author queries with the Rust, TypeScript, Go, or Python DSL; they serialize to query JSON.
 4. Send queries to a running instance via `POST /v2/query` (`helix query`); validation happens server-side.
 5. For Cloud, sign in with `helix auth login`, link a project/database, and run queries through the authenticated backend broker.

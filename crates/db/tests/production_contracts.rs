@@ -24,13 +24,13 @@ use db::search::vector::{
     VectorParameterError, VectorRef,
 };
 use db::{HelixDB, HelixDbMode, HelixDbSource, ProcessLocalDatabaseToken};
-use helix_ast::batch;
+use helix_ast::batch::{self, BatchEntry, NamedQuery, ReadBatch};
 use helix_ast::expr::{CompareOp, Expr, Predicate, StreamBound};
 use helix_ast::graph::{EdgeRef, NodeRef};
 use helix_ast::index;
 use helix_ast::projection::{BindingProjection, BindingValueRef, Projection};
 use helix_ast::query::{QueryRequest, QueryValue};
-use helix_ast::traversal;
+use helix_ast::traversal::{self, AstNode};
 use helix_ast::value::{PropertyInput, PropertyValue};
 use helix_planner::{catalog, context, cost, exec, ir, planning, properties, trace};
 use slatedb::object_store::memory::InMemory;
@@ -4480,6 +4480,221 @@ async fn public_query_boundary_covers_projection_expressions_and_row_bindings_co
 }
 
 #[tokio::test]
+async fn public_query_boundary_distinct_binding_projection_uses_storage_value_identity() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-distinct-value-identity".to_owned(),
+    })
+    .await
+    .expect("production distinct identity fixture opens");
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "integer",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(42_i64))]),
+            )
+            .var_as(
+                "double",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(42.0_f64))]),
+            )
+            .var_as(
+                "single",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(42.0_f32))]),
+            )
+            .var_as(
+                "text",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from("42"))]),
+            )
+            .var_as(
+                "other",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(7_i64))]),
+            )
+            .returning(Vec::<String>::new()),
+    ))
+    .await
+    .unwrap();
+    let read = batch::read_batch()
+        .var_as(
+            "all",
+            traversal::g()
+                .n(NodeRef::all())
+                .project_bindings(vec![BindingProjection::current("score", "score")]),
+        )
+        .var_as(
+            "distinct",
+            traversal::g()
+                .n(NodeRef::all())
+                .project_distinct_bindings(vec![BindingProjection::current("score", "score")]),
+        )
+        .returning(["all", "distinct"]);
+    assert_eq!(
+        db.query(QueryRequest::read(read)).await.unwrap(),
+        serde_json::json!({
+            "all": [
+                { "score": 42 },
+                { "score": 42.0 },
+                { "score": 42.0 },
+                { "score": "42" },
+                { "score": 7 },
+            ],
+            "distinct": [{ "score": 42 }, { "score": "42" }, { "score": 7 }],
+        })
+    );
+    // A terminal limit selects pull execution; canonical numeric identity must
+    // still determine which values count toward that limit.
+    let source = traversal::g().n(NodeRef::all());
+    for (root, expected) in [
+        (
+            AstNode::Dedup {
+                input: Box::new(source.clone().values(vec!["score"]).into_ast()),
+            },
+            serde_json::json!([{ "score": 42 }, { "score": "42" }, { "score": 7 }]),
+        ),
+        (
+            AstNode::Dedup {
+                input: Box::new(source.clone().value_map(Some(vec!["score"])).into_ast()),
+            },
+            serde_json::json!([{ "score": 42 }, { "score": "42" }, { "score": 7 }]),
+        ),
+        (
+            source
+                .project_distinct_bindings(vec![BindingProjection::current("score", "score")])
+                .into_ast(),
+            serde_json::json!([{ "score": 42 }, { "score": "42" }, { "score": 7 }]),
+        ),
+    ] {
+        for take in [0, 1, 2, 10] {
+            let request = ReadBatch::try_from_parts(
+                vec![BatchEntry::Query(Box::new(NamedQuery {
+                    name: Some("result".into()),
+                    root: AstNode::Limit {
+                        input: Box::new(root.clone()),
+                        count: StreamBound::Literal(take),
+                    },
+                    condition: None,
+                }))],
+                vec!["result".into()],
+            )
+            .unwrap();
+            let actual = db.query(QueryRequest::read(request)).await.unwrap();
+            let expected = serde_json::json!(expected
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(take)
+                .collect::<Vec<_>>());
+            // Known-empty scalar plans serialize as null; drained ones use [].
+            let actual = if take == 0 && actual["result"].is_null() {
+                serde_json::json!([])
+            } else {
+                actual["result"].clone()
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn public_query_boundary_distinct_over_scalar_terminals_from_request_ast() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-distinct-scalar-terminals".to_owned(),
+    })
+    .await
+    .expect("production distinct scalar terminal fixture opens");
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "alice",
+                traversal::g().add_n("Person", vec![("name", PropertyInput::from("alice"))]),
+            )
+            .var_as(
+                "bob",
+                traversal::g().add_n("Person", vec![("name", PropertyInput::from("bob"))]),
+            )
+            .var_as(
+                "acme",
+                traversal::g().add_n("Company", vec![("name", PropertyInput::from("acme"))]),
+            )
+            .var_as(
+                "knows",
+                traversal::g().n(NodeRef::id(0)).add_e(
+                    "KNOWS",
+                    NodeRef::id(1),
+                    Vec::<(&str, PropertyInput)>::new(),
+                ),
+            )
+            .var_as(
+                "works_at",
+                traversal::g().n(NodeRef::id(0)).add_e(
+                    "WORKS_AT",
+                    NodeRef::id(2),
+                    Vec::<(&str, PropertyInput)>::new(),
+                ),
+            )
+            .returning(Vec::<String>::new()),
+    ))
+    .await
+    .unwrap();
+    // The typed builder ends at a terminal, so `dedup` over `id()` or `label()` only
+    // arrives as a request AST, the shape the transports deserialize.
+    let distinct = |name: &str, terminal: AstNode| {
+        BatchEntry::Query(Box::new(NamedQuery {
+            name: Some(name.to_owned()),
+            root: AstNode::Dedup {
+                input: Box::new(terminal),
+            },
+            condition: None,
+        }))
+    };
+    let read = ReadBatch::try_from_parts(
+        vec![
+            distinct(
+                "node_ids",
+                traversal::g()
+                    .n(NodeRef::id(0))
+                    .union(vec![
+                        traversal::sub().out(None::<&str>),
+                        traversal::sub().out(None::<&str>),
+                    ])
+                    .id()
+                    .into_ast(),
+            ),
+            distinct(
+                "edge_ids",
+                traversal::g()
+                    .n(NodeRef::id(0))
+                    .union(vec![
+                        traversal::sub().out_e(None::<&str>),
+                        traversal::sub().out_e(None::<&str>),
+                    ])
+                    .id()
+                    .into_ast(),
+            ),
+            distinct(
+                "labels",
+                traversal::g().n(NodeRef::all()).label().into_ast(),
+            ),
+        ],
+        vec![
+            "node_ids".to_owned(),
+            "edge_ids".to_owned(),
+            "labels".to_owned(),
+        ],
+    )
+    .expect("dedup over scalar terminals is a read-only batch");
+    assert_eq!(
+        db.query(QueryRequest::read(read)).await.unwrap(),
+        serde_json::json!({
+            "node_ids": [1, 2],
+            "edge_ids": [0, 1],
+            "labels": ["Person", "Company"],
+        })
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn public_query_boundary_covers_aggregate_and_expression_value_edges() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-value-edges".to_owned(),
@@ -5199,6 +5414,28 @@ async fn public_query_boundary_covers_active_secondary_index_families_contract()
         .expect("already-active lifecycle value is observable")
         .last
         .expect("already-active lifecycle plan returns its receipt");
+    let passthrough = lifecycle_plan(exec::ExecOp::Noop, false);
+    let mut steps = passthrough.steps().to_vec();
+    let mut terminal = steps.last().unwrap().clone();
+    terminal.id = exec::ExecStepId::new(3).unwrap();
+    terminal.dependencies = vec![passthrough.root()];
+    steps.push(terminal);
+    let passthrough = exec::ExecutablePlan::new(
+        ir::PlanKind::Write,
+        ir::ReturnPlan::None,
+        ir::AtLeast::try_from_vec(steps).unwrap(),
+        exec::ExecStepId::new(3).unwrap(),
+        trace::PlanningTrace::default(),
+        exec::PlannerMetrics::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.execute(&passthrough, context::ParamBindings::default())
+            .await
+            .unwrap()
+            .last,
+        Some(lifecycle_value.clone())
+    );
     let error = db
         .execute(
             &lifecycle_plan(
@@ -7231,7 +7468,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
         .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "Query error: unfold expected stream or folded stream input, got Count(2)"
+        "Query error: unfold expected stream or folded stream input"
     );
 
     let scalar_group = linear_plan(vec![

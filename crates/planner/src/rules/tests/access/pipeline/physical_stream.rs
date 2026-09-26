@@ -53,7 +53,7 @@ fn access_pipeline_implementation_rule_keeps_composed_streams_in_cascades() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
+            .element_scan(rows)
             .serial(storage.predicate_eval(rows))
             .serial(storage.stream_operator(cost::EstimatedRows::rows(2)))
     );
@@ -139,7 +139,7 @@ fn access_pipeline_implementation_rule_lowers_dynamic_stream_bounds() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
+            .element_scan(rows)
             .serial(storage.stream_operator(rows))
             .serial(storage.stream_operator(rows))
             .serial(storage.stream_operator(rows))

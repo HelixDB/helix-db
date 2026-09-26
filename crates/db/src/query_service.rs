@@ -287,7 +287,7 @@ impl QueryObservation {
                 warnings: Vec::new(),
             },
             Err(error) => {
-                let error_type = query_error_type(error);
+                let error_type = query::QueryErrorType::from(error.classify());
                 let message = match error_type {
                     query::QueryErrorType::InvalidRequest => "query request was invalid",
                     query::QueryErrorType::Planning => "query planning failed",
@@ -316,23 +316,6 @@ impl QueryObservation {
             outcome,
             planner_diagnostics,
         )
-    }
-}
-
-fn query_error_type(error: &QueryServiceError) -> query::QueryErrorType {
-    match error {
-        QueryServiceError::InvalidRequest(_) => query::QueryErrorType::InvalidRequest,
-        QueryServiceError::Planner(_) => query::QueryErrorType::Planning,
-        QueryServiceError::Db(error) if error.is_transaction_conflict() => {
-            query::QueryErrorType::Conflict
-        }
-        QueryServiceError::Db(error) if error.is_invalid_vector_input() => {
-            query::QueryErrorType::InvalidRequest
-        }
-        QueryServiceError::Db(_) => query::QueryErrorType::Execution,
-        QueryServiceError::JsonSerialize(_) | QueryServiceError::Serialize(_) => {
-            query::QueryErrorType::Internal
-        }
     }
 }
 
@@ -662,7 +645,62 @@ pub enum QueryServiceError {
     Serialize(sonic_rs::Error),
 }
 
+/// Transport- and telemetry-neutral failure class shared by HTTP, gRPC and metrics.
+///
+/// Every [`QueryServiceError`] maps to exactly one class through
+/// [`QueryServiceError::classify`]; transports and telemetry then map the class
+/// to their own status or bucket so the three cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryFailureClass {
+    /// The writer was fenced mid-commit and durability is unknown; never retry blindly.
+    CommitOutcomeUnknown,
+    /// A transaction conflict that is safe to retry.
+    Conflict,
+    /// The request itself or the data it carried was invalid.
+    InvalidRequest,
+    /// Query planning failed before execution started.
+    Planning,
+    /// The operation needs a writer handle but this handle is not one.
+    WriterModeRequired,
+    /// Execution failed inside the database.
+    Execution,
+    /// The response could not be serialized.
+    Internal,
+}
+
+impl From<QueryFailureClass> for query::QueryErrorType {
+    fn from(class: QueryFailureClass) -> Self {
+        match class {
+            QueryFailureClass::Conflict => Self::Conflict,
+            QueryFailureClass::InvalidRequest => Self::InvalidRequest,
+            QueryFailureClass::Planning => Self::Planning,
+            QueryFailureClass::CommitOutcomeUnknown
+            | QueryFailureClass::WriterModeRequired
+            | QueryFailureClass::Execution => Self::Execution,
+            QueryFailureClass::Internal => Self::Internal,
+        }
+    }
+}
+
 impl QueryServiceError {
+    /// Classify this failure for transports and telemetry.
+    pub fn classify(&self) -> QueryFailureClass {
+        match self {
+            Self::Db(HelixDbError::WriterFencedCommitOutcomeUnknown) => {
+                QueryFailureClass::CommitOutcomeUnknown
+            }
+            Self::Db(error) if error.is_transaction_conflict() => QueryFailureClass::Conflict,
+            Self::InvalidRequest(_) => QueryFailureClass::InvalidRequest,
+            Self::Planner(_) | Self::Db(HelixDbError::Planner(_)) => QueryFailureClass::Planning,
+            Self::Db(error) if error.is_invalid_input() => QueryFailureClass::InvalidRequest,
+            Self::Db(HelixDbError::WriterModeRequired { .. }) => {
+                QueryFailureClass::WriterModeRequired
+            }
+            Self::Db(_) => QueryFailureClass::Execution,
+            Self::JsonSerialize(_) | Self::Serialize(_) => QueryFailureClass::Internal,
+        }
+    }
+
     /// Returns true when the request can be retried after a transaction conflict.
     pub fn is_transaction_conflict(&self) -> bool {
         matches!(self, Self::Db(error) if error.is_transaction_conflict())
@@ -716,13 +754,8 @@ impl From<QueryServiceError> for HelixDbError {
     fn from(value: QueryServiceError) -> Self {
         match value {
             QueryServiceError::Db(error) => error,
-            QueryServiceError::Planner(error)
-                if error.error_code() == helix_ast::error_code::QueryErrorCode::IndexNotFound =>
-            {
-                HelixDbError::IndexNotFound(error.to_string())
-            }
+            QueryServiceError::Planner(error) => HelixDbError::Planner(error),
             other @ (QueryServiceError::InvalidRequest(_)
-            | QueryServiceError::Planner(_)
             | QueryServiceError::JsonSerialize(_)
             | QueryServiceError::Serialize(_)) => HelixDbError::Query(other.to_string()),
         }
@@ -738,6 +771,9 @@ impl QueryResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod selective_equality_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2340,10 +2376,17 @@ mod tests {
         let planner = QueryServiceError::Planner(
             helix_planner::error::PlannerError::UnsupportedEdgeAllTarget,
         );
+        let expected_message = planner.to_string();
+        let converted = HelixDbError::from(planner);
         assert!(matches!(
-            HelixDbError::from(planner),
-            HelixDbError::Query(_)
+            converted,
+            HelixDbError::Planner(helix_planner::error::PlannerError::UnsupportedEdgeAllTarget)
         ));
+        assert_eq!(
+            converted.error_code(),
+            helix_ast::error_code::QueryErrorCode::UnsupportedEdgeAllTarget
+        );
+        assert_eq!(converted.to_string(), expected_message);
 
         let json =
             execution_scalar_to_json(ExecutionScalar::Value(PropertyValue::DateTime(i64::MAX)))
@@ -2356,6 +2399,120 @@ mod tests {
             HelixDbError::from(QueryServiceError::Serialize(sonic)),
             HelixDbError::Query(_)
         ));
+    }
+
+    #[test]
+    fn query_failure_classes_cover_every_service_error() {
+        let json_error =
+            execution_scalar_to_json(ExecutionScalar::Value(PropertyValue::DateTime(i64::MAX)))
+                .expect_err("invalid datetime should fail JSON conversion");
+        let QueryServiceError::JsonSerialize(json_error) = json_error else {
+            panic!("datetime overflow should be a JSON serialization failure");
+        };
+        let sonic_error =
+            sonic_rs::from_str::<u8>("not-json").expect_err("invalid JSON should fail");
+        let cases = [
+            (
+                QueryServiceError::Db(HelixDbError::WriterFencedCommitOutcomeUnknown),
+                QueryFailureClass::CommitOutcomeUnknown,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::TransactionConflict("retry".to_owned())),
+                QueryFailureClass::Conflict,
+            ),
+            (
+                QueryServiceError::InvalidRequest("bad request".to_owned()),
+                QueryFailureClass::InvalidRequest,
+            ),
+            (
+                QueryServiceError::Planner(
+                    helix_planner::error::PlannerError::UnsupportedEdgeAllTarget,
+                ),
+                QueryFailureClass::Planning,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::Planner(
+                    helix_planner::error::PlannerError::UnsupportedEdgeAllTarget,
+                )),
+                QueryFailureClass::Planning,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::ActiveTextMutationLimitExceeded {
+                    resource: crate::error::ActiveTextMutationResource::Entities,
+                    observed: 513,
+                    limit: 512,
+                }),
+                QueryFailureClass::InvalidRequest,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::WriterModeRequired { actual: "reader" }),
+                QueryFailureClass::WriterModeRequired,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::Query("execution".to_owned())),
+                QueryFailureClass::Execution,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::IndexNotFound("documents".to_owned())),
+                QueryFailureClass::Execution,
+            ),
+            (
+                QueryServiceError::JsonSerialize(json_error),
+                QueryFailureClass::Internal,
+            ),
+            (
+                QueryServiceError::Serialize(sonic_error),
+                QueryFailureClass::Internal,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.classify(), expected, "{error}");
+        }
+    }
+
+    #[test]
+    fn query_failure_classes_map_to_telemetry_error_types() {
+        let cases = [
+            (
+                QueryFailureClass::CommitOutcomeUnknown,
+                query::QueryErrorType::Execution,
+            ),
+            (QueryFailureClass::Conflict, query::QueryErrorType::Conflict),
+            (
+                QueryFailureClass::InvalidRequest,
+                query::QueryErrorType::InvalidRequest,
+            ),
+            (QueryFailureClass::Planning, query::QueryErrorType::Planning),
+            (
+                QueryFailureClass::WriterModeRequired,
+                query::QueryErrorType::Execution,
+            ),
+            (
+                QueryFailureClass::Execution,
+                query::QueryErrorType::Execution,
+            ),
+            (QueryFailureClass::Internal, query::QueryErrorType::Internal),
+        ];
+
+        for (class, expected) in cases {
+            assert_eq!(query::QueryErrorType::from(class), expected, "{class:?}");
+        }
+    }
+
+    #[test]
+    fn active_text_limit_telemetry_is_invalid_request() {
+        let error = QueryServiceError::Db(HelixDbError::ActiveTextMutationLimitExceeded {
+            resource: crate::error::ActiveTextMutationResource::Entities,
+            observed: 513,
+            limit: 512,
+        });
+        assert_eq!(
+            query::QueryErrorType::from(error.classify()),
+            query::QueryErrorType::InvalidRequest
+        );
+        assert!(!error.is_commit_outcome_unknown());
+        assert!(!error.is_transaction_conflict());
     }
 
     #[test]
@@ -2379,13 +2536,16 @@ mod tests {
         assert_eq!(observation.query_type, query::QueryType::Read);
 
         assert_eq!(
-            query_error_type(&QueryServiceError::InvalidRequest("invalid".to_owned())),
+            query::QueryErrorType::from(
+                QueryServiceError::InvalidRequest("invalid".to_owned()).classify()
+            ),
             query::QueryErrorType::InvalidRequest
         );
         assert_eq!(
-            query_error_type(&QueryServiceError::Db(HelixDbError::TransactionConflict(
-                "conflict".to_owned()
-            ))),
+            query::QueryErrorType::from(
+                QueryServiceError::Db(HelixDbError::TransactionConflict("conflict".to_owned()))
+                    .classify()
+            ),
             query::QueryErrorType::Conflict
         );
         let invalid_vector_inputs = [
@@ -2405,20 +2565,23 @@ mod tests {
         ];
         for error in invalid_vector_inputs {
             assert_eq!(
-                query_error_type(&QueryServiceError::Db(error)),
+                query::QueryErrorType::from(QueryServiceError::Db(error).classify()),
                 query::QueryErrorType::InvalidRequest
             );
         }
         assert_eq!(
-            query_error_type(&QueryServiceError::Db(HelixDbError::InvalidVectorItem(
-                crate::search::vector::VectorItemDecodeError::HeaderMismatch
-            ))),
+            query::QueryErrorType::from(
+                QueryServiceError::Db(HelixDbError::InvalidVectorItem(
+                    crate::search::vector::VectorItemDecodeError::HeaderMismatch
+                ))
+                .classify()
+            ),
             query::QueryErrorType::Execution
         );
         assert_eq!(
-            query_error_type(&QueryServiceError::Db(HelixDbError::Query(
-                "execution".to_owned()
-            ))),
+            query::QueryErrorType::from(
+                QueryServiceError::Db(HelixDbError::Query("execution".to_owned())).classify()
+            ),
             query::QueryErrorType::Execution
         );
 

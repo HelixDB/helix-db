@@ -132,7 +132,7 @@ fn access_distinct_implementation_rule_keeps_dedup_in_cascades() {
     let rows = cost::EstimatedRows::rows(6);
     assert_eq!(
         alternative.cost,
-        storage.range_scan(rows).serial(storage.explicit_sort(rows))
+        storage.label_scan(rows).serial(storage.explicit_sort(rows))
     );
 
     let already_unique = node_access_distinct_expr(ir::NodeAccessPlan::PointIds {

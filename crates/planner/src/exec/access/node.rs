@@ -287,6 +287,16 @@ pub enum ExecNodeSecondarySetPlan {
     Empty,
     /// Exact non-unique equality bitmap program.
     Bitmap(exec::ExecNodeBitmapExpr),
+    /// Same-index unique owner multi-get with authoritative verification in
+    /// the request snapshot. Null and non-reflexive values cannot enter it.
+    UniqueUnion {
+        /// The required unique index lane.
+        index: exec::ExecNodeUniqueEqualityIndex,
+        /// One label-scoped property shared by every value.
+        key: catalog::ScopedPropertyKey,
+        /// Finite indexed literals; duplicates have set semantics.
+        values: ir::AtLeast<exec::ExecIndexedEqualityValue, 2>,
+    },
     /// Exact unique-owner lookup and verification.
     Unique {
         /// Planner-selected owner read.

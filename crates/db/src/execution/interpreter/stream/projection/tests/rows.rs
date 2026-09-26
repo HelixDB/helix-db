@@ -913,6 +913,67 @@ async fn binding_projection_dedup_is_stream_local() {
     );
 }
 
+/// Distinct binding projections use the engine's numeric identity (`total_order`, the
+/// same identity `WHERE`, `ORDER BY` and GROUP BY use), so a property stored as I64
+/// `42` and one stored as F64 `42.0` project to one distinct row.
+#[tokio::test]
+async fn binding_projection_distinct_unifies_numerically_equal_property_values() {
+    let db = test_support::open_db("projection-binding-distinct-numeric-identity").await;
+    let integral = test_support::add_node_with_properties(
+        &db,
+        "Metric",
+        vec![("score", PropertyValue::I64(42))],
+    )
+    .await;
+    let fractional = test_support::add_node_with_properties(
+        &db,
+        "Metric",
+        vec![("score", PropertyValue::F64(42.0))],
+    )
+    .await;
+    let other = test_support::add_node_with_properties(
+        &db,
+        "Metric",
+        vec![("score", PropertyValue::I64(7))],
+    )
+    .await;
+    let binding = name("metric");
+    let bound = |id: u64| {
+        let mut row = ExecutionRow::empty();
+        row.bindings.insert(binding.clone(), ElementRef::Node(id));
+        row
+    };
+    let rows = vec![bound(integral), bound(fractional), bound(other)];
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let result = ctx
+        .project(
+            ExecutionValue::Stream(rows),
+            &ir::ProjectionPlan::ProjectBindings {
+                projections: binding_projection_items(vec![ir::BindingProjectionPlan::Property {
+                    target: ir::BindingTargetPlan::Binding(binding),
+                    source: name("score"),
+                    alias: name("score"),
+                }]),
+                dedup: ir::ProjectionDedupMode::Distinct,
+            },
+        )
+        .await
+        .expect("binding projection succeeds");
+
+    let score_row = |value: DbPropertyValue| {
+        ExecutionScalar::Object(BTreeMap::from([("score".to_string(), value)]))
+    };
+    assert_eq!(
+        result,
+        ExecutionValue::Scalars(vec![
+            score_row(DbPropertyValue::I64(42)),
+            score_row(DbPropertyValue::I64(7)),
+        ]),
+        "distinct binding projection must collapse I64(42) and F64(42.0) into one row"
+    );
+}
+
 #[tokio::test]
 async fn edge_properties_projection_includes_system_fields_and_skips_invalid_rows() {
     let db = test_support::open_db("projection-edge-properties-filter").await;

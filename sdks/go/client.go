@@ -61,11 +61,13 @@ func IsRetryable(err error) bool {
 }
 
 type Client struct {
-	baseURL    *url.URL
-	httpClient *http.Client
-	embedded   nativeDB
-	apiKeyMu   sync.RWMutex
-	apiKey     string
+	baseURL      *url.URL
+	httpClient   *http.Client
+	embedded     nativeDB
+	apiKeyMu     sync.RWMutex
+	apiKey       string
+	databaseIDMu sync.RWMutex
+	databaseID   string
 }
 
 type nativeDB interface {
@@ -155,6 +157,10 @@ func WithAPIKey(apiKey string) ClientOption {
 	return func(c *Client) { c.setAPIKey(apiKey) }
 }
 
+func WithDatabaseID(databaseID string) ClientOption {
+	return func(c *Client) { c.setDatabaseID(databaseID) }
+}
+
 func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	if baseURL == "" {
 		baseURL = "http://localhost:6969"
@@ -210,6 +216,8 @@ func NewEmbeddedReaderClientWithConfig(source HelixDbSource, cache EmbeddedCache
 
 func (c *Client) WithAPIKey(apiKey string) *Client { c.setAPIKey(apiKey); return c }
 func (c *Client) ClearAPIKey() *Client             { c.setAPIKey(""); return c }
+func (c *Client) WithDatabaseID(databaseID string) *Client { c.setDatabaseID(databaseID); return c }
+func (c *Client) ClearDatabaseID() *Client                { c.setDatabaseID(""); return c }
 func (c *Client) BaseURL() string {
 	if c == nil || c.baseURL == nil {
 		return ""
@@ -231,6 +239,22 @@ func (c *Client) getAPIKey() string {
 	apiKey := c.apiKey
 	c.apiKeyMu.RUnlock()
 	return apiKey
+}
+
+func (c *Client) setDatabaseID(databaseID string) {
+	if c == nil {
+		return
+	}
+	c.databaseIDMu.Lock()
+	c.databaseID = databaseID
+	c.databaseIDMu.Unlock()
+}
+
+func (c *Client) getDatabaseID() string {
+	c.databaseIDMu.RLock()
+	databaseID := c.databaseID
+	c.databaseIDMu.RUnlock()
+	return databaseID
 }
 
 type execOptions struct {
@@ -292,6 +316,9 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey := c.getAPIKey(); apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if dbID := c.getDatabaseID(); dbID != "" {
+		httpReq.Header.Set("x-helix-database-id", dbID)
 	}
 	if options.writerOnly {
 		httpReq.Header.Set("x-helix-require-writer", "true")

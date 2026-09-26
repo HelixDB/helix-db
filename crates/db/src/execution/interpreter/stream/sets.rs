@@ -17,3 +17,5 @@ pub(in crate::execution::interpreter::stream) use self::merge::merge_streams;
 pub(in crate::execution::interpreter::stream) use self::variables::{
     bind_rows, filter_within_rows, filter_without_rows,
 };
+
+pub(in crate::execution::interpreter) use self::distinct::RowDistinctKey;

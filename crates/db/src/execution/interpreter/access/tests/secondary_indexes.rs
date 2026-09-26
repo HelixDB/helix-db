@@ -878,6 +878,110 @@ async fn exact_unique_row_access_verifies_present_missing_and_corrupt_owners() {
 }
 
 #[tokio::test]
+async fn unique_union_batches_owners_and_rejects_stale_graph_rows() {
+    crate::index_lifecycle::secondary::EqualityReadObserver::default()
+        .scope(async {
+            let db = test_support::open_db("unique-union-batch").await;
+            let first = test_support::add_node_with_properties(
+                &db,
+                "Fixture",
+                vec![("key", PropertyValue::from("first"))],
+            )
+            .await;
+            let second = test_support::add_node_with_properties(
+                &db,
+                "Fixture",
+                vec![("key", PropertyValue::from("second"))],
+            )
+            .await;
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::node_unique_equality("Fixture", "key").unwrap(),
+                79,
+                &[("first", first), ("second", second), ("stale", second)],
+            )
+            .await;
+            let plan = |values: &[&str]| exec::ExecNodeAccessPlan::SecondarySet {
+                set: exec::ExecNodeSecondarySetPlan::UniqueUnion {
+                    index: exec::ExecNodeUniqueEqualityIndex::try_from(
+                        catalog::NodeEqualityIndexMeta::new(test_support::name(
+                            "node_eq:Fixture:key",
+                        ))
+                        .with_uniqueness(catalog::IndexUniqueness::Unique),
+                    )
+                    .unwrap(),
+                    key: catalog::ScopedPropertyKey::try_new("Fixture", "key").unwrap(),
+                    values: ir::AtLeast::try_from_vec(
+                        values
+                            .iter()
+                            .map(|value| {
+                                exec::ExecIndexedEqualityValue::try_from(
+                                    ir::SecondaryIndexLiteral::new(PropertyValue::from(*value))
+                                        .unwrap(),
+                                )
+                                .unwrap()
+                            })
+                            .collect(),
+                    )
+                    .unwrap(),
+                },
+            };
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            let result = run_node_access(&db, plan(&["second", "missing", "first", "first"])).await;
+            let mut ids = vec![first, second];
+            ids.sort_unstable();
+            assert_eq!(
+                result,
+                ExecutionValue::Scalars(ids.into_iter().map(ExecutionScalar::NodeId).collect())
+            );
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(metrics.multi_get_calls, 1);
+            assert_eq!(metrics.scans, 0);
+            assert_eq!(metrics.graph_reads, 3);
+            assert_eq!(
+                run_node_access(&db, plan(&["missing", "absent"])).await,
+                ExecutionValue::Scalars(Vec::new())
+            );
+            let error = db
+                .execute(
+                    &node_access_ids_plan(plan(&["first", "stale"])),
+                    context::ParamBindings::default(),
+                )
+                .await
+                .expect_err("stale owner must fail closed");
+            assert!(matches!(error, HelixDbError::IndexCatalogCorruption(_)));
+            let key = ManagedKey::Data {
+                scope: DataScope::LegacyUnscoped,
+                kind: ScopedKey::SecondaryEntry(
+                    SecondaryEntryKey::try_new(
+                        IndexId::new(79).unwrap(),
+                        IndexGenerationId::initial(),
+                        SecondaryEntryLane::NodeUniqueEquality,
+                        CanonicalSecondaryValue::equality_string("first"),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            }
+            .to_bytes();
+            db.inner_db()
+                .put(key, bytes::Bytes::from_static(b"malformed-owner"))
+                .await
+                .unwrap();
+            assert!(
+                db.execute(
+                    &node_access_ids_plan(plan(&["first", "second"])),
+                    context::ParamBindings::default()
+                )
+                .await
+                .is_err(),
+                "malformed owners must not become misses"
+            );
+        })
+        .await
+}
+
+#[tokio::test]
 async fn exact_null_and_nan_row_access_never_enter_bitmap_dispatch() {
     crate::index_lifecycle::secondary::EqualityReadObserver::default()
         .scope(async {
@@ -3256,6 +3360,32 @@ async fn direct_range_access_covers_writer_reader_and_active_transaction_views()
             .expect("direct reader edge range access succeeds"),
         vec![edge]
     );
+    for (element, key, expected) in [
+        (IndexElementKind::Node, &node_key, vec![low, high]),
+        (IndexElementKind::Edge, &edge_key, vec![edge]),
+    ] {
+        let mut cursor = reader_context
+            .open_range_cursor(
+                element,
+                key,
+                &ir::IndexRange::All,
+                ir::RangeScanIteration::Forward,
+            )
+            .await
+            .unwrap();
+        for id in expected {
+            assert_eq!(
+                reader_context.next_range_cursor(&mut cursor).await.unwrap(),
+                Some(id)
+            );
+        }
+        assert!(reader_context
+            .next_range_cursor(&mut cursor)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    reader.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -3444,3 +3574,5 @@ async fn reader_range_access_covers_node_and_edge_bound_shapes() {
         ExecutionValue::Scalars(vec![ExecutionScalar::EdgeId(light)])
     );
 }
+
+mod nested;

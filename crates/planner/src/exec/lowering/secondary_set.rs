@@ -153,6 +153,36 @@ fn node_union(
         0 => Some(exec::ExecNodeSecondarySetPlan::Empty),
         1 => flattened.pop(),
         _ => {
+            let unique = flattened
+                .iter()
+                .map(|child| match child {
+                    exec::ExecNodeSecondarySetPlan::Unique {
+                        lookup,
+                        verification,
+                    } if lookup.key == verification.key && lookup.value == verification.value => {
+                        Some(lookup)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            match unique {
+                Some(unique)
+                    if unique.iter().all(|lookup| {
+                        lookup.index == unique[0].index && lookup.key == unique[0].key
+                    }) =>
+                {
+                    let first = unique[0];
+                    return Some(exec::ExecNodeSecondarySetPlan::UniqueUnion {
+                        index: first.index.clone(),
+                        key: first.key.clone(),
+                        values: ir::AtLeast::try_from_vec(
+                            unique.iter().map(|lookup| lookup.value.clone()).collect(),
+                        )
+                        .expect("unique union has at least two indexed values"),
+                    });
+                }
+                Some(_) | None => {}
+            }
             let batch = flattened
                 .iter()
                 .map(|child| match child {
@@ -454,6 +484,55 @@ mod tests {
                 exec::ExecNodeBitmapExpr::BatchedUnionRead { key, values, .. }
             ))
                 if key.property == "name" && values.len() == 2
+        ));
+    }
+
+    #[test]
+    fn unique_batches_preserve_index_identity_and_typed_literal_contract() {
+        let leaf = |property: &str, value: PropertyValue| ir::NodeAccessPlan::EqualityIndex {
+            index: crate::catalog::NodeEqualityIndexMeta::try_new(format!("fixture_{property}"))
+                .unwrap()
+                .with_uniqueness(crate::catalog::IndexUniqueness::Unique),
+            key: crate::catalog::ScopedPropertyKey::try_new("Fixture", property).unwrap(),
+            value: ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(value).unwrap()),
+        };
+        let union = |left, right| {
+            ir::NodeAccessPlan::Union(ir::AtLeast::from_pair(
+                node_source(left),
+                node_source(right),
+            ))
+        };
+        let plan = node_secondary_set(&union(
+            leaf("key", PropertyValue::from(1_i64)),
+            leaf("key", PropertyValue::from(2_i64)),
+        ))
+        .unwrap();
+        assert!(
+            matches!(&plan, exec::ExecNodeSecondarySetPlan::UniqueUnion { values, .. } if values.len() == 2)
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(
+            serde_json::from_value::<exec::ExecNodeSecondarySetPlan>(json.clone()).unwrap(),
+            plan
+        );
+        let mut invalid = json.clone();
+        invalid["unique_union"]["values"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<exec::ExecNodeSecondarySetPlan>(invalid).is_err());
+        assert!(matches!(
+            node_secondary_set(&union(
+                leaf("key", PropertyValue::from(1_i64)),
+                leaf("other", PropertyValue::from(2_i64))
+            ))
+            .unwrap(),
+            exec::ExecNodeSecondarySetPlan::Union { .. }
+        ));
+        assert!(matches!(
+            node_secondary_set(&union(
+                leaf("key", PropertyValue::from(1_i64)),
+                leaf("key", PropertyValue::Null)
+            ))
+            .unwrap(),
+            exec::ExecNodeSecondarySetPlan::Union { .. }
         ));
     }
 

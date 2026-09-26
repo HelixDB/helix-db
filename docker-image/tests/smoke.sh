@@ -180,6 +180,7 @@ run_memory_test() {
   wait_for_http "http://127.0.0.1:${first_port}/readyz" "$first"
   post_json "$first_port" dynamic-write.json true >/dev/null
   assert_users_state nonempty "$(post_json "$first_port" dynamic-read.json)"
+  python3 "$script_dir/early_termination_contracts.py" "$first_port"
   docker rm -f "$first" >/dev/null
 
   start_container "$second" "$second_port"
@@ -203,12 +204,14 @@ run_native_disk_test() {
   wait_for_http "http://127.0.0.1:${first_port}/readyz" "$first"
   post_json "$first_port" dynamic-write.json true >/dev/null
   assert_users_state nonempty "$(post_json "$first_port" dynamic-read.json)"
+  python3 "$script_dir/early_termination_contracts.py" "$first_port"
   docker stop "$first" >/dev/null
   docker rm "$first" >/dev/null
 
   start_container "$second" "$second_port" -e HELIX_DATA_DIR=/var/lib/helix --mount "$mount"
   wait_for_http "http://127.0.0.1:${second_port}/readyz" "$second"
   assert_users_state nonempty "$(post_json "$second_port" dynamic-read.json)"
+  python3 "$script_dir/early_termination_contracts.py" "$second_port"
 
   log "Testing membership deletion, cold restart, and reinsertion"
   post_json "$second_port" dynamic-write.json true >/dev/null

@@ -141,11 +141,11 @@ fn access_path_contract_covers_edge_source_families() {
     assert_eq!(runtime_var.cost, storage.source_inject());
     assert_eq!(
         all_scan.cost,
-        storage.range_scan(storage.default_unknown_scan_rows)
+        storage.element_scan(storage.default_unknown_scan_rows)
     );
     assert_eq!(
         label_scan.cost,
-        storage.range_scan(cost::EstimatedRows::rows(4))
+        storage.label_scan(cost::EstimatedRows::rows(4))
     );
     assert_eq!(
         equality.cost,
@@ -173,7 +173,7 @@ fn access_path_contract_covers_edge_source_families() {
     assert_eq!(
         filtered.cost,
         storage
-            .range_scan(cost::EstimatedRows::rows(4))
+            .label_scan(cost::EstimatedRows::rows(4))
             .serial(storage.predicate_eval(cost::EstimatedRows::rows(4)))
     );
 }

@@ -116,3 +116,33 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_rewrites_match_implementation_rule_deferrals() {
+        // Each required rewrite is paired with an implementation rule that
+        // returns `NotApplicable` for the shapes the rewrite matches, so the
+        // rewrite must keep running after the time budget expires. Pinning
+        // the set makes a new implementation-rule deferral update it
+        // deliberately.
+        let required = KnownRuleId::ALL
+            .iter()
+            .copied()
+            .filter(|id| for_known_rule(*id).is_required_rewrite())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            required,
+            [
+                KnownRuleId::AccessWindow,
+                KnownRuleId::AccessFilterSimplification,
+                KnownRuleId::AccessDistinct,
+                KnownRuleId::AccessPipelineSimplification,
+                KnownRuleId::RootControlFlowEmpty,
+            ]
+        );
+    }
+}

@@ -31,6 +31,13 @@ struct CheckedEntry {
     value: CanonicalRangeValue,
 }
 
+// The incremental cursor retains admitted owners; eager callers borrow their
+// existing sets. Both representations test membership without per-row allocation.
+enum Membership<'a> {
+    Borrowed(&'a [&'a roaring::RoaringTreemap]),
+    Owned(&'a [bitmap::Bitmap]),
+}
+
 /// All phases, including stale-entry recovery, share this exact read view.
 struct RangeScan<'a, R> {
     reader: &'a R,
@@ -39,7 +46,7 @@ struct RangeScan<'a, R> {
     direction: StorageRangeIndexDirection,
     lane: SecondaryEntryLane,
     query: Option<&'a SecondaryRangeQuery>,
-    membership: &'a [&'a roaring::RoaringTreemap],
+    membership: Membership<'a>,
     progress: &'a dyn ExactRangeScanProgress,
 }
 
@@ -87,9 +94,12 @@ impl<R: DbReadOps + Sync> RangeScan<'_, R> {
     }
 
     fn contains(&self, owner: IndexEntityId) -> bool {
-        self.membership
-            .iter()
-            .all(|bitmap| bitmap.contains(owner.get()))
+        match self.membership {
+            Membership::Borrowed(bitmaps) => {
+                bitmaps.iter().all(|bitmap| bitmap.contains(owner.get()))
+            }
+            Membership::Owned(bitmaps) => bitmaps.iter().all(|bitmap| bitmap.contains(owner.get())),
+        }
     }
 
     async fn verify(&self, owner: IndexEntityId, value: &CanonicalRangeValue) -> Result<bool> {
@@ -217,7 +227,7 @@ pub(crate) async fn scan_active_range_generation_ordered(
         direction,
         lane: definition_lane(definition),
         query,
-        membership,
+        membership: Membership::Borrowed(membership),
         progress,
     };
     let prefix = IndexKey::data_prefix(
@@ -327,5 +337,161 @@ impl ExactRangeScanProgress for RangeScanCounters {
     fn retained_ids(&self, count: usize) {
         self.peak
             .fetch_max(count, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Resumable ordered serving for consumers whose accepted-row demand is not
+/// known in advance (for example a filter). Reverse iteration prepares one tie
+/// group's identifiers to retain ascending entity-ID ties, then verifies only
+/// the owners actually requested. It never reopens a growing prefix scan.
+pub(crate) struct OrderedRangeCursor {
+    handle: ActiveIndexHandle,
+    query: Option<SecondaryRangeQuery>,
+    iteration: RangeScanIteration,
+    rows: Option<slatedb::DbIterator>,
+    pending: Vec<CheckedEntry>,
+    lookahead: Option<CheckedEntry>,
+    membership: Vec<bitmap::Bitmap>,
+}
+
+impl OrderedRangeCursor {
+    pub(crate) fn with_membership(mut self, membership: Vec<bitmap::Bitmap>) -> Self {
+        if membership.iter().any(|bitmap| bitmap.is_empty()) {
+            self.rows = None;
+            self.pending.clear();
+            self.lookahead = None;
+        }
+        self.membership = membership;
+        self
+    }
+
+    pub(crate) async fn open(
+        reader: &(impl DbReadOps + Sync),
+        handle: ActiveIndexHandle,
+        query: Option<SecondaryRangeQuery>,
+        iteration: RangeScanIteration,
+    ) -> Result<Self> {
+        let Some(definition) = handle.secondary_definition() else {
+            return Err(corruption(
+                "range cursor received a non-secondary Active handle",
+            ));
+        };
+        if !matches!(
+            definition,
+            ValidatedSecondaryIndexDefinition::NodeRange { .. }
+                | ValidatedSecondaryIndexDefinition::EdgeRange { .. }
+        ) {
+            return Err(corruption("range cursor received an equality definition"));
+        }
+        let direction = match definition.direction() {
+            RangeIndexDirection::Asc => StorageRangeIndexDirection::Asc,
+            RangeIndexDirection::Desc => StorageRangeIndexDirection::Desc,
+        };
+        let bounds = match &query {
+            Some(query) => secondary_range_scan_bounds(direction, query)?,
+            None => Some((Bound::Unbounded, Bound::Unbounded)),
+        };
+        let rows = match bounds {
+            None => None,
+            Some(bounds) => {
+                let prefix = IndexKey::data_prefix(
+                    handle.scope(),
+                    ScopedKey::secondary_lane_prefix(
+                        handle.index_id(),
+                        handle.generation(),
+                        definition_lane(definition),
+                    ),
+                );
+                let options = slatedb::config::ScanOptions::default().with_order(match iteration {
+                    RangeScanIteration::Forward => slatedb::IterationOrder::Ascending,
+                    RangeScanIteration::Reverse => slatedb::IterationOrder::Descending,
+                });
+                Some(
+                    reader
+                        .scan_prefix_with_options(prefix, bounds, &options)
+                        .await?,
+                )
+            }
+        };
+        Ok(Self {
+            handle,
+            query,
+            iteration,
+            rows,
+            pending: Vec::new(),
+            lookahead: None,
+            membership: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn next(
+        &mut self,
+        reader: &(impl DbReadOps + Sync),
+        progress: &dyn ExactRangeScanProgress,
+    ) -> Result<Option<u64>> {
+        let definition = self
+            .handle
+            .secondary_definition()
+            .expect("range definition validated on open");
+        let direction = match definition.direction() {
+            RangeIndexDirection::Asc => StorageRangeIndexDirection::Asc,
+            RangeIndexDirection::Desc => StorageRangeIndexDirection::Desc,
+        };
+        let scan = RangeScan {
+            reader,
+            handle: &self.handle,
+            definition,
+            direction,
+            lane: definition_lane(definition),
+            query: self.query.as_ref(),
+            membership: Membership::Owned(&self.membership),
+            progress,
+        };
+        loop {
+            progress.checkpoint()?;
+            if let Some(entry) = self.pending.pop() {
+                if scan.contains(entry.owner) && scan.verify(entry.owner, &entry.value).await? {
+                    return Ok(Some(entry.owner.get()));
+                }
+                continue;
+            }
+            let first = match self.lookahead.take() {
+                Some(entry) => entry,
+                None => {
+                    let Some(rows) = &mut self.rows else {
+                        return Ok(None);
+                    };
+                    let Some(row) = rows.next().await? else {
+                        self.rows = None;
+                        return Ok(None);
+                    };
+                    scan.checked_entry(row)?
+                }
+            };
+            if self.iteration == RangeScanIteration::Forward {
+                if scan.contains(first.owner) && scan.verify(first.owner, &first.value).await? {
+                    return Ok(Some(first.owner.get()));
+                }
+                continue;
+            }
+            self.pending.push(first);
+            loop {
+                progress.checkpoint()?;
+                let Some(rows) = &mut self.rows else {
+                    break;
+                };
+                let Some(row) = rows.next().await? else {
+                    self.rows = None;
+                    break;
+                };
+                let entry = scan.checked_entry(row)?;
+                if self.pending[0].value != entry.value {
+                    self.lookahead = Some(entry);
+                    break;
+                }
+                self.pending.push(entry);
+                progress.retained_ids(self.pending.len());
+            }
+        }
     }
 }

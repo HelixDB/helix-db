@@ -24,7 +24,7 @@ export interface CypherResponse {
  * Error raised by the network {@link Client}.
  *
  * Strict port of the Rust `HelixError` enum:
- * - `Network` ↔ `ReqwestError` (the request failed to reach the server)
+ * - `Network` ↔ `ReqwestError` (transport failure; a write may already have committed)
  * - `Remote` ↔ `RemoteError` (the server returned neither query success `200`
  *   nor Cloud warm success `204`)
  * - `Serialization` ↔ `SerializationError` (request/response (de)serialization failed)
@@ -167,7 +167,7 @@ function remoteError(body: string, fallback: string, statusCode: number): HelixE
   return HelixError.remote(statusCode, body, fallback);
 }
 
-type ClientBackend = { kind: "server"; url: URL; apiKey?: string } | { kind: "embedded"; native: NativeHelixDB };
+type ClientBackend = { kind: "server"; url: URL; apiKey?: string; databaseId?: string } | { kind: "embedded"; native: NativeHelixDB };
 
 /** Complete query request handed from {@link QueryBuilder} to {@link QueryExecutionRequest}. */
 interface RequestParts {
@@ -310,6 +310,12 @@ export class Client {
   /** Set (or, with `null`/`undefined`, clear) the bearer API key sent on every request. */
   withApiKey(apiKey?: string | null): Client {
     if (this.backend.kind === "server") this.backend.apiKey = apiKey ?? undefined;
+    return this;
+  }
+
+  /** Set (or, with `null`/`undefined`, clear) the database ID header sent on every request. */
+  withDatabaseId(databaseId?: string | null): Client {
+    if (this.backend.kind === "server") this.backend.databaseId = databaseId ?? undefined;
     return this;
   }
 
@@ -460,6 +466,7 @@ export class QueryExecutionRequest<R = unknown> {
 
     const requestHeaders: Record<string, string> = { ...headers };
     if (backend.apiKey !== undefined) requestHeaders["Authorization"] = `Bearer ${backend.apiKey}`;
+    if (backend.databaseId !== undefined) requestHeaders["x-helix-database-id"] = backend.databaseId;
 
     let response: Response;
     try {

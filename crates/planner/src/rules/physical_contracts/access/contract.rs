@@ -27,6 +27,7 @@ enum SecondaryIdSource {
     BatchableEquality {
         index_id: ir::NonEmptyString,
         key: catalog::ScopedPropertyKey,
+        uniqueness: catalog::IndexUniqueness,
     },
 }
 
@@ -70,25 +71,21 @@ impl AccessPhysicalContract {
         }
     }
 
-    pub(in crate::rules) fn new_batchable_equality(
-        access: physical::PhysicalAccess,
-        delivered: properties::DeliveredProperties,
-        id_cost: cost::CostVector,
-        materialization_cost: cost::CostVector,
-        estimated_rows: cost::EstimatedRows,
+    pub(in crate::rules) fn with_batchable_equality(
+        mut self,
         index_id: ir::NonEmptyString,
         key: catalog::ScopedPropertyKey,
+        uniqueness: catalog::IndexUniqueness,
     ) -> Self {
-        Self {
-            access,
-            delivered,
-            cost: id_cost.serial(materialization_cost),
-            estimated_rows,
-            execution: AccessExecutionCost::SecondaryIds {
-                cost: id_cost,
-                source: SecondaryIdSource::BatchableEquality { index_id, key },
-            },
-        }
+        let AccessExecutionCost::SecondaryIds { source, .. } = &mut self.execution else {
+            unreachable!("an equality contract produces secondary IDs");
+        };
+        *source = SecondaryIdSource::BatchableEquality {
+            index_id,
+            key,
+            uniqueness,
+        };
+        self
     }
 
     pub(in crate::rules) fn with_range_iteration(
@@ -121,12 +118,21 @@ impl AccessPhysicalContract {
 
     pub(in crate::rules) fn batchable_equality_identity(
         &self,
-    ) -> Option<(&ir::NonEmptyString, &catalog::ScopedPropertyKey)> {
+    ) -> Option<(
+        &ir::NonEmptyString,
+        &catalog::ScopedPropertyKey,
+        catalog::IndexUniqueness,
+    )> {
         match &self.execution {
             AccessExecutionCost::SecondaryIds {
-                source: SecondaryIdSource::BatchableEquality { index_id, key },
+                source:
+                    SecondaryIdSource::BatchableEquality {
+                        index_id,
+                        key,
+                        uniqueness,
+                    },
                 ..
-            } => Some((index_id, key)),
+            } => Some((index_id, key, *uniqueness)),
             AccessExecutionCost::MaterializedRows
             | AccessExecutionCost::SecondaryIds {
                 source: SecondaryIdSource::Other | SecondaryIdSource::Range { .. },

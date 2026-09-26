@@ -34,7 +34,7 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecMutationPlan::RemoveProperty { name } => {
                 self.remove_property(input, name).await
             }
-            exec::ExecMutationPlan::Drop => self.drop_nodes(input).await,
+            exec::ExecMutationPlan::Drop => self.drop_elements(input).await,
             exec::ExecMutationPlan::DropEdge { to } => {
                 self.drop_edges_between(input, to, None).await
             }
@@ -339,20 +339,43 @@ impl<'db> ExecutionContext<'db> {
         Ok(ExecutionValue::Stream(rows))
     }
 
-    async fn drop_nodes(&mut self, input: ExecutionValue) -> Result<ExecutionValue> {
+    /// Delete each distinct current element in one write scope, edges before node cascades.
+    async fn drop_elements(&mut self, input: ExecutionValue) -> Result<ExecutionValue> {
         let rows = self.stream_rows(input, "drop")?;
-        let node_ids = rows
-            .iter()
-            .filter_map(|row| match row.current.as_ref() {
-                Some(ElementRef::Node(id)) => Some(*id),
-                Some(ElementRef::Edge(_)) | None => None,
-            })
-            .collect::<BTreeSet<_>>();
-        if node_ids.is_empty() {
+        let mut node_ids = BTreeSet::new();
+        let mut edge_ids = BTreeSet::new();
+        for row in rows {
+            match row.current {
+                Some(ElementRef::Node(id)) => {
+                    node_ids.insert(id);
+                }
+                Some(ElementRef::Edge(id)) => {
+                    edge_ids.insert(id);
+                }
+                None => {}
+            }
+        }
+        if node_ids.is_empty() && edge_ids.is_empty() {
             return Ok(ExecutionValue::Stream(Vec::new()));
         }
 
         let mut scope = self.take_or_begin_write_scope().await?;
+        if !edge_ids.is_empty() {
+            scope.index_context.flush_topology(&scope.txn).await?;
+            let mut observed_edges = self
+                .observe_edge_deletions(&scope.txn, edge_ids.iter().copied(), &scope.index_context)
+                .await?;
+            for edge_id in edge_ids {
+                self.check_execution_deadline()?;
+                self.delete_edge_observed(
+                    &scope.txn,
+                    edge_id,
+                    observed_edges.take(edge_id)?,
+                    &mut scope.index_context,
+                )
+                .await?;
+            }
+        }
         for node_id in node_ids {
             self.check_execution_deadline()?;
             self.delete_node(&scope.txn, node_id, &mut scope.index_context)
@@ -486,6 +509,52 @@ mod tests {
 
     use super::super::super::test_support;
     use super::*;
+
+    #[tokio::test]
+    async fn drop_mixed_elements_deduplicates_and_preserves_other_nodes() {
+        let db = test_support::open_db("drop-mixed-elements").await;
+        let from = test_support::add_user(&db, "source").await;
+        let to = test_support::add_user(&db, "target").await;
+        let edge = test_support::add_edge(&db, from, to, "LINK").await;
+        let other = test_support::add_edge(&db, from, to, "LINK").await;
+        // Node and edge IDs occupy independent namespaces.
+        assert_eq!(from, edge);
+        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let result = context
+            .execute_mutation(
+                ExecutionValue::Stream(vec![
+                    ExecutionRow::current(ElementRef::Node(from)),
+                    ExecutionRow::current(ElementRef::Edge(edge)),
+                    ExecutionRow::current(ElementRef::Edge(edge)),
+                    ExecutionRow::current(ElementRef::Node(from)),
+                    ExecutionRow::empty(),
+                ]),
+                &exec::ExecMutationPlan::Drop,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, ExecutionValue::Stream(Vec::new()));
+        for edge_id in [edge, other] {
+            let result = db
+                .query(helix_ast::query::QueryRequest::read(
+                    helix_ast::batch::read_batch()
+                        .var_as("edges", helix_ast::traversal::g().e(edge_id).count())
+                        .returning(["edges"]),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(result, serde_json::json!({"edges": 0}));
+        }
+        let response = db
+            .query(helix_ast::query::QueryRequest::read(
+                helix_ast::batch::read_batch()
+                    .var_as("nodes", helix_ast::traversal::g().n(to).count())
+                    .returning(["nodes"]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response, serde_json::json!({"nodes": 1}));
+    }
 
     #[tokio::test]
     async fn executable_mutation_rejects_direct_edge_label_changes() {

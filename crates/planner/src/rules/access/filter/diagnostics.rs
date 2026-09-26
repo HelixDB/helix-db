@@ -76,6 +76,11 @@ fn collect_missing(
             .iter()
             .flat_map(|atoms| atoms.as_ref())
             .for_each(|atom| collect_missing_atom(element, label, atom, indexes, candidates)),
+        AccessFilterIndexPlan::ConjunctionWithDisjunction { shared, branches } => shared
+            .as_ref()
+            .iter()
+            .chain(branches.as_ref().iter().flat_map(|atoms| atoms.as_ref()))
+            .for_each(|atom| collect_missing_atom(element, label, atom, indexes, candidates)),
     }
 }
 
@@ -181,6 +186,33 @@ mod tests {
             &context::PlannerContext::default(),
         )
         .is_empty());
+    }
+
+    #[test]
+    fn shared_conjunction_and_union_report_all_missing_indexes() {
+        let label = ir::NonEmptyString::new("Resource").unwrap();
+        let predicate = Predicate::and(vec![
+            Predicate::eq("tenant", "one"),
+            Predicate::or(vec![
+                Predicate::eq("type", "pod"),
+                Predicate::eq("type", "service"),
+            ]),
+        ]);
+        for element in [catalog::ElementKind::Node, catalog::ElementKind::Edge] {
+            let missing = missing_index_candidates(
+                element,
+                &label,
+                &predicate,
+                &context::PlannerContext::default(),
+            );
+            assert_eq!(
+                missing
+                    .into_iter()
+                    .map(|candidate| candidate.property.as_ref().to_owned())
+                    .collect::<Vec<_>>(),
+                ["tenant", "type"]
+            );
+        }
     }
 
     #[test]

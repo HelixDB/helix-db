@@ -57,6 +57,12 @@ impl AsRef<[AccessFilterIndexAtom]> for AccessFilterIndexAtoms {
 pub(in crate::rules::access::filter) enum AccessFilterIndexPlan {
     Conjunction(AccessFilterIndexAtoms),
     Disjunction(AccessFilterIndexBranches),
+    /// Evaluate shared conjuncts once and intersect them with a bounded union.
+    /// Both the shared conjunction and every union branch are nonempty.
+    ConjunctionWithDisjunction {
+        shared: AccessFilterIndexAtoms,
+        branches: AccessFilterIndexBranches,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -31,6 +31,7 @@ flowchart LR
     planner --> semantics
     planner -.-> ast
     cypher --> planner
+    cypher -.-> ast
     sdk --> db
     sdk --> ast
     sdk --> macros["helix-dsl-macros · sdks/rust/helix-dsl-macros"]
@@ -161,7 +162,7 @@ flowchart TD
 | Engine area | Navigation | Correctness rule |
 | --- | --- | --- |
 | Native DAG dispatch | [interpreter](../crates/db/src/execution/interpreter/mod.rs), [scheduler](../crates/db/src/execution/interpreter/scheduler.rs), [dispatch](../crates/db/src/execution/interpreter/dispatch.rs), [control](../crates/db/src/execution/interpreter/control) | Execute planned dependencies and effects; do not choose access paths again. |
-| Native access/streams | [access](../crates/db/src/execution/interpreter/access), [stream](../crates/db/src/execution/interpreter/stream), [row_mode](../crates/db/src/execution/interpreter/row_mode.rs), [count](../crates/db/src/execution/interpreter/count.rs) | Specialised traversal state, count bounds, vector/text access and native semantic adapters. |
+| Native access/streams | [pull](../crates/db/src/execution/interpreter/pull), [access](../crates/db/src/execution/interpreter/access), [stream](../crates/db/src/execution/interpreter/stream), [row_mode](../crates/db/src/execution/interpreter/row_mode.rs), [count](../crates/db/src/execution/interpreter/count.rs) | Resumable source/expansion/window state, count bounds, vector/text access and native semantic adapters. Pulling a row preserves native error and scope contracts. |
 | Row program dispatch | [rows/mod](../crates/db/src/execution/interpreter/rows/mod.rs), [projection_chain](../crates/db/src/execution/interpreter/rows/projection_chain.rs) | Bounded producer/consumer pipelines where validated; materialised fallback elsewhere; mutations retain their order. |
 | Graph matching | [matches](../crates/db/src/execution/interpreter/rows/matches.rs), [expansion_stack](../crates/db/src/execution/interpreter/rows/expansion_stack.rs), [bound_match](../crates/db/src/execution/interpreter/rows/bound_match.rs), [correlated](../crates/db/src/execution/interpreter/rows/correlated.rs) | Preserve repeated bindings, relationship uniqueness, direction, paths and optional null extension. Cursors resume without retaining a database handle. |
 | Joining and access | [scan](../crates/db/src/execution/interpreter/rows/scan.rs), [lookup_cursor](../crates/db/src/execution/interpreter/rows/lookup_cursor.rs), [hash_probe](../crates/db/src/execution/interpreter/rows/hash_probe.rs), [cross_product](../crates/db/src/execution/interpreter/rows/cross_product.rs) | Batch physical access and preserve multiplicity. Hash build state and Cartesian output are not constant-memory by definition. |
@@ -220,6 +221,7 @@ flowchart LR
 | [encoding/v2](../crates/db/src/encoding/v2) | Authoritative keys and values. `encoding::keys`, `encoding::values` and property aliases re-export v2. New code must not build raw persistence bytes independently. |
 | [encoding/v1](../crates/db/src/encoding/v1), [migrations](../crates/db/src/migrations), [migration_parity](../crates/db/src/migration_parity.rs) | Compatibility/migration code, not a second layout for Cypher. |
 | [index_lifecycle](../crates/db/src/index_lifecycle) | Validated catalog records, generations, DDL, mutation catalog, scope gates, repository, outbox and bounded work. |
+| [unique equality batches](../crates/db/src/index_lifecycle/secondary/exact/unique.rs) | One owner multi-get, same-view authoritative checks and admitted result ownership. Failed verification never returns a partial owner set. |
 | [search](../crates/db/src/search), [text](../crates/db/src/search/text), [vector](../crates/db/src/search/vector) | Secondary lookup, text and vector algorithms backed by typed codecs and lifecycle state. |
 | [id_allocator](../crates/db/src/id_allocator.rs), [merge_operator](../crates/db/src/merge_operator.rs) | Identity allocation and backend merge interpretation; preserve existing persistence semantics. |
 
@@ -253,6 +255,7 @@ submitted commit. Tests must distinguish pre-commit rollback from that boundary.
 | --- | --- |
 | `cargo test --locked --workspace --all-targets` | Default-feature unit, integration and target checks across workspace packages; ignored and feature-gated tests are separate. |
 | `cargo test --locked --workspace --doc` | Executable contract examples. |
+| [Complete plan regressions](planner-regressions.md) | Frozen inputs, complete plan signatures and explicit full-plan diffs across storage-latency profiles. Runtime reads and memory remain separate review gates. |
 | [Planner tests](../crates/planner/tests) and [planner corpus script](../scripts/planner-normalized-corpus.sh) | Validation, rewrite legality, deterministic fallback, costs, operator contracts and plan-quality regressions. |
 | [Row executor tests](../crates/db/src/execution/interpreter/rows/tests) | Batches versus materialised/reference execution, independent expected rows, errors, scopes, admission and rollback. |
 | [Production contracts](../crates/db/tests/production_internal_contracts.rs) with `production-coverage` | Production-linked storage/interpreter behaviour beyond `cfg(test)` paths. |

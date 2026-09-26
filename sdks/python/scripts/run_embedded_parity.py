@@ -127,7 +127,7 @@ def main() -> None:
             try:
                 client.query(_required_fixture(fixtures, search_name))
             except HelixError as error:
-                if "index_not_found" not in str(error):
+                if error.code != "index_not_found":
                     raise RuntimeError(
                         f"{search_name} returned the wrong post-DROP error: {error}"
                     ) from error
@@ -225,7 +225,7 @@ async def async_main() -> None:
             try:
                 await client.query(_required_fixture(fixtures, search_name))
             except HelixError as error:
-                if "index_not_found" not in str(error):
+                if error.code != "index_not_found":
                     raise RuntimeError(
                         f"{search_name} returned the wrong post-DROP error: {error}"
                     ) from error

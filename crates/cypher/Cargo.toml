@@ -9,6 +9,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+helix-ast = { path = "../ast" }
+sha2 = "0.11"
 proptest = "1"
 
 [lints]

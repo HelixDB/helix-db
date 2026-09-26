@@ -58,7 +58,7 @@ try {
       throw new Error(`${search.name} unexpectedly succeeded after index DROP`);
     } catch (error) {
       if (error instanceof Error && error.message.includes("unexpectedly succeeded")) throw error;
-      if (!(error instanceof Error) || !error.message.includes("index_not_found")) {
+      if (!(error instanceof HelixError) || error.code !== "index_not_found") {
         throw new Error(`${search.name} returned the wrong post-DROP error: ${String(error)}`);
       }
     }

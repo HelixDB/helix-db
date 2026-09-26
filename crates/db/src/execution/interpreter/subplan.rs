@@ -17,8 +17,13 @@ impl<'db> ExecutionContext<'db> {
             let outer_outputs = std::mem::take(&mut self.step_outputs);
             let outer_uses = std::mem::take(&mut self.step_output_uses);
             let result = async {
-                self.execute_steps(plan.steps(), plan.execution_order(), plan.root())
-                    .await?;
+                self.execute_steps(
+                    plan.steps(),
+                    plan.execution_order(),
+                    plan.root(),
+                    plan.execution_program(),
+                )
+                .await?;
                 self.subplan_root_output(plan.root())
             }
             .await;

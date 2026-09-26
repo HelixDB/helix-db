@@ -11,6 +11,25 @@ Helix query failures expose a stable machine-readable code separately from the
 human-readable diagnostic. Branch on the code; log or display the message.
 Messages can gain context over time and are not a compatibility contract.
 
+## TypeScript release compatibility
+
+`@helix-db/helix-db` **3.1.0** exposes `HelixError.code`, `statusCode`,
+`serverMessage`, `rawBody`, and explicit `retryable` metadata. The published
+**3.0.4** package lacks these structured fields. Docker **v0.0.5** already
+returns a confirmed transaction conflict as HTTP **409** with
+`{"error":"transaction_conflict","msg":"<diagnostic>"}`.
+
+Use both `error.code === "transaction_conflict"` and `error.statusCode === 409`
+to recognize that condition. Reload the asset before rebuilding the mutation;
+do not match diagnostic wording. A dropped connection after sending a write is
+a `Network` failure with an unknown commit outcome, not proof that the write
+was aborted. An explicit `writer_fenced_commit_outcome_unknown` response is also
+distinct from a conflict and carries `retryable: false`. Reconcile state before
+resubmitting such writes. The SDK does not automatically replay mutations.
+
+This compatibility statement concerns transaction conflicts; it does not claim
+that v0.0.5 implements every newer error classification in the reference below.
+
 ## HTTP error envelope
 
 Every non-success response from `POST /v2/query` uses `error` for the static
@@ -92,8 +111,8 @@ being collapsed or rejected.
 ## Other query boundaries
 
 For gRPC, the status message remains human-readable and the same static code is
-attached as ASCII metadata under `helix-error-code`. gRPC status classes are
-unchanged.
+attached as ASCII metadata under `helix-error-code`. Active-text mutation admission
+failures use `InvalidArgument`, matching their HTTP 400 classification.
 
 Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
 fields named `error` and `msg`; generated Python, Node, and Go bindings pass
@@ -186,13 +205,35 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | `vector_component_magnitude_exceeded` | A component exceeds the score-safe magnitude. | 400 | After normalizing the vector | Yes |
 | `zero_norm_cosine_vector` | A cosine vector has zero norm. | 400 | After supplying a nonzero vector | Yes |
 
+### Active-text mutation limits
+
+`active_text_mutation_limit_exceeded` reports a deterministic rejection before the
+write transaction commits. The request's graph changes are not committed. The error
+is caller-correctable and uses HTTP 400, gRPC `InvalidArgument`, or the embedded
+`InvalidRequest` binding category. It is not a transient rate limit or an unknown
+write outcome; retrying the identical mutation does not resolve the limit.
+
+For example, the HTTP query service returns:
+
+```json
+{
+  "error": "active_text_mutation_limit_exceeded",
+  "msg": "db error: Active text mutation exceeds entities: observed 513, limit 512. This is a hard mutation-batch limit; reduce the number or size of mutations."
+}
+```
+
+Branch on `error`, not the wording in `msg`. The diagnostic identifies the resource,
+observed usage and configured limit. See [active-text admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission)
+for the default bounds and how entities are counted. The same engine policy applies
+to standalone databases; embedded configurations may override it.
+
 ### Index lifecycle
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
 | `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
-| `active_text_mutation_limit_exceeded` | An active text mutation exceeded an admission limit. | 500 | With a smaller mutation | Yes |
+| `active_text_mutation_limit_exceeded` | An active text mutation exceeded a hard admission limit. | 400 | Reduce the mutation before retrying | Yes |
 | `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
 | `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |

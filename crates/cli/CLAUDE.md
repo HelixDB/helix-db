@@ -7,7 +7,7 @@ The Helix CLI — binary `helix`, crate `helix-cli` (v3.0.1). It is a **runtime 
 This CLI has **no `helix compile` and no `helix check`**, and there is **no `.hx` query workflow** in it. (Older notes/memory that mention those commands describe the v2 CLI and are stale.) In v3:
 
 - **Queries are JSON requests** sent to a *running* instance via `POST /v2/query` (`helix query`). Validation happens server-side, in the instance.
-- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.4`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (MinIO-backed) with `--disk`.
+- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.6`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (MinIO-backed) with `--disk`.
 - **Cloud instances are linked resources.** The CLI authenticates only with a rotating WorkOS session and sends Cloud queries through WFE's backend broker. It does not deploy query bundles or call Cloud gateways directly.
 
 The Rust DSL builder lives in `sdks/rust/` (a client library), not in this CLI.
@@ -126,7 +126,7 @@ stdout is piped and parsed line-by-line as NDJSON into `ClaudeEvent` (System / A
 **Project config — `helix.toml`** (`HelixConfig` in `config.rs`, found via `ProjectContext::find_and_load`):
 
 - `[project]` — `name` (required), optional `id` / `workspace_id`, `queries` (default `db/`), `container_runtime` (`docker` | `podman`, default docker).
-- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.4`), `storage` (`memory` | `disk`, default memory).
+- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.6`), `storage` (`memory` | `disk`, default memory).
 - `[enterprise.<name>]` — typed `database = "cluster:<id>"|"tenant:<id>"`, plus optional stable `workspace_id` and `project_id` linkage. Gateway URLs, query keys, query bundles, and sync snapshots are rejected as obsolete.
 
 `HelixConfig::validate` requires a non-empty project name, at least one instance, non-empty instance names, and a valid typed database for each Cloud instance. `default_config()` seeds a single in-memory `local.dev`.

@@ -63,18 +63,26 @@ impl<'db> ExecutionContext<'db> {
         let ExecutionValue::Stream(rows) = value else {
             return Ok(());
         };
-        if !rows_are_in_row_mode(rows) {
+        self.enforce_row_mode_count(op_name, rows.len(), rows_are_in_row_mode(rows))
+    }
+
+    pub(in crate::execution::interpreter) fn enforce_row_mode_count(
+        &mut self,
+        op_name: &'static str,
+        produced: usize,
+        row_mode: bool,
+    ) -> Result<()> {
+        if !row_mode {
             return Ok(());
         }
         let Some(cap) = self.row_mode_max_rows.resolve()? else {
             return Ok(());
         };
-        if rows.len() <= cap.get() {
+        if produced <= cap.get() {
             return Ok(());
         }
         Err(HelixDbError::Query(format!(
-            "{op_name} produced {} row-mode rows, exceeding {ROW_MODE_MAX_ROWS_ENV}={}",
-            rows.len(),
+            "{op_name} produced {produced} row-mode rows, exceeding {ROW_MODE_MAX_ROWS_ENV}={}",
             cap.get()
         )))
     }
@@ -356,5 +364,61 @@ mod tests {
 
         let mut disabled = RowModeMaxRowsSetting::Disabled;
         assert_eq!(disabled.resolve().unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod pull_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pull_binding_cap_counts_across_polls() {
+        let db = test_support::open_db("pull-row-mode-cap").await;
+        for _ in 0..3 {
+            test_support::add_user(&db, "match").await;
+        }
+        for take in [2, 3] {
+            let steps = vec![
+                test_support::step(
+                    1,
+                    vec![],
+                    exec::ExecOp::Access {
+                        plan: Box::new(exec::ExecAccessPlan::Node(
+                            exec::ExecNodeAccessPlan::AllScan,
+                        )),
+                    },
+                ),
+                test_support::step(
+                    2,
+                    vec![exec::ExecStepId::new(1).unwrap()],
+                    exec::ExecOp::Variable {
+                        op: exec::ExecVariableOp::Stream(ir::StreamVariableOp::Bind(
+                            test_support::name("row"),
+                        )),
+                    },
+                ),
+                test_support::step(
+                    3,
+                    vec![exec::ExecStepId::new(2).unwrap()],
+                    exec::ExecOp::Limit {
+                        count: ir::StreamBoundPlan::Literal(take),
+                    },
+                ),
+            ];
+            let plan = test_support::executable(ir::PlanKind::Read, steps, 3);
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.row_mode_max_rows =
+                RowModeMaxRowsSetting::Enabled(RowModeMaxRows(NonZeroUsize::new(2).unwrap()));
+            let result = ctx
+                .execute_steps(
+                    plan.steps(),
+                    plan.execution_order(),
+                    plan.root(),
+                    plan.execution_program(),
+                )
+                .await;
+            assert_eq!(result.is_ok(), take == 2, "{result:?}");
+        }
+        db.close().await.unwrap();
     }
 }

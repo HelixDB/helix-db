@@ -660,6 +660,64 @@ if (asStrStart < 0 || asStrEnd < 0) {
   }
 }
 
+// The unified MCP adapter lives in helix-hyperscale. Keep its public endpoint
+// and copyable tool argument examples consistent across the documentation.
+for (const file of docsFiles) {
+  const content = fs.readFileSync(file, "utf8").replace(/\s+/g, " ");
+  for (const stale of [
+    /https:\/\/(?:query|admin)-mcp\.helix-db\.com\/mcp/,
+    /(?:public )?unified MCP endpoint does not accept service[ -]credential/,
+    /separat(?:e|ely deployed) Admin MCP/i,
+  ]) {
+    if (stale.test(content)) {
+      errors.push(
+        `${path.relative(DOCS_ROOT, file)}: stale MCP endpoint or auth guidance`,
+      );
+    }
+  }
+}
+const mcpGuide = fs.readFileSync(
+  path.join(DOCS_ROOT, "database/helix-cloud/connect/mcp.mdx"),
+  "utf8",
+);
+const mcpQueries = [];
+for (const match of mcpGuide.matchAll(/```json\n([\s\S]*?)\n```/g)) {
+  try {
+    const args = JSON.parse(match[1]);
+    if (!("query_json" in args)) continue;
+    if (
+      typeof args.query_json !== "string" ||
+      !/^(tenant|cluster):.+$/.test(args.database)
+    ) {
+      throw new Error("expected database reference and query_json string");
+    }
+    const request = JSON.parse(args.query_json);
+    if (
+      !["read", "write"].includes(request.request_type) ||
+      !request.query[request.request_type]
+    ) {
+      throw new Error("inner request_type must match query batch");
+    }
+    mcpQueries.push(args);
+  } catch (error) {
+    errors.push(`mcp: invalid tool argument example: ${error.message}`);
+  }
+}
+const prepared = mcpQueries.filter(
+  (args) => JSON.parse(args.query_json).request_type === "write",
+);
+if (
+  prepared.length !== 2 ||
+  prepared[0].query_json !== prepared[1].query_json ||
+  prepared[0].database !== prepared[1].database ||
+  !prepared[1].confirmation_id ||
+  !prepared[1].confirmation_token
+) {
+  errors.push(
+    "mcp: write preparation and execution examples must preserve payload and target with confirmation fields",
+  );
+}
+
 if (errors.length > 0) {
   console.error(
     `Documentation validation failed with ${errors.length} error(s):`,

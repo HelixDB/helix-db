@@ -16,7 +16,7 @@ import {
   stringifyJson,
   structuralJsonEqual,
 } from "../../src/index.js";
-import { goGeneratedRoot, resultsRoot, rustGeneratedRoot, typescriptGeneratedRoot, workspaceRoot } from "./paths.js";
+import { cargoTarget, goGeneratedRoot, resultsRoot, rustGeneratedRoot, typescriptGeneratedRoot, workspaceRoot } from "./paths.js";
 import { cypherFixturePath, readCypherCases, verifyCypherResults } from "./cypher-results.js";
 import { writeCypherCase } from "./cypher-client.js";
 
@@ -57,7 +57,7 @@ const instances: Instance[] = [
   },
 ];
 
-const serverBinary = process.env.HELIX_PARITY_SERVER_BIN ?? join(workspaceRoot, "target", "debug", "server");
+const serverBinary = process.env.HELIX_PARITY_SERVER_BIN ?? join(cargoTarget, "debug", "server");
 if (process.env.HELIX_PARITY_SERVER_BIN === undefined) run("cargo", ["build", "-p", "server"], workspaceRoot, 900_000);
 if (!existsSync(serverBinary)) throw new Error(`Helix parity server binary does not exist: ${serverBinary}`);
 
@@ -141,13 +141,7 @@ async function runCypherHttpSuite(temp: string): Promise<void> {
             await client.close();
           }
         } else if (sdk === "rust") {
-          run(
-            join(process.env.CARGO_TARGET_DIR ?? join(workspaceRoot, "target"), "debug/examples/generate_parity_fixtures"),
-            [],
-            workspaceRoot,
-            120_000,
-            env,
-          );
+          run(join(cargoTarget, "debug/examples/generate_parity_fixtures"), [], workspaceRoot, 120_000, env);
         } else if (sdk === "go") {
           run(goBinary, [], workspaceRoot, 120_000, env);
         } else {

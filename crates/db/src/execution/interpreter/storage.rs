@@ -41,6 +41,10 @@ impl<'db> ExecutionContext<'db> {
         key: &[u8],
     ) -> Result<Option<Bytes>> {
         self.check_execution_deadline()?;
+        #[cfg(test)]
+        self.pull_work
+            .raw_gets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cache = self.request_read_cache();
         let Some(cached) = cache.and_then(|cache| cache.get(key)) else {
             let _request_memory = self
@@ -93,6 +97,10 @@ impl<'db> ExecutionContext<'db> {
         K: AsRef<[u8]> + Send + Sync,
     {
         self.check_execution_deadline()?;
+        #[cfg(test)]
+        self.pull_work
+            .multi_get_keys
+            .fetch_add(keys.len(), std::sync::atomic::Ordering::Relaxed);
         let Some(cache) = self.request_read_cache() else {
             return self.multi_get_uncached(keys).await;
         };
@@ -299,6 +307,75 @@ impl<'db> ExecutionContext<'db> {
                 self.row_memory.as_ref(),
             )
             .await
+        }
+        #[cfg(not(test))]
+        {
+            Err(HelixDbError::InvariantViolation(
+                "storage prefix scan escaped its request read view".to_string(),
+            ))
+        }
+    }
+
+    /// Opens a resumable scan in the same request snapshot or write transaction.
+    pub(in crate::execution::interpreter) async fn open_raw_range(
+        &self,
+        start: Bytes,
+        end: Bytes,
+    ) -> Result<slatedb::DbIterator> {
+        self.check_execution_deadline()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
+        let (start, end) = keys::DataKey::data_range(self.tenant_scope, start, end);
+        if let Some(active) = self.active_write_tx() {
+            return Ok(active.txn.scan(start..end).await?);
+        }
+        if let Some(view) = self.request_read_view() {
+            return Ok(view.scan(start..end).await?);
+        }
+        #[cfg(test)]
+        {
+            Ok(match self.db.storage() {
+                HelixStorage::Reader(reader) => reader.scan(start..end).await?,
+                HelixStorage::Writer(writer) => writer.scan(start..end).await?,
+            })
+        }
+        #[cfg(not(test))]
+        {
+            Err(HelixDbError::InvariantViolation(
+                "storage range scan escaped its request read view".to_string(),
+            ))
+        }
+    }
+
+    /// Opens a resumable scan in the same request snapshot or write transaction.
+    pub(in crate::execution::interpreter) async fn open_raw_prefix(
+        &self,
+        prefix: Bytes,
+    ) -> Result<slatedb::DbIterator> {
+        self.check_execution_deadline()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
+        let prefix = keys::DataKey::data_prefix(self.tenant_scope, prefix);
+        if let Some(active) = self.active_write_tx() {
+            return Ok(active.txn.scan_prefix(prefix, ..).await?);
+        }
+        if let Some(view) = self.request_read_view() {
+            return Ok(view.scan_prefix(prefix, ..).await?);
+        }
+        #[cfg(test)]
+        {
+            Ok(match self.db.storage() {
+                HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
+                HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
+            })
         }
         #[cfg(not(test))]
         {

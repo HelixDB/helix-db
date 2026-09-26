@@ -82,6 +82,9 @@ use crate::index_lifecycle::{
 use super::IndexScopeGates;
 
 mod exact;
+#[cfg(any(test, feature = "production-coverage"))]
+pub(crate) use exact::lookup_active_unique_equality_batch;
+pub(crate) use exact::lookup_active_unique_equality_batch_admitted;
 #[cfg(all(feature = "production-coverage", not(test)))]
 pub(crate) use exact::run_production_contracts as run_exact_production_contracts;
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
@@ -90,6 +93,7 @@ pub(crate) use exact::{
     count_active_range_generation_with_membership, lookup_active_equality_batch_admitted,
     lookup_active_equality_generations_admitted, lookup_active_equality_point_admitted,
     record_equality_graph_read, scan_active_range_generation_ordered, ExactRangeScanProgress,
+    OrderedRangeCursor,
 };
 #[cfg(test)]
 pub(crate) use exact::{
@@ -3578,6 +3582,7 @@ mod tests {
     enum ExactReadFailure {
         Get,
         MultiGet,
+        ShortMultiGet,
         Scan,
         Next,
     }
@@ -3610,6 +3615,9 @@ mod tests {
         where
             K: AsRef<[u8]> + Send + Sync,
         {
+            if matches!(self.failure, ExactReadFailure::ShortMultiGet) {
+                return Ok(Vec::new());
+            }
             if matches!(self.failure, ExactReadFailure::MultiGet) {
                 return Err(slatedb::Error::unavailable(
                     "injected exact multi-get failure".to_string(),
@@ -3645,6 +3653,31 @@ mod tests {
             }
             Ok(rows)
         }
+    }
+
+    #[tokio::test]
+    async fn unique_batch_rejects_failed_and_truncated_multi_gets() {
+        let db = test_db("unique-batch-storage-failures").await;
+        let handle = active_read_handle(
+            &db,
+            crate::config::SecondaryIndexDefinition::node_unique_equality("Fixture", "key")
+                .unwrap(),
+        )
+        .await;
+        let values = [
+            PropertyValue::String("first".into()),
+            PropertyValue::String("second".into()),
+        ];
+        for failure in [ExactReadFailure::MultiGet, ExactReadFailure::ShortMultiGet] {
+            assert!(lookup_active_unique_equality_batch(
+                &FailingExactRead { db: &db, failure },
+                &handle,
+                &values
+            )
+            .await
+            .is_err());
+        }
+        db.close().await.unwrap();
     }
 
     #[async_trait::async_trait]
@@ -7426,3 +7459,12 @@ pub(crate) use exact::RangeScanCounters;
 
 #[cfg(test)]
 mod ordered_tests;
+
+#[cfg(test)]
+mod test_read_counters;
+
+#[cfg(any(test, feature = "production-coverage"))]
+#[path = "../../tests/production_support/secondary_unique_batch.rs"]
+mod unique_batch_contracts;
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) use unique_batch_contracts::run as run_unique_batch_production_contracts;

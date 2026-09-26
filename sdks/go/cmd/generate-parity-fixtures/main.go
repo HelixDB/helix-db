@@ -213,7 +213,8 @@ func executeEmbeddedFixtures(fixtures []fixture, results string) error {
 		if err == nil {
 			return fmt.Errorf("%s unexpectedly succeeded after index DROP", search.name)
 		}
-		if !strings.Contains(err.Error(), "index_not_found") {
+		var helixErr *helix.HelixError
+		if !errors.As(err, &helixErr) || helixErr.Code != helix.QueryErrorCode("index_not_found") {
 			return fmt.Errorf("%s returned the wrong post-DROP error: %w", search.name, err)
 		}
 	}
@@ -639,7 +640,7 @@ func runtimeFixtures() []fixture {
 			"906-write-drop-indexed-items",
 			write().
 				VarAs("edge_matches", helix.G().EWithLabel("FOLLOWS").Where(helix.PredEq("note", "dropitemedge"))).
-				VarAs("edges", helix.G().DropEdgeByID(helix.EdgeVar("edge_matches")).Count()).
+				VarAs("edges", helix.G().E(helix.EdgeVar("edge_matches")).Drop().Count()).
 				VarAs("source", helix.G().NWithLabel("ParityUser").Where(helix.PredEq("externalId", "drop-text-source")).Drop().Count()).
 				VarAs("target", helix.G().NWithLabel("ParityUser").Where(helix.PredEq("externalId", "drop-text-target")).Drop().Count()).
 				VarAs("active_source", helix.G().NWithLabel("ParityUser").Where(helix.PredEq("externalId", "active-text-source")).Drop().Count()).

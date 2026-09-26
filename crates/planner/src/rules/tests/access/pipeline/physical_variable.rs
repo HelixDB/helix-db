@@ -63,7 +63,7 @@ fn access_pipeline_implementation_rule_lowers_stateful_variable_writes() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
+            .element_scan(rows)
             .serial(storage.stream_operator(rows))
             .serial(storage.stream_operator(rows))
     );

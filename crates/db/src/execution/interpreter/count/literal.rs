@@ -4,12 +4,12 @@ use super::{stream, DbPropertyValue};
 use crate::{error::Result, query_resources};
 use helix_planner::exec;
 
-pub(super) struct Value {
+pub(in crate::execution::interpreter) struct Value {
     value: DbPropertyValue,
     _memory: Option<query_resources::Reservation>,
 }
 impl Value {
-    pub(super) fn new(
+    pub(in crate::execution::interpreter) fn new(
         value: &exec::ExecIndexedEqualityValue,
         budget: Option<&query_resources::Budget>,
     ) -> Result<Self> {
@@ -29,12 +29,12 @@ impl std::ops::Deref for Value {
     }
 }
 
-pub(super) struct Batch {
+pub(in crate::execution::interpreter) struct Batch {
     values: Vec<DbPropertyValue>,
     _memory: Option<query_resources::Reservation>,
 }
 impl Batch {
-    pub(super) fn new(
+    pub(in crate::execution::interpreter) fn new(
         values: &[exec::ExecIndexedEqualityValue],
         budget: Option<&query_resources::Budget>,
     ) -> Result<Self> {

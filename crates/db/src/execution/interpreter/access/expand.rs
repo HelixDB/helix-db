@@ -22,102 +22,19 @@ impl<'db> ExecutionContext<'db> {
         plan: &ir::ExpandPlan,
     ) -> Result<ExecutionValue> {
         let rows = self.stream_rows(input, "expand")?;
-        // Keep storage-batch futures out of the recursive interpreter's stack
-        // frame. One allocation per expansion operator preserves the normal
-        // thread-stack contract even inside nested native control flow.
-        match plan.output {
-            ir::ExpandOutput::Nodes => Box::pin(self.expand_node_output(rows, plan)).await,
-            ir::ExpandOutput::Edges => Box::pin(self.expand_edge_output(rows, plan)).await,
-        }
-    }
-
-    async fn expand_node_output(
-        &self,
-        rows: Vec<ExecutionRow>,
-        plan: &ir::ExpandPlan,
-    ) -> Result<ExecutionValue> {
-        let mut expanded = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            let neighbor_ids = match row.current.as_ref() {
-                Some(ElementRef::Node(node_id)) => match &plan.label {
-                    ir::ExpandLabelPlan::Any => {
-                        self.expand_any_edges(*node_id, plan.direction).await?
-                    }
-                    ir::ExpandLabelPlan::Label(label) => {
-                        self.expand_labeled_edges(*node_id, plan.direction, label)
-                            .await?
-                    }
-                },
-                Some(ElementRef::Edge(edge_id)) => {
-                    let Some((from, to)) = self.get_edge_endpoints(*edge_id).await? else {
-                        continue;
-                    };
-                    match plan.direction {
-                        ir::ExpandDirection::Out => vec![to],
-                        ir::ExpandDirection::In => vec![from],
-                        ir::ExpandDirection::Both => {
-                            let previous_node = row.path.elements().iter().rev().find_map(
-                                |element| match element {
-                                    ElementRef::Node(id) => Some(*id),
-                                    ElementRef::Edge(_) => None,
-                                },
-                            );
-                            match previous_node {
-                                Some(previous) if previous == from => vec![to],
-                                Some(previous) if previous == to => vec![from],
-                                _ if from == to => vec![from],
-                                _ => vec![from, to],
-                            }
-                        }
-                    }
-                }
-                None => continue,
-            };
-            for neighbor_id in neighbor_ids {
-                self.check_execution_deadline()?;
-                let mut next = row.clone();
-                next.set_current(ElementRef::Node(neighbor_id));
-                expanded.push(next);
-            }
-        }
-        Ok(ExecutionValue::Stream(expanded))
-    }
-
-    async fn expand_edge_output(
-        &self,
-        rows: Vec<ExecutionRow>,
-        plan: &ir::ExpandPlan,
-    ) -> Result<ExecutionValue> {
-        let Some(label) = self.edge_output_label(&plan.label).await? else {
-            return Ok(ExecutionValue::Stream(Vec::new()));
+        let label = match plan.output {
+            ir::ExpandOutput::Nodes => None,
+            ir::ExpandOutput::Edges => self.edge_output_label(&plan.label).await?,
         };
         let mut expanded = Vec::new();
         for row in rows {
-            self.check_execution_deadline()?;
-            let Some(ElementRef::Node(node_id)) = row.current.as_ref() else {
-                continue;
-            };
-            let edge_ids = match &label {
-                EdgeOutputExpansionLabel::Any => {
-                    self.expand_any_edge_ids(*node_id, plan.direction, 512)
-                        .await?
-                }
-                EdgeOutputExpansionLabel::Label { label, edge_ids } => {
-                    self.expand_labeled_edge_ids(
-                        *node_id,
-                        plan.direction,
-                        label,
-                        Some(edge_ids),
-                        512,
-                    )
-                    .await?
-                }
-            };
-            for edge_id in edge_ids {
+            for id in Box::pin(self.expansion_ids(&row, plan, label.as_ref())).await? {
                 self.check_execution_deadline()?;
                 let mut next = row.clone();
-                next.set_current(ElementRef::Edge(edge_id));
+                next.set_current(match plan.output {
+                    ir::ExpandOutput::Nodes => ElementRef::Node(id),
+                    ir::ExpandOutput::Edges => ElementRef::Edge(id),
+                });
                 expanded.push(next);
             }
         }
@@ -145,7 +62,86 @@ impl<'db> ExecutionContext<'db> {
         .await
     }
 
-    async fn edge_output_label<'a>(
+    /// Prepares only one parent's ordered identifiers. Edge order requires every
+    /// neighbor pair for this parent; rows and subsequent parents remain lazy.
+    pub(in crate::execution::interpreter) async fn expansion_ids(
+        &self,
+        row: &ExecutionRow,
+        plan: &ir::ExpandPlan,
+        label: Option<&EdgeOutputExpansionLabel<'_>>,
+    ) -> Result<std::vec::IntoIter<u64>> {
+        self.check_execution_deadline()?;
+        #[cfg(test)]
+        self.pull_work
+            .expansion_parents
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match plan.output {
+            ir::ExpandOutput::Nodes => {
+                let ids = match row.current.as_ref() {
+                    Some(ElementRef::Node(node_id)) => match &plan.label {
+                        ir::ExpandLabelPlan::Any => {
+                            self.expand_any_edges(*node_id, plan.direction).await?
+                        }
+                        ir::ExpandLabelPlan::Label(label) => {
+                            self.expand_labeled_edges(*node_id, plan.direction, label)
+                                .await?
+                        }
+                    },
+                    Some(ElementRef::Edge(edge_id)) => {
+                        let Some((from, to)) = self.get_edge_endpoints(*edge_id).await? else {
+                            return Ok(Vec::new().into_iter());
+                        };
+                        match plan.direction {
+                            ir::ExpandDirection::Out => vec![to],
+                            ir::ExpandDirection::In => vec![from],
+                            ir::ExpandDirection::Both => {
+                                let previous_node =
+                                    row.path.elements().iter().rev().find_map(|element| {
+                                        match element {
+                                            ElementRef::Node(id) => Some(*id),
+                                            ElementRef::Edge(_) => None,
+                                        }
+                                    });
+                                match previous_node {
+                                    Some(previous) if previous == from => vec![to],
+                                    Some(previous) if previous == to => vec![from],
+                                    _ if from == to => vec![from],
+                                    _ => vec![from, to],
+                                }
+                            }
+                        }
+                    }
+                    None => return Ok(Vec::new().into_iter()),
+                };
+                Ok(ids.into_iter())
+            }
+            ir::ExpandOutput::Edges => {
+                let Some(ElementRef::Node(node_id)) = row.current.as_ref() else {
+                    return Ok(Vec::new().into_iter());
+                };
+                let ids = match label {
+                    None => return Ok(Vec::new().into_iter()),
+                    Some(EdgeOutputExpansionLabel::Any) => {
+                        self.expand_any_edge_ids(*node_id, plan.direction, 512)
+                            .await?
+                    }
+                    Some(EdgeOutputExpansionLabel::Label { label, edge_ids }) => {
+                        self.expand_labeled_edge_ids(
+                            *node_id,
+                            plan.direction,
+                            label,
+                            Some(edge_ids),
+                            512,
+                        )
+                        .await?
+                    }
+                };
+                Ok(ids.into_iter().collect::<Vec<_>>().into_iter())
+            }
+        }
+    }
+
+    pub(in crate::execution::interpreter) async fn edge_output_label<'a>(
         &self,
         label: &'a ir::ExpandLabelPlan,
     ) -> Result<Option<EdgeOutputExpansionLabel<'a>>> {
@@ -254,7 +250,7 @@ impl<'db> ExecutionContext<'db> {
     }
 }
 
-enum EdgeOutputExpansionLabel<'a> {
+pub(in crate::execution::interpreter) enum EdgeOutputExpansionLabel<'a> {
     Any,
     Label {
         label: &'a ir::NonEmptyString,

@@ -50,15 +50,17 @@ pub(super) fn access_set_contract(
             children
                 .iter()
                 .all(|child| child.batchable_equality_identity() == Some(first))
-                .then_some(())
+                .then_some(first.2)
         })
-        .flatten()
-        .is_some();
-    let id_cost = if batchable_equality {
-        storage.bitmap_equality_batch(
-            properties::PositiveUsize::at_least_one(children.len()),
-            rows,
-        )
+        .flatten();
+    let id_cost = if let Some(uniqueness) = batchable_equality {
+        let values = properties::PositiveUsize::at_least_one(children.len());
+        match uniqueness {
+            crate::catalog::IndexUniqueness::Unique => storage.unique_equality_batch(values, rows),
+            crate::catalog::IndexUniqueness::NonUnique => {
+                storage.bitmap_equality_batch(values, rows)
+            }
+        }
     } else {
         let driver = (access == physical::PhysicalAccess::SetIntersection)
             .then(|| {
@@ -67,7 +69,13 @@ pub(super) fn access_set_contract(
                     .position(|child| child.range_iteration().is_some())
             })
             .flatten();
-        let scanned = driver.map_or(rows, |index| children[index].estimated_rows);
+        // Unordered set algebra consumes membership inputs, even when the
+        // intersection is estimated empty. Output cardinality only controls
+        // final row construction. Ordered drivers retain their visited budget.
+        let scanned = driver.map_or_else(
+            || set_union_estimated_rows(&child_estimates),
+            |index| children[index].estimated_rows,
+        );
         children
             .iter()
             .zip(secondary_costs)

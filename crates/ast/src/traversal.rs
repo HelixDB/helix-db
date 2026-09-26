@@ -506,7 +506,7 @@ pub enum AstNode {
         /// Property name.
         name: String,
     },
-    /// Drop nodes.
+    /// Delete current edges, or nodes and their incident edges, returning an empty stream.
     Drop { input: Box<AstNode> },
     /// Drop edges between current nodes and targets.
     DropEdge {
@@ -2205,7 +2205,7 @@ impl<M: MutationMode> Traversal<OnNodes, M> {
         self.push_mutation(Operation::RemoveProperty(name.into()))
     }
 
-    /// Drop nodes.
+    /// Delete current nodes and their incident edges, returning an empty stream.
     pub fn drop(self) -> Traversal<OnNodes, WriteEnabled> {
         self.push_mutation(Operation::Drop)
     }
@@ -2234,6 +2234,16 @@ impl<M: MutationMode> Traversal<OnNodes, M> {
 }
 
 impl<M: MutationMode> Traversal<OnEdges, M> {
+    /// Delete current edges without deleting their endpoints, returning an empty stream.
+    ///
+    /// ```
+    /// use helix_ast::traversal::g;
+    /// let query = g().e(1_u64).drop();
+    /// ```
+    pub fn drop(self) -> Traversal<OnEdges, WriteEnabled> {
+        self.push_mutation(Operation::Drop)
+    }
+
     /// Edge to target node.
     pub fn out_n(self) -> Traversal<OnNodes, M> {
         self.push(Operation::OutN)

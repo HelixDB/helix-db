@@ -80,10 +80,11 @@ flow for agents. See the [HelixDB MCP guide](/database/helix-cloud/connect/mcp) 
 can be untyped, or every parameter can have a matching entry in
 `parameter_types`.
 
-For raw HTTP JSON, send floating-point values without `parameter_types`.
-The HTTP schema does not advertise typed `f32` or `f64` declarations because
-JSON Schema cannot distinguish an integral number token such as `5` from the
-integer representation that exact typed decoding rejects.
+Raw HTTP JSON supports `f32` and `f64` parameter declarations. The decoder
+converts integer JSON values such as `5` and floating-point values such as `5.25`
+to the declared floating-point type. Values must be finite, and `f32` values must
+fit within the finite `f32` range. Floating-point parameters may also be untyped;
+when `parameter_types` is present, it must describe every supplied parameter.
 
 ```json
 {

@@ -28,12 +28,12 @@ impl<'db> ExecutionContext<'db> {
             return Ok(value);
         }
         let input = self.dependency_input(&step.dependencies)?;
-        let value = self.execute_op(&step.op, input).await?;
+        let value = Box::pin(self.execute_op(&step.op, input)).await?;
         self.check_execution_deadline()?;
         Ok(value)
     }
 
-    async fn execute_op(
+    pub(in crate::execution::interpreter) async fn execute_op(
         &mut self,
         op: &exec::ExecOp,
         input: ExecutionValue,
@@ -91,7 +91,9 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecOp::Merge { .. } => Err(HelixDbError::InvariantViolation(
                 "merge operations must be executed with dependency provenance".to_string(),
             )),
-            exec::ExecOp::Mutation { plan } => self.execute_mutation(input, plan).await,
+            // Mutation futures contain large transaction/index-maintenance state.
+            // Keep that state off enclosing query futures and their thread stacks.
+            exec::ExecOp::Mutation { plan } => Box::pin(self.execute_mutation(input, plan)).await,
             exec::ExecOp::IndexDdl { plan } => {
                 if plan.requires_isolated_catalog_transaction() {
                     let resume_request_scope = self.has_request_write_scope();

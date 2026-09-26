@@ -384,6 +384,24 @@ func TestPublicQueryRequestSurface(t *testing.T) {
 	VarMinSize("users", -1)
 }
 
+func TestBoundLiteralValidatesNonNegative(t *testing.T) {
+	bound := BoundLiteral(10)
+	payload, err := json.Marshal(bound)
+	if err != nil {
+		t.Fatalf("unexpected json marshal error: %v", err)
+	}
+	if string(payload) != `{"literal":10}` {
+		t.Fatalf("expected {\"literal\":10}, got %s", string(payload))
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected negative bound literal construction to panic")
+		}
+	}()
+	BoundLiteral(-1)
+}
+
 func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 	valid := []QueryParamType{
 		{},

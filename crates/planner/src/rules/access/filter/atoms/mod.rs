@@ -70,8 +70,8 @@ fn scoped_conjunction_disjunction_plan(
         if super::labels::label_equality_matches(predicate, label) {
             continue;
         }
-        // Multiple disjunctive conjuncts require a Cartesian DNF expansion.
-        // Keep that out until it has its own bounded ADT contract.
+        // This contract covers one disjunctive conjunct. Multiple OR groups
+        // retain the existing fallback rather than expanding a Cartesian DNF.
         match predicate {
             helix_ast::expr::Predicate::Or { predicates } if disjunction.is_none() => {
                 disjunction = Some(predicates.as_slice());
@@ -82,23 +82,30 @@ fn scoped_conjunction_disjunction_plan(
     }
 
     let branches = disjunction?;
-    Some(plan_disjunction_from_atom_results(
+    let disjunction = plan_disjunction_from_atom_results(
         branches.len(),
-        branches.iter().map(|branch| {
-            if shared.is_empty() {
-                collect::access_filter_index_atoms(branch, label, planner_limits)
-            } else {
-                let mut predicates = shared
-                    .iter()
-                    .map(|predicate| (*predicate).clone())
-                    .collect::<Vec<_>>();
-                predicates.push(branch.clone());
-                let distributed = helix_ast::expr::Predicate::and(predicates);
-                collect::access_filter_index_atoms(&distributed, label, planner_limits)
-            }
-        }),
+        branches
+            .iter()
+            .map(|branch| collect::access_filter_index_atoms(branch, label, planner_limits)),
         planner_limits,
-    ))
+    );
+    if shared.is_empty() {
+        return Some(disjunction);
+    }
+    let AccessFilterIndexPlanMatch::Planned(AccessFilterIndexPlan::Disjunction(branches)) =
+        disjunction
+    else {
+        return Some(disjunction);
+    };
+    let predicate = helix_ast::expr::Predicate::and(shared.into_iter().cloned().collect());
+    Some(
+        match collect::access_filter_index_atoms(&predicate, label, planner_limits) {
+            Ok(shared) => AccessFilterIndexPlanMatch::Planned(
+                AccessFilterIndexPlan::ConjunctionWithDisjunction { shared, branches },
+            ),
+            Err(reason) => AccessFilterIndexPlanMatch::NotIndexable(reason),
+        },
+    )
 }
 
 fn plan_disjunction_from_atom_results(
@@ -191,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn index_plan_distributes_shared_conjunction_into_one_or() {
+    fn index_plan_preserves_shared_conjunction_outside_one_or() {
         let predicate = helix_ast::expr::Predicate::and(vec![
             helix_ast::expr::Predicate::eq("$label", "User"),
             helix_ast::expr::Predicate::eq("tenant_id", "acme"),
@@ -201,32 +208,29 @@ mod tests {
             ]),
         ]);
 
-        let AccessFilterIndexPlanMatch::Planned(AccessFilterIndexPlan::Disjunction(branches)) =
-            access_filter_index_plan(&predicate, &user_label(), &limited(2))
+        let AccessFilterIndexPlanMatch::Planned(
+            AccessFilterIndexPlan::ConjunctionWithDisjunction { shared, branches },
+        ) = access_filter_index_plan(&predicate, &user_label(), &limited(2))
         else {
-            panic!("expected distributed disjunction");
+            panic!("expected shared conjunction outside the disjunction");
         };
 
         assert_eq!(branches.as_ref().len(), 2);
         assert!(branches
             .as_ref()
             .iter()
-            .all(|atoms| atoms.as_ref().len() == 2));
-        assert!(branches.as_ref().iter().all(|atoms| {
-            atoms.as_ref().iter().any(|atom| {
-                matches!(
-                    atom,
-                    AccessFilterIndexAtom::Equality { property, .. }
-                        if property.as_ref() == "tenant_id"
-                )
-            })
-        }));
+            .all(|atoms| atoms.as_ref().len() == 1));
+        assert!(
+            matches!(shared.as_ref(), [AccessFilterIndexAtom::Equality { property, .. }]
+            if property.as_ref() == "tenant_id")
+        );
     }
 
     #[test]
     fn index_plan_distributed_or_keeps_branch_limit_and_rejects_multi_or_dnf() {
         let distributed = helix_ast::expr::Predicate::and(vec![
             helix_ast::expr::Predicate::eq("$label", "User"),
+            helix_ast::expr::Predicate::eq("tenant_id", "acme"),
             helix_ast::expr::Predicate::or(vec![
                 helix_ast::expr::Predicate::eq("username", "alice"),
                 helix_ast::expr::Predicate::eq("username", "bob"),
@@ -256,5 +260,37 @@ mod tests {
                 AccessFilterIndexPlanRejection::NotIndexCandidate
             )
         );
+    }
+
+    #[test]
+    fn index_plan_rejects_unsupported_shared_conjuncts() {
+        let predicate = helix_ast::expr::Predicate::and(vec![
+            helix_ast::expr::Predicate::contains("bio", "rust"),
+            helix_ast::expr::Predicate::or(vec![
+                helix_ast::expr::Predicate::eq("username", "alice"),
+                helix_ast::expr::Predicate::eq("username", "bob"),
+            ]),
+        ]);
+        assert_eq!(
+            access_filter_index_plan(&predicate, &user_label(), &limited(2)),
+            AccessFilterIndexPlanMatch::NotIndexable(
+                AccessFilterIndexPlanRejection::NotIndexCandidate
+            )
+        );
+    }
+
+    #[test]
+    fn index_plan_label_scoped_or_has_no_shared_membership_work() {
+        let predicate = helix_ast::expr::Predicate::and(vec![
+            helix_ast::expr::Predicate::eq("$label", "User"),
+            helix_ast::expr::Predicate::or(vec![
+                helix_ast::expr::Predicate::eq("username", "alice"),
+                helix_ast::expr::Predicate::eq("username", "bob"),
+            ]),
+        ]);
+        assert!(matches!(
+            access_filter_index_plan(&predicate, &user_label(), &limited(2)),
+            AccessFilterIndexPlanMatch::Planned(AccessFilterIndexPlan::Disjunction(_))
+        ));
     }
 }

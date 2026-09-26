@@ -115,7 +115,7 @@ jobs:
         with:
           node-version: "24"
       - uses: dtolnay/rust-toolchain@1.97.1
-      - name: Install and execute exact npm 3.0.0 read/write requests
+      - name: Install and execute pinned TypeScript SDK read/write requests
         run: >-
           cargo test --locked -p helix-cli --test typescript_runtime
           registry_smoke_executes_exact_sdk_read_and_write

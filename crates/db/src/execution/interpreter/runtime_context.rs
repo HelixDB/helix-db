@@ -290,6 +290,8 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
     #[cfg(test)]
+    pub(in crate::execution::interpreter) pull_work: Arc<super::pull::metrics::WorkCounters>,
+    #[cfg(test)]
     pub(in crate::execution::interpreter) range_reads:
         Arc<crate::index_lifecycle::secondary::RangeScanCounters>,
     #[cfg(test)]
@@ -362,6 +364,8 @@ impl<'db> ExecutionContext<'db> {
             execution_control,
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
+            #[cfg(test)]
+            pull_work: Arc::new(super::pull::metrics::WorkCounters::default()),
             #[cfg(test)]
             range_reads: Arc::new(crate::index_lifecycle::secondary::RangeScanCounters::default()),
             #[cfg(test)]

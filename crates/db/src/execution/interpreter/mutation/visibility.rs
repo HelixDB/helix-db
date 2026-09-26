@@ -75,6 +75,45 @@ pub(in crate::execution::interpreter) fn required_for(
         exec::ExecOp::Expand { .. } | exec::ExecOp::ShortestPath { .. } => {
             RequiredMutationVisibility::one(DeferredMutationFamily::Topology)
         }
+        exec::ExecOp::Branch { plan } => {
+            let subplan = |plan: &exec::ExecutableSubplan| {
+                plan.steps()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, step| {
+                        RequiredMutationVisibility(mask.0 | required_for(&step.op).0)
+                    })
+            };
+            match plan {
+                exec::ExecBranchPlan::Union(branches) => branches
+                    .as_ref()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, plan| {
+                        RequiredMutationVisibility(mask.0 | subplan(plan).0)
+                    }),
+                exec::ExecBranchPlan::Coalesce(branches) => branches
+                    .as_ref()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, plan| {
+                        RequiredMutationVisibility(mask.0 | subplan(plan).0)
+                    }),
+                exec::ExecBranchPlan::Optional(plan)
+                | exec::ExecBranchPlan::Choose {
+                    then_plan: plan, ..
+                } => subplan(plan),
+                exec::ExecBranchPlan::ChooseElse {
+                    then_plan,
+                    else_plan,
+                    ..
+                } => RequiredMutationVisibility(subplan(then_plan).0 | subplan(else_plan).0),
+            }
+        }
+        exec::ExecOp::Repeat { plan } => plan
+            .body
+            .steps()
+            .iter()
+            .fold(RequiredMutationVisibility::NONE, |mask, step| {
+                RequiredMutationVisibility(mask.0 | required_for(&step.op).0)
+            }),
         exec::ExecOp::Filter { .. }
         | exec::ExecOp::Limit { .. }
         | exec::ExecOp::Skip { .. }
@@ -84,8 +123,6 @@ pub(in crate::execution::interpreter) fn required_for(
         | exec::ExecOp::Project { .. }
         | exec::ExecOp::Aggregate { .. }
         | exec::ExecOp::Variable { .. }
-        | exec::ExecOp::Branch { .. }
-        | exec::ExecOp::Repeat { .. }
         | exec::ExecOp::Mutation { .. }
         | exec::ExecOp::Merge { .. }
         | exec::ExecOp::ForEach { .. }

@@ -369,3 +369,25 @@ fn reverse_range_cost_charges_visited_rows_with_sub_microsecond_precision() {
         }
     }
 }
+
+#[test]
+fn graph_scans_charge_rows_at_empty_small_and_saturating_estimates() {
+    let profile = StorageCostProfile::default();
+    for count in [0, 1, 1000, u64::MAX] {
+        let rows = EstimatedRows::rows(count);
+        let label = profile.label_scan(rows);
+        let elements = profile.element_scan(rows);
+        assert_eq!(label.object_reads, count.saturating_add(1));
+        assert_eq!(label.authoritative_graph_reads, count);
+        assert_eq!(label.range_nexts, 0);
+        assert_eq!(elements.object_reads, count);
+        assert_eq!(elements.authoritative_graph_reads, count);
+        assert_eq!(elements.range_nexts, count);
+        assert_eq!(
+            label.peak_memory,
+            profile.default_materialized_row_bytes.saturating_mul(count)
+        );
+        assert!(label.latency >= profile.bitmap_equality_lookup(rows).latency);
+        assert!(elements.latency >= profile.range_scan(rows).latency);
+    }
+}

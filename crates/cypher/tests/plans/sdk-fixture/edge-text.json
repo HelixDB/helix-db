@@ -1,0 +1,1 @@
+{"request_type":"read","query_name":null,"query":{"read":{"entries":[{"query":{"name":"edge_text_hits","root":{"edge_properties":{"input":{"text_search_edges":{"label":"FOLLOWS","property":"note","query_text":{"value":{"string":"follows"}},"k":{"literal":5}}}}}}}],"returns":["edge_text_hits"]}}}

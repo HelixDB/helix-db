@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// `package.json`; exact pins prevent a warm cache and a cold install from
 /// evaluating different query-envelope implementations.
 const SDK_PACKAGE: &str = "@helix-db/helix-db";
-const SDK_VERSION: &str = "3.0.4";
+const SDK_VERSION: &str = "3.1.0";
 const VERSION_MARKER: &str = ".sdk-version";
 const INSTALL_LOCK: &str = ".ts-runtime-install-lock";
 const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);

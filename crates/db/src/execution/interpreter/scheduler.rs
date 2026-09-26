@@ -19,6 +19,7 @@ impl<'db> ExecutionContext<'db> {
         steps: &[exec::ExecStep],
         order: exec::ExecExecutionOrder,
         root: exec::ExecStepId,
+        program: &exec::ExecProgram,
     ) -> Result<()> {
         self.initialize_step_output_uses(steps, root)?;
         let by_id = steps
@@ -28,14 +29,60 @@ impl<'db> ExecutionContext<'db> {
 
         for stage in order.stages() {
             self.check_execution_deadline()?;
+            if stage
+                .iter()
+                .any(|id| program.is_absorbed(id) || program.region(id).is_some())
+            {
+                if let exec::ExecExecutionStage::Parallel(parallel) = stage {
+                    let isolated = stage
+                        .iter()
+                        .filter(|id| !program.is_absorbed(*id))
+                        .all(|id| {
+                            program.region(id).map_or_else(
+                                || is_parallel_isolated_step(by_id[&id]),
+                                |region| {
+                                    region
+                                        .steps()
+                                        .iter()
+                                        .all(|member| is_parallel_isolated_step(by_id[member]))
+                                },
+                            )
+                        });
+                    if isolated
+                        && !self.has_active_write_tx()
+                        && !self.request_read_view_requires_serial_stages()
+                    {
+                        self.execute_parallel_pull_stage(stage, &by_id, program, parallel.policy())
+                            .await?;
+                        continue;
+                    }
+                }
+                for id in stage.iter() {
+                    if program.is_absorbed(id) {
+                        continue;
+                    }
+                    let step = step_by_id(&by_id, id)?;
+                    let value = match program.region(id) {
+                        Some(region) => {
+                            let control = self.execution_control.clone();
+                            control
+                                .run(Box::pin(self.execute_pull_region(region, &by_id)))
+                                .await?
+                        }
+                        None => Box::pin(self.execute_step(step)).await?,
+                    };
+                    self.record_step_output(step, value);
+                }
+                continue;
+            }
             match StageExecutionMode::for_stage(stage, &by_id)? {
                 StageExecutionMode::Serial => {
-                    self.execute_serial_stage(stage, &by_id).await?;
+                    Box::pin(self.execute_serial_stage(stage, &by_id)).await?;
                 }
                 StageExecutionMode::ParallelIsolated(policy) => {
                     if self.has_active_write_tx() || self.request_read_view_requires_serial_stages()
                     {
-                        self.execute_serial_stage(stage, &by_id).await?;
+                        Box::pin(self.execute_serial_stage(stage, &by_id)).await?;
                     } else {
                         self.execute_parallel_isolated_stage(stage, &by_id, policy)
                             .await?;
@@ -54,7 +101,7 @@ impl<'db> ExecutionContext<'db> {
         for id in stage.iter() {
             self.check_execution_deadline()?;
             let step = step_by_id(by_id, id)?;
-            let value = self.execute_step(step).await?;
+            let value = Box::pin(self.execute_step(step)).await?;
             self.check_execution_deadline()?;
             self.record_step_output(step, value);
         }
@@ -90,8 +137,58 @@ impl<'db> ExecutionContext<'db> {
         Ok(())
     }
 
+    async fn execute_parallel_pull_stage(
+        &mut self,
+        stage: &exec::ExecExecutionStage,
+        by_id: &BTreeMap<exec::ExecStepId, &exec::ExecStep>,
+        program: &exec::ExecProgram,
+        policy: exec::ExecParallelStagePolicy,
+    ) -> Result<()> {
+        let ids = stage
+            .iter()
+            .filter(|id| !program.is_absorbed(*id))
+            .collect::<Vec<_>>();
+        for chunk in ids.chunks(policy.max_concurrency().get()) {
+            let mut futures = Vec::new();
+            for id in chunk {
+                let step = step_by_id(by_id, *id)?;
+                let region = program.region(*id);
+                let mut uses = runtime_context::StepOutputUsePlan::default();
+                for member in region.map_or(std::slice::from_ref(id), exec::ExecPullRegion::steps) {
+                    for (dependency, count) in step_output_references(by_id[member])?.iter() {
+                        add_output_uses(&mut uses, *dependency, *count)?;
+                    }
+                }
+                let mut context = self.parallel_context(step, uses)?;
+                futures.push(async move {
+                    let control = context.execution_control.clone();
+                    let value = match region {
+                        Some(region) => {
+                            control
+                                .run(Box::pin(context.execute_pull_region(region, by_id)))
+                                .await?
+                        }
+                        None => Box::pin(context.execute_step(step)).await?,
+                    };
+                    Ok::<_, HelixDbError>(CompletedStep::new(step, value))
+                });
+            }
+            for completed in future::try_join_all(futures).await? {
+                self.record_step_output(completed.step, completed.value);
+            }
+        }
+        Ok(())
+    }
+
     fn parallel_step_context(&mut self, step: &exec::ExecStep) -> Result<Self> {
-        let step_output_uses = step_output_references(step)?;
+        self.parallel_context(step, step_output_references(step)?)
+    }
+
+    fn parallel_context(
+        &mut self,
+        step: &exec::ExecStep,
+        step_output_uses: runtime_context::StepOutputUsePlan,
+    ) -> Result<Self> {
         let mut step_outputs = ExecutionValueStore::default();
         for (dependency, consumed) in step_output_uses.iter() {
             let remaining = self.step_output_uses.get_mut(dependency).ok_or_else(|| {
@@ -142,6 +239,8 @@ impl<'db> ExecutionContext<'db> {
             execution_control: self.execution_control.clone(),
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
+            #[cfg(test)]
+            pull_work: std::sync::Arc::clone(&self.pull_work),
             #[cfg(test)]
             range_reads: std::sync::Arc::clone(&self.range_reads),
             #[cfg(test)]
@@ -286,6 +385,8 @@ fn is_parallel_isolated_step(step: &exec::ExecStep) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod pull_regions;
+
     use helix_planner::{context, exec, ir, properties, trace};
 
     use super::super::runtime_context;
@@ -502,7 +603,12 @@ mod tests {
         ));
 
         context
-            .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+            .execute_steps(
+                plan.steps(),
+                plan.execution_order(),
+                plan.root(),
+                plan.execution_program(),
+            )
             .await
             .expect("active transaction executes the parallel stage serially");
 
@@ -537,7 +643,12 @@ mod tests {
         assert!(context.request_read_view_requires_serial_stages());
 
         context
-            .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+            .execute_steps(
+                plan.steps(),
+                plan.execution_order(),
+                plan.root(),
+                plan.execution_program(),
+            )
             .await
             .expect("writer transaction executes the parallel stage serially");
 

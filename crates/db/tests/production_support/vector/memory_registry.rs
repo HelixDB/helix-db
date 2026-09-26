@@ -91,12 +91,103 @@ fn cleanup_authority() -> ValidatedVectorCleanupAuthority {
     .unwrap()
 }
 
+/// Retention must obey the same commit and retirement fences as publication.
+async fn run_retention_contracts() {
+    let registry = VectorCacheRegistry::default();
+    let handle = validated(1);
+    let budget = store::VectorMemoryAdmissionBudget::Bounded(4096);
+    let VectorCacheHydration::Initial(initial) = registry.prepare_hydration(&handle, budget) else {
+        panic!("new entry needs initial hydration");
+    };
+    let resident = store(&VectorCacheIdentity::from_validated(&handle));
+    let seq = resident.visible_seq();
+    assert!(initial.finish(resident.clone()).await);
+    for _ in 0..3 {
+        let VectorCacheHydration::Refresh(mut refresh) =
+            registry.prepare_hydration(&handle, budget)
+        else {
+            panic!("retention releases its reservation");
+        };
+        assert_eq!(
+            refresh.retain_if_current(seq).await,
+            Some(resident.estimated_bytes())
+        );
+        assert!(Arc::ptr_eq(
+            &resident,
+            registry.read_guard_for(&handle).unwrap().store()
+        ));
+    }
+    for (requested, sequence) in [
+        (budget, seq + 1),
+        (store::VectorMemoryAdmissionBudget::Bounded(0), seq),
+        (store::VectorMemoryAdmissionBudget::Unbounded, seq),
+    ] {
+        let VectorCacheHydration::Refresh(mut refresh) =
+            registry.prepare_hydration(&handle, requested)
+        else {
+            panic!("changed request reserves refresh");
+        };
+        assert_eq!(refresh.retain_if_current(sequence).await, None);
+        // Cancellation cannot update the successful hydration metadata.
+        drop(refresh);
+        let VectorCacheHydration::Refresh(mut retry) = registry.prepare_hydration(&handle, budget)
+        else {
+            panic!("cancelled refresh is retryable");
+        };
+        assert!(retry.retain_if_current(seq).await.is_some());
+    }
+    let VectorCacheHydration::Refresh(mut refresh) = registry.prepare_hydration(&handle, budget)
+    else {
+        panic!("ready entry reserves refresh");
+    };
+    assert!(matches!(
+        registry.prepare_hydration(&handle, budget),
+        VectorCacheHydration::Unavailable(VectorCacheLifecycle::Ready)
+    ));
+    refresh.entry.pending_dirty.bump_generation();
+    assert_eq!(refresh.retain_if_current(seq).await, None);
+    let stale = store(&VectorCacheIdentity::from_validated(&handle));
+    assert!(!refresh.finish(stale).await);
+    let VectorCacheHydration::Refresh(mut retry) = registry.prepare_hydration(&handle, budget)
+    else {
+        panic!("commit-conflicted refresh is retryable");
+    };
+    // Even with a matching snapshot and reservation generation, the published
+    // store's older dirty generation prevents retention.
+    assert_eq!(retry.retain_if_current(seq).await, None);
+    assert!(
+        retry
+            .finish(store(&VectorCacheIdentity::from_validated(&handle)))
+            .await
+    );
+    let VectorCacheHydration::Refresh(mut current) = registry.prepare_hydration(&handle, budget)
+    else {
+        panic!("successful retry becomes current");
+    };
+    assert!(current.retain_if_current(seq).await.is_some());
+    let VectorCacheHydration::Refresh(mut retiring) = registry.prepare_hydration(&handle, budget)
+    else {
+        panic!("ready entry reserves refresh");
+    };
+    let retirement = registry.retire(&handle);
+    tokio::pin!(retirement);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut retirement)
+            .await
+            .is_err()
+    );
+    assert_eq!(retiring.retain_if_current(seq).await, None);
+    drop(retiring);
+    assert_eq!(retirement.await, VectorCacheRetirement::ClosedResident);
+}
+
 /// Exercises cache identity, hydration, refresh, read-guard, retirement, and commit arms.
 ///
 /// The owning module re-exports this runner only under `production-coverage`.
 /// The integration harness invokes it as one contract so the measured lines
 /// belong to production modules rather than to this support source.
 pub(crate) async fn run() {
+    run_retention_contracts().await;
     let first = VectorCacheIdentity::from_validated(&validated(1));
     let same = VectorCacheIdentity::from_validated(&validated(1));
     let successor = VectorCacheIdentity::from_validated(&validated(2));
@@ -220,7 +311,7 @@ pub(crate) async fn run() {
         let (entry, owns_hydration) = registry.entry_for(&handle);
         assert!(owns_hydration);
         assert!(entry.finish_hydration(Arc::clone(&store)));
-        let writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let writes = super::super::commit::VectorCacheWriteSet::default();
         writes.dirty_rows_for(&handle).mark_node_dirty(7);
         let write = writes.entries().pop().unwrap();
         let aborted = registry.prepare_commit(&write).unwrap();
@@ -275,7 +366,7 @@ pub(crate) async fn run() {
         assert!(entry.finish_hydration(Arc::clone(&resident)));
         let guard = entry.acquire_read_guard().unwrap();
 
-        let writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let writes = super::super::commit::VectorCacheWriteSet::default();
         let dirty_rows = writes.dirty_rows_for(&handle);
         dirty_rows.mark_node_dirty(7);
         dirty_rows.mark_upper_neighbors_dirty(2, 9);
@@ -302,13 +393,15 @@ pub(crate) async fn run() {
     {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
-        let initial = match registry.prepare_hydration(&handle) {
+        let initial = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("absent identity must grant initial hydration")
             }
         };
-        let writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let writes = super::super::commit::VectorCacheWriteSet::default();
         writes.dirty_rows_for(&handle).mark_node_dirty(7);
         let pending = registry
             .prepare_commit(&writes.entries().pop().unwrap())
@@ -366,7 +459,7 @@ pub(crate) async fn run() {
             registry.read_guard_for(&handle),
             Err(VectorCacheReadGuardError::Absent)
         ));
-        let empty_writes = super::super::write_cache::VectorCacheWriteSet::default();
+        let empty_writes = super::super::commit::VectorCacheWriteSet::default();
         let empty_write = empty_writes.dirty_rows_for(&handle);
         assert!(registry
             .prepare_commit(&empty_writes.entries().pop().unwrap())
@@ -378,7 +471,9 @@ pub(crate) async fn run() {
         let identity = VectorCacheIdentity::from_validated(&handle);
         assert!(!registry.forget_closed(&identity));
 
-        let initial = match registry.prepare_hydration(&handle) {
+        let initial = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("absent identity must grant initial hydration")
@@ -393,14 +488,16 @@ pub(crate) async fn run() {
         assert!(initial.finish(Arc::clone(&first)).await);
         assert!(!registry.forget_closed(&identity));
         let old_guard = registry.read_guard_for(&handle).unwrap();
-        let refresh = match registry.prepare_hydration(&handle) {
+        let refresh = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Refresh(refresh) => refresh,
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("ready identity must grant one refresh")
             }
         };
         assert!(matches!(
-            registry.prepare_hydration(&handle),
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded),
             VectorCacheHydration::Unavailable(VectorCacheLifecycle::Ready)
         ));
         let second = Arc::new(VectorMemoryStore::new(
@@ -422,14 +519,18 @@ pub(crate) async fn run() {
             b"second"
         );
 
-        let cancelled_refresh = match registry.prepare_hydration(&handle) {
+        let cancelled_refresh = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Refresh(refresh) => refresh,
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("ready identity must grant refresh")
             }
         };
         drop(cancelled_refresh);
-        let stale_refresh = match registry.prepare_hydration(&handle) {
+        let stale_refresh = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Refresh(refresh) => refresh,
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("cancelled refresh must release its reservation")
@@ -444,7 +545,9 @@ pub(crate) async fn run() {
         assert!(!stale_refresh.finish(Arc::clone(&stale)).await);
         assert!(stale.get_upper_vector(7).is_none());
 
-        let equal_refresh = match registry.prepare_hydration(&handle) {
+        let equal_refresh = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Refresh(refresh) => refresh,
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("ready identity must allow equal-sequence budget replacement")
@@ -467,7 +570,9 @@ pub(crate) async fn run() {
             b"second"
         );
 
-        let dirty_refresh = match registry.prepare_hydration(&handle) {
+        let dirty_refresh = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Refresh(refresh) => refresh,
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("ready identity must grant a fenced refresh")
@@ -487,7 +592,9 @@ pub(crate) async fn run() {
     {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
-        let initial = match registry.prepare_hydration(&handle) {
+        let initial = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("absent identity must grant initial hydration")
@@ -495,7 +602,7 @@ pub(crate) async fn run() {
         };
         drop(initial);
         assert!(matches!(
-            registry.prepare_hydration(&handle),
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded),
             VectorCacheHydration::Unavailable(VectorCacheLifecycle::Closed)
         ));
         assert!(registry.forget_validated_closed(&handle));
@@ -504,7 +611,9 @@ pub(crate) async fn run() {
     {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
-        let initial = match registry.prepare_hydration(&handle) {
+        let initial = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("absent identity must grant initial hydration")
@@ -525,7 +634,9 @@ pub(crate) async fn run() {
     {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
-        let initial = match registry.prepare_hydration(&handle) {
+        let initial = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("absent identity must grant initial hydration")
@@ -545,7 +656,9 @@ pub(crate) async fn run() {
     {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
-        let initial = match registry.prepare_hydration(&handle) {
+        let initial = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("absent identity must grant initial hydration")
@@ -557,7 +670,9 @@ pub(crate) async fn run() {
             1,
         ));
         assert!(initial.finish(first).await);
-        let refresh = match registry.prepare_hydration(&handle) {
+        let refresh = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Refresh(refresh) => refresh,
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("ready identity must grant refresh")
@@ -590,7 +705,9 @@ pub(crate) async fn run() {
     {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
-        let initial = match registry.prepare_hydration(&handle) {
+        let initial = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("absent identity must grant initial hydration")
@@ -602,7 +719,9 @@ pub(crate) async fn run() {
             1,
         ));
         assert!(initial.finish(first).await);
-        let refresh = match registry.prepare_hydration(&handle) {
+        let refresh = match registry
+            .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        {
             VectorCacheHydration::Refresh(refresh) => refresh,
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Unavailable(_) => {
                 panic!("ready identity must grant refresh")

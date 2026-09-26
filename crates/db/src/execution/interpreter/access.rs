@@ -1,10 +1,10 @@
 mod dispatch;
 mod edge_candidates;
-mod expand;
+pub(super) mod expand;
 pub(in crate::execution::interpreter) use edge_candidates::Cursor as EdgeCursor;
 pub(in crate::execution::interpreter) use edge_candidates::IdBatch as EdgeIdBatch;
 mod indexes;
-mod kv;
+pub(super) mod kv;
 mod membership;
 mod params;
 mod range;

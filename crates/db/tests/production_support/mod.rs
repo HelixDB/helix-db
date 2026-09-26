@@ -68,6 +68,11 @@ pub use v1_migration::{
     V1RetirementFailpointObservation, V1SemanticRow, V1UniqueMigrationObservation,
 };
 
+/// Exercises typed permanent and transient driver failures without test-only code paths.
+pub async fn index_driver_failure_classification_contract() {
+    crate::index_lifecycle::outbox::driver_failure_classification_contract().await;
+}
+
 /// Runs graph-first legacy-definition migration contracts with one-row batches.
 pub async fn migration_definition_contracts() {
     crate::migrations::production_contracts::run_migration_contracts().await;
@@ -590,3 +595,7 @@ pub async fn vector_migration_scale_10m() {
 
 mod mixed_aggregation;
 pub use mixed_aggregation::mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values;
+/// Verifies unique batched reads validate inputs and owners and propagate storage errors.
+pub async fn secondary_unique_batch_contracts() {
+    crate::index_lifecycle::secondary::run_unique_batch_production_contracts().await;
+}

@@ -193,6 +193,29 @@ pub enum QueryErrorCode {
 }
 
 impl QueryErrorCode {
+    /// Whether database execution rejected caller-controlled input or mutation size.
+    ///
+    /// This is the shared classification for typed vector validation and active-text
+    /// admission errors. It excludes persisted-data corruption and storage failures;
+    /// request syntax and planner errors have their own transport classifications.
+    ///
+    /// ```
+    /// use helix_ast::error_code::QueryErrorCode;
+    /// assert!(QueryErrorCode::ActiveTextMutationLimitExceeded.is_invalid_database_input());
+    /// assert!(!QueryErrorCode::StorageError.is_invalid_database_input());
+    /// ```
+    #[must_use]
+    pub const fn is_invalid_database_input(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidVectorDimension
+                | Self::InvalidVectorComponent
+                | Self::VectorComponentMagnitudeExceeded
+                | Self::ZeroNormCosineVector
+                | Self::ActiveTextMutationLimitExceeded
+        )
+    }
+
     /// Every code in the stable public catalog.
     pub const ALL: &'static [Self] = &[
         Self::InvalidRequest,
@@ -434,6 +457,25 @@ mod tests {
                 *code
             );
         }
+    }
+
+    #[test]
+    fn database_input_classification_is_a_closed_subset_of_the_catalog() {
+        let classified: Vec<_> = QueryErrorCode::ALL
+            .iter()
+            .copied()
+            .filter(|code| code.is_invalid_database_input())
+            .collect();
+        assert_eq!(
+            classified,
+            vec![
+                QueryErrorCode::ActiveTextMutationLimitExceeded,
+                QueryErrorCode::InvalidVectorDimension,
+                QueryErrorCode::InvalidVectorComponent,
+                QueryErrorCode::VectorComponentMagnitudeExceeded,
+                QueryErrorCode::ZeroNormCosineVector,
+            ]
+        );
     }
 
     #[test]

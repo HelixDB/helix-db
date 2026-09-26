@@ -37,7 +37,7 @@ impl SecondaryIds {
 }
 
 impl<'db> ExecutionContext<'db> {
-    pub(super) async fn node_secondary_set_ids(
+    pub(in crate::execution::interpreter) async fn node_secondary_set_ids(
         &self,
         set: &exec::ExecNodeSecondarySetPlan,
         limit: Option<properties::PositiveUsize>,
@@ -47,7 +47,7 @@ impl<'db> ExecutionContext<'db> {
             .map(|ids| ids.into_vec(limit))
     }
 
-    pub(super) async fn edge_secondary_set_ids(
+    pub(in crate::execution::interpreter) async fn edge_secondary_set_ids(
         &self,
         set: &exec::ExecEdgeSecondarySetPlan,
         limit: Option<properties::PositiveUsize>,
@@ -55,6 +55,23 @@ impl<'db> ExecutionContext<'db> {
         self.edge_secondary_ids(set, limit)
             .await
             .map(|ids| ids.into_vec(limit))
+    }
+
+    pub(in crate::execution::interpreter) async fn node_secondary_bitmap(
+        &self,
+        set: &exec::ExecNodeSecondarySetPlan,
+    ) -> Result<bitmap::Bitmap> {
+        self.node_secondary_ids(set, None)
+            .await?
+            .into_bitmap(self.row_memory.as_ref())
+    }
+    pub(in crate::execution::interpreter) async fn edge_secondary_bitmap(
+        &self,
+        set: &exec::ExecEdgeSecondarySetPlan,
+    ) -> Result<bitmap::Bitmap> {
+        self.edge_secondary_ids(set, None)
+            .await?
+            .into_bitmap(self.row_memory.as_ref())
     }
 
     fn node_secondary_ids<'a>(
@@ -70,6 +87,26 @@ impl<'db> ExecutionContext<'db> {
                 )),
                 exec::ExecNodeSecondarySetPlan::Bitmap(bitmap) => {
                     self.node_bitmap(bitmap).await.map(SecondaryIds::Unordered)
+                }
+                exec::ExecNodeSecondarySetPlan::UniqueUnion { index, key, values } => {
+                    super::super::count::validate_node_equality_index(
+                        &index.metadata().index_id,
+                        key,
+                    )?;
+                    let values = super::super::count::literal::Batch::new(
+                        values.as_ref(),
+                        self.row_memory.as_ref(),
+                    )?;
+                    let ids = self
+                        .lookup_managed_equality_batch(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            &values,
+                            true,
+                        )
+                        .await?;
+                    self.check_execution_deadline()?;
+                    Ok(SecondaryIds::Unordered(ids))
                 }
                 exec::ExecNodeSecondarySetPlan::Unique {
                     lookup,

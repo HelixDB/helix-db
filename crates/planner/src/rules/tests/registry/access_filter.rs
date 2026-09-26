@@ -1,6 +1,133 @@
 use super::*;
 
 #[test]
+fn selective_equality_type_union_retains_full_cost_competition() {
+    let rules = SeedRuleSet::default();
+    let indexes = ["tenant", "type"].into_iter().fold(
+        catalog::IndexCatalogSnapshot::default(),
+        |indexes, property| {
+            indexes.with_node_eq(catalog::ScopedPropertyKey::try_new("Resource", property).unwrap())
+        },
+    );
+    let config = optimizer::OptimizerConfig::from_context(&crate::context::PlannerContext {
+        indexes,
+        ..Default::default()
+    });
+    let expr = node_access_filter_expr(
+        ir::NodeAccessPlan::LabelScan {
+            label: name("Resource"),
+        },
+        ir::PredicatePlan::new(helix_ast::expr::Predicate::and(vec![
+            helix_ast::expr::Predicate::eq("tenant", "one"),
+            helix_ast::expr::Predicate::or(vec![
+                helix_ast::expr::Predicate::eq("type", "pod"),
+                helix_ast::expr::Predicate::eq("type", "service"),
+            ]),
+        ]))
+        .unwrap(),
+    );
+    let result = optimize(&rules.optimizer(), expr, &config);
+    assert_eq!(result.guardrail(), None);
+    let candidates = result
+        .physical()
+        .iter()
+        .flat_map(|group| &group.alternatives)
+        .collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 2);
+    for entry in &candidates {
+        eprintln!(
+            "type union candidate: {:?} cost={:?}",
+            entry.alternative.expr, entry.alternative.cost
+        );
+    }
+    let indexed = candidates
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.alternative.expr,
+                physical::PhysicalExpr::Access { .. }
+            )
+        })
+        .unwrap();
+    assert_eq!(indexed.alternative.cost.latency.as_micros(), 6_020);
+    assert_eq!(indexed.alternative.cost.object_reads, 3);
+    assert_eq!(indexed.alternative.cost.multi_get_calls, 1);
+    assert_eq!(
+        result.best_alternative(result.root()).unwrap(),
+        &indexed.alternative
+    );
+}
+
+#[test]
+fn selective_equality_retains_full_cost_competition() {
+    let rules = SeedRuleSet::default();
+    let indexes = ["tenant", "type", "deleted"].into_iter().fold(
+        catalog::IndexCatalogSnapshot::default(),
+        |indexes, property| {
+            indexes.with_node_eq(catalog::ScopedPropertyKey::try_new("Resource", property).unwrap())
+        },
+    );
+    let config = optimizer::OptimizerConfig::from_context(&crate::context::PlannerContext {
+        indexes,
+        ..Default::default()
+    });
+    let expr = node_access_filter_expr(
+        ir::NodeAccessPlan::LabelScan {
+            label: name("Resource"),
+        },
+        ir::PredicatePlan::new(helix_ast::expr::Predicate::and(vec![
+            helix_ast::expr::Predicate::eq("tenant", "one"),
+            helix_ast::expr::Predicate::eq("type", "pod"),
+            helix_ast::expr::Predicate::eq("deleted", true),
+        ]))
+        .unwrap(),
+    );
+    let result = optimize(&rules.optimizer(), expr, &config);
+    assert_eq!(result.guardrail(), None);
+    for group in result.physical() {
+        for entry in &group.alternatives {
+            eprintln!(
+                "candidate {:?}: {:?} cost={:?}",
+                entry.id, entry.alternative.expr, entry.alternative.cost
+            );
+        }
+    }
+    let candidates = result
+        .physical()
+        .iter()
+        .flat_map(|group| &group.alternatives)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candidates.len(),
+        2,
+        "both scan and intersection must survive exploration"
+    );
+    let scan = candidates
+        .iter()
+        .find(|entry| matches!(entry.alternative.expr, physical::PhysicalExpr::Pipeline(_)))
+        .unwrap();
+    let indexed = candidates
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.alternative.expr,
+                physical::PhysicalExpr::Access { .. }
+            )
+        })
+        .unwrap();
+    assert_eq!(scan.alternative.cost.latency.as_micros(), 18_050);
+    assert_eq!(scan.alternative.cost.authoritative_graph_reads, 1000);
+    assert_eq!(indexed.alternative.cost.latency.as_micros(), 15_220);
+    assert_eq!(indexed.alternative.cost.object_reads, 3);
+    assert_eq!(indexed.alternative.cost.cpu_units, 70);
+    assert_eq!(indexed.alternative.cost.parallel_width, 1);
+    assert_eq!(
+        result.best_alternative(result.root()).unwrap(),
+        &indexed.alternative
+    );
+}
+
+#[test]
 fn seed_rule_set_explores_access_filter_before_access_implementation() {
     let rules = SeedRuleSet::default();
     let optimizer = rules.optimizer();

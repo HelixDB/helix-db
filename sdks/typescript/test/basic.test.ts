@@ -21,6 +21,7 @@ import {
   SourcePredicate,
   VectorDistanceMetric,
   WhenThen,
+  bytes,
   defineParams,
   g,
   param,
@@ -107,7 +108,12 @@ assert.deepEqual(parseJson('{"n":9223372036854775807,"nested":[-9223372036854775
 });
 
 assert.deepEqual(parsed(PropertyValue.null()), "null");
-assert.deepEqual(parsed(PropertyValue.bytes(new Uint8Array([1, 2]))), { bytes: [1, 2] });
+assert.deepEqual(parsed(PropertyValue.bytes(new Uint8Array([0, 255]))), { bytes: [0, 255] });
+assert.deepEqual(parsed(PropertyValue.from(bytes([0, 255]))), { bytes: [0, 255] });
+for (const value of [-1, 1.5, 256, "7", true]) {
+  assert.throws(() => PropertyValue.bytes([value] as never), /byte at index 0 must be an integer from 0 to 255/);
+  assert.throws(() => PropertyValue.from(bytes([value] as never)), /byte at index 0 must be an integer from 0 to 255/);
+}
 assert.deepEqual(parsed(PropertyInput.param("limit")), { expr: { param: "limit" } });
 assert.deepEqual(parsed(NodeRef.param("node_ids")), { param: "node_ids" });
 assert.deepEqual(parsed(QueryParamType.array(QueryParamType.array(QueryParamType.f64()))), { array: { array: "f64" } });
@@ -118,6 +124,23 @@ assert.equal(Object.isFrozen(writeBatch()), true);
 assert.equal(PropertyValue.string("x").asStr(), "x");
 assert.equal(PropertyValue.i64(1n).asI64(), 1n);
 assert.equal(DateTime.parseRfc3339("1969-12-31T23:59:59.999-00:00").toRfc3339(), "1969-12-31T23:59:59.999Z");
+assert.equal(DateTime.parseRfc3339("2026-04-05t12:34:56z").toRfc3339(), "2026-04-05T12:34:56.000Z");
+for (const value of ["2026-04-05", "2026-04-05T12:34:56", "2026-02-30T12:00:00Z", "2026-01-01T24:00:00Z"]) {
+  assert.throws(() => DateTime.parseRfc3339(value), TypeError);
+}
+assert.equal(DateTime.fromMillis(8_640_000_000_000_000n).toRfc3339(), "+275760-09-13T00:00:00.000Z");
+for (const millis of [8_640_000_000_000_001n, -8_640_000_000_000_001n]) {
+  assert.throws(
+    () => DateTime.fromMillis(millis).toRfc3339(),
+    (error: unknown) => {
+      assert.ok(error instanceof QueryError);
+      assert.equal(error.kind, "InvalidDateTimeParameter");
+      assert.equal(error.path, "datetime");
+      assert.equal(error.millis, millis);
+      return true;
+    },
+  );
+}
 
 assert.deepEqual(parsed(Expr.prop("a").add(Expr.val(1)).neg()), {
   neg: { expr: { add: { left: { property: "a" }, right: { constant: { i64: 1 } } } } },
@@ -461,3 +484,11 @@ assert.deepEqual(
     },
   },
 );
+
+const droppedEdges = g().e([1, 2]).drop();
+const droppedEdgeState: "edges" = droppedEdges.state;
+const droppedEdgeMode: "write" = droppedEdges.mode;
+assert.equal(droppedEdgeState, "edges");
+assert.equal(droppedEdgeMode, "write");
+assert.deepEqual(parsed(droppedEdges.intoAst()), { drop: { input: parsed(g().e([1, 2]).intoAst()) } });
+assert.equal(g().n(1).drop().state, "nodes");

@@ -211,18 +211,10 @@ async fn multi_get_restores_original_edge_order_after_sorted_physical_reads() {
 }
 
 #[test]
-fn limited_index_helpers_preserve_prefix_order_and_tighten_search_k() {
-    let mut ids = roaring::RoaringTreemap::new();
-    ids.insert(3);
-    ids.insert(1);
-    ids.insert(2);
-
-    assert_eq!(
-        limited_index_ids(ids.clone(), properties::PositiveUsize::new(2)),
-        vec![1, 2]
-    );
-    assert_eq!(limited_index_ids(ids, None), vec![1, 2, 3]);
+fn search_limits_tighten_search_k() {
     assert_eq!(limited_search_k(10, properties::PositiveUsize::new(4)), 4);
     assert_eq!(limited_search_k(3, properties::PositiveUsize::new(4)), 3);
     assert_eq!(limited_search_k(7, None), 7);
 }
+
+mod cursor_views;

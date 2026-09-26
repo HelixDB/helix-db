@@ -67,7 +67,7 @@ where
     AccessPhysicalContract::new(
         unbounded_range_access(F::all_scan_keyspace()),
         super::super::super::super::support::access_delivered(element),
-        storage.range_scan(storage.default_unknown_scan_rows),
+        storage.element_scan(storage.default_unknown_scan_rows),
         storage.default_unknown_scan_rows,
     )
 }
@@ -81,7 +81,7 @@ pub(super) fn label_scan_contract(
     AccessPhysicalContract::new(
         physical::PhysicalAccess::LabelScan,
         access_delivered_close(element),
-        storage.range_scan(rows),
+        storage.label_scan(rows),
         rows,
     )
 }
@@ -134,17 +134,21 @@ pub(super) fn equality_index_contract(
         access_delivered_with(input.element, cardinality),
         properties::KeyLocality::Close,
     );
-    if input.kind == EqualityIndexKind::NonUnique
-        && input.semantics == ir::EqualityIndexValueSemantics::Indexed
-    {
-        AccessPhysicalContract::new_batchable_equality(
+    if input.semantics == ir::EqualityIndexValueSemantics::Indexed {
+        AccessPhysicalContract::new_secondary(
             input.access,
             delivered,
             id_cost,
             storage.secondary_row_materialization(rows),
             rows,
+        )
+        .with_batchable_equality(
             input.index_id.clone(),
             input.key.clone(),
+            match input.kind {
+                EqualityIndexKind::Unique => catalog::IndexUniqueness::Unique,
+                EqualityIndexKind::NonUnique => catalog::IndexUniqueness::NonUnique,
+            },
         )
     } else {
         AccessPhysicalContract::new_secondary(

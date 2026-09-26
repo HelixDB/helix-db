@@ -4,7 +4,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { canonicalizeJson, parseJsonStructural, structuralJsonEqual } from "../../src/index.js";
-import { workspaceRoot } from "./paths.js";
+import { cargoTarget, workspaceRoot } from "./paths.js";
 import { cypherFixturePath, readCypherCases, verifyCypherResults } from "./cypher-results.js";
 import { parityProgress } from "./progress.js";
 
@@ -18,7 +18,6 @@ const rustManifest = join(workspaceRoot, "sdks", "rust", "Cargo.toml");
 const bindingManifest = join(workspaceRoot, "bindings", "uniffi", "Cargo.toml");
 const bindingConfig = join(workspaceRoot, "bindings", "uniffi", "uniffi.toml");
 const generatorManifest = join(workspaceRoot, "bindings", "uniffi-bindgen", "Cargo.toml");
-const cargoTarget = process.env.CARGO_TARGET_DIR ?? join(workspaceRoot, "target");
 const nativeLibrary = join(cargoTarget, "debug", nativeLibraryName());
 const temp = await mkdtemp(join(tmpdir(), "helixdb-embedded-parity-"));
 const sdks = ["rust", "typescript", "go", "python", "python-async"] as const;

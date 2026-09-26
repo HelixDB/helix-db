@@ -10,7 +10,10 @@ mod count;
 mod ddl;
 mod dependencies;
 mod dispatch;
+#[cfg(test)]
+mod early_termination_tests;
 mod mutation;
+mod pull;
 pub(crate) mod read_view;
 mod reserved;
 mod row_mode;
@@ -147,7 +150,12 @@ impl<'db> Interpreter<'db> {
 
         let result = self
             .ctx
-            .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+            .execute_steps(
+                plan.steps(),
+                plan.execution_order(),
+                plan.root(),
+                plan.execution_program(),
+            )
             .await;
         if let Err(err) = result {
             self.ctx.abort_request_write_scope();

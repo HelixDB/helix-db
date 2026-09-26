@@ -246,6 +246,8 @@ const scalarParameterTypes = spec.components?.schemas?.QueryParameterType?.oneOf
 const expectedScalarParameterTypes = [
   'bool',
   'date_time',
+  'f32',
+  'f64',
   'i64',
   'object',
   'string',
@@ -256,7 +258,7 @@ if (
   scalarParameterTypes.toSorted().join(',') !== expectedScalarParameterTypes.join(',')
 ) {
   errors.push(
-    'openapi.json: typed JSON parameters must omit bytes, f32, and f64',
+    'openapi.json: typed JSON parameters must include f32 and f64 and omit bytes',
   );
 }
 

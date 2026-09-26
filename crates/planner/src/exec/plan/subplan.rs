@@ -19,16 +19,20 @@ pub struct ExecutableSubplan {
     /// validation and skipped in serde because it is redundant with `steps`.
     #[serde(skip)]
     execution_order: ExecExecutionOrder,
+    #[serde(skip)]
+    program: crate::exec::ExecProgram,
 }
 
 impl ExecutableSubplan {
     /// Build and validate an executable subplan.
     pub fn new(steps: ir::AtLeast<ExecStep, 1>, root: ExecStepId) -> Result<Self, ExecPlanError> {
         let execution_order = execution_order(&steps, root)?;
+        let program = crate::exec::ExecProgram::derive(steps.as_ref(), &execution_order, root);
         Ok(Self {
             steps,
             root,
             execution_order,
+            program,
         })
     }
 
@@ -115,6 +119,11 @@ impl ExecutableSubplan {
     /// Root step.
     pub const fn root(&self) -> ExecStepId {
         self.root
+    }
+
+    /// Demand-driven regions derived from the validated steps.
+    pub const fn execution_program(&self) -> &crate::exec::ExecProgram {
+        &self.program
     }
 
     /// Deterministic interpreter-ready execution stages.

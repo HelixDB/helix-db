@@ -226,6 +226,57 @@ impl RuleApplicability {
         Self::RootRepeatImplementationCandidate
     }
 
+    /// Whether this rule's rewrite is the only route to a physical
+    /// alternative for the expressions it matches.
+    ///
+    /// A rewrite is required when its paired implementation rule returns
+    /// `NotApplicable` for exactly the shapes the rewrite matches, deferring
+    /// to the rewrite instead of implementing the unsimplified expression. The
+    /// optimizer must keep applying such rewrites after the time budget has
+    /// stopped optional exploration, or the memo group would reach selection
+    /// with no physical alternative. The required pairs are:
+    ///
+    /// - root branch/repeat over a direct empty input, implemented only via
+    ///   `RootControlFlowEmptyRule`;
+    /// - foldable access windows such as `limit(0)`, folded only by
+    ///   `AccessWindowRule`;
+    /// - provably redundant access distinct (point IDs, cardinality at most
+    ///   one), elided only by `AccessDistinctRule`;
+    /// - locally simplifiable access pipelines (adjacent distincts, empty
+    ///   source), simplified only by `AccessPipelineSimplificationRule`; and
+    /// - access filters over a direct empty access path, collapsed only by
+    ///   `AccessFilterSimplificationRule`.
+    ///
+    /// The match is exhaustive so adding an applicability variant forces an
+    /// explicit decision about whether its implementation rule defers.
+    pub const fn is_required_rewrite(&self) -> bool {
+        match self {
+            Self::RootControlFlowEmptyInputCandidate
+            | Self::AccessWindowRewriteCandidate
+            | Self::AccessDistinctNoopCandidate
+            | Self::AccessPipelineLocalSimplification
+            | Self::AccessFilterSimplificationCandidate => true,
+            Self::Any
+            | Self::LogicalKinds(_)
+            | Self::PureOpKinds(_)
+            | Self::PurePipelineLocalSimplification
+            | Self::PurePipelineStaticWindowComposition
+            | Self::AccessPipelineHeadOpKinds(_)
+            | Self::AccessFilterIndexCandidate
+            | Self::AccessOrderElisionCandidate
+            | Self::AccessOrderRangeDirectionCandidate
+            | Self::AccessSetCanonicalizationCandidate
+            | Self::AccessSetSubsumptionCandidate
+            | Self::AccessRangeIntersectionCandidate
+            | Self::AccessEqualityRangeIntersectionCandidate
+            | Self::AccessEqualityRangeUnionCandidate
+            | Self::AccessContradictionCandidate
+            | Self::RootBranchImplementationCandidate
+            | Self::RootRepeatImplementationCandidate
+            | Self::AccessSourceKinds(_) => false,
+        }
+    }
+
     /// Match one access source kind.
     pub fn access_source_only(kind: logical::AccessSourceKind) -> Self {
         Self::AccessSourceKinds(RuleAccessSourceKinds::one(kind))

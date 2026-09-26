@@ -767,7 +767,12 @@ pub(crate) async fn run_scheduler_and_projection_contracts() {
     ));
     let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
     context
-        .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+        .execute_steps(
+            plan.steps(),
+            plan.execution_order(),
+            plan.root(),
+            plan.execution_program(),
+        )
         .await
         .expect("fan-out/fan-in plan executes");
     assert!(context.step_outputs.get(&id(4)).is_some());
@@ -789,7 +794,12 @@ pub(crate) async fn run_scheduler_and_projection_contracts() {
     .expect("wide scheduler plan validates");
     let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
     context
-        .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+        .execute_steps(
+            plan.steps(),
+            plan.execution_order(),
+            plan.root(),
+            plan.execution_program(),
+        )
         .await
         .expect("wide scheduler plan executes");
     assert!(context.step_outputs.get(&id(6)).is_some());
@@ -1150,6 +1160,25 @@ pub(crate) async fn run_request_read_view_guards() {
                 .expect_err("prefix scans require a request view"),
             "storage prefix scan escaped its request read view",
         ),
+        (
+            context
+                .open_raw_range(
+                    Bytes::from_static(b"guard-range-start"),
+                    Bytes::from_static(b"guard-range-end"),
+                )
+                .await
+                .err()
+                .expect("resumable range scans require a request view"),
+            "storage range scan escaped its request read view",
+        ),
+        (
+            context
+                .open_raw_prefix(Bytes::from_static(b"guard-prefix"))
+                .await
+                .err()
+                .expect("resumable prefix scans require a request view"),
+            "storage prefix scan escaped its request read view",
+        ),
     ] {
         let HelixDbError::InvariantViolation(message) = error else {
             panic!("request-view guard returned the wrong error: {error}");
@@ -1204,7 +1233,7 @@ pub(crate) async fn run_request_read_view_guards() {
                 key: range_key.clone(),
                 range: ir::IndexRange::All,
             }),
-            "node secondary range lookup escaped its request read view",
+            "range cursor escaped request read view",
         ),
         (
             exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::RangeIndex {
@@ -1215,7 +1244,7 @@ pub(crate) async fn run_request_read_view_guards() {
                 key: range_key,
                 range: ir::IndexRange::All,
             }),
-            "edge secondary range lookup escaped its request read view",
+            "range cursor escaped request read view",
         ),
     ] {
         let error = context

@@ -1,178 +1,36 @@
-//! Executable graph-access dispatch.
-//!
-//! This module owns the element-specific interpretation of planner
-//! `ExecAccessPlan` values. Storage row materialization, runtime parameter
-//! extraction, index lookups, range scans, and search reads stay in sibling
-//! access modules so the planner-facing dispatch remains small.
-
-use helix_planner::{exec, ir, properties};
-
+//! Planner-selected access dispatch. Incremental sources share the pull reader;
+//! ranking and unordered set preparation retain their existing native primitives.
 use super::super::{ExecutionContext, ExecutionValue};
-use super::indexes::limited_index_ids;
 use super::search::SearchReadLimit;
 use crate::config::{TextElementType, VectorElementType};
-use crate::error::Result;
+use crate::error::{HelixDbError, Result};
+use helix_planner::{exec, properties};
 
-impl<'db> ExecutionContext<'db> {
+impl ExecutionContext<'_> {
     pub(in crate::execution::interpreter) async fn execute_access(
         &mut self,
         plan: &exec::ExecAccessPlan,
     ) -> Result<ExecutionValue> {
-        self.execute_limited_access(plan, None).await
+        self.check_execution_deadline()?;
+        self.execute_access_cursor(plan).await
     }
 
-    async fn execute_limited_access(
+    pub(in crate::execution::interpreter) async fn execute_prepared_access(
         &mut self,
         plan: &exec::ExecAccessPlan,
         limit: Option<properties::PositiveUsize>,
     ) -> Result<ExecutionValue> {
-        self.check_execution_deadline()?;
-        let mut source = plan;
-        let mut bounds = Vec::new();
-        while let exec::ExecAccessPlan::Limited(limited) = source {
-            bounds.push(limited.limit());
-            source = limited.source();
-        }
-        let mut resolved = limit.map_or(usize::MAX, properties::PositiveUsize::get);
-        for bound in bounds.iter().rev() {
-            let value = match bound {
-                exec::ExecAccessLimit::Zero => 0,
-                exec::ExecAccessLimit::Static(value) => value.get(),
-                exec::ExecAccessLimit::Dynamic(expr) => super::super::stream::eval_stream_bound(
-                    &ir::StreamBoundPlan::Expr(expr.clone()),
-                    &self.params,
-                )?,
-            };
-            resolved = resolved.min(value);
-        }
-        if resolved == 0 {
-            return Ok(ExecutionValue::Stream(Vec::new()));
-        }
-        let limit = if bounds.is_empty() {
-            limit
-        } else {
-            Some(properties::PositiveUsize::at_least_one(resolved))
-        };
-        match source {
-            exec::ExecAccessPlan::Node(plan) => self.execute_node_access(plan, limit).await,
-            exec::ExecAccessPlan::Edge(plan) => self.execute_edge_access(plan, limit).await,
-            exec::ExecAccessPlan::Limited(_) => unreachable!("all bound layers were resolved"),
-        }
-    }
-
-    async fn execute_node_access(
-        &mut self,
-        plan: &exec::ExecNodeAccessPlan,
-        limit: Option<properties::PositiveUsize>,
-    ) -> Result<ExecutionValue> {
-        let mut ids = match plan {
-            exec::ExecNodeAccessPlan::Empty => Vec::new(),
-            exec::ExecNodeAccessPlan::FromParam { param } => self.param_ids(param)?,
-            exec::ExecNodeAccessPlan::FromVar { variable } => {
-                self.access_variable_nodes(variable)?
-            }
-            exec::ExecNodeAccessPlan::AllScan => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, limit);
-                read.await?
-            }
-            exec::ExecNodeAccessPlan::LabelScan { label } => limited_index_ids(
-                self.lookup_equality_index_set(
-                    "$label",
-                    &crate::encoding::property::property_value::PropertyValue::String(
-                        label.as_ref().to_string(),
-                    ),
-                )
-                .await?,
-                limit,
-            ),
-            exec::ExecNodeAccessPlan::Bitmap { bitmap } => {
-                let ids = limited_index_ids(self.node_bitmap(bitmap).await?, limit);
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::Unique {
-                lookup,
-                verification,
-            } => {
-                let ids = self
-                    .verified_node_unique_owner(lookup, verification)
-                    .await?
-                    .into_iter()
-                    .collect();
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::AuthoritativeScan { predicate } => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
-                let ids = read.await?;
-                let mut rows = Vec::new();
-                for id in ids {
-                    let row =
-                        super::super::ExecutionRow::current(super::super::ElementRef::Node(id));
-                    let matches = match predicate {
-                        exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                            self.scoped_null_matches(&row, key).await?
-                        }
-                        exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                            self.eval_predicate_plan(&row, predicate).await?
-                        }
-                    };
-                    if matches {
-                        rows.push(row);
-                        if limit.is_some_and(|limit| rows.len() >= limit.get()) {
-                            break;
-                        }
-                    }
-                }
-                return Ok(ExecutionValue::Stream(rows));
-            }
-            exec::ExecNodeAccessPlan::DynamicEquality { index, key, param } => {
-                super::super::count::validate_node_equality_index(&index.index_id, key)?;
-                let value = self.index_value(&ir::IndexValue::Param(param.clone()))?;
-                let read = self.lookup_managed_equality_union(
-                    crate::index_lifecycle::IndexElementKind::Node,
-                    key,
-                    core::slice::from_ref(&value),
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::DynamicMembership { index, key, values } => {
-                super::super::count::validate_node_equality_index(&index.index_id, key)?;
-                let read = self.dynamic_membership_ids(
-                    crate::index_lifecycle::IndexElementKind::Node,
-                    key,
-                    values,
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::RangeIndex {
-                key,
-                range,
-                iteration,
-                ..
-            } => {
-                let ids = self
-                    .range_index_ids(
-                        crate::index_lifecycle::IndexElementKind::Node,
-                        key,
-                        range,
-                        *iteration,
-                        &[],
-                        limit,
-                    )
-                    .await?;
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::SecondarySet { set } => {
+        match plan {
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::SecondarySet { set }) => {
                 let ids = self.node_secondary_set_ids(set, limit).await?;
-                return self.verified_node_rows(ids);
+                self.verified_node_rows(ids)
             }
-            exec::ExecNodeAccessPlan::VectorSearch {
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::VectorSearch {
                 key,
                 index,
                 query_vector,
                 k,
-            } => {
+            }) => {
                 let mut results = self
                     .vector_search_results(
                         VectorElementType::Node,
@@ -184,14 +42,14 @@ impl<'db> ExecutionContext<'db> {
                     )
                     .await?;
                 truncate_search_results(&mut results, limit);
-                return self.node_search_rows(results).await;
+                self.node_search_rows(results).await
             }
-            exec::ExecNodeAccessPlan::TextSearch {
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::TextSearch {
                 key,
                 index,
                 query_text,
                 k,
-            } => {
+            }) => {
                 let results = self
                     .text_search_hits(
                         TextElementType::Node,
@@ -202,109 +60,18 @@ impl<'db> ExecutionContext<'db> {
                         SearchReadLimit::new(k, limit),
                     )
                     .await?;
-                return self.node_text_search_rows(results).await;
+                self.node_text_search_rows(results).await
             }
-        };
-        truncate_ids(&mut ids, limit);
-        self.node_rows(ids).await
-    }
-
-    async fn execute_edge_access(
-        &mut self,
-        plan: &exec::ExecEdgeAccessPlan,
-        limit: Option<properties::PositiveUsize>,
-    ) -> Result<ExecutionValue> {
-        let mut ids = match plan {
-            exec::ExecEdgeAccessPlan::Empty => Vec::new(),
-            exec::ExecEdgeAccessPlan::FromParam { param } => self.param_ids(param)?,
-            exec::ExecEdgeAccessPlan::FromVar { variable } => {
-                self.access_variable_edges(variable)?
-            }
-            exec::ExecEdgeAccessPlan::AllScan => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, limit);
-                read.await?
-            }
-            exec::ExecEdgeAccessPlan::LabelScan { label } => limited_index_ids(
-                self.lookup_global_edge_label_index(label.as_ref()).await?,
-                limit,
-            ),
-            exec::ExecEdgeAccessPlan::Bitmap { bitmap } => {
-                let ids = limited_index_ids(self.edge_bitmap(bitmap).await?, limit);
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::AuthoritativeScan { predicate } => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
-                let ids = read.await?;
-                let mut rows = Vec::new();
-                for id in ids {
-                    let row =
-                        super::super::ExecutionRow::current(super::super::ElementRef::Edge(id));
-                    let matches = match predicate {
-                        exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                            self.scoped_null_matches(&row, key).await?
-                        }
-                        exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                            self.eval_predicate_plan(&row, predicate).await?
-                        }
-                    };
-                    if matches {
-                        rows.push(row);
-                        if limit.is_some_and(|limit| rows.len() >= limit.get()) {
-                            break;
-                        }
-                    }
-                }
-                return Ok(ExecutionValue::Stream(rows));
-            }
-            exec::ExecEdgeAccessPlan::DynamicEquality { index, key, param } => {
-                super::super::count::validate_edge_equality_index(&index.index_id, key)?;
-                let value = self.index_value(&ir::IndexValue::Param(param.clone()))?;
-                let read = self.lookup_managed_equality_union(
-                    crate::index_lifecycle::IndexElementKind::Edge,
-                    key,
-                    core::slice::from_ref(&value),
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::DynamicMembership { index, key, values } => {
-                super::super::count::validate_edge_equality_index(&index.index_id, key)?;
-                let read = self.dynamic_membership_ids(
-                    crate::index_lifecycle::IndexElementKind::Edge,
-                    key,
-                    values,
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::RangeIndex {
-                key,
-                range,
-                iteration,
-                ..
-            } => {
-                let ids = self
-                    .range_index_ids(
-                        crate::index_lifecycle::IndexElementKind::Edge,
-                        key,
-                        range,
-                        *iteration,
-                        &[],
-                        limit,
-                    )
-                    .await?;
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::SecondarySet { set } => {
+            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::SecondarySet { set }) => {
                 let ids = self.edge_secondary_set_ids(set, limit).await?;
-                return self.verified_edge_rows(ids);
+                self.verified_edge_rows(ids)
             }
-            exec::ExecEdgeAccessPlan::VectorSearch {
+            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::VectorSearch {
                 key,
                 index,
                 query_vector,
                 k,
-            } => {
+            }) => {
                 let read = self.vector_search_results(
                     VectorElementType::Edge,
                     &key.label,
@@ -315,14 +82,14 @@ impl<'db> ExecutionContext<'db> {
                 );
                 let mut results = read.await?;
                 truncate_search_results(&mut results, limit);
-                return self.edge_search_rows(results).await;
+                self.edge_search_rows(results).await
             }
-            exec::ExecEdgeAccessPlan::TextSearch {
+            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::TextSearch {
                 key,
                 index,
                 query_text,
                 k,
-            } => {
+            }) => {
                 let read = self.text_search_hits(
                     TextElementType::Edge,
                     &key.label,
@@ -332,17 +99,14 @@ impl<'db> ExecutionContext<'db> {
                     SearchReadLimit::new(k, limit),
                 );
                 let results = read.await?;
-                return self.edge_text_search_rows(results).await;
+                self.edge_text_search_rows(results).await
             }
-        };
-        truncate_ids(&mut ids, limit);
-        self.edge_rows(ids).await
-    }
-}
-
-fn truncate_ids(ids: &mut Vec<u64>, limit: Option<properties::PositiveUsize>) {
-    if let Some(limit) = limit {
-        ids.truncate(limit.get());
+            exec::ExecAccessPlan::Node(_)
+            | exec::ExecAccessPlan::Edge(_)
+            | exec::ExecAccessPlan::Limited(_) => Err(HelixDbError::InvariantViolation(
+                "incremental source reached prepared access".into(),
+            )),
+        }
     }
 }
 
@@ -464,17 +228,7 @@ pub(super) mod tests {
     }
 
     #[cfg_attr(test, test)]
-    fn truncate_ids_applies_optional_positive_limit() {
-        let mut ids = vec![1, 2, 3, 4];
-        truncate_ids(&mut ids, Some(positive(2)));
-        assert_eq!(ids, vec![1, 2]);
-
-        truncate_ids(&mut ids, None);
-        assert_eq!(ids, vec![1, 2]);
-
-        truncate_ids(&mut ids, Some(positive(10)));
-        assert_eq!(ids, vec![1, 2]);
-
+    fn truncate_search_results_applies_optional_positive_limit() {
         let mut results = vec![
             crate::search::vector::TypedVectorSearchResult::from_physical(
                 crate::encoding::v2::values::indexes::vector::VectorEntityKind::Node,
@@ -1244,7 +998,7 @@ pub(super) mod tests {
 
     #[cfg(all(feature = "production-coverage", not(test)))]
     pub(in crate::execution::interpreter::access) async fn run_production_contracts() {
-        truncate_ids_applies_optional_positive_limit();
+        truncate_search_results_applies_optional_positive_limit();
         access_dispatch_covers_node_equality_and_edge_source_variants().await;
         exact_access_dispatch_covers_bitmap_unique_scan_and_dynamic_families().await;
         exact_access_dispatch_rejects_each_invalid_dynamic_and_set_driver_contract().await;

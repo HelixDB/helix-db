@@ -144,7 +144,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         &stats,
     );
 
-    assert_eq!(label.cost, storage.range_scan(cost::EstimatedRows::rows(4)));
+    assert_eq!(label.cost, storage.label_scan(cost::EstimatedRows::rows(4)));
     assert_eq!(
         equality.cost,
         storage

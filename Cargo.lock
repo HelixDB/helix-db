@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "helix-cli"
-version = "3.1.2"
+version = "3.3.0"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -2122,10 +2122,12 @@ dependencies = [
 name = "helix-cypher"
 version = "0.1.0"
 dependencies = [
+ "helix-ast",
  "helix-planner",
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]

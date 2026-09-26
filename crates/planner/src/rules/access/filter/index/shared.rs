@@ -185,6 +185,15 @@ where
                 branches.try_map_ref(|atoms| index_source_for_atoms::<F>(label, atoms, indexes))?;
             Ok(F::union_source(sources.into_iter().collect()))
         }
+        AccessFilterIndexPlan::ConjunctionWithDisjunction { shared, branches } => {
+            let shared = index_source_for_atoms::<F>(label, shared, indexes)?;
+            let branches =
+                branches.try_map_ref(|atoms| index_source_for_atoms::<F>(label, atoms, indexes))?;
+            Ok(F::intersection_source(vec![
+                shared,
+                F::union_source(branches.into_iter().collect()),
+            ]))
+        }
     }
 }
 

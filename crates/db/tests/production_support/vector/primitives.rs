@@ -10,6 +10,7 @@ use std::borrow::{Borrow, Cow};
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 
+use super::hnsw::{model, randomness};
 use super::*;
 use crate::encoding::v2::values::indexes::vector::{ActiveScoreSemantic, VectorEntityKind};
 

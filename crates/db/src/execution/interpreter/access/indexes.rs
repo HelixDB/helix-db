@@ -5,7 +5,7 @@
 //! through the same stable request snapshot.
 
 use crate::query_resources::{self, bitmap};
-use helix_planner::{catalog, ir, properties};
+use helix_planner::{catalog, ir};
 use slatedb::DbReadOps;
 
 use super::super::stream::ast_to_db_value;
@@ -16,7 +16,10 @@ use crate::error::{HelixDbError, Result};
 use crate::HelixStorage;
 
 impl<'db> ExecutionContext<'db> {
-    pub(super) fn index_value(&self, value: &ir::IndexValue) -> Result<DbPropertyValue> {
+    pub(in crate::execution::interpreter) fn index_value(
+        &self,
+        value: &ir::IndexValue,
+    ) -> Result<DbPropertyValue> {
         match value {
             ir::IndexValue::Literal(value) => {
                 Ok(ast_to_db_value(value.as_property_value().clone()))
@@ -123,6 +126,17 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyKey,
         values: &[DbPropertyValue],
     ) -> Result<bitmap::Bitmap> {
+        self.lookup_managed_equality_batch(element_kind, key, values, false)
+            .await
+    }
+
+    pub(super) async fn lookup_managed_equality_batch(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyKey,
+        values: &[DbPropertyValue],
+        unique: bool,
+    ) -> Result<bitmap::Bitmap> {
         let identity = match secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,
@@ -141,6 +155,7 @@ impl<'db> ExecutionContext<'db> {
                 &active.txn,
                 handle,
                 values,
+                unique,
                 crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
             )
             .await;
@@ -155,6 +170,7 @@ impl<'db> ExecutionContext<'db> {
                     view,
                     handle,
                     values,
+                    unique,
                     view.storage_compatibility(),
                 )
                 .await;
@@ -180,6 +196,7 @@ impl<'db> ExecutionContext<'db> {
                 view,
                 &handle,
                 values,
+                unique,
                 view.storage_compatibility(),
             )
             .await;
@@ -484,6 +501,10 @@ impl<'db> ExecutionContext<'db> {
         from: u64,
         to: u64,
     ) -> Result<bitmap::Bitmap> {
+        #[cfg(test)]
+        self.pull_work
+            .pair_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(active) = self.active_write_tx() {
             return crate::search::lookup_edge_pair_index_admitted(
                 &active.txn,
@@ -743,8 +764,17 @@ async fn lookup_managed_active_literal_batch(
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
+    unique: bool,
     compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<bitmap::Bitmap> {
+    if unique {
+        return Box::pin(
+            crate::index_lifecycle::secondary::lookup_active_unique_equality_batch_admitted(
+                reader, active, values, budget,
+            ),
+        )
+        .await;
+    }
     crate::index_lifecycle::secondary::lookup_active_equality_batch_admitted(
         reader,
         active,
@@ -800,16 +830,6 @@ fn secondary_catalog_unavailable() -> HelixDbError {
     }
 }
 
-pub(super) fn limited_index_ids(
-    ids: impl IntoIterator<Item = u64>,
-    limit: Option<properties::PositiveUsize>,
-) -> Vec<u64> {
-    match limit {
-        Some(limit) => ids.into_iter().take(limit.get()).collect(),
-        None => ids.into_iter().collect(),
-    }
-}
-
 #[cfg(any(test, feature = "production-coverage"))]
 pub(super) fn scoped_property_key(key: &catalog::ScopedPropertyKey) -> String {
     crate::config::scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref())
@@ -826,10 +846,6 @@ pub(super) mod tests {
 
     fn name(value: &str) -> ir::NonEmptyString {
         test_support::name(value)
-    }
-
-    fn positive(value: usize) -> properties::PositiveUsize {
-        properties::PositiveUsize::new(value).expect("positive test limit")
     }
 
     fn active_handle(
@@ -910,14 +926,6 @@ pub(super) mod tests {
             .expect_err("missing parameter should fail");
 
         assert!(err.to_string().contains("parameter `missing` is not bound"));
-    }
-
-    #[cfg_attr(test, test)]
-    fn limited_index_ids_preserve_storage_order_and_apply_positive_limits() {
-        let ids = roaring::RoaringTreemap::from_iter([9, 1, 5, 3]);
-
-        assert_eq!(limited_index_ids(ids.clone(), None), vec![1, 3, 5, 9]);
-        assert_eq!(limited_index_ids(ids, Some(positive(2))), vec![1, 3]);
     }
 
     #[cfg_attr(test, test)]
@@ -1637,7 +1645,6 @@ pub(super) mod tests {
     pub(in crate::execution::interpreter::access) async fn run_production_contracts() {
         index_value_converts_literals_and_runtime_parameters().await;
         index_value_rejects_missing_parameters().await;
-        limited_index_ids_preserve_storage_order_and_apply_positive_limits();
         scoped_property_key_uses_internal_secondary_index_scope();
         exact_equality_dispatch_rejects_every_wrong_catalog_lane().await;
         active_transaction_dispatches_index_lookup_contracts().await;
