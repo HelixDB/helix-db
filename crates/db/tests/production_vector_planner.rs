@@ -1412,6 +1412,76 @@ async fn public_dynamic_vector_ddl_backfills_existing_nodes() {
     reopened.close().await.expect("reopened writer closes");
 }
 
+/// Proves bounded output batches and a tiny build cache still converge.
+///
+/// A small output-operation budget ends source-scan steps on an entity whose
+/// planned writes no longer fit, so that entity is discarded from the retained
+/// planning cache and replanned by the next step. The 4 KiB cache budget
+/// evicts retained rows between entities throughout the build.
+#[tokio::test]
+async fn public_vector_backfill_splits_batches_under_small_output_and_cache_budgets() {
+    let defaults = SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    let cache_bytes = NonZeroU64::new(4 * 1024).expect("fixture cache budget is positive");
+    let limits = SearchIndexBackfillLimits::try_new(
+        SearchIndexBatchLimits::try_new(
+            batch.max_entities(),
+            batch.max_input_bytes(),
+            NonZeroU64::new(256).expect("fixture output budget is positive"),
+            batch.max_output_bytes(),
+            batch.max_single_vector_output_bytes(),
+        )
+        .expect("small output limits remain internally consistent"),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        defaults.text_compaction(),
+    )
+    .expect("small output policy preserves cross-budget invariants")
+    .with_vector_build_cache_bytes(cache_bytes);
+    assert_eq!(limits.vector_build_cache_bytes(), cache_bytes);
+    let db = HelixDB::open_with_config(
+        HelixDbSource::InMemory {
+            database: "production-vector-bounded-backfill-batches".to_string(),
+        },
+        DbConfig::new().with_search_index_backfill_limits(limits),
+    )
+    .await
+    .expect("bounded-batch writer opens");
+    let mut node_ids = Vec::new();
+    for offset in 0_u16..32 {
+        let displacement = f32::from(offset) / 32.0;
+        node_ids.push(created_node_id(
+            db.execute(
+                &add_node_plan(
+                    "Doc",
+                    vec![(
+                        "embedding",
+                        PropertyValue::F32Array(vec![1.0 - displacement, displacement]),
+                    )],
+                ),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("bounded-batch fixture node commits before DDL"),
+        ));
+    }
+
+    execute_ddl_to_success(
+        &db,
+        &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
+    )
+    .await;
+
+    for (query, expected) in [
+        (vec![1.0, 0.0], node_ids[0]),
+        (vec![0.5, 0.5], node_ids[16]),
+        (vec![0.0, 1.0], node_ids[31]),
+    ] {
+        assert_eq!(search_node_ids(&db, query).await, vec![expected]);
+    }
+    db.close().await.expect("bounded-batch writer closes");
+}
+
 #[tokio::test]
 async fn public_managed_search_executes_every_active_vector_metric() {
     let db = HelixDB::open(HelixDbSource::InMemoryToken {
