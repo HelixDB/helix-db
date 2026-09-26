@@ -767,30 +767,31 @@ mod tests {
         ]);
         let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
 
-        let StorageConfig::S3 {
-            cache: CacheConfig::Hybrid(cache),
-            ..
-        } = &config.storage
-        else {
-            panic!("S3 storage with a cache directory selects the hybrid cache");
-        };
-        assert_eq!(cache.root(), root);
+        assert!(matches!(
+            &config.storage,
+            StorageConfig::S3 { cache: CacheConfig::Hybrid(cache), .. } if cache.root() == root
+        ));
+        // Each tier is a directory (`read_dir` succeeds) left empty by the
+        // removed write probe.
         let mut tiers = std::fs::read_dir(&root)
             .unwrap()
             .map(|entry| {
                 let path = entry.unwrap().path();
-                assert!(path.is_dir(), "{} is a tier directory", path.display());
-                assert_eq!(
-                    std::fs::read_dir(&path).unwrap().count(),
-                    0,
-                    "the write probe is removed from {}",
-                    path.display()
-                );
-                path.file_name().unwrap().to_owned()
+                (
+                    path.file_name().unwrap().to_owned(),
+                    std::fs::read_dir(&path).map(Iterator::count).ok(),
+                )
             })
             .collect::<Vec<_>>();
         tiers.sort();
-        assert_eq!(tiers, ["fts", "object-store", "slate"]);
+        assert_eq!(
+            tiers,
+            [
+                (OsString::from("fts"), Some(0)),
+                (OsString::from("object-store"), Some(0)),
+                (OsString::from("slate"), Some(0)),
+            ]
+        );
 
         let db::config::CacheMode::Hybrid {
             slate_db,
@@ -975,8 +976,7 @@ mod tests {
             let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
             assert!(
                 matches!(&error, ServerConfigError::CacheDirectory { path, .. } if *path == root),
-                "{} produced {error:?}",
-                root.display()
+                "{root:?} produced {error:?}"
             );
             assert!(error.to_string().starts_with("HELIX_DISK_CACHE_DIR"));
         }
@@ -1011,8 +1011,7 @@ mod tests {
                         if *path == target
                             && source.kind() == std::io::ErrorKind::PermissionDenied
                 ),
-                "{} produced {error:?}",
-                target.display()
+                "{target:?} produced {error:?}"
             );
             assert!(error.to_string().starts_with("HELIX_DISK_CACHE_DIR"));
             std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
