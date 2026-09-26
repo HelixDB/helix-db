@@ -2,9 +2,10 @@
 //!
 //! Production search receives [`ValidatedVectorReadIndex`] instead of choosing
 //! an index name, scope, cache, and visibility independently. Managed indexes
-//! may attach only a cache read guard for the exact validated generation when the
-//! cache hydration sequence equals the request's SlateDB snapshot sequence.
-//! All other states fall back to `DbReadOps` without observing cache contents.
+//! may attach only a cache read guard for the exact validated generation whose
+//! store the registry proves current for the request's SlateDB snapshot
+//! sequence. All other states fall back to `DbReadOps` without observing cache
+//! contents.
 
 use std::sync::Arc;
 
@@ -37,10 +38,11 @@ pub(crate) struct ValidatedVectorReadIndex<D: Distance> {
 impl<D: Distance> ValidatedVectorReadIndex<D> {
     /// Constructs a managed reader from one validated descriptor handle.
     ///
-    /// A ready resident snapshot is attached when its full identity and
-    /// hydration sequence both match. Missing, stale, newer, hydrating,
-    /// retiring, and closed entries are safe storage fallbacks. The retained
-    /// guard fences cache retirement until this façade is dropped.
+    /// A ready resident snapshot is attached when its full identity matches
+    /// and the registry's visibility proves it current for the request
+    /// sequence. Missing, not-current, vacant, hydrating, retiring, and closed
+    /// entries are safe storage fallbacks. The retained guard fences cache
+    /// retirement until this façade is dropped.
     pub(crate) fn managed(
         handle: &ValidatedVectorGenerationHandle,
         registry: &VectorCacheRegistry,
@@ -52,10 +54,9 @@ impl<D: Distance> ValidatedVectorReadIndex<D> {
             .with_simhasher_registry(simhasher_registry)
             .with_simhash_identity(handle.simhash_identity());
         let cache_read_guard = match visibility {
-            VectorReadVisibility::Comparable(sequence) => registry
-                .read_guard_for(handle)
-                .ok()
-                .filter(|guard| guard.store().is_visible_to_snapshot(sequence)),
+            VectorReadVisibility::Comparable(sequence) => {
+                registry.read_guard_for(handle, sequence).ok()
+            }
             VectorReadVisibility::Unavailable => None,
         };
         if let Some(guard) = &cache_read_guard {
@@ -118,6 +119,7 @@ mod tests {
     use super::*;
     use crate::encoding::keys::scope::DataScope;
     use crate::search::vector::distance::{Cosine, Euclidean};
+    use crate::search::vector::VectorCacheVisibility;
     use crate::search::vector::{VectorDimension, VectorGenerationIdentity, VectorMemoryStore};
 
     /// Builds one complete validated generation for factory boundary tests.
@@ -139,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_factory_requires_exact_visibility_and_distance_identity() {
+    fn managed_factory_exact_registry_requires_the_hydrated_sequence() {
         let handle = handle();
         let registry = VectorCacheRegistry::default();
         let simhasher_registry = Arc::new(SimHasherRegistry::default());
@@ -160,14 +162,17 @@ mod tests {
         .unwrap();
         assert!(exact.has_cache_read_guard());
 
-        let stale = ValidatedVectorReadIndex::<Cosine>::managed(
+        let newer = ValidatedVectorReadIndex::<Cosine>::managed(
             &handle,
             &registry,
             Arc::clone(&simhasher_registry),
             VectorReadVisibility::Comparable(10),
         )
         .unwrap();
-        assert!(!stale.has_cache_read_guard());
+        assert!(
+            !newer.has_cache_read_guard(),
+            "an exact-sequence registry never serves a newer reader snapshot"
+        );
         let unavailable = ValidatedVectorReadIndex::<Cosine>::managed(
             &handle,
             &registry,
@@ -185,5 +190,47 @@ mod tests {
             ),
             Err(VectorGenerationValidationError::MetricMismatch)
         ));
+    }
+
+    #[tokio::test]
+    async fn managed_factory_commit_fenced_registry_serves_newer_snapshots_between_commits() {
+        let handle = handle();
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let simhasher_registry = Arc::new(SimHasherRegistry::default());
+        let (entry, owns_hydration) = registry.entry_for(&handle);
+        assert!(owns_hydration);
+        assert!(entry.finish_hydration(Arc::new(VectorMemoryStore::new(
+            DataScope::LegacyUnscoped,
+            handle.physical_index_id(),
+            9,
+        ))));
+        let attached = |sequence| {
+            ValidatedVectorReadIndex::<Cosine>::managed(
+                &handle,
+                &registry,
+                Arc::clone(&simhasher_registry),
+                VectorReadVisibility::Comparable(sequence),
+            )
+            .unwrap()
+            .has_cache_read_guard()
+        };
+
+        assert!(!attached(8), "a store never serves an older snapshot");
+        assert!(attached(9));
+        assert!(attached(10), "non-vector commits keep the store attached");
+
+        let writes = crate::search::vector::VectorCacheWriteSet::default();
+        writes.dirty_rows_for(&handle).mark_node_dirty(7);
+        let pending = registry
+            .prepare_commit(&writes.entries().pop().unwrap())
+            .unwrap();
+        assert!(
+            !attached(10),
+            "an unresolved vector commit detaches the store"
+        );
+        pending
+            .resolve(crate::search::vector::cache::registry::VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+        assert!(attached(11), "the evicted store is current again");
     }
 }
