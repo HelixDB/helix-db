@@ -338,6 +338,7 @@ pub async fn vector_search_contracts() {
 /// metric, corruption rejection, SimHash-directory lifecycle and seeding,
 /// bounded bridge traversal, termination reasons, membership, and recall.
 pub async fn vector_restricted_search_contracts() {
+    enable_vector_tracing();
     crate::search::vector::run_restricted_contracts().await;
 }
 

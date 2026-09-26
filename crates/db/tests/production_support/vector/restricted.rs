@@ -1142,6 +1142,78 @@ async fn directoryless_bridge_missing_simhash_fails_closed() {
     assert!(error.to_string().contains("missing simhash for node 2"));
 }
 
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn directoryless_bridge_corrupt_simhash_fails_closed() {
+    let (db, index) =
+        seed_three_edge_filtered_gulf::<Cosine>("restricted-bridge-corrupt-simhash").await;
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    transaction
+        .put(
+            index
+                .row_keyspace()
+                .key(VectorKey::SimHash(VectorSimHashKey::new(index.id(), 2))),
+            b"corrupt",
+        )
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
+    let error = index
+        .search_restricted_with_stats(
+            &transaction,
+            &[1.0, 0.0],
+            &SearchParams::new(10).unwrap(),
+            &candidates,
+        )
+        .await
+        .expect_err("ranking a bridge with a corrupt SimHash row must fail closed");
+    assert!(error.to_string().contains("invalid simhash row for node 2"));
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+fn bridge_enqueue_prefers_known_ranks_and_queues_each_node_once() {
+    let query_hash = crate::search::vector::SimHash::from_bits(0);
+    let mut bridge_state = RestrictedBridgeState {
+        simhash_cache: HashMap::from([
+            (1, Some(crate::search::vector::SimHash::from_bits(0b111))),
+            (2, None),
+        ]),
+        known_hamming: HashMap::from([(2, 5)]),
+        queued: HashSet::new(),
+        frontier: BinaryHeap::new(),
+    };
+    let mut stats = RestrictedSearchStats::default();
+
+    bridge_state.enqueue(query_hash, [(1, 60), (2, 61), (3, 62), (1, 0)], &mut stats);
+
+    assert_eq!(stats.bridge_frontier_pushes, 3);
+    let entries = std::iter::from_fn(|| bridge_state.frontier.pop())
+        .map(|Reverse(entry)| entry)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries,
+        vec![
+            BridgeEntry {
+                hamming: 3,
+                source: BridgeRankSource::Exact,
+                node_id: 1,
+            },
+            BridgeEntry {
+                hamming: 5,
+                source: BridgeRankSource::Exact,
+                node_id: 2,
+            },
+            BridgeEntry {
+                hamming: 62,
+                source: BridgeRankSource::Inherited,
+                node_id: 3,
+            },
+        ]
+    );
+}
+
 async fn assert_directoryless_filtered_metric<D: Distance>(name: &str) {
     let (db, index) = seed_three_edge_filtered_gulf::<D>(name).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -1854,6 +1926,8 @@ pub(crate) async fn run() {
     directory_entries_seed_vectors_without_re_reading_point_simhash_rows().await;
     directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors().await;
     directoryless_bridge_missing_simhash_fails_closed().await;
+    directoryless_bridge_corrupt_simhash_fails_closed().await;
+    bridge_enqueue_prefers_known_ranks_and_queues_each_node_once();
     simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_region().await;
     simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id().await;
     bridge_simhash_reads_stay_within_the_rank_window().await;
@@ -1883,6 +1957,26 @@ pub(crate) async fn run() {
     // One full fetch batch, flushed inside the scan loop.
     assert_eq!(exact_stats.vector_payload_requests, FULL_BATCH as usize);
     assert_eq!(exact_stats.vector_multi_get_calls, 1);
+    // The deployed entry point reports the same ranking through its diagnostics.
+    let traced = exact_index
+        .search_restricted(
+            &exact_txn,
+            &vector_for(1, FULL_BATCH, 8),
+            &SearchParams::new(10).unwrap(),
+            &exact_candidates,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        traced
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        exact_results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>()
+    );
 
     assert!(!RestrictedVectorCandidates::Empty.contains(1));
     assert_eq!(RestrictedVectorCandidates::Empty.iter().count(), 0);
