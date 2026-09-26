@@ -595,6 +595,55 @@ mod tests {
         assert_eq!(config.required_open_files(), None);
     }
 
+    /// Set only in the child process [`from_env_reads_the_process_environment`]
+    /// launches.
+    const FROM_ENV_PROBE: &str = "HELIX_SERVER_FROM_ENV_PROBE";
+
+    /// The environment is process-global, so instead of mutating it under
+    /// concurrently running tests, this re-runs the test binary as a child
+    /// whose environment is set from startup; the child checks `from_env`.
+    #[test]
+    fn from_env_reads_the_process_environment() {
+        let status = std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", "config::tests::from_env_probe", "--nocapture"])
+            .env(FROM_ENV_PROBE, "1")
+            .env("HELIX_HTTP_ADDR", "127.0.0.1:9100")
+            .env("HELIX_GRPC_ADDR", "127.0.0.1:9101")
+            .env("DB_PATH", "env/db")
+            .env("HELIX_DATA_DIR", "/var/lib/helix")
+            .env_remove("S3_BUCKET")
+            .env_remove("HELIX_DISK_CACHE_DIR")
+            .env_remove("HELIX_DISK_CACHE_MEMORY_BYTES")
+            .env_remove("HELIX_DISK_CACHE_BYTES")
+            .status()
+            .unwrap();
+        assert!(status.success(), "the from_env probe process succeeds");
+    }
+
+    #[test]
+    fn from_env_probe() {
+        if env::var_os(FROM_ENV_PROBE).is_none() {
+            return;
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(
+            config.http_addr,
+            "127.0.0.1:9100".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            config.grpc_addr,
+            "127.0.0.1:9101".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(config.db_path, "env/db");
+        assert_eq!(
+            config.storage,
+            StorageConfig::Disk {
+                root: PathBuf::from("/var/lib/helix"),
+                cache: CacheConfig::Memory,
+            }
+        );
+    }
+
     #[test]
     fn canonical_addresses_override_fallbacks_and_invalid_values_are_typed() {
         let values = BTreeMap::from([
