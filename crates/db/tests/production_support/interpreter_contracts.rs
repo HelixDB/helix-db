@@ -396,7 +396,8 @@ async fn text_blob_paths(object_store: &Arc<dyn ObjectStore>) -> BTreeSet<String
 }
 
 async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
-    let index = VectorIndex::<D>::new(name);
+    // The directory makes the filtered walk probe it through the request view.
+    let index = VectorIndex::<D>::new(name).with_simhash_directory();
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     index
         .create(
@@ -430,9 +431,11 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         .unwrap();
     assert_eq!(exact_results.len(), 2);
 
-    let filtered = RestrictedVectorCandidates::from_ids(1..=257).unwrap();
-    let filtered_results = index
-        .search_restricted(
+    // One past the restricted exact-scan cardinality cap (8,192) routes the
+    // request view through the filtered graph walk.
+    let filtered = RestrictedVectorCandidates::from_ids(1..=8_193).unwrap();
+    let (filtered_results, filtered_stats) = index
+        .search_restricted_with_stats(
             &view,
             &[1.0, 0.0],
             &SearchParams::new(2).unwrap(),
@@ -440,6 +443,11 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         )
         .await
         .unwrap();
+    assert_eq!(
+        filtered_stats.strategy,
+        Some(crate::search::vector::RestrictedSearchStrategy::FilteredGraph)
+    );
+    assert!(filtered_stats.directory_scan_calls > 0);
     assert!(!filtered_results.is_empty());
     assert!(filtered_results
         .iter()

@@ -276,18 +276,6 @@
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
-    "path": "crates/db/src/search/vector/hnsw/restricted.rs",
-    "line": 1102,
-    "reason": "The loop's opening guard exits whenever vector payload requests have reached the budget, and the intervening routing and bridge work cannot increment vector payload requests.",
-    "evidence": "vector_restricted_search_exercises_exact_and_filtered_contracts"
-  },
-  {
-    "path": "crates/db/src/search/vector/hnsw/restricted.rs",
-    "line": 1103,
-    "reason": "This break is dominated by the loop's opening vector-budget guard because the intervening routing and bridge work cannot increment vector payload requests.",
-    "evidence": "vector_restricted_search_exercises_exact_and_filtered_contracts"
-  },
-  {
     "path": "crates/db/src/search/vector/simhash/registry.rs",
     "line": 285,
     "reason": "The closure calls the total fallible SimHasher constructor; allocation failure is returned as an error rather than panicking.",
