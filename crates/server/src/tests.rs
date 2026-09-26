@@ -237,6 +237,22 @@ async fn grpc_bind_failure_report_keeps_the_os_cause() {
     );
 }
 
+#[tokio::test]
+async fn ctrl_c_runner_returns_a_failed_database_open_without_waiting() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing");
+    let mut config = memory_config("server-ctrl-c-open-failure");
+    config.storage = StorageConfig::Disk {
+        root: missing.clone(),
+        cache: CacheConfig::Memory,
+    };
+
+    let error = run_until_ctrl_c(config).await.unwrap_err();
+    let report = error_report(&*error);
+    assert!(report.contains(&missing.display().to_string()), "{report}");
+    assert!(!missing.exists(), "a failed open creates no data directory");
+}
+
 #[test]
 fn error_report_prints_every_cause_once() {
     #[derive(Debug, thiserror::Error)]
