@@ -335,11 +335,11 @@ impl GraphDistribution {
 #[derive(Debug, Clone)]
 enum Storage {
     Local,
-    Minio(MinioConfig),
+    SeaweedFs(SeaweedFsConfig),
 }
 
 #[derive(Debug, Clone)]
-struct MinioConfig {
+struct SeaweedFsConfig {
     endpoint: String,
     bucket: String,
     access_key: String,
@@ -351,8 +351,8 @@ impl Storage {
     fn report_name(&self) -> String {
         match self {
             Self::Local => "local_filesystem".to_string(),
-            Self::Minio(config) => format!(
-                "minio(endpoint={},bucket={},prefix={})",
+            Self::SeaweedFs(config) => format!(
+                "seaweedfs(endpoint={},bucket={},prefix={})",
                 config.endpoint, config.bucket, config.run_prefix
             ),
         }
@@ -590,7 +590,7 @@ async fn cleanup_successful_scenario(args: &Args, scenario: Scenario) -> Result<
     if args.preserve_store {
         return Ok(());
     }
-    if matches!(args.storage, Storage::Minio(_)) {
+    if matches!(args.storage, Storage::SeaweedFs(_)) {
         let store = build_source_store(args, &args.store_root)?;
         let (source_database, target_database) = scenario_databases(args, scenario);
         let rollback_database = scenario_rollback_database(args, scenario);
@@ -614,7 +614,7 @@ async fn cleanup_successful_run(args: &Args, scenarios: &[Scenario]) -> Result<(
     if args.preserve_store {
         return Ok(());
     }
-    if matches!(args.storage, Storage::Minio(_)) {
+    if matches!(args.storage, Storage::SeaweedFs(_)) {
         let store = build_source_store(args, &args.store_root)?;
         for scenario in scenarios {
             let (source_database, target_database) = scenario_databases(args, *scenario);
@@ -951,9 +951,9 @@ fn parse_args() -> Result<Args> {
     let mut oracle_buffer_mib = 64_usize;
     let mut report = None;
     let mut object_store_latency_millis = 0_u64;
-    let mut minio_endpoint = None;
-    let mut minio_bucket = "helix-migration-parity".to_string();
-    let mut minio_run_prefix = "release-rehearsal".to_string();
+    let mut seaweedfs_endpoint = None;
+    let mut seaweedfs_bucket = "helix-migration-parity".to_string();
+    let mut seaweedfs_run_prefix = "release-rehearsal".to_string();
     let mut target_fault = None;
     let mut maximum_open_attempts = NonZeroUsize::new(10).expect("ten is nonzero");
     let mut scale_nodes = 0_u64;
@@ -1025,23 +1025,23 @@ fn parse_args() -> Result<Args> {
                     .parse::<u64>()
                     .context("--object-store-latency-ms must be a non-negative integer")?;
             }
-            "--minio-endpoint" => {
+            "--seaweedfs-endpoint" => {
                 let Some(value) = args.next() else {
-                    bail!("--minio-endpoint requires a URL");
+                    bail!("--seaweedfs-endpoint requires a URL");
                 };
-                minio_endpoint = Some(value);
+                seaweedfs_endpoint = Some(value);
             }
-            "--minio-bucket" => {
+            "--seaweedfs-bucket" => {
                 let Some(value) = args.next() else {
-                    bail!("--minio-bucket requires a bucket name");
+                    bail!("--seaweedfs-bucket requires a bucket name");
                 };
-                minio_bucket = value;
+                seaweedfs_bucket = value;
             }
-            "--minio-run-prefix" => {
+            "--seaweedfs-run-prefix" => {
                 let Some(value) = args.next() else {
-                    bail!("--minio-run-prefix requires an object prefix");
+                    bail!("--seaweedfs-run-prefix requires an object prefix");
                 };
-                minio_run_prefix = value;
+                seaweedfs_run_prefix = value;
             }
             "--target-fault" => {
                 let Some(value) = args.next() else {
@@ -1215,7 +1215,7 @@ fn parse_args() -> Result<Args> {
             "--crash-recovery-matrix" => crash_recovery_matrix = true,
             "--help" | "-h" => {
                 println!(
-                    "usage: cargo run --manifest-path tools/hyperscale-migration-parity/Cargo.toml -- [--hyperscale PATH] [--store-root PATH] [--batch-rows N] [--oracle-buffer-mib N] [--object-store-latency-ms N] [--minio-endpoint URL] [--minio-bucket NAME] [--minio-run-prefix PREFIX] [--target-fault [KIND:]OPERATION:EVERY] [--migration-failpoint NAME] [--crash-recovery-matrix] [--maximum-open-attempts N] [--scale-nodes N] [--scale-edges N] [--seed-batch-rows N] [--distribution NAME] [--scenario MODE] [--maximum-scenario-seconds N] [--scale-baseline-report PATH] [--resume-verification] [--resume-source-seed] [--compaction-drain-seconds N] [--maximum-steady-l0-ssts N] [--report PATH] [--preserve-store]"
+                    "usage: cargo run --manifest-path tools/hyperscale-migration-parity/Cargo.toml -- [--hyperscale PATH] [--store-root PATH] [--batch-rows N] [--oracle-buffer-mib N] [--object-store-latency-ms N] [--seaweedfs-endpoint URL] [--seaweedfs-bucket NAME] [--seaweedfs-run-prefix PREFIX] [--target-fault [KIND:]OPERATION:EVERY] [--migration-failpoint NAME] [--crash-recovery-matrix] [--maximum-open-attempts N] [--scale-nodes N] [--scale-edges N] [--seed-batch-rows N] [--distribution NAME] [--scenario MODE] [--maximum-scenario-seconds N] [--scale-baseline-report PATH] [--resume-verification] [--resume-source-seed] [--compaction-drain-seconds N] [--maximum-steady-l0-ssts N] [--report PATH] [--preserve-store]"
                 );
                 std::process::exit(0);
             }
@@ -1224,16 +1224,16 @@ fn parse_args() -> Result<Args> {
     }
 
     let report = report.unwrap_or_else(|| store_root.join("migration-report.json"));
-    let storage = match minio_endpoint {
+    let storage = match seaweedfs_endpoint {
         None => Storage::Local,
-        Some(endpoint) => Storage::Minio(MinioConfig {
+        Some(endpoint) => Storage::SeaweedFs(SeaweedFsConfig {
             endpoint,
-            bucket: minio_bucket,
-            access_key: std::env::var("MINIO_ROOT_USER")
-                .unwrap_or_else(|_| "minioadmin".to_string()),
-            secret_key: std::env::var("MINIO_ROOT_PASSWORD")
-                .unwrap_or_else(|_| "minioadmin".to_string()),
-            run_prefix: minio_run_prefix.trim_matches('/').to_string(),
+            bucket: seaweedfs_bucket,
+            access_key: std::env::var("SEAWEEDFS_ACCESS_KEY")
+                .unwrap_or_else(|_| "helix".to_string()),
+            secret_key: std::env::var("SEAWEEDFS_SECRET_KEY")
+                .unwrap_or_else(|_| "helix-local-secret".to_string()),
+            run_prefix: seaweedfs_run_prefix.trim_matches('/').to_string(),
         }),
     };
     if scale_edges > 0 && scale_nodes == 0 {
@@ -1408,7 +1408,7 @@ async fn run_scenario(args: &Args, scenario: Scenario) -> Result<report::Scenari
     let (source_database, target_database) = scenario_databases(args, scenario);
     let rollback_database = scenario_rollback_database(args, scenario);
     let source_raw_store = build_source_store(args, &source_root)?;
-    if matches!(args.storage, Storage::Minio(_)) && !args.preserve_store {
+    if matches!(args.storage, Storage::SeaweedFs(_)) && !args.preserve_store {
         clear_object_prefix(&source_raw_store, &source_database).await?;
         clear_object_prefix(&source_raw_store, &target_database).await?;
         clear_object_prefix(&source_raw_store, &rollback_database).await?;
@@ -1636,7 +1636,7 @@ async fn run_scenario(args: &Args, scenario: Scenario) -> Result<report::Scenari
             copy_directory(&source_root, &target_root)
                 .context("failed to copy immutable source store")?;
         }
-        Storage::Minio(_) => {
+        Storage::SeaweedFs(_) => {
             copy_object_prefix(&source_store, &source_database, &target_database)
                 .await
                 .context("failed to copy immutable source object prefix")?;
@@ -2316,7 +2316,7 @@ async fn run_scenario(args: &Args, scenario: Scenario) -> Result<report::Scenari
                     )
                 })?;
             }
-            Storage::Minio(_) => {
+            Storage::SeaweedFs(_) => {
                 let cleanup_store = build_target_store(args, &target_root)?;
                 clear_target_object_prefix(&cleanup_store, &target_database).await?;
             }
@@ -2345,7 +2345,7 @@ async fn run_scenario(args: &Args, scenario: Scenario) -> Result<report::Scenari
                 )
             })?;
         }
-        Storage::Minio(_) => {
+        Storage::SeaweedFs(_) => {
             copy_object_prefix(&source_store, &source_database, &rollback_database)
                 .await
                 .context("failed to restore the immutable source object prefix")?;
@@ -3748,7 +3748,7 @@ fn hyperscale_config(
 fn scenario_databases(args: &Args, scenario: Scenario) -> (String, String) {
     match &args.storage {
         Storage::Local => (DATABASE.to_string(), DATABASE.to_string()),
-        Storage::Minio(config) => (
+        Storage::SeaweedFs(config) => (
             format!("{}/{}/source/{DATABASE}", config.run_prefix, scenario.name),
             format!("{}/{}/target/{DATABASE}", config.run_prefix, scenario.name),
         ),
@@ -3758,7 +3758,7 @@ fn scenario_databases(args: &Args, scenario: Scenario) -> (String, String) {
 fn scenario_rollback_database(args: &Args, scenario: Scenario) -> String {
     match &args.storage {
         Storage::Local => DATABASE.to_string(),
-        Storage::Minio(config) => format!(
+        Storage::SeaweedFs(config) => format!(
             "{}/{}/rollback/{DATABASE}",
             config.run_prefix, scenario.name
         ),
@@ -3778,7 +3778,7 @@ fn build_source_store(
                 )
             })?,
         )),
-        Storage::Minio(config) => Ok(Arc::new(
+        Storage::SeaweedFs(config) => Ok(Arc::new(
             object_store::aws::AmazonS3Builder::new()
                 .with_bucket_name(&config.bucket)
                 .with_endpoint(&config.endpoint)
@@ -3787,7 +3787,7 @@ fn build_source_store(
                 .with_allow_http(config.endpoint.starts_with("http://"))
                 .with_virtual_hosted_style_request(false)
                 .build()
-                .context("failed to build source MinIO object store")?,
+                .context("failed to build source SeaweedFS object store")?,
         )),
     }
 }
@@ -3807,7 +3807,7 @@ fn build_target_store(
                 },
             )?,
         )),
-        Storage::Minio(config) => Ok(Arc::new(
+        Storage::SeaweedFs(config) => Ok(Arc::new(
             object_store_014::aws::AmazonS3Builder::new()
                 .with_bucket_name(&config.bucket)
                 .with_endpoint(&config.endpoint)
@@ -3816,7 +3816,7 @@ fn build_target_store(
                 .with_allow_http(config.endpoint.starts_with("http://"))
                 .with_virtual_hosted_style_request(false)
                 .build()
-                .context("failed to build target MinIO object store")?,
+                .context("failed to build target SeaweedFS object store")?,
         )),
     }
 }

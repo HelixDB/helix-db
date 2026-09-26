@@ -19,7 +19,7 @@ class ComposeDependencyTests(unittest.TestCase):
                     '#!/bin/sh\n'
                     'printf "%s|%s\\n" "${HELIX_IMAGE_PLATFORM:-}" "$*" >> "$DOCKER_LOG"\n'
                     'case "$*" in\n'
-                    '  *" pull minio minio-init") exit 42 ;;\n'
+                    '  *" pull seaweedfs s3-trace") exit 42 ;;\n'
                     'esac\n'
                     'exit 0\n'
                 )
@@ -42,7 +42,7 @@ class ComposeDependencyTests(unittest.TestCase):
                 self.assertTrue(
                     any(
                         call.startswith(f"{platform}|compose ")
-                        and call.endswith(" pull minio minio-init")
+                        and call.endswith(" pull seaweedfs s3-trace")
                         for call in calls
                     ),
                     calls,

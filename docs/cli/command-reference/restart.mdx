@@ -10,7 +10,7 @@ pageType: "Reference"
 
 Restart an existing background local instance in place, using its current image and container settings. Readiness is checked on the existing container's published port, including a temporary `helix start --port` override. Restart never pulls an image or creates a replacement container. If the container has been removed, the command fails. Use [`helix start`](/cli/command-reference/start) to create a container or apply new image or configuration settings.
 
-Default local data is in-memory and is wiped by every restart. Disk-mode instances preserve data in their local MinIO volume.
+Default local data is in-memory and is wiped by every restart. Disk-mode instances preserve data in their local SeaweedFS volume.
 
 ## Usage
 

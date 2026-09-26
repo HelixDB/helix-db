@@ -307,8 +307,8 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 | --- | --- | --- |
 | Memory | Lost when the server stops | Fast local iteration and tests |
 | Native directory (`HELIX_DATA_DIR`) | Preserved in a mounted volume or directory | Running the image directly with local persistence |
-| CLI disk (`--disk`) | Preserved in a CLI-managed MinIO volume | Testing restart and persistence through the CLI |
-| Existing S3-compatible store | Owned outside Helix | Reusing MinIO, LocalStack, Ceph, or AWS S3 |
+| CLI disk (`--disk`) | Preserved in a CLI-managed SeaweedFS volume | Testing restart and persistence through the CLI |
+| Existing S3-compatible store | Owned outside Helix | Reusing SeaweedFS, Ceph, LocalStack, or AWS S3 |
 
 ## Start with the CLI
 
@@ -355,13 +355,13 @@ AWS_SECRET_ACCESS_KEY=your-secret-key
 # AWS_SESSION_TOKEN=your-session-token
 ```
 
-  <Tab title="MinIO">
+  <Tab title="S3-compatible">
 
 ```bash
 helix start dev \
   --storage-uri s3://helix-db/my-app \
   --s3-region us-east-1 \
-  --s3-endpoint-url https://minio.example.com \
+  --s3-endpoint-url https://s3.example.com \
   --persist
 ```
 
@@ -418,68 +418,109 @@ docker run --rm --name helixdb \
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
 same volume preserves its database. Removing the volume deletes the data.
-This mode does not require MinIO; the CLI's `--disk` mode still uses MinIO.
+This mode needs no object store; the CLI's `--disk` mode uses SeaweedFS.
 
 The image runs as user and group `65532:65532`. Its `/var/lib/helix` directory
 is prepared for that user, including when initializing a new Docker named volume.
 If you use a bind mount or an existing volume, its directory must be writable by
 that user.
 
-## Run with MinIO persistence
+## Run with SeaweedFS persistence
 
-This Compose configuration creates a bucket and stores HelixDB objects in the
-`minio-data` volume:
+This Compose configuration runs SeaweedFS as a single-node S3 store with a
+static identity, creates the `helix-db` bucket on startup, and stores HelixDB
+objects in the `seaweedfs-data` volume. HelixDB starts once a signed request
+to the bucket succeeds:
 
 ```yaml docker-compose.yaml expandable
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    command: server /data --console-address ":9001"
+  seaweedfs:
+    image: ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+    command:
+      - mini
+      - -dir=/data
+      - -bucket=helix-db
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -master.telemetry=false
+      - -admin.ui=false
+      - -webdav=false
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
     restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+    configs:
+      - source: seaweedfs-s3
+        target: /etc/seaweedfs/s3.json
     volumes:
-      - minio-data:/data
-
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    restart: "no"
-    depends_on:
-      - minio
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
-        mc mb --ignore-existing local/helix-db
+      - seaweedfs-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - -o
+        - /dev/null
+        - --max-time
+        - "2"
+        - -I
+        - --aws-sigv4
+        - aws:amz:us-east-1:s3
+        - --user
+        - helix:helix-local-secret
+        - http://127.0.0.1:8333/helix-db
+      interval: 1s
+      timeout: 5s
+      retries: 120
 
   helix:
     image: ghcr.io/helixdb/helixdb:v0.0.6
     restart: unless-stopped
     depends_on:
-      minio-init:
-        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
     ports:
       - "6969:8080"
     environment:
       S3_BUCKET: helix-db
       S3_REGION: us-east-1
       DB_PATH: db/
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: helix
+      AWS_SECRET_ACCESS_KEY: helix-local-secret
+      AWS_ENDPOINT: http://seaweedfs:8333
       AWS_ALLOW_HTTP: "true"
 
+configs:
+  seaweedfs-s3:
+    content: |
+      {
+        "identities": [
+          {
+            "name": "helix",
+            "credentials": [
+              {"accessKey": "helix", "secretKey": "helix-local-secret"}
+            ],
+            "actions": ["Read:helix-db", "Write:helix-db", "List:helix-db"]
+          }
+        ]
+      }
+
 volumes:
-  minio-data:
+  seaweedfs-data:
 ```
 
+Inline `configs` content needs Docker Compose 2.23.1 or later. The SeaweedFS
+container is not published to the host. Change the example credentials in all
+three places if you expose it.
+
 Run `docker compose down` to replace the HelixDB container without deleting
-the MinIO data. `docker compose down -v` deletes the persisted database.
+the SeaweedFS data. `docker compose down -v` deletes the persisted database.
 
 For an existing object store, use the same HelixDB environment variables and
-omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
+omit the SeaweedFS service. For AWS S3, omit the endpoint and HTTP override.
+
+HelixDB's storage engine needs S3 conditional writes: `If-None-Match: *` on
+create and `If-Match` on replace must fail with HTTP 412 when the condition
+does not hold. A store that ignores them can silently lose data. AWS S3 and
+SeaweedFS 4.09 or later enforce both.
 
 | Variable | Purpose |
 | --- | --- |
@@ -5870,7 +5911,7 @@ Page type: Guide
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.6` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed MinIO volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.6` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -5934,7 +5975,48 @@ helix add local --name persistent --disk
 helix start persistent
 ```
 
-Disk mode starts a MinIO sidecar, creates the `helix-db` bucket, and stores data in a Helix-managed Docker/Podman volume. `helix stop` removes the containers but keeps the volume. `helix prune <instance>` removes the volume and deletes the persisted local data.
+Disk mode starts a SeaweedFS S3 sidecar, creates the `helix-db` bucket, and stores data in a Helix-managed Docker/Podman volume named `helix-<project>-<instance>-seaweedfs-data`. `helix stop` removes the containers but keeps the volume. `helix prune <instance>` removes the volume and deletes the persisted local data.
+
+## Migrate MinIO disk data
+
+Earlier CLI releases ran disk mode on MinIO. MinIO has withdrawn its community container images, so disk mode now uses SeaweedFS, which cannot read MinIO's on-disk format. When the old `helix-<project>-<instance>-minio-data` volume exists, `helix start` removes the old MinIO sidecar, leaves that volume untouched, starts the instance on a new SeaweedFS volume, and prints a warning. `helix stop` keeps both volumes. `helix prune <instance>` deletes both.
+
+Copying the old data needs a MinIO server image that is still cached on your machine. Earlier CLI releases pulled `quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`; `docker image ls --digests quay.io/minio/minio` shows whether it is still cached. Copy the objects into the new volume before Helix writes there. If you already started the instance with the new CLI, the new volume holds a fresh empty database: remove it with the `docker volume rm` line below. Use `podman` in place of `docker` if your project uses Podman.
+
+```bash
+helix stop dev
+base=helix-my-app-dev  # the Container value printed by `helix start dev`
+minio_image=quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+seaweedfs_image=ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+aws_cli=public.ecr.aws/aws-cli/aws-cli:2.37.4@sha256:fdd8d1fcbea9c371678dee5a40df8b178c7a781b4586605756ee28114c97ead6
+
+docker volume rm "$base-seaweedfs-data"  # only if the new CLI already started it
+docker network create helix-migrate
+docker run -d --name helix-migrate-minio --network helix-migrate \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  -v "$base-minio-data:/data" "$minio_image" server /data
+docker run -d --name helix-migrate-seaweedfs --network helix-migrate \
+  -e AWS_ACCESS_KEY_ID=helix -e AWS_SECRET_ACCESS_KEY=helix-local-secret \
+  -v "$base-seaweedfs-data:/data" "$seaweedfs_image" \
+  mini -dir=/data -bucket=helix-db -master.telemetry=false
+sleep 10
+
+docker run --rm --network helix-migrate -v helix-migrate-export:/export \
+  -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin \
+  -e AWS_DEFAULT_REGION=us-east-1 "$aws_cli" \
+  --endpoint-url http://helix-migrate-minio:9000 s3 sync s3://helix-db /export
+docker run --rm --network helix-migrate -v helix-migrate-export:/export \
+  -e AWS_ACCESS_KEY_ID=helix -e AWS_SECRET_ACCESS_KEY=helix-local-secret \
+  -e AWS_DEFAULT_REGION=us-east-1 "$aws_cli" \
+  --endpoint-url http://helix-migrate-seaweedfs:8333 s3 sync /export s3://helix-db
+
+docker rm -f helix-migrate-minio helix-migrate-seaweedfs
+docker network rm helix-migrate
+docker volume rm helix-migrate-export
+helix start dev
+```
+
+After checking the data, run `docker volume rm "$base-minio-data"` to delete the old volume and stop the warning. Do not use `helix prune` for this step: it deletes the new volume too.
 
 ## Iteration loop
 
@@ -5968,7 +6050,7 @@ helix start staging
 helix status
 ```
 
-Each instance is isolated by container name and host port. Disk-mode instances also get their own MinIO container, network, and volume.
+Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume.
 
 ## Inspecting logs
 
@@ -5989,7 +6071,7 @@ helix logs dev --follow      # stream
 | Remove everything Helix-owned, for every local instance | `helix prune --all` (`--yes` in non-TTY) |
 | Permanently delete an instance from `helix.toml` | `helix delete <instance>` (`--yes` in non-TTY) |
 
-[`helix prune`](/cli/command-reference/prune) only touches Helix-managed containers (`helix-<project>-<instance>` and disk-mode MinIO sidecars), networks, volumes, and the per-instance `.helix/<instance>` directory. It never runs a broad `docker/podman system prune`.
+[`helix prune`](/cli/command-reference/prune) only touches Helix-managed containers (`helix-<project>-<instance>`, disk-mode SeaweedFS sidecars, and MinIO sidecars left by older releases), networks, volumes, and the per-instance `.helix/<instance>` directory. It never runs a broad `docker/podman system prune`.
 
 ## Authoring dynamic queries
 
@@ -6514,7 +6596,7 @@ Remove Helix-owned local containers, networks, disk-mode volumes, and per-instan
 `helix prune` only touches resources the CLI manages:
 
 - The container named `helix-<project>-<instance>`.
-- The disk-mode MinIO sidecar, network, and persistent volume when present.
+- The disk-mode SeaweedFS sidecar, network, and persistent volume when present, plus any MinIO sidecar and volume left by an older CLI.
 - The per-instance directory under `.helix/`.
 
 It never runs a broad `docker system prune` or `podman system prune`.
@@ -6603,7 +6685,7 @@ Page type: Reference
 
 Restart an existing background local instance in place, using its current image and container settings. Readiness is checked on the existing container's published port, including a temporary `helix start --port` override. Restart never pulls an image or creates a replacement container. If the container has been removed, the command fails. Use [`helix start`](/cli/command-reference/start) to create a container or apply new image or configuration settings.
 
-Default local data is in-memory and is wiped by every restart. Disk-mode instances preserve data in their local MinIO volume.
+Default local data is in-memory and is wiped by every restart. Disk-mode instances preserve data in their local SeaweedFS volume.
 
 ## Usage
 
@@ -6718,9 +6800,9 @@ helix start [INSTANCE] [OPTIONS]
 |------|------|-------------|---------|
 | `--foreground` | Boolean | Run attached and stop the container on Ctrl-C. Useful for streaming startup logs. | `false` |
 | `--port` | Number | Override the host port for this run. The container always listens on `8080` internally. | Value from `[local.<instance>] port` (default `6969`) |
-| `--disk` | Boolean | Use on-disk storage backed by a CLI-managed MinIO container for this run. | `false` |
+| `--disk` | Boolean | Use on-disk storage backed by a CLI-managed SeaweedFS container for this run. | `false` |
 | `--image-version` | String | Override the image tag or `sha256:<64 lowercase hex digits>` for this run. | Configured tag |
-| `--pull` | String | `always`, `missing`, or `never`. Explicit policies also apply to disk-mode MinIO images. | Configured policy, otherwise `always` for `latest`, `missing` for other versions |
+| `--pull` | String | `always`, `missing`, or `never`. Explicit policies also apply to the disk-mode SeaweedFS image. | Configured policy, otherwise `always` for `latest`, `missing` for other versions |
 | `--persist` | Boolean | Write the resolved port, storage, image, and pull settings for this run back to `[local.<instance>]` in `helix.toml`, so future runs reuse them. | `false` |
 
 ## Behavior
@@ -6728,16 +6810,18 @@ helix start [INSTANCE] [OPTIONS]
 - Defaults to `ghcr.io/helixdb/helixdb:v0.0.6`. Flags override the image tag and pull policy in `[local.<instance>]`.
 - `always` requires a successful pull; `missing` uses a cached image when available; `never` fails if the image is not cached. A failed pull never silently selects an older cached image.
 - Resolves all required images before saving overrides or replacing containers. Failed image resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
-- Disk-mode MinIO images default to `missing` unless a pull policy is explicitly configured.
+- The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
 - Names the container `helix-<project>-<instance>` and publishes the configured port to container port `8080`.
 - Uses Docker or Podman based on `[project] container_runtime` in `helix.toml`.
-- Default storage is in-memory. Passing `--disk` starts a MinIO sidecar, creates the `helix-db` bucket, and runs `helixdb` with S3-compatible storage environment variables.
+- Default storage is in-memory. Passing `--disk` starts a SeaweedFS S3 sidecar (`ghcr.io/chrislusf/seaweedfs:4.47`, pinned by digest) that creates the `helix-db` bucket, waits until the bucket accepts signed requests, and runs `helixdb` with S3-compatible storage environment variables.
 - Background mode (`-d`, `--restart unless-stopped`) waits up to ~30 seconds for `GET /healthz` readiness and prints the URL and container name when ready.
 - Foreground mode (`--rm`) streams the container's stdout/stderr until Ctrl-C, then removes the container.
 
 The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
 
-With `--disk`, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data.
+With `--disk`, `helix stop` removes the Helix and SeaweedFS containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data.
+
+Older CLI releases stored disk-mode data with MinIO, which SeaweedFS cannot read. `helix start` removes an old MinIO sidecar, starts on a new SeaweedFS volume, and warns while the MinIO volume remains. See [Migrate MinIO disk data](/cli/workflows/local#migrate-minio-disk-data).
 
 ## Examples
 
@@ -6800,7 +6884,7 @@ Stop a background local instance and remove its containers.
 
 `helix stop` is idempotent — if the instance is not running, the CLI exits successfully without error.
 
-For disk-mode instances, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
+For disk-mode instances, `helix stop` removes the Helix and SeaweedFS containers, and any MinIO sidecar left by an older CLI, but keeps the persistent local volumes. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
 
 ## Usage
 
