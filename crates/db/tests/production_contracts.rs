@@ -2713,8 +2713,11 @@ async fn public_query_boundary_covers_active_text_index_mutations_contract() {
         serde_json::json!({ "ids": [0] })
     );
 
+    // A conflicted attempt still consumes its leased node ID, so the newcomer's
+    // ID comes from the attempt that commits rather than the fixture order.
     const MAX_TRANSACTION_CONFLICT_RETRIES: usize = 3;
-    for attempt in 0..MAX_TRANSACTION_CONFLICT_RETRIES {
+    let mut attempt = 0;
+    let newcomer = loop {
         match db
             .query(QueryRequest::write(
                 batch::write_batch()
@@ -2724,32 +2727,36 @@ async fn public_query_boundary_covers_active_text_index_mutations_contract() {
                     )
                     .var_as(
                         "newcomer",
-                        traversal::g().add_n(
-                            "Document",
-                            vec![("body", PropertyInput::from("alpha newcomer"))],
-                        ),
+                        traversal::g()
+                            .add_n(
+                                "Document",
+                                vec![("body", PropertyInput::from("alpha newcomer"))],
+                            )
+                            .id(),
                     )
-                    .returning(Vec::<String>::new()),
+                    .returning(["newcomer"]),
             ))
             .await
         {
-            Ok(_) => break,
+            Ok(receipt) => break receipt["newcomer"][0].clone(),
             Err(error)
                 if error.is_transaction_conflict()
                     && attempt + 1 < MAX_TRANSACTION_CONFLICT_RETRIES =>
             {
+                attempt += 1;
                 tokio::task::yield_now().await;
             }
             Err(error) => panic!("text-index mutation commits after maintenance: {error}"),
         }
-    }
+    };
+    assert!(newcomer.is_u64(), "committed newcomer returns its node ID");
     assert_eq!(
         db.query(search("retired")).await.unwrap(),
         serde_json::json!({ "ids": [] })
     );
     assert_eq!(
         db.query(search("alpha")).await.unwrap(),
-        serde_json::json!({ "ids": [2, 3] })
+        serde_json::json!({ "ids": [2, newcomer] })
     );
 
     db.query(QueryRequest::write(
@@ -2761,7 +2768,7 @@ async fn public_query_boundary_covers_active_text_index_mutations_contract() {
     .unwrap();
     assert_eq!(
         db.query(search("alpha")).await.unwrap(),
-        serde_json::json!({ "ids": [3] })
+        serde_json::json!({ "ids": [newcomer] })
     );
 
     let edge = db
