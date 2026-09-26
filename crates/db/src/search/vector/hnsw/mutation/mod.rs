@@ -51,6 +51,13 @@ const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_MUTATION: usize = 8;
 pub(in crate::search::vector) const VECTOR_BUILD_ITEM_CACHE_LIMIT: usize = 4_096;
 pub(in crate::search::vector) const VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT: usize = 2_048;
 pub(in crate::search::vector) const VECTOR_BUILD_SIMHASH_CACHE_LIMIT: usize = 4_096;
+/// Conservative per-entry bookkeeping charged against a build session budget.
+///
+/// Covers the hash-map slot, recency-index entry, and allocation headers that
+/// accompany every retained item, neighbor row, or SimHash, so a session's
+/// resident memory stays near its configured byte budget even when entries
+/// carry tiny payloads such as 8-byte SimHashes.
+const VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES: usize = 96;
 
 /// Aggregate observable behavior of one reusable vector build session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -632,8 +639,9 @@ impl<D: Distance> VectorIndex<D> {
                 false,
             )
             .await;
-        mutation_cache.finish_entity_changes();
-        session.restore_cache(identity, mutation_cache);
+        let changed = mutation_cache.finish_entity_changes();
+        session.restore_cache(identity.clone(), mutation_cache);
+        session.record_entity_changes(&identity, node_id, changed.into_keys());
         result
     }
 
@@ -1080,16 +1088,14 @@ impl<D: Distance> VectorIndex<D> {
         layer: u16,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<Vec<NodeId>, HelixDbError> {
-        let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
-        for candidate in candidates.iter().take(maximum_neighbors * 2) {
-            let Some(item) = self
-                .get_item_for_layer_cached(txn, layer, candidate.node_id, mutation_cache)
-                .await?
-            else {
-                continue;
-            };
-            items.insert(candidate.node_id, item);
-        }
+        let candidate_ids = candidates
+            .iter()
+            .take(maximum_neighbors * 2)
+            .map(|candidate| candidate.node_id)
+            .collect::<Vec<_>>();
+        let items = self
+            .get_items_for_layer_cached_batch(txn, layer, &candidate_ids, mutation_cache)
+            .await?;
         select_diverse(
             query,
             candidates,
@@ -1516,10 +1522,15 @@ impl<D: Distance> VectorIndex<D> {
         let candidate_neighbors = to_neighbors.clone();
 
         if to_neighbors.len() > maximum_neighbors {
-            let to_item = self
-                .get_item_for_layer_cached(txn, layer, to_node, mutation_cache)
+            // One batched read hydrates the destination and every candidate,
+            // including the inserting node whose cached item feeds selection.
+            let hydrate = core::iter::once(to_node)
+                .chain(to_neighbors.iter().copied())
+                .collect::<Vec<_>>();
+            let items = self
+                .get_items_for_layer_cached_batch(txn, layer, &hydrate, mutation_cache)
                 .await?;
-            match to_item {
+            match items.get(&to_node) {
                 Some(to_item) => {
                     let mut distances = Vec::with_capacity(to_neighbors.len());
                     for &neighbor_id in &to_neighbors {
@@ -1530,10 +1541,7 @@ impl<D: Distance> VectorIndex<D> {
                             )?);
                             continue;
                         }
-                        let Some(neighbor_item) = self
-                            .get_item_for_layer_cached(txn, layer, neighbor_id, mutation_cache)
-                            .await?
-                        else {
+                        let Some(neighbor_item) = items.get(&neighbor_id) else {
                             continue;
                         };
                         distances.push(Candidate::try_new(
@@ -1542,22 +1550,6 @@ impl<D: Distance> VectorIndex<D> {
                         )?);
                     }
                     distances.sort();
-
-                    let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
-                    for candidate in &distances {
-                        let Some(item) = self
-                            .get_item_for_layer_cached(
-                                txn,
-                                layer,
-                                candidate.node_id,
-                                mutation_cache,
-                            )
-                            .await?
-                        else {
-                            continue;
-                        };
-                        items.insert(candidate.node_id, item);
-                    }
                     to_neighbors = select_diverse(
                         to_item.as_ref(),
                         &distances,
@@ -1652,8 +1644,9 @@ impl<D: Distance> VectorIndex<D> {
             .stage_delete_with_metadata(txn, node_id, &mut metadata, &mut mutation_cache)
             .await
             .map(|_| ());
-        mutation_cache.finish_entity_changes();
-        session.restore_cache(identity, mutation_cache);
+        let changed = mutation_cache.finish_entity_changes();
+        session.restore_cache(identity.clone(), mutation_cache);
+        session.record_entity_changes(&identity, node_id, changed.into_keys());
         result
     }
 
@@ -2280,6 +2273,10 @@ pub(in crate::search::vector) struct MutationOpCache<D: Distance> {
     stats: VectorBuildSessionStats,
     enforce_local_limits: bool,
     entity_changed_neighbors: BTreeMap<NeighborRowId, NeighborRowValue>,
+    /// Highest layer ever installed in `items`; bounds targeted invalidation.
+    max_item_layer: u16,
+    /// Highest layer ever installed in `neighbor_rows`; bounds targeted invalidation.
+    max_neighbor_layer: u16,
 }
 
 impl<D: Distance> Default for MutationOpCache<D> {
@@ -2310,6 +2307,8 @@ impl<D: Distance> MutationOpCache<D> {
             stats: VectorBuildSessionStats::default(),
             enforce_local_limits: true,
             entity_changed_neighbors: BTreeMap::new(),
+            max_item_layer: 0,
+            max_neighbor_layer: 0,
         })
     }
 
@@ -2469,6 +2468,7 @@ impl<D: Distance> MutationOpCache<D> {
         self.replace_retained_payload(0, payload_bytes)
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(row, cached).is_none());
+        self.max_neighbor_layer = self.max_neighbor_layer.max(row.layer.number());
         self.insert_neighbor_recency(row, touch, false);
         true
     }
@@ -2541,6 +2541,7 @@ impl<D: Distance> MutationOpCache<D> {
         self.replace_retained_payload(0, payload_bytes)
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(proof.row, cached).is_none());
+        self.max_neighbor_layer = self.max_neighbor_layer.max(proof.row.layer.number());
         self.insert_neighbor_recency(proof.row, touch, true);
     }
 
@@ -2593,16 +2594,20 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes every layer-specific neighbor state for one entity.
+    ///
+    /// Rows are addressed directly for every layer up to the highest one ever
+    /// installed, so the cost is independent of the cache size. Both entity
+    /// identities sharing the local ID are removed, matching the storage-ID
+    /// equality this method has always used.
     pub(in crate::search::vector) fn invalidate_neighbors(&mut self, node_id: NodeId) {
-        let rows = self
-            .neighbor_rows
-            .keys()
-            .copied()
-            .filter(|row| row.storage_parts().1 == node_id)
-            .collect::<Vec<_>>();
-        for row in rows {
-            self.entity_changed_neighbors.remove(&row);
-            self.remove_neighbor(row);
+        for layer in 0..=self.max_neighbor_layer {
+            for entity in [VectorEntityId::Node(node_id), VectorEntityId::Edge(node_id)] {
+                let row = NeighborRowId::new(HnswLayer::from_deployed(layer), entity);
+                if self.neighbor_rows.contains_key(&row) {
+                    self.entity_changed_neighbors.remove(&row);
+                    self.remove_neighbor(row);
+                }
+            }
         }
     }
 
@@ -2663,6 +2668,7 @@ impl<D: Distance> MutationOpCache<D> {
         self.replace_retained_payload(previous_payload, payload_bytes)
             .expect("bounded vector item cache payload cannot overflow");
         let touch = self.take_touch();
+        self.max_item_layer = self.max_item_layer.max(layer);
         let replaced = self.items.insert(
             (layer, node_id),
             CachedItem {
@@ -2685,14 +2691,11 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Removes every layer-specific item state for one entity.
+    ///
+    /// Items are addressed directly for every layer up to the highest one ever
+    /// installed, so the cost is independent of the cache size.
     pub(in crate::search::vector) fn invalidate_items(&mut self, node_id: NodeId) {
-        let keys = self
-            .items
-            .keys()
-            .copied()
-            .filter(|(_, cached_node_id)| *cached_node_id == node_id)
-            .collect::<Vec<_>>();
-        for (layer, node_id) in keys {
+        for layer in 0..=self.max_item_layer {
             self.remove_item(layer, node_id);
         }
     }
@@ -2948,34 +2951,56 @@ impl<D: Distance> MutationOpCache<D> {
     }
 }
 
-/// One bounded cache session shared by a vector Scan or CatchUp planning transaction.
+/// One bounded cache session shared by vector Scan and CatchUp planning.
 ///
 /// Entries are nested under the complete generation identity, so equal physical
 /// node/layer numbers from another scope, logical generation, record revision,
 /// or physical partition cannot alias. The session owns no database or resident
-/// vector-memory handle and is dropped with the disposable planning transaction.
+/// vector-memory handle. A lifecycle driver may retain it across committed
+/// steps of one builder-exclusive generation; the entity journal lets the
+/// driver discard exactly the state of an entity it planned but did not admit.
 #[derive(Debug)]
 pub(crate) struct VectorBuildSession<D: Distance> {
     caches: HashMap<VectorGenerationIdentity, MutationOpCache<D>>,
     next_touch: CacheSequence,
+    /// Budget for retained payload plus per-entry bookkeeping.
     max_payload_bytes: usize,
     max_items: usize,
     max_neighbors: usize,
     max_simhashes: usize,
     session_stats: VectorBuildSessionStats,
+    /// Cache state changed by the entity currently being planned.
+    entity_changes: BTreeMap<VectorGenerationIdentity, EntityCacheChanges>,
+}
+
+/// Cache state one planned entity changed inside one generation namespace.
+#[derive(Debug, Default)]
+struct EntityCacheChanges {
+    /// Planning this entity created the namespace, so none of it predates it.
+    created_namespace: bool,
+    /// Mutated graph nodes whose items, SimHash, and neighbor rows changed.
+    nodes: BTreeSet<NodeId>,
+    /// Other neighbor rows whose logical value changed.
+    rows: BTreeSet<NeighborRowId>,
 }
 
 impl<D: Distance> VectorBuildSession<D> {
-    /// Creates one session with the batch input-byte ceiling as retained payload budget.
-    pub(crate) fn new(max_input_bytes: NonZeroU64) -> Self {
+    /// Creates one session bounded only by its retained byte budget.
+    ///
+    /// The budget charges every entry its encoded payload plus
+    /// [`VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES`]. Class counts are not
+    /// separately capped, so 8-byte SimHashes stay resident for as long as the
+    /// byte budget allows and eviction remains deterministic global LRU.
+    pub(crate) fn new(max_retained_bytes: NonZeroU64) -> Self {
         Self {
             caches: HashMap::new(),
             next_touch: CacheSequence::initial(),
-            max_payload_bytes: usize::try_from(max_input_bytes.get()).unwrap_or(usize::MAX),
-            max_items: VECTOR_BUILD_ITEM_CACHE_LIMIT,
-            max_neighbors: VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT,
-            max_simhashes: VECTOR_BUILD_SIMHASH_CACHE_LIMIT,
+            max_payload_bytes: usize::try_from(max_retained_bytes.get()).unwrap_or(usize::MAX),
+            max_items: usize::MAX,
+            max_neighbors: usize::MAX,
+            max_simhashes: usize::MAX,
             session_stats: VectorBuildSessionStats::default(),
+            entity_changes: BTreeMap::new(),
         }
     }
 
@@ -3018,8 +3043,15 @@ impl<D: Distance> VectorBuildSession<D> {
                 }
                 cache
             }
-            None => MutationOpCache::with_degree_limits(layer0_degree, upper_degree)?
-                .into_build_session_cache(),
+            None => {
+                let cache = MutationOpCache::with_degree_limits(layer0_degree, upper_degree)?
+                    .into_build_session_cache();
+                self.entity_changes
+                    .entry(identity.clone())
+                    .or_default()
+                    .created_namespace = true;
+                cache
+            }
         };
         cache.next_touch = self.next_touch;
         Ok(cache)
@@ -3036,6 +3068,75 @@ impl<D: Distance> VectorBuildSession<D> {
             self.caches.insert(identity, cache).is_none(),
             "a vector build session cannot restore one identity twice"
         );
+    }
+
+    /// Journals the cache state one entity mutation changed in `identity`.
+    pub(in crate::search::vector) fn record_entity_changes(
+        &mut self,
+        identity: &VectorGenerationIdentity,
+        node_id: NodeId,
+        rows: impl IntoIterator<Item = NeighborRowId>,
+    ) {
+        let changes = self.entity_changes.entry(identity.clone()).or_default();
+        changes.nodes.insert(node_id);
+        changes.rows.extend(rows);
+    }
+
+    /// Accepts every change journaled since the previous entity boundary.
+    ///
+    /// Call after the entity's planned writes were staged in the transaction
+    /// that commits them.
+    pub(crate) fn admit_entity(&mut self) {
+        self.entity_changes.clear();
+    }
+
+    /// Removes all cache state changed by the planned but unadmitted entity.
+    ///
+    /// Namespaces the entity created are dropped whole; otherwise its mutated
+    /// nodes lose every item, SimHash, and neighbor row, and each other changed
+    /// row is removed. Remaining entries were loaded from storage the entity did
+    /// not write, so they still equal the state before the entity. Call only
+    /// after [`Self::flush_all`], because a dirty row of an earlier admitted
+    /// entity cannot be told apart from this entity's change.
+    pub(crate) fn discard_entity(&mut self) {
+        debug_assert!(
+            !self.has_dirty_neighbors(),
+            "vector build entity discard follows a complete flush"
+        );
+        for (identity, changes) in core::mem::take(&mut self.entity_changes) {
+            if changes.created_namespace {
+                if let Some(cache) = self.caches.remove(&identity) {
+                    self.session_stats.merge(cache.stats);
+                }
+                continue;
+            }
+            let Some(cache) = self.caches.get_mut(&identity) else {
+                continue;
+            };
+            for node_id in changes.nodes {
+                cache.invalidate_items(node_id);
+                cache.invalidate_simhash(node_id);
+                cache.invalidate_neighbors(node_id);
+            }
+            for row in changes.rows {
+                cache.remove_neighbor(row);
+            }
+        }
+    }
+
+    /// Returns whether any neighbor row still awaits a flush.
+    pub(crate) fn has_dirty_neighbors(&self) -> bool {
+        self.caches
+            .values()
+            .any(|cache| cache.oldest_dirty_neighbor().is_some())
+    }
+
+    /// Starts per-step telemetry without dropping any cached state.
+    pub(crate) fn reset_stats(&mut self) {
+        self.session_stats = VectorBuildSessionStats::default();
+        for cache in self.caches.values_mut() {
+            cache.stats = VectorBuildSessionStats::default();
+        }
     }
 
     /// Flushes every dirty neighbor in deterministic identity/recency order.
@@ -3083,7 +3184,7 @@ impl<D: Distance> VectorBuildSession<D> {
             let neighbor_count = self.neighbor_count();
             let simhash_count = self.simhash_count();
             let payload_bytes = self.retained_payload_bytes()?;
-            let payload_pressure = payload_bytes > self.max_payload_bytes;
+            let payload_pressure = self.retained_bytes()? > self.max_payload_bytes;
             let item_pressure = item_count > self.max_items;
             let neighbor_pressure = neighbor_count > self.max_neighbors;
             let simhash_pressure = simhash_count > self.max_simhashes;
@@ -3256,6 +3357,23 @@ impl<D: Distance> VectorBuildSession<D> {
             .values()
             .map(MutationOpCache::simhash_count)
             .sum()
+    }
+
+    /// Returns retained payload plus per-entry bookkeeping charged to the budget.
+    pub(crate) fn retained_bytes(&self) -> Result<usize, HelixDbError> {
+        let entries = self
+            .item_count()
+            .saturating_add(self.neighbor_count())
+            .saturating_add(self.simhash_count());
+        let payload_bytes = self.retained_payload_bytes()?;
+        entries
+            .checked_mul(VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES)
+            .and_then(|overhead| overhead.checked_add(payload_bytes))
+            .ok_or_else(|| {
+                HelixDbError::InvariantViolation(
+                    "vector build session byte accounting overflowed".to_string(),
+                )
+            })
     }
 
     /// Returns retained decoded payload bytes across every namespace.
@@ -3871,6 +3989,249 @@ mod tests {
         assert!(stats.item_hits() > 0);
         assert!(stats.neighbor_hits() > 0);
         assert!(stats.simhash_hits() > 0);
+    }
+
+    #[test]
+    fn targeted_invalidation_removes_every_layer_of_exactly_one_node() {
+        type Cache = MutationOpCache<crate::search::vector::distance::Cosine>;
+        let mut cache = Cache::default();
+        for (layer, node_id) in [(0, 1), (3, 1), (5, 1), (0, 2), (5, 2), (3, 3)] {
+            cache.put_item(layer, node_id, None, 8);
+            cache.install_loaded_neighbor(
+                Cache::node_row_id(layer, node_id),
+                NeighborRowValue::KnownAbsent,
+            );
+        }
+        cache.record_neighbor_change(Cache::node_row_id(3, 1), NeighborRowValue::KnownAbsent);
+        cache.record_neighbor_change(Cache::node_row_id(0, 2), NeighborRowValue::KnownAbsent);
+
+        cache.invalidate_items(1);
+        cache.invalidate_neighbors(1);
+
+        for layer in 0..=5 {
+            assert!(!cache.items.contains_key(&(layer, 1)));
+            assert!(!cache.contains_neighbor(Cache::node_row_id(layer, 1)));
+        }
+        for (layer, node_id) in [(0, 2), (5, 2), (3, 3)] {
+            assert!(cache.item_is_known_absent(layer, node_id));
+            assert!(cache.contains_neighbor(Cache::node_row_id(layer, node_id)));
+        }
+        assert_eq!(cache.item_count(), 3);
+        assert_eq!(cache.item_recency.len(), 3);
+        assert_eq!(cache.neighbor_count(), 3);
+        assert_eq!(cache.clean_neighbor_recency.len(), 3);
+        assert_eq!(cache.retained_payload_bytes().unwrap(), 3 * 8);
+        assert_eq!(
+            cache
+                .finish_entity_changes()
+                .into_keys()
+                .collect::<Vec<_>>(),
+            vec![Cache::node_row_id(0, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn build_session_discard_removes_only_the_unadmitted_entity() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+        type Cache = MutationOpCache<Cosine>;
+
+        let existing = session_identity(DataScope::LegacyUnscoped, 71);
+        let created = session_identity(DataScope::LegacyUnscoped, 72);
+        let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+
+        // An admitted entity leaves clean state for nodes 1 and 2.
+        let mut cache = session.take_cache(&existing, 8, 4).unwrap();
+        cache.put_item(0, 1, None, 8);
+        cache.put_simhash(1, None);
+        cache.install_loaded_neighbor(Cache::node_row_id(0, 1), neighbors(1, vec![2]));
+        cache.install_loaded_neighbor(Cache::node_row_id(0, 2), neighbors(2, vec![1]));
+        session.restore_cache(existing.clone(), cache);
+        session.record_entity_changes(&existing, 1, []);
+        session.admit_entity();
+
+        // The unadmitted entity inserts node 3, relinks node 2, and creates a namespace.
+        let row_2 = Cache::node_row_id(0, 2);
+        let row_3 = Cache::node_row_id(0, 3);
+        let mut cache = session.take_cache(&existing, 8, 4).unwrap();
+        cache.begin_entity();
+        cache.put_item(0, 3, None, 8);
+        cache.put_item(1, 3, None, 8);
+        cache.put_simhash(3, None);
+        let proof = cache.prove_new_neighbor_row(row_3).unwrap();
+        cache.stage_new_neighbor(proof, neighbors(3, vec![2]));
+        cache
+            .stage_loaded_neighbor(row_2, neighbors(2, vec![1, 3]))
+            .unwrap();
+        cache.mark_neighbor_flushed(row_3);
+        cache.mark_neighbor_flushed(row_2);
+        let changed = cache.finish_entity_changes();
+        session.restore_cache(existing.clone(), cache);
+        session.record_entity_changes(&existing, 3, changed.into_keys());
+        let mut created_cache = session.take_cache(&created, 8, 4).unwrap();
+        created_cache.put_item(0, 3, None, 8);
+        session.restore_cache(created.clone(), created_cache);
+        session.record_entity_changes(&created, 3, []);
+        assert!(!session.has_dirty_neighbors());
+
+        session.discard_entity();
+
+        assert!(!session.caches.contains_key(&created));
+        let cache = session.caches.get(&existing).unwrap();
+        assert!(!cache.items.contains_key(&(0, 3)));
+        assert!(!cache.items.contains_key(&(1, 3)));
+        assert!(!cache.simhashes.contains_key(&3));
+        assert!(!cache.contains_neighbor(row_3));
+        assert!(!cache.contains_neighbor(row_2));
+        assert!(cache.item_is_known_absent(0, 1));
+        assert!(cache.simhashes.contains_key(&1));
+        assert_eq!(
+            cache
+                .neighbor(Cache::node_row_id(0, 1))
+                .map(CachedNeighbor::current),
+            Some(&neighbors(1, vec![2]))
+        );
+
+        // An empty journal discards nothing.
+        let retained = session.retained_bytes().unwrap();
+        session.discard_entity();
+        assert_eq!(session.retained_bytes().unwrap(), retained);
+    }
+
+    #[tokio::test]
+    async fn build_session_budget_charges_entry_overhead_and_evicts_least_recent() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+
+        let identity = session_identity(DataScope::LegacyUnscoped, 81);
+        let per_simhash = VECTOR_BUILD_SESSION_ENTRY_OVERHEAD_BYTES + core::mem::size_of::<u64>();
+        let mut session = VectorBuildSession::<Cosine>::new(
+            NonZeroU64::new(u64::try_from(per_simhash * 3).unwrap()).unwrap(),
+        );
+        let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+        for node_id in 1..=5 {
+            cache.put_simhash(
+                node_id,
+                Some(crate::search::vector::SimHash::from_bits(node_id)),
+            );
+        }
+        // Touching node 1 leaves nodes 2 and 3 as the least recently used.
+        assert!(cache.simhash(1).is_some());
+        session.restore_cache(identity.clone(), cache);
+        assert_eq!(session.retained_bytes().unwrap(), per_simhash * 5);
+        assert_eq!(
+            session.retained_payload_bytes().unwrap(),
+            5 * core::mem::size_of::<u64>()
+        );
+
+        let db = session_test_db("vector-build-session-byte-budget").await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        session
+            .enforce_limits(&MeasuredVectorTransaction::new(&transaction))
+            .unwrap();
+
+        assert_eq!(session.retained_bytes().unwrap(), per_simhash * 3);
+        let cache = session.caches.get(&identity).unwrap();
+        for evicted in [2, 3] {
+            assert!(!cache.simhashes.contains_key(&evicted));
+        }
+        for kept in [1, 4, 5] {
+            assert!(cache.simhashes.contains_key(&kept));
+        }
+        assert_eq!(session.stats().simhash_evictions(), 2);
+    }
+
+    #[tokio::test]
+    async fn build_session_counts_are_bounded_only_by_bytes() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+
+        let identity = session_identity(DataScope::LegacyUnscoped, 82);
+        let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+        let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+        let entries = VECTOR_BUILD_SIMHASH_CACHE_LIMIT + VECTOR_BUILD_ITEM_CACHE_LIMIT;
+        for node_id in 0..u64::try_from(entries).unwrap() {
+            cache.put_simhash(
+                node_id,
+                Some(crate::search::vector::SimHash::from_bits(node_id)),
+            );
+        }
+        session.restore_cache(identity, cache);
+        let db = session_test_db("vector-build-session-uncapped-counts").await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        session
+            .enforce_limits(&MeasuredVectorTransaction::new(&transaction))
+            .unwrap();
+        assert_eq!(session.simhash_count(), entries);
+        assert_eq!(session.stats().simhash_evictions(), 0);
+    }
+
+    #[test]
+    fn build_session_stats_reset_without_dropping_state() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+
+        let identity = session_identity(DataScope::LegacyUnscoped, 83);
+        let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+        let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+        cache.put_item(0, 1, None, 8);
+        assert!(cache.item(0, 1).is_some());
+        assert!(cache.item(0, 2).is_none());
+        session.restore_cache(identity, cache);
+        assert_eq!(session.stats().item_hits(), 1);
+        assert_eq!(session.stats().item_misses(), 1);
+
+        session.reset_stats();
+
+        assert_eq!(session.stats(), VectorBuildSessionStats::default());
+        assert_eq!(session.item_count(), 1);
+    }
+
+    proptest! {
+        #[test]
+        fn targeted_invalidation_matches_a_full_scan_model(
+            entries in prop::collection::vec((0_u16..6, 1_u64..6, any::<bool>()), 0..48),
+            victim in 1_u64..6,
+        ) {
+            type Cache = MutationOpCache<crate::search::vector::distance::Cosine>;
+            let mut cache = Cache::default();
+            let mut items = BTreeSet::new();
+            let mut rows = BTreeSet::new();
+            for (layer, node_id, neighbor) in entries {
+                if neighbor {
+                    cache.install_loaded_neighbor(
+                        Cache::node_row_id(layer, node_id),
+                        NeighborRowValue::KnownAbsent,
+                    );
+                    rows.insert((layer, node_id));
+                } else {
+                    cache.put_item(layer, node_id, None, 1);
+                    items.insert((layer, node_id));
+                }
+            }
+            cache.invalidate_items(victim);
+            cache.invalidate_neighbors(victim);
+            items.retain(|(_, node_id)| *node_id != victim);
+            rows.retain(|(_, node_id)| *node_id != victim);
+            for layer in 0..6 {
+                for node_id in 1..6 {
+                    prop_assert_eq!(
+                        cache.items.contains_key(&(layer, node_id)),
+                        items.contains(&(layer, node_id))
+                    );
+                    prop_assert_eq!(
+                        cache.contains_neighbor(Cache::node_row_id(layer, node_id)),
+                        rows.contains(&(layer, node_id))
+                    );
+                }
+            }
+            prop_assert_eq!(cache.item_recency.len(), items.len());
+            prop_assert_eq!(
+                cache.clean_neighbor_recency.len() + cache.dirty_neighbor_recency.len(),
+                rows.len()
+            );
+            prop_assert_eq!(cache.retained_payload_bytes().unwrap(), items.len());
+        }
     }
 
     proptest! {

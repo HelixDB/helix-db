@@ -6,9 +6,16 @@
 //! transaction also owns tenant mappings, builder-applied state,
 //! delta deletion, and the next durable checkpoint.
 //!
+//! The decoded rows planning reads are kept in one bounded
+//! [`VectorBuildSession`] that outlives its step only after that step commits:
+//! see [`RetainedVectorBuild`] for why a matching checkpoint proves the cached
+//! rows still equal the committed builder-exclusive generation.
+//!
 //! No vector row codec is defined here. Physical reads and writes remain behind
 //! [`crate::search::vector::VectorIndex`] and the typed `encoding/v2` boundary.
 
+use std::any::Any;
+use std::num::NonZeroU64;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -18,7 +25,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use sha2::{Digest, Sha256};
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
-use crate::config::{IndexLifecycleScanTuning, SearchIndexBatchLimits};
+use crate::config::{IndexLifecycleScanTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits};
 use crate::encoding::property::{decode_properties, Property};
 use crate::encoding::v2::keys::indexes::vector::VectorStorageLane;
 use crate::encoding::v2::keys::scope::DataScope;
@@ -43,15 +50,16 @@ use crate::search::vector::{
 
 use super::{vector_document, VectorIndexedDocument};
 use crate::index_lifecycle::outbox::{
-    IndexOperationDriver, IndexOperationStepExecution, IndexOperationStepPermit,
-    IndexOperationStepResult, PreparedIndexOperationStep, StepResourceUsage, VectorPlanningUsage,
+    CommittedOperationStep, CommittedStepState, IndexOperationDriver, IndexOperationStepExecution,
+    IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep,
+    StepResourceUsage, VectorPlanningUsage,
 };
 use crate::index_lifecycle::work::{
     AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue, VectorTenantPartition,
 };
 use crate::index_lifecycle::{
     BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId, IndexGenerationId,
-    IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationOutcome,
+    IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationId, IndexOperationOutcome,
     IndexOperationProgress, IndexOperationRecord, IndexRecordV2, IndexV2MetadataValue,
     LegacyVectorDirectoryValidationProgress, LegacyVectorPhysicalReservation,
     LegacyVectorValidationLane, LegacyVectorValidationProgress, NoCursorProgress,
@@ -67,6 +75,121 @@ pub(crate) struct VectorIndexDriver {
     cache_registry: Arc<vector::VectorCacheRegistry>,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     scan_tuning: IndexLifecycleScanTuning,
+    build_cache: VectorBuildCache,
+}
+
+/// Exact durable checkpoint a retained build planning cache mirrors.
+///
+/// The operation progress is the one the next step must start from; the index
+/// record revision and generation bind the exact physical descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VectorBuildCheckpoint {
+    operation_id: IndexOperationId,
+    generation: IndexGenerationId,
+    index_record_revision: crate::index_lifecycle::IndexRevision,
+    progress: IndexOperationProgress,
+}
+
+impl VectorBuildCheckpoint {
+    fn new(
+        operation: &IndexOperationRecord,
+        record: &IndexRecordV2,
+        progress: IndexOperationProgress,
+    ) -> Self {
+        Self {
+            operation_id: operation.operation_id(),
+            generation: operation.generation(),
+            index_record_revision: record.revision(),
+            progress,
+        }
+    }
+}
+
+/// Build planning cache proven equal to committed physical rows at a checkpoint.
+///
+/// Only the V2 builder writes a `Building` generation's physical vector rows:
+/// foreground mutations of a building index record coalesced build deltas
+/// instead, and the planning/apply contract of
+/// [`crate::search::vector::PlannedVectorMutation::apply_to`] relies on the same
+/// exclusivity. A session is retained only through
+/// [`CommittedStepState`], which the outbox releases after the step that
+/// produced it committed. Every later commit that writes the generation's rows
+/// is a builder step that starts from `checkpoint` and admits at least one
+/// entity, advancing the persisted progress counters, so a checkpoint match
+/// proves no other write intervened.
+pub(crate) struct RetainedVectorBuild {
+    checkpoint: VectorBuildCheckpoint,
+    /// Type-erased `VectorBuildSession<D>` for the index's distance metric.
+    session: Box<dyn Any + Send>,
+}
+
+/// Driver-owned slot holding the most recently committed build planning cache.
+///
+/// At most one retained session exists per driver; in-flight steps each own
+/// one more. Every session is bounded by `budget`.
+struct VectorBuildCache {
+    budget: NonZeroU64,
+    retained: parking_lot::Mutex<Option<RetainedVectorBuild>>,
+}
+
+impl VectorBuildCache {
+    fn new(budget: NonZeroU64) -> Self {
+        Self {
+            budget,
+            retained: parking_lot::Mutex::new(None),
+        }
+    }
+
+    /// Returns the retained session for exactly `checkpoint`, or a fresh one.
+    ///
+    /// A retained session for the same operation at any other checkpoint is
+    /// stale and dropped; one for another operation is left in place.
+    fn checkout<D: Distance>(&self, checkpoint: &VectorBuildCheckpoint) -> VectorBuildSession<D> {
+        let (reusable, stale) = {
+            let mut slot = self.retained.lock();
+            match slot.take() {
+                None => (None, None),
+                Some(retained) if retained.checkpoint == *checkpoint => (Some(retained), None),
+                Some(retained) if retained.checkpoint.operation_id != checkpoint.operation_id => {
+                    *slot = Some(retained);
+                    (None, None)
+                }
+                Some(retained) => (None, Some(retained)),
+            }
+        };
+        drop(stale);
+        let mut session = reusable
+            .and_then(|retained| retained.session.downcast::<VectorBuildSession<D>>().ok())
+            .map_or_else(|| VectorBuildSession::new(self.budget), |session| *session);
+        session.reset_stats();
+        session
+    }
+
+    /// Stores committed state or forgets this operation's stale session.
+    fn after_commit(
+        &self,
+        operation: &IndexOperationRecord,
+        committed: CommittedOperationStep,
+        state: Option<CommittedStepState>,
+    ) {
+        let displaced = {
+            let mut slot = self.retained.lock();
+            match (committed, state) {
+                (
+                    CommittedOperationStep::Progressed,
+                    Some(CommittedStepState::VectorBuild(retained)),
+                ) => slot.replace(*retained),
+                _ if slot.as_ref().is_some_and(|retained| {
+                    retained.checkpoint.operation_id == operation.operation_id()
+                }) =>
+                {
+                    slot.take()
+                }
+                _ => None,
+            }
+        };
+        drop(displaced);
+    }
 }
 
 impl core::fmt::Debug for VectorIndexDriver {
@@ -89,12 +212,21 @@ impl VectorIndexDriver {
             cache_registry,
             simhasher_registry,
             scan_tuning: IndexLifecycleScanTuning::default(),
+            build_cache: VectorBuildCache::new(
+                SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
+            ),
         }
     }
 
     /// Applies runtime source-scan prefetching without admitting blocks to cache.
     pub(crate) const fn with_scan_tuning(mut self, scan_tuning: IndexLifecycleScanTuning) -> Self {
         self.scan_tuning = scan_tuning;
+        self
+    }
+
+    /// Bounds each build planning cache retained across committed steps.
+    pub(crate) fn with_build_cache_bytes(mut self, budget: NonZeroU64) -> Self {
+        self.build_cache = VectorBuildCache::new(budget);
         self
     }
 }
@@ -168,6 +300,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
+                            &self.build_cache,
                         )
                         .await?
                     }
@@ -183,6 +316,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
+                            &self.build_cache,
                         )
                         .await?
                     }
@@ -198,6 +332,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
+                            &self.build_cache,
                         )
                         .await?
                     }
@@ -280,9 +415,11 @@ impl IndexOperationDriver for VectorIndexDriver {
         scope: DataScope,
         index: &IndexRecordV2,
         operation: &IndexOperationRecord,
-        committed: crate::index_lifecycle::outbox::CommittedOperationStep,
+        committed: CommittedOperationStep,
+        state: Option<CommittedStepState>,
     ) {
-        if committed != crate::index_lifecycle::outbox::CommittedOperationStep::Completed
+        self.build_cache.after_commit(operation, committed, state);
+        if committed != CommittedOperationStep::Completed
             || !matches!(
                 operation.progress(),
                 IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(
@@ -995,6 +1132,7 @@ struct VectorStepResult {
     physical_operations: u64,
     output_bytes: u64,
     vector_planning: VectorPlanningUsage,
+    retained: Option<RetainedVectorBuild>,
 }
 
 impl VectorStepResult {
@@ -1005,7 +1143,31 @@ impl VectorStepResult {
             physical_operations: 0,
             output_bytes: 0,
             vector_planning: VectorPlanningUsage::default(),
+            retained: None,
         }
+    }
+
+    /// Offers `session` for reuse once this step commits its progress.
+    ///
+    /// Only a progressed step whose session holds no unflushed rows can mirror
+    /// committed state; every other outcome drops the session here.
+    fn retaining<D: Distance>(
+        mut self,
+        operation: &IndexOperationRecord,
+        record: &IndexRecordV2,
+        session: VectorBuildSession<D>,
+    ) -> Self {
+        let IndexOperationStepResult::Progressed(next) = &self.result else {
+            return self;
+        };
+        if session.has_dirty_neighbors() {
+            return self;
+        }
+        self.retained = Some(RetainedVectorBuild {
+            checkpoint: VectorBuildCheckpoint::new(operation, record, next.clone()),
+            session: Box::new(session),
+        });
+        self
     }
 
     fn metadata_transcode(
@@ -1018,6 +1180,7 @@ impl VectorStepResult {
             physical_operations: measurement.operations(),
             output_bytes: measurement.encoded_bytes(),
             vector_planning: VectorPlanningUsage::default(),
+            retained: None,
         }
     }
 
@@ -1031,6 +1194,7 @@ impl VectorStepResult {
             physical_operations: measurement.operations(),
             output_bytes: measurement.encoded_bytes(),
             vector_planning: VectorPlanningUsage::default(),
+            retained: None,
         }
     }
 
@@ -1040,13 +1204,18 @@ impl VectorStepResult {
     }
 
     fn into_execution(self) -> IndexOperationStepExecution {
-        IndexOperationStepExecution::new(self.result).with_resources(StepResourceUsage {
-            physical_operations: self.physical_operations,
-            output_bytes: self.output_bytes,
-            single_vector_output_bytes: self.single_vector_output_bytes,
-            vector_planning: self.vector_planning,
-            ..StepResourceUsage::default()
-        })
+        IndexOperationStepExecution::new(self.result)
+            .with_resources(StepResourceUsage {
+                physical_operations: self.physical_operations,
+                output_bytes: self.output_bytes,
+                single_vector_output_bytes: self.single_vector_output_bytes,
+                vector_planning: self.vector_planning,
+                ..StepResourceUsage::default()
+            })
+            .with_committed_state(
+                self.retained
+                    .map(|retained| CommittedStepState::VectorBuild(Box::new(retained))),
+            )
     }
 }
 
@@ -1065,6 +1234,7 @@ async fn step_build<D: Distance>(
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    build_cache: &VectorBuildCache,
 ) -> Result<VectorStepResult> {
     match stage {
         VectorBuildStage::AdoptLegacy(progress) => {
@@ -1092,7 +1262,12 @@ async fn step_build<D: Distance>(
             .await
         }
         VectorBuildStage::Scan(progress) => {
-            scan_source::<D>(
+            let mut session = build_cache.checkout::<D>(&VectorBuildCheckpoint::new(
+                operation,
+                record,
+                operation.progress().clone(),
+            ));
+            let step = scan_source::<D>(
                 db,
                 transaction,
                 scope,
@@ -1103,11 +1278,18 @@ async fn step_build<D: Distance>(
                 limits,
                 scan_tuning,
                 simhasher_registry,
+                &mut session,
             )
-            .await
+            .await?;
+            Ok(step.retaining(operation, record, session))
         }
         VectorBuildStage::CatchUp(progress) => {
-            catch_up::<D>(
+            let mut session = build_cache.checkout::<D>(&VectorBuildCheckpoint::new(
+                operation,
+                record,
+                operation.progress().clone(),
+            ));
+            let step = catch_up::<D>(
                 db,
                 transaction,
                 scope,
@@ -1117,8 +1299,10 @@ async fn step_build<D: Distance>(
                 progress,
                 limits,
                 simhasher_registry,
+                &mut session,
             )
-            .await
+            .await?;
+            Ok(step.retaining(operation, record, session))
         }
         VectorBuildStage::ValidateDescriptor(progress) => Ok(VectorStepResult::ordinary(
             validate_descriptor::<D>(
@@ -1723,6 +1907,7 @@ async fn scan_source<D: Distance>(
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    build_session: &mut VectorBuildSession<D>,
 ) -> Result<VectorStepResult> {
     let source_prefix = source_prefix(scope, definition.element_kind());
     let start = cursor_suffix(&source_prefix, progress.cursor.as_ref())?;
@@ -1755,7 +1940,6 @@ async fn scan_source<D: Distance>(
         .await?;
     let planning = db.begin(IsolationLevel::Snapshot).await?;
     let planning_recorder = VectorWriteRecorder::new();
-    let mut build_session = VectorBuildSession::<D>::new(limits.max_input_bytes());
     let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
     let mut cursor = progress.cursor.clone();
     let mut exhausted = true;
@@ -1834,7 +2018,7 @@ async fn scan_source<D: Distance>(
             true,
             false,
             &accounting,
-            &mut build_session,
+            build_session,
         )
         .await?;
         accounting.record_planning();
@@ -1846,6 +2030,7 @@ async fn scan_source<D: Distance>(
             next_partition,
         } = outcome
         else {
+            build_session.discard_entity();
             return finish_or_block_scan(
                 outcome,
                 accounting,
@@ -1898,6 +2083,7 @@ async fn scan_source<D: Distance>(
         physical_operations: 0,
         output_bytes: 0,
         vector_planning,
+        retained: None,
     })
 }
 
@@ -1915,6 +2101,7 @@ async fn catch_up<D: Distance>(
     progress: &PrefixScanProgress,
     limits: SearchIndexBatchLimits,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    build_session: &mut VectorBuildSession<D>,
 ) -> Result<VectorStepResult> {
     let prefix = generation_prefix(
         scope,
@@ -1925,7 +2112,6 @@ async fn catch_up<D: Distance>(
     let mut rows = transaction.scan_prefix(&prefix, ..).await?;
     let planning = db.begin(IsolationLevel::Snapshot).await?;
     let planning_recorder = VectorWriteRecorder::new();
-    let mut build_session = VectorBuildSession::<D>::new(limits.max_input_bytes());
     let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
     let mut saw_row = false;
     while accounting.can_read_another() {
@@ -2008,7 +2194,7 @@ async fn catch_up<D: Distance>(
             false,
             true,
             &accounting,
-            &mut build_session,
+            build_session,
         )
         .await?;
         accounting.record_planning();
@@ -2020,6 +2206,7 @@ async fn catch_up<D: Distance>(
             next_partition,
         } = outcome
         else {
+            build_session.discard_entity();
             if let EntityPlanOutcome::Blocked(blocker) = outcome {
                 return Ok(
                     VectorStepResult::ordinary(IndexOperationStepResult::Blocked(blocker))
@@ -2059,6 +2246,7 @@ async fn catch_up<D: Distance>(
             physical_operations: 0,
             output_bytes: 0,
             vector_planning,
+            retained: None,
         });
     }
     Ok(VectorStepResult {
@@ -2070,6 +2258,7 @@ async fn catch_up<D: Distance>(
         physical_operations: 0,
         output_bytes: 0,
         vector_planning,
+        retained: None,
     })
 }
 
@@ -2208,6 +2397,7 @@ async fn plan_and_apply<D: Distance>(
         }
     }
     plan.apply_to(transaction)?;
+    build_session.admit_entity();
     Ok(EntityPlanOutcome::Admitted {
         vector_writes: cumulative_vector,
         single_vector_output_bytes: entity_vector.encoded_bytes(),
@@ -3205,6 +3395,7 @@ fn finish_or_block_scan(
                 physical_operations: 0,
                 output_bytes: 0,
                 vector_planning,
+                retained: None,
             })
         }
         EntityPlanOutcome::Admitted { .. } => Err(corruption(format!(
@@ -3384,6 +3575,10 @@ fn corruption(message: impl Into<String>) -> HelixDbError {
 fn operation_error(error: crate::index_lifecycle::IndexOperationModelError) -> HelixDbError {
     HelixDbError::InvariantViolation(error.to_string())
 }
+
+#[cfg(all(feature = "production-coverage", not(test)))]
+#[path = "../../../tests/production_support/vector_build_cache.rs"]
+pub(super) mod build_cache_production_contracts;
 
 #[cfg(test)]
 mod tests {
@@ -4220,6 +4415,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                &mut VectorBuildSession::new(limits.max_input_bytes()),
             )
             .await
             .unwrap()
@@ -4245,6 +4441,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                &mut VectorBuildSession::new(limits.max_input_bytes()),
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(_))
@@ -4272,6 +4469,7 @@ mod tests {
                 tiny,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                &mut VectorBuildSession::new(limits.max_input_bytes()),
             )
             .await
             .unwrap()
@@ -4299,6 +4497,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                &mut VectorBuildSession::new(limits.max_input_bytes()),
             )
             .await
             .unwrap()
@@ -4328,6 +4527,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                &mut VectorBuildSession::new(limits.max_input_bytes()),
             )
             .await
             .unwrap()
@@ -4359,6 +4559,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                &mut VectorBuildSession::new(limits.max_input_bytes()),
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(reason))
@@ -5873,4 +6074,6 @@ mod tests {
         ));
         db.close().await.expect("active adoption closes");
     }
+
+    mod build_cache;
 }

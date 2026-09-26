@@ -13,7 +13,9 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, IsolationLevel};
 
 use super::*;
-use crate::encoding::v2::keys::indexes::vector::{VectorEntryCandidateNodeKey, VectorKey};
+use crate::encoding::v2::keys::indexes::vector::{
+    VectorEntryCandidateNodeKey, VectorKey, VectorSimHashKey,
+};
 use crate::encoding::v2::values::indexes::vector::entry_candidate::encode_entry_candidate_layer;
 use crate::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
 use crate::search::vector::{self, VectorIndexConfig, VectorWriteMeasurement};
@@ -821,6 +823,55 @@ async fn run_graph_delete_contracts(db: &Db) {
     }
     assert!(delete_read_reached_success);
 
+    // With the deleted item already cached, the canonical payload lookup is
+    // the first read of its SimHash row and can fail on its own boundary.
+    let mut cached_item_delete_reached_success = false;
+    for successful_reads in 0..128 {
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&txn);
+        let mut metadata = index.get_metadata(&measured).await.unwrap().unwrap();
+        let item = index.get_item(&measured, 3).await.unwrap().unwrap();
+        let mut cache = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
+        cache.put_item(0, 3, Some(Arc::new(item)), 0);
+        measured.fail_read_after(successful_reads);
+        let result = index
+            .stage_delete_with_metadata(&measured, 3, &mut metadata, &mut cache)
+            .await;
+        txn.rollback();
+        if result.is_ok() {
+            cached_item_delete_reached_success = true;
+            break;
+        }
+    }
+    assert!(cached_item_delete_reached_success);
+
+    // A corrupt SimHash row fails batched and single item hydration alike.
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    txn.put(
+        index
+            .row_keyspace()
+            .key(VectorKey::SimHash(VectorSimHashKey::new(index.id(), 996))),
+        Bytes::from_static(b"corrupt"),
+    )
+    .unwrap();
+    let mut corrupt = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
+    assert!(index
+        .select_neighbors_heuristic(
+            &txn,
+            &Item::<Cosine>::new(vec![1.0, 0.0, 0.0]),
+            &[Candidate::try_new(996, 0.5).unwrap()],
+            2,
+            0,
+            &mut corrupt,
+        )
+        .await
+        .is_err());
+    assert!(index
+        .get_item_for_layer_cached(&txn, 0, 996, &mut corrupt)
+        .await
+        .is_err());
+    txn.rollback();
+
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let measured = MeasuredVectorTransaction::new(&txn);
     let metadata = index.get_metadata(&measured).await.unwrap().unwrap();
@@ -1337,6 +1388,89 @@ async fn run_build_session_reuse_contract() {
     assert!(stats.simhash_hits() > 0);
 }
 
+/// Discarding an unadmitted entity forgets exactly the cache state it changed.
+///
+/// Namespaces the entity created are dropped whole, rows it changed in an
+/// existing namespace are invalidated, state admitted earlier survives, and
+/// journal entries whose namespace is no longer cached are skipped.
+fn run_build_session_discard_contract() {
+    use crate::encoding::v2::keys::scope::DataScope;
+    type Cache = MutationOpCache<Cosine>;
+
+    let existing = session_identity(DataScope::LegacyUnscoped, 71);
+    let created = session_identity(DataScope::LegacyUnscoped, 72);
+    let detached = session_identity(DataScope::LegacyUnscoped, 73);
+    let uncached = session_identity(DataScope::LegacyUnscoped, 74);
+    let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+
+    let mut cache = session.take_cache(&existing, 8, 4).unwrap();
+    cache.put_item(0, 1, None, 8);
+    cache.put_simhash(1, None);
+    cache.install_loaded_neighbor(Cache::node_row_id(0, 1), neighbors(1, vec![2]));
+    cache.install_loaded_neighbor(Cache::node_row_id(0, 2), neighbors(2, vec![1]));
+    session.restore_cache(existing.clone(), cache);
+    session.record_entity_changes(&existing, 1, []);
+    session.admit_entity();
+
+    let row_2 = Cache::node_row_id(0, 2);
+    let row_3 = Cache::node_row_id(0, 3);
+    let mut cache = session.take_cache(&existing, 8, 4).unwrap();
+    cache.begin_entity();
+    cache.put_item(0, 3, None, 8);
+    cache.put_item(1, 3, None, 8);
+    cache.put_simhash(3, None);
+    let proof = cache.prove_new_neighbor_row(row_3).unwrap();
+    cache.stage_new_neighbor(proof, neighbors(3, vec![2]));
+    cache
+        .stage_loaded_neighbor(row_2, neighbors(2, vec![1, 3]))
+        .unwrap();
+    cache.mark_neighbor_flushed(row_3);
+    cache.mark_neighbor_flushed(row_2);
+    let changed = cache.finish_entity_changes();
+    session.restore_cache(existing.clone(), cache);
+    session.record_entity_changes(&existing, 3, changed.into_keys());
+    let mut created_cache = session.take_cache(&created, 8, 4).unwrap();
+    created_cache.put_item(0, 3, None, 8);
+    session.restore_cache(created.clone(), created_cache);
+    session.record_entity_changes(&created, 3, []);
+    drop(session.take_cache(&detached, 8, 4).unwrap());
+    session.record_entity_changes(&uncached, 3, [row_3]);
+    assert!(!session.has_dirty_neighbors());
+
+    session.discard_entity();
+
+    assert!(!session.caches.contains_key(&created));
+    assert!(!session.caches.contains_key(&detached));
+    assert!(!session.caches.contains_key(&uncached));
+    let cache = session.caches.get(&existing).unwrap();
+    assert!(!cache.items.contains_key(&(0, 3)));
+    assert!(!cache.items.contains_key(&(1, 3)));
+    assert!(!cache.simhashes.contains_key(&3));
+    assert!(!cache.contains_neighbor(row_3));
+    assert!(!cache.contains_neighbor(row_2));
+    assert!(cache.item_is_known_absent(0, 1));
+    assert!(cache.simhashes.contains_key(&1));
+    assert_eq!(
+        cache
+            .neighbor(Cache::node_row_id(0, 1))
+            .map(CachedNeighbor::current),
+        Some(&neighbors(1, vec![2]))
+    );
+
+    let retained = session.retained_bytes().unwrap();
+    session.discard_entity();
+    assert_eq!(session.retained_bytes().unwrap(), retained);
+
+    // Entry overhead added to a saturated payload total cannot be charged.
+    let mut overflow = session.take_cache(&existing, 8, 4).unwrap();
+    overflow.put_item(0, 9, None, usize::MAX - retained);
+    session.restore_cache(existing, overflow);
+    assert!(matches!(
+        session.retained_bytes(),
+        Err(HelixDbError::InvariantViolation(_))
+    ));
+}
+
 async fn run_unbound_metric_rejection_contract() {
     let db = session_test_db("production-vector-unbound-mutation").await;
     let index_name = "production-vector-unbound-mutation-index";
@@ -1404,6 +1538,7 @@ pub(crate) async fn run() {
     run_build_session_flush_recovery_contract::<Manhattan>().await;
     run_build_session_flush_edge_contract::<Cosine>().await;
     run_build_session_reuse_contract().await;
+    run_build_session_discard_contract();
     run_unbound_metric_rejection_contract().await;
     let db = Db::open(
         "production-vector-mutation-contracts",
