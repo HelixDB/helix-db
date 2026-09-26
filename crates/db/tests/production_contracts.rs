@@ -6407,6 +6407,37 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
             vec!["a2", "n2"],
             true,
         ),
+        // Residual conjuncts keep the per-row filter behind the membership.
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::not(Predicate::starts_with("uid", "n")),
+            ]),
+            default(),
+            vec!["a1", "a1"],
+            true,
+        ),
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                // `2 - rank % 2` is always positive, so only the arithmetic
+                // shape matters: each operator reaches the stored `rank`.
+                Predicate::compare(
+                    Expr::prop("rank")
+                        .modulo(Expr::val(2_i64))
+                        .div(Expr::val(1_i64))
+                        .mul(Expr::val(1_i64))
+                        .sub(Expr::val(0_i64))
+                        .neg()
+                        .add(Expr::val(2_i64)),
+                    CompareOp::Gt,
+                    Expr::val(0_i64),
+                ),
+            ]),
+            default(),
+            vec!["a1", "a1", "n1"],
+            true,
+        ),
         // A missing property equals null, which only an authoritative scan
         // can answer, so literal null equality keeps the per-row filter.
         (
@@ -6674,35 +6705,41 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
         )
         .expect("hand-built membership plan validates")
     };
-    let membership = |index: catalog::NodeEqualityIndexMeta, property: &str, value: &str| {
-        exec::ExecOp::IndexMembership {
+    let membership =
+        |set: ir::NodeAccessPlan, predicate: &Predicate| exec::ExecOp::IndexMembership {
             plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
                 &ir::NodeIndexMembershipPlan::new(
-                    ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
-                        index,
-                        key: catalog::ScopedPropertyKey::try_new("Attribute", property)
-                            .expect("membership key validates"),
-                        value: ir::IndexValue::Literal(
-                            ir::SecondaryIndexLiteral::new(PropertyValue::from(value))
-                                .expect("membership literal validates"),
-                        ),
-                    })
-                    .expect("membership set is a node source"),
-                    ir::PredicatePlan::new(Predicate::eq(property, value))
+                    ir::NodeAccessSourcePlan::new(set).expect("membership set is a node source"),
+                    ir::PredicatePlan::new(predicate.clone())
                         .expect("membership predicate validates"),
                 )
                 .expect("membership plan validates"),
             )),
+        };
+    let equality = |index: catalog::NodeEqualityIndexMeta, property: &str, value: &str| {
+        ir::NodeAccessPlan::EqualityIndex {
+            index,
+            key: catalog::ScopedPropertyKey::try_new("Attribute", property)
+                .expect("membership key validates"),
+            value: ir::IndexValue::Literal(
+                ir::SecondaryIndexLiteral::new(PropertyValue::from(value))
+                    .expect("membership literal validates"),
+            ),
         }
     };
-    let filter = |property: &str, value: &str| exec::ExecOp::Filter {
-        predicate: ir::PredicatePlan::new(Predicate::eq(property, value))
-            .expect("filter predicate validates"),
+    let filter = |predicate: Predicate| exec::ExecOp::Filter {
+        predicate: ir::PredicatePlan::new(predicate).expect("filter predicate validates"),
     };
     let kind_key =
         catalog::ScopedPropertyKey::try_new("Attribute", "kind").expect("kind key validates");
     let uid_key =
         catalog::ScopedPropertyKey::try_new("Attribute", "uid").expect("uid key validates");
+    let rank_key = catalog::ScopedPropertyDirectionKey::try_new(
+        "Attribute",
+        "rank",
+        index::RangeIndexDirection::Asc,
+    )
+    .expect("rank key validates");
     let served = with_catalog.indexes.node_eq[&kind_key].clone();
     // No Active index serves `Attribute.uid`, so its identity is unavailable
     // at runtime and membership evaluates every row instead.
@@ -6712,6 +6749,58 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
         .clone();
     let corrupt = catalog::NodeEqualityIndexMeta::try_new("not-a-planner-identity")
         .expect("identity is non-empty");
+    // An equality and a range child cannot batch, so they stay a set union.
+    let kind_a_or_rank_9 = Predicate::or(vec![
+        Predicate::eq("kind", "A"),
+        Predicate::gte("rank", 9_i64),
+    ]);
+    let union = membership(
+        ir::NodeAccessPlan::Union(ir::AtLeast::<_, 2>::from_pair(
+            ir::NodeAccessSourcePlan::new(equality(served.clone(), "kind", "A"))
+                .expect("equality child is a node source"),
+            ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+                index: with_catalog.indexes.node_range[&rank_key].clone(),
+                key: rank_key,
+                range: ir::IndexRange::Lower {
+                    lower: ir::IndexBound::Inclusive(
+                        ir::RangeIndexValue::literal(9_i64.into())
+                            .expect("range literal validates"),
+                    ),
+                },
+                iteration: ir::RangeScanIteration::Forward,
+            })
+            .expect("range child is a node source"),
+        )),
+        &kind_a_or_rank_9,
+    );
+    // Validated plans never carry an authoritative-scan set, but the
+    // executable contract is serializable; such a set still evaluates rows
+    // instead of scanning the keyspace.
+    let null_kind = Predicate::eq("kind", PropertyValue::Null);
+    let authoritative = exec::ExecOp::IndexMembership {
+        plan: Box::new(exec::ExecNodeIndexMembershipPlan {
+            set: exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key: kind_key },
+            ),
+            label: ir::NonEmptyString::new("Attribute").expect("label is non-empty"),
+            predicate: ir::PredicatePlan::new(null_kind.clone()).expect("null predicate validates"),
+            outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+        }),
+    };
+    let kind_b = Predicate::eq("kind", "B");
+    let uid_a1 = Predicate::eq("uid", "a1");
+    // Two equality children intersect without a range driver; the unserved
+    // child makes the whole set fall back to per-row evaluation.
+    let kind_b_and_uid_a1 = Predicate::and(vec![kind_b.clone(), uid_a1.clone()]);
+    let intersect = membership(
+        ir::NodeAccessPlan::Intersect(ir::AtLeast::<_, 2>::from_pair(
+            ir::NodeAccessSourcePlan::new(equality(served.clone(), "kind", "B"))
+                .expect("served child is a node source"),
+            ir::NodeAccessSourcePlan::new(equality(unserved.clone(), "uid", "a1"))
+                .expect("unserved child is a node source"),
+        )),
+        &kind_b_and_uid_a1,
+    );
     let mixed_rows = context::ParamBindings::default()
         .with_value(
             ir::NonEmptyString::new("edges").expect("parameter is non-empty"),
@@ -6726,36 +6815,54 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
         PropertyValue::I64Array(Vec::new()),
     );
     for window in [false, true] {
-        for (index, property, value, rows, kept) in [
-            (served.clone(), "kind", "B", &mixed_rows, 4),
-            (unserved.clone(), "uid", "a1", &mixed_rows, 2),
-            (corrupt.clone(), "kind", "B", &edge_rows, 1),
+        for (membership, predicate, rows, kept) in [
+            (
+                membership(equality(served.clone(), "kind", "B"), &kind_b),
+                kind_b.clone(),
+                &mixed_rows,
+                4,
+            ),
+            (
+                membership(equality(unserved.clone(), "uid", "a1"), &uid_a1),
+                uid_a1.clone(),
+                &mixed_rows,
+                2,
+            ),
+            (
+                membership(equality(corrupt.clone(), "kind", "B"), &kind_b),
+                kind_b.clone(),
+                &edge_rows,
+                1,
+            ),
+            (union.clone(), kind_a_or_rank_9.clone(), &mixed_rows, 4),
+            (intersect.clone(), kind_b_and_uid_a1.clone(), &mixed_rows, 2),
+            (authoritative.clone(), null_kind.clone(), &mixed_rows, 2),
         ] {
             let expected = db
-                .execute(&mixed(filter(property, value), window), rows.clone())
+                .execute(&mixed(filter(predicate.clone()), window), rows.clone())
                 .await
                 .expect("per-row filter executes")
                 .last;
             let Some(ExecutionValue::Stream(expected_rows)) = &expected else {
                 panic!("per-row filter returns rows");
             };
-            assert_eq!(expected_rows.len(), kept, "{property} = {value}");
+            assert_eq!(expected_rows.len(), kept, "{predicate:?}");
             assert_eq!(
-                db.execute(
-                    &mixed(membership(index, property, value), window),
-                    rows.clone()
-                )
-                .await
-                .expect("membership executes")
-                .last,
+                db.execute(&mixed(membership, window), rows.clone())
+                    .await
+                    .expect("membership executes")
+                    .last,
                 expected,
-                "{property} = {value}, window {window}"
+                "{predicate:?}, window {window}"
             );
         }
         // Node rows force the corrupt identity to resolve, which fails closed.
         let error = db
             .execute(
-                &mixed(membership(corrupt.clone(), "kind", "B"), window),
+                &mixed(
+                    membership(equality(corrupt.clone(), "kind", "B"), &kind_b),
+                    window,
+                ),
                 mixed_rows.clone(),
             )
             .await
