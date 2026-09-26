@@ -9,7 +9,7 @@ pageType: "Guide"
 
 > For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.6` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed MinIO volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.6` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -77,7 +77,48 @@ helix add local --name persistent --disk
 helix start persistent
 ```
 
-Disk mode starts a MinIO sidecar, creates the `helix-db` bucket, and stores data in a Helix-managed Docker/Podman volume. `helix stop` removes the containers but keeps the volume. `helix prune <instance>` removes the volume and deletes the persisted local data.
+Disk mode starts a SeaweedFS S3 sidecar, creates the `helix-db` bucket, and stores data in a Helix-managed Docker/Podman volume named `helix-<project>-<instance>-seaweedfs-data`. `helix stop` removes the containers but keeps the volume. `helix prune <instance>` removes the volume and deletes the persisted local data.
+
+## Migrate MinIO disk data
+
+Earlier CLI releases ran disk mode on MinIO. MinIO has withdrawn its community container images, so disk mode now uses SeaweedFS, which cannot read MinIO's on-disk format. When the old `helix-<project>-<instance>-minio-data` volume exists, `helix start` removes the old MinIO sidecar, leaves that volume untouched, starts the instance on a new SeaweedFS volume, and prints a warning. `helix stop` keeps both volumes. `helix prune <instance>` deletes both.
+
+Copying the old data needs a MinIO server image that is still cached on your machine. Earlier CLI releases pulled `quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`; `docker image ls --digests quay.io/minio/minio` shows whether it is still cached. Copy the objects into the new volume before Helix writes there. If you already started the instance with the new CLI, the new volume holds a fresh empty database: remove it with the `docker volume rm` line below. Use `podman` in place of `docker` if your project uses Podman.
+
+```bash
+helix stop dev
+base=helix-my-app-dev  # the Container value printed by `helix start dev`
+minio_image=quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+seaweedfs_image=ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+aws_cli=public.ecr.aws/aws-cli/aws-cli:2.37.4@sha256:fdd8d1fcbea9c371678dee5a40df8b178c7a781b4586605756ee28114c97ead6
+
+docker volume rm "$base-seaweedfs-data"  # only if the new CLI already started it
+docker network create helix-migrate
+docker run -d --name helix-migrate-minio --network helix-migrate \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  -v "$base-minio-data:/data" "$minio_image" server /data
+docker run -d --name helix-migrate-seaweedfs --network helix-migrate \
+  -e AWS_ACCESS_KEY_ID=helix -e AWS_SECRET_ACCESS_KEY=helix-local-secret \
+  -v "$base-seaweedfs-data:/data" "$seaweedfs_image" \
+  mini -dir=/data -bucket=helix-db -master.telemetry=false
+sleep 10
+
+docker run --rm --network helix-migrate -v helix-migrate-export:/export \
+  -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin \
+  -e AWS_DEFAULT_REGION=us-east-1 "$aws_cli" \
+  --endpoint-url http://helix-migrate-minio:9000 s3 sync s3://helix-db /export
+docker run --rm --network helix-migrate -v helix-migrate-export:/export \
+  -e AWS_ACCESS_KEY_ID=helix -e AWS_SECRET_ACCESS_KEY=helix-local-secret \
+  -e AWS_DEFAULT_REGION=us-east-1 "$aws_cli" \
+  --endpoint-url http://helix-migrate-seaweedfs:8333 s3 sync /export s3://helix-db
+
+docker rm -f helix-migrate-minio helix-migrate-seaweedfs
+docker network rm helix-migrate
+docker volume rm helix-migrate-export
+helix start dev
+```
+
+After checking the data, run `docker volume rm "$base-minio-data"` to delete the old volume and stop the warning. Do not use `helix prune` for this step: it deletes the new volume too.
 
 ## Iteration loop
 
@@ -111,7 +152,7 @@ helix start staging
 helix status
 ```
 
-Each instance is isolated by container name and host port. Disk-mode instances also get their own MinIO container, network, and volume.
+Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume.
 
 ## Inspecting logs
 
@@ -132,7 +173,7 @@ helix logs dev --follow      # stream
 | Remove everything Helix-owned, for every local instance | `helix prune --all` (`--yes` in non-TTY) |
 | Permanently delete an instance from `helix.toml` | `helix delete <instance>` (`--yes` in non-TTY) |
 
-[`helix prune`](/cli/command-reference/prune) only touches Helix-managed containers (`helix-<project>-<instance>` and disk-mode MinIO sidecars), networks, volumes, and the per-instance `.helix/<instance>` directory. It never runs a broad `docker/podman system prune`.
+[`helix prune`](/cli/command-reference/prune) only touches Helix-managed containers (`helix-<project>-<instance>`, disk-mode SeaweedFS sidecars, and MinIO sidecars left by older releases), networks, volumes, and the per-instance `.helix/<instance>` directory. It never runs a broad `docker/podman system prune`.
 
 ## Authoring dynamic queries
 

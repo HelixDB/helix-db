@@ -21,14 +21,14 @@ case "$SCALE_MAX_NODES" in
 esac
 
 usage() {
-    echo "usage: scripts/run-migration-parity.sh contracts|dev|full-correctness|scale-local|scale-minio|full" >&2
+    echo "usage: scripts/run-migration-parity.sh contracts|dev|full-correctness|scale-local|scale-seaweedfs|full" >&2
     exit 2
 }
 
 [[ $# -eq 1 ]] || usage
 PROFILE="$1"
 case "$PROFILE" in
-    contracts|dev|full-correctness|scale-local|scale-minio|full) ;;
+    contracts|dev|full-correctness|scale-local|scale-seaweedfs|full) ;;
     *) usage ;;
 esac
 
@@ -49,9 +49,9 @@ command -v jq >/dev/null 2>&1 || {
     echo "$PROFILE migration parity requires jq" >&2
     exit 1
 }
-if [[ "$PROFILE" == full-correctness || "$PROFILE" == scale-minio || "$PROFILE" == full ]]; then
-    [[ -n "${MINIO_ENDPOINT:-}" ]] || {
-        echo "$PROFILE requires MINIO_ENDPOINT" >&2
+if [[ "$PROFILE" == full-correctness || "$PROFILE" == scale-seaweedfs || "$PROFILE" == full ]]; then
+    [[ -n "${SEAWEEDFS_ENDPOINT:-}" ]] || {
+        echo "$PROFILE requires SEAWEEDFS_ENDPOINT" >&2
         exit 1
     }
 fi
@@ -304,9 +304,9 @@ run_full_correctness() {
     for kind in transient timeout throttled connection-loss; do
         for operation in get head put multipart list delete copy; do
             run_report "fault-${kind}-${operation}" \
-                --minio-endpoint "$MINIO_ENDPOINT" \
-                --minio-bucket "${MINIO_BUCKET:-helix-migration-parity}" \
-                --minio-run-prefix "fault-${kind}-${operation}" \
+                --seaweedfs-endpoint "$SEAWEEDFS_ENDPOINT" \
+                --seaweedfs-bucket "${SEAWEEDFS_BUCKET:-helix-migration-parity}" \
+                --seaweedfs-run-prefix "fault-${kind}-${operation}" \
                 --target-fault "${kind}:${operation}:2" \
                 --maximum-open-attempts 10 \
                 --scenario all \
@@ -319,17 +319,17 @@ run_full_correctness() {
 scale_storage() {
     local storage="$1"
     local storage_args=()
-    if [[ "$storage" == minio ]]; then
+    if [[ "$storage" == seaweedfs ]]; then
         storage_args=(
-            --minio-endpoint "$MINIO_ENDPOINT"
-            --minio-bucket "${MINIO_BUCKET:-helix-migration-parity}"
+            --seaweedfs-endpoint "$SEAWEEDFS_ENDPOINT"
+            --seaweedfs-bucket "${SEAWEEDFS_BUCKET:-helix-migration-parity}"
         )
     fi
     local modes=(eager lazy adaptive)
     for mode in "${modes[@]}"; do
         run_report "scale-${storage}-${mode}-5k-20k" \
             "${storage_args[@]}" \
-            --minio-run-prefix "scale-${storage}-${mode}-5k-20k" \
+            --seaweedfs-run-prefix "scale-${storage}-${mode}-5k-20k" \
             --distribution power-law --scenario "$mode" --batch-rows 1024 \
             --scale-nodes 5000 --scale-edges 20000 --seed-batch-rows 10000 \
             --compaction-drain-seconds 300 --project-next-rows 100000
@@ -340,7 +340,7 @@ scale_storage() {
     for mode in "${modes[@]}"; do
         run_report "scale-${storage}-${mode}-20k-80k" \
             "${storage_args[@]}" \
-            --minio-run-prefix "scale-${storage}-${mode}-20k-80k" \
+            --seaweedfs-run-prefix "scale-${storage}-${mode}-20k-80k" \
             --distribution power-law --scenario "$mode" --batch-rows 1024 \
             --scale-nodes 20000 --scale-edges 80000 --seed-batch-rows 10000 \
             --compaction-drain-seconds 300 --project-next-rows 500000 \
@@ -352,7 +352,7 @@ scale_storage() {
     for mode in "${modes[@]}"; do
         run_report "scale-${storage}-${mode}-100k-400k" \
             "${storage_args[@]}" \
-            --minio-run-prefix "scale-${storage}-${mode}-100k-400k" \
+            --seaweedfs-run-prefix "scale-${storage}-${mode}-100k-400k" \
             --distribution power-law --scenario "$mode" --batch-rows 1024 \
             --scale-nodes 100000 --scale-edges 400000 --seed-batch-rows 10000 \
             --compaction-drain-seconds 300 --project-next-rows 2500000 \
@@ -378,7 +378,7 @@ scale_storage() {
 
     run_report "scale-${storage}-${slowest}-500k-2m" \
         "${storage_args[@]}" \
-        --minio-run-prefix "scale-${storage}-${slowest}-500k-2m" \
+        --seaweedfs-run-prefix "scale-${storage}-${slowest}-500k-2m" \
         --distribution power-law --scenario "$slowest" --batch-rows 1024 \
         --scale-nodes 500000 --scale-edges 2000000 --seed-batch-rows 10000 \
         --compaction-drain-seconds 600 --project-next-rows 10000000 \
@@ -389,7 +389,7 @@ scale_storage() {
     fi
     run_report "scale-${storage}-${slowest}-2m-8m" \
         "${storage_args[@]}" \
-        --minio-run-prefix "scale-${storage}-${slowest}-2m-8m" \
+        --seaweedfs-run-prefix "scale-${storage}-${slowest}-2m-8m" \
         --distribution power-law --scenario "$slowest" --batch-rows 1024 \
         --scale-nodes 2000000 --scale-edges 8000000 --seed-batch-rows 10000 \
         --compaction-drain-seconds 1200 \
@@ -401,11 +401,11 @@ case "$PROFILE" in
     dev) run_dev ;;
     full-correctness) run_full_correctness ;;
     scale-local) scale_storage local ;;
-    scale-minio) scale_storage minio ;;
+    scale-seaweedfs) scale_storage seaweedfs ;;
     full)
         run_full_correctness
         scale_storage local
-        scale_storage minio
+        scale_storage seaweedfs
         ;;
 esac
 

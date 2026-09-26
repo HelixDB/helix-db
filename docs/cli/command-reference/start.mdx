@@ -32,9 +32,9 @@ helix start [INSTANCE] [OPTIONS]
 |------|------|-------------|---------|
 | `--foreground` | Boolean | Run attached and stop the container on Ctrl-C. Useful for streaming startup logs. | `false` |
 | `--port` | Number | Override the host port for this run. The container always listens on `8080` internally. | Value from `[local.<instance>] port` (default `6969`) |
-| `--disk` | Boolean | Use on-disk storage backed by a CLI-managed MinIO container for this run. | `false` |
+| `--disk` | Boolean | Use on-disk storage backed by a CLI-managed SeaweedFS container for this run. | `false` |
 | `--image-version` | String | Override the image tag or `sha256:<64 lowercase hex digits>` for this run. | Configured tag |
-| `--pull` | String | `always`, `missing`, or `never`. Explicit policies also apply to disk-mode MinIO images. | Configured policy, otherwise `always` for `latest`, `missing` for other versions |
+| `--pull` | String | `always`, `missing`, or `never`. Explicit policies also apply to the disk-mode SeaweedFS image. | Configured policy, otherwise `always` for `latest`, `missing` for other versions |
 | `--persist` | Boolean | Write the resolved port, storage, image, and pull settings for this run back to `[local.<instance>]` in `helix.toml`, so future runs reuse them. | `false` |
 
 ## Behavior
@@ -42,10 +42,10 @@ helix start [INSTANCE] [OPTIONS]
 - Defaults to `ghcr.io/helixdb/helixdb:v0.0.6`. Flags override the image tag and pull policy in `[local.<instance>]`.
 - `always` requires a successful pull; `missing` uses a cached image when available; `never` fails if the image is not cached. A failed pull never silently selects an older cached image.
 - Resolves all required images before saving overrides or replacing containers. Failed image resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
-- Disk-mode MinIO images default to `missing` unless a pull policy is explicitly configured.
+- The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
 - Names the container `helix-<project>-<instance>` and publishes the configured port to container port `8080`.
 - Uses Docker or Podman based on `[project] container_runtime` in `helix.toml`.
-- Default storage is in-memory. Passing `--disk` starts a MinIO sidecar, creates the `helix-db` bucket, and runs `helixdb` with S3-compatible storage environment variables.
+- Default storage is in-memory. Passing `--disk` starts a SeaweedFS S3 sidecar (`ghcr.io/chrislusf/seaweedfs:4.47`, pinned by digest) that creates the `helix-db` bucket, waits until the bucket accepts signed requests, and runs `helixdb` with S3-compatible storage environment variables.
 - Background mode (`-d`, `--restart unless-stopped`) waits up to ~30 seconds for `GET /healthz` readiness and prints the URL and container name when ready.
 - Foreground mode (`--rm`) streams the container's stdout/stderr until Ctrl-C, then removes the container.
 
@@ -53,7 +53,9 @@ helix start [INSTANCE] [OPTIONS]
 The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
 </Warning>
 
-With `--disk`, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data.
+With `--disk`, `helix stop` removes the Helix and SeaweedFS containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data.
+
+Older CLI releases stored disk-mode data with MinIO, which SeaweedFS cannot read. `helix start` removes an old MinIO sidecar, starts on a new SeaweedFS volume, and warns while the MinIO volume remains. See [Migrate MinIO disk data](/cli/workflows/local#migrate-minio-disk-data).
 
 ## Examples
 

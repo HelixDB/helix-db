@@ -28,10 +28,10 @@ Named profiles are:
   contracts, with a hard 600-second aggregate limit and a 300-second limit for
   each individual mode.
 - `full-correctness`: six distributions, batch sizes 1 and 1,024, every crash
-  boundary, and the MinIO operation-fault matrix.
+  boundary, and the SeaweedFS operation-fault matrix.
 - `scale-local`: the progressive 5k/20k through 2M/8M local ladder.
-- `scale-minio`: the same ladder with isolated MinIO prefixes and verified
-  cleanup.
+- `scale-seaweedfs`: the same ladder with isolated SeaweedFS prefixes and
+  verified cleanup.
 - `full`: full correctness followed by both scale ladders.
 
 For example:
@@ -41,9 +41,21 @@ scripts/run-migration-parity.sh dev
 
 scripts/run-migration-parity.sh scale-local
 
-MINIO_ENDPOINT=http://127.0.0.1:9000 \
-MINIO_BUCKET=helix-migration-parity \
+SEAWEEDFS_ENDPOINT=http://127.0.0.1:8333 \
+SEAWEEDFS_BUCKET=helix-migration-parity \
 scripts/run-migration-parity.sh full-correctness
+```
+
+The SeaweedFS profiles expect an S3 endpoint with the bucket already created
+and credentials in `SEAWEEDFS_ACCESS_KEY` and `SEAWEEDFS_SECRET_KEY` (default
+`helix` / `helix-local-secret`). SeaweedFS 4.09 or later enforces the S3
+conditional writes SlateDB needs. For example:
+
+```bash
+docker run -d --name helix-parity-seaweedfs -p 127.0.0.1:8333:8333 \
+  -e AWS_ACCESS_KEY_ID=helix -e AWS_SECRET_ACCESS_KEY=helix-local-secret \
+  ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882 \
+  mini -dir=/data -bucket=helix-migration-parity -master.telemetry=false
 ```
 
 Official scale runs keep the 1:4 node/edge ratio, power-law distribution,
