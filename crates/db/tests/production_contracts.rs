@@ -272,6 +272,137 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
     assert!(default_response.diagnostics().insights.is_empty());
 }
 
+thread_local! {
+    /// `helix::query::step` records logged on this thread while it records;
+    /// `None` when the thread does not record.
+    static QUERY_STEP_LOGS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `log` facade sink that keeps `helix::query::step` records for the thread
+/// that emitted them when that thread records.
+///
+/// The logger comes from `tracing::log`, the exact `log` crate that tracing's
+/// `log` feature forwards to while no tracing subscriber is installed.
+struct QueryStepLog;
+
+impl tracing::log::Log for QueryStepLog {
+    fn enabled(&self, metadata: &tracing::log::Metadata<'_>) -> bool {
+        metadata.target() == "helix::query::step"
+    }
+
+    fn log(&self, record: &tracing::log::Record<'_>) {
+        if record.target() != "helix::query::step" {
+            return;
+        }
+        QUERY_STEP_LOGS.with_borrow_mut(|logs| {
+            let Some(logs) = logs else {
+                return;
+            };
+            logs.push(record.args().to_string());
+        });
+    }
+
+    fn flush(&self) {}
+}
+
+/// Every executed step emits one `helix::query::step` debug event with its
+/// operator name, the rows it produced (zero for non-stream values), and its
+/// elapsed microseconds. Without a tracing subscriber the event reaches the
+/// `log` facade.
+#[tokio::test]
+async fn public_execute_boundary_logs_every_executed_step() {
+    static LOGGER: QueryStepLog = QueryStepLog;
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing::log::set_logger(&LOGGER).expect("no other contract installs a logger");
+        tracing::log::set_max_level(tracing::log::LevelFilter::Debug);
+    });
+    assert!(
+        !tracing::dispatcher::has_been_set(),
+        "step events reach the log facade only without a tracing subscriber"
+    );
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-query-step-logging".to_owned(),
+    })
+    .await
+    .expect("query step logging fixture opens");
+    let step_id = |value| exec::ExecStepId::new(value).expect("step ID is positive");
+    let step = |id, dependencies, op| exec::ExecStep {
+        id: step_id(id),
+        dependencies,
+        output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
+        condition: exec::ExecCondition::Always,
+        op,
+        schedule: exec::ExecSchedule::Pipeline,
+        delivered: properties::DeliveredProperties::default(),
+        cost: cost::CostVector::ZERO,
+    };
+    // The mutation is an effect boundary, so the count runs as its own step
+    // rather than inside a pull region.
+    let plan = exec::ExecutablePlan::new(
+        ir::PlanKind::Write,
+        ir::ReturnPlan::None,
+        ir::AtLeast::<_, 1>::from_one_and_rest(
+            step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::AddNodeSource {
+                        label: ir::NonEmptyString::new("Logged").expect("label is non-empty"),
+                        properties: ir::PropertyAssignments::try_from_vec(Vec::new())
+                            .expect("empty assignments are valid"),
+                    },
+                },
+            ),
+            vec![step(
+                2,
+                vec![step_id(1)],
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
+                },
+            )],
+        ),
+        step_id(2),
+        trace::PlanningTrace::default(),
+        exec::PlannerMetrics::default(),
+    )
+    .expect("logged plan validates");
+
+    QUERY_STEP_LOGS.set(Some(Vec::new()));
+    let result = db
+        .execute(&plan, context::ParamBindings::default())
+        .await
+        .expect("logged plan executes");
+    let logs = QUERY_STEP_LOGS.take().expect("this thread records");
+
+    assert_eq!(result.last, Some(ExecutionValue::Count(1)));
+    let steps = logs
+        .iter()
+        .map(|record| {
+            let field = |name: &str| {
+                record
+                    .split(' ')
+                    .find_map(|token| token.strip_prefix(name))
+                    .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
+            };
+            field("elapsed_us=")
+                .parse::<u64>()
+                .expect("latency is whole microseconds");
+            (field("op="), field("rows="))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steps,
+        [("\"mutation()\"", "1"), ("\"count()\"", "0")],
+        "{logs:?}"
+    );
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn public_shared_runtime_keeps_search_families_available() {
     let db = HelixDB::open_with_object_store(

@@ -405,7 +405,7 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Enables directory maintenance for generation-capability tests.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(in crate::search::vector) fn with_simhash_directory(mut self) -> Self {
+    pub(crate) fn with_simhash_directory(mut self) -> Self {
         self.simhash_directory_enabled = true;
         self
     }

@@ -28,7 +28,23 @@ impl<'db> ExecutionContext<'db> {
             return Ok(value);
         }
         let input = self.dependency_input(&step.dependencies)?;
+        let started = std::time::Instant::now();
         let value = Box::pin(self.execute_op(&step.op, input)).await?;
+        tracing::debug!(
+            target: "helix::query::step",
+            op = row_mode::op_name(&step.op),
+            rows = match &value {
+                ExecutionValue::Stream(rows) => rows.len(),
+                ExecutionValue::FoldedStream(_)
+                | ExecutionValue::Count(_)
+                | ExecutionValue::Bool(_)
+                | ExecutionValue::Scalars(_)
+                | ExecutionValue::IndexDdlReceipt(_)
+                | ExecutionValue::IndexOperationStatus(_) => 0,
+            },
+            elapsed_us = started.elapsed().as_micros() as u64,
+            "query step"
+        );
         self.check_execution_deadline()?;
         Ok(value)
     }
