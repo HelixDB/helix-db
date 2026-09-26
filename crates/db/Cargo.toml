@@ -63,6 +63,7 @@ bincode = "^1.3.3"
 parquet = "59"
 arrow-array = "59"
 helix-db-testkit = { path = "../db-testkit" }
+reqwest = "0.13.3"
 
 [features]
 default = []
@@ -156,6 +157,10 @@ required-features = ["production-scale"]
 
 [[test]]
 name = "production_vector_migration_scale"
+required-features = ["production-scale"]
+
+[[test]]
+name = "scoped_search_gate"
 required-features = ["production-scale"]
 
 [[test]]
