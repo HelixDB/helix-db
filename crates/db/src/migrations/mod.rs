@@ -736,7 +736,7 @@ impl MigrationFailpoint {
                 | Self::LegacyDefinitionRetirementBefore
                 | Self::LegacyDefinitionRetirementAfter
         ) {
-            HelixDbError::Storage(slatedb::Error::unavailable(message.into()))
+            HelixDbError::Storage(slatedb::Error::unavailable(message))
         } else {
             HelixDbError::Config(message)
         }
