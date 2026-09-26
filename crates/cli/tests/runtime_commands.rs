@@ -6,6 +6,9 @@ use support::CliFixture;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// The disk-mode dependency pin, mirrored by the fake runtime in `support`.
+const SEAWEEDFS_IMAGE: &str = "ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882";
+
 fn stdout(assert: Assert) -> String {
     String::from_utf8(assert.get_output().stdout.clone()).expect("stdout should be utf8")
 }
@@ -110,10 +113,153 @@ async fn disk_runtime_commands_cover_resource_reuse_status_cleanup_and_errors() 
 
     let log = fixture.runtime_log();
     assert!(log.contains("network create"));
-    assert!(log.contains("volume create"));
-    assert!(log.contains("quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"));
+    assert!(log.contains(&format!(
+        "volume create --label helixdb.identity=20:disk-command-project/dev {container}-seaweedfs-data"
+    )));
+    assert!(log.contains(&format!(
+        "run -d --restart unless-stopped --name {container}-seaweedfs"
+    )));
+    assert!(log.contains(&format!("exec {container}-seaweedfs sh -c")));
+    assert!(log.contains(&format!("AWS_ENDPOINT=http://{container}-seaweedfs:8333")));
+    assert!(!log.contains("quay.io/minio"), "{log}");
     assert!(log.contains("logs -f"));
     assert!(log.contains("network inspect"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_minio_sidecars_are_removed_and_their_data_is_kept_until_prune() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("upgraded-disk");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--port"])
+        .arg(server.address().port().to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+
+    // Every resource inspection succeeds, so the MinIO-era volume is present.
+    let started = stdout(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["start", "dev"])
+            .env("HELIX_TEST_RUNTIME_RESOURCES_EXIST", "1")
+            .assert()
+            .success(),
+    );
+    let base = "helix-upgraded-disk-dev";
+    assert!(
+        started.contains(&format!(
+            "Volume {base}-minio-data holds data from a MinIO-based Helix CLI"
+        )),
+        "{started}"
+    );
+    assert!(started.contains(&format!("now stores data in {base}-seaweedfs-data")));
+    assert!(started.contains("#migrate-minio-disk-data"));
+
+    let log = fixture.runtime_log().replace('\r', "");
+    let lines: Vec<_> = log.lines().collect();
+    let legacy_removal = lines
+        .iter()
+        .position(|line| *line == format!("rm -f {base}-minio"))
+        .expect("start must remove the MinIO sidecar");
+    let network_inspect = lines
+        .iter()
+        .position(|line| *line == format!("network inspect {base}-net"))
+        .expect("start must reuse the instance network");
+    assert!(
+        legacy_removal < network_inspect,
+        "the MinIO sidecar must leave the shared network first: {log}"
+    );
+    assert!(!log.contains(&format!("-v {base}-minio-data")), "{log}");
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["stop", "dev"])
+        .env("HELIX_TEST_RUNTIME_RESOURCES_EXIST", "1")
+        .assert()
+        .success();
+    let log = fixture.runtime_log().replace('\r', "");
+    assert_eq!(
+        log.matches(&format!("rm -f {base}-minio\n")).count(),
+        2,
+        "{log}"
+    );
+    assert!(
+        !log.contains("volume rm"),
+        "stop must keep both volumes: {log}"
+    );
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["prune", "dev", "--yes"])
+        .env("HELIX_TEST_RUNTIME_RESOURCES_EXIST", "1")
+        .assert()
+        .success();
+    let log = fixture.runtime_log().replace('\r', "");
+    assert!(
+        log.contains(&format!("volume rm {base}-seaweedfs-data\n")),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!("volume rm {base}-minio-data\n")),
+        "{log}"
+    );
+}
+
+#[test]
+fn seaweedfs_readiness_failure_stops_before_starting_helix() {
+    for foreground in [false, true] {
+        let fixture = CliFixture::new_with_fake_runtime();
+        let project = fixture.root().join("unready-disk");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(
+            project.join("helix.toml"),
+            "[project]\nname = \"unready-disk\"\n[local.dev]\nstorage = \"disk\"\n",
+        )
+        .unwrap();
+        let mut command = fixture.command();
+        command
+            .current_dir(&project)
+            .args(["start", "dev"])
+            .env("HELIX_TEST_RUNTIME_FAIL_COMMAND", "exec");
+        if foreground {
+            command.arg("--foreground");
+        }
+        let error = stderr(command.assert().failure());
+        assert!(
+            error.contains("local SeaweedFS bucket helix-db did not become ready"),
+            "{error}"
+        );
+        assert!(error.contains("simulated runtime failure"), "{error}");
+        assert!(
+            error.contains("docker logs helix-unready-disk-dev-seaweedfs"),
+            "{error}"
+        );
+        let log = fixture.runtime_log();
+        let runs: Vec<_> = log
+            .lines()
+            .filter(|line| line.starts_with("run "))
+            .collect();
+        assert_eq!(runs.len(), 1, "only the sidecar may start: {log}");
+        assert!(
+            runs[0].contains("--name helix-unready-disk-dev-seaweedfs"),
+            "{log}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -147,19 +293,25 @@ async fn hash_suffixed_legacy_resources_are_adopted_on_upgrade() {
     )
     .unwrap();
 
-    fixture
-        .command()
-        .current_dir(&project)
-        .env("HELIX_TEST_RUNTIME_VOLUME_MODE", "existing")
-        .args(["start", instance])
-        .assert()
-        .success();
+    let started = stdout(
+        fixture
+            .command()
+            .current_dir(&project)
+            .env("HELIX_TEST_RUNTIME_VOLUME_MODE", "existing")
+            .args(["start", instance])
+            .assert()
+            .success(),
+    );
 
     let legacy = "helix-upgrade-corner-project-14527b3cbdf37376ceb9eda41d2afac4";
     let log = fixture.runtime_log();
     assert!(
-        log.contains(&format!("volume inspect {legacy}-minio-data")),
+        log.contains(&format!("volume inspect {legacy}-seaweedfs-data")),
         "expected the legacy volume to be adopted, got: {log}"
+    );
+    assert!(
+        started.contains(&format!("Volume {legacy}-minio-data holds data")),
+        "the adopted name must also find its MinIO-era volume, got: {started}"
     );
     assert!(
         !log.contains("volume create"),
@@ -215,7 +367,7 @@ async fn fresh_hash_suffixed_names_get_their_own_digest() {
     let log = fixture.runtime_log();
     assert!(
         log.contains(&format!(
-            "volume create --label helixdb.identity=22:upgrade-corner-project/14527b3cbdf37376ceb9eda41d2afac4 {suffixed}-minio-data"
+            "volume create --label helixdb.identity=22:upgrade-corner-project/14527b3cbdf37376ceb9eda41d2afac4 {suffixed}-seaweedfs-data"
         )),
         "expected a fresh labeled suffixed volume, got: {log}"
     );
@@ -377,13 +529,13 @@ async fn mixed_ownership_is_not_adopted() {
     );
     assert!(
         log.contains(&format!(
-            "volume create --label helixdb.identity=7:a-b-dev/{instance} {suffixed}-minio-data"
+            "volume create --label helixdb.identity=7:a-b-dev/{instance} {suffixed}-seaweedfs-data"
         )),
         "mixed ownership must create its own volume, got: {log}"
     );
     assert!(
         !log.contains(&format!(
-            "volume create --label helixdb.identity=7:a-b-dev/{instance} {legacy}-minio-data"
+            "volume create --label helixdb.identity=7:a-b-dev/{instance} {legacy}-seaweedfs-data"
         )),
         "mixed ownership must not reuse the foreign volume, got: {log}"
     );
@@ -395,13 +547,19 @@ async fn mixed_ownership_is_not_adopted() {
         !log.contains(&format!("rm -f {legacy}\n")),
         "prune must not remove the legacy container, got: {log}"
     );
+    for volume in ["seaweedfs-data", "minio-data"] {
+        assert!(
+            log.contains(&format!("volume rm {suffixed}-{volume}")),
+            "prune must remove the suffixed {volume} volume, got: {log}"
+        );
+        assert!(
+            !log.contains(&format!("volume rm {legacy}-{volume}")),
+            "prune must not remove the foreign {volume} volume, got: {log}"
+        );
+    }
     assert!(
-        log.contains(&format!("volume rm {suffixed}-minio-data")),
-        "prune must remove the suffixed volume, got: {log}"
-    );
-    assert!(
-        !log.contains(&format!("volume rm {legacy}-minio-data")),
-        "prune must not remove the foreign volume, got: {log}"
+        !log.contains(&format!("rm -f {legacy}-minio\n")),
+        "prune must not remove the foreign MinIO sidecar, got: {log}"
     );
     assert!(
         !log.contains(&format!("network rm {legacy}-net\n")),
@@ -683,7 +841,7 @@ async fn configured_policy_applies_to_foreground_and_dependency_failures_preserv
         .mount(&server)
         .await;
     for foreground in [false, true] {
-        for failed_image in ["", "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e", "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"] {
+        for failed_image in ["", SEAWEEDFS_IMAGE] {
             let fixture = CliFixture::new_with_fake_runtime();
             let project = fixture.root().join("image-project");
             std::fs::create_dir(&project).unwrap();
@@ -706,7 +864,7 @@ async fn configured_policy_applies_to_foreground_and_dependency_failures_preserv
             }
             let log = fixture.runtime_log();
             assert!(log.contains("pull ghcr.io/helixdb/helixdb:v0.0.6"));
-            assert!(log.contains("pull quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"));
+            assert!(log.contains(&format!("pull {SEAWEEDFS_IMAGE}")));
             if !failed_image.is_empty() {
                 assert!(
                     !log.lines()
@@ -753,8 +911,7 @@ fn failed_image_resolution_with_persist_preserves_config_and_containers() {
             ("never", true, "", ""),
             ("missing", true, "pull", ""),
             ("always", false, "image", ""),
-            ("always", false, "", "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"),
-            ("always", false, "", "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"),
+            ("always", false, "", SEAWEEDFS_IMAGE),
         ] {
             let fixture = CliFixture::new_with_fake_runtime();
             let project = fixture.root().join("persist-failure");
@@ -828,14 +985,14 @@ async fn every_disk_container_uses_its_resolved_image_without_resolving_again() 
             .enumerate()
             .filter(|(_, line)| line.starts_with("image inspect "))
             .collect();
-        assert_eq!(inspections.len(), 3);
+        assert_eq!(inspections.len(), 2);
         assert!(inspections.iter().all(|(index, _)| *index < first_removal));
         let runs: Vec<_> = lines
             .iter()
             .filter(|line| line.starts_with("run "))
             .collect();
-        assert_eq!(runs.len(), 3);
-        for (run, byte) in runs.iter().zip(['c', 'd', 'a']) {
+        assert_eq!(runs.len(), 2);
+        for (run, byte) in runs.iter().zip(['c', 'a']) {
             assert!(
                 run.contains(&format!("sha256:{}", byte.to_string().repeat(64))),
                 "{run}"

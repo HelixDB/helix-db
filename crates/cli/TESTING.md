@@ -54,8 +54,8 @@ Run the real Docker tests sequentially:
 cargo test --locked -p helix-cli --test e2e_runtime -- --ignored --test-threads=1
 ```
 
-To use an unpublished local image for the same runtime tests, preload the MinIO
-images required by disk mode and set `HELIX_E2E_IMAGE` to an explicit image tag or
+To use an unpublished local image for the same runtime tests, preload the SeaweedFS
+image required by disk mode and set `HELIX_E2E_IMAGE` to an explicit image tag or
 digest. The fixture uses `pull = "never"`:
 
 ```bash
