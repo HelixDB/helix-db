@@ -6200,6 +6200,619 @@ async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
     db.close().await.unwrap();
 }
 
+#[test]
+fn public_query_boundary_answers_post_expansion_filters_with_index_membership() {
+    run_high_stack_contract(
+        "public-post-expansion-index-membership",
+        public_query_boundary_answers_post_expansion_filters_with_index_membership_contract,
+    );
+}
+
+/// Post-expansion stored-property filters planned as node index membership
+/// return exactly the rows of the per-row filter they replace.
+///
+/// The reference for every shape is the same batch planned without the index
+/// catalog, which keeps the per-row filter, executed on the same database.
+/// Both agree row for row, in order and with duplicates, for literal,
+/// label-scoped, IN, range, intersected, and residual sets; for runtime
+/// parameters that the index serves or that fall back to per-row evaluation;
+/// through stream, windowed pull, and count execution; for empty streams and
+/// streams wider than one stored-record batch; and for same-request writes.
+/// Hand-built plans add edge rows, an index the catalog does not serve, and a
+/// corrupt index identity.
+async fn public_query_boundary_answers_post_expansion_filters_with_index_membership_contract() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-post-expansion-index-membership".to_owned(),
+    })
+    .await
+    .expect("index membership fixture opens");
+    for (spec, description) in [
+        (
+            index::IndexSpec::node_equality("Attribute", "kind"),
+            "membership equality index",
+        ),
+        (
+            index::IndexSpec::node_range("Attribute", "rank"),
+            "membership range index",
+        ),
+    ] {
+        let receipt = db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["operation"]),
+            ))
+            .await
+            .unwrap();
+        let operation_id = receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted membership index operation has an ID");
+        await_index_operation_success(&db, operation_id, description).await;
+    }
+
+    // `g` reaches `a1` through both items, `n1` and `n2` are same-valued nodes
+    // of another label, `a3` has no kind, and `empty` has no items. `wide`
+    // links 17 alternating Attribute and Note nodes, so bouncing out, in, and
+    // out again yields 289 rows, more than one 256-row record batch.
+    let node = |label: &str, uid: &str, kind: Option<&str>, rank: i64| {
+        let mut properties = vec![
+            ("uid", PropertyInput::from(uid)),
+            ("rank", PropertyInput::from(rank)),
+        ];
+        properties.extend(kind.map(|kind| ("kind", PropertyInput::from(kind))));
+        traversal::g().add_n(label, properties)
+    };
+    let edge = |from: &str, label: &str, to: &str, kind: Option<&str>| {
+        traversal::g().n(NodeRef::var(from)).add_e(
+            label,
+            NodeRef::var(to),
+            kind.map(|kind| ("kind", PropertyInput::from(kind)))
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )
+    };
+    let seed = [
+        ("g", node("Group", "g", None, 0)),
+        ("empty", node("Group", "empty", None, 0)),
+        ("wide", node("Group", "wide", None, 0)),
+        ("i1", node("Item", "i1", None, 0)),
+        ("i2", node("Item", "i2", None, 0)),
+        ("a1", node("Attribute", "a1", Some("B"), 1)),
+        ("a2", node("Attribute", "a2", Some("A"), 5)),
+        ("a3", node("Attribute", "a3", None, 9)),
+        ("n1", node("Note", "n1", Some("B"), 1)),
+        ("n2", node("Note", "n2", Some("A"), 5)),
+        ("i1_in_g", edge("i1", "IN_GROUP", "g", None)),
+        ("i2_in_g", edge("i2", "IN_GROUP", "g", None)),
+        ("i1_a1", edge("i1", "HAS", "a1", Some("B"))),
+        ("i1_a2", edge("i1", "HAS", "a2", Some("A"))),
+        ("i1_n1", edge("i1", "HAS", "n1", None)),
+        ("i2_a1", edge("i2", "HAS", "a1", None)),
+        ("i2_a3", edge("i2", "HAS", "a3", None)),
+        ("i2_n2", edge("i2", "HAS", "n2", None)),
+    ]
+    .into_iter()
+    .fold(batch::write_batch(), |write, (name, entry)| {
+        write.var_as(name, entry)
+    });
+    let seed = (0..17_i64).fold(seed, |write, index| {
+        let uid = format!("w{index}");
+        write
+            .var_as(
+                &uid,
+                node(
+                    if index % 2 == 0 { "Attribute" } else { "Note" },
+                    &uid,
+                    Some(if index % 3 == 0 { "B" } else { "A" }),
+                    index,
+                ),
+            )
+            .var_as(&format!("wide_{uid}"), edge("wide", "HAS", &uid, None))
+    });
+    db.query(QueryRequest::write(seed.returning(Vec::<String>::new())))
+        .await
+        .expect("index membership graph seeds");
+
+    // Runtime parameters stay late-bound so membership classifies them per
+    // request, and a two-value domain bound makes a third value authoritative.
+    let late_bound = ["kind", "kinds"]
+        .map(|name| ir::NonEmptyString::new(name).expect("parameter name is non-empty"))
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let limits = context::PlannerLimits {
+        max_index_union_branches: context::IndexUnionBranchLimit::limited(2)
+            .expect("two-branch limit is positive"),
+    };
+    let with_catalog = context::PlannerContext {
+        late_bound_params: late_bound.clone(),
+        limits: limits.clone(),
+        ..db.planner_context(context::ParamBindings::default())
+    };
+    let without_catalog = context::PlannerContext {
+        late_bound_params: late_bound,
+        limits,
+        ..context::PlannerContext::default()
+    };
+    let is_membership =
+        |step: &exec::ExecStep| matches!(step.op, exec::ExecOp::IndexMembership { .. });
+    let bind = |name: &str, value: PropertyValue| {
+        context::ParamBindings::default().with_value(
+            ir::NonEmptyString::new(name).expect("parameter name is non-empty"),
+            value,
+        )
+    };
+    let strings = |values: &[&str]| {
+        PropertyValue::StringArray(values.iter().map(|value| (*value).to_owned()).collect())
+    };
+    let sorted_uids = |value: &Option<ExecutionValue>| {
+        let Some(ExecutionValue::Scalars(rows)) = value else {
+            panic!("uid projection returns scalars, got {value:?}");
+        };
+        let mut uids = rows
+            .iter()
+            .map(|row| {
+                let ExecutionScalar::Object(object) = row else {
+                    panic!("uid projection returns objects, got {row:?}");
+                };
+                object["uid"].as_str().expect("uid is a string").to_owned()
+            })
+            .collect::<Vec<_>>();
+        uids.sort();
+        uids
+    };
+    let default = context::ParamBindings::default;
+    for (predicate, params, expected, planned) in [
+        (
+            Predicate::eq("kind", "B"),
+            default(),
+            vec!["a1", "a1", "n1"],
+            true,
+        ),
+        (
+            Predicate::and(vec![
+                Predicate::eq("$label", "Attribute"),
+                Predicate::eq("kind", "B"),
+            ]),
+            default(),
+            vec!["a1", "a1"],
+            true,
+        ),
+        (
+            Predicate::is_in("kind", strings(&["A", "B"])),
+            default(),
+            vec!["a1", "a1", "a2", "n1", "n2"],
+            true,
+        ),
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::starts_with("uid", "n"),
+            ]),
+            default(),
+            vec!["n1"],
+            true,
+        ),
+        (
+            Predicate::gte("rank", 5_i64),
+            default(),
+            vec!["a2", "a3", "n2"],
+            true,
+        ),
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "A"),
+                Predicate::gte("rank", 5_i64),
+            ]),
+            default(),
+            vec!["a2", "n2"],
+            true,
+        ),
+        // A missing property equals null, which only an authoritative scan
+        // can answer, so literal null equality keeps the per-row filter.
+        (
+            Predicate::eq("kind", PropertyValue::Null),
+            default(),
+            vec!["a3"],
+            false,
+        ),
+        (
+            Predicate::eq_param("kind", "kind"),
+            bind("kind", PropertyValue::from("B")),
+            vec!["a1", "a1", "n1"],
+            true,
+        ),
+        // Null falls back to per-row evaluation; NaN is served and matches
+        // nothing.
+        (
+            Predicate::eq_param("kind", "kind"),
+            bind("kind", PropertyValue::Null),
+            vec!["a3"],
+            true,
+        ),
+        (
+            Predicate::eq_param("kind", "kind"),
+            bind("kind", PropertyValue::F64(f64::NAN)),
+            Vec::new(),
+            true,
+        ),
+        (
+            Predicate::is_in_param("kind", "kinds"),
+            bind("kinds", strings(&["A", "B"])),
+            vec!["a1", "a1", "a2", "n1", "n2"],
+            true,
+        ),
+        // Three values exceed the planned domain bound and fall back.
+        (
+            Predicate::is_in_param("kind", "kinds"),
+            bind("kinds", strings(&["A", "B", "C"])),
+            vec!["a1", "a1", "a2", "n1", "n2"],
+            true,
+        ),
+    ] {
+        let filtered = |group: &str| {
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", group))
+                .in_(Some("IN_GROUP"))
+                .out(Some("HAS"))
+                .where_(predicate.clone())
+        };
+        let wide = || {
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "wide"))
+                .out(Some("HAS"))
+                .in_(Some("HAS"))
+                .out(Some("HAS"))
+                .where_(predicate.clone())
+        };
+        for (shape, checked) in [
+            (filtered("g").values(vec!["uid"]), true),
+            (filtered("g").limit(2_usize).values(vec!["uid"]), false),
+            (filtered("g").count(), false),
+            (filtered("empty").values(vec!["uid"]), false),
+            (filtered("empty").limit(2_usize).values(vec!["uid"]), false),
+            (wide().values(vec!["uid"]), false),
+            (wide().count(), false),
+        ] {
+            let read = batch::read_batch()
+                .var_as("result", shape)
+                .returning(["result"]);
+            let membership = planning::plan_read_batch(&read, &with_catalog)
+                .unwrap_or_else(|error| panic!("{predicate:?} plans with the catalog: {error}"));
+            let per_row = planning::plan_read_batch(&read, &without_catalog)
+                .unwrap_or_else(|error| panic!("{predicate:?} plans without the catalog: {error}"));
+            assert!(!per_row.steps().iter().any(is_membership));
+            let membership_rows = db
+                .execute(&membership, params.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{predicate:?} membership executes: {error}"))
+                .last;
+            let per_row_rows = db
+                .execute(&per_row, params.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{predicate:?} per-row filter executes: {error}"))
+                .last;
+            assert_eq!(membership_rows, per_row_rows, "{predicate:?}");
+            if checked {
+                assert_eq!(
+                    membership.steps().iter().any(is_membership),
+                    planned,
+                    "{predicate:?}: {:?}",
+                    membership.steps()
+                );
+                assert_eq!(sorted_uids(&membership_rows), expected, "{predicate:?}");
+            }
+        }
+    }
+
+    // Six B-valued nodes, each reached 17 times, survive across both batches.
+    let wide_count = batch::read_batch()
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "wide"))
+                .out(Some("HAS"))
+                .in_(Some("HAS"))
+                .out(Some("HAS"))
+                .where_(Predicate::eq("kind", "B"))
+                .count(),
+        )
+        .returning(["result"]);
+    assert_eq!(
+        db.execute(
+            &planning::plan_read_batch(&wide_count, &with_catalog)
+                .expect("wide membership count plans"),
+            default(),
+        )
+        .await
+        .expect("wide membership count executes")
+        .last,
+        Some(ExecutionValue::Count(102))
+    );
+
+    // An unbound runtime parameter fails the request on both plans.
+    let unbound = batch::read_batch()
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "g"))
+                .in_(Some("IN_GROUP"))
+                .out(Some("HAS"))
+                .where_(Predicate::eq_param("kind", "kind"))
+                .values(vec!["uid"]),
+        )
+        .returning(["result"]);
+    for planning_context in [&with_catalog, &without_catalog] {
+        let plan = planning::plan_read_batch(&unbound, planning_context)
+            .expect("unbound parameter read plans");
+        let error = db.execute(&plan, default()).await.unwrap_err();
+        assert!(error.to_string().contains("`kind`"), "{error}");
+    }
+
+    // Hand-built plans feed edge rows before node rows. Edges always evaluate
+    // the predicate, and a stream without node rows never resolves the set.
+    let element_ids = |value: Option<ExecutionValue>| {
+        let Some(ExecutionValue::Stream(rows)) = value else {
+            panic!("element read returns rows");
+        };
+        PropertyValue::I64Array(
+            rows.into_iter()
+                .map(|row| match row.current {
+                    Some(ElementRef::Node(id) | ElementRef::Edge(id)) => {
+                        i64::try_from(id).expect("fixture IDs fit in i64")
+                    }
+                    None => panic!("element read rows carry an element"),
+                })
+                .collect(),
+        )
+    };
+    let nodes = element_ids(
+        db.execute(
+            &planning::plan_read_batch(
+                &batch::read_batch()
+                    .var_as(
+                        "rows",
+                        traversal::g()
+                            .n_with_label_where("Group", Predicate::eq("uid", "g"))
+                            .in_(Some("IN_GROUP"))
+                            .out(Some("HAS")),
+                    )
+                    .returning(["rows"]),
+                &without_catalog,
+            )
+            .expect("node rows plan"),
+            default(),
+        )
+        .await
+        .expect("node rows read")
+        .last,
+    );
+    let edges = element_ids(
+        db.execute(
+            &planning::plan_read_batch(
+                &batch::read_batch()
+                    .var_as(
+                        "rows",
+                        traversal::g()
+                            .n_with_label_where("Item", Predicate::eq("uid", "i1"))
+                            .out_e(Some("HAS")),
+                    )
+                    .returning(["rows"]),
+                &without_catalog,
+            )
+            .expect("edge rows plan"),
+            default(),
+        )
+        .await
+        .expect("edge rows read")
+        .last,
+    );
+    let step_id = |value| exec::ExecStepId::new(value).expect("step ID is positive");
+    let step = |id, dependencies, op| exec::ExecStep {
+        id: step_id(id),
+        dependencies,
+        output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
+        condition: exec::ExecCondition::Always,
+        op,
+        schedule: exec::ExecSchedule::Pipeline,
+        delivered: properties::DeliveredProperties::default(),
+        cost: cost::CostVector::ZERO,
+    };
+    // Edge rows from `edges`, then node rows from `nodes`, into `filter`; a
+    // window runs the filter as a pull cursor.
+    let mixed = |filter: exec::ExecOp, window: bool| {
+        let param = |name: &str| ir::NonEmptyString::new(name).expect("parameter is non-empty");
+        let mut steps = vec![
+            step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(exec::ExecAccessPlan::Edge(
+                        exec::ExecEdgeAccessPlan::FromParam {
+                            param: param("edges"),
+                        },
+                    )),
+                },
+            ),
+            step(
+                2,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(exec::ExecAccessPlan::Node(
+                        exec::ExecNodeAccessPlan::FromParam {
+                            param: param("nodes"),
+                        },
+                    )),
+                },
+            ),
+            step(
+                3,
+                vec![step_id(1), step_id(2)],
+                exec::ExecOp::Merge {
+                    mode: exec::ExecMergeMode::Concat,
+                },
+            ),
+            step(4, vec![step_id(3)], filter),
+        ];
+        if window {
+            steps.push(step(
+                5,
+                vec![step_id(4)],
+                exec::ExecOp::Limit {
+                    count: ir::StreamBoundPlan::Literal(64),
+                },
+            ));
+        }
+        let root = steps.last().expect("membership plan has steps").id;
+        exec::ExecutablePlan::new(
+            ir::PlanKind::Read,
+            ir::ReturnPlan::None,
+            ir::AtLeast::<_, 1>::try_from_vec(steps).expect("membership plan is non-empty"),
+            root,
+            trace::PlanningTrace::default(),
+            exec::PlannerMetrics::default(),
+        )
+        .expect("hand-built membership plan validates")
+    };
+    let membership = |index: catalog::NodeEqualityIndexMeta, property: &str, value: &str| {
+        exec::ExecOp::IndexMembership {
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                &ir::NodeIndexMembershipPlan::new(
+                    ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                        index,
+                        key: catalog::ScopedPropertyKey::try_new("Attribute", property)
+                            .expect("membership key validates"),
+                        value: ir::IndexValue::Literal(
+                            ir::SecondaryIndexLiteral::new(PropertyValue::from(value))
+                                .expect("membership literal validates"),
+                        ),
+                    })
+                    .expect("membership set is a node source"),
+                    ir::PredicatePlan::new(Predicate::eq(property, value))
+                        .expect("membership predicate validates"),
+                )
+                .expect("membership plan validates"),
+            )),
+        }
+    };
+    let filter = |property: &str, value: &str| exec::ExecOp::Filter {
+        predicate: ir::PredicatePlan::new(Predicate::eq(property, value))
+            .expect("filter predicate validates"),
+    };
+    let kind_key =
+        catalog::ScopedPropertyKey::try_new("Attribute", "kind").expect("kind key validates");
+    let uid_key =
+        catalog::ScopedPropertyKey::try_new("Attribute", "uid").expect("uid key validates");
+    let served = with_catalog.indexes.node_eq[&kind_key].clone();
+    // No Active index serves `Attribute.uid`, so its identity is unavailable
+    // at runtime and membership evaluates every row instead.
+    let unserved = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(uid_key.clone())
+        .node_eq[&uid_key]
+        .clone();
+    let corrupt = catalog::NodeEqualityIndexMeta::try_new("not-a-planner-identity")
+        .expect("identity is non-empty");
+    let mixed_rows = context::ParamBindings::default()
+        .with_value(
+            ir::NonEmptyString::new("edges").expect("parameter is non-empty"),
+            edges,
+        )
+        .with_value(
+            ir::NonEmptyString::new("nodes").expect("parameter is non-empty"),
+            nodes,
+        );
+    let edge_rows = mixed_rows.clone().with_value(
+        ir::NonEmptyString::new("nodes").expect("parameter is non-empty"),
+        PropertyValue::I64Array(Vec::new()),
+    );
+    for window in [false, true] {
+        for (index, property, value, rows, kept) in [
+            (served.clone(), "kind", "B", &mixed_rows, 4),
+            (unserved.clone(), "uid", "a1", &mixed_rows, 2),
+            (corrupt.clone(), "kind", "B", &edge_rows, 1),
+        ] {
+            let expected = db
+                .execute(&mixed(filter(property, value), window), rows.clone())
+                .await
+                .expect("per-row filter executes")
+                .last;
+            let Some(ExecutionValue::Stream(expected_rows)) = &expected else {
+                panic!("per-row filter returns rows");
+            };
+            assert_eq!(expected_rows.len(), kept, "{property} = {value}");
+            assert_eq!(
+                db.execute(
+                    &mixed(membership(index, property, value), window),
+                    rows.clone()
+                )
+                .await
+                .expect("membership executes")
+                .last,
+                expected,
+                "{property} = {value}, window {window}"
+            );
+        }
+        // Node rows force the corrupt identity to resolve, which fails closed.
+        let error = db
+            .execute(
+                &mixed(membership(corrupt.clone(), "kind", "B"), window),
+                mixed_rows.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, db::error::HelixDbError::IndexCatalogCorruption(_)),
+            "{error:?}"
+        );
+    }
+
+    // Membership in a write request flushes the request's pending secondary
+    // and topology writes first, so it sees a new node, its new edge, and an
+    // index move before the request commits.
+    let write = batch::write_batch()
+        .var_as(
+            "item",
+            traversal::g().n_with_label_where("Item", Predicate::eq("uid", "i2")),
+        )
+        .var_as("fresh", node("Attribute", "a5", Some("B"), 3))
+        .var_as("link", edge("item", "HAS", "fresh", None))
+        .var_as(
+            "moved",
+            traversal::g()
+                .n_with_label_where("Attribute", Predicate::eq("uid", "a1"))
+                .set_property("kind", "A"),
+        )
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "g"))
+                .in_(Some("IN_GROUP"))
+                .out(Some("HAS"))
+                .where_(Predicate::eq("kind", "B"))
+                .values(vec!["uid"]),
+        )
+        .returning(["result"]);
+    assert!(planning::plan_write_batch(&write, &with_catalog)
+        .expect("membership write plans")
+        .steps()
+        .iter()
+        .any(is_membership));
+    let response = db
+        .query(QueryRequest::write(write))
+        .await
+        .expect("membership write executes");
+    let mut written = response["result"]
+        .as_array()
+        .expect("write returns result rows")
+        .iter()
+        .map(|row| row["uid"].as_str().expect("row has a uid").to_owned())
+        .collect::<Vec<_>>();
+    written.sort();
+    assert_eq!(written, ["a5", "n1"]);
+
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn public_query_boundary_covers_dynamic_bounds_and_parameter_errors() {
     let db = HelixDB::open(HelixDbSource::InMemory {
