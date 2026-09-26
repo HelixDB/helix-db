@@ -111,7 +111,51 @@ impl SlateHybridCacheConfig {
     pub const fn disk(&self) -> &DiskCacheConfig {
         &self.disk
     }
+
+    /// Foyer disk block size: the disk capacity divided by 32Ki, rounded up
+    /// to a power of two and clamped to 64 KiB..=16 MiB.
+    ///
+    /// Up to 512 GiB this gives at most 32Ki blocks. Above it blocks stay at
+    /// 16 MiB and the count grows linearly; see [`Self::disk_partitions`].
+    ///
+    /// ```
+    /// # use db::config::SlateHybridCacheConfig;
+    /// let small = SlateHybridCacheConfig::try_new(1, "/tmp/slate", 16 * 1024 * 1024)?;
+    /// assert_eq!(small.disk_block_bytes(), 64 * 1024);
+    /// let large = SlateHybridCacheConfig::try_new(1, "/tmp/slate", 12 << 30)?;
+    /// assert_eq!(large.disk_block_bytes(), 512 * 1024);
+    /// # Ok::<(), db::config::ConfigError>(())
+    /// ```
+    pub fn disk_block_bytes(&self) -> usize {
+        self.disk
+            .bytes()
+            .div_ceil(FOYER_TARGET_MAX_DISK_PARTITIONS)
+            .next_power_of_two()
+            .clamp(
+                FOYER_MIN_DISK_BLOCK_SIZE_BYTES,
+                FOYER_MAX_DISK_BLOCK_SIZE_BYTES,
+            )
+    }
+
+    /// Number of Foyer partition files, each held open while the cache runs.
+    ///
+    /// At most 32Ki until the disk capacity exceeds 512 GiB, where blocks
+    /// stop growing and the count grows linearly.
+    ///
+    /// ```
+    /// # use db::config::SlateHybridCacheConfig;
+    /// let cache = SlateHybridCacheConfig::try_new(1, "/tmp/slate", 12 << 30)?;
+    /// assert_eq!(cache.disk_partitions(), 24_576);
+    /// # Ok::<(), db::config::ConfigError>(())
+    /// ```
+    pub fn disk_partitions(&self) -> usize {
+        self.disk.bytes() / self.disk_block_bytes()
+    }
 }
+
+const FOYER_MIN_DISK_BLOCK_SIZE_BYTES: usize = 64 * 1024;
+const FOYER_MAX_DISK_BLOCK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+const FOYER_TARGET_MAX_DISK_PARTITIONS: usize = 32 * 1024;
 
 /// Checked capacities for SlateDB's in-memory block and metadata caches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +354,11 @@ impl SlateObjectStoreCacheSettings {
     /// Startup preload level for the object-store cache.
     pub const fn warm(&self) -> ObjectStoreWarmLevel {
         self.warm
+    }
+
+    /// Most cache files the object-store tier keeps open at once.
+    pub const fn max_open_file_handles(&self) -> usize {
+        self.max_open_file_handles.get()
     }
 }
 

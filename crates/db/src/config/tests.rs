@@ -107,6 +107,23 @@ fn db_config_rejects_invalid_raw_values() {
 }
 
 #[test]
+fn slate_hybrid_disk_layout_scales_embedded_and_managed_caches() {
+    const MIB: usize = 1024 * 1024;
+    for (disk_bytes, block_bytes, partitions) in [
+        (16 * MIB, 64 * 1024, 256),
+        (24 * MIB, 64 * 1024, 384),
+        (12 * 1024 * MIB, 512 * 1024, 24_576),
+        (352 * 1024 * MIB, 16 * MIB, 22_528),
+        (1024 * 1024 * MIB, 16 * MIB, 65_536),
+    ] {
+        let cache = SlateHybridCacheConfig::try_new(1, "/tmp/slate", disk_bytes)
+            .expect("valid Slate hybrid cache");
+        assert_eq!(cache.disk_block_bytes(), block_bytes, "{disk_bytes}");
+        assert_eq!(cache.disk_partitions(), partitions, "{disk_bytes}");
+    }
+}
+
+#[test]
 fn db_config_uses_typed_edge_settings() {
     let config = DbConfig::new()
         .with_encoding_type(EdgeEncoding::Efp)

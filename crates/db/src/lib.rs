@@ -994,10 +994,31 @@ impl HelixDB {
     }
 
     /// Opens a database for a transport server that owns its metrics recorder.
+    ///
+    /// Unlike [`Self::open_with_config`], no embedded query-metrics recorder is
+    /// attached; `config` selects the server's cache tiers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DbConfig, HelixDB, HelixDbSource};
+    ///
+    /// let db = HelixDB::open_for_server(
+    ///     HelixDbSource::InMemory {
+    ///         database: "server-open".to_string(),
+    ///     },
+    ///     DbConfig::new(),
+    /// )
+    /// .await
+    /// .unwrap();
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
     #[doc(hidden)]
-    pub async fn open_for_server(source: HelixDbSource) -> Result<Self> {
+    pub async fn open_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
         let (path, object_store) = source.into_parts()?;
-        Self::open_writer_inner(path, object_store, DbConfig::new()).await
+        Self::open_writer_inner(path, object_store, config).await
     }
 
     #[cfg(test)]
@@ -3149,19 +3170,38 @@ fn build_fts_cache(
         .map(Some)
 }
 
-const FOYER_MIN_DISK_BLOCK_SIZE_BYTES: usize = 64 * 1024;
-const FOYER_MAX_DISK_BLOCK_SIZE_BYTES: usize = 16 * 1024 * 1024;
-const FOYER_TARGET_MAX_DISK_PARTITIONS: usize = 32 * 1024;
+const FOYER_PARTITION_FILE_PREFIX: &str = "foyer-storage-direct-fs-";
 
-fn foyer_disk_block_size(disk_capacity_bytes: usize) -> usize {
-    debug_assert!(disk_capacity_bytes > 0);
-    disk_capacity_bytes
-        .div_ceil(FOYER_TARGET_MAX_DISK_PARTITIONS)
-        .next_power_of_two()
-        .clamp(
-            FOYER_MIN_DISK_BLOCK_SIZE_BYTES,
-            FOYER_MAX_DISK_BLOCK_SIZE_BYTES,
-        )
+/// Removes Foyer partition files that the device about to open would not own.
+///
+/// Foyer opens partitions `0..partitions`, resizing reused files in place, and
+/// never looks at higher indexes. Files left by a larger earlier disk budget
+/// would stay on disk forever, and files of another block size would be
+/// recovered at the wrong block boundaries. Both are disposable cache data.
+fn remove_stale_foyer_partitions(
+    root: &std::path::Path,
+    partitions: usize,
+    block_bytes: usize,
+) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    entries.into_iter().try_for_each(|entry| {
+        let entry = entry?;
+        let Some(index) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(FOYER_PARTITION_FILE_PREFIX))
+            .and_then(|index| index.parse::<usize>().ok())
+        else {
+            return Ok(());
+        };
+        if index < partitions && entry.metadata()?.len() == block_bytes as u64 {
+            return Ok(());
+        }
+        std::fs::remove_file(entry.path())
+    })
 }
 
 async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
@@ -3186,6 +3226,17 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
             )))
         }
         CacheMode::Hybrid { slate_db, .. } => {
+            remove_stale_foyer_partitions(
+                slate_db.disk().root(),
+                slate_db.disk_partitions(),
+                slate_db.disk_block_bytes(),
+            )
+            .map_err(|err| {
+                HelixDbError::Config(format!(
+                    "failed to remove stale Slate hybrid cache partitions in '{}': {err}",
+                    slate_db.disk().root().display()
+                ))
+            })?;
             let metrics = FoyerHybridCacheMetrics::new();
             let cache = HybridCacheBuilder::new()
                 .with_name("helix-slate-hybrid")
@@ -3205,7 +3256,7 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                                 ))
                             })?,
                     )
-                    .with_block_size(foyer_disk_block_size(slate_db.disk().bytes())),
+                    .with_block_size(slate_db.disk_block_bytes()),
                 )
                 .build()
                 .await
@@ -3242,10 +3293,11 @@ mod tests {
 
         let root = tempfile::tempdir().expect("temporary cache root");
         let foyer_root = root.path().join("foyer");
-        let disk_bytes = 16 * 1024 * 1024;
+        let slate_db = SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, 16 * 1024 * 1024)
+            .expect("valid Slate hybrid cache");
+        let expected_partitions = slate_db.disk_partitions();
         let mode = CacheMode::Hybrid {
-            slate_db: SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, disk_bytes)
-                .expect("valid Slate hybrid cache"),
+            slate_db,
             object_store: SlateObjectStoreCacheSettings::try_new(
                 root.path().join("object-store"),
                 Some(1024 * 1024),
@@ -3274,27 +3326,98 @@ mod tests {
                     .starts_with("foyer-storage-direct-fs-")
             })
             .count();
-        assert_eq!(
-            partition_count,
-            disk_bytes / foyer_disk_block_size(disk_bytes)
-        );
+        assert_eq!(partition_count, expected_partitions);
         cache.close().await.expect("Foyer cache closes");
     }
 
+    #[tokio::test]
+    async fn slate_hybrid_cache_removes_partitions_beyond_a_smaller_budget() {
+        use crate::config::{
+            ObjectStoreWarmLevel, SlateHybridCacheConfig, SlateObjectStoreCacheSettings,
+            SlateWarmConfig,
+        };
+
+        let root = tempfile::tempdir().expect("temporary cache root");
+        let foyer_root = root.path().join("foyer");
+        let partition_indexes = || {
+            let mut indexes = std::fs::read_dir(&foyer_root)
+                .expect("Foyer cache directory exists")
+                .map(|entry| {
+                    entry
+                        .expect("readable cache entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .strip_prefix(FOYER_PARTITION_FILE_PREFIX)
+                        .expect("only partition files")
+                        .parse::<usize>()
+                        .expect("numbered partition")
+                })
+                .collect::<Vec<_>>();
+            indexes.sort_unstable();
+            indexes
+        };
+        for (disk_bytes, partitions) in [(16 * 1024 * 1024, 256), (8 * 1024 * 1024, 128)] {
+            let mode = CacheMode::Hybrid {
+                slate_db: SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, disk_bytes)
+                    .expect("valid Slate hybrid cache"),
+                object_store: SlateObjectStoreCacheSettings::try_new(
+                    root.path().join("object-store"),
+                    Some(1024 * 1024),
+                    4096,
+                    false,
+                    ObjectStoreWarmLevel::Off,
+                    None,
+                    1,
+                )
+                .expect("valid object-store cache"),
+                slate_warm: SlateWarmConfig::Off,
+                fts: None,
+            };
+            let cache = build_slate_db_cache(&mode)
+                .await
+                .expect("Foyer cache builds")
+                .expect("hybrid mode enables Foyer");
+            assert_eq!(partition_indexes(), (0..partitions).collect::<Vec<_>>());
+            cache.close().await.expect("Foyer cache closes");
+        }
+    }
+
     #[test]
-    fn foyer_disk_block_size_scales_embedded_and_managed_caches() {
+    fn stale_foyer_partitions_are_indexes_past_the_device_or_another_block_size() {
+        const BLOCK: u64 = 64 * 1024;
+        let root = tempfile::tempdir().expect("temporary cache root");
+        for (name, length) in [
+            ("foyer-storage-direct-fs-00000000", BLOCK),
+            ("foyer-storage-direct-fs-00000001", 2 * BLOCK),
+            ("foyer-storage-direct-fs-00000003", BLOCK),
+            ("foyer-storage-direct-fs-00000004", BLOCK),
+            ("foyer-storage-direct-fs-not-a-number", BLOCK),
+            ("unrelated", 2 * BLOCK),
+        ] {
+            std::fs::File::create(root.path().join(name))
+                .and_then(|file| file.set_len(length))
+                .expect("fixture file");
+        }
+
+        remove_stale_foyer_partitions(root.path(), 4, BLOCK as usize)
+            .expect("stale partitions are removed");
+        let mut remaining = std::fs::read_dir(root.path())
+            .expect("cache root exists")
+            .map(|entry| entry.expect("readable entry").file_name())
+            .collect::<Vec<_>>();
+        remaining.sort();
         assert_eq!(
-            foyer_disk_block_size(16 * 1024 * 1024),
-            FOYER_MIN_DISK_BLOCK_SIZE_BYTES
+            remaining,
+            [
+                "foyer-storage-direct-fs-00000000",
+                "foyer-storage-direct-fs-00000003",
+                "foyer-storage-direct-fs-not-a-number",
+                "unrelated",
+            ]
         );
-        assert_eq!(
-            foyer_disk_block_size(352 * 1024 * 1024 * 1024),
-            FOYER_MAX_DISK_BLOCK_SIZE_BYTES
-        );
-        assert_eq!(
-            352 * 1024 * 1024 * 1024 / foyer_disk_block_size(352 * 1024 * 1024 * 1024),
-            22_528
-        );
+
+        remove_stale_foyer_partitions(&root.path().join("missing"), 4, BLOCK as usize)
+            .expect("a missing cache directory has nothing to remove");
     }
 
     #[test]
