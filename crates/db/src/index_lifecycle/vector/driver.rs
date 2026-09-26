@@ -3576,6 +3576,10 @@ fn operation_error(error: crate::index_lifecycle::IndexOperationModelError) -> H
     HelixDbError::InvariantViolation(error.to_string())
 }
 
+#[cfg(all(feature = "production-coverage", not(test)))]
+#[path = "../../../tests/production_support/vector_build_cache.rs"]
+pub(super) mod build_cache_production_contracts;
+
 #[cfg(test)]
 mod tests {
     use std::num::{NonZeroU64, NonZeroUsize};
