@@ -163,19 +163,30 @@ async fn execute_cloud_query(
 }
 
 fn print_response(body: &[u8], compact: bool) -> Result<()> {
-    if body.iter().all(u8::is_ascii_whitespace) {
-        return Ok(());
+    if let Some(rendered) = render_response(body, compact, crate::output::Verbosity::current())? {
+        println!("{rendered}");
+    }
+    Ok(())
+}
+
+/// The query result is the command's final result, so `--quiet` still prints
+/// it. Only `Silent` (a wrapping command such as `helix chef`) suppresses it.
+fn render_response(
+    body: &[u8],
+    compact: bool,
+    verbosity: crate::output::Verbosity,
+) -> Result<Option<String>> {
+    if !verbosity.show_quiet() || body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
     }
     let value: Value = serde_json::from_slice(body)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()));
-    if crate::output::Verbosity::current().show_normal() {
-        if compact {
-            println!("{}", serde_json::to_string(&value)?);
-        } else {
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        }
-    }
-    Ok(())
+    let rendered = if compact {
+        serde_json::to_string(&value)?
+    } else {
+        serde_json::to_string_pretty(&value)?
+    };
+    Ok(Some(rendered))
 }
 
 fn connect_error(instance: &str, endpoint: &str, cause: &str) -> CliError {
@@ -291,6 +302,26 @@ mod tests {
             false
         )
         .is_err());
+    }
+
+    #[test]
+    fn render_response_prints_result_unless_silent() {
+        use crate::output::Verbosity;
+        let body = br#"{"node_count":0}"#;
+        for verbosity in [Verbosity::Quiet, Verbosity::Normal, Verbosity::Verbose] {
+            assert_eq!(
+                render_response(body, true, verbosity).unwrap().as_deref(),
+                Some(r#"{"node_count":0}"#)
+            );
+        }
+        assert_eq!(
+            render_response(body, true, Verbosity::Silent).unwrap(),
+            None
+        );
+        assert_eq!(
+            render_response(b"  \n", true, Verbosity::Normal).unwrap(),
+            None
+        );
     }
 
     #[test]
