@@ -1414,12 +1414,16 @@ async fn public_dynamic_vector_ddl_backfills_existing_nodes() {
 
 /// Proves bounded output batches and a tiny build cache still converge.
 ///
-/// A small output-operation budget ends source-scan steps on an entity whose
-/// planned writes no longer fit, so that entity is discarded from the retained
-/// planning cache and replanned by the next step. The 4 KiB cache budget
-/// evicts retained rows between entities throughout the build.
+/// The build first blocks on a one-byte input budget while later documents
+/// record build deltas. Retried under a small output-operation budget, both
+/// source-scan and catch-up steps end on an entity whose planned writes no
+/// longer fit; that entity is discarded from the retained planning cache and
+/// replanned by the next step. The 4 KiB cache budget evicts retained rows
+/// between entities throughout the build.
 #[tokio::test]
-async fn public_vector_backfill_splits_batches_under_small_output_and_cache_budgets() {
+async fn public_vector_backfill_splits_scan_and_catch_up_batches_under_small_budgets() {
+    let token = ProcessLocalDatabaseToken::new("production-vector-bounded-backfill-batches")
+        .expect("fixture token is valid");
     let defaults = SearchIndexBackfillLimits::default();
     let batch = defaults.batch();
     let cache_bytes = NonZeroU64::new(4 * 1024).expect("fixture cache budget is positive");
@@ -1439,43 +1443,70 @@ async fn public_vector_backfill_splits_batches_under_small_output_and_cache_budg
     .expect("small output policy preserves cross-budget invariants")
     .with_vector_build_cache_bytes(cache_bytes);
     assert_eq!(limits.vector_build_cache_bytes(), cache_bytes);
+    let document = |offset: u16| {
+        let displacement = f32::from(offset) / 48.0;
+        add_node_plan(
+            "Doc",
+            vec![(
+                "embedding",
+                PropertyValue::F32Array(vec![1.0 - displacement, displacement]),
+            )],
+        )
+    };
+
     let db = HelixDB::open_with_config(
-        HelixDbSource::InMemory {
-            database: "production-vector-bounded-backfill-batches".to_string(),
+        HelixDbSource::InMemoryToken {
+            token: token.clone(),
         },
+        blocked_vector_limit_config(),
+    )
+    .await
+    .expect("blocking writer opens");
+    let mut node_ids = Vec::new();
+    for offset in 0_u16..32 {
+        node_ids.push(created_node_id(
+            db.execute(&document(offset), context::ParamBindings::default())
+                .await
+                .expect("scanned fixture node commits before DDL"),
+        ));
+    }
+    let operation_id = accepted_operation_id(
+        db.execute(
+            &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("bounded-batch vector DDL is accepted"),
+    );
+    wait_for_expected(&db, operation_id, ExpectedVectorTerminal::Blocked).await;
+    for offset in 32_u16..48 {
+        node_ids.push(created_node_id(
+            db.execute(&document(offset), context::ParamBindings::default())
+                .await
+                .expect("delta fixture node commits during the blocked build"),
+        ));
+    }
+    db.close().await.expect("blocking writer closes");
+
+    let db = HelixDB::open_with_config(
+        HelixDbSource::InMemoryToken { token },
         DbConfig::new().with_search_index_backfill_limits(limits),
     )
     .await
     .expect("bounded-batch writer opens");
-    let mut node_ids = Vec::new();
-    for offset in 0_u16..32 {
-        let displacement = f32::from(offset) / 32.0;
-        node_ids.push(created_node_id(
-            db.execute(
-                &add_node_plan(
-                    "Doc",
-                    vec![(
-                        "embedding",
-                        PropertyValue::F32Array(vec![1.0 - displacement, displacement]),
-                    )],
-                ),
-                context::ParamBindings::default(),
-            )
-            .await
-            .expect("bounded-batch fixture node commits before DDL"),
-        ));
-    }
-
-    execute_ddl_to_success(
-        &db,
-        &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
-    )
-    .await;
+    db.retry_index_operation(DataScope::LegacyUnscoped, operation_id)
+        .await
+        .expect("blocked vector build requeues");
+    wait_for_expected(&db, operation_id, ExpectedVectorTerminal::Succeeded).await;
+    db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
+        .await
+        .expect("the completed build is visible through a refreshed planner catalog");
 
     for (query, expected) in [
         (vec![1.0, 0.0], node_ids[0]),
-        (vec![0.5, 0.5], node_ids[16]),
-        (vec![0.0, 1.0], node_ids[31]),
+        (vec![0.5, 0.5], node_ids[24]),
+        (vec![0.25, 0.75], node_ids[36]),
+        (vec![0.0, 1.0], node_ids[47]),
     ] {
         assert_eq!(search_node_ids(&db, query).await, vec![expected]);
     }
