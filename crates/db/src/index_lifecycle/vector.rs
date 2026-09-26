@@ -49,7 +49,9 @@ use super::{
 };
 
 mod driver;
-pub(crate) use driver::VectorIndexDriver;
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) use driver::build_cache_production_contracts::run as run_build_cache_contracts;
+pub(crate) use driver::{RetainedVectorBuild, VectorIndexDriver};
 
 /// Validated vector and its canonical physical-partition identity.
 #[derive(Debug, Clone, PartialEq)]

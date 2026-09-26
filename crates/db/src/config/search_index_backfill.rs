@@ -42,6 +42,7 @@ const DEFAULT_TEXT_COMPACTION_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEXT_COMPACTION_TEMP_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_TEXT_COMPACTION_OUTPUT_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_TEXT_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_VECTOR_BUILD_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Positive common source and transaction limits for text/vector builders.
 ///
@@ -221,6 +222,7 @@ pub struct SearchIndexBackfillLimits {
     edge_property_read_batch: NonZeroUsize,
     text_artifacts: TextBuildArtifactLimits,
     text_compaction: TextBackfillCompactionLimits,
+    vector_build_cache_bytes: NonZeroU64,
 }
 
 /// Complete runtime-only limits for one request-owned Active text mutation.
@@ -322,7 +324,36 @@ impl SearchIndexBackfillLimits {
             edge_property_read_batch,
             text_artifacts,
             text_compaction,
+            vector_build_cache_bytes: NonZeroU64::new(DEFAULT_VECTOR_BUILD_CACHE_BYTES)
+                .expect("default vector build cache bytes are positive"),
         })
+    }
+
+    /// Replaces the memory budget of the vector build planning cache.
+    ///
+    /// One vector build retains up to this many bytes of decoded vectors,
+    /// neighbor rows, and SimHashes between its committed steps, plus the same
+    /// amount per in-flight vector build task. The cache is process-local and
+    /// never persisted.
+    ///
+    /// The 2 GiB default keeps the planning working set of a build of roughly
+    /// half a million 768-dimensional vectors resident; once a build outgrows
+    /// the budget, evicted rows are re-read and decoded from storage on every
+    /// insert and throughput falls steeply. Retention is demand-filled, so
+    /// smaller builds hold only what they touch.
+    ///
+    /// ```
+    /// use std::num::NonZeroU64;
+    ///
+    /// use db::config::SearchIndexBackfillLimits;
+    ///
+    /// let budget = NonZeroU64::new(64 * 1024 * 1024).unwrap();
+    /// let limits = SearchIndexBackfillLimits::default().with_vector_build_cache_bytes(budget);
+    /// assert_eq!(limits.vector_build_cache_bytes(), budget);
+    /// ```
+    pub const fn with_vector_build_cache_bytes(mut self, bytes: NonZeroU64) -> Self {
+        self.vector_build_cache_bytes = bytes;
+        self
     }
 
     /// Returns the source-admission and transaction-staging limits used by both
@@ -351,6 +382,11 @@ impl SearchIndexBackfillLimits {
     /// Returns the runtime-only request admission view for Active text updates.
     pub const fn active_text_mutation(self) -> ActiveTextMutationLimits {
         ActiveTextMutationLimits::from_backfill(self)
+    }
+
+    /// Returns the byte budget of each vector build planning cache.
+    pub const fn vector_build_cache_bytes(self) -> NonZeroU64 {
+        self.vector_build_cache_bytes
     }
 }
 
@@ -462,6 +498,10 @@ mod tests {
         assert_eq!(limits.batch().max_output_operations().get(), 32_768);
         assert_eq!(limits.batch().max_output_bytes().get(), 8 * 1024 * 1024);
         assert_eq!(limits.edge_property_read_batch(), NonZeroUsize::MIN);
+        assert_eq!(
+            limits.vector_build_cache_bytes().get(),
+            2 * 1024 * 1024 * 1024
+        );
         assert!(limits.text_artifacts().max_bytes() <= limits.batch().max_output_bytes());
         assert!(limits.text_compaction().max_manifest_bytes() <= limits.batch().max_output_bytes());
         assert_eq!(

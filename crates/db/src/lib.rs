@@ -1460,7 +1460,13 @@ impl HelixDB {
                 Arc::clone(&vector_memory.registry),
                 Arc::clone(&vector_memory.simhasher_registry),
             )
-            .with_scan_tuning(lifecycle_throughput.scan()),
+            .with_scan_tuning(lifecycle_throughput.scan())
+            .with_build_cache_bytes(
+                config
+                    .db()
+                    .search_index_backfill()
+                    .vector_build_cache_bytes(),
+            ),
         );
         let secondary_scheduling = index_scheduling.resolve(match secondary_tuning.worker_mode() {
             config::SecondaryIndexLifecycleWorkerMode::Enabled => {
