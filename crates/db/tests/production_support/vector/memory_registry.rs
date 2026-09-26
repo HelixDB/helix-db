@@ -312,6 +312,113 @@ async fn run_commit_fence_contracts() {
     assert!(registry.forget_validated_closed(&vacant));
 }
 
+/// Storage outcomes resolve fenced commits: rejections release, the rest evict.
+///
+/// Every commit dirties node 7 of one published store. Pre-apply rejections
+/// (an empty batch and a write-write conflict) keep it; a detached commit task
+/// stopped by runtime shutdown invalidates without evicting; an error returned
+/// after the batch may have applied evicts, yet the store stays unattachable
+/// because the stopped commit was never evicted from it.
+async fn run_commit_outcome_contracts() {
+    let db = slatedb::Db::open(
+        "production-vector-cache-commit-outcomes",
+        Arc::new(slatedb::object_store::memory::InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+    let handle = validated(1);
+    let resident = store(&VectorCacheIdentity::from_validated(&handle));
+    resident.insert_upper_vector(7, Bytes::from_static(b"cached"));
+    let (entry, owns_hydration) = registry.entry_for(&handle);
+    assert!(owns_hydration);
+    assert!(entry.finish_hydration(Arc::clone(&resident)));
+
+    let empty = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+    assert!(super::super::commit::commit_fenced(
+        empty,
+        vec![prepare_commit_for(&registry, &handle)]
+    )
+    .await
+    .unwrap()
+    .is_none());
+    assert!(resident.get_upper_vector(7).is_some());
+    assert_eq!(entry.pending_dirty.generation(), 0);
+    assert!(registry.read_guard_for(&handle, u64::MAX).is_ok());
+
+    let conflicted = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+    conflicted
+        .put(b"fenced-key", Bytes::from_static(b"loser"))
+        .unwrap();
+    db.put(b"fenced-key", Bytes::from_static(b"winner"))
+        .await
+        .unwrap();
+    let error = super::super::commit::commit_fenced(
+        conflicted,
+        vec![prepare_commit_for(&registry, &handle)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
+    assert!(resident.get_upper_vector(7).is_some());
+    assert_eq!(entry.pending_dirty.generation(), 0);
+
+    // The detached task is spawned on a runtime that shuts down before it
+    // runs, so the caller observes a stopped task instead of an outcome.
+    let stopped = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+    stopped
+        .put(b"fenced-key", Bytes::from_static(b"stopped"))
+        .unwrap();
+    let fences = vec![prepare_commit_for(&registry, &handle)];
+    let commit = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut commit = Box::pin(super::super::commit::commit_fenced(stopped, fences));
+        assert!(runtime
+            .block_on(async { futures::poll!(commit.as_mut()) })
+            .is_pending());
+        drop(runtime);
+        commit
+    })
+    .join()
+    .unwrap();
+    let error = commit.await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("vector cache commit task stopped before resolving its fences"));
+    assert!(resident.get_upper_vector(7).is_some());
+    assert_eq!(entry.pending_dirty.generation(), 1);
+    assert!(matches!(
+        registry.read_guard_for(&handle, u64::MAX),
+        Err(VectorCacheReadGuardError::NotCurrent(
+            VectorCacheStaleness::UnevictedCommit
+        ))
+    ));
+
+    let after_close = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+    after_close
+        .put(b"fenced-key", Bytes::from_static(b"after-close"))
+        .unwrap();
+    db.close().await.unwrap();
+    let error = super::super::commit::commit_fenced(
+        after_close,
+        vec![prepare_commit_for(&registry, &handle)],
+    )
+    .await
+    .unwrap_err();
+    assert_ne!(error.kind(), slatedb::ErrorKind::Transaction);
+    assert!(resident.get_upper_vector(7).is_none());
+    assert_eq!(entry.pending_dirty.generation(), 2);
+    assert!(matches!(
+        registry.read_guard_for(&handle, u64::MAX),
+        Err(VectorCacheReadGuardError::NotCurrent(
+            VectorCacheStaleness::UnevictedCommit
+        ))
+    ));
+}
+
 /// Exercises cache identity, hydration, refresh, read-guard, retirement, and commit arms.
 ///
 /// The owning module re-exports this runner only under `production-coverage`.
@@ -320,6 +427,7 @@ async fn run_commit_fence_contracts() {
 pub(crate) async fn run() {
     run_retention_contracts().await;
     run_commit_fence_contracts().await;
+    run_commit_outcome_contracts().await;
     let first = VectorCacheIdentity::from_validated(&validated(1));
     let same = VectorCacheIdentity::from_validated(&validated(1));
     let successor = VectorCacheIdentity::from_validated(&validated(2));
@@ -901,5 +1009,24 @@ pub(crate) async fn run() {
         assert!(!owns_hydration);
         assert_eq!(fenced.lifecycle(), VectorCacheLifecycle::Closed);
         assert!(registry.forget_cleanup_generation(&authority));
+    }
+
+    // Cancelling an initial reservation whose entry no longer tracks a
+    // hydration leaves that state untouched.
+    for (state, lifecycle) in [
+        (VectorCacheEntryState::Vacant, VectorCacheLifecycle::Vacant),
+        (VectorCacheEntryState::Closed, VectorCacheLifecycle::Closed),
+    ] {
+        let registry = VectorCacheRegistry::default();
+        let handle = validated(1);
+        let VectorCacheHydration::Initial(initial) =
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        else {
+            panic!("absent identity must grant initial hydration");
+        };
+        let entry = Arc::clone(&initial.entry);
+        *entry.state.lock() = state;
+        drop(initial);
+        assert_eq!(entry.lifecycle(), lifecycle);
     }
 }
