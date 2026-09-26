@@ -7615,6 +7615,132 @@ async fn public_query_boundary_rejects_folded_stream_consumers() {
     db.close().await.unwrap();
 }
 
+/// Proves a reader hydrates vector memory from its own snapshots.
+///
+/// Blocking startup hydration publishes the reader's store before open
+/// returns. The hour-long poll interval leaves the reader's status change
+/// after a later writer commit as the only trigger that can refresh it.
+#[test]
+fn public_reader_hydrates_vector_memory_at_open_and_on_status_changes() {
+    run_high_stack_contract(
+        "public-reader-vector-memory",
+        public_reader_hydrates_vector_memory_at_open_and_on_status_changes_contract,
+    );
+}
+
+async fn public_reader_hydrates_vector_memory_at_open_and_on_status_changes_contract() {
+    let token = ProcessLocalDatabaseToken::new("production-reader-vector-memory")
+        .expect("process-local database token validates");
+    let config = config::DbConfig::new().with_cache(config::CacheConfig::new(
+        config::VectorMemorySettings::try_new_with_hydration(
+            config::VectorMemoryBudget::bounded(64 * 1024 * 1024)
+                .expect("vector memory budget is positive"),
+            config::VectorMemoryHydrationMode::blocking_then_background(3_600)
+                .expect("poll interval is positive"),
+        )
+        .expect("vector memory settings validate"),
+        config::CacheMode::VectorMemoryOnly,
+    ));
+    let add_document = |embedding: Vec<f32>| {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "document",
+                    traversal::g().add_n(
+                        "Document",
+                        vec![("embedding", PropertyInput::from(embedding))],
+                    ),
+                )
+                .returning(Vec::<String>::new()),
+        )
+    };
+    let writer = HelixDB::open_with_config(
+        HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        },
+        config.clone(),
+    )
+    .await
+    .expect("vector-memory writer opens");
+    writer
+        .query(add_document(vec![1.0, 0.0]))
+        .await
+        .expect("first document commits");
+    let receipt = writer
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(index::IndexSpec::node_vector(
+                        "Document",
+                        "embedding",
+                        NonZeroUsize::new(2).expect("dimension is positive"),
+                        index::VectorDistanceMetric::Euclidean,
+                        None::<String>,
+                    )),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .expect("vector index DDL is accepted");
+    let operation_id = receipt["operation"]["operation_id"]
+        .as_str()
+        .expect("accepted vector-index operation has an ID");
+    await_index_operation_success(&writer, operation_id, "reader vector index").await;
+
+    let reader = HelixDB::open_reader_with_config(HelixDbSource::InMemoryToken { token }, config)
+        .await
+        .expect("vector-memory reader opens");
+    let resident_bytes = |db: &HelixDB| {
+        let db::CacheTierState::Ready { used_bytes, .. } = db.cache_stats().vector_memory.state
+        else {
+            panic!("vector memory is always ready");
+        };
+        used_bytes
+    };
+    let hydrated = resident_bytes(&reader);
+    assert!(
+        hydrated > 0,
+        "the reader store is published before open returns"
+    );
+
+    writer
+        .query(add_document(vec![0.0, 1.0]))
+        .await
+        .expect("second document commits");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while resident_bytes(&reader) <= hydrated {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reader refreshes its store after applying the writer commit");
+    assert_eq!(
+        reader
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "nodes",
+                        traversal::g()
+                            .vector_search_nodes_with(
+                                "Document",
+                                "embedding",
+                                PropertyInput::from(vec![0.0_f32, 1.0]),
+                                1_usize,
+                                None,
+                            )
+                            .id(),
+                    )
+                    .returning(["nodes"]),
+            ))
+            .await
+            .expect("reader vector search succeeds"),
+        serde_json::json!({ "nodes": [1] })
+    );
+    reader.close().await.expect("vector-memory reader closes");
+    writer.close().await.expect("vector-memory writer closes");
+}
+
 #[tokio::test]
 async fn public_reader_executes_parallel_stage_with_stable_output_order() {
     let token = ProcessLocalDatabaseToken::new("production-interpreter-parallel-stage")

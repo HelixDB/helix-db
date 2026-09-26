@@ -4,3 +4,6 @@ pub(super) mod commit;
 pub(super) mod hydration;
 pub(super) mod registry;
 pub(super) mod store;
+
+#[cfg(test)]
+mod node_tests;

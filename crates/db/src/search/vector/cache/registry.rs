@@ -2,11 +2,17 @@
 //!
 //! [`VectorCacheRegistry`] is the only owner of cache entries whose identity is
 //! derived from a [`ValidatedVectorGenerationHandle`]. Each entry follows the
-//! explicit `Hydrating -> Ready -> Retiring -> Closed` lifecycle. Any operation
-//! must hold a [`VectorCacheReadGuard`] while using its store; retirement
-//! changes the entry to `Retiring`, rejects new guards, waits for existing
-//! guards and hydration to finish, acquires the independent all-dirty
+//! explicit `Vacant <-> Hydrating -> Ready -> Retiring -> Closed` lifecycle.
+//! Any operation must hold a [`VectorCacheReadGuard`] while using its store;
+//! retirement changes the entry to `Retiring`, rejects new guards, waits for
+//! existing guards and hydration to finish, acquires the independent all-dirty
 //! publication guard, clears the exact store, and only then reaches `Closed`.
+//!
+//! Every identity has one commit fence owned by the registry rather than by
+//! its entry, so a storage commit is fenced even before the first hydration
+//! creates the entry and even if the entry is replaced while the commit is in
+//! flight. [`VectorCacheVisibility`] decides how a published store's hydration
+//! sequence and that fence authorize a request snapshot.
 //!
 //! Closed entries deliberately remain registered until physical cleanup calls
 //! [`VectorCacheRegistry::forget_closed`]. That tombstone prevents a concurrent
@@ -116,9 +122,53 @@ impl VectorCacheGenerationFence {
     }
 }
 
+/// How a registry proves that a published store is current for a request snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum VectorCacheVisibility {
+    /// Only a store hydrated at exactly the request sequence is current.
+    ///
+    /// Sound for every storage source, including reader nodes, which observe
+    /// writer commits without passing any commit fence.
+    #[default]
+    ExactSequence,
+    /// A store hydrated at or before the request sequence is current while its
+    /// identity has no unresolved commit and every resolved commit was evicted
+    /// from it.
+    ///
+    /// Sound only when every commit that changes this registry's vector rows
+    /// passes [`VectorCacheRegistry::prepare_commit`] and is resolved with its
+    /// storage outcome, which holds on the writer node that owns the registry.
+    CommitFenced,
+}
+
+/// Why a ready store is not current for one request snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorCacheStaleness {
+    /// The store's hydration sequence cannot serve the request sequence.
+    SnapshotSequence,
+    /// A commit on this identity is unresolved, so its rows may be missing.
+    CommitInFlight,
+    /// A commit's rows may have changed without being evicted from this store.
+    UnevictedCommit,
+}
+
+/// Process-local state one hydration pass may release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorCacheSweep {
+    /// Writer node: retirement owns every entry, so only fences guarding no
+    /// entry and no unresolved commit are released.
+    OrphanFences,
+    /// Reader node: nothing retires entries, so entries of the swept scope
+    /// outside the Active inventory are released before orphaned fences.
+    InactiveEntries,
+}
+
 /// Runtime state of one complete vector cache identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VectorCacheLifecycle {
+    /// No store is published and no hydration owns the entry; the next pass
+    /// may reserve initial hydration.
+    Vacant,
     /// A store is being populated but is not visible to readers.
     Hydrating,
     /// A fully published store may issue cache read guards.
@@ -134,10 +184,17 @@ struct ResidentVectorCache {
     active_readers: usize,
     refresh_inflight: bool,
     admission: store::VectorMemoryAdmissionBudget,
+    /// Fence generation observed before the store's snapshot. A newer fence
+    /// generation means a commit may have added rows the store never loaded,
+    /// so the next refresh rescans instead of retaining it.
     hydrated_dirty_generation: u64,
+    /// Fence generation through which every commit's rows were evicted from
+    /// this store; commit-fenced guards require it to equal the fence.
+    evicted_dirty_generation: u64,
 }
 
 enum VectorCacheEntryState {
+    Vacant,
     Hydrating,
     Ready(ResidentVectorCache),
     Retiring {
@@ -151,6 +208,7 @@ impl VectorCacheEntryState {
     /// Projects private payload state into the externally testable lifecycle.
     const fn lifecycle(&self) -> VectorCacheLifecycle {
         match self {
+            Self::Vacant => VectorCacheLifecycle::Vacant,
             Self::Hydrating => VectorCacheLifecycle::Hydrating,
             Self::Ready(_) => VectorCacheLifecycle::Ready,
             Self::Retiring { .. } => VectorCacheLifecycle::Retiring,
@@ -162,28 +220,23 @@ impl VectorCacheEntryState {
 /// One complete-identity cache entry with reader and publication coordination.
 pub(crate) struct VectorMemoryCacheEntry {
     identity: VectorCacheIdentity,
+    /// The identity's registry-owned commit fence, shared with any successor entry.
     pending_dirty: Arc<VectorMemoryPendingDirtyRows>,
     state: Mutex<VectorCacheEntryState>,
     changed: Notify,
 }
 
 impl VectorMemoryCacheEntry {
-    /// Creates an unpublished entry for a single validated generation.
-    fn hydrating(identity: VectorCacheIdentity) -> Self {
+    /// Creates an entry bound to its identity's registry-owned commit fence.
+    fn new(
+        identity: VectorCacheIdentity,
+        pending_dirty: Arc<VectorMemoryPendingDirtyRows>,
+        state: VectorCacheEntryState,
+    ) -> Self {
         Self {
             identity,
-            pending_dirty: Arc::new(VectorMemoryPendingDirtyRows::new()),
-            state: Mutex::new(VectorCacheEntryState::Hydrating),
-            changed: Notify::new(),
-        }
-    }
-
-    /// Creates the non-readable tombstone used when drop beats cache admission.
-    fn closed(identity: VectorCacheIdentity) -> Self {
-        Self {
-            identity,
-            pending_dirty: Arc::new(VectorMemoryPendingDirtyRows::new()),
-            state: Mutex::new(VectorCacheEntryState::Closed),
+            pending_dirty,
+            state: Mutex::new(state),
             changed: Notify::new(),
         }
     }
@@ -202,7 +255,8 @@ impl VectorMemoryCacheEntry {
     fn estimated_bytes(&self) -> u64 {
         match &*self.state.lock() {
             VectorCacheEntryState::Ready(resident) => resident.store.estimated_bytes(),
-            VectorCacheEntryState::Hydrating
+            VectorCacheEntryState::Vacant
+            | VectorCacheEntryState::Hydrating
             | VectorCacheEntryState::Retiring { .. }
             | VectorCacheEntryState::Closed => 0,
         }
@@ -223,7 +277,8 @@ impl VectorMemoryCacheEntry {
     /// Hydration callers must build the store off-entry and invoke this exactly
     /// once. If drop changed the entry to `Retiring`, the unpublished store is
     /// cleared and retirement is notified instead of exposing partial or stale
-    /// rows. Calling this in `Ready` or `Closed` is an invariant violation.
+    /// rows. Calling this outside `Hydrating` or `Retiring` is an invariant
+    /// violation.
     fn publish_initial(
         &self,
         store: Arc<VectorMemoryStore>,
@@ -242,6 +297,7 @@ impl VectorMemoryCacheEntry {
                         refresh_inflight: false,
                         admission,
                         hydrated_dirty_generation,
+                        evicted_dirty_generation: hydrated_dirty_generation,
                     });
                     true
                 }
@@ -252,8 +308,10 @@ impl VectorMemoryCacheEntry {
                     *hydration_inflight = false;
                     false
                 }
-                VectorCacheEntryState::Ready(_) | VectorCacheEntryState::Closed => {
-                    panic!("vector cache hydration may finish exactly once")
+                VectorCacheEntryState::Vacant
+                | VectorCacheEntryState::Ready(_)
+                | VectorCacheEntryState::Closed => {
+                    panic!("vector cache hydration may finish exactly once from Hydrating")
                 }
             }
         };
@@ -264,48 +322,68 @@ impl VectorMemoryCacheEntry {
     /// Cancels unpublished initial hydration and wakes retirement waiters.
     ///
     /// Background hydration owns this transition through an RAII permit. A
-    /// dropped permit cannot strand the entry in `Hydrating`; an active caller
-    /// may subsequently forget the closed failed entry and retry on a later
-    /// pass while the shared lifecycle gate still protects the generation.
+    /// dropped or commit-discarded permit returns the entry to `Vacant`, so a
+    /// later pass hydrates it again, while retirement keeps its own tombstone
+    /// path and only learns that hydration drained.
     fn cancel_initial_hydration(&self) {
         {
             let mut state = self.state.lock();
             match &mut *state {
                 VectorCacheEntryState::Hydrating => {
-                    *state = VectorCacheEntryState::Closed;
+                    *state = VectorCacheEntryState::Vacant;
                 }
                 VectorCacheEntryState::Retiring {
                     hydration_inflight, ..
                 } => {
                     *hydration_inflight = false;
                 }
-                VectorCacheEntryState::Ready(_) | VectorCacheEntryState::Closed => {}
+                VectorCacheEntryState::Vacant
+                | VectorCacheEntryState::Ready(_)
+                | VectorCacheEntryState::Closed => {}
             }
         }
         self.changed.notify_waiters();
     }
 
-    /// Claims the single immutable refresh slot while readers retain the old store.
-    fn begin_refresh(
+    /// Claims the single hydration slot of an existing entry.
+    ///
+    /// A `Vacant` entry grants a new initial hydration and a `Ready` entry
+    /// grants one refresh while readers retain the published store. Both
+    /// reservations observe the fence generation before the caller's snapshot.
+    /// Every other state is an explicit unavailable lifecycle.
+    fn reserve_hydration(
         self: &Arc<Self>,
+        visibility: VectorCacheVisibility,
         admission: store::VectorMemoryAdmissionBudget,
-    ) -> Option<VectorCacheRefresh> {
-        {
-            let mut state = self.state.lock();
-            let VectorCacheEntryState::Ready(resident) = &mut *state else {
-                return None;
-            };
-            if resident.refresh_inflight {
-                return None;
+    ) -> VectorCacheHydration {
+        let mut state = self.state.lock();
+        match &mut *state {
+            VectorCacheEntryState::Vacant => {
+                *state = VectorCacheEntryState::Hydrating;
+                VectorCacheHydration::Initial(VectorCacheInitialHydration {
+                    entry: Arc::clone(self),
+                    observed_dirty_generation: self.pending_dirty.generation(),
+                    admission,
+                    completed: false,
+                })
             }
-            resident.refresh_inflight = true;
+            VectorCacheEntryState::Ready(resident) if !resident.refresh_inflight => {
+                resident.refresh_inflight = true;
+                VectorCacheHydration::Refresh(VectorCacheRefresh {
+                    entry: Arc::clone(self),
+                    observed_dirty_generation: self.pending_dirty.generation(),
+                    visibility,
+                    admission,
+                    completed: false,
+                })
+            }
+            unavailable @ (VectorCacheEntryState::Hydrating
+            | VectorCacheEntryState::Ready(_)
+            | VectorCacheEntryState::Retiring { .. }
+            | VectorCacheEntryState::Closed) => {
+                VectorCacheHydration::Unavailable(unavailable.lifecycle())
+            }
         }
-        Some(VectorCacheRefresh {
-            entry: Arc::clone(self),
-            observed_dirty_generation: self.pending_dirty.generation(),
-            admission,
-            completed: false,
-        })
     }
 
     /// Releases a refresh reservation without changing the published store.
@@ -322,7 +400,7 @@ impl VectorMemoryCacheEntry {
                     *hydration_inflight = false;
                 }
                 VectorCacheEntryState::Closed => {}
-                VectorCacheEntryState::Hydrating => {
+                VectorCacheEntryState::Vacant | VectorCacheEntryState::Hydrating => {
                     unreachable!("a refresh reservation starts only from Ready")
                 }
             }
@@ -330,19 +408,62 @@ impl VectorMemoryCacheEntry {
         self.changed.notify_waiters();
     }
 
-    /// Acquires active-reader ownership only from a fully ready generation.
+    /// Acquires active-reader ownership of a store proven current for one snapshot.
     ///
     /// The guard retains both the exact identity and immutable store `Arc`.
-    /// `Hydrating`, `Retiring`, and `Closed` are explicit non-readable states;
-    /// callers fall back to storage rather than guessing cache compatibility.
+    /// `Vacant`, `Hydrating`, `Retiring`, and `Closed` are explicit
+    /// non-readable states, and a ready store that `visibility` cannot prove
+    /// current is rejected with its [`VectorCacheStaleness`]; callers fall back
+    /// to storage rather than guessing cache compatibility. The checks run
+    /// under the entry lock that commit eviction also holds, so a guard is
+    /// never granted between a commit's row eviction and its generation advance.
     pub(crate) fn acquire_read_guard(
         self: &Arc<Self>,
+        visibility: VectorCacheVisibility,
+        snapshot_seq: u64,
+    ) -> Result<VectorCacheReadGuard, VectorCacheReadGuardError> {
+        self.grant_read_guard(|resident| match visibility {
+            VectorCacheVisibility::ExactSequence
+                if !resident.store.is_visible_to_snapshot(snapshot_seq) =>
+            {
+                Err(VectorCacheStaleness::SnapshotSequence)
+            }
+            VectorCacheVisibility::CommitFenced
+                if !resident.store.is_usable_for_writer_snapshot(snapshot_seq) =>
+            {
+                Err(VectorCacheStaleness::SnapshotSequence)
+            }
+            VectorCacheVisibility::CommitFenced if self.pending_dirty.has_pending_commits() => {
+                Err(VectorCacheStaleness::CommitInFlight)
+            }
+            VectorCacheVisibility::CommitFenced
+                if self.pending_dirty.generation() != resident.evicted_dirty_generation =>
+            {
+                Err(VectorCacheStaleness::UnevictedCommit)
+            }
+            VectorCacheVisibility::ExactSequence | VectorCacheVisibility::CommitFenced => Ok(()),
+        })
+    }
+
+    /// Acquires the published store without a currency proof, for inspection only.
+    #[cfg(any(test, feature = "production-coverage"))]
+    pub(crate) fn acquire_resident_guard(
+        self: &Arc<Self>,
+    ) -> Result<VectorCacheReadGuard, VectorCacheReadGuardError> {
+        self.grant_read_guard(|_| Ok(()))
+    }
+
+    /// Grants a guard on the published store once `current` accepts it.
+    fn grant_read_guard(
+        self: &Arc<Self>,
+        current: impl FnOnce(&ResidentVectorCache) -> Result<(), VectorCacheStaleness>,
     ) -> Result<VectorCacheReadGuard, VectorCacheReadGuardError> {
         let store = {
             let mut state = self.state.lock();
             let VectorCacheEntryState::Ready(resident) = &mut *state else {
                 return Err(VectorCacheReadGuardError::Unavailable(state.lifecycle()));
             };
+            current(resident).map_err(VectorCacheReadGuardError::NotCurrent)?;
             resident.active_readers = resident
                 .active_readers
                 .checked_add(1)
@@ -365,6 +486,12 @@ impl VectorMemoryCacheEntry {
         {
             let mut state = self.state.lock();
             match &mut *state {
+                VectorCacheEntryState::Vacant => {
+                    *state = VectorCacheEntryState::Retiring {
+                        resident: None,
+                        hydration_inflight: false,
+                    };
+                }
                 VectorCacheEntryState::Hydrating => {
                     *state = VectorCacheEntryState::Retiring {
                         resident: None,
@@ -405,7 +532,9 @@ impl VectorMemoryCacheEntry {
                                 .is_none_or(|resident| resident.active_readers == 0)
                     }
                     VectorCacheEntryState::Closed => return,
-                    VectorCacheEntryState::Hydrating | VectorCacheEntryState::Ready(_) => {
+                    VectorCacheEntryState::Vacant
+                    | VectorCacheEntryState::Hydrating
+                    | VectorCacheEntryState::Ready(_) => {
                         unreachable!("retirement cannot return to a guard-admitting state")
                     }
                 }
@@ -450,6 +579,9 @@ pub(crate) struct VectorCacheInitialHydration {
 
 impl VectorCacheInitialHydration {
     /// Publishes the first immutable store if no commit crossed its snapshot.
+    ///
+    /// A commit that advanced the fence since the reservation discards the
+    /// store and returns the entry to `Vacant` for the next pass.
     pub(crate) async fn finish(mut self, store: Arc<VectorMemoryStore>) -> bool {
         let _publication = self.entry.pending_dirty.lock_publish().await;
         if self.entry.pending_dirty.generation() != self.observed_dirty_generation {
@@ -478,15 +610,21 @@ impl Drop for VectorCacheInitialHydration {
 pub(crate) struct VectorCacheRefresh {
     entry: Arc<VectorMemoryCacheEntry>,
     observed_dirty_generation: u64,
+    visibility: VectorCacheVisibility,
     admission: store::VectorMemoryAdmissionBudget,
     completed: bool,
 }
 
 impl VectorCacheRefresh {
-    /// Releases this reservation without scanning when the published store still
-    /// matches the fresh snapshot, assigned budget, and committed dirty generation.
-    /// Returns retained resident bytes for the caller's admission accounting.
-    /// The caller must acquire its snapshot after reserving this refresh.
+    /// Releases this reservation without scanning when the published store is
+    /// still visible to the fresh snapshot, matches the assigned budget, and no
+    /// commit advanced the fence since it was hydrated.
+    ///
+    /// Under [`VectorCacheVisibility::CommitFenced`] a newer snapshot alone
+    /// never forces a rescan, so writes that touch no fenced vector row keep
+    /// the store. Returns retained resident bytes for the caller's admission
+    /// accounting. The caller must acquire its snapshot after reserving this
+    /// refresh.
     pub(crate) async fn retain_if_current(&mut self, snapshot_seq: u64) -> Option<u64> {
         let _publication = self.entry.pending_dirty.lock_publish().await;
         let retained_bytes = {
@@ -495,7 +633,15 @@ impl VectorCacheRefresh {
                 return None;
             };
             assert!(resident.refresh_inflight);
-            if resident.store.visible_seq() != snapshot_seq
+            let visible = match self.visibility {
+                VectorCacheVisibility::ExactSequence => {
+                    resident.store.is_visible_to_snapshot(snapshot_seq)
+                }
+                VectorCacheVisibility::CommitFenced => {
+                    resident.store.is_usable_for_writer_snapshot(snapshot_seq)
+                }
+            };
+            if !visible
                 || resident.admission != self.admission
                 || resident.hydrated_dirty_generation != self.observed_dirty_generation
                 || self.entry.pending_dirty.generation() != self.observed_dirty_generation
@@ -535,6 +681,7 @@ impl VectorCacheRefresh {
                         resident.store = store;
                         resident.admission = self.admission;
                         resident.hydrated_dirty_generation = self.observed_dirty_generation;
+                        resident.evicted_dirty_generation = self.observed_dirty_generation;
                         true
                     } else {
                         store.clear();
@@ -552,8 +699,8 @@ impl VectorCacheRefresh {
                     store.clear();
                     false
                 }
-                VectorCacheEntryState::Hydrating => {
-                    unreachable!("a refresh reservation cannot return to Hydrating")
+                VectorCacheEntryState::Vacant | VectorCacheEntryState::Hydrating => {
+                    unreachable!("a refresh reservation cannot leave Ready for Vacant or Hydrating")
                 }
             }
         };
@@ -605,63 +752,92 @@ impl VectorCacheReadGuard {
     }
 }
 
-/// Pre-commit fence for one exact generation's transaction-local dirty rows.
-pub(crate) struct VectorCachePendingCommit {
-    entry: Arc<VectorMemoryCacheEntry>,
-    dirty_rows: Arc<VectorMemoryDirtyRows>,
-    _pending_guard: VectorMemoryPendingDirtyGuard,
+/// Storage outcome that resolves one pending commit fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorCacheCommitOutcome {
+    /// Storage rejected the batch before applying it, so no cached row changed.
+    Rejected,
+    /// Storage applied the batch, or failed after it may have been applied.
+    MaybeApplied,
 }
 
-/// Storage evidence authorizing cache eviction after a graph transaction.
-enum VectorCacheCommitEvidence {
-    /// SlateDB returned the exact committed sequence in its write handle.
-    Sequence(u64),
+/// Pre-commit fence for one exact generation's transaction-local dirty rows.
+///
+/// It holds the identity's registry-owned fence from before the storage commit
+/// until [`Self::resolve`] observes the storage outcome, so commit-fenced reads
+/// never attach a store while this commit's rows may be visible but not yet
+/// evicted.
+pub(crate) struct VectorCachePendingCommit {
+    /// Entry registered when the commit was prepared, if one existed.
+    entry: Option<Arc<VectorMemoryCacheEntry>>,
+    fence: Arc<VectorMemoryPendingDirtyRows>,
+    dirty_rows: Arc<VectorMemoryDirtyRows>,
+    _pending_guard: VectorMemoryPendingDirtyGuard,
+    resolved: bool,
 }
 
 impl VectorCachePendingCommit {
-    /// Evicts committed rows while holding the entry publication lock.
+    /// Releases the fence once the storage outcome is known.
     ///
-    /// The storage commit sequence is supplied by SlateDB's `WriteHandle`, not
-    /// synthesized. This phase deliberately publishes no replacement rows: it
-    /// evicts only, so a later snapshot either uses an independently hydrated
-    /// exact-sequence store or falls back to storage.
-    pub(crate) async fn evict_after_commit(self, committed_sequence: u64) {
-        self.evict(VectorCacheCommitEvidence::Sequence(committed_sequence))
-            .await;
-    }
-
-    /// Evicts the exact dirty rows under their publication fence.
-    async fn evict(self, evidence: VectorCacheCommitEvidence) {
-        let _publication = self.entry.pending_dirty.lock_publish().await;
-        {
-            let state = self.entry.state.lock();
-            let resident = match &*state {
-                VectorCacheEntryState::Ready(resident)
+    /// A rejected batch releases it unchanged. Any other outcome evicts the
+    /// dirty rows from the published store under the publication lock and
+    /// advances the fence generation; the store stays attachable only if every
+    /// earlier commit was evicted from it too. Nothing is republished here: a
+    /// later snapshot either uses the evicted store, whose absent rows fall
+    /// back to storage, or an independently hydrated store.
+    pub(crate) async fn resolve(mut self, outcome: VectorCacheCommitOutcome) {
+        self.resolved = true;
+        match outcome {
+            VectorCacheCommitOutcome::Rejected => {}
+            VectorCacheCommitOutcome::MaybeApplied => {
+                let _publication = self.fence.lock_publish().await;
+                let Some(entry) = &self.entry else {
+                    // A store first published after preparation recorded the
+                    // pre-advance generation, so it stays unattachable until a
+                    // refresh observes this commit.
+                    self.fence.bump_generation();
+                    return;
+                };
+                let mut state = entry.state.lock();
+                let (VectorCacheEntryState::Ready(resident)
                 | VectorCacheEntryState::Retiring {
                     resident: Some(resident),
                     ..
-                } => resident,
-                VectorCacheEntryState::Hydrating
-                | VectorCacheEntryState::Retiring { resident: None, .. }
-                | VectorCacheEntryState::Closed => {
-                    drop(state);
-                    self.entry.pending_dirty.bump_generation();
+                }) = &mut *state
+                else {
+                    self.fence.bump_generation();
                     return;
+                };
+                for node_id in self.dirty_rows.dirty_nodes() {
+                    resident.store.remove_node(node_id);
                 }
-            };
-            match evidence {
-                VectorCacheCommitEvidence::Sequence(committed_sequence) => {
-                    debug_assert!(resident.store.visible_seq() <= committed_sequence);
+                for (layer, node_id) in self.dirty_rows.dirty_upper_neighbors() {
+                    resident.store.remove_upper_neighbors(layer, node_id);
                 }
-            }
-            for node_id in self.dirty_rows.dirty_nodes() {
-                resident.store.remove_node(node_id);
-            }
-            for (layer, node_id) in self.dirty_rows.dirty_upper_neighbors() {
-                resident.store.remove_upper_neighbors(layer, node_id);
+                let replaced = self.fence.bump_generation();
+                if resident.evicted_dirty_generation == replaced {
+                    // Mirrors the wrapping `fetch_add` that advanced the fence.
+                    resident.evicted_dirty_generation = replaced.wrapping_add(1);
+                }
             }
         }
-        self.entry.pending_dirty.bump_generation();
+    }
+}
+
+impl Drop for VectorCachePendingCommit {
+    /// Invalidates conservatively when the storage outcome was never observed.
+    ///
+    /// Advancing the fence without advancing any store's evicted generation
+    /// leaves every published store unattachable to commit-fenced reads until
+    /// a refresh that observes the advance rehydrates it; guards held already
+    /// were granted before this commit was prepared, so their snapshots precede
+    /// it. Production commits resolve through `commit_fenced`, whose detached
+    /// task the caller cannot cancel, so this path follows only a panic or
+    /// runtime shutdown.
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.fence.bump_generation();
+        }
     }
 }
 
@@ -675,7 +851,8 @@ impl Drop for VectorCacheReadGuard {
                     resident: Some(resident),
                     ..
                 } => resident,
-                VectorCacheEntryState::Hydrating
+                VectorCacheEntryState::Vacant
+                | VectorCacheEntryState::Hydrating
                 | VectorCacheEntryState::Retiring { resident: None, .. }
                 | VectorCacheEntryState::Closed => {
                     unreachable!("a live vector cache read guard must retain resident state")
@@ -699,6 +876,9 @@ pub(crate) enum VectorCacheReadGuardError {
     /// Only `Ready` entries may be read; callers should use durable storage.
     #[error("vector cache generation is not readable while {0:?}")]
     Unavailable(VectorCacheLifecycle),
+    /// The published store is not proven current for the request snapshot.
+    #[error("vector cache store is not current for the request snapshot: {0:?}")]
+    NotCurrent(VectorCacheStaleness),
 }
 
 /// Outcome of closing an exact generation in the process-local registry.
@@ -706,7 +886,7 @@ pub(crate) enum VectorCacheReadGuardError {
 pub(crate) enum VectorCacheRetirement {
     /// Drop installed a closed tombstone before any cache admission occurred.
     ClosedEmpty,
-    /// A hydrating or resident matching entry was drained and closed.
+    /// An existing matching entry was drained and closed.
     ClosedResident,
 }
 
@@ -714,16 +894,28 @@ pub(crate) enum VectorCacheRetirement {
 #[derive(Default)]
 struct VectorCacheRegistryState {
     entries: HashMap<VectorCacheIdentity, Arc<VectorMemoryCacheEntry>>,
+    /// One commit fence per identity, outliving entries so a commit prepared
+    /// before an entry exists, or while one is replaced, still fences it.
+    fences: HashMap<VectorCacheIdentity, Arc<VectorMemoryPendingDirtyRows>>,
     retired_generations: HashSet<VectorCacheGenerationFence>,
 }
 
-/// Atomic owner of exact cache entries and generation-wide retirement fences.
+/// Atomic owner of exact cache entries, commit fences, and retirement fences.
 #[derive(Default)]
 pub(crate) struct VectorCacheRegistry {
     state: RwLock<VectorCacheRegistryState>,
+    visibility: VectorCacheVisibility,
 }
 
 impl VectorCacheRegistry {
+    /// Creates an empty registry whose read guards prove currency with `visibility`.
+    pub(crate) fn new(visibility: VectorCacheVisibility) -> Self {
+        Self {
+            state: RwLock::default(),
+            visibility,
+        }
+    }
+
     /// Sum the approximate bytes in currently published resident stores.
     pub(crate) fn estimated_bytes(&self) -> u64 {
         self.state
@@ -755,17 +947,16 @@ impl VectorCacheRegistry {
                 completed: false,
             });
         }
-        match entry.begin_refresh(admission) {
-            Some(refresh) => VectorCacheHydration::Refresh(refresh),
-            None => VectorCacheHydration::Unavailable(entry.lifecycle()),
-        }
+        entry.reserve_hydration(self.visibility, admission)
     }
 
-    /// Acquires pending dirty ownership before one storage commit.
+    /// Acquires the identity's commit fence before one storage commit.
     ///
-    /// Absent entries need no fence. Empty write sets likewise return `None`.
-    /// The returned guard must live across `DbTransaction::commit`; dropping it
-    /// after a conflict or abort publishes nothing.
+    /// The fence is created when absent, so a commit is fenced even before the
+    /// first hydration creates the cache entry; an entry created later shares
+    /// the fence, and its hydration observes this commit's generation advance.
+    /// Empty write sets return `None`. The returned value must live across
+    /// `DbTransaction::commit` and be resolved with the storage outcome.
     pub(crate) fn prepare_commit(
         &self,
         write: &super::commit::VectorCacheWriteEntry,
@@ -775,21 +966,41 @@ impl VectorCacheRegistry {
             return None;
         }
         let identity = VectorCacheIdentity::from_validated(write.handle());
-        let entry = self.state.read().entries.get(&identity).cloned()?;
-        let pending_guard = entry.pending_dirty.acquire(dirty_rows);
+        let (entry, fence) = {
+            let mut state = self.state.write();
+            let fence = Arc::clone(state.fences.entry(identity.clone()).or_default());
+            (state.entries.get(&identity).cloned(), fence)
+        };
+        let pending_guard = fence.acquire(dirty_rows);
         Some(VectorCachePendingCommit {
             entry,
+            fence,
             dirty_rows: Arc::clone(dirty_rows),
             _pending_guard: pending_guard,
+            resolved: false,
         })
     }
 
-    /// Acquires a cache read guard only for an already admitted exact generation.
+    /// Acquires a guard on a store proven current for `snapshot_seq`.
     ///
     /// Read factories use this non-creating lookup so a cache miss cannot
-    /// accidentally claim hydration ownership. `Hydrating`, `Retiring`, and
-    /// `Closed` entries remain explicit storage-fallback states.
+    /// accidentally claim hydration ownership. Absent, unreadable, and
+    /// not-current entries are explicit storage-fallback results.
     pub(crate) fn read_guard_for(
+        &self,
+        handle: &ValidatedVectorGenerationHandle,
+        snapshot_seq: u64,
+    ) -> Result<VectorCacheReadGuard, VectorCacheReadGuardError> {
+        let identity = VectorCacheIdentity::from_validated(handle);
+        let Some(entry) = self.state.read().entries.get(&identity).cloned() else {
+            return Err(VectorCacheReadGuardError::Absent);
+        };
+        entry.acquire_read_guard(self.visibility, snapshot_seq)
+    }
+
+    /// Acquires the published store without a currency proof, for inspection only.
+    #[cfg(any(test, feature = "production-coverage"))]
+    pub(crate) fn resident_guard_for(
         &self,
         handle: &ValidatedVectorGenerationHandle,
     ) -> Result<VectorCacheReadGuard, VectorCacheReadGuardError> {
@@ -797,31 +1008,40 @@ impl VectorCacheRegistry {
         let Some(entry) = self.state.read().entries.get(&identity).cloned() else {
             return Err(VectorCacheReadGuardError::Absent);
         };
-        entry.acquire_read_guard()
+        entry.acquire_resident_guard()
     }
 
-    /// Returns the single hydrating/ready/retiring/closed entry for `handle`.
+    /// Returns the single entry for `handle`, creating a hydrating one if absent.
     ///
     /// The boolean is true only for the caller that inserted a new `Hydrating`
-    /// entry and therefore owns hydration. Closed entries are returned rather
-    /// than replaced; recreation must carry a distinct lifecycle generation.
+    /// entry and therefore owns hydration. Existing entries in any lifecycle,
+    /// including closed tombstones, are returned rather than replaced;
+    /// recreation must carry a distinct lifecycle generation.
     pub(crate) fn entry_for(
         &self,
         handle: &ValidatedVectorGenerationHandle,
     ) -> (Arc<VectorMemoryCacheEntry>, bool) {
         let identity = VectorCacheIdentity::from_validated(handle);
         let mut state = self.state.write();
-        let retired = state
-            .retired_generations
-            .contains(&VectorCacheGenerationFence::from_identity(&identity));
-        match state.entries.entry(identity) {
+        let VectorCacheRegistryState {
+            entries,
+            fences,
+            retired_generations,
+        } = &mut *state;
+        let retired =
+            retired_generations.contains(&VectorCacheGenerationFence::from_identity(&identity));
+        match entries.entry(identity) {
             hash_map::Entry::Occupied(entry) => (Arc::clone(entry.get()), false),
             hash_map::Entry::Vacant(entry) => {
-                let cache_entry = Arc::new(if retired {
-                    VectorMemoryCacheEntry::closed(entry.key().clone())
-                } else {
-                    VectorMemoryCacheEntry::hydrating(entry.key().clone())
-                });
+                let cache_entry = Arc::new(VectorMemoryCacheEntry::new(
+                    entry.key().clone(),
+                    Arc::clone(fences.entry(entry.key().clone()).or_default()),
+                    if retired {
+                        VectorCacheEntryState::Closed
+                    } else {
+                        VectorCacheEntryState::Hydrating
+                    },
+                ));
                 entry.insert(Arc::clone(&cache_entry));
                 (cache_entry, !retired)
             }
@@ -841,10 +1061,17 @@ impl VectorCacheRegistry {
         let identity = VectorCacheIdentity::from_validated(handle);
         let entry = {
             let mut state = self.state.write();
-            match state.entries.entry(identity) {
+            let VectorCacheRegistryState {
+                entries, fences, ..
+            } = &mut *state;
+            match entries.entry(identity) {
                 hash_map::Entry::Occupied(entry) => Some(Arc::clone(entry.get())),
                 hash_map::Entry::Vacant(entry) => {
-                    let cache_entry = Arc::new(VectorMemoryCacheEntry::closed(entry.key().clone()));
+                    let cache_entry = Arc::new(VectorMemoryCacheEntry::new(
+                        entry.key().clone(),
+                        Arc::clone(fences.entry(entry.key().clone()).or_default()),
+                        VectorCacheEntryState::Closed,
+                    ));
                     entry.insert(cache_entry);
                     None
                 }
@@ -884,6 +1111,43 @@ impl VectorCacheRegistry {
         count
     }
 
+    /// Releases process-local state that no Active generation or commit needs.
+    ///
+    /// With [`VectorCacheSweep::InactiveEntries`] (reader nodes, which never
+    /// run drop or partition retirement) entries of `scope` outside `active`
+    /// are removed first; `Retiring` and `Closed` entries are retirement
+    /// tombstones owned by physical cleanup and are always kept. Removing any
+    /// other entry only causes storage fallback: a retained read guard keeps
+    /// its own entry and store alive until it is dropped. Every sweep then
+    /// drops fences that only this map references: they guard no entry and no
+    /// unresolved commit, and the next commit or entry for that identity
+    /// creates a fresh one.
+    pub(crate) fn sweep(
+        &self,
+        scope: DataScope,
+        active: &HashSet<VectorCacheIdentity>,
+        sweep: VectorCacheSweep,
+    ) {
+        let mut state = self.state.write();
+        let VectorCacheRegistryState {
+            entries, fences, ..
+        } = &mut *state;
+        match sweep {
+            VectorCacheSweep::OrphanFences => {}
+            VectorCacheSweep::InactiveEntries => entries.retain(|identity, entry| {
+                identity.scope() != scope
+                    || active.contains(identity)
+                    || matches!(
+                        entry.lifecycle(),
+                        VectorCacheLifecycle::Retiring | VectorCacheLifecycle::Closed
+                    )
+            }),
+        }
+        fences.retain(|identity, fence| {
+            entries.contains_key(identity) || Arc::strong_count(fence) > 1
+        });
+    }
+
     /// Removes a generation fence after its terminal durable cleanup commit.
     ///
     /// The caller invokes this only from the outbox post-commit hook. Every
@@ -892,22 +1156,31 @@ impl VectorCacheRegistry {
         &self,
         authority: &ValidatedVectorCleanupAuthority,
     ) -> bool {
-        let fence = VectorCacheGenerationFence::from_cleanup(authority);
+        let generation = VectorCacheGenerationFence::from_cleanup(authority);
         let mut state = self.state.write();
-        if state.entries.iter().any(|(identity, entry)| {
-            fence.matches(identity) && entry.lifecycle() != VectorCacheLifecycle::Closed
+        let VectorCacheRegistryState {
+            entries,
+            fences,
+            retired_generations,
+        } = &mut *state;
+        if entries.iter().any(|(identity, entry)| {
+            generation.matches(identity) && entry.lifecycle() != VectorCacheLifecycle::Closed
         }) {
             return false;
         }
-        state.entries.retain(|identity, _| !fence.matches(identity));
-        state.retired_generations.remove(&fence)
+        entries.retain(|identity, _| !generation.matches(identity));
+        fences.retain(|identity, fence| {
+            !generation.matches(identity) || Arc::strong_count(fence) > 1
+        });
+        retired_generations.remove(&generation)
     }
 
     /// Removes a closed tombstone only after exact physical absence is durable.
     ///
     /// Returning `false` means the identity was absent or not yet closed. This
-    /// prevents cleanup from accidentally making a `Hydrating`, `Ready`, or
-    /// `Retiring` identity insertable again.
+    /// prevents cleanup from accidentally making a `Vacant`, `Hydrating`,
+    /// `Ready`, or `Retiring` identity insertable again. The identity's fence
+    /// is released too unless an unresolved commit or retained guard holds it.
     pub(crate) fn forget_closed(&self, identity: &VectorCacheIdentity) -> bool {
         let mut state = self.state.write();
         let Some(entry) = state.entries.get(identity) else {
@@ -917,6 +1190,13 @@ impl VectorCacheRegistry {
             return false;
         }
         state.entries.remove(identity);
+        if state
+            .fences
+            .get(identity)
+            .is_some_and(|fence| Arc::strong_count(fence) == 1)
+        {
+            state.fences.remove(identity);
+        }
         true
     }
 
@@ -1035,6 +1315,75 @@ mod tests {
         ))
     }
 
+    /// Builds a store hydrated at `visible_seq` that caches `node_id` as `value`.
+    fn store_at(
+        handle: &ValidatedVectorGenerationHandle,
+        visible_seq: u64,
+        node_id: u64,
+        value: &'static [u8],
+    ) -> Arc<VectorMemoryStore> {
+        let store = Arc::new(VectorMemoryStore::new(
+            handle.scope(),
+            handle.physical_index_id(),
+            visible_seq,
+        ));
+        store.insert_upper_vector(node_id, Bytes::from_static(value));
+        store
+    }
+
+    /// Prepares one commit whose write set dirties `node_id`.
+    fn prepare_dirty_commit(
+        registry: &VectorCacheRegistry,
+        handle: &ValidatedVectorGenerationHandle,
+        node_id: u64,
+    ) -> VectorCachePendingCommit {
+        let writes = super::super::commit::VectorCacheWriteSet::default();
+        writes.dirty_rows_for(handle).mark_node_dirty(node_id);
+        registry
+            .prepare_commit(&writes.entries().pop().unwrap())
+            .expect("a non-empty write set is fenced")
+    }
+
+    /// Publishes `store` through the production initial-hydration reservation.
+    async fn publish_initial(
+        registry: &VectorCacheRegistry,
+        handle: &ValidatedVectorGenerationHandle,
+        store: Arc<VectorMemoryStore>,
+    ) -> bool {
+        let VectorCacheHydration::Initial(initial) =
+            registry.prepare_hydration(handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        else {
+            panic!("the identity must grant initial hydration");
+        };
+        initial.finish(store).await
+    }
+
+    /// Reserves the single refresh of a ready identity.
+    fn reserve_refresh(
+        registry: &VectorCacheRegistry,
+        handle: &ValidatedVectorGenerationHandle,
+    ) -> VectorCacheRefresh {
+        let VectorCacheHydration::Refresh(refresh) =
+            registry.prepare_hydration(handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        else {
+            panic!("a ready identity must grant one refresh");
+        };
+        refresh
+    }
+
+    /// Returns the staleness that rejects a guard for `snapshot_seq`, if any.
+    fn staleness(
+        registry: &VectorCacheRegistry,
+        handle: &ValidatedVectorGenerationHandle,
+        snapshot_seq: u64,
+    ) -> Option<VectorCacheStaleness> {
+        match registry.read_guard_for(handle, snapshot_seq) {
+            Ok(_) => None,
+            Err(VectorCacheReadGuardError::NotCurrent(staleness)) => Some(staleness),
+            Err(error) => panic!("a ready store must be readable or not current: {error}"),
+        }
+    }
+
     #[test]
     fn identity_is_full_descriptor_and_generation_specific() {
         let first = VectorCacheIdentity::from_validated(&validated(1));
@@ -1097,7 +1446,7 @@ mod tests {
         let (entry, owns_hydration) = registry.entry_for(&handle);
         assert!(owns_hydration);
         assert!(entry.finish_hydration(store(entry.identity())));
-        let guard = entry.acquire_read_guard().unwrap();
+        let guard = entry.acquire_resident_guard().unwrap();
         let retirement_registry = Arc::clone(&registry);
         let retirement_handle = handle.clone();
         let retirement =
@@ -1106,7 +1455,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(entry.lifecycle(), VectorCacheLifecycle::Retiring);
         assert!(matches!(
-            entry.acquire_read_guard(),
+            entry.acquire_resident_guard(),
             Err(VectorCacheReadGuardError::Unavailable(
                 VectorCacheLifecycle::Retiring
             ))
@@ -1119,7 +1468,7 @@ mod tests {
             VectorCacheRetirement::ClosedResident
         );
         assert_eq!(entry.lifecycle(), VectorCacheLifecycle::Closed);
-        assert!(entry.acquire_read_guard().is_err());
+        assert!(entry.acquire_resident_guard().is_err());
     }
 
     #[tokio::test]
@@ -1191,6 +1540,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inactive_sweep_releases_entries_but_keeps_retirement_tombstones() {
+        let registry = VectorCacheRegistry::default();
+        let kept = validated(1);
+        let released = validated(2);
+        let retired = validated(3);
+        let other_scope = validated_exact(
+            DataScope::Tenant(crate::encoding::keys::scope::TenantId::from_u128(1)),
+            7,
+            1,
+            70,
+            1,
+        );
+        for handle in [&kept, &released, &other_scope] {
+            let (entry, owns_hydration) = registry.entry_for(handle);
+            assert!(owns_hydration);
+            assert!(entry.finish_hydration(store(entry.identity())));
+        }
+        assert_eq!(
+            registry.retire(&retired).await,
+            VectorCacheRetirement::ClosedEmpty
+        );
+        let released_guard = registry.resident_guard_for(&released).unwrap();
+
+        registry.sweep(
+            DataScope::LegacyUnscoped,
+            &HashSet::from([VectorCacheIdentity::from_validated(&kept)]),
+            VectorCacheSweep::InactiveEntries,
+        );
+
+        assert!(registry.resident_guard_for(&kept).is_ok());
+        assert!(matches!(
+            registry.resident_guard_for(&released),
+            Err(VectorCacheReadGuardError::Absent)
+        ));
+        assert!(
+            registry.resident_guard_for(&other_scope).is_ok(),
+            "the sweep is bounded to its own scope"
+        );
+        let (tombstone, owns_hydration) = registry.entry_for(&retired);
+        assert!(!owns_hydration, "retirement tombstones survive the sweep");
+        assert_eq!(tombstone.lifecycle(), VectorCacheLifecycle::Closed);
+        assert_eq!(
+            released_guard.store().visible_seq(),
+            0,
+            "a retained guard keeps its released store usable"
+        );
+        drop(released_guard);
+    }
+
+    #[tokio::test]
     async fn drop_before_admission_installs_closed_tombstone() {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
@@ -1222,14 +1621,18 @@ mod tests {
         let write = writes.entries().pop().unwrap();
         let aborted = registry.prepare_commit(&write).unwrap();
         assert!(entry.pending_dirty.is_node_dirty(7));
-        drop(aborted);
+        assert!(entry.pending_dirty.has_pending_commits());
+        aborted.resolve(VectorCacheCommitOutcome::Rejected).await;
         assert!(!entry.pending_dirty.is_node_dirty(7));
+        assert!(!entry.pending_dirty.has_pending_commits());
         assert!(store.get_upper_vector(7).is_some());
         assert_eq!(entry.pending_dirty.generation(), 0);
 
         let committed = registry.prepare_commit(&write).unwrap();
         assert!(entry.pending_dirty.is_node_dirty(7));
-        committed.evict_after_commit(store.visible_seq() + 1).await;
+        committed
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
         assert!(!entry.pending_dirty.is_node_dirty(7));
         assert!(store.get_simhash(7).is_none());
         assert!(store.get_upper_vector(7).is_none());
@@ -1255,7 +1658,7 @@ mod tests {
         ));
         first.insert_upper_vector(7, Bytes::from_static(b"first"));
         assert!(initial.finish(Arc::clone(&first)).await);
-        let old_guard = registry.read_guard_for(&handle).unwrap();
+        let old_guard = registry.resident_guard_for(&handle).unwrap();
 
         let refresh = match registry
             .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
@@ -1282,7 +1685,7 @@ mod tests {
             old_guard.store().get_upper_vector(7).unwrap().as_ref(),
             b"first"
         );
-        let new_guard = registry.read_guard_for(&handle).unwrap();
+        let new_guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(new_guard.store().visible_seq(), 2);
         assert_eq!(
             new_guard.store().get_upper_vector(7).unwrap().as_ref(),
@@ -1303,7 +1706,7 @@ mod tests {
         ));
         assert!(equal_refresh.finish(Arc::clone(&equal)).await);
         assert!(registry
-            .read_guard_for(&handle)
+            .resident_guard_for(&handle)
             .unwrap()
             .store()
             .get_upper_vector(7)
@@ -1335,14 +1738,20 @@ mod tests {
         unpublished.insert_upper_vector(7, Bytes::from_static(b"stale"));
         assert!(!initial.finish(Arc::clone(&unpublished)).await);
         assert!(unpublished.get_upper_vector(7).is_none());
-        assert!(registry.forget_validated_closed(&handle));
+        let (discarded, owns_hydration) = registry.entry_for(&handle);
+        assert!(!owns_hydration);
+        assert_eq!(discarded.lifecycle(), VectorCacheLifecycle::Vacant);
+        assert!(
+            !registry.forget_validated_closed(&handle),
+            "a discarded hydration is not a retirement tombstone"
+        );
 
         let initial = match registry
             .prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
         {
             VectorCacheHydration::Initial(initial) => initial,
             VectorCacheHydration::Refresh(_) | VectorCacheHydration::Unavailable(_) => {
-                panic!("forgotten failed hydration must be retryable")
+                panic!("a vacant entry must grant a new initial hydration")
             }
         };
         let resident = Arc::new(VectorMemoryStore::new(
@@ -1370,13 +1779,13 @@ mod tests {
         assert!(!refresh.finish(Arc::clone(&replacement)).await);
         assert!(replacement.get_upper_vector(7).is_none());
         assert!(Arc::ptr_eq(
-            registry.read_guard_for(&handle).unwrap().store(),
+            registry.resident_guard_for(&handle).unwrap().store(),
             &resident
         ));
     }
 
     #[test]
-    fn dropped_initial_hydration_closes_and_wakes_the_entry() {
+    fn dropped_initial_hydration_returns_the_entry_to_vacant() {
         let registry = VectorCacheRegistry::default();
         let handle = validated(1);
         let initial = match registry
@@ -1387,13 +1796,28 @@ mod tests {
                 panic!("absent identity must grant initial hydration")
             }
         };
+        let entry = Arc::clone(&initial.entry);
         drop(initial);
 
+        assert_eq!(entry.lifecycle(), VectorCacheLifecycle::Vacant);
+        assert!(matches!(
+            entry.acquire_resident_guard(),
+            Err(VectorCacheReadGuardError::Unavailable(
+                VectorCacheLifecycle::Vacant
+            ))
+        ));
+        assert_eq!(entry.estimated_bytes(), 0);
+        assert!(!registry.forget_validated_closed(&handle));
+        let VectorCacheHydration::Initial(retry) =
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        else {
+            panic!("a vacant entry grants a new initial hydration");
+        };
         assert!(matches!(
             registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded),
-            VectorCacheHydration::Unavailable(VectorCacheLifecycle::Closed)
+            VectorCacheHydration::Unavailable(VectorCacheLifecycle::Hydrating)
         ));
-        assert!(registry.forget_validated_closed(&handle));
+        drop(retry);
     }
 
     #[tokio::test]
@@ -1440,10 +1864,406 @@ mod tests {
         assert_eq!(retirement.await, VectorCacheRetirement::ClosedResident);
         assert!(replacement.get_upper_vector(7).is_none());
         assert!(matches!(
-            registry.read_guard_for(&handle),
+            registry.resident_guard_for(&handle),
             Err(VectorCacheReadGuardError::Unavailable(
                 VectorCacheLifecycle::Closed
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn exact_sequence_visibility_attaches_only_the_hydrated_sequence() {
+        let registry = VectorCacheRegistry::default();
+        let handle = validated(1);
+        assert!(publish_initial(&registry, &handle, store_at(&handle, 5, 7, b"cached")).await);
+
+        assert_eq!(staleness(&registry, &handle, 5), None);
+        assert_eq!(
+            staleness(&registry, &handle, 4),
+            Some(VectorCacheStaleness::SnapshotSequence)
+        );
+        assert_eq!(
+            staleness(&registry, &handle, 6),
+            Some(VectorCacheStaleness::SnapshotSequence),
+            "without commit fences a newer snapshot may see rows the store lacks"
+        );
+        let mut refresh = reserve_refresh(&registry, &handle);
+        assert!(refresh.retain_if_current(5).await.is_some());
+        let mut refresh = reserve_refresh(&registry, &handle);
+        assert_eq!(
+            refresh.retain_if_current(6).await,
+            None,
+            "a newer exact sequence always rehydrates"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_fenced_visibility_requires_an_older_store_and_a_quiet_evicted_fence() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let resident = store_at(&handle, 5, 7, b"stale");
+        resident.insert_upper_vector(8, Bytes::from_static(b"untouched"));
+        assert!(publish_initial(&registry, &handle, Arc::clone(&resident)).await);
+
+        assert_eq!(
+            staleness(&registry, &handle, 4),
+            Some(VectorCacheStaleness::SnapshotSequence)
+        );
+        assert_eq!(staleness(&registry, &handle, 5), None);
+        assert_eq!(
+            staleness(&registry, &handle, 9),
+            None,
+            "writes that pass no vector fence keep an older store current"
+        );
+
+        let rejected = prepare_dirty_commit(&registry, &handle, 7);
+        assert_eq!(
+            staleness(&registry, &handle, 9),
+            Some(VectorCacheStaleness::CommitInFlight)
+        );
+        rejected.resolve(VectorCacheCommitOutcome::Rejected).await;
+        assert_eq!(staleness(&registry, &handle, 9), None);
+        assert!(resident.get_upper_vector(7).is_some());
+
+        let applied = prepare_dirty_commit(&registry, &handle, 7);
+        assert_eq!(
+            staleness(&registry, &handle, 9),
+            Some(VectorCacheStaleness::CommitInFlight)
+        );
+        applied
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+        let guard = registry
+            .read_guard_for(&handle, 9)
+            .expect("an evicted store stays current for newer snapshots");
+        assert!(guard.store().get_upper_vector(7).is_none());
+        assert!(guard.store().get_upper_vector(8).is_some());
+        drop(guard);
+
+        let second = prepare_dirty_commit(&registry, &handle, 8);
+        second.resolve(VectorCacheCommitOutcome::MaybeApplied).await;
+        assert_eq!(
+            staleness(&registry, &handle, 9),
+            None,
+            "consecutive evictions keep advancing the store's evicted generation"
+        );
+        assert!(resident.get_upper_vector(8).is_none());
+    }
+
+    #[tokio::test]
+    async fn unresolved_commit_drop_invalidates_until_a_refresh_rehydrates() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let resident = store_at(&handle, 5, 7, b"maybe-stale");
+        assert!(publish_initial(&registry, &handle, Arc::clone(&resident)).await);
+
+        let abandoned = prepare_dirty_commit(&registry, &handle, 7);
+        drop(abandoned);
+
+        assert_eq!(
+            staleness(&registry, &handle, 9),
+            Some(VectorCacheStaleness::UnevictedCommit),
+            "an unobserved outcome may have changed rows the store still holds"
+        );
+        let mut refresh = reserve_refresh(&registry, &handle);
+        assert_eq!(refresh.retain_if_current(9).await, None);
+        assert!(refresh.finish(store_at(&handle, 9, 7, b"fresh")).await);
+        let guard = registry.read_guard_for(&handle, 9).unwrap();
+        assert_eq!(
+            guard.store().get_upper_vector(7).as_deref(),
+            Some(b"fresh".as_slice())
+        );
+        assert_eq!(
+            staleness(&registry, &handle, 8),
+            Some(VectorCacheStaleness::SnapshotSequence)
+        );
+        assert_eq!(
+            resident.get_upper_vector(7).as_deref(),
+            Some(b"maybe-stale".as_slice()),
+            "the superseded store is never attached again"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_fenced_refresh_retains_across_sequences_until_a_commit_resolves() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let resident = store_at(&handle, 3, 7, b"resident");
+        assert!(publish_initial(&registry, &handle, Arc::clone(&resident)).await);
+
+        let mut refresh = reserve_refresh(&registry, &handle);
+        assert_eq!(
+            refresh.retain_if_current(10).await,
+            Some(resident.estimated_bytes()),
+            "non-vector commits advance the snapshot without forcing a rescan"
+        );
+        assert!(Arc::ptr_eq(
+            registry.read_guard_for(&handle, 10).unwrap().store(),
+            &resident
+        ));
+
+        prepare_dirty_commit(&registry, &handle, 9)
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+        let mut refresh = reserve_refresh(&registry, &handle);
+        assert_eq!(
+            refresh.retain_if_current(10).await,
+            None,
+            "a resolved vector commit may have added rows, so the store is rescanned"
+        );
+        assert!(refresh.finish(store_at(&handle, 10, 9, b"added")).await);
+        let mut refresh = reserve_refresh(&registry, &handle);
+        assert!(refresh.retain_if_current(12).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn commit_prepared_before_admission_discards_a_crossing_initial_hydration() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let pending = prepare_dirty_commit(&registry, &handle, 7);
+        assert!(matches!(
+            registry.resident_guard_for(&handle),
+            Err(VectorCacheReadGuardError::Absent)
+        ));
+
+        let VectorCacheHydration::Initial(initial) =
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        else {
+            panic!("the first hydration owns the new entry");
+        };
+        assert!(
+            Arc::ptr_eq(&initial.entry.pending_dirty, &pending.fence),
+            "an entry created after the commit adopts the commit's fence"
+        );
+        let crossed = store_at(&handle, 1, 7, b"pre-commit");
+        pending
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+
+        assert!(!initial.finish(Arc::clone(&crossed)).await);
+        assert!(crossed.get_upper_vector(7).is_none());
+        assert!(publish_initial(&registry, &handle, store_at(&handle, 2, 7, b"post-commit")).await);
+        let guard = registry.read_guard_for(&handle, 2).unwrap();
+        assert_eq!(
+            guard.store().get_upper_vector(7).as_deref(),
+            Some(b"post-commit".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn store_published_during_an_unadmitted_commit_waits_for_a_refresh() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let pending = prepare_dirty_commit(&registry, &handle, 7);
+        assert!(
+            publish_initial(&registry, &handle, store_at(&handle, 1, 7, b"pre-commit")).await,
+            "publication before the commit resolves observes an unchanged generation"
+        );
+        assert_eq!(
+            staleness(&registry, &handle, 5),
+            Some(VectorCacheStaleness::CommitInFlight)
+        );
+
+        pending
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+
+        assert_eq!(
+            staleness(&registry, &handle, 5),
+            Some(VectorCacheStaleness::UnevictedCommit),
+            "the commit had no entry to evict from, so the store is never proven current"
+        );
+        let mut refresh = reserve_refresh(&registry, &handle);
+        assert_eq!(refresh.retain_if_current(5).await, None);
+        assert!(
+            refresh
+                .finish(store_at(&handle, 5, 7, b"post-commit"))
+                .await
+        );
+        assert_eq!(staleness(&registry, &handle, 5), None);
+    }
+
+    #[tokio::test]
+    async fn store_superseded_while_a_commit_is_pending_is_never_attached_again() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let superseded = store_at(&handle, 1, 7, b"old");
+        assert!(publish_initial(&registry, &handle, Arc::clone(&superseded)).await);
+        let earlier_reader = registry.read_guard_for(&handle, 1).unwrap();
+
+        let pending = prepare_dirty_commit(&registry, &handle, 7);
+        let refresh = reserve_refresh(&registry, &handle);
+        let replacement = store_at(&handle, 3, 7, b"new");
+        assert!(
+            refresh.finish(Arc::clone(&replacement)).await,
+            "a refresh finishing before the commit resolves may publish"
+        );
+        assert_eq!(
+            staleness(&registry, &handle, 3),
+            Some(VectorCacheStaleness::CommitInFlight),
+            "no reader may attach either store while the commit is unresolved"
+        );
+        pending
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+
+        let later_reader = registry.read_guard_for(&handle, 3).unwrap();
+        assert!(Arc::ptr_eq(later_reader.store(), &replacement));
+        assert!(
+            replacement.get_upper_vector(7).is_none(),
+            "the commit evicts from the store that is resident when it resolves"
+        );
+        assert!(
+            Arc::ptr_eq(earlier_reader.store(), &superseded),
+            "a reader whose snapshot precedes the commit keeps its immutable store"
+        );
+        assert_eq!(
+            staleness(&registry, &handle, 2),
+            Some(VectorCacheStaleness::SnapshotSequence),
+            "the superseded store can no longer be granted to any snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_reserved_before_a_commit_resolves_is_discarded() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let resident = store_at(&handle, 1, 7, b"old");
+        assert!(publish_initial(&registry, &handle, Arc::clone(&resident)).await);
+        let pending = prepare_dirty_commit(&registry, &handle, 7);
+        let refresh = reserve_refresh(&registry, &handle);
+        let crossed = store_at(&handle, 2, 7, b"crossed");
+
+        pending
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+
+        assert!(!refresh.finish(Arc::clone(&crossed)).await);
+        assert!(crossed.get_upper_vector(7).is_none());
+        assert!(Arc::ptr_eq(
+            registry.read_guard_for(&handle, 2).unwrap().store(),
+            &resident
+        ));
+        assert!(resident.get_upper_vector(7).is_none());
+    }
+
+    #[tokio::test]
+    async fn commit_fences_outlive_replaced_entries_and_are_pruned_once_orphaned() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let identity = VectorCacheIdentity::from_validated(&handle);
+        assert!(publish_initial(&registry, &handle, store_at(&handle, 1, 7, b"old")).await);
+        let pending = prepare_dirty_commit(&registry, &handle, 7);
+
+        registry.sweep(
+            DataScope::LegacyUnscoped,
+            &HashSet::new(),
+            VectorCacheSweep::InactiveEntries,
+        );
+        assert!(matches!(
+            registry.resident_guard_for(&handle),
+            Err(VectorCacheReadGuardError::Absent)
+        ));
+        assert!(
+            registry.state.read().fences.contains_key(&identity),
+            "an unresolved commit keeps its fence after the entry is released"
+        );
+        let VectorCacheHydration::Initial(initial) =
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        else {
+            panic!("a released identity hydrates again");
+        };
+        assert!(Arc::ptr_eq(&initial.entry.pending_dirty, &pending.fence));
+        pending
+            .resolve(VectorCacheCommitOutcome::MaybeApplied)
+            .await;
+        assert!(
+            !initial.finish(store_at(&handle, 1, 7, b"crossed")).await,
+            "the replacement entry observes the commit through the shared fence"
+        );
+
+        registry.sweep(
+            DataScope::LegacyUnscoped,
+            &HashSet::new(),
+            VectorCacheSweep::InactiveEntries,
+        );
+        assert!(registry.state.read().fences.is_empty());
+
+        let kept = validated(2);
+        assert!(publish_initial(&registry, &kept, store_at(&kept, 1, 7, b"kept")).await);
+        let unadmitted = validated(3);
+        let pending = prepare_dirty_commit(&registry, &unadmitted, 7);
+        registry.sweep(
+            DataScope::LegacyUnscoped,
+            &HashSet::new(),
+            VectorCacheSweep::OrphanFences,
+        );
+        assert_eq!(registry.state.read().fences.len(), 2);
+        pending.resolve(VectorCacheCommitOutcome::Rejected).await;
+        registry.sweep(
+            DataScope::LegacyUnscoped,
+            &HashSet::new(),
+            VectorCacheSweep::OrphanFences,
+        );
+        assert!(
+            registry.resident_guard_for(&kept).is_ok(),
+            "writer sweeps never release entries"
+        );
+        let fences = &registry.state.read().fences;
+        assert_eq!(fences.len(), 1);
+        assert!(fences.contains_key(&VectorCacheIdentity::from_validated(&kept)));
+    }
+
+    #[tokio::test]
+    async fn forgetting_tombstones_releases_fences_not_held_by_unresolved_commits() {
+        let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
+        let handle = validated(1);
+        let identity = VectorCacheIdentity::from_validated(&handle);
+        let pending = prepare_dirty_commit(&registry, &handle, 7);
+        assert_eq!(
+            registry.retire(&handle).await,
+            VectorCacheRetirement::ClosedEmpty
+        );
+        assert!(registry.forget_closed(&identity));
+        assert!(registry.state.read().fences.contains_key(&identity));
+        pending.resolve(VectorCacheCommitOutcome::Rejected).await;
+
+        assert_eq!(
+            registry.retire(&handle).await,
+            VectorCacheRetirement::ClosedEmpty
+        );
+        assert!(registry.forget_closed(&identity));
+        assert!(registry.state.read().fences.is_empty());
+
+        let (authority, generation) = cleaning_authority();
+        assert!(publish_initial(&registry, &generation, store_at(&generation, 1, 7, b"x")).await);
+        assert_eq!(registry.retire_cleanup_generation(&authority).await, 1);
+        assert!(registry.forget_cleanup_generation(&authority));
+        assert!(registry.state.read().fences.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vacant_entries_retire_directly_to_closed() {
+        let registry = VectorCacheRegistry::default();
+        let handle = validated(1);
+        let VectorCacheHydration::Initial(initial) =
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded)
+        else {
+            panic!("absent identity must grant initial hydration");
+        };
+        let entry = Arc::clone(&initial.entry);
+        drop(initial);
+        assert_eq!(entry.lifecycle(), VectorCacheLifecycle::Vacant);
+
+        assert_eq!(
+            registry.retire(&handle).await,
+            VectorCacheRetirement::ClosedResident
+        );
+        assert_eq!(entry.lifecycle(), VectorCacheLifecycle::Closed);
+        assert!(matches!(
+            registry.prepare_hydration(&handle, store::VectorMemoryAdmissionBudget::Unbounded),
+            VectorCacheHydration::Unavailable(VectorCacheLifecycle::Closed)
+        ));
+        assert!(registry.forget_validated_closed(&handle));
     }
 }

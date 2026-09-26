@@ -1,22 +1,27 @@
 //! Descriptor-bound background hydration for V2 vector caches.
 //!
-//! The runtime supplies canonical [`ActiveIndexHandle`] values and one stable
-//! SlateDB snapshot. This module enumerates only physical namespaces owned by
-//! those Active generations, validates every tenant-partition mapping through
-//! the canonical key/value codecs, divides the configured budget deterministically,
-//! and publishes completed stores through [`VectorCacheRegistry`]. Partial
-//! budget-limited stores are safe because managed reads fall back to the same
-//! snapshot for every absent row. Corrupt or cancelled loads never publish.
+//! The runtime supplies canonical [`ActiveIndexHandle`] values for one scope and
+//! a [`VectorCacheSnapshotSource`] for the node's storage. This module
+//! enumerates only physical namespaces owned by those Active generations,
+//! validates every tenant-partition mapping through the canonical key/value
+//! codecs, divides the configured budget deterministically, releases reader
+//! entries whose generations left the inventory, and publishes stores through
+//! [`VectorCacheRegistry`]. Partial budget-limited stores are safe because
+//! managed reads fall back to the same snapshot for every absent row. Corrupt
+//! or cancelled loads never publish.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::registry::{VectorCacheHydration, VectorCacheRegistry};
+use super::registry::{
+    VectorCacheHydration, VectorCacheIdentity, VectorCacheRegistry, VectorCacheSweep,
+};
 use super::store::{
     VectorMemoryAdmissionBudget, VectorMemoryStore, VectorMemoryStoreLoadCompletion,
 };
+use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 #[cfg(test)]
 use crate::encoding::v2::keys::{DataKey, DataKeyKind};
@@ -25,6 +30,29 @@ use crate::encoding::v2::values::decode_partition_mapping;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{ActiveIndexHandle, VectorPhysicalLayout};
 use crate::search::vector::ValidatedVectorGenerationHandle;
+
+/// Storage handle whose stable snapshots feed one hydration pass.
+///
+/// Both variants pin SlateDB snapshots in the sequence domain that request read
+/// views report, so a published store's `visible_seq` is directly comparable
+/// with a request snapshot on the same node.
+#[derive(Clone, Copy)]
+pub(crate) enum VectorCacheSnapshotSource<'a> {
+    /// Writer node: snapshots include every locally committed write.
+    Writer(&'a slatedb::Db),
+    /// Reader node: snapshots include the WAL and manifest state its poller applied.
+    Reader(&'a slatedb::DbReader),
+}
+
+impl VectorCacheSnapshotSource<'_> {
+    /// Pins the node's latest visible state.
+    async fn snapshot(self) -> Result<Arc<slatedb::DbSnapshot>> {
+        Ok(match self {
+            Self::Writer(db) => db.snapshot().await?,
+            Self::Reader(reader) => reader.snapshot().await?,
+        })
+    }
+}
 
 /// Runtime share assigned to one scope after the configured global budget is split.
 ///
@@ -57,25 +85,29 @@ impl VectorCacheHydrationBudget {
     }
 }
 
-/// Hydrates every concrete physical namespace owned by the supplied Active records.
+/// Hydrates every concrete physical namespace owned by `scope`'s Active records.
 ///
 /// Partition mappings are enumerated from one stable inventory snapshot. Each
 /// cache reservation is acquired before its own fresh data snapshot so a graph
 /// commit either evicts the published store or changes the reservation's commit
-/// generation and forces the unpublished store to be discarded.
+/// generation and forces the unpublished store to be discarded. On a reader
+/// node, which never runs retirement, entries of `scope` outside the validated
+/// inventory are released before any load so dropped generations are not
+/// retained.
 pub(crate) async fn hydrate_active_generations(
-    db: &slatedb::Db,
+    source: VectorCacheSnapshotSource<'_>,
+    scope: DataScope,
     active: Vec<ActiveIndexHandle>,
     registry: &VectorCacheRegistry,
     budget: VectorCacheHydrationBudget,
     mut shutdown: Option<&mut watch::Receiver<bool>>,
 ) -> Result<()> {
-    let inventory = db.snapshot().await?;
+    let inventory = source.snapshot().await?;
     let mut targets = Vec::new();
     let mut physical_ids = HashSet::new();
     for active in active {
         let ActiveIndexHandle::Vector {
-            scope,
+            scope: active_scope,
             index_id,
             generation,
             layout,
@@ -84,9 +116,15 @@ pub(crate) async fn hydrate_active_generations(
         else {
             continue;
         };
+        if *active_scope != scope {
+            return Err(HelixDbError::InvariantViolation(
+                "vector cache hydration received an Active generation from another scope"
+                    .to_string(),
+            ));
+        }
         match layout {
             VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
-                if !physical_ids.insert((*scope, physical_index_id.get())) {
+                if !physical_ids.insert(physical_index_id.get()) {
                     return Err(HelixDbError::IndexCatalogCorruption(
                         "two Active vector generations in one scope own the same physical index ID"
                             .to_string(),
@@ -102,7 +140,7 @@ pub(crate) async fn hydrate_active_generations(
             }
             VectorPhysicalLayout::Partitioned => {
                 let prefix = IndexKey::data_prefix(
-                    *scope,
+                    scope,
                     ScopedKey::generation_prefix(
                         RecordKind::VectorPartitionMapping,
                         *index_id,
@@ -114,7 +152,7 @@ pub(crate) async fn hydrate_active_generations(
                     let IndexKey::Data {
                         kind: ScopedKey::VectorPartitionMapping(mapping_key),
                         ..
-                    } = IndexKey::parse_from_slice(*scope, &row.key)?
+                    } = IndexKey::parse_from_slice(scope, &row.key)?
                     else {
                         return Err(HelixDbError::IndexCatalogCorruption(
                             "vector partition prefix yielded another key kind".to_string(),
@@ -131,7 +169,7 @@ pub(crate) async fn hydrate_active_generations(
                             "vector partition mapping key and value disagree".to_string(),
                         ));
                     }
-                    if !physical_ids.insert((*scope, mapping.physical_index_id.get())) {
+                    if !physical_ids.insert(mapping.physical_index_id.get()) {
                         return Err(HelixDbError::IndexCatalogCorruption(
                             "two Active vector partitions in one scope own the same physical index ID"
                                 .to_string(),
@@ -164,6 +202,19 @@ pub(crate) async fn hydrate_active_generations(
             "vector cache hydration target count exceeds u64".to_string(),
         ));
     };
+    registry.sweep(
+        scope,
+        &targets
+            .iter()
+            .map(VectorCacheIdentity::from_validated)
+            .collect(),
+        match source {
+            // Writer entries are released only by retirement, whose tombstones
+            // outlive the Active inventory until physical cleanup completes.
+            VectorCacheSnapshotSource::Writer(_) => VectorCacheSweep::OrphanFences,
+            VectorCacheSnapshotSource::Reader(_) => VectorCacheSweep::InactiveEntries,
+        },
+    );
     if target_count == 0 {
         return Ok(());
     }
@@ -198,7 +249,7 @@ pub(crate) async fn hydrate_active_generations(
             }
             VectorCacheHydration::Initial(_) | VectorCacheHydration::Refresh(_) => {}
         }
-        let snapshot = db.snapshot().await?;
+        let snapshot = source.snapshot().await?;
         let retained_bytes = match &mut hydration {
             VectorCacheHydration::Refresh(refresh) => {
                 refresh.retain_if_current(snapshot.seq()).await
@@ -222,15 +273,11 @@ pub(crate) async fn hydrate_active_generations(
                     .await;
                 let summary = match loaded {
                     Ok(summary) => summary,
-                    Err(error) => {
-                        drop(hydration);
-                        registry.forget_validated_closed(&handle);
-                        return Err(error);
-                    }
+                    // Dropping the reservation returns an initial entry to
+                    // `Vacant` or keeps a refreshed entry's published store.
+                    Err(error) => return Err(error),
                 };
                 if summary.completion == VectorMemoryStoreLoadCompletion::Shutdown {
-                    drop(hydration);
-                    registry.forget_validated_closed(&handle);
                     break;
                 }
                 (summary.estimated_bytes, Some((hydration, store)))
@@ -377,7 +424,8 @@ mod tests {
         let registry = VectorCacheRegistry::default();
         let first_snapshot = db.snapshot().await.unwrap();
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![active.clone()],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -385,7 +433,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let first_guard = registry.read_guard_for(&handle).unwrap();
+        let first_guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(first_guard.store().visible_seq(), first_snapshot.seq());
         assert_eq!(
             first_guard.store().get_upper_vector(1).as_deref(),
@@ -407,7 +455,8 @@ mod tests {
         transaction.commit().await.unwrap();
         let second_snapshot = db.snapshot().await.unwrap();
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![active.clone()],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -415,13 +464,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let second_guard = registry.read_guard_for(&handle).unwrap();
+        let second_guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(second_guard.store().visible_seq(), second_snapshot.seq());
         assert!(second_guard.store().get_upper_vector(2).is_some());
         assert!(first_guard.store().get_upper_vector(2).is_none());
 
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![active],
             &registry,
             VectorCacheHydrationBudget::Bounded(0),
@@ -429,11 +479,236 @@ mod tests {
         )
         .await
         .unwrap();
-        let empty_guard = registry.read_guard_for(&handle).unwrap();
+        let empty_guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(empty_guard.store().estimated_bytes(), 0);
         assert!(empty_guard.store().get_upper_vector(1).is_none());
         assert!(empty_guard.store().get_upper_vector(2).is_none());
         assert!(second_guard.store().get_upper_vector(2).is_some());
+    }
+
+    #[tokio::test]
+    async fn reader_hydration_publishes_exact_reader_sequences_and_sweeps_inactive_entries() {
+        let object_store: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("vector-cache-reader-hydration", Arc::clone(&object_store))
+            .build()
+            .await
+            .unwrap();
+        let scope = DataScope::LegacyUnscoped;
+        let (active, handle) = active_vector(scope, 7, 71, false);
+        let (inactive, inactive_handle) = active_vector(scope, 8, 81, false);
+        let upper_vector = |physical_index_id, node_id| {
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
+                    physical_index_id,
+                    node_id,
+                ))),
+            }
+            .to_bytes()
+        };
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .put(upper_vector(71, 1), Bytes::from_static(b"first"))
+            .unwrap();
+        transaction
+            .put(upper_vector(81, 1), Bytes::from_static(b"inactive"))
+            .unwrap();
+        transaction.commit().await.unwrap();
+        db.flush().await.unwrap();
+        let reader = slatedb::DbReader::open(
+            "vector-cache-reader-hydration",
+            object_store,
+            None,
+            slatedb::config::DbReaderOptions {
+                manifest_poll_interval: std::time::Duration::from_millis(10),
+                wal_poll_interval: std::time::Duration::from_millis(10),
+                ..slatedb::config::DbReaderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let registry = VectorCacheRegistry::default();
+
+        hydrate_active_generations(
+            VectorCacheSnapshotSource::Reader(&reader),
+            scope,
+            vec![active.clone(), inactive.clone()],
+            &registry,
+            VectorCacheHydrationBudget::Unbounded,
+            None,
+        )
+        .await
+        .unwrap();
+        let first_seq = reader.snapshot().await.unwrap().seq();
+        let first = registry.resident_guard_for(&handle).unwrap();
+        assert_eq!(first.store().visible_seq(), first_seq);
+        assert_eq!(
+            first.store().get_upper_vector(1).as_deref(),
+            Some(b"first".as_slice())
+        );
+        assert!(registry.resident_guard_for(&inactive_handle).is_ok());
+        hydrate_active_generations(
+            VectorCacheSnapshotSource::Reader(&reader),
+            scope,
+            vec![active.clone(), inactive],
+            &registry,
+            VectorCacheHydrationBudget::Unbounded,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(
+                first.store(),
+                registry.resident_guard_for(&handle).unwrap().store()
+            ),
+            "an unchanged reader sequence retains the published store"
+        );
+
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .put(upper_vector(71, 2), Bytes::from_static(b"second"))
+            .unwrap();
+        transaction.commit().await.unwrap();
+        db.flush().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while reader.snapshot().await.unwrap().seq() == first_seq {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("reader applies the writer commit");
+        hydrate_active_generations(
+            VectorCacheSnapshotSource::Reader(&reader),
+            scope,
+            vec![active],
+            &registry,
+            VectorCacheHydrationBudget::Unbounded,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let second = registry.resident_guard_for(&handle).unwrap();
+        assert_eq!(
+            second.store().visible_seq(),
+            reader.snapshot().await.unwrap().seq()
+        );
+        assert!(second.store().visible_seq() > first_seq);
+        assert_eq!(
+            second.store().get_upper_vector(2).as_deref(),
+            Some(b"second".as_slice())
+        );
+        assert!(
+            first.store().get_upper_vector(2).is_none(),
+            "a retained guard keeps its immutable older snapshot"
+        );
+        assert!(
+            matches!(
+                registry.resident_guard_for(&inactive_handle),
+                Err(super::super::registry::VectorCacheReadGuardError::Absent)
+            ),
+            "readers release generations that left the Active inventory"
+        );
+        drop((first, second));
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_fenced_hydration_retains_across_unfenced_sequences_and_rescans_after_commits() {
+        let db = raw_db("vector-cache-commit-fenced-hydration").await;
+        let scope = DataScope::LegacyUnscoped;
+        let (active, handle) = active_vector(scope, 7, 71, false);
+        let upper_vector = |node_id| {
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::Vector(VectorKey::UpperVector(VectorUpperVectorKey::new(
+                    71, node_id,
+                ))),
+            }
+            .to_bytes()
+        };
+        db.put(upper_vector(1), Bytes::from_static(b"first"))
+            .await
+            .unwrap();
+        let registry =
+            VectorCacheRegistry::new(super::super::registry::VectorCacheVisibility::CommitFenced);
+        let hydrate = || {
+            hydrate_active_generations(
+                VectorCacheSnapshotSource::Writer(&db),
+                scope,
+                vec![active.clone()],
+                &registry,
+                VectorCacheHydrationBudget::Unbounded,
+                None,
+            )
+        };
+        hydrate().await.unwrap();
+        let first = registry.resident_guard_for(&handle).unwrap();
+
+        db.put(b"unrelated-graph-row", Bytes::from_static(b"row"))
+            .await
+            .unwrap();
+        let newer_seq = db.snapshot().await.unwrap().seq();
+        assert!(newer_seq > first.store().visible_seq());
+        hydrate().await.unwrap();
+        assert!(
+            Arc::ptr_eq(
+                first.store(),
+                registry.resident_guard_for(&handle).unwrap().store()
+            ),
+            "an unfenced sequence advance does not rescan a commit-fenced store"
+        );
+        assert!(registry.read_guard_for(&handle, newer_seq).is_ok());
+
+        let writes = super::super::commit::VectorCacheWriteSet::default();
+        writes.dirty_rows_for(&handle).mark_node_dirty(2);
+        let fences = writes
+            .entries()
+            .iter()
+            .filter_map(|write| registry.prepare_commit(write))
+            .collect::<Vec<_>>();
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .put(upper_vector(2), Bytes::from_static(b"second"))
+            .unwrap();
+        super::super::commit::commit_fenced(transaction, fences)
+            .await
+            .unwrap();
+        hydrate().await.unwrap();
+
+        let rescanned = registry.resident_guard_for(&handle).unwrap();
+        assert!(!Arc::ptr_eq(first.store(), rescanned.store()));
+        assert_eq!(
+            rescanned.store().get_upper_vector(2).as_deref(),
+            Some(b"second".as_slice())
+        );
+        assert!(first.store().get_upper_vector(2).is_none());
+        drop((first, rescanned));
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hydration_rejects_an_active_generation_from_another_scope() {
+        let db = raw_db("vector-cache-foreign-scope").await;
+        let (foreign, handle) =
+            active_vector(DataScope::Tenant(TenantId::from_u128(9)), 5, 55, false);
+        let registry = VectorCacheRegistry::default();
+
+        let error = hydrate_active_generations(
+            VectorCacheSnapshotSource::Writer(&db),
+            DataScope::LegacyUnscoped,
+            vec![foreign],
+            &registry,
+            VectorCacheHydrationBudget::Unbounded,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, HelixDbError::InvariantViolation(_)));
+        assert!(registry.resident_guard_for(&handle).is_err());
     }
 
     #[tokio::test]
@@ -476,7 +751,8 @@ mod tests {
 
         let registry = VectorCacheRegistry::default();
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![active],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -484,7 +760,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let guard = registry.read_guard_for(&handle).unwrap();
+        let guard = registry.resident_guard_for(&handle).unwrap();
         assert_eq!(
             guard.store().get_upper_vector(3).as_deref(),
             Some(b"partitioned".as_slice())
@@ -527,7 +803,8 @@ mod tests {
 
         let registry = VectorCacheRegistry::default();
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![high_active, low_active],
             &registry,
             VectorCacheHydrationBudget::Bounded(row_bytes * 2 - 1),
@@ -536,12 +813,12 @@ mod tests {
         .await
         .unwrap();
 
-        let low = registry.read_guard_for(&low_handle).unwrap();
+        let low = registry.resident_guard_for(&low_handle).unwrap();
         assert_eq!(low.store().estimated_bytes(), row_bytes);
         assert_eq!(low.store().get_upper_vector(1).as_deref(), Some(&value[..]));
         assert_eq!(
             registry
-                .read_guard_for(&high_handle)
+                .resident_guard_for(&high_handle)
                 .unwrap()
                 .store()
                 .estimated_bytes(),
@@ -584,18 +861,21 @@ mod tests {
         transaction.commit().await.unwrap();
 
         let registry = VectorCacheRegistry::default();
-        hydrate_active_generations(
-            &db,
-            vec![second_active, first_active],
-            &registry,
-            VectorCacheHydrationBudget::Unbounded,
-            None,
-        )
-        .await
-        .unwrap();
+        for (scope, active) in [(second_scope, second_active), (first_scope, first_active)] {
+            hydrate_active_generations(
+                VectorCacheSnapshotSource::Writer(&db),
+                scope,
+                vec![active],
+                &registry,
+                VectorCacheHydrationBudget::Unbounded,
+                None,
+            )
+            .await
+            .unwrap();
+        }
 
-        let first = registry.read_guard_for(&first_handle).unwrap();
-        let second = registry.read_guard_for(&second_handle).unwrap();
+        let first = registry.resident_guard_for(&first_handle).unwrap();
+        let second = registry.resident_guard_for(&second_handle).unwrap();
         assert_eq!(
             first.store().get_upper_vector(1).as_deref(),
             Some(b"first-scope".as_slice())
@@ -615,7 +895,8 @@ mod tests {
         let registry = VectorCacheRegistry::default();
 
         let error = hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![first_active, second_active],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -625,8 +906,8 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, HelixDbError::IndexCatalogCorruption(_)));
-        assert!(registry.read_guard_for(&first_handle).is_err());
-        assert!(registry.read_guard_for(&second_handle).is_err());
+        assert!(registry.resident_guard_for(&first_handle).is_err());
+        assert!(registry.resident_guard_for(&second_handle).is_err());
     }
 
     #[tokio::test]
@@ -661,7 +942,8 @@ mod tests {
 
         let registry = VectorCacheRegistry::default();
         let error = hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![active],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -671,7 +953,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, HelixDbError::IndexCatalogCorruption(_)));
-        assert!(registry.read_guard_for(&handle).is_err());
+        assert!(registry.resident_guard_for(&handle).is_err());
     }
 
     #[tokio::test]
@@ -683,7 +965,8 @@ mod tests {
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(true);
 
         hydrate_active_generations(
-            &db,
+            VectorCacheSnapshotSource::Writer(&db),
+            scope,
             vec![active],
             &registry,
             VectorCacheHydrationBudget::Unbounded,
@@ -692,6 +975,6 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(registry.read_guard_for(&handle).is_err());
+        assert!(registry.resident_guard_for(&handle).is_err());
     }
 }
