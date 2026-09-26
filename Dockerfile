@@ -29,7 +29,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         | grep -Eq '/(lib/ld-linux-aarch64\.so\.1|lib64/ld-linux-x86-64\.so\.2)' \
     && ! readelf -l /tmp/helix-server | grep -qi musl \
     && install -d -m 1777 /tmp/runtime-root/tmp \
-    && install -d -o 65532 -g 65532 -m 0755 /tmp/runtime-root/var/lib/helix
+    && install -d -o 65532 -g 65532 -m 0755 \
+        /tmp/runtime-root/var/lib/helix \
+        /tmp/runtime-root/var/cache/helix
 
 FROM ${RUNTIME_IMAGE}
 
