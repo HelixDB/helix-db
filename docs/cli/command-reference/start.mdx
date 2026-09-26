@@ -1,14 +1,13 @@
 ---
 title: "helix start"
 sidebarTitle: "start"
+description: "Start a local instance in the background or foreground"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Start a local instance. By default the container starts in the background and the CLI waits for `GET /healthz` to report ready before returning.
+Start a local instance. By default the container starts in the background and the CLI waits for `GET /healthz` to report ready before returning. Local only.
 
 <Note>
 `helix run` is a backwards-compatible alias for `helix start`.
@@ -23,37 +22,43 @@ helix start [INSTANCE] [OPTIONS]
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
-| `INSTANCE` | Local instance name from `helix.toml`. If omitted, defaults to `dev` when present, otherwise prompts in a TTY or fails if non-interactive. |
+| --- | --- |
+| `INSTANCE` | Local instance name from `helix.toml`. If omitted in a TTY with multiple local instances, the CLI prompts. Otherwise defaults to `dev` when present, or the only local instance. |
 
-## Available flags
+## Options
 
-| Flag | Type | Description | Default |
-|------|------|-------------|---------|
-| `--foreground` | Boolean | Run attached and stop the container on Ctrl-C. Useful for streaming startup logs. | `false` |
-| `--port` | Number | Override the host port for this run. The container always listens on `8080` internally. | Value from `[local.<instance>] port` (default `6969`) |
-| `--disk` | Boolean | Use on-disk storage backed by a CLI-managed MinIO container for this run. | `false` |
-| `--image-version` | String | Override the image tag or `sha256:<64 lowercase hex digits>` for this run. | Configured tag |
-| `--pull` | String | `always`, `missing`, or `never`. Explicit policies also apply to disk-mode MinIO images. | Configured policy, otherwise `always` for `latest`, `missing` for other versions |
-| `--persist` | Boolean | Write the resolved port, storage, image, and pull settings for this run back to `[local.<instance>]` in `helix.toml`, so future runs reuse them. | `false` |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--foreground` | Run attached and stop the container on Ctrl-C. Useful for streaming startup logs. | Off (background) |
+| `--port <PORT>` | Override the host port for this run. The container always listens on `8080` internally. | Value from `[local.<instance>] port` (default `6969`) |
+| `--disk` | Use on-disk storage backed by a CLI-managed MinIO container for this run. Cannot be combined with `--storage-uri`. | Off |
+| `--storage-uri <URI>` | Use an S3 or S3-compatible bucket and prefix for this run, for example `s3://bucket/prefix/`. | — |
+| `--s3-region <REGION>` | Region for S3 storage. | — |
+| `--s3-endpoint-url <URL>` | Custom S3-compatible endpoint URL. | — |
+| `--s3-allow-http` | Allow plain HTTP for the S3 endpoint. | Off |
+| `--image-version <VERSION>` | Override the image tag, or `sha256:<64 lowercase hex digits>`, for this run. | Configured tag |
+| `--pull <POLICY>` | `always`, `missing`, or `never`. Explicit policies also apply to disk-mode MinIO images. | Configured policy, otherwise `always` for `latest` and `missing` for other versions |
+| `--persist` | Write the resolved port, storage, image, and pull settings for this run back to `[local.<instance>]` in `helix.toml`, so future runs reuse them. | Off |
 
 ## Behavior
 
-- Defaults to `ghcr.io/helixdb/helixdb:v0.0.6`. Flags override the image tag and pull policy in `[local.<instance>]`.
-- `always` requires a successful pull; `missing` uses a cached image when available; `never` fails if the image is not cached. A failed pull never silently selects an older cached image.
-- Resolves all required images before saving overrides or replacing containers. Failed image resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
+- Defaults to `ghcr.io/helixdb/helixdb:v0.0.6`. Flags override the image tag and pull policy set in `[local.<instance>]`.
+- `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
+- All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - Disk-mode MinIO images default to `missing` unless a pull policy is explicitly configured.
 - Names the container `helix-<project>-<instance>` and publishes the configured port to container port `8080`.
 - Uses Docker or Podman based on `[project] container_runtime` in `helix.toml`.
 - Default storage is in-memory. Passing `--disk` starts a MinIO sidecar, creates the `helix-db` bucket, and runs `helixdb` with S3-compatible storage environment variables.
+- `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`, unless the instance already uses S3 storage; then they override its saved S3 settings for this run.
+- The CLI loads `.env` from the project root before starting. For S3 storage, it passes any `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, and `AWS_DEFAULT_REGION` values from the environment into the container.
 - Background mode (`-d`, `--restart unless-stopped`) waits up to ~30 seconds for `GET /healthz` readiness and prints the URL and container name when ready.
 - Foreground mode (`--rm`) streams the container's stdout/stderr until Ctrl-C, then removes the container.
 
 <Warning>
-The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data.
+The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data. The CLI shows this warning the first time you start each in-memory instance.
 </Warning>
 
-With `--disk`, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data.
+With `--disk`, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data. With S3 storage, `helix stop`, `helix restart`, and `helix prune` never delete remote data.
 
 ## Examples
 
@@ -82,13 +87,16 @@ helix start dev --image-version v0.0.6 --persist
 # Start using cached images only
 helix start dev --pull never
 
+# Store data in an S3 bucket and save that setting to helix.toml
+helix start dev --storage-uri s3://bucket/prefix/ --s3-region us-east-1 --persist
+
 # Start on a new port and save it to helix.toml for future runs
 helix start dev --port 9090 --persist
 ```
 
 ## Related
 
-- [`helix stop`](/cli/command-reference/stop) — stop a background instance
-- [`helix restart`](/cli/command-reference/restart) — restart a background instance
-- [`helix query`](/cli/command-reference/query) — send a dynamic query to a running instance
-- [`helix logs`](/cli/command-reference/logs) — view container logs
+- [`helix stop`](/cli/command-reference/stop) — stop a background instance.
+- [`helix restart`](/cli/command-reference/restart) — restart a background instance.
+- [`helix query`](/cli/command-reference/query) — send a dynamic query to a running instance.
+- [`helix logs`](/cli/command-reference/logs) — view container logs.

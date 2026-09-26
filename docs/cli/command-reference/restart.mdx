@@ -1,16 +1,13 @@
 ---
 title: "helix restart"
 sidebarTitle: "restart"
+description: "Restart a background local instance"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Restart an existing background local instance in place, using its current image and container settings. Readiness is checked on the existing container's published port, including a temporary `helix start --port` override. Restart never pulls an image or creates a replacement container. If the container has been removed, the command fails. Use [`helix start`](/cli/command-reference/start) to create a container or apply new image or configuration settings.
-
-Default local data is in-memory and is wiped by every restart. Disk-mode instances preserve data in their local MinIO volume.
+Restart an existing background local instance in place. Local only.
 
 ## Usage
 
@@ -21,8 +18,16 @@ helix restart [INSTANCE]
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
-| `INSTANCE` | Local instance to restart. If omitted in a TTY with multiple instances, the CLI prompts. Defaults to `dev` when present. |
+| --- | --- |
+| `INSTANCE` | Local instance to restart. If omitted in a TTY with multiple instances, the CLI prompts. Defaults to `dev` when present, otherwise the only local instance. |
+
+## Behavior
+
+- Restarts the existing container with its current image and container settings. It never pulls an image or creates a replacement container.
+- If the container has been removed (for example after `helix stop` or `helix prune`), the command fails. Use [`helix start`](/cli/command-reference/start) to create a container.
+- Readiness is checked with `GET /healthz` on the container's published port, including a temporary `helix start --port` override.
+- Default local data is in-memory and is wiped by every restart. Disk-mode instances keep data in their local MinIO volume, and S3 data is never deleted.
+- `restart` takes no overrides. To change the image, port, or storage mode, use `helix start`, adding `--persist` to save the change.
 
 ## Examples
 
@@ -33,3 +38,9 @@ helix restart dev
 # Restart with interactive picker
 helix restart
 ```
+
+## Related
+
+- [`helix start`](/cli/command-reference/start) — start with one-off overrides.
+- [`helix stop`](/cli/command-reference/stop) — stop a background instance.
+- [`helix prune`](/cli/command-reference/prune) — remove all Helix-owned local state for an instance.

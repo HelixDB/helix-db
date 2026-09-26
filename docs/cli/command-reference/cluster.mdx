@@ -1,16 +1,68 @@
 ---
 title: "helix cluster"
-description: "Discover dedicated clusters and active indexes"
+sidebarTitle: "cluster"
+description: "List and inspect Helix Cloud clusters and their active indexes"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+Discover the Helix Cloud clusters you can access and inspect the active indexes of a dedicated
+cluster. Cloud only; these commands are read-only.
+
+## Usage
+
 ```bash
-helix cluster list [--project-id <id> | --workspace-id <id>] [--format human|json]
+helix cluster list [--project-id <id>] [--workspace-id <id>] [--format human|json]
 helix cluster get <cluster-id> [--format human|json]
 helix cluster indexes [--cluster-id <id>] [--format human|json]
 ```
 
-The command uses explicit IDs or the current `helix.toml` link. It does not persist a workspace.
-Dedicated-cluster create/delete, networking, regions/SKUs, branches, and backups are outside the CLI.
+## Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `list` | List clusters in a project or workspace. |
+| `get` | Show one cluster by ID. |
+| `indexes` | List the active indexes in a cluster. Alias: `indices`. |
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `CLUSTER_ID` | Cluster to show with `get`. Required. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--project-id <ID>` | `list`: project whose clusters to list. | Project linked in `helix.toml` |
+| `--workspace-id <ID>` | `list`: workspace whose clusters to list. | Linked workspace, or the project's workspace |
+| `--cluster-id <ID>` | `indexes`: cluster to inspect. | The linked `cluster:<id>` database |
+| `--format <FORMAT>` | Output format: `human` or `json`. | `human` |
+
+## Behavior
+
+- The command uses explicit IDs or the current `helix.toml` link. It does not persist a workspace.
+- `list` needs `--project-id`, `--workspace-id`, or a linked project.
+- `indexes` without `--cluster-id` needs exactly one linked Cloud database, and it must be a `cluster:<id>` database; a linked tenant fails.
+- Dedicated-cluster create/delete, networking, regions/SKUs, branches, and backups are outside the CLI.
+
+## Examples
+
+```bash
+# List clusters for the linked project
+helix cluster list
+
+# Show one cluster as JSON
+helix cluster get <cluster-id> --format json
+
+# List the active indexes of a specific cluster
+helix cluster indexes --cluster-id <cluster-id>
+```
+
+## Related
+
+- [`helix database`](/cli/command-reference/database) — manage databases and application keys.
+- [`helix project`](/cli/command-reference/project) — find and link the owning project.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

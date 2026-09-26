@@ -1,10 +1,16 @@
 ---
 title: "helix init"
+sidebarTitle: "init"
 description: "Create a local project or a WorkOS-authenticated Cloud link"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+Create a new Helix project: `helix init` writes a `helix.toml` with either one local instance or one
+Helix Cloud database link. Local or Cloud.
+
+## Usage
 
 ```bash
 helix init local [--name dev] [--port 6969] [--disk | --storage-uri s3://bucket/prefix]
@@ -12,6 +18,72 @@ helix init cloud [--name production] [--database tenant:<id>|cluster:<id>] \
   [--project <id>] [--workspace <id>]
 ```
 
-Cloud init authenticates through the WorkOS session and resolves the database from explicit flags or
-an unambiguous project. It stores stable linkage only. It has no gateway URL or query-auth options.
-Use `--skills` or `--no-skills` to control agent-skill installation.
+## Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `local` | Create a project with a local instance. |
+| `cloud` | Create a project linked to a Helix Cloud database. Alias: `enterprise`. |
+
+Without a subcommand, the CLI prompts for the target in a terminal and creates a local `dev`
+instance in non-interactive shells.
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-p`, `--path <DIR>` | Project directory. Created if missing. | Prompted in a terminal; otherwise the current directory |
+| `--skills` | Install the Helix agent skills and docs MCP without prompting. | Prompted in a terminal; skipped otherwise |
+| `--no-skills` | Skip installing the Helix agent skills and docs MCP. | — |
+
+`--path`, `--skills`, and `--no-skills` can be passed before or after the subcommand.
+
+### `helix init local`
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-n`, `--name <NAME>` | Local instance name. | `dev` |
+| `--port <PORT>` | Host port for the instance. | `6969` |
+| `--disk` | Use on-disk storage backed by a CLI-managed MinIO container. Cannot be combined with `--storage-uri`. | Off (in-memory) |
+| `--storage-uri <URI>` | Use an S3 or S3-compatible bucket and prefix, for example `s3://bucket/prefix/`. | — |
+| `--s3-region <REGION>` | Region for S3 storage. Requires `--storage-uri`. | — |
+| `--s3-endpoint-url <URL>` | Custom S3-compatible endpoint URL. Requires `--storage-uri`. | — |
+| `--s3-allow-http` | Allow plain HTTP for the S3 endpoint. Requires `--storage-uri`. | Off |
+
+### `helix init cloud`
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-n`, `--name <NAME>` | Cloud instance name. | `production` |
+| `--database <REF>` | Cloud database as `tenant:<id>` or `cluster:<id>`. | The project's only database |
+| `--project <ID>` | Owning project ID. Required when `--database` is omitted. | Derived from `--database` |
+| `--workspace <ID>` | Owning workspace ID. | The project's workspace |
+
+## Behavior
+
+- Fails if `helix.toml` already exists in the project directory.
+- Creates `.helix/` for instance state and adds `.helix/`, `.env`, `target/`, and `*.log` to `.gitignore` when missing.
+- `init local` also writes `examples/request.json` and an `AGENTS.md` (never overwriting an existing one), and warns if Docker or Podman is unavailable.
+- Cloud init authenticates through the WorkOS session and resolves the database from explicit flags or an unambiguous project.
+- It stores stable linkage only. It has no gateway URL (database endpoint) or query-auth options.
+- The skills install runs through `npx`; if it fails, the project is still created and the CLI prints a warning.
+
+## Examples
+
+```bash
+# Local project with a 'dev' instance on port 6969
+helix init local
+
+# Local project with persistent on-disk storage, in a new directory
+helix init local --disk --path my-app
+
+# Link a Cloud database, skipping the skills install
+helix init cloud --database tenant:<id> --no-skills
+```
+
+## Related
+
+- [`helix add`](/cli/command-reference/add) — add more instances later.
+- [`helix start`](/cli/command-reference/start) — start the local instance.
+- [`helix chef`](/cli/command-reference/chef) — initialize and hand off to a coding agent.
+- [CLI configuration](/cli/configuration) — the `helix.toml` format.

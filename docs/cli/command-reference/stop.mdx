@@ -1,18 +1,13 @@
 ---
 title: "helix stop"
 sidebarTitle: "stop"
+description: "Stop a background local instance and remove its containers"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Stop a background local instance and remove its containers.
-
-`helix stop` is idempotent — if the instance is not running, the CLI exits successfully without error.
-
-For disk-mode instances, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
+Stop a background local instance and remove its containers. Local only.
 
 ## Usage
 
@@ -23,8 +18,15 @@ helix stop [INSTANCE]
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
-| `INSTANCE` | Local instance to stop. If omitted in a TTY with multiple instances, the CLI prompts. Defaults to `dev` when present. |
+| --- | --- |
+| `INSTANCE` | Local instance to stop. If omitted in a TTY with multiple instances, the CLI prompts. Defaults to `dev` when present, otherwise the only local instance. |
+
+## Behavior
+
+- `helix stop` is idempotent — if the instance is not running, the CLI exits successfully without error.
+- Default in-memory data is wiped when the container is removed.
+- For disk-mode instances, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
+- Remote S3 data is never touched.
 
 ## Examples
 
@@ -36,11 +38,11 @@ helix stop dev
 helix stop
 
 # Safe to call in scripts even if the instance is already stopped
-helix stop staging || true
+helix stop staging
 ```
 
 ## Related
 
-- [`helix start`](/cli/command-reference/start) — start a local instance
-- [`helix restart`](/cli/command-reference/restart) — restart a local instance
-- [`helix prune`](/cli/command-reference/prune) — remove all Helix-owned local state for an instance
+- [`helix start`](/cli/command-reference/start) — start a local instance.
+- [`helix restart`](/cli/command-reference/restart) — restart a local instance.
+- [`helix prune`](/cli/command-reference/prune) — remove all Helix-owned local state for an instance.

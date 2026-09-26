@@ -1,16 +1,13 @@
 ---
 title: "helix update"
 sidebarTitle: "update"
+description: "Update the Helix CLI and refresh installed agent skills"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
 Update the Helix CLI to the latest version. Use `--v1` to update to `v2.3.5`, the last CLI release for v1 projects.
-
-If the [Helix agent skills](/cli/command-reference/skills) are installed, `helix update` also refreshes them to the latest version (a failure here degrades to a warning and never fails the CLI update). Separately, when skills are installed the CLI checks once every 24 hours whether they are out of date and prints a notice pointing you at `helix skills update`; set `HELIX_NO_UPDATE_CHECK=1` to opt out of both the CLI and skills checks.
 
 ## Usage
 
@@ -18,12 +15,20 @@ If the [Helix agent skills](/cli/command-reference/skills) are installed, `helix
 helix update [OPTIONS]
 ```
 
-## Available flags
+## Options
 
-| Flag | Type | Description |
-|------|------|-------------|
-| `--force` | Boolean | Force update even if already on latest version |
-| `--v1` | Boolean | Update to `v2.3.5`, the last CLI release for v1 projects |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--force` | Force update even if already on latest version. | Off |
+| `--v1` | Update to `v2.3.5`, the last CLI release for v1 projects. | Off |
+
+## Behavior
+
+- Downloads the release binary from GitHub and replaces the current one. Restart your terminal afterwards to use the new version.
+- Updating from a pre-3.x CLI to 3.x prints a breaking-change warning first.
+- If the [Helix agent skills](/cli/command-reference/skills) are installed, `helix update` also refreshes them to the latest version, even when the CLI is already up to date. A failure here degrades to a warning and never fails the CLI update.
+- Separately, when skills are installed the CLI checks once every 24 hours whether they are out of date and prints a notice pointing you at `helix skills update`.
+- Set `HELIX_NO_UPDATE_CHECK=1` to opt out of both the CLI and skills checks. `HELIX_DISABLE_UPDATE_CHECK` works the same way.
 
 ## Examples
 
@@ -37,3 +42,8 @@ helix update --force
 # Update to the last v1-compatible CLI release
 helix update --v1
 ```
+
+## Related
+
+- [`helix skills`](/cli/command-reference/skills) — manage the agent skills separately.
+- [`helix feedback`](/cli/command-reference/feedback) — report a problem with a release.

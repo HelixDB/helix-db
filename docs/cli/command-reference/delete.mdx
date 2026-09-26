@@ -1,16 +1,14 @@
 ---
 title: "helix delete"
 sidebarTitle: "delete"
+description: "Remove an instance from helix.toml and clean up its local state"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Delete an instance from `helix.toml` and clean up any local runtime state for it.
-
-For local instances, Helix-owned containers, networks, disk-mode volumes, and the per-instance directory under `.helix/` are deleted. For Helix Cloud instances, only the `[enterprise.<name>]` block in `helix.toml` is removed — the database itself is untouched.
+Delete an instance from `helix.toml` and clean up any local runtime state for it. Works for local
+instances and Helix Cloud links; a Cloud database itself is never deleted.
 
 ## Usage
 
@@ -21,22 +19,26 @@ helix delete <INSTANCE> [OPTIONS]
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
+| --- | --- |
 | `INSTANCE` | Instance to delete. Required. |
 
-## Available flags
+## Options
 
-| Flag | Type | Description |
-|------|------|-------------|
-| `-y`, `--yes` | Boolean | Skip confirmation prompts. Required in non-TTY environments. |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-y`, `--yes` | Skip confirmation prompts. Required in non-TTY environments. | Off |
 
-## Confirmation behavior
+## Behavior
 
-In a TTY, `helix delete` prints a warning and asks for confirmation. In non-TTY environments it refuses to run without `--yes`:
+- For local instances, Helix-owned containers, networks, disk-mode volumes, and the per-instance directory under `.helix/` are deleted.
+- For Helix Cloud instances, only the `[enterprise.<name>]` block in `helix.toml` is removed — the database itself is untouched.
+- Remote S3 object-store data is not deleted.
+- The CLI refuses to delete the last instance in `helix.toml`; add a replacement first.
+- In a TTY, `helix delete` prints a warning and asks for confirmation. In non-TTY environments it refuses to run without `--yes`:
 
-```
-Refusing to delete '<instance>' non-interactively. Re-run with --yes to confirm.
-```
+  ```text
+  Refusing to delete '<instance>' non-interactively. Re-run with --yes to confirm.
+  ```
 
 ## Examples
 
@@ -47,3 +49,9 @@ helix delete staging
 # Delete non-interactively
 helix delete staging --yes
 ```
+
+## Related
+
+- [`helix prune`](/cli/command-reference/prune) — clean up local state but keep the instance in `helix.toml`.
+- [`helix add`](/cli/command-reference/add) — add a replacement instance.
+- [CLI configuration](/cli/configuration) — the `helix.toml` format.

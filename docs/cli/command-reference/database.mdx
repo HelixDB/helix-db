@@ -1,30 +1,91 @@
 ---
 title: "helix database"
+sidebarTitle: "database"
 description: "Discover and manage Helix Cloud databases and application keys"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-Database targets use `cluster:<id>` for a dedicated database or `tenant:<id>` for a tenant.
-Omit the target only when `helix.toml` links exactly one Cloud database.
+List, inspect, create, and delete Helix Cloud databases, list their active indexes, and manage the
+application keys your software uses to reach them. Cloud only.
+
+## Usage
 
 ```bash
-helix database list --project <project-id>
-helix database get tenant:<id>
-helix database indexes tenant:<id>
-helix database create --project <id> --name <name> --slug <slug> --plan <plan>
-helix database create --project <id> --cluster <cluster-id> --name <name> --slug <slug>
-helix database delete tenant:<id> --yes
+helix database list [--project <project-id>]
+helix database get [tenant:<id>|cluster:<id>]
+helix database indexes [tenant:<id>|cluster:<id>]
+helix database create [--project <id>] --name <name> --slug <slug> --plan <plan>
+helix database create [--project <id>] --cluster <cluster-id> --name <name> --slug <slug>
+helix database delete [tenant:<id>] [--yes]
 
-helix database key create tenant:<id> --access read-only [--name <name>]
-helix database key create tenant:<id> --access read-write [--name <name>]
-helix database key list tenant:<id>
+helix database key create [tenant:<id>|cluster:<id>] --access read-only|read-write [--name <name>]
+helix database key list [tenant:<id>|cluster:<id>]
+helix database key revoke [tenant:<id>|cluster:<id>] --key <key-id> [--yes]
+```
+
+## Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `list` | List the dedicated-cluster and tenant databases in a project. |
+| `get` | Show one database. |
+| `indexes` | List the database's active indexes. Alias: `indices`. |
+| `create` | Create a tenant database and print its default read-write application key once. |
+| `delete` | Delete a tenant database. |
+| `key create` | Create an application key and print its token once. |
+| `key list` | List application keys. Tokens are never returned. |
+| `key revoke` | Revoke an application key. |
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `DATABASE` | `cluster:<id>` for a dedicated database or `tenant:<id>` for a tenant. Omit it only when `helix.toml` links exactly one Cloud database. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--project <ID>` | `list`, `create`: owning project. | Project linked in `helix.toml` |
+| `--name <NAME>` | `create`: database name (required). `key create`: optional key name. | — |
+| `--slug <SLUG>` | `create`: database slug. Required. | — |
+| `--plan <PLAN>` | `create`: plan for a shared tenant database. Required without `--cluster`; not allowed with it. | — |
+| `--cluster <CLUSTER_ID>` | `create`: create the tenant inside this dedicated cluster. | — |
+| `--access <ACCESS>` | `key create`: `read-only` or `read-write`. Required. | — |
+| `--key <KEY_ID>` | `key revoke`: key to revoke. Required. | — |
+| `-y`, `--yes` | `delete`, `key revoke`: skip the confirmation prompt. Required in non-interactive shells. | Off |
+| `--format <FORMAT>` | `list`, `get`, `indexes`, `create`, `key list`: `human` or `json`. | `human` |
+
+## Behavior
+
+- `list` includes dedicated clusters and tenants in the project; shared clusters are not listed.
+- `create` always creates a tenant database, either on a shared plan (`--plan`) or inside a dedicated cluster (`--cluster`).
+- Creating a database creates a default read-write application key and prints its raw token once. The session-authenticated CLI never stores or uses it.
+- Additional key creation is explicit, and each new raw token is also printed once. `key create` prints only the token on stdout, so you can capture it in a script.
+- Application keys are for software that calls the gateway (the Cloud database endpoint your application connects to) directly.
+- `delete` accepts only `tenant:<id>`. Dedicated-cluster create/delete lifecycle is not supported by this CLI.
+
+## Examples
+
+```bash
+# List databases in the linked project
+helix database list
+
+# Create a tenant database on a shared plan
+helix database create --project <id> --name <name> --slug <slug> --plan <plan>
+
+# Create a read-only application key and save the token
+helix database key create tenant:<id> --access read-only --name reporting > reporting.key
+
+# Revoke a key without a prompt
 helix database key revoke tenant:<id> --key <key-id> --yes
 ```
 
-Creating a database creates a default read-write application key and prints its raw token once. The
-session-authenticated CLI never stores or uses it. Additional key creation is explicit, and each new
-raw token is also printed once. Application keys are for software that calls the gateway directly.
+## Related
 
-Dedicated-cluster create/delete lifecycle is not supported by this CLI.
+- [`helix cluster`](/cli/command-reference/cluster) — inspect dedicated clusters.
+- [`helix project`](/cli/command-reference/project) — find the owning project.
+- [`helix query`](/cli/command-reference/query) — query a database with your login session.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

@@ -1,10 +1,54 @@
 ---
 title: "helix api"
-description: "Call a Helix Cloud WFE endpoint with the current WorkOS session"
+sidebarTitle: "api"
+description: "Call a Helix Cloud API endpoint with your CLI login session"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+Send an authenticated request to any `/v1/...` path of the Helix Cloud API (called WFE in CLI help)
+using your WorkOS session, and print the JSON response. Cloud only. Use a resource-specific command
+when one exists.
+
+## Usage
+
+```bash
+helix api get <path>
+helix api post <path> [--json '<body>']
+helix api patch <path> [--json '<body>']
+helix api delete <path>
+```
+
+## Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `get` | Send a `GET` request. |
+| `post` | Send a `POST` request with a JSON body. |
+| `patch` | Send a `PATCH` request with a JSON body. |
+| `delete` | Send a `DELETE` request. |
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `PATH` | Absolute Helix Cloud API path starting with `/v1/`. Required. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json <BODY>` | Request body for `post` and `patch`. Must be valid JSON. | `{}` |
+
+## Behavior
+
+- Only absolute `/v1/...` paths are accepted. Absolute URLs and direct gateway paths (the database endpoint used with application keys) are rejected.
+- The response is printed as pretty-printed JSON.
+- The command uses the same rotating WorkOS session as all other Cloud commands.
+- If the API rejects an expired token before handling the request, the CLI refreshes the session and retries once. No other failure is retried.
+
+## Examples
 
 ```bash
 helix api get /v1/workspaces
@@ -13,6 +57,8 @@ helix api patch /v1/example --json '{"value":"updated"}'
 helix api delete /v1/example
 ```
 
-Only absolute `/v1/...` WFE paths are accepted. Absolute URLs and direct gateway paths are rejected.
-The command uses the same rotating WorkOS session and typed pre-dispatch authentication retry rule as
-all other Cloud commands. Use resource-specific commands when one exists.
+## Related
+
+- [`helix auth`](/cli/command-reference/auth) — log in before calling the API.
+- [`helix workspace`](/cli/command-reference/workspace) — list workspaces without a raw API call.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.
