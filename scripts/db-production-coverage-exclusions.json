@@ -115,12 +115,6 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 1126,
-    "reason": "This closing edge belongs to an impossible empty-recency result after the negative SimHash admission loop proved the item cache is non-empty.",
-    "evidence": "vector_index_exercises_facade_and_row_safety_contracts"
-  },
-  {
-    "path": "crates/db/src/search/vector/hnsw/index.rs",
     "line": 1168,
     "reason": "This closing edge belongs to an impossible empty-recency result after the absent payload admission loop proved the item cache is non-empty.",
     "evidence": "vector_index_exercises_facade_and_row_safety_contracts"
@@ -586,5 +580,23 @@
     "line": 910,
     "reason": "After checked round-up addition succeeds, dividing by the nonzero word size and multiplying by that same word size cannot exceed the rounded dividend.",
     "evidence": "vector_primitives_exercise_active_codec_and_runtime_boundaries and db-vector-production-coverage architecture matrix"
+  },
+  {
+    "path": "crates/db/src/search/vector/cache/commit.rs",
+    "line": 53,
+    "reason": "This statement re-raises a panic from the detached commit task. The task only awaits the SlateDB commit and resolves its fences, and nothing it runs panics, so joining it yields the commit result or a cancellation, never a panic payload.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/cache/registry.rs",
+    "line": 703,
+    "reason": "A refresh reservation is claimed only from a Ready entry, and a held reservation leaves it only for Ready, Retiring, or Closed, so completing one can never observe Vacant or Hydrating.",
+    "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/restricted.rs",
+    "line": 1163,
+    "reason": "Scoring skips nodes it has already scored, so each node enters the restricted frontier at most once and inserting a popped node into the expanded set always succeeds; this closing edge belongs to the never-taken repeat case.",
+    "evidence": "vector_restricted_search_exercises_bounded_graph_and_directory_paths"
   }
 ]

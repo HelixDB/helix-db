@@ -66,11 +66,7 @@
   {
     "path": "crates/db/src/search/vector/cache/registry.rs",
     "lines": [
-      255,
-      256,
-      257,
       261,
-      263,
       402,
       404,
       505,
@@ -81,9 +77,7 @@
       560,
       699,
       700,
-      858,
-      926,
-      927
+      858
     ],
     "classification": "named-test",
     "evidence": "vector_memory_registry_exercises_every_lifecycle_transition",
@@ -174,7 +168,6 @@
       1966,
       1975,
       1985,
-      1994,
       2000,
       2002,
       2003,
@@ -286,6 +279,8 @@
   {
     "path": "crates/db/src/search/vector/hnsw/restricted.rs",
     "lines": [
+      558,
+      559,
       643,
       722,
       743,
@@ -298,8 +293,8 @@
       1265
     ],
     "classification": "named-test",
-    "evidence": "vector_restricted_search_exercises_exact_and_filtered_contracts and interpreter_request_read_view_guards_fail_closed",
-    "reason": "The named contracts exercise exact and filtered search for every metric, directory and directoryless bridge routing, missing companion-row corruption, every explicit budget termination, and writer-scoped stable request views. The residual zero-count lines are async continuation and closing-edge mappings around those asserted operations."
+    "evidence": "vector_restricted_search_exercises_bounded_graph_and_directory_paths and interpreter_request_read_view_guards_fail_closed",
+    "reason": "The named contracts exercise exact and filtered search for every metric, directory and directoryless bridge routing, missing companion-row corruption, every explicit budget termination, and writer-scoped stable request views. The residual zero-count lines are async continuation and closing-edge mappings around those asserted operations, plus the index and elapsed-time fields of the search_restricted debug event: the contract runs a search through that deployed entry point under the coverage subscriber, and LLVM leaves those tracing field expressions at zero like the fields at hnsw/search.rs 181 and 182."
   },
   {
     "path": "crates/db/src/search/vector/hnsw/search.rs",
