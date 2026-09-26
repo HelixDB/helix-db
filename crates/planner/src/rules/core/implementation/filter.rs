@@ -32,7 +32,7 @@ impl optimizer::OptimizerRule for FilterImplementationRule {
             rules::filtered_delivered(),
             input
                 .storage
-                .predicate_eval(input.storage.default_unknown_scan_rows),
+                .stored_predicate_filter(input.storage.default_unknown_scan_rows),
         ))
     }
 }

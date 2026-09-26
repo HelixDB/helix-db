@@ -5,6 +5,7 @@ use super::*;
 mod aggregate;
 mod bounds;
 mod eval;
+mod filter;
 mod order;
 mod projection;
 mod sets;
@@ -14,25 +15,10 @@ mod values;
 mod tests;
 
 pub(super) use self::eval::property_value_is_in;
+pub(super) use self::filter::{PreparedIndexMembership, RowDecision};
 pub(super) use self::values::ast_to_db_value;
 
 impl<'db> ExecutionContext<'db> {
-    pub(super) async fn filter(
-        &mut self,
-        input: ExecutionValue,
-        predicate: &ir::PredicatePlan,
-    ) -> Result<ExecutionValue> {
-        let rows = self.stream_rows(input, "filter")?;
-        let mut filtered = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            if self.eval_predicate(&row, predicate.predicate()).await? {
-                filtered.push(row);
-            }
-        }
-        Ok(ExecutionValue::Stream(filtered))
-    }
-
     pub(super) fn stream_rows(
         &self,
         value: ExecutionValue,

@@ -26,6 +26,7 @@ impl ExecPullCapability {
             | ExecOp::Expand { .. }
             | ExecOp::Merge { .. } => Self::Prepared,
             ExecOp::Filter { .. }
+            | ExecOp::IndexMembership { .. }
             | ExecOp::Limit { .. }
             | ExecOp::Skip { .. }
             | ExecOp::Range { .. }

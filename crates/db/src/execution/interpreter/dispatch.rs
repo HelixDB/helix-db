@@ -59,6 +59,11 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecOp::Filter { predicate } => {
                 execution_control.run(self.filter(input, predicate)).await
             }
+            exec::ExecOp::IndexMembership { plan } => {
+                execution_control
+                    .run(self.index_membership(input, plan))
+                    .await
+            }
             exec::ExecOp::Limit { count } => self.limit(input, count),
             exec::ExecOp::Skip { count } => self.skip(input, count),
             exec::ExecOp::Range { range } => self.range(input, range),

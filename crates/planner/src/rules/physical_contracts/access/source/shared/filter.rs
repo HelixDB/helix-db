@@ -12,7 +12,7 @@ pub(super) fn scan_then_filter_contract(
         contract.delivered,
         contract
             .cost
-            .serial(storage.predicate_eval(contract.estimated_rows)),
+            .serial(storage.stored_predicate_filter(contract.estimated_rows)),
         contract.estimated_rows,
     )
 }

@@ -83,6 +83,29 @@ fn stream_op(kind: logical::StreamPipelineOpKind) -> logical::StreamPipelineOp {
         logical::StreamPipelineOpKind::Filter => logical::StreamPipelineOp::Filter {
             predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("age", 42)).unwrap(),
         },
+        logical::StreamPipelineOpKind::IndexMembership => {
+            logical::StreamPipelineOp::IndexMembership {
+                plan: Box::new(
+                    ir::NodeIndexMembershipPlan::new(
+                        ir::NodeAccessSourcePlan::from_unfiltered(
+                            ir::NodeAccessPlan::EqualityIndex {
+                                index: catalog::NodeEqualityIndexMeta::try_new("item_kind")
+                                    .unwrap(),
+                                key: catalog::ScopedPropertyKey::try_new("Item", "kind").unwrap(),
+                                value: ir::IndexValue::Param(
+                                    ir::NonEmptyString::new("kind").unwrap(),
+                                ),
+                            },
+                        ),
+                        ir::PredicatePlan::new(helix_ast::expr::Predicate::eq_param(
+                            "kind", "kind",
+                        ))
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                ),
+            }
+        }
         logical::StreamPipelineOpKind::Window => logical::StreamPipelineOp::Window {
             window: logical::AccessWindowRange::new(0, Some(1)).unwrap(),
         },

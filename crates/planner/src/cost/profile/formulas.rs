@@ -266,6 +266,55 @@ impl StorageCostProfile {
         }
     }
 
+    /// Cost a residual filter whose predicate reads each row's stored record.
+    ///
+    /// Every input row pays one authoritative record read and decode before
+    /// the predicate is evaluated, so the cost grows with the input stream.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.stored_predicate_filter(EstimatedRows::rows(1_000));
+    /// assert_eq!(cost.authoritative_graph_reads, 1_000);
+    /// assert_eq!(cost.object_reads, 1_000);
+    /// ```
+    pub fn stored_predicate_filter(&self, rows: EstimatedRows) -> CostVector {
+        self.authoritative_verification(rows)
+            .serial(self.predicate_eval(rows))
+    }
+
+    /// Cost a row-preserving node index membership filter.
+    ///
+    /// The secondary set and, when present, the label bitmap are read
+    /// concurrently once; each input row then pays one in-memory probe.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let set = profile.bitmap_equality_lookup(EstimatedRows::rows(10));
+    /// let label = profile.bitmap_equality_lookup(EstimatedRows::rows(1_000));
+    /// let rows = EstimatedRows::rows(1_000);
+    /// let scoped = profile.index_membership_filter(set, None, rows);
+    /// let unscoped = profile.index_membership_filter(set, Some(label), rows);
+    /// assert_eq!(scoped.authoritative_graph_reads, 0);
+    /// assert_eq!(unscoped.object_reads, 2);
+    /// assert!(unscoped.latency < profile.stored_predicate_filter(rows).latency);
+    /// ```
+    pub fn index_membership_filter(
+        &self,
+        set: CostVector,
+        label_domain: Option<CostVector>,
+        rows: EstimatedRows,
+    ) -> CostVector {
+        let reads = match label_domain {
+            Some(label_domain) => {
+                self.parallel(&[set, label_domain], PositiveUsize::at_least_one(2))
+            }
+            None => set,
+        };
+        reads.serial(self.secondary_set_operation(rows))
+    }
+
     /// Cost residual predicate evaluation for a row estimate.
     pub fn predicate_eval(&self, rows: EstimatedRows) -> CostVector {
         let rows = rows.as_rows();

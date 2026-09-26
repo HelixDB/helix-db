@@ -1,6 +1,7 @@
 use super::*;
 
 mod filter;
+mod membership;
 mod order;
 mod physical_expand;
 mod physical_stream;
