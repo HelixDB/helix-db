@@ -1,12 +1,14 @@
 ---
 title: "Text indexes"
-description: "Create BM25 indexes for ranked full-text search"
+description: "Create BM25 indexes and run ranked full-text search"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Text indexes provide durable BM25 search over string properties on nodes or edges.
+A text index provides durable BM25 full-text search over a top-level string or
+string-array property on nodes or edges. Use it to rank records by exact terms and
+keyword relevance.
 
 ## Create a text index
 
@@ -74,37 +76,132 @@ helix.WriteQuery("create_doc_text_index").
 
 </CodeGroup>
 
-Pass a tenant property as the final argument to partition the index.
+Pass a tenant property as the final argument to partition the index by tenant. Text
+indexes currently require that property to be named `tenant_id`. See
+[tenant-partitioned search indexes](/database/helix-cloud/operate/multi-tenancy#tenant-partitioned-search-indexes).
 
-## Search indexed text
+## Search an index
 
-Start with the SDK's text-search operation for label `Doc`, property `body`, query
-text `"consensus protocol"`, and a result limit of `10`. The hit stream is ordered
-by BM25 relevance. Project the rank field before traversing away from a hit.
+Search the whole index when every record of the label is a valid result. This request
+returns the ten `Doc` nodes that best match `"consensus protocol"`:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "hits",
+        g().text_search_nodes("Doc", "body", "consensus protocol", 10, None)
+            .value_map(Some(vec!["$id", "title", "$score"])),
+    )
+    .returning(["hits"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs(
+    "hits",
+    g()
+      .textSearchNodes("Doc", "body", "consensus protocol", 10, null)
+      .valueMap(["$id", "title", "$score"]),
+  )
+  .returning(["hits"]);
+```
+
+```go Go
+helix.ReadQuery("search_docs").
+	VarAs(
+		"hits",
+		helix.G().
+			TextSearchNodes("Doc", "body", "consensus protocol", 10).
+			ValueMap("$id", "title", "$score"),
+	).
+	Returning("hits")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "hits",
+        g()
+        .text_search_nodes("Doc", "body", "consensus protocol", 10)
+        .value_map(["$id", "title", "$score"]),
+    )
+    .returning(["hits"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "search_docs",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "hits",
+          "root": {
+            "value_map": {
+              "input": {
+                "text_search_nodes": {
+                  "label": "Doc",
+                  "property": "body",
+                  "query_text": { "value": { "string": "consensus protocol" } },
+                  "k": { "literal": 10 }
+                }
+              },
+              "properties": ["$id", "title", "$score"]
+            }
+          }
+        }
+      }],
+      "returns": ["hits"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Hits arrive best match first, ordered by BM25 `$score` descending and then by ID. Use
+`textSearchEdges` / `text_search_edges` (`TextSearchEdges` in Go) to search an edge
+index. For a tenant-partitioned index, pass the tenant value as the final argument.
+
+`$score` exists only on the hit stream. Project it before traversing away from a hit
+if the response needs it.
+
+## Prefilter with a traversal
+
+To rank only the nodes or edges a traversal reaches, such as documents a user can
+read, search within the traversal instead of the whole index. See
+[Prefiltered search](/database/helix-db/query-guides/prefiltering#full-text-search-prefiltering).
 
 ## Result limits
 
-The server caps the effective text-search result count at 800 per request. Traversal-scoped text
-search returns at most `min(unique candidates, k, 800)` rows. A candidate stream with more than
-1,000,000 unique entities is a query error.
+The server caps the effective result count of a whole-index search at 800.
+Prefiltered searches have their own [limits](/database/helix-db/query-guides/prefiltering#result-limits).
 
 ## Indexed values
 
-- Store searchable text in a top-level property.
+- Store searchable text in a top-level `String` or `StringArray` property.
+- `null` and non-string values are rejected; fix them before retrying a blocked backfill.
 - Keep tenant property names and values consistent with the definition.
 - Treat analyzer and term-position behavior as part of the index definition.
-- Fix invalid source values before retrying a blocked backfill.
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Full Text Search prefiltering" icon="filter" href="/database/helix-db/query-guides/filtering#full-text-search-prefiltering">
-    Rank only an exact traversal-defined candidate set.
-  </Card>
   <Card title="Project search results" icon="table-columns" href="/database/helix-db/query-guides/projections">
     Preserve ranked hit metadata before continuing a traversal.
   </Card>
-  <Card title="Troubleshoot index operations" icon="wrench" href="/database/helix-cloud/operate/troubleshooting#index-operation-is-blocked">
+  <Card title="Vector indexes" icon="vector-square" href="/database/helix-db/query-guides/vector-indexes">
+    Rank embeddings by semantic similarity.
+  </Card>
+  <Card title="Troubleshoot index operations" icon="wrench" href="/database/helix-db/query-guides/troubleshooting#index-operation-is-blocked">
     Resolve blocked builds and lifecycle errors.
+  </Card>
+  <Card title="Limits" icon="gauge" href="/database/helix-cloud/operate/limits#text-indexes">
+    Review analyzers, supported types, and search limits.
   </Card>
 </CardGroup>

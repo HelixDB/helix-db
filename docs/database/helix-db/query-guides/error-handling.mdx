@@ -1,15 +1,19 @@
 ---
-title: "Handle query errors"
-description: "Branch on stable error codes while retaining diagnostic messages"
-sidebarTitle: "Error handling"
+title: "Query error reference"
+description: "Branch on stable error codes, apply retry rules, and look up every HelixDB query error"
+sidebarTitle: "Error codes"
 pageType: "Reference"
 ---
 
-<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Reference</Badge></div>
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
 Helix query failures expose a stable machine-readable code separately from the
 human-readable diagnostic. Branch on the code; log or display the message.
 Messages can gain context over time and are not a compatibility contract.
+
+This page covers errors raised by the HelixDB engine in every run mode. A Helix Cloud
+gateway can also return its own codes, such as `rate_limited` and `unauthorized`; see
+[Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling).
 
 ## TypeScript release compatibility
 

@@ -1,0 +1,475 @@
+---
+title: "Prefiltered search"
+description: "Rank only the nodes or edges a traversal reaches with vector or BM25 search"
+sidebarTitle: "Prefiltering"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Prefiltering ranks only the nodes or edges that a traversal reaches, instead of a whole
+index. Use it when graph membership is a correctness boundary, such as "documents this
+user may access" or "products reachable from this category." It works the same way for
+vector and full-text search.
+
+## How it works
+
+Every prefiltered search runs in the same order: **graph traversal → exact candidate
+membership → ranking → top k**.
+
+- The traversal is authoritative. A result outside the candidate set is never
+  returned, even when approximate index structures accelerate ranking.
+- Output IDs are a deduplicated subset of the input IDs.
+- Each selected row keeps its bindings, path, and sack, with `$distance` (vector) or
+  `$score` (text) attached.
+- Empty input returns without opening the index.
+- A tenant-partitioned index requires the same tenant value used to build the
+  candidate stream.
+
+<Warning>
+Do not emulate prefiltering by searching the whole index and filtering afterward with
+`.where(...)`. Excluded high-ranking hits still consume the top `k`, so the response
+can hold fewer than `k` eligible results. Build the candidate traversal first when
+membership matters.
+</Warning>
+
+## Vector prefiltering
+
+This request finds the projects a user owns, ranks that exact set by embedding
+distance, and returns the top five. It requires an active three-dimensional cosine
+[vector index](/database/helix-db/query-guides/vector-indexes) on `Project.embedding`.
+
+<CodeGroup>
+
+```rust Rust
+use helix_db::dsl::prelude::*;
+
+#[query]
+fn owned_project_matches(
+    username: String,
+    query_vector: Vec<f32>,
+    limit: i64,
+) -> ReadBatch {
+    read_batch()
+        .var_as(
+            "matches",
+            g()
+                .n_with_label_where("User", SourcePredicate::eq("username", username))
+                .out(Some("OWNS"))
+                .vector_search_with("Project", "embedding", query_vector, limit, None)
+                .value_map(Some(vec!["$id", "name", "$distance"])),
+        )
+        .returning(["matches"])
+}
+
+let request = owned_project_matches(
+    "alice".to_string(),
+    vec![1.0f32, 0.0, 0.0],
+    5,
+)?;
+```
+
+```ts TypeScript
+import {
+  SourcePredicate,
+  defineParams,
+  g,
+  param,
+  readBatch,
+} from "@helix-db/helix-db";
+
+const params = defineParams({
+  username: param.string(),
+  query_vector: param.array(param.f32()),
+  limit: param.i64(),
+});
+
+const query = readBatch()
+  .varAs(
+    "matches",
+    g()
+      .nWithLabelWhere("User", SourcePredicate.eq("username", params.username))
+      .out("OWNS")
+      .vectorSearchWith("Project", "embedding", params.query_vector, params.limit)
+      .valueMap(["$id", "name", "$distance"]),
+  )
+  .returning(["matches"]);
+
+const request = query.toQueryRequest(
+  params,
+  { username: "alice", query_vector: [1, 0, 0], limit: 5n },
+  { queryName: "owned_project_matches" },
+);
+```
+
+```go Go
+q := helix.ReadQuery("owned_project_matches")
+username := q.ParamString("username", "alice")
+queryVector := q.ParamArray(
+	"query_vector",
+	[]float32{1, 0, 0},
+	helix.ParamTypeF32(),
+)
+limit := q.ParamI64("limit", 5)
+
+request := q.
+	VarAs(
+		"matches",
+		helix.G().
+			NWithLabelWhere("User", helix.SourceEq("username", username)).
+			Out("OWNS").
+			VectorSearchNodesWithin("Project", "embedding", queryVector, limit).
+			ValueMap("$id", "name", "$distance"),
+	).
+	Returning("matches")
+```
+
+```python Python
+from helixdb import SourcePredicate, define_params, g, param, read_batch
+
+params = define_params({
+    "username": param.string(),
+    "query_vector": param.array(param.f32()),
+    "limit": param.i64(),
+})
+
+query = (
+    read_batch()
+    .var_as(
+        "matches",
+        g()
+        .n_with_label_where(
+            "User", SourcePredicate.eq("username", params.username)
+        )
+        .out("OWNS")
+        .vector_search_with(
+            "Project", "embedding", params.query_vector, params.limit
+        )
+        .value_map(["$id", "name", "$distance"]),
+    )
+    .returning(["matches"])
+)
+
+request = query.to_query_request(
+    params,
+    {
+        "username": "alice",
+        "query_vector": [1.0, 0.0, 0.0],
+        "limit": 5,
+    },
+    query_name="owned_project_matches",
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "owned_project_matches",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "matches",
+          "root": {
+            "value_map": {
+              "input": {
+                "vector_search_nodes_within": {
+                  "input": {
+                    "out": {
+                      "input": {
+                        "nodes_where": {
+                          "predicate": {
+                            "and": {
+                              "predicates": [
+                                {
+                                  "eq": {
+                                    "left": { "property": "$label" },
+                                    "right": { "constant": { "string": "User" } }
+                                  }
+                                },
+                                {
+                                  "eq": {
+                                    "left": { "property": "username" },
+                                    "right": { "param": "username" }
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      "label": "OWNS"
+                    }
+                  },
+                  "label": "Project",
+                  "property": "embedding",
+                  "query_vector": { "expr": { "param": "query_vector" } },
+                  "k": { "expr": { "param": "limit" } }
+                }
+              },
+              "properties": ["$id", "name", "$distance"]
+            }
+          }
+        }
+      }],
+      "returns": ["matches"]
+    }
+  },
+  "parameters": {
+    "username": "alice",
+    "query_vector": [1, 0, 0],
+    "limit": 5
+  },
+  "parameter_types": {
+    "username": "string",
+    "query_vector": { "array": "f32" },
+    "limit": "i64"
+  }
+}
+```
+
+</CodeGroup>
+
+Exact membership does not mean the engine compares every candidate embedding
+exhaustively. It means every returned hit is checked against the exact traversal set.
+
+## Full-text search prefiltering
+
+This request finds the documents a user can read, ranks that exact set for
+`"graph databases"`, and returns the top five. It requires an active
+[text index](/database/helix-db/query-guides/text-indexes) on `Document.body`.
+
+<CodeGroup>
+
+```rust Rust
+use helix_db::dsl::prelude::*;
+
+#[query]
+fn readable_document_matches(
+    username: String,
+    query_text: String,
+    limit: i64,
+) -> ReadBatch {
+    read_batch()
+        .var_as(
+            "matches",
+            g()
+                .n_with_label_where("User", SourcePredicate::eq("username", username))
+                .out(Some("CAN_READ"))
+                .text_search_with("Document", "body", query_text, limit, None)
+                .value_map(Some(vec!["$id", "title", "$score"])),
+        )
+        .returning(["matches"])
+}
+
+let request = readable_document_matches(
+    "alice".to_string(),
+    "graph databases".to_string(),
+    5,
+)?;
+```
+
+```ts TypeScript
+import {
+  SourcePredicate,
+  defineParams,
+  g,
+  param,
+  readBatch,
+} from "@helix-db/helix-db";
+
+const params = defineParams({
+  username: param.string(),
+  query_text: param.string(),
+  limit: param.i64(),
+});
+
+const query = readBatch()
+  .varAs(
+    "matches",
+    g()
+      .nWithLabelWhere("User", SourcePredicate.eq("username", params.username))
+      .out("CAN_READ")
+      .textSearchWith("Document", "body", params.query_text, params.limit)
+      .valueMap(["$id", "title", "$score"]),
+  )
+  .returning(["matches"]);
+
+const request = query.toQueryRequest(
+  params,
+  { username: "alice", query_text: "graph databases", limit: 5n },
+  { queryName: "readable_document_matches" },
+);
+```
+
+```go Go
+q := helix.ReadQuery("readable_document_matches")
+username := q.ParamString("username", "alice")
+queryText := q.ParamString("query_text", "graph databases")
+limit := q.ParamI64("limit", 5)
+
+request := q.
+	VarAs(
+		"matches",
+		helix.G().
+			NWithLabelWhere("User", helix.SourceEq("username", username)).
+			Out("CAN_READ").
+			TextSearchNodesWithin("Document", "body", queryText, limit).
+			ValueMap("$id", "title", "$score"),
+	).
+	Returning("matches")
+```
+
+```python Python
+from helixdb import SourcePredicate, define_params, g, param, read_batch
+
+params = define_params({
+    "username": param.string(),
+    "query_text": param.string(),
+    "limit": param.i64(),
+})
+
+query = (
+    read_batch()
+    .var_as(
+        "matches",
+        g()
+        .n_with_label_where(
+            "User", SourcePredicate.eq("username", params.username)
+        )
+        .out("CAN_READ")
+        .text_search_with(
+            "Document", "body", params.query_text, params.limit
+        )
+        .value_map(["$id", "title", "$score"]),
+    )
+    .returning(["matches"])
+)
+
+request = query.to_query_request(
+    params,
+    {
+        "username": "alice",
+        "query_text": "graph databases",
+        "limit": 5,
+    },
+    query_name="readable_document_matches",
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "readable_document_matches",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "matches",
+          "root": {
+            "value_map": {
+              "input": {
+                "text_search_nodes_within": {
+                  "input": {
+                    "out": {
+                      "input": {
+                        "nodes_where": {
+                          "predicate": {
+                            "and": {
+                              "predicates": [
+                                {
+                                  "eq": {
+                                    "left": { "property": "$label" },
+                                    "right": { "constant": { "string": "User" } }
+                                  }
+                                },
+                                {
+                                  "eq": {
+                                    "left": { "property": "username" },
+                                    "right": { "param": "username" }
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      "label": "CAN_READ"
+                    }
+                  },
+                  "label": "Document",
+                  "property": "body",
+                  "query_text": { "expr": { "param": "query_text" } },
+                  "k": { "expr": { "param": "limit" } }
+                }
+              },
+              "properties": ["$id", "title", "$score"]
+            }
+          }
+        }
+      }],
+      "returns": ["matches"]
+    }
+  },
+  "parameters": {
+    "username": "alice",
+    "query_text": "graph databases",
+    "limit": 5
+  },
+  "parameter_types": {
+    "username": "string",
+    "query_text": "string",
+    "limit": "i64"
+  }
+}
+```
+
+</CodeGroup>
+
+Results are identical to an exhaustive BM25 search of the tenant partition, intersected
+with the candidate IDs, followed by deterministic top-k selection: BM25 score
+descending, then entity ID ascending. BM25 statistics still come from the full tenant
+partition, not only the candidates.
+
+## SDK methods
+
+Rust, TypeScript, and Python pick the node or edge wire operation from the current
+stream. Go has separate node and edge methods.
+
+| Search | Rust and Python | TypeScript | Go |
+| --- | --- | --- | --- |
+| Vector | `vector_search_with`, or `vector_search` for literal inputs | `vectorSearchWith`, or `vectorSearch` | `VectorSearchNodesWithin`, `VectorSearchEdgesWithin` |
+| Text | `text_search_with`, or `text_search` for literal inputs | `textSearchWith`, or `textSearch` | `TextSearchNodesWithin`, `TextSearchEdgesWithin` |
+
+## Result limits
+
+| Search | Limit |
+| --- | --- |
+| Vector | The request fails when `min(k, unique candidates)` exceeds 800. `k` is never reduced silently, so a larger `k` succeeds when 800 or fewer unique candidates exist. |
+| Text | At most `min(unique candidates, k, 800)` rows. |
+| Both | More than 1,000,000 unique candidates is a query error. |
+
+## Checklist
+
+- Create a compatible index for the candidate label and property. Vector queries must
+  match the index dimension exactly.
+- Pass the same tenant value as the index when it is tenant-partitioned.
+- Project `$distance` or `$score` before traversing away from a ranked hit.
+- Bound the candidate traversal when its size can grow without application limits.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Vector indexes" icon="vector-square" href="/database/helix-db/query-guides/vector-indexes">
+    Create the dimensioned index used for ranking.
+  </Card>
+  <Card title="Text indexes" icon="align-left" href="/database/helix-db/query-guides/text-indexes">
+    Create the BM25 index used for full-text ranking.
+  </Card>
+  <Card title="Traversals" icon="route" href="/database/helix-db/query-guides/traversals">
+    Build the candidate set by following relationships.
+  </Card>
+  <Card title="Project search results" icon="table-columns" href="/database/helix-db/query-guides/projections">
+    Preserve ranked hit metadata before continuing a traversal.
+  </Card>
+</CardGroup>

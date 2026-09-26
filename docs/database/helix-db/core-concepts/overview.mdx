@@ -1,16 +1,17 @@
 ---
 title: "Build and run a query"
-description: "Take the Get Started query apart operation by operation, then read its request and response"
+description: "Build a small write query operation by operation, then read its request and response"
 sidebarTitle: "Query walkthrough"
 pageType: "Tutorial"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
-[Get Started](/database/helix-db/start-here/quickstart) runs one query that creates two
-users, connects them with a relationship, and reads that relationship back. This page
-takes the same query apart: what each operation contributes, what it becomes on the
-wire, and what the server sends back.
+This walkthrough builds one query that creates two users, connects them with a
+relationship, and reads that relationship back, all in a single transaction. Each step
+shows what an operation contributes, what it becomes on the wire, and what the server
+sends back. To run it, start a local instance as described in
+[Get started](/database/helix-db/start-here/quickstart).
 
 <Note>
   Every tab builds the same request. The JSON tab is the body sent to `POST /v2/query`,

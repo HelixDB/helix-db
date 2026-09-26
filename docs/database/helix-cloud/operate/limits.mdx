@@ -7,8 +7,6 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
 Current constraints and practical limits. These reflect the current implementation, not
 fundamental architectural boundaries.
 
@@ -130,7 +128,7 @@ bucket was exhausted.
    tenants share one Cloud database; the Helix bucket does not distinguish those
    application tenants.
 
-## Data Model
+## Data model
 
 | Limit                  | Value                                                                                          |
 | ---------------------- | ---------------------------------------------------------------------------------------------- |
@@ -139,7 +137,7 @@ bucket was exhausted.
 | Nested structures      | Stored object/array values are supported. Dotted-path lookup such as `metadata.externalID` works in scan-time filters, expressions, projections, `values`, filtered `valueMap`, and fallback ordering. Arrays are opaque; there is no array-index path syntax. |
 | Reserved property keys | `$label` (used for label-based filtering and label-scoped secondary, vector, and text indexes) |
 
-## Vector Indexes
+## Vector indexes
 
 | Limit                    | Value                                                                                                                                    |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -152,7 +150,7 @@ bucket was exhausted.
 | Result count              | Unrestricted vector search caps effective `k` at 800. Traversal-scoped vector search rejects when `min(k, unique candidates)` exceeds 800 or when the candidate stream exceeds 1,000,000 unique entities. |
 | Restricted search        | Final membership is the exact current traversal stream; ranking may still use approximate index structures                              |
 
-## Text Indexes
+## Text indexes
 
 | Limit                    | Value                                                                                                                                                         |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -164,7 +162,7 @@ bucket was exhausted.
 | Result count              | Effective `k` is capped at 800. Traversal-scoped text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
 | Tenant partitioning      | Optional. Tenant-partitioned text indexes currently require the partition property name to be `tenant_id`, and tenant-scoped searches require a tenant value. |
 
-## Secondary Indexes
+## Secondary indexes
 
 | Limit            | Value                                                                                                      |
 | ---------------- | ---------------------------------------------------------------------------------------------------------- |

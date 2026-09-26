@@ -1,11 +1,10 @@
 ---
 title: 'Security'
+description: "Authenticate requests, handle API keys, and review encryption and enterprise security features"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
-
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
 ## Direct gateway authentication
 
@@ -35,13 +34,15 @@ or observability tools. Service credentials also support headless HTTP API calls
 All traffic between clients and the gateway is encrypted in transit via TLS. Data at rest in
 object storage is encrypted using the storage provider's server-side encryption.
 
-## Enterprise features
+## Coming soon
 
-The following are available for enterprise clusters. Contact
-[founders@helix-db.com](mailto:founders@helix-db.com) to enable them for your deployment.
+These enterprise security features are on the [roadmap](/database/helix-db/start-here/roadmap)
+and are not yet available. Contact [founders@helix-db.com](mailto:founders@helix-db.com)
+if your deployment depends on one of them.
 
-- **Role-based access control.** Scoped API keys with read-only, read-write, or operation-restricted
-  permissions for least-privilege credentials per service or environment.
+- **Role-based access control.** Fine-grained API key permissions beyond today's
+  read-only and read-write keys, for least-privilege credentials per service or
+  environment.
 - **SSO / SAML.** Dashboard access through your identity provider (Okta, Azure AD, Google Workspace)
   with centralized provisioning and deprovisioning.
 - **Audit logs.** Per-request logging (timestamp, token identity, query name, source IP, response
