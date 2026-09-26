@@ -176,6 +176,27 @@ async fn public_hybrid_cache_opens_with_bounded_foyer_partitions() {
     db.close().await.expect("hybrid-cache writer closes");
 }
 
+#[test]
+fn public_object_store_cache_settings_expose_their_validated_bounds() {
+    let root = std::path::Path::new("/var/cache/helix/object-store");
+    let settings = config::SlateObjectStoreCacheSettings::try_new(
+        root,
+        Some(1024 * 1024),
+        4096,
+        true,
+        config::ObjectStoreWarmLevel::L0,
+        None,
+        8,
+    )
+    .expect("valid object-store cache");
+
+    assert_eq!(settings.root(), root);
+    assert_eq!(settings.warm(), config::ObjectStoreWarmLevel::L0);
+    // A server sizes its open-file limit from this handle budget.
+    assert_eq!(settings.max_open_file_handles(), 8);
+    assert_eq!(settings.to_slate_options().max_open_file_handles, 8);
+}
+
 #[tokio::test]
 async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_owns() {
     let root = tempfile::tempdir().expect("temporary server root");
