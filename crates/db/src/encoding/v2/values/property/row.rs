@@ -20,9 +20,27 @@ pub(crate) fn datetime_millis_to_rfc3339(millis: i64) -> Option<String> {
         .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
-const SIGNED_I64_SORT_MASK: u64 = 0x8000_0000_0000_0000;
+const U64_SIGN_BIT: u64 = 0x8000_0000_0000_0000;
 pub(crate) fn sortable_i64_index_string(value: i64) -> String {
-    format!("{:020}", (value as u64) ^ SIGNED_I64_SORT_MASK)
+    format!("{:020}", (value as u64) ^ U64_SIGN_BIT)
+}
+
+/// Maps `value`'s IEEE-754 bits onto an order-preserving `u64`: for a
+/// negative value (sign bit set) every bit is inverted, for a non-negative
+/// value only the sign bit is set. Ascending order over the returned `u64`
+/// then matches ascending order over the original `f64`, including across
+/// the negative/positive boundary and for the two zeros.
+fn sortable_f64_bits(value: f64) -> u64 {
+    let bits = value.to_bits();
+    if bits & U64_SIGN_BIT != 0 {
+        !bits
+    } else {
+        bits | U64_SIGN_BIT
+    }
+}
+
+pub(crate) fn sortable_f64_index_string(value: f64) -> String {
+    format!("{:020}", sortable_f64_bits(value))
 }
 
 pub(super) const PROPERTY_ALIGNMENT: usize = core::mem::align_of::<rkyv::Archived<Vec<Property>>>();
