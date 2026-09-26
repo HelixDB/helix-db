@@ -257,6 +257,14 @@ impl<'a> Cursor<'a> {
                 shape.require_rows("filter")?;
                 Node::Filter { predicate, input }
             }
+            exec::ExecOp::IndexMembership { plan } => {
+                shape.require_rows("index membership")?;
+                Node::IndexMembership {
+                    plan,
+                    input,
+                    prepared: None,
+                }
+            }
             exec::ExecOp::Project { .. } | exec::ExecOp::Noop => {
                 if let exec::ExecOp::Project { projection } = op {
                     shape = shape.projection(projection)?;
@@ -364,6 +372,7 @@ impl<'a> Cursor<'a> {
                     } => Shape::of(ctx.variable_value(variable)?),
                     exec::ExecOp::Expand { .. }
                     | exec::ExecOp::Filter { .. }
+                    | exec::ExecOp::IndexMembership { .. }
                     | exec::ExecOp::Limit { .. }
                     | exec::ExecOp::Skip { .. }
                     | exec::ExecOp::Range { .. }

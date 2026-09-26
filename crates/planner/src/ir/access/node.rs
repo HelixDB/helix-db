@@ -1,6 +1,7 @@
 //! Node access-plan contracts.
 
 mod analysis;
+mod membership;
 mod source;
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,9 @@ use crate::catalog;
 
 use crate::ir;
 
+pub use membership::{
+    NodeIndexMembershipError, NodeIndexMembershipPlan, NodeMembershipOutsideLabel,
+};
 pub use source::NodeAccessSourcePlan;
 
 /// Node access plan.

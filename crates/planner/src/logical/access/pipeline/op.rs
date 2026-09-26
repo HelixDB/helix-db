@@ -20,6 +20,11 @@ pub enum StreamPipelineOp {
         /// Predicate.
         predicate: ir::PredicatePlan,
     },
+    /// Row-preserving secondary-index membership filter over node rows.
+    IndexMembership {
+        /// Validated membership set and the predicate it decides.
+        plan: Box<ir::NodeIndexMembershipPlan>,
+    },
     /// Composed static stream window.
     Window {
         /// Window.
@@ -80,6 +85,8 @@ pub enum StreamPipelineOp {
 pub enum StreamPipelineOpKind {
     /// `StreamPipelineOp::Filter`.
     Filter,
+    /// `StreamPipelineOp::IndexMembership`.
+    IndexMembership,
     /// `StreamPipelineOp::Window`.
     Window,
     /// `StreamPipelineOp::Limit`.
@@ -106,8 +113,9 @@ pub enum StreamPipelineOpKind {
 
 impl StreamPipelineOpKind {
     /// All stream-pipeline operator families.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Filter,
+        Self::IndexMembership,
         Self::Window,
         Self::Limit,
         Self::Skip,
@@ -127,6 +135,7 @@ impl StreamPipelineOp {
     pub const fn kind(&self) -> StreamPipelineOpKind {
         match self {
             Self::Filter { .. } => StreamPipelineOpKind::Filter,
+            Self::IndexMembership { .. } => StreamPipelineOpKind::IndexMembership,
             Self::Window { .. } => StreamPipelineOpKind::Window,
             Self::Limit { .. } => StreamPipelineOpKind::Limit,
             Self::Skip { .. } => StreamPipelineOpKind::Skip,
@@ -149,6 +158,7 @@ impl StreamPipelineOp {
             }
             Self::VariableWrite { .. } => properties::EffectKind::Barrier,
             Self::Filter { .. }
+            | Self::IndexMembership { .. }
             | Self::Window { .. }
             | Self::Limit { .. }
             | Self::Skip { .. }
@@ -176,6 +186,24 @@ mod tests {
         let variants = [
             StreamPipelineOp::Filter {
                 predicate: ir::PredicatePlan::new(Predicate::eq("active", true)).unwrap(),
+            },
+            StreamPipelineOp::IndexMembership {
+                plan: Box::new(
+                    ir::NodeIndexMembershipPlan::new(
+                        ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                            index: crate::catalog::NodeEqualityIndexMeta::try_new("item_kind")
+                                .unwrap(),
+                            key: crate::catalog::ScopedPropertyKey::try_new("Item", "kind")
+                                .unwrap(),
+                            value: ir::IndexValue::Literal(
+                                ir::SecondaryIndexLiteral::new("B".into()).unwrap(),
+                            ),
+                        })
+                        .unwrap(),
+                        ir::PredicatePlan::new(Predicate::eq("kind", "B")).unwrap(),
+                    )
+                    .unwrap(),
+                ),
             },
             StreamPipelineOp::Window {
                 window: AccessWindowRange::new(1, Some(3)).unwrap(),

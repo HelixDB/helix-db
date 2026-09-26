@@ -260,6 +260,7 @@ fn append_window(
         }
         logical::StreamPipelineOp::Order { .. } => Ok(window),
         logical::StreamPipelineOp::Filter { .. }
+        | logical::StreamPipelineOp::IndexMembership { .. }
         | logical::StreamPipelineOp::Expand { .. }
         | logical::StreamPipelineOp::VectorSearch { .. }
         | logical::StreamPipelineOp::TextSearch { .. }
@@ -305,6 +306,13 @@ fn fold_cursor(
                 cursor = exec::ExecCountCursorPlan::Filter {
                     input: Box::new(cursor),
                     predicate: predicate.clone(),
+                };
+            }
+            logical::StreamPipelineOp::IndexMembership { plan } => {
+                flush_positioned_window!();
+                cursor = exec::ExecCountCursorPlan::IndexMembership {
+                    input: Box::new(cursor),
+                    plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(plan.as_ref())),
                 };
             }
             logical::StreamPipelineOp::Order { ordering } => {
@@ -1779,7 +1787,15 @@ fn cursor_cost(
                 })
         }
         exec::ExecCountCursorPlan::Filter { input, .. } => cursor_cost(input, stats, storage)
-            .serial(storage.predicate_eval(storage.default_unknown_scan_rows)),
+            .serial(storage.stored_predicate_filter(storage.default_unknown_scan_rows)),
+        exec::ExecCountCursorPlan::IndexMembership { input, plan } => cursor_cost(
+            input, stats, storage,
+        )
+        .serial(storage.index_membership_filter(
+            storage.bitmap_equality_lookup(storage.default_equality_index_rows),
+            super::membership_label_domain_cost(plan.outside_label, &plan.label, stats, storage),
+            storage.default_unknown_scan_rows,
+        )),
         exec::ExecCountCursorPlan::Window { input, .. } => cursor_cost(input, stats, storage),
         exec::ExecCountCursorPlan::Order { input, .. } => cursor_cost(input, stats, storage)
             .serial(storage.explicit_sort(storage.default_unknown_scan_rows)),

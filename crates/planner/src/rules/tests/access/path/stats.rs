@@ -162,7 +162,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         storage
             .bitmap_equality_lookup(cost::EstimatedRows::rows(7))
             .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(7)))
-            .serial(storage.predicate_eval(cost::EstimatedRows::rows(7)))
+            .serial(storage.stored_predicate_filter(cost::EstimatedRows::rows(7)))
     );
     assert_eq!(filtered.estimated_rows, cost::EstimatedRows::rows(7));
     assert_eq!(
@@ -170,7 +170,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         storage
             .unique_equality_lookup(cost::EstimatedRows::rows(1))
             .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(1)))
-            .serial(storage.predicate_eval(cost::EstimatedRows::rows(1)))
+            .serial(storage.stored_predicate_filter(cost::EstimatedRows::rows(1)))
     );
     assert_eq!(unique_filtered.estimated_rows, cost::EstimatedRows::rows(1));
     assert_eq!(
@@ -181,7 +181,9 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
                 unique_missing_stats_storage
                     .secondary_row_materialization(cost::EstimatedRows::ZERO),
             )
-            .serial(unique_missing_stats_storage.predicate_eval(cost::EstimatedRows::ZERO))
+            .serial(
+                unique_missing_stats_storage.stored_predicate_filter(cost::EstimatedRows::ZERO)
+            )
     );
     assert_eq!(
         unique_missing_stats_filtered.estimated_rows,
