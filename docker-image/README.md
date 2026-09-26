@@ -86,20 +86,36 @@ docker-image/test.sh \
   --image ghcr.io/helixdb/helixdb:local-amd64
 ```
 
-The suite inspects the saved image metadata and filesystem, scans it for credential material, exercises memory and native-volume behavior, rejects invalid configuration, checks clean `SIGTERM` shutdown, and verifies S3-compatible persistence with digest-pinned MinIO images. It creates only `helixdb-image-*` Docker resources and removes them on exit. The MinIO test also seeds a vector index, reopens flushed data, and checks that three idle refresh intervals produce no vector-data SST GETs (catalog polling is measured separately) while search remains correct before and after a write.
+The suite inspects the saved image metadata and filesystem, scans it for credential material, exercises memory and native-volume behavior, rejects invalid configuration, checks clean `SIGTERM` shutdown, and verifies S3-compatible persistence with a digest-pinned SeaweedFS image. It creates only `helixdb-image-*` Docker resources and removes them on exit.
 
-MinIO and `mc` use the upstream `quay.io/minio` repositories. The server
-`RELEASE.2025-09-07T16-13-09Z` and client `RELEASE.2025-08-13T08-35-41Z`
-are pinned to multi-platform index digests shared with the CLI disk runtime.
-These are the same digests previously used through Docker Hub, whose MinIO
-repositories no longer allow anonymous pulls. Both pins contain Linux amd64
-and arm64 images. The Compose suite explicitly pulls both dependencies for the
-requested platform before startup and fails if either pull fails, even when
-images are cached. It does not remove or retag cached images.
+The Compose stage runs SeaweedFS `weed mini` with a static S3 identity config
+and a startup-created `helix-db` bucket. Before Helix writes anything, it
+probes S3 conditional writes, which SlateDB needs to avoid silent data loss:
+`If-None-Match: *` on an existing key and `If-Match` with a wrong ETag must both
+return HTTP 412 and leave the object unchanged, and the matching create and
+replace must succeed. The probe runs against SeaweedFS directly and through the
+request-logging proxy Helix uses. The stage then seeds a vector index, reopens
+flushed data, and checks that three idle refresh intervals produce no
+vector-data SST GETs (catalog polling is measured separately) while search
+remains correct before and after a write. A test-only nginx proxy logs each
+S3 request's method, path, and `Range` header for that check.
 
-When updating a pin, keep the Compose fixture, object-check client in
-`compose-smoke.sh`, CLI defaults, CLI test fixtures, and local-server docs aligned.
-Verify anonymous pulls and run the full suite on both platforms.
+| Dependency | Pinned reference |
+| --- | --- |
+| SeaweedFS 4.47 | `ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882` |
+| nginx 1.30.5 (request log) | `ghcr.io/nginx/nginx-unprivileged:1.30.5-alpine@sha256:4714e0b1b2577eaa1a6131d07c958b67f0eb68e6d0521e90c6e5287db8cf0bc5` |
+
+Both pins are multi-platform index digests from the projects' official GHCR
+repositories and contain Linux amd64 and arm64 images; the SeaweedFS pin is
+shared with the CLI disk runtime. SeaweedFS enforces S3 conditional writes from
+4.09. MinIO's community images were withdrawn from Quay and Docker Hub, which is
+why the suite no longer uses them. The Compose suite explicitly pulls both
+dependencies for the requested platform before startup and fails if either pull
+fails, even when images are cached. It does not remove or retag cached images.
+
+When updating a pin, keep the Compose fixture, CLI defaults, CLI test fixtures,
+and local-server docs aligned. Verify anonymous pulls and run the full suite on
+both platforms.
 
 Archive and secret-scanner unit tests can be run without Docker:
 
