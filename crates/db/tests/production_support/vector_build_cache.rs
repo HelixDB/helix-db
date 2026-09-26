@@ -85,7 +85,8 @@ async fn create_build(
 /// Another operation's step leaves it in place, a stale checkpoint or a
 /// committed step without state forgets it, and the newest committed session
 /// replaces the slot. The committed state crosses the outbox boundary with a
-/// diagnostic that names it without exposing its rows.
+/// diagnostic that names it without exposing its rows, and source-scan and
+/// catch-up planning errors return from the step without offering a session.
 pub(crate) async fn run() {
     let db = Db::builder(
         "vector-build-cache-production-contracts",
@@ -103,13 +104,13 @@ pub(crate) async fn run() {
     let checkpoint = VectorBuildCheckpoint::new(&first, &first_record, first.progress().clone());
     let other_operation =
         VectorBuildCheckpoint::new(&second, &second_record, second.progress().clone());
+    let catch_up = VectorBuildStage::CatchUp(PrefixScanProgress {
+        cursor: None,
+        counters: OperationCounters::default(),
+    });
     let mut advanced = checkpoint.clone();
-    advanced.progress = IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
-        VectorBuildStage::CatchUp(PrefixScanProgress {
-            cursor: None,
-            counters: OperationCounters::default(),
-        }),
-    ));
+    advanced.progress =
+        IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(catch_up.clone()));
 
     const FRESH: u64 = 1 << 20;
     const MARKED: u64 = 4_099;
@@ -212,5 +213,60 @@ pub(crate) async fn run() {
         marked(&other_operation),
     );
     assert_eq!(retained_checkpoint(), Some(other_operation));
+
+    // Planning errors cross the step unchanged, before any session is offered.
+    let ValidatedDynamicIndexDefinition::Vector(definition) = first_record.definition() else {
+        panic!("contract index is a vector index");
+    };
+    let source_cursor = |entity_id| {
+        IndexCursor::try_new(
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
+            }
+            .to_bytes(),
+        )
+        .expect("source key is a valid cursor")
+    };
+    let transaction = db
+        .begin(IsolationLevel::Snapshot)
+        .await
+        .expect("contract step transaction opens");
+    assert!(matches!(
+        step_build::<Euclidean>(
+            &db,
+            &transaction,
+            scope,
+            &first,
+            &first_record,
+            definition,
+            &VectorBuildStage::Scan(SourceScanProgress {
+                inclusive_upper_bound: source_cursor(1),
+                cursor: Some(source_cursor(2)),
+                counters: OperationCounters::default(),
+            }),
+            SearchIndexBackfillLimits::default().batch(),
+            IndexLifecycleScanTuning::default(),
+            Arc::new(vector::SimHasherRegistry::default()),
+            &cache,
+        )
+        .await,
+        Err(HelixDbError::IndexCatalogCorruption(_))
+    ));
     db.close().await.expect("contract database closes");
+    assert!(step_build::<Euclidean>(
+        &db,
+        &transaction,
+        scope,
+        &first,
+        &first_record,
+        definition,
+        &catch_up,
+        SearchIndexBackfillLimits::default().batch(),
+        IndexLifecycleScanTuning::default(),
+        Arc::new(vector::SimHasherRegistry::default()),
+        &cache,
+    )
+    .await
+    .is_err());
 }
