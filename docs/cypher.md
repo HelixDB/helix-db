@@ -330,7 +330,14 @@ limit is exhausted. Literal windows compose their skips and caps into a tighter
 source bound. Later parameterized windows keep their existing validation point
 and stop at batch boundaries; they are not evaluated early during source setup.
 For example, `WITH n LIMIT 1000000 RETURN n LIMIT 5` needs only the smaller
-window when the projections satisfy that proof. A proven zero limit needs no
+window when the projections satisfy that proof. The proof also crosses an
+OPTIONAL MATCH with no WHERE clause or property constraints whose bound
+variables come from earlier matches, because it keeps every input row and
+cannot fail. `MATCH (a:User) OPTIONAL MATCH (a)-[:FOLLOWS]->(b) RETURN a, b
+LIMIT 10` therefore expands only enough users for ten rows, and stops a user
+with many followers once the limit is reached. Returning `a.name` instead of
+`a` keeps the full scan, because reading a stored property can fail; write
+`WITH a, b LIMIT 10 RETURN a.name, b` to read properties only for kept rows. A proven zero limit needs no
 candidate rows regardless of preceding skips; sources that require initial
 validation still run, and invalid offsets still fail. Filters, ordering, aggregation
 and mutations still end the proof.

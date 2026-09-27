@@ -1,9 +1,19 @@
-//! A validated bound on source demand through consecutive total projections.
-//! Every window in the proven prefix can stop its source. Literal downstream
-//! windows also tighten source demand; dynamic windows retain their existing
+//! A validated bound on source demand through total projections and OPTIONAL
+//! MATCHes that cannot fail and keep at least one row per input row. Every
+//! window in the proven prefix can stop its source. Literal downstream windows
+//! also tighten source demand; dynamic windows retain their existing
 //! consumer-side evaluation order.
 
-use super::{pipeline::Termination, Expression, Operator, Query, Result, Value};
+use super::{pipeline::Termination, Expression, Operator, Query, Result, Slot, Value};
+use std::collections::BTreeMap;
+
+/// Entity kind a slot provably holds because a proven MATCH bound it. Catalog
+/// types are not evidence: validation does not type-check projection items.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    Node,
+    Relationship,
+}
 
 /// Derived only from a validated query. It cannot be deserialized independently
 /// of the operator contracts that establish its early-termination proof.
@@ -40,6 +50,7 @@ impl InputWindow {
     pub(super) fn for_initial_source(query: &Query) -> Option<Self> {
         // A correlated source can contain later failing input expressions.
         // Only the initial source has the required single-input proof.
+        let mut entities = BTreeMap::<Slot, Provenance>::new();
         let termination = match query.operators().first()? {
             Operator::Unwind { .. } => Termination::AfterFirstBatch,
             Operator::Match {
@@ -47,6 +58,18 @@ impl InputWindow {
                 predicate: None,
                 ..
             } => {
+                entities.extend(
+                    pattern
+                        .nodes
+                        .iter()
+                        .map(|node| (node.slot, Provenance::Node)),
+                );
+                entities.extend(
+                    pattern
+                        .relationships
+                        .iter()
+                        .map(|edge| (edge.slot, Provenance::Relationship)),
+                );
                 let mut constraints = pattern
                     .nodes
                     .iter()
@@ -85,12 +108,59 @@ impl InputWindow {
         let mut window: Option<Self> = None;
         let mut downstream_skips = Some(0_usize);
         for (projection, operator) in query.operators().iter().enumerate().skip(1) {
-            let Operator::Project { skip, limit, .. } = operator else {
-                break;
+            let input = query.contracts()[projection].input();
+            let (skip, limit) = match operator {
+                Operator::Project {
+                    items, skip, limit, ..
+                } if query.contracts()[projection].is_total_projection() => {
+                    entities = items
+                        .iter()
+                        .filter_map(|item| {
+                            let Expression::Slot(slot) = &item.expression else {
+                                return None;
+                            };
+                            Some((item.slot, *entities.get(slot)?))
+                        })
+                        .collect();
+                    (skip, limit)
+                }
+                // Null extension keeps every input row, so source demand stays
+                // an upper bound. Without a predicate or property constraint,
+                // and with each bound slot proven to hold its entity kind, no
+                // expression or incoming-type check here can fail.
+                Operator::Match {
+                    pattern,
+                    optional: true,
+                    predicate: None,
+                } if pattern.nodes.iter().all(|node| {
+                    node.properties.is_empty()
+                        && (input.get(node.slot).is_none()
+                            || entities.get(&node.slot) == Some(&Provenance::Node))
+                }) && pattern.relationships.iter().all(|edge| {
+                    edge.properties.is_empty()
+                        && (input.get(edge.slot).is_none()
+                            || entities.get(&edge.slot) == Some(&Provenance::Relationship))
+                }) && pattern
+                    .paths
+                    .iter()
+                    .all(|path| input.get(path.slot).is_none()) =>
+                {
+                    entities.extend(
+                        pattern
+                            .nodes
+                            .iter()
+                            .map(|node| (node.slot, Provenance::Node)),
+                    );
+                    entities.extend(
+                        pattern
+                            .relationships
+                            .iter()
+                            .map(|edge| (edge.slot, Provenance::Relationship)),
+                    );
+                    continue;
+                }
+                _ => break,
             };
-            if !query.contracts()[projection].is_total_projection() {
-                break;
-            }
             let Some(window) = &mut window else {
                 skips.extend(skip.iter().cloned());
                 let Some(limit) = limit else {
@@ -127,8 +197,9 @@ impl InputWindow {
             let skipped = skipped.saturating_add(skip);
             downstream_skips = Some(skipped);
             // Empty windows need no candidates, regardless of preceding skips.
-            // Other windows cap input at cumulative SKIP + LIMIT; an earlier
-            // cap still wins when a later skip exhausts that output.
+            // Other windows cap input at cumulative SKIP + LIMIT, which crossed
+            // OPTIONAL MATCHes can only exceed; an earlier cap still wins when
+            // a later skip exhausts that output.
             window.downstream_demand = window.downstream_demand.min(if limit == 0 {
                 0
             } else {
@@ -143,9 +214,12 @@ impl InputWindow {
         self.projection
     }
 
-    /// Last bounded projection in the consecutive total prefix. Exhausting any
-    /// window through this index permits stopping after downstream continuations
-    /// finish; an earlier window may run out before this one receives a row.
+    /// Last bounded projection in the proven prefix. Every operator between the
+    /// source and this index is a total projection or an OPTIONAL MATCH that
+    /// cannot fail and keeps each input row. Exhausting any window through this
+    /// index permits stopping; continuations below it are abandoned, while
+    /// downstream ones finish. An earlier window may run out before this one
+    /// receives a row.
     pub fn last_projection(&self) -> usize {
         self.last_projection
     }

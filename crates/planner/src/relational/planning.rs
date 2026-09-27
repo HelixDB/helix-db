@@ -128,8 +128,10 @@ impl RowPlan {
     pub fn batch_consumer(&self, source: usize) -> Option<BatchConsumer> {
         self.consumers.get(&source).copied()
     }
-    /// Safe upstream demand for a window over a total, row-preserving projection.
-    /// No filter, aggregation, ordering, distinct, or write boundary is crossed.
+    /// Safe upstream demand for a window over total, row-preserving projections
+    /// and OPTIONAL MATCHes that cannot fail and keep at least one row per
+    /// input, null-extending unmatched inputs. No
+    /// filter, aggregation, ordering, distinct, or write boundary is crossed.
     pub fn input_window(&self, operator: usize) -> Option<&InputWindow> {
         self.pipeline.input_window(operator)
     }

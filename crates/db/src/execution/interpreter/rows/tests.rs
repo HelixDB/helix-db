@@ -16,6 +16,7 @@ mod hash_join;
 mod mixed_pipeline;
 mod mutation_hydration;
 mod mutations;
+mod optional_windows;
 mod pipeline;
 mod projection_admission;
 mod projection_chain;

@@ -7,6 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 mod tests;
 
+/// A prepared consumer always contains its source's window proof: splitting a
+/// chain inside it would stop short of the proven window or drain a source
+/// whose batches are sized to that proof's demand.
 pub(super) fn prepare(
     pipeline: &r::RowPipeline,
     matches: &BTreeMap<usize, r::MatchPlan>,
@@ -77,6 +80,13 @@ pub(super) fn prepare(
             if let r::BatchConsumer::Pipeline { end } = consumer
                 && let Some(&blocked) = unsupported.range(source + 1..end).next()
             {
+                // Without a consumer the source truncates to the proven demand.
+                if pipeline
+                    .input_window(source)
+                    .is_some_and(|window| blocked < window.last_projection())
+                {
+                    return None;
+                }
                 let end = previous_projections[blocked].filter(|end| *end > source)?;
                 consumer = if end == source + 1 {
                     r::BatchConsumer::Project {
@@ -88,6 +98,19 @@ pub(super) fn prepare(
                     r::BatchConsumer::Pipeline { end }
                 };
             }
+            let covered = match consumer {
+                r::BatchConsumer::Pipeline { end } => end,
+                r::BatchConsumer::Project { .. }
+                | r::BatchConsumer::Aggregate
+                | r::BatchConsumer::Distinct
+                | r::BatchConsumer::TopK => source + 1,
+            };
+            assert!(
+                pipeline
+                    .input_window(source)
+                    .is_none_or(|window| window.last_projection() <= covered),
+                "a prepared consumer contains its source window's proof"
+            );
             Some((source, consumer))
         })
         .collect()

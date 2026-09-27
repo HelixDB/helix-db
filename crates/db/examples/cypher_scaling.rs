@@ -387,6 +387,16 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[size]]),
         ),
         (
+            "optional_limit",
+            "MATCH (a:Left) OPTIONAL MATCH (a)-[:MISSING]->(b) WITH a, b LIMIT 1 RETURN count(*), count(b)".into(),
+            json!([[1, 0]]),
+        ),
+        (
+            "optional_hub_limit",
+            "MATCH (a:Chain) OPTIONAL MATCH (a)-[:SPOKE]->(b) WITH a, b LIMIT 1 RETURN count(*)".into(),
+            json!([[1]]),
+        ),
+        (
             "bound_chain",
             "MATCH (a:Chain) OPTIONAL MATCH p=(a)-[:NEXT]->(b)-[:NEXT]->(c) RETURN count(*),count(p),sum(length(p))".into(),
             // NEXT forms one directed cycle. Every start has exactly one
@@ -559,6 +569,22 @@ async fn measure_cases(
             {
                 return Err(format!(
                     "{case} read beyond its indexed members at size {size}: {:?}",
+                    response.resources.reads,
+                )
+                .into());
+            }
+            // A limit across a pure OPTIONAL MATCH expands only demanded
+            // parents, and stops a hub parent after one correlated batch.
+            if (case == "optional_limit"
+                && (response.resources.reads.point_gets > 4
+                    || response.resources.reads.multi_get_keys > 16))
+                || (case == "optional_hub_limit"
+                    && (response.resources.reads.point_gets > 4
+                        // Smaller hubs fit one correlated batch either way.
+                        || (size > 512 && response.resources.reads.multi_get_keys > 1536)))
+            {
+                return Err(format!(
+                    "{case} expanded beyond its demanded parents at size {size}: {:?}",
                     response.resources.reads,
                 )
                 .into());

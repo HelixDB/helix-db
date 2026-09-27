@@ -271,11 +271,13 @@ The window consumers now use one evaluated `Window` contract for offset
 validation and retention bounds. This removes repeated evaluation code from
 plain projection, pipeline projection, DISTINCT and top-k. `InputWindow` remains
 separate: it proves legal early termination, which is a different responsibility.
-Its consecutive-projection proof composes literal window bounds and permits any
-validated window in the prefix to stop the source. Dynamic downstream windows
+Its proof over total projections and OPTIONAL MATCHes that cannot fail composes
+literal window bounds and permits any validated window in the prefix to stop the
+source. Dynamic downstream windows
 stop through consumer counters without moving their validation ahead of source
 setup. Earlier exhausted windows still stop even when a later skip produces no
-rows; downstream expansion continuations finish before stopping upstream input.
+rows. Continuations below an exhausted proven window are abandoned, while
+downstream ones finish before upstream input stops.
 Proven empty windows ignore preceding skips in their demand and costing bounds,
 while retaining offset validation and any required initial source evaluation.
 

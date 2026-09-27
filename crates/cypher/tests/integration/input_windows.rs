@@ -170,3 +170,127 @@ fn source_demand_never_crosses_error_ordering_or_multiplicity_boundaries() {
         );
     }
 }
+
+#[test]
+fn source_demand_crosses_only_infallible_optional_matches() {
+    for text in [
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.k=1 RETURN a,b LIMIT 1",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b {k:1}) RETURN a,b LIMIT 1",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b {k:$k}) RETURN a,b LIMIT 1",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R {w:1}]->(b) RETURN a,b LIMIT 1",
+        "MATCH (a) MATCH (a)-[:R]->(b) RETURN a,b LIMIT 1",
+        "UNWIND [null,1] AS a OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b LIMIT 1",
+        "MATCH (x) WITH x, null AS a OPTIONAL MATCH (a)-->(b) RETURN b LIMIT 1",
+        "MATCH (x) WITH x, $p AS a OPTIONAL MATCH (a)-->(b) RETURN b LIMIT 1",
+        "UNWIND [null,1] AS r OPTIONAL MATCH ()-[r]->() RETURN r LIMIT 1",
+        "MATCH (x) WITH x, null AS r OPTIONAL MATCH ()-[r]->() RETURN r LIMIT 1",
+        "MATCH (x) WITH x, $p AS r OPTIONAL MATCH ()-[r]->() RETURN r LIMIT 1",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) RETURN a.key AS k, b LIMIT 1",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WITH a, b WHERE b IS NULL RETURN a LIMIT 1",
+        "MATCH (a) WITH DISTINCT a OPTIONAL MATCH (a)-->(b) RETURN b LIMIT 1",
+    ] {
+        let query = helix_cypher::compile(text).unwrap();
+        let pipeline = r::RowPipeline::new(Arc::new(query), r::RowExecution::Batched);
+        for source in 0..pipeline.query().operators().len() {
+            assert!(pipeline.input_window(source).is_none(), "{text}");
+        }
+    }
+    for (text, stage, last, termination, demand) in [
+        (
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b LIMIT 1",
+            2,
+            2,
+            r::Termination::BeforeInput,
+            1,
+        ),
+        (
+            "MATCH (a:L) OPTIONAL MATCH p=(a)-[:R|S]-(b:M)<-[:T]-(c) RETURN p,c SKIP 2 LIMIT 3",
+            2,
+            2,
+            r::Termination::BeforeInput,
+            5,
+        ),
+        (
+            "MATCH (a) WITH a SKIP 1 OPTIONAL MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN a,b,c LIMIT 2",
+            4,
+            4,
+            r::Termination::BeforeInput,
+            3,
+        ),
+        (
+            "MATCH (a) WITH a LIMIT 5 OPTIONAL MATCH (a)-->(b) RETURN a,b LIMIT 1",
+            1,
+            3,
+            r::Termination::BeforeInput,
+            1,
+        ),
+        (
+            "MATCH (a:L) WITH a AS x OPTIONAL MATCH (x)-[:R]->(b) RETURN b LIMIT 1",
+            3,
+            3,
+            r::Termination::BeforeInput,
+            1,
+        ),
+        (
+            "MATCH ()-[r]->() OPTIONAL MATCH (x)-[r]-(y) RETURN x,y LIMIT 1",
+            2,
+            2,
+            r::Termination::BeforeInput,
+            1,
+        ),
+        (
+            "MATCH (a:L) OPTIONAL MATCH (a:Other)-[:R]->(b) RETURN a LIMIT 1",
+            2,
+            2,
+            r::Termination::BeforeInput,
+            1,
+        ),
+        (
+            "UNWIND [1,2] AS x OPTIONAL MATCH (n:L) RETURN x,n LIMIT 1",
+            2,
+            2,
+            r::Termination::AfterFirstBatch,
+            1,
+        ),
+        (
+            "MATCH (a {key:$key}) OPTIONAL MATCH (a)-->(b) RETURN b LIMIT 0",
+            2,
+            2,
+            r::Termination::AfterFirstBatch,
+            1,
+        ),
+        (
+            "MATCH (a) OPTIONAL MATCH (a)-->(b) RETURN a,b LIMIT 0",
+            2,
+            2,
+            r::Termination::BeforeInput,
+            0,
+        ),
+    ] {
+        let query = helix_cypher::compile(text).unwrap();
+        let pipeline = r::RowPipeline::new(Arc::new(query.clone()), r::RowExecution::Batched);
+        let window = pipeline
+            .input_window(0)
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(
+            (window.projection(), window.last_projection()),
+            (stage, last),
+            "{text}"
+        );
+        assert_eq!(window.termination(), termination, "{text}");
+        assert_eq!(
+            window
+                .demand(|expression| {
+                    let r::Expression::Literal(value) = expression else {
+                        panic!("literal");
+                    };
+                    Ok(value.clone())
+                })
+                .unwrap(),
+            demand,
+            "{text}"
+        );
+        let reference = r::RowPipeline::new(Arc::new(query), r::RowExecution::Materialized);
+        assert!(reference.input_window(0).is_none());
+    }
+}

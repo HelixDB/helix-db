@@ -210,7 +210,8 @@ impl ExecutionContext<'_> {
         let stop = window.map(|window| {
             assert!(
                 window.last_projection() >= start
-                    && window.last_projection() < start + operators.len()
+                    && window.last_projection() < start + operators.len(),
+                "consumers::prepare keeps window proofs inside their chain"
             );
             (window.last_projection() - start, window.termination())
         });
@@ -263,6 +264,8 @@ impl ExecutionContext<'_> {
                     optional,
                     predicate,
                 } => {
+                    // Never pass window demand to a chained match: truncated
+                    // candidates would null-extend parents that do match.
                     let operation = matches::Match {
                         pattern,
                         optional: *optional,
@@ -297,6 +300,28 @@ impl ExecutionContext<'_> {
                 move |(mut batches, mut stages, mut stack, memory, mut input_started)| async move {
                     'input: loop {
                         self.check_execution_deadline()?;
+                        // Continuation stages strictly increase up the stack.
+                        // Rows pending below an exhausted proven window can only
+                        // die there, and the proof admits only stages that cannot
+                        // fail before it. Continuations past it still feed later
+                        // stages, so they drain first.
+                        let floor = stack.last().map_or(0, |expansion| expansion.stage + 1);
+                        if stop.is_some_and(|(stage, termination)| {
+                            termination.may_stop(input_started)
+                                && stages.get(floor..=stage).is_some_and(|proven| {
+                                    proven.iter().any(|stage| {
+                                        matches!(stage, Stage::Project { remaining: 0, .. })
+                                    })
+                                })
+                        }) {
+                            assert!(
+                                stack.iter().all(|expansion| {
+                                    matches!(stages[expansion.stage], Stage::BoundMatch(_))
+                                }),
+                                "only proven OPTIONAL MATCH continuations precede a window"
+                            );
+                            return Ok(None);
+                        }
                         let (mut rows, first) = if let Some(expansion) = stack.last_mut() {
                             let next = match (&mut stages[expansion.stage], &mut expansion.cursor) {
                                 (
@@ -331,15 +356,6 @@ impl ExecutionContext<'_> {
                             };
                             (rows, expansion.stage + 1)
                         } else {
-                            // Drain downstream continuations before stopping the
-                            // upstream source; a limited row may still expand.
-                            if stop.is_some_and(|(stage, termination)| {
-                                stages[..stage + 1].iter().any(|stage| {
-                                    matches!(stage, Stage::Project { remaining: 0, .. })
-                                }) && termination.may_stop(input_started)
-                            }) {
-                                return Ok(None);
-                            }
                             let Some(batch) = batches.next().await else {
                                 return Ok(None);
                             };

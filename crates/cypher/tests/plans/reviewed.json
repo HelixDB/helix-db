@@ -19020,8 +19020,8 @@
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
-          "cpu_units": 403800,
-          "latency": 20000711850,
+          "cpu_units": 402810,
+          "latency": 20000710860,
           "multi_get_calls": 0,
           "object_reads": 100001,
           "parallel_width": 1,
@@ -19030,7 +19030,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "ebbfb945d96f21a22174cabcf461a6328758c1071b0af43ca1ead8155ee6d68f"
+      "sha256": "e240f04cc861590a1e582196bf0cfac1896fbf219739020148e7fdd88723e3cf"
     },
     "skew/optional_skew/exhausted=false/storage=cold_50ms": {
       "error": null,
@@ -19044,8 +19044,8 @@
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
-          "cpu_units": 403800,
-          "latency": 5000411850,
+          "cpu_units": 402810,
+          "latency": 5000410860,
           "multi_get_calls": 0,
           "object_reads": 100001,
           "parallel_width": 1,
@@ -19054,7 +19054,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "0e6fbd6ab8107304e79fec3a1f972ba4250cdac0fb739ef7797af5f6cc3eed86"
+      "sha256": "b1cf659184dcca44ca8d84b83560562f30e8e195eb93ee7f045a8922aa4a1080"
     },
     "skew/optional_skew/exhausted=false/storage=default": {
       "error": null,
@@ -19068,8 +19068,8 @@
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
-          "cpu_units": 403800,
-          "latency": 1318850,
+          "cpu_units": 402810,
+          "latency": 1317860,
           "multi_get_calls": 0,
           "object_reads": 100001,
           "parallel_width": 1,
@@ -19078,7 +19078,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "2316c406818e33bc7ddee22990989bf20dca503c10ed0315524a066e2fae9e85"
+      "sha256": "d1a4ab82c8e9e003ec664c18e75fbd556894886dff8d219b6b5983cb5a0f380c"
     },
     "skew/optional_skew/exhausted=true/storage=cold_200ms": {
       "error": null,
@@ -19092,8 +19092,8 @@
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
-          "cpu_units": 403800,
-          "latency": 20000711850,
+          "cpu_units": 402810,
+          "latency": 20000710860,
           "multi_get_calls": 0,
           "object_reads": 100001,
           "parallel_width": 1,
@@ -19102,7 +19102,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "3c93b32dbd677f2b1c0c86e6ca1172f4a69c44f3fcc0b9db10131c658efdd0b2"
+      "sha256": "1b13a2234e8623c6e309898cad1649d7fa5375984960cd58858c4ddb66cc8394"
     },
     "skew/optional_skew/exhausted=true/storage=cold_50ms": {
       "error": null,
@@ -19116,8 +19116,8 @@
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
-          "cpu_units": 403800,
-          "latency": 5000411850,
+          "cpu_units": 402810,
+          "latency": 5000410860,
           "multi_get_calls": 0,
           "object_reads": 100001,
           "parallel_width": 1,
@@ -19126,7 +19126,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "03d3960ae9842cc2df622e0df25d1c3f6c9b4ad645613a5e6b05716775e98b9c"
+      "sha256": "070a330ab2f94e7367b807ce320a914e8202c03eae8cc6fae90c3e2604a01df4"
     },
     "skew/optional_skew/exhausted=true/storage=default": {
       "error": null,
@@ -19140,8 +19140,8 @@
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
-          "cpu_units": 403800,
-          "latency": 1318850,
+          "cpu_units": 402810,
+          "latency": 1317860,
           "multi_get_calls": 0,
           "object_reads": 100001,
           "parallel_width": 1,
@@ -19150,7 +19150,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "12fec08f910a104e44169397d682d98867f93e067d9df36d522c7f386d610e15"
+      "sha256": "986bbee57ae03bbab91137e8cc74be6a94b29e992d25c2da7fd78b436277effe"
     },
     "skew/rare_head/exhausted=false/storage=cold_200ms": {
       "error": null,
