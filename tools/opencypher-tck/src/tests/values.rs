@@ -121,10 +121,28 @@ mod boundary_tests {
         );
         assert!(parse("(:N)").unwrap().parameter().is_err());
         assert!(parse("{a:[1,true,null]}").unwrap().parameter().is_ok());
+        for (integer, float) in [(1, 1.0), (0, 0.0), (0, -0.0), (i64::MAX, i64::MAX as f64)] {
+            assert!(!equal(
+                &Value::Integer(integer),
+                &Value::Float(float),
+                false
+            ));
+            assert!(!equal(
+                &Value::Float(float),
+                &Value::Integer(integer),
+                false
+            ));
+        }
+        assert!(equal(&Value::Float(0.0), &Value::Float(-0.0), false));
+        assert!(equal(
+            &Value::List(vec![Value::Integer(1), Value::Float(1.0)]),
+            &Value::List(vec![Value::Float(1.0), Value::Integer(1)]),
+            true
+        ));
         assert!(!equal(
-            &Value::Integer(i64::MAX),
-            &Value::Float(i64::MAX as f64),
-            false
+            &Value::List(vec![Value::Integer(1)]),
+            &Value::List(vec![Value::Float(1.0)]),
+            true
         ));
     }
 }

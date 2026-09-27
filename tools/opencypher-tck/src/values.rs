@@ -368,14 +368,8 @@ pub fn wire(value: &Json) -> Result<Value> {
 
 pub fn equal(a: &Value, b: &Value, unordered_lists: bool) -> bool {
     match (a, b) {
+        // Result tables are typed: an integer never equals an integral float.
         (Value::Float(a), Value::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
-        (Value::Integer(a), Value::Float(b)) | (Value::Float(b), Value::Integer(a)) => {
-            b.is_finite()
-                && b.fract() == 0.0
-                && *b >= i64::MIN as f64
-                && *b < -(i64::MIN as f64)
-                && *a == *b as i64
-        }
         (Value::List(a), Value::List(b)) => {
             rows_equal(a, b, unordered_lists, |a, b| equal(a, b, unordered_lists))
         }
