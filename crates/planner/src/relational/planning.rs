@@ -1,7 +1,7 @@
 //! Shared physical planning for resolved graph/row queries. Graph access uses
 //! the production Cascades rules and executable lowering, not frontend ASTs.
 use super::*;
-use crate::{catalog, context, exec, ir, logical, optimizer, rules, trace};
+use crate::{analysis, catalog, context, exec, ir, logical, optimizer, rules, trace};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -224,6 +224,11 @@ fn plan_accesses(
 )> {
     use optimizer::OptimizerRule;
     let config = optimizer::OptimizerConfig::from_context(ctx);
+    // An IN list shares the optimizer's Boolean index-union budget.
+    let union_branches = match ctx.limits.max_index_union_branches {
+        context::IndexUnionBranchLimit::Disabled => 0,
+        context::IndexUnionBranchLimit::Limited(limit) => limit.get(),
+    };
     let mut roots = Vec::new();
     let mut nodes = Vec::new();
     for (operator_index, operator) in query.operators().iter().enumerate() {
@@ -233,6 +238,19 @@ fn plan_accesses(
         else {
             continue;
         };
+        // An index source skips candidate nodes, so it must not hide an error
+        // that another property constraint of this pattern could raise.
+        let constraints_total = pattern
+            .nodes
+            .iter()
+            .flat_map(|node| &node.properties)
+            .chain(pattern.relationships.iter().flat_map(|rel| &rel.properties))
+            .all(|(_, expression)| {
+                matches!(
+                    expression,
+                    Expression::Literal(_) | Expression::Parameter(_) | Expression::Slot(_)
+                )
+            });
         let mut seen = BTreeSet::new();
         for node in &pattern.nodes {
             if !seen.insert(node.slot) {
@@ -251,12 +269,16 @@ fn plan_accesses(
                 },
                 None => ir::NodeAccessPlan::AllScan,
             }];
-            if let Some(label) = label {
+            if let Some(label) = label
+                && constraints_total
+            {
                 let mut equalities = node.properties.clone();
+                let mut memberships = Vec::new();
                 if let Some(predicate) = predicate.as_deref()
-                    && index_predicate_is_total(predicate, pattern)
+                    && index_predicate_is_total(predicate, pattern, &ctx.params)
                 {
                     collect_equalities(predicate, node.slot, &mut equalities);
+                    collect_memberships(predicate, node.slot, &mut memberships);
                 }
                 for (property, value) in equalities {
                     let Some(key) = catalog::ScopedPropertyKey::try_new(label.clone(), property)
@@ -281,13 +303,80 @@ fn plan_accesses(
                     if value == helix_ast::value::PropertyValue::Null {
                         continue;
                     }
+                    // Storage rejects an oversized lookup, while no indexed
+                    // element can hold one, so only the scan answers exactly.
                     let Ok(value) = ir::SecondaryIndexLiteral::new(value) else {
                         continue;
                     };
+                    if value.may_exceed_index_key() {
+                        continue;
+                    }
                     candidates.push(ir::NodeAccessPlan::EqualityIndex {
                         index: index.clone(),
                         key,
                         value: ir::IndexValue::Literal(value),
+                    });
+                }
+                // The residual predicate still checks every candidate, so each
+                // membership source only needs to contain the matching nodes.
+                // Without value statistics a small batched lookup is estimated
+                // below one point read, so an existing equality candidate keeps
+                // its exact lookup instead of competing with a set.
+                if candidates.len() > 1 {
+                    memberships.clear();
+                }
+                for (property, list) in memberships {
+                    let Some(key) = catalog::ScopedPropertyKey::try_new(label.clone(), property)
+                    else {
+                        continue;
+                    };
+                    let Some(index) = ctx.indexes.node_eq.get(&key) else {
+                        continue;
+                    };
+                    let Some(values) = membership_values(list, &ctx.params) else {
+                        continue;
+                    };
+                    let Some(domain) = analysis::literal_equality_domain(values) else {
+                        continue;
+                    };
+                    let values = match &domain {
+                        analysis::EqualityIndexDomain::One(value) => std::slice::from_ref(value),
+                        analysis::EqualityIndexDomain::Many(values) => values.as_ref(),
+                        analysis::EqualityIndexDomain::Empty
+                        | analysis::EqualityIndexDomain::RuntimeSet(_) => &[],
+                    };
+                    if values.iter().any(|value| {
+                        matches!(value, ir::IndexValue::Literal(value) if value.may_exceed_index_key())
+                    }) {
+                        continue;
+                    }
+                    let equality = |value| ir::NodeAccessPlan::EqualityIndex {
+                        index: index.clone(),
+                        key: key.clone(),
+                        value,
+                    };
+                    candidates.push(match domain {
+                        analysis::EqualityIndexDomain::Empty => ir::NodeAccessPlan::Empty,
+                        analysis::EqualityIndexDomain::One(value) => equality(value),
+                        analysis::EqualityIndexDomain::Many(values)
+                            if values.as_ref().len() <= union_branches =>
+                        {
+                            ir::NodeAccessPlan::Union(
+                                ir::AtLeast::try_from_vec(
+                                    values
+                                        .into_iter()
+                                        .map(|value| {
+                                            ir::NodeAccessSourcePlan::from_unfiltered(equality(
+                                                value,
+                                            ))
+                                        })
+                                        .collect(),
+                                )
+                                .expect("a multi-value domain has at least two values"),
+                            )
+                        }
+                        analysis::EqualityIndexDomain::Many(_)
+                        | analysis::EqualityIndexDomain::RuntimeSet(_) => continue,
                     });
                 }
             }
@@ -437,7 +526,7 @@ fn plan_accesses(
             });
         let mut predicate_total = predicate
             .as_deref()
-            .is_none_or(|expression| index_predicate_is_total(expression, pattern));
+            .is_none_or(|expression| index_predicate_is_total(expression, pattern, &ctx.params));
         if let Some(predicate) = predicate {
             predicate.visit(&mut |expression| {
                 if matches!(expression, Expression::Parameter(_)) {
@@ -643,11 +732,39 @@ fn plan_accesses(
 // error in another conjunct. In particular NULL AND an error still evaluates
 // that error; treating NULL as an early false result would be incorrect. Keep
 // potentially failing arithmetic, functions, and dynamic access above a scan.
-fn index_predicate_is_total(expression: &Expression, pattern: &Pattern) -> bool {
+fn index_predicate_is_total(
+    expression: &Expression,
+    pattern: &Pattern,
+    params: &context::ParamBindings,
+) -> bool {
     match expression {
         Expression::Literal(Value::Boolean(_) | Value::Null) => true,
         Expression::Binary(Binary::And, left, right) => {
-            index_predicate_is_total(left, pattern) && index_predicate_is_total(right, pattern)
+            index_predicate_is_total(left, pattern, params)
+                && index_predicate_is_total(right, pattern, params)
+        }
+        // IN fails only for a right operand that is neither a list nor null;
+        // comparing a property with list members cannot fail.
+        Expression::Binary(Binary::In, value, list) => {
+            matches!(value.as_ref(), Expression::Property(value, _)
+                if matches!(value.as_ref(), Expression::Slot(slot)
+                    if pattern.nodes.iter().any(|node| node.slot == *slot)))
+                && match list.as_ref() {
+                    Expression::Literal(Value::List(_) | Value::Null) => true,
+                    Expression::List(items) => items.iter().all(|item| {
+                        matches!(item, Expression::Literal(_) | Expression::Parameter(_))
+                    }),
+                    Expression::Parameter(name) => matches!(
+                        params.values.get(
+                            &ir::NonEmptyString::new(name.clone()).expect("validated parameter")
+                        ),
+                        Some(
+                            helix_ast::value::PropertyValue::Array(_)
+                                | helix_ast::value::PropertyValue::Null
+                        )
+                    ),
+                    _ => false,
+                }
         }
         Expression::Binary(Binary::Equal, left, right) => {
             [left, right].iter().all(|operand| match operand.as_ref() {
@@ -681,6 +798,70 @@ fn collect_equalities(expression: &Expression, slot: Slot, out: &mut Vec<(String
     }
 }
 
+fn collect_memberships<'a>(
+    expression: &'a Expression,
+    slot: Slot,
+    out: &mut Vec<(String, &'a Expression)>,
+) {
+    match expression {
+        Expression::Binary(Binary::And, a, b) => {
+            collect_memberships(a, slot, out);
+            collect_memberships(b, slot, out);
+        }
+        Expression::Binary(Binary::In, value, list) => {
+            let Expression::Property(value, key) = value.as_ref() else {
+                return;
+            };
+            if value.as_ref() == &Expression::Slot(slot) {
+                out.push((key.clone(), list.as_ref()));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Non-null members of a total IN list operand. Cypher null never equals a
+/// member, and a member that is not a scalar literal prevents index access.
+fn membership_values(
+    list: &Expression,
+    params: &context::ParamBindings,
+) -> Option<Vec<helix_ast::value::PropertyValue>> {
+    use helix_ast::value::PropertyValue as P;
+    let parameter = |name: &String| {
+        params
+            .values
+            .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))
+    };
+    let members = match list {
+        Expression::Literal(Value::List(values)) => values
+            .iter()
+            .cloned()
+            .map(literal)
+            .collect::<Option<Vec<_>>>()?,
+        Expression::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Expression::Literal(value) => literal(value.clone()),
+                Expression::Parameter(name) => parameter(name).cloned(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?,
+        Expression::Parameter(name) => match parameter(name)? {
+            P::Array(values) => values.clone(),
+            P::Null => Vec::new(),
+            _ => return None,
+        },
+        Expression::Literal(Value::Null) => Vec::new(),
+        _ => return None,
+    };
+    Some(
+        members
+            .into_iter()
+            .filter(|value| *value != P::Null)
+            .collect(),
+    )
+}
+
 fn literal(value: Value) -> Option<helix_ast::value::PropertyValue> {
     use helix_ast::value::PropertyValue as P;
     match value {
@@ -701,7 +882,16 @@ fn source_rows(root: &logical::LogicalExpr, config: &optimizer::OptimizerConfig)
     let logical::LogicalExpr::AccessPath(logical::AccessPath::Node(node)) = root else {
         unreachable!("source candidates are node access roots");
     };
-    match node.source().as_ref() {
+    access_rows(node.source().as_ref(), config)
+}
+
+fn access_rows(access: &ir::NodeAccessPlan, config: &optimizer::OptimizerConfig) -> u64 {
+    match access {
+        ir::NodeAccessPlan::Empty => 0,
+        ir::NodeAccessPlan::Union(children) => children
+            .iter()
+            .map(|child| access_rows(child.as_ref(), config))
+            .fold(0, u64::saturating_add),
         ir::NodeAccessPlan::EqualityIndex { key, .. } => config
             .storage
             .equality_index_rows(config.stats.node_eq_cardinality.get(key).copied())
@@ -713,6 +903,6 @@ fn source_rows(root: &logical::LogicalExpr, config: &optimizer::OptimizerConfig)
             .copied()
             .unwrap_or(config.storage.default_unknown_scan_rows.as_rows()),
         ir::NodeAccessPlan::AllScan => config.storage.default_unknown_scan_rows.as_rows(),
-        _ => unreachable!("candidate construction admits all/label/equality access only"),
+        _ => unreachable!("candidate construction admits all/label/equality/set access only"),
     }
 }

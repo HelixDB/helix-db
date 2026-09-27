@@ -18,6 +18,10 @@ pub enum ExecNodeCursor<'a> {
         lookup: &'a exec::ExecNodeUniqueOwnerReadPlan,
         verification: &'a exec::ExecNodeAuthoritativeVerificationPlan,
     },
+    /// Verified secondary-index ID set, such as an equality-literal union.
+    SecondarySet {
+        set: &'a exec::ExecNodeSecondarySetPlan,
+    },
 }
 
 impl exec::ExecOp {
@@ -61,6 +65,7 @@ impl exec::ExecOp {
                 lookup,
                 verification,
             },
+            ExecNodeAccessPlan::SecondarySet { set } => ExecNodeCursor::SecondarySet { set },
             _ => return None,
         })
     }

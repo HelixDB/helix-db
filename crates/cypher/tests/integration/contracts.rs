@@ -1,4 +1,4 @@
-use helix_planner::{catalog, context, ir, properties, relational as r};
+use helix_planner::{catalog, context, exec, ir, properties, relational as r};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
@@ -53,6 +53,155 @@ fn indexed_cardinality_selects_the_start_and_preserves_optional_boundaries() {
             .unwrap()
             .estimated_rows,
         1
+    );
+}
+
+#[test]
+fn membership_sources_respect_the_union_budget_and_constraint_totality() {
+    #[derive(Debug, PartialEq)]
+    enum Source {
+        Scan,
+        Point,
+        Unique,
+        Union,
+        Empty,
+    }
+    let key = catalog::ScopedPropertyKey::try_new("N", "key").unwrap();
+    let mut indexes = catalog::IndexCatalogSnapshot::default().with_node_eq(key);
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "email").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:email")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let source = |text: &str, limit: usize, parameter: Option<helix_ast::value::PropertyValue>| {
+        let mut context = context::PlannerContext {
+            indexes: indexes.clone(),
+            stats: context::StatsSnapshot::default()
+                .with_node_label_cardinality(ir::NonEmptyString::new("N").unwrap(), 1_000_000),
+            ..context::PlannerContext::default()
+        };
+        context.limits.max_index_union_branches = context::IndexUnionBranchLimit::from_usize(limit);
+        if let Some(value) = parameter {
+            context
+                .params
+                .values
+                .insert(ir::NonEmptyString::new("keys").unwrap(), value);
+        }
+        let plan = r::plan(helix_cypher::compile(text).unwrap(), &context).unwrap();
+        let [step] = plan.matches()[&0].sources[0].access.steps() else {
+            panic!("single access step: {text}");
+        };
+        let exec::ExecOp::Access { plan: access } = &step.op else {
+            panic!("access step: {text}");
+        };
+        match access.as_ref() {
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::LabelScan { .. }) => Source::Scan,
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Bitmap { .. }) => Source::Point,
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Unique { .. }) => Source::Unique,
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::SecondarySet { .. }) => {
+                Source::Union
+            }
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Empty) => Source::Empty,
+            other @ (exec::ExecAccessPlan::Node(_)
+            | exec::ExecAccessPlan::Edge(_)
+            | exec::ExecAccessPlan::Limited(_)) => panic!("unexpected source {other:?}: {text}"),
+        }
+    };
+    let membership = |list: &str| format!("MATCH (n:N) WHERE n.key IN {list} RETURN n");
+    for (list, limit, expected) in [
+        ("[1, 2, 3]", 3, Source::Union),
+        ("[1, 2, 3, 4]", 3, Source::Scan),
+        ("[1, 2, 3]", 2, Source::Scan),
+        ("[1, 2]", 0, Source::Scan),
+        ("[1, 1, null]", 0, Source::Point),
+        ("[1]", 64, Source::Point),
+        ("[]", 0, Source::Empty),
+        ("[null]", 64, Source::Empty),
+        ("null", 64, Source::Empty),
+        ("[[1], 2]", 64, Source::Scan),
+    ] {
+        assert_eq!(
+            source(&membership(list), limit, None),
+            expected,
+            "{list} within {limit}"
+        );
+    }
+    use helix_ast::value::PropertyValue as P;
+    for (value, expected) in [
+        (P::Array(vec![P::I64(1), P::Null, P::I64(2)]), Source::Union),
+        (P::Array(vec![P::Array(vec![P::I64(1)])]), Source::Scan),
+        (P::Null, Source::Empty),
+        (P::I64(3), Source::Scan),
+    ] {
+        assert_eq!(
+            source(
+                "MATCH (n:N) WHERE n.key IN $keys RETURN n",
+                64,
+                Some(value.clone())
+            ),
+            expected,
+            "{value:?}"
+        );
+    }
+    // An index source would skip the failing expression for every other node.
+    for text in [
+        "MATCH (n:N) WHERE n.key IN [1, 2] AND n.x / 0 = 1 RETURN n",
+        "MATCH (n:N {name: toString(1 / $z)}) WHERE n.key IN [1] RETURN n",
+        "MATCH (n:N {key: 1, name: toString(1 / $z)}) RETURN n",
+        "MATCH (n:N)-[:R {w: 1 / $z}]->(m) WHERE n.key = 1 RETURN n",
+    ] {
+        assert_eq!(source(text, 64, None), Source::Scan, "{text}");
+    }
+    assert_eq!(
+        source(
+            "MATCH (n:N {key: $keys, name: 'a'}) RETURN n",
+            64,
+            Some(P::I64(1))
+        ),
+        Source::Point
+    );
+    // An exact equality lookup is kept rather than replaced by a set.
+    for (text, expected) in [
+        (
+            "MATCH (n:N {email: 'a'}) WHERE n.key IN [1, 2] RETURN n",
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WHERE n.email = 'a' AND n.key IN [1, 2] RETURN n",
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N {key: 1}) WHERE n.key IN [1, 2, 3] RETURN n",
+            Source::Point,
+        ),
+        (
+            "MATCH (n:N) WHERE n.email IN ['a', 'b'] RETURN n",
+            Source::Union,
+        ),
+    ] {
+        assert_eq!(source(text, 64, None), expected, "{text}");
+    }
+    // Storage rejects oversized lookups, so they keep the exact label scan.
+    let oversized = P::String("x".repeat(ir::MAX_INDEXED_EQUALITY_BYTES));
+    for text in [
+        "MATCH (n:N) WHERE n.key IN [1, $keys] RETURN n",
+        "MATCH (n:N) WHERE n.key = $keys RETURN n",
+        "MATCH (n:N {key: $keys}) RETURN n",
+    ] {
+        assert_eq!(
+            source(text, 64, Some(oversized.clone())),
+            Source::Scan,
+            "{text}"
+        );
+    }
+    assert_eq!(
+        source(
+            "MATCH (n:N) WHERE n.key IN $keys RETURN n",
+            64,
+            Some(P::Array(vec![P::I64(1), oversized]))
+        ),
+        Source::Scan
     );
 }
 

@@ -77,6 +77,9 @@ impl ExecutionContext<'_> {
                 },
                 false,
             ),
+            exec::ExecNodeCursor::SecondarySet { set } => {
+                (self.node_secondary_bitmap(set).await?, false)
+            }
             exec::ExecNodeCursor::Empty => (bitmap::Bitmap::empty(Some(self.row_budget()))?, false),
         };
         Ok(Some(NodeCursor::Indexed {

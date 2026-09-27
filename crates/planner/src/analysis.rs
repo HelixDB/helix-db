@@ -19,7 +19,8 @@ mod scalar;
 pub(crate) mod tests;
 
 pub(crate) use self::index_atoms::{
-    equality_atom, range_atom, EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,
+    equality_atom, literal_equality_domain, range_atom, EqualityIndexAtom, EqualityIndexDomain,
+    RangeIndexAtom,
 };
 pub(crate) use self::labels::{label_equality_atom, label_scope, FeasibleLabelScope, LabelScope};
 pub(crate) use self::literal_set::{

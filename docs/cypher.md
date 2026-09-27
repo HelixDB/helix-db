@@ -119,6 +119,22 @@ parameter map in a MATCH pattern, such as `(n $props)`, is an
 existing native index-management API to create indexes; Cypher planning can
 select existing compatible indexes.
 
+For a labeled node, a WHERE conjunct such as `n.email = $email` or
+`n.key IN [1, 2, 3]` can read a native equality index on that property instead
+of scanning the label. An `IN` list may be a literal, a list of literals and
+parameters, or a parameter bound to a list. Null and NaN members never match, so
+they need no lookup. A list with a nested member, or with more than 64 distinct
+values, scans the label instead. An indexed equality on the same node takes
+precedence, and its `IN` list is then checked as a filter. A string too large
+to index, about 1 MiB, cannot equal an indexed value, so a lookup of one keeps
+the label scan. Index access also requires every other
+conjunct and every property constraint in the pattern to be unable to fail;
+arithmetic or a function call there keeps the label scan. Every candidate is
+still checked against the complete predicate. Nodes the index excludes are not
+read, so their unsupported stored values, such as temporal or binary data,
+cannot fail the query, and an `IN` list that is never evaluated is not charged
+against collection limits.
+
 ## Numeric conversions
 
 `toInteger()` and its `toInt()` alias convert decimal strings exactly, including

@@ -5,6 +5,11 @@ use std::num::NonZeroUsize;
 
 use crate::ir::NonEmptyString;
 
+/// Largest canonical secondary-equality value that storage indexes. Storage
+/// rejects indexing a larger value, so no indexed element can equal one. The
+/// database codec asserts that this equals its own bound.
+pub const MAX_INDEXED_EQUALITY_BYTES: usize = 1024 * 1024 - 64;
+
 /// Invalid literal payload for a secondary index lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecondaryIndexLiteralError {
@@ -118,6 +123,47 @@ impl SecondaryIndexLiteral {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Whether this value's canonical encoding may exceed
+    /// [`MAX_INDEXED_EQUALITY_BYTES`]. The estimate allows 64 bytes for the
+    /// value header and 16 bytes per array item, which covers every number and
+    /// string length prefix, so a lookup of any other value fits a key.
+    ///
+    /// ```
+    /// use helix_ast::value::PropertyValue;
+    /// use helix_planner::ir::{SecondaryIndexLiteral, MAX_INDEXED_EQUALITY_BYTES};
+    ///
+    /// let literal = |value| SecondaryIndexLiteral::new(value).unwrap();
+    /// assert!(!literal(PropertyValue::from("alice")).may_exceed_index_key());
+    /// assert!(literal(PropertyValue::from("x".repeat(MAX_INDEXED_EQUALITY_BYTES)))
+    ///     .may_exceed_index_key());
+    /// assert!(literal(PropertyValue::I64Array(vec![0; MAX_INDEXED_EQUALITY_BYTES / 16]))
+    ///     .may_exceed_index_key());
+    /// ```
+    pub fn may_exceed_index_key(&self) -> bool {
+        let items = |count: usize| count.saturating_mul(16);
+        let payload = match &self.value {
+            PropertyValue::String(value) => value.len(),
+            PropertyValue::Bytes(value) => value.len(),
+            PropertyValue::StringArray(values) => {
+                values.iter().fold(items(values.len()), |bytes, value| {
+                    bytes.saturating_add(value.len())
+                })
+            }
+            PropertyValue::I64Array(values) => items(values.len()),
+            PropertyValue::F64Array(values) => items(values.len()),
+            PropertyValue::F32Array(values) => items(values.len()),
+            PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::I64(_)
+            | PropertyValue::F64(_)
+            | PropertyValue::F32(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::Array(_)
+            | PropertyValue::Object(_) => 0,
+        };
+        payload.saturating_add(64) > MAX_INDEXED_EQUALITY_BYTES
     }
 
     /// Borrow the validated literal value.

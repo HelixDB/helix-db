@@ -290,6 +290,14 @@ mod tests {
     }
 
     #[test]
+    fn planner_skips_lookups_that_exceed_the_canonical_bound() {
+        assert_eq!(
+            helix_planner::ir::MAX_INDEXED_EQUALITY_BYTES,
+            MAX_EQUALITY_CANONICAL_LEN
+        );
+    }
+
+    #[test]
     fn canonical_equality_is_typed_exact_and_collision_safe() {
         assert_ne!(
             indexed(&PropertyValue::Bool(true)),

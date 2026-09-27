@@ -302,6 +302,11 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[size / 2]]),
         ),
         (
+            "membership_index",
+            format!("MATCH (n:Chain) WHERE n.key IN [0,{},{},{}] RETURN n.key ORDER BY n.key", size / 2, size - 1, size + 1),
+            json!([[0], [size / 2], [size - 1]]),
+        ),
+        (
             "correlated_index",
             format!("UNWIND [0,{},null,{}] AS key OPTIONAL MATCH (n:Chain {{key:key}}) RETURN key,n.key ORDER BY key", size / 2, size + 1),
             json!([[0,0],[size / 2,size / 2],[size + 1,null],[null,null]]),
@@ -545,6 +550,18 @@ async fn measure_cases(
                     || response.resources.reads.point_gets != 2)
             {
                 return Err(format!("{case} exceeded its memory/source-read guard at size {size}: peak={}, reads={:?}",response.resources.peak_memory_bytes,response.resources.reads).into());
+            }
+            // Three unique owners and one absent key: index reads, never a scan.
+            if case == "membership_index"
+                && (response.resources.reads.scans != 0
+                    || response.resources.reads.point_gets > 4
+                    || response.resources.reads.multi_get_keys > 16)
+            {
+                return Err(format!(
+                    "{case} read beyond its indexed members at size {size}: {:?}",
+                    response.resources.reads,
+                )
+                .into());
             }
             if case == "product_limit"
                 && (response.resources.reads.multi_get_batches > 3

@@ -164,6 +164,12 @@ fn literal_equality_set(value: &PropertyValue) -> Option<EqualityIndexDomain> {
         | PropertyValue::Bytes(_)
         | PropertyValue::Object(_)) => vec![value.clone()],
     };
+    literal_equality_domain(values)
+}
+
+/// Distinct reflexive index literals of constant equality values, or `None`
+/// when a value is nested. Null is kept for native null equality.
+pub(crate) fn literal_equality_domain(values: Vec<PropertyValue>) -> Option<EqualityIndexDomain> {
     let values = values
         .into_iter()
         .map(SecondaryIndexLiteral::new)
