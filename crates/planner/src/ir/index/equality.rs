@@ -29,6 +29,37 @@ pub enum EqualityIndexValueSemantics {
     RuntimeDependent,
 }
 
+impl EqualityIndexValueSemantics {
+    /// Hard upper bound on the elements one equality lookup can return.
+    ///
+    /// Uniqueness bounds only an indexed value. Null equality is served by an
+    /// authoritative scan that can match many elements, and a runtime parameter
+    /// can bind null or a set, so neither has a static bound.
+    ///
+    /// ```
+    /// use helix_planner::catalog::IndexUniqueness;
+    /// use helix_planner::ir::EqualityIndexValueSemantics as Semantics;
+    ///
+    /// let unique = IndexUniqueness::Unique;
+    /// assert_eq!(Semantics::Indexed.hard_upper_bound(unique), Some(1));
+    /// assert_eq!(Semantics::NonReflexive.hard_upper_bound(unique), Some(0));
+    /// assert_eq!(Semantics::AuthoritativeNull.hard_upper_bound(unique), None);
+    /// assert_eq!(Semantics::RuntimeDependent.hard_upper_bound(unique), None);
+    /// assert_eq!(Semantics::Indexed.hard_upper_bound(IndexUniqueness::NonUnique), None);
+    /// ```
+    pub const fn hard_upper_bound(
+        self,
+        uniqueness: crate::catalog::IndexUniqueness,
+    ) -> Option<usize> {
+        match (self, uniqueness) {
+            (Self::NonReflexive, _) => Some(0),
+            (Self::Indexed, crate::catalog::IndexUniqueness::Unique) => Some(1),
+            (Self::Indexed, crate::catalog::IndexUniqueness::NonUnique)
+            | (Self::AuthoritativeNull | Self::RuntimeDependent, _) => None,
+        }
+    }
+}
+
 /// Storage behavior proven for a validated literal equality value.
 ///
 /// Unlike [`EqualityIndexValueSemantics`], this type cannot represent runtime

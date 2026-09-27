@@ -122,14 +122,12 @@ pub(super) fn equality_index_contract(
             EqualityIndexKind::NonUnique => storage.bitmap_equality_lookup(rows),
         },
     };
-    let cardinality = match input.semantics {
-        ir::EqualityIndexValueSemantics::NonReflexive => properties::CardinalityBounds::exact(0),
-        ir::EqualityIndexValueSemantics::Indexed => equality_cardinality(input.kind),
-        ir::EqualityIndexValueSemantics::AuthoritativeNull
-        | ir::EqualityIndexValueSemantics::RuntimeDependent => {
-            properties::CardinalityBounds::unknown()
-        }
+    let uniqueness = match input.kind {
+        EqualityIndexKind::Unique => catalog::IndexUniqueness::Unique,
+        EqualityIndexKind::NonUnique => catalog::IndexUniqueness::NonUnique,
     };
+    let cardinality =
+        properties::CardinalityBounds::zero_to(input.semantics.hard_upper_bound(uniqueness));
     let delivered = with_key_locality(
         access_delivered_with(input.element, cardinality),
         properties::KeyLocality::Close,
@@ -142,14 +140,7 @@ pub(super) fn equality_index_contract(
             storage.secondary_row_materialization(rows),
             rows,
         )
-        .with_batchable_equality(
-            input.index_id.clone(),
-            input.key.clone(),
-            match input.kind {
-                EqualityIndexKind::Unique => catalog::IndexUniqueness::Unique,
-                EqualityIndexKind::NonUnique => catalog::IndexUniqueness::NonUnique,
-            },
-        )
+        .with_batchable_equality(input.index_id.clone(), input.key.clone(), uniqueness)
     } else {
         AccessPhysicalContract::new_secondary(
             input.access,
@@ -169,13 +160,6 @@ fn equality_rows(
     match kind {
         EqualityIndexKind::Unique => unique_equality_rows(cardinality, storage),
         EqualityIndexKind::NonUnique => equality_index_rows(cardinality, storage),
-    }
-}
-
-const fn equality_cardinality(kind: EqualityIndexKind) -> properties::CardinalityBounds {
-    match kind {
-        EqualityIndexKind::Unique => properties::CardinalityBounds::zero_to(Some(1)),
-        EqualityIndexKind::NonUnique => properties::CardinalityBounds::unknown(),
     }
 }
 

@@ -8,10 +8,8 @@ pub(super) fn hard_cardinality_upper_bound(source: &NodeAccessPlan) -> Option<us
     match source {
         NodeAccessPlan::Empty => Some(0),
         NodeAccessPlan::PointIds { ids } => Some(ids.as_ref().len()),
-        NodeAccessPlan::EqualityIndex { index, .. }
-            if matches!(index.uniqueness, catalog::IndexUniqueness::Unique) =>
-        {
-            Some(1)
+        NodeAccessPlan::EqualityIndex { index, value, .. } => {
+            value.semantics().hard_upper_bound(index.uniqueness)
         }
         NodeAccessPlan::VectorSearch { k, .. } | NodeAccessPlan::TextSearch { k, .. } => {
             super::super::search_limit_hard_cardinality_upper_bound(k)
@@ -28,7 +26,6 @@ pub(super) fn hard_cardinality_upper_bound(source: &NodeAccessPlan) -> Option<us
         | NodeAccessPlan::FromVar { .. }
         | NodeAccessPlan::AllScan
         | NodeAccessPlan::LabelScan { .. }
-        | NodeAccessPlan::EqualityIndex { .. }
         | NodeAccessPlan::RangeIndex { .. }
         | NodeAccessPlan::ScanThenFilter { .. } => None,
     }

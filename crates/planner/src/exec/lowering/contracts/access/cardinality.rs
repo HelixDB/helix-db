@@ -1,15 +1,13 @@
 //! Access cardinality inference.
 
-use crate::{catalog, ir};
+use crate::ir;
 
 pub(in crate::exec) fn node_access_hard_upper_bound(plan: &ir::NodeAccessPlan) -> Option<usize> {
     match plan {
         ir::NodeAccessPlan::Empty => Some(0),
         ir::NodeAccessPlan::PointIds { ids } => Some(ids.as_ref().len()),
-        ir::NodeAccessPlan::EqualityIndex { index, .. }
-            if matches!(index.uniqueness, catalog::IndexUniqueness::Unique) =>
-        {
-            Some(1)
+        ir::NodeAccessPlan::EqualityIndex { index, value, .. } => {
+            value.semantics().hard_upper_bound(index.uniqueness)
         }
         ir::NodeAccessPlan::VectorSearch { k, .. } | ir::NodeAccessPlan::TextSearch { k, .. } => {
             search_limit_hard_upper_bound(k)
@@ -26,7 +24,6 @@ pub(in crate::exec) fn node_access_hard_upper_bound(plan: &ir::NodeAccessPlan) -
         | ir::NodeAccessPlan::FromVar { .. }
         | ir::NodeAccessPlan::AllScan
         | ir::NodeAccessPlan::LabelScan { .. }
-        | ir::NodeAccessPlan::EqualityIndex { .. }
         | ir::NodeAccessPlan::RangeIndex { .. } => None,
     }
 }
@@ -59,11 +56,6 @@ pub(super) fn node_access_exact_cardinality(plan: &ir::NodeAccessPlan) -> Option
     match plan {
         ir::NodeAccessPlan::Empty => Some(0),
         ir::NodeAccessPlan::PointIds { ids } => Some(ids.as_ref().len()),
-        ir::NodeAccessPlan::EqualityIndex { index, .. }
-            if matches!(index.uniqueness, catalog::IndexUniqueness::Unique) =>
-        {
-            Some(1)
-        }
         ir::NodeAccessPlan::FromParam { .. }
         | ir::NodeAccessPlan::FromVar { .. }
         | ir::NodeAccessPlan::AllScan
