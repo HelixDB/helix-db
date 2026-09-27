@@ -6,7 +6,10 @@ fn ratchet_rejects_missing_duplicate_unclassified_and_regressed_results() {
     let root = tempfile::tempdir().unwrap();
     let corpus = vec![
         test_support::scenario("required", "    Given an empty graph"),
-        test_support::scenario("excluded", "    Given an empty graph"),
+        test_support::scenario(
+            "excluded",
+            "    When executing query:\n      \"\"\"\n      MERGE (n:N)\n      \"\"\"",
+        ),
     ];
     let revision = "007895aff5f33097d67b2e48a0a2babd6bd18590";
     let mut required = Required {
@@ -90,6 +93,76 @@ fn ratchet_rejects_missing_duplicate_unclassified_and_regressed_results() {
         .unwrap();
         assert!(verify(root.path(), &corpus, &report).is_err());
     }
+}
+
+#[test]
+fn exclusions_must_match_the_draft_and_stop_at_their_capability() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = vec![test_support::scenario(
+        "excluded",
+        "    When executing query:\n      \"\"\"\n      MERGE (n:N)\n      \"\"\"",
+    )];
+    let revision = "007895aff5f33097d67b2e48a0a2babd6bd18590";
+    let manifest = |reason: &str| {
+        std::fs::write(
+            root.path().join("required-mvp.json"),
+            serde_json::to_vec(&Required {
+                revision: revision.into(),
+                required: vec![],
+                exclusions: BTreeMap::from([("excluded".into(), reason.into())]),
+                unclassified: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    std::fs::write(
+        root.path().join("previously-passing.json"),
+        serde_json::to_vec(&serde_json::json!({"revision":revision,"scenarios":[]})).unwrap(),
+    )
+    .unwrap();
+    let report = |status, reason: Option<&str>| {
+        report::summarize(vec![report::Outcome {
+            id: "excluded".into(),
+            status,
+            parsed: true,
+            resolved: false,
+            planned: false,
+            reason: reason.map(Into::into),
+        }])
+    };
+    manifest("Merge");
+    for (status, reason) in [
+        (Status::Unsupported, Some("Merge")),
+        (Status::SetupBlocked, Some("Setup:Merge")),
+        (
+            Status::SetupBlocked,
+            Some("Setup:UnsupportedFeature: Merge: Merge is outside the Cypher MVP profile"),
+        ),
+    ] {
+        verify(root.path(), &corpus, &report(status, reason)).unwrap();
+    }
+    for (status, reason) in [
+        (Status::Passed, None),
+        (Status::Failed, Some("Rows")),
+        (Status::TimedOut, Some("ScenarioTimeout")),
+        (Status::Unsupported, Some("Union")),
+        (Status::SetupBlocked, Some("Setup:SyntaxError: Merge")),
+        (
+            Status::SetupBlocked,
+            Some("Setup:UnsupportedFeature: MergeAll: MergeAll is outside the Cypher MVP profile"),
+        ),
+    ] {
+        assert!(verify(root.path(), &corpus, &report(status, reason)).is_err());
+    }
+    // A reviewed manifest must equal the current draft classification.
+    manifest("Union");
+    assert!(verify(
+        root.path(),
+        &corpus,
+        &report(Status::Unsupported, Some("Union"))
+    )
+    .is_err());
 }
 
 #[test]

@@ -75,6 +75,43 @@ pub fn verify(root: &Path, corpus: &[Scenario], report: &Report) -> Result<()> {
         )
         .into());
     }
+    // The committed manifest is the reviewed current draft, so promotions and
+    // exclusion reasons cannot drift from the frontend's classification.
+    let current = draft(corpus);
+    if current.required.iter().collect::<BTreeSet<_>>()
+        != required.required.iter().collect::<BTreeSet<_>>()
+        || current.exclusions != required.exclusions
+    {
+        return Err("capability manifest differs from the current profile draft".into());
+    }
+    // An excluded scenario must stop at its declared capability. Any other
+    // outcome, including a pass, needs review instead of hiding behind it.
+    let outcomes = report
+        .outcomes
+        .iter()
+        .map(|o| (o.id.as_str(), o))
+        .collect::<BTreeMap<_, _>>();
+    for (id, reason) in &required.exclusions {
+        let outcome = outcomes[id.as_str()];
+        let detail = outcome.reason.as_deref().unwrap_or_default();
+        let expected = match outcome.status {
+            Status::Unsupported => detail == reason,
+            Status::SetupBlocked => {
+                detail == format!("Setup:{reason}")
+                    || detail.starts_with(&format!("Setup:UnsupportedFeature: {reason}: "))
+            }
+            Status::Passed
+            | Status::Failed
+            | Status::TimedOut
+            | Status::HarnessError
+            | Status::NotExecuted => false,
+        };
+        if !expected {
+            return Err(
+                format!("excluded scenario {id} did not stop at {reason}: {detail}").into(),
+            );
+        }
+    }
     let passing = report
         .outcomes
         .iter()
