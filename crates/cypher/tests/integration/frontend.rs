@@ -75,6 +75,84 @@ fn profile_examples_resolve() {
 }
 
 #[test]
+fn standard_errors_precede_deferred_capabilities() {
+    for (text, category, detail) in [
+        (
+            "CREATE (n {}) CREATE (n:Bar)-[:OWNS]->(:Dog)",
+            "SyntaxError",
+            "VariableAlreadyBound",
+        ),
+        (
+            "CREATE (b {name: missing}) RETURN b",
+            "SyntaxError",
+            "UndefinedVariable",
+        ),
+        ("CREATE ()-->()", "SyntaxError", "NoSingleRelationshipType"),
+        (
+            "CREATE ()-[:A|:B]->()",
+            "SyntaxError",
+            "NoSingleRelationshipType",
+        ),
+        (
+            "MATCH ()-[r]->() CREATE ()-[r]->()",
+            "SyntaxError",
+            "VariableAlreadyBound",
+        ),
+        (
+            "MATCH ()-[r]->() CREATE (:A)-[r]->(:B)",
+            "SyntaxError",
+            "VariableAlreadyBound",
+        ),
+        ("CREATE () RETURN foo()", "SyntaxError", "UnknownFunction"),
+        // The first capability error still wins over later deferred features.
+        (
+            "CREATE () RETURN date() AS d",
+            "UnsupportedFeature",
+            "NodeLabelRequired",
+        ),
+        (
+            "CREATE (), (:A {x: 1}) RETURN 1 AS one",
+            "UnsupportedFeature",
+            "NodeLabelRequired",
+        ),
+        ("RETURN foo(1) AS x", "SyntaxError", "UnknownFunction"),
+        ("RETURN sqrt(4) AS x", "UnsupportedFeature", "Function:sqrt"),
+        (
+            "RETURN percentileCont(1, 0.5) AS x",
+            "UnsupportedFeature",
+            "Function:percentilecont",
+        ),
+        (
+            "MATCH (n $param) RETURN n",
+            "SyntaxError",
+            "InvalidParameterUse",
+        ),
+        (
+            "MATCH ()-[r:T $param]->() RETURN r",
+            "SyntaxError",
+            "InvalidParameterUse",
+        ),
+        (
+            "CREATE (n:A $props)",
+            "UnsupportedFeature",
+            "PatternParameterMap",
+        ),
+        (
+            "CREATE (:A)-[:R $props]->(:B)",
+            "UnsupportedFeature",
+            "PatternParameterMap",
+        ),
+    ] {
+        let error = helix_cypher::compile(text).unwrap_err();
+        assert_eq!(
+            (&*error.category, &*error.detail),
+            (category, detail),
+            "{text}: {error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_profile_boundaries_and_scope_errors() {
     for (text, category, detail) in [
         ("CREATE ()", "UnsupportedFeature", "NodeLabelRequired"),

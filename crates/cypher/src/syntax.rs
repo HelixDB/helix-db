@@ -92,7 +92,7 @@ impl Expr {
             ExprKind::Literal(_)
             | ExprKind::Variable(_)
             | ExprKind::Parameter(_)
-            | ExprKind::PatternPredicate => 0,
+            | ExprKind::PatternPredicate(_) => 0,
             ExprKind::Property(x, _) | ExprKind::Unary(_, x) | ExprKind::HasLabel(x, _) => x.depth,
             ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => a.depth.max(b.depth),
             ExprKind::Slice { value, start, end } => start
@@ -133,9 +133,10 @@ pub enum ExprKind {
     Literal(r::Value),
     Variable(String),
     Parameter(String),
-    /// Recognized graph-pattern syntax. Binding rejects scalar use and reports
-    /// the deferred capability in boolean contexts; it never enters the planner.
-    PatternPredicate,
+    /// Recognized graph-pattern syntax and the variables it names. Binding
+    /// rejects scalar use and variables absent from scope, then reports the
+    /// deferred capability in boolean contexts; it never enters the planner.
+    PatternPredicate(Vec<String>),
     Property(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Slice {

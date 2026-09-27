@@ -108,9 +108,16 @@ instance configuration.
 
 `MERGE`, variable-length and shortest paths, `UNION`, subqueries, comprehensions,
 procedures, schema DDL, temporal/spatial functions, and Bolt are outside this
-profile. Unsupported syntax receives a specific error. Use the existing native
-index-management API to create indexes; Cypher planning can select existing
-compatible indexes.
+profile. Unsupported syntax receives a specific `UnsupportedFeature` error. A
+statement that is also invalid openCypher reports the standard compile error
+instead, such as `VariableAlreadyBound` for a CREATE that redeclares a variable
+or `UndefinedVariable` for a pattern predicate that introduces one. Other
+openCypher built-in functions, such as `sqrt` or `date`, are unsupported, while
+an unrecognized function name is a `SyntaxError` with `UnknownFunction`. A
+parameter map in a MATCH pattern, such as `(n $props)`, is an
+`InvalidParameterUse` syntax error; in CREATE it is unsupported. Use the
+existing native index-management API to create indexes; Cypher planning can
+select existing compatible indexes.
 
 ## Numeric conversions
 

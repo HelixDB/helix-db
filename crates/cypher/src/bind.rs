@@ -64,7 +64,21 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
         bindings: Vec::new(),
         scope: Scope::new(),
         anonymous: 0,
+        deferred: None,
     };
+    let result = bind_clauses(&mut binder, statement);
+    // Standard syntax and semantic errors take precedence over a deferred
+    // capability error, which in turn precedes any later capability error.
+    let Some(deferred) = binder.deferred else {
+        return result;
+    };
+    match result {
+        Err(error) if error.category != "UnsupportedFeature" => Err(error),
+        Ok(_) | Err(_) => Err(deferred),
+    }
+}
+
+fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Query> {
     let mut operators = Vec::new();
     let mut returns = Vec::new();
     let mut anonymous_at_projection = 0;
@@ -547,13 +561,16 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
             "statement must end in RETURN or a mutation",
         ));
     }
-    r::Query::new(binder.bindings, operators, returns)
+    r::Query::new(std::mem::take(&mut binder.bindings), operators, returns)
 }
 
 struct Binder {
     bindings: Vec<r::Binding>,
     scope: Scope,
     anonymous: usize,
+    /// First capability error that does not affect binding. Binding continues
+    /// so that invalid openCypher still reports its standard error.
+    deferred: Option<QueryError>,
 }
 
 impl Binder {
@@ -612,10 +629,14 @@ impl Binder {
         scope: ScopeRef<'_>,
         allow_aggregate: bool,
     ) -> Result<r::Expression> {
-        if matches!(e.kind, E::PatternPredicate) {
-            return Err(QueryError::unsupported("PatternExpression").at(e.span));
+        let E::PatternPredicate(variables) = &e.kind else {
+            return self.expression(e, scope, allow_aggregate);
+        };
+        // A pattern predicate cannot introduce variables in openCypher.
+        if let Some(name) = variables.iter().find(|name| scope.get(name).is_none()) {
+            return Err(semantic("UndefinedVariable", format!("{name} is not defined")).at(e.span));
         }
-        self.expression(e, scope, allow_aggregate)
+        Err(QueryError::unsupported("PatternExpression").at(e.span))
     }
 
     fn allocate(&mut self, name: String, kind: r::BindingType, nullable: bool) -> Result<r::Slot> {
@@ -744,7 +765,8 @@ impl Binder {
                     && !nodes.iter().any(|(s, _)| *s == slot)
                     && node.labels.len() != 1
                 {
-                    return Err(QueryError::unsupported("NodeLabelRequired"));
+                    self.deferred
+                        .get_or_insert_with(|| QueryError::unsupported("NodeLabelRequired"));
                 }
                 if create
                     && ((slot.0 as usize) < first_new_binding
@@ -771,12 +793,6 @@ impl Binder {
                         "CREATE requires a directed relationship",
                     ));
                 }
-                if create && rel.types.len() != 1 {
-                    return Err(semantic(
-                        "NoSingleRelationshipType",
-                        "CREATE requires one type and a directed relationship",
-                    ));
-                }
                 let slot = self.binding(&rel.name, r::BindingType::Relationship, optional)?;
                 if create
                     && ((slot.0 as usize) < first_new_binding
@@ -785,6 +801,12 @@ impl Binder {
                     return Err(semantic(
                         "VariableAlreadyBound",
                         "CREATE cannot redeclare a relationship",
+                    ));
+                }
+                if create && rel.types.len() != 1 {
+                    return Err(semantic(
+                        "NoSingleRelationshipType",
+                        "CREATE requires one type and a directed relationship",
                     ));
                 }
                 if !create && relationships.iter().any(|(s, _, _, _)| *s == slot) {
@@ -874,7 +896,7 @@ impl Binder {
                 semantic("UndefinedVariable", format!("{name} is not defined")).at(e.span)
             })?),
             E::Parameter(name) => r::Expression::Parameter(name.clone()),
-            E::PatternPredicate => {
+            E::PatternPredicate(_) => {
                 return Err(semantic(
                     "UnexpectedSyntax",
                     "a pattern predicate cannot be used as a scalar value",
@@ -1052,10 +1074,17 @@ impl Binder {
                         "tolower" => (F::ToLower, 1, 1),
                         "toupper" => (F::ToUpper, 1, 1),
                         "substring" => (F::Substring, 2, 3),
-                        _ => {
+                        _ if DEFERRED_FUNCTIONS.contains(&name.as_str()) => {
                             return Err(
                                 QueryError::unsupported(&format!("Function:{name}")).at(e.span)
                             )
+                        }
+                        _ => {
+                            return Err(semantic(
+                                "UnknownFunction",
+                                format!("{name} is not a known function"),
+                            )
+                            .at(e.span))
                         }
                     };
                     if arguments.len() < min || arguments.len() > max {
@@ -1084,6 +1113,58 @@ impl Binder {
         Ok(expression)
     }
 }
+
+/// Lowercase openCypher 9 built-in functions outside this profile. Calling one
+/// reports an unsupported capability; any other unrecognized name is unknown.
+const DEFERRED_FUNCTIONS: [&str; 47] = [
+    "acos",
+    "all",
+    "any",
+    "asin",
+    "atan",
+    "atan2",
+    "ceil",
+    "cos",
+    "cot",
+    "date",
+    "datetime",
+    "degrees",
+    "distance",
+    "duration",
+    "e",
+    "endnode",
+    "exp",
+    "floor",
+    "haversin",
+    "left",
+    "localdatetime",
+    "localtime",
+    "log",
+    "log10",
+    "none",
+    "percentilecont",
+    "percentiledisc",
+    "pi",
+    "point",
+    "radians",
+    "rand",
+    "reduce",
+    "replace",
+    "right",
+    "round",
+    "sign",
+    "sin",
+    "single",
+    "split",
+    "sqrt",
+    "startnode",
+    "stdev",
+    "stdevp",
+    "tail",
+    "tan",
+    "time",
+    "timestamp",
+];
 
 fn semantic(detail: &str, message: impl Into<String>) -> QueryError {
     QueryError::compile("SyntaxError", detail, message)

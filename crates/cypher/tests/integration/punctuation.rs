@@ -79,6 +79,38 @@ fn graph_only_unicode_does_not_change_scalar_operators_or_identifiers() {
 }
 
 #[test]
+fn pattern_predicates_cannot_introduce_variables() {
+    for text in [
+        "MATCH (n) WHERE (n)-[r]->() RETURN n",
+        "MATCH (n) WHERE (n)-->(a) RETURN n",
+        "MATCH (n) WHERE ()-[r]-() RETURN n",
+        "MATCH (n) WHERE NOT (n)-[:T]->(:C)<-[s:T]-() RETURN n",
+        "MATCH (n) WHERE (n)-[r:T*0..2]->() RETURN n",
+    ] {
+        let error = helix_cypher::compile(text).unwrap_err();
+        assert_eq!(
+            (&*error.category, &*error.detail),
+            ("SyntaxError", "UndefinedVariable"),
+            "{text}: {error}"
+        );
+        let span = error.span.unwrap();
+        assert!(text[span.start..span.end].starts_with('('));
+    }
+    // Anonymous elements and variables already in scope remain deferred.
+    for text in [
+        "MATCH (n), (a) WHERE (n)-->(a) RETURN n",
+        "MATCH (n) WITH n AS m WHERE (m)-[:T]->() RETURN m",
+    ] {
+        let error = helix_cypher::compile(text).unwrap_err();
+        assert_eq!(
+            (&*error.category, &*error.detail),
+            ("UnsupportedFeature", "PatternExpression"),
+            "{text}: {error}"
+        );
+    }
+}
+
+#[test]
 fn deferred_pattern_expressions_are_recognized_without_reinterpreting_scalars() {
     for text in [
         "RETURN NOT ()-->()",
@@ -87,7 +119,8 @@ fn deferred_pattern_expressions_are_recognized_without_reinterpreting_scalars() 
         "MATCH (n) WHERE (n)-[*]->() RETURN n",
         "MATCH (n) WHERE (n)-[*1..3]-() RETURN n",
         "MATCH (n) RETURN CASE WHEN (n)-[*..3]->() THEN 1 ELSE 2 END",
-        "MATCH (n) WHERE (n {x:((1+2))})-[r:T {x:[1,2]}]->() RETURN n",
+        "MATCH (n) WHERE (n {x:((1+2))})-[:T {x:[1,2]}]->() RETURN n",
+        "MATCH (n)-[r]->(a) WHERE (n)-[r]->(a) RETURN n",
         "MATCH (n) RETURN NOT ((n)-[:T]->())",
         "MATCH (n) RETURN exists((n)-->() )",
         "MATCH (n) RETURN true AND (n)-->()",

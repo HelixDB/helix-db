@@ -36,6 +36,14 @@ enum PatternContext {
     Comprehension,
 }
 
+/// The clause that owns a pattern. openCypher accepts a parameter map in a
+/// CREATE pattern but rejects one in a MATCH pattern.
+#[derive(Clone, Copy)]
+enum PatternClause {
+    Match,
+    Create,
+}
+
 impl<'source> Parser<'source> {
     fn token(&self) -> &Token<'source> {
         &self.tokens[self.position]
@@ -111,6 +119,17 @@ impl<'source> Parser<'source> {
     fn unsupported(&self, name: &str) -> QueryError {
         QueryError::unsupported(name).at(self.token().span)
     }
+    fn parameter_map(&self, clause: PatternClause) -> QueryError {
+        match clause {
+            PatternClause::Match => QueryError::compile(
+                "SyntaxError",
+                "InvalidParameterUse",
+                "pattern predicates in MATCH require a map literal",
+            )
+            .at(self.token().span),
+            PatternClause::Create => self.unsupported("PatternParameterMap"),
+        }
+    }
 
     fn statement(&mut self) -> Result<Statement> {
         let mut clauses = Vec::new();
@@ -132,7 +151,7 @@ impl<'source> Parser<'source> {
                     name: self.name()?,
                 }
             } else if self.take("CREATE") {
-                Clause::Create(self.patterns()?)
+                Clause::Create(self.patterns(PatternClause::Create)?)
             } else if self.take("SET") {
                 let mut assignments = Vec::new();
                 loop {
@@ -157,7 +176,7 @@ impl<'source> Parser<'source> {
                         ExprKind::HasLabel(..) => return Err(self.unsupported("LabelMutation")),
                         ExprKind::Literal(_)
                         | ExprKind::Parameter(_)
-                        | ExprKind::PatternPredicate
+                        | ExprKind::PatternPredicate(_)
                         | ExprKind::Property(..)
                         | ExprKind::Index(..)
                         | ExprKind::Slice { .. }
@@ -225,7 +244,7 @@ impl<'source> Parser<'source> {
     }
 
     fn match_clause(&mut self, optional: bool) -> Result<Clause> {
-        let patterns = self.patterns()?;
+        let patterns = self.patterns(PatternClause::Match)?;
         let predicate = if self.take("WHERE") {
             Some(self.expr(0)?)
         } else {
@@ -304,35 +323,44 @@ impl<'source> Parser<'source> {
         })
     }
 
-    fn patterns(&mut self) -> Result<Vec<Pattern>> {
-        let mut xs = vec![self.pattern()?];
+    fn patterns(&mut self, clause: PatternClause) -> Result<Vec<Pattern>> {
+        let mut xs = vec![self.pattern(clause)?];
         while self.take(",") {
-            xs.push(self.pattern()?);
+            xs.push(self.pattern(clause)?);
         }
         Ok(xs)
     }
 
-    fn take_deferred_pattern(&mut self, context: PatternContext) -> Result<bool> {
+    /// Recognize a deferred pattern. An expression pattern is consumed and
+    /// returns the variables it names so binding can reject new variables.
+    fn take_deferred_pattern(&mut self, context: PatternContext) -> Result<Option<Vec<String>>> {
         if self.pattern_mode == PatternMode::Probe {
-            return Ok(false);
+            return Ok(None);
         }
         let (position, depth) = (self.position, self.depth);
         self.pattern_mode = PatternMode::Probe;
-        let pattern = self.pattern();
+        let pattern = self.pattern(PatternClause::Match);
         let end = self.position;
         self.position = position;
         self.depth = depth;
         self.pattern_mode = PatternMode::Build;
         let Ok(pattern) = pattern else {
-            return Ok(false);
+            return Ok(None);
         };
         if pattern.relationships.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let detail = match context {
             PatternContext::Expression => {
                 self.position = end;
-                return Ok(true);
+                return Ok(Some(
+                    pattern
+                        .nodes
+                        .into_iter()
+                        .filter_map(|node| node.name)
+                        .chain(pattern.relationships.into_iter().filter_map(|r| r.name))
+                        .collect(),
+                ));
             }
             PatternContext::Comprehension
                 if matches!(&self.tokens[end].kind, Kind::Symbol("|"))
@@ -340,7 +368,7 @@ impl<'source> Parser<'source> {
             {
                 "PatternComprehension"
             }
-            PatternContext::Comprehension => return Ok(false),
+            PatternContext::Comprehension => return Ok(None),
         };
         Err(QueryError::unsupported(detail).at(Span {
             start: self.tokens[position].span.start,
@@ -348,7 +376,7 @@ impl<'source> Parser<'source> {
         }))
     }
 
-    fn pattern(&mut self) -> Result<Pattern> {
+    fn pattern(&mut self, clause: PatternClause) -> Result<Pattern> {
         let name = if !self.is("(") {
             if (self.is("shortestPath") || self.is("allShortestPaths"))
                 && self
@@ -372,7 +400,7 @@ impl<'source> Parser<'source> {
         {
             return Err(self.unsupported("ShortestPath"));
         }
-        let mut nodes = vec![self.node()?];
+        let mut nodes = vec![self.node(clause)?];
         let mut relationships = Vec::new();
         loop {
             // Keep arrowheads and dashes separate in the lexer: `<-` can also
@@ -413,12 +441,7 @@ impl<'source> Parser<'source> {
                     }
                 }
                 if matches!(self.token().kind, Kind::Parameter(_)) {
-                    return Err(QueryError::compile(
-                        "SyntaxError",
-                        "InvalidParameterUse",
-                        "relationship predicates in MATCH require a map literal",
-                    )
-                    .at(self.token().span));
+                    return Err(self.parameter_map(clause));
                 }
                 if matches!(self.token().kind, Kind::Number(_)) || self.is("..") {
                     return Err(QueryError::compile(
@@ -452,7 +475,7 @@ impl<'source> Parser<'source> {
                 direction,
                 properties,
             });
-            nodes.push(self.node()?);
+            nodes.push(self.node(clause)?);
         }
         Ok(Pattern {
             name,
@@ -461,7 +484,7 @@ impl<'source> Parser<'source> {
         })
     }
 
-    fn node(&mut self) -> Result<Node> {
+    fn node(&mut self, clause: PatternClause) -> Result<Node> {
         self.expect("(")?;
         let name = self.optional_name()?;
         let mut labels = Vec::new();
@@ -475,7 +498,7 @@ impl<'source> Parser<'source> {
             Vec::new()
         };
         if matches!(self.token().kind, Kind::Parameter(_)) {
-            return Err(self.unsupported("PatternParameterMap"));
+            return Err(self.parameter_map(clause));
         }
         self.expect(")")?;
         Ok(Node {
@@ -520,8 +543,13 @@ impl<'source> Parser<'source> {
 
     fn expr_inner(&mut self, min: u8) -> Result<Expr> {
         let start = self.token().span.start;
-        let mut left = if self.is("(") && self.take_deferred_pattern(PatternContext::Expression)? {
-            ExprKind::PatternPredicate
+        let pattern = if self.is("(") {
+            self.take_deferred_pattern(PatternContext::Expression)?
+        } else {
+            None
+        };
+        let mut left = if let Some(variables) = pattern {
+            ExprKind::PatternPredicate(variables)
         } else if self.take("NOT") {
             ExprKind::Unary(r::Unary::Not, Box::new(self.expr(4)?))
         } else if self.take("-") {
