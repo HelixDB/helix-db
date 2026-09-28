@@ -265,6 +265,10 @@ async fn verify_indexed_membership() {
         // Properties of bound nodes cannot fail, so they keep index access.
         ("MATCH (a:Item {key: 10})-[:NEXT]->(b:Item) WHERE b.key > a.key RETURN b.name AS v", json!({})),
         ("MATCH (a:Item {key: 12}) MATCH (b:Item) WHERE b.key = 13 AND b.alt > a.alt RETURN b.name AS v", json!({})),
+        // Boolean parameters and projected conditions cannot fail.
+        ("MATCH (n:Item) WHERE n.key = 7 AND $flag RETURN n.name AS v", json!({"flag": true})),
+        ("MATCH (n:Item) WHERE n.key = 7 AND $flag RETURN n.name AS v", json!({"flag": false})),
+        ("MATCH (n:Item) WITH n, n.alt > 3.0 AS big WHERE big AND n.key = 9 RETURN n.name AS v", json!({})),
     ];
     let request = |text: &str, parameters: &serde_json::Value| -> cypher::Request {
         serde_json::from_value(json!({"query": text, "parameters": parameters})).unwrap()
@@ -296,6 +300,11 @@ async fn verify_indexed_membership() {
             "MATCH (n:Item) WHERE n.name = toString(1 / $z) AND n.key IN [] RETURN n.name",
             json!({"z": 0}),
         ),
+        // A condition that is not boolean fails on every row.
+        (
+            "MATCH (n:Item) WHERE n.key = 7 AND $flag RETURN n.name",
+            json!({"flag": 3}),
+        ),
     ];
     let writes = [
         (
@@ -323,9 +332,10 @@ async fn verify_indexed_membership() {
     }
     assert_eq!(written, [vec![vec![json!("n3")]], vec![vec![json!("c")]]]);
     assert!(
-        errors[1..]
+        errors[1..4]
             .iter()
-            .all(|error| error.contains("DivisionByZero")),
+            .all(|error| error.contains("DivisionByZero"))
+            && errors[4].contains("InvalidArgumentType"),
         "{errors:?}"
     );
     let rows = |response: &cypher::Response| response.rows.clone();
@@ -368,7 +378,7 @@ async fn verify_indexed_membership() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        reference[26..40].iter().map(rows).collect::<Vec<_>>(),
+        reference[26..43].iter().map(rows).collect::<Vec<_>>(),
         [
             names(&["n5"]),
             names(&["n7"]),
@@ -384,6 +394,9 @@ async fn verify_indexed_membership() {
             names(&["n5"]),
             names(&["n11"]),
             names(&["n13"]),
+            names(&["n7"]),
+            names(&[]),
+            names(&["n9"]),
         ]
     );
 

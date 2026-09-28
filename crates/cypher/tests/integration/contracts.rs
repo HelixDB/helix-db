@@ -263,6 +263,42 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             assert_eq!(source(&text, 64, Some(P::I64(3))), expected, "{text}");
         }
     }
+    // Boolean parameters, collection literals and projected conditions cannot
+    // fail; a parameter that is not boolean fails as a condition.
+    for (text, parameter, expected) in [
+        (
+            "MATCH (n:N) WHERE n.email = 'a' AND $keys RETURN n",
+            P::Bool(true),
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WHERE n.email = 'a' AND NOT $keys RETURN n",
+            P::Null,
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WHERE n.email = 'a' AND $keys RETURN n",
+            P::I64(1),
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) WHERE n.email = 'a' AND {a: n.age} = {a: [1, $keys]} RETURN n",
+            P::I64(1),
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WITH n, [1, 2] AS xs WHERE n.email = 'a' RETURN n",
+            P::Null,
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WITH n, n.age > 3 AS adult WHERE adult AND n.email = 'a' RETURN n",
+            P::Null,
+            Source::Unique,
+        ),
+    ] {
+        assert_eq!(source(text, 64, Some(parameter)), expected, "{text}");
+    }
     // Arithmetic, functions, non-boolean operands and unbound parameters can fail.
     for sibling in [
         "n.age + 1 > 20",

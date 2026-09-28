@@ -145,7 +145,9 @@ conjunct and every property constraint in the pattern to be unable to fail.
 Comparisons, string predicates, label and null tests, and `AND`, `OR`, `XOR`
 and `NOT` over them cannot fail when their operands are literals, parameters,
 variables, or properties of nodes, relationships and maps, including those bound
-by earlier clauses, because mismatched types compare as null. Arithmetic, a
+by earlier clauses, or list and map literals of those, because mismatched types
+compare as null. A boolean parameter or variable is such a condition too; any
+other value fails as a condition. Arithmetic, a
 function call, or a property of a value of unknown type, such as an `UNWIND`
 element, keeps the label scan. The WHERE of a later `WITH` counts
 too when every clause in between is a `WITH` that only passes variables,

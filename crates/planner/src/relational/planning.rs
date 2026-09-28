@@ -849,7 +849,8 @@ fn index_predicate(
                     .iter()
                     .map(|item| {
                         let value = substitute(&item.expression, &bindings)?;
-                        totality.operand(&value).then_some((item.slot, value))
+                        (totality.operand(&value) || totality.predicate(&value))
+                            .then_some((item.slot, value))
                     })
                     .collect::<Option<BTreeMap<_, _>>>()
                 else {
@@ -914,10 +915,13 @@ impl Totality<'_> {
     }
 
     /// An operand that evaluates without failing: a literal, a slot, a bound
-    /// parameter, or a property of a slot that holds properties.
+    /// parameter, a property of a slot that holds properties, or a list or
+    /// map built from such operands.
     pub(super) fn operand(self, operand: &Expression) -> bool {
         match operand {
             Expression::Literal(_) | Expression::Slot(_) => true,
+            Expression::List(items) => items.iter().all(|item| self.operand(item)),
+            Expression::Map(entries) => entries.iter().all(|(_, value)| self.operand(value)),
             Expression::Parameter(name) => match self.params {
                 Parameters::Bound(params) => {
                     let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
@@ -942,6 +946,21 @@ impl Totality<'_> {
     pub(super) fn predicate(self, expression: &Expression) -> bool {
         match expression {
             Expression::Literal(Value::Boolean(_) | Value::Null) => true,
+            // A condition must be boolean or null; other values fail its truth.
+            Expression::Slot(slot) => matches!(
+                self.bindings[slot.0 as usize].value_type,
+                super::ValueType::Boolean | super::ValueType::Null
+            ),
+            Expression::Parameter(name) => matches!(self.params, Parameters::Bound(params)
+            if matches!(
+                params
+                    .values
+                    .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter")),
+                Some(
+                    helix_ast::value::PropertyValue::Bool(_)
+                        | helix_ast::value::PropertyValue::Null
+                )
+            )),
             Expression::Binary(Binary::And | Binary::Or | Binary::Xor, left, right) => {
                 self.predicate(left) && self.predicate(right)
             }
