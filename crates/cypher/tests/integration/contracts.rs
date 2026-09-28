@@ -285,6 +285,19 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             "MATCH (n:N) WITH n, 'x' AS c WHERE n.key = 1 OR n.key = 2 RETURN n",
             Source::Union,
         ),
+        // A later WHERE that can fail ends the walk but keeps earlier predicates.
+        (
+            "MATCH (n:N) WHERE n.email = 'a' WITH n WHERE n.age + 1 > 3 RETURN n",
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WITH n WHERE n.email = 'a' WITH n WHERE toLower(n.name) = 'x' RETURN n",
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WITH n WHERE n.age + 1 > 3 WITH n WHERE n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
         // A window, DISTINCT, aggregation or a failing item runs first.
         (
             "MATCH (n:N) WITH n ORDER BY n.age LIMIT 3 WHERE n.email = 'a' RETURN n",
@@ -401,8 +414,7 @@ fn correlated_lookups_accept_bound_parameters_in_the_predicate() {
             .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap()),
         ..context::PlannerContext::default()
     };
-    let lookups = |context: &context::PlannerContext| {
-        let text = "UNWIND [1, 2, 3] AS k MATCH (n:N {key: k}) WHERE n.region = $r RETURN n";
+    let lookups_of = |context: &context::PlannerContext, text: &str| {
         r::plan(helix_cypher::compile(text).unwrap(), context)
             .unwrap()
             .matches()
@@ -411,6 +423,12 @@ fn correlated_lookups_accept_bound_parameters_in_the_predicate() {
             .filter(|step| matches!(step, r::MatchStep::IndexLookup(_)))
             .count()
     };
+    let lookups = |context: &context::PlannerContext| {
+        lookups_of(
+            context,
+            "UNWIND [1, 2, 3] AS k MATCH (n:N {key: k}) WHERE n.region = $r RETURN n",
+        )
+    };
     // An unbound parameter could fail on a row the lookup would skip.
     assert_eq!(lookups(&context), 0);
     context.params.values.insert(
@@ -418,6 +436,14 @@ fn correlated_lookups_accept_bound_parameters_in_the_predicate() {
         helix_ast::value::PropertyValue::from("us"),
     );
     assert_eq!(lookups(&context), 1);
+    // A later WHERE that can fail runs after the lookup and keeps it.
+    assert_eq!(
+        lookups_of(
+            &context,
+            "UNWIND [1, 2] AS k MATCH (n:N {key: k}) WITH n WHERE n.age + 0 > 0 RETURN n",
+        ),
+        1
+    );
 }
 
 #[test]

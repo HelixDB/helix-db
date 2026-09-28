@@ -260,6 +260,8 @@ async fn verify_indexed_membership() {
         ("MATCH (n:Item) WITH n WHERE n.key = 5 RETURN n.name AS v", json!({})),
         ("MATCH (n:Item) WITH n AS m WHERE m.key IN [6, 1] RETURN m.name AS v ORDER BY v", json!({})),
         ("MATCH (n:Item) WITH n.key AS k, n WHERE k = 8 RETURN n.name AS v", json!({})),
+        // A later WHERE that can fail keeps the MATCH's own index source.
+        ("MATCH (n:Item) WHERE n.key = 5 WITH n WHERE n.alt + 1 > 0 RETURN n.name AS v", json!({})),
     ];
     let request = |text: &str, parameters: &serde_json::Value| -> cypher::Request {
         serde_json::from_value(json!({"query": text, "parameters": parameters})).unwrap()
@@ -363,7 +365,7 @@ async fn verify_indexed_membership() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        reference[26..37].iter().map(rows).collect::<Vec<_>>(),
+        reference[26..38].iter().map(rows).collect::<Vec<_>>(),
         [
             names(&["n5"]),
             names(&["n7"]),
@@ -376,6 +378,7 @@ async fn verify_indexed_membership() {
             names(&["n5"]),
             names(&["float-one", "n1", "n6"]),
             names(&["n8"]),
+            names(&["n5"]),
         ]
     );
 
@@ -423,6 +426,7 @@ async fn verify_indexed_membership() {
         (cases[26].0, &reference[26]),
         (cases[31].0, &reference[31]),
         (cases[34].0, &reference[34]),
+        (cases[37].0, &reference[37]),
     ] {
         let indexed = run(&db, text).await;
         assert!(

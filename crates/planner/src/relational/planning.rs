@@ -762,10 +762,11 @@ fn plan_accesses(
 ///
 /// Those later predicates drop every row they reject, so a source may skip
 /// such rows as well, provided nothing in between could fail on them: each
-/// projected item must be a total operand, and ordering, SKIP, LIMIT,
-/// DISTINCT and aggregation stop the walk. An OPTIONAL MATCH keeps rows its
-/// predicate rejects, so only its own predicate applies. The caller still
-/// requires the result to be total before extracting any lookup.
+/// projected item must be a total operand, and a later WHERE that can fail,
+/// ordering, SKIP, LIMIT, DISTINCT and aggregation stop the walk. An
+/// OPTIONAL MATCH keeps rows its predicate rejects, so only its own
+/// predicate applies. The caller still requires the result, including the
+/// MATCH's own WHERE, to be total before extracting any lookup.
 fn index_predicate(
     query: &Query,
     index: usize,
@@ -842,7 +843,11 @@ fn index_predicate(
             }
             _ => break,
         };
-        let Some(next) = next else {
+        // A later WHERE that can fail may raise an error on a row the source
+        // would skip, so neither it nor anything after it can select an index.
+        let Some(next) =
+            next.filter(|next| index_predicate_is_total(next, pattern, Parameters::Bound(params)))
+        else {
             break;
         };
         conjuncts.push(next);

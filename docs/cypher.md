@@ -146,7 +146,8 @@ or a function call there keeps the label scan. The WHERE of a later `WITH` count
 too when every clause in between is a `WITH` that only passes variables,
 properties, literals or parameters along, without `DISTINCT`, `ORDER BY`,
 `SKIP`, `LIMIT` or aggregation, so `MATCH (n:User) WITH n AS m WHERE m.email = $e`
-reads the index; it still filters where it is written. Every candidate is
+reads the index; it still filters where it is written. A later `WHERE` that can
+fail ends that chain, so it and anything after it select no index. Every candidate is
 still checked against the complete predicate. Nodes the index excludes are not
 read, so their unsupported stored values, such as temporal or binary data,
 cannot fail the query, and an `IN` list that is never evaluated is not charged
