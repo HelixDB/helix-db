@@ -12,6 +12,7 @@ mod pipeline;
 mod sets;
 mod source;
 
+pub(in crate::rules) use contract::AccessPhysicalContract;
 pub(in crate::rules) use pipeline::{
     access_distinct_pipeline_contract, access_filter_pipeline_contract,
     access_order_pipeline_contract, access_pipeline_physical_contract,

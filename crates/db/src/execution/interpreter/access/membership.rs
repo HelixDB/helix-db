@@ -7,9 +7,12 @@ use crate::encoding::v2::values::property::{equality_index_value, property_value
 use crate::error::Result;
 use crate::query_resources::bitmap;
 
+/// Runtime classification of a bounded equality-domain parameter.
 #[derive(Debug, PartialEq)]
-enum RuntimeEqualityDomain {
+pub(in crate::execution::interpreter) enum RuntimeEqualityDomain {
+    /// Every member has an exact index representation within the bound.
     Indexed(Vec<PropertyValue>),
+    /// The domain needs authoritative evaluation.
     Authoritative(PropertyValue),
 }
 
@@ -49,7 +52,7 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 
-    fn runtime_equality_domain(
+    pub(in crate::execution::interpreter) fn runtime_equality_domain(
         &self,
         plan: &ir::RuntimeEqualitySet,
     ) -> Result<RuntimeEqualityDomain> {

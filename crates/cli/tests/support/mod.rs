@@ -213,12 +213,16 @@ impl CliFixture {
     }
 }
 
+/// The tools [`CliFixture::with_fake_tools`] installs.
+#[allow(dead_code)]
+pub const FAKE_TOOLS: [&str; 8] = [
+    "cargo", "node", "npm", "npx", "curl", "claude", "codex", "opencode",
+];
+
 #[allow(dead_code)]
 fn install_fake_tools(directory: &Path) {
     fs::create_dir_all(directory).expect("create fake tool directory");
-    for tool in [
-        "cargo", "node", "npm", "npx", "curl", "claude", "codex", "opencode",
-    ] {
+    for tool in FAKE_TOOLS {
         install_fake_tool(directory, tool);
     }
 }
@@ -226,18 +230,28 @@ fn install_fake_tools(directory: &Path) {
 #[cfg(windows)]
 #[allow(dead_code)]
 fn install_fake_tool(directory: &Path, tool: &str) {
-    let script = directory.join(format!("{tool}.cmd"));
+    fs::write(
+        directory.join(format!("{tool}.cmd")),
+        windows_fake_tool(tool),
+    )
+    .expect("write fake Windows tool");
+}
+
+/// The Windows fake for `tool`, which the CLI runs as `cmd /C call <tool>.cmd`.
+///
+/// It logs its arguments the way [`WINDOWS_FAKE_DOCKER`] does, and for the
+/// same reason: the redirection comes first and `%*` ends the line.
+#[allow(dead_code)]
+pub fn windows_fake_tool(tool: &str) -> String {
     let log_command = if tool == "node" {
-        r#"if "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG echo node --input-type=module>>"%HELIX_TEST_TOOL_LOG%"
-if not "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG echo node %*>>"%HELIX_TEST_TOOL_LOG%""#
+        r#"if "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG >>"%HELIX_TEST_TOOL_LOG%" echo(node --input-type=module
+if not "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG >>"%HELIX_TEST_TOOL_LOG%" echo(node %*"#
             .to_owned()
     } else {
-        format!(r#"if defined HELIX_TEST_TOOL_LOG echo {tool} %*>>"%HELIX_TEST_TOOL_LOG%""#)
+        format!(r#"if defined HELIX_TEST_TOOL_LOG >>"%HELIX_TEST_TOOL_LOG%" echo({tool} %*"#)
     };
-    fs::write(
-        script,
-        format!(
-            r#"@echo off
+    format!(
+        r#"@echo off
 {log_command}
 set "HELIX_TEST_TOOL_FIRST_ARGUMENT=%~1"
 if "{tool}"=="node" if "%~1"=="--input-type" set "HELIX_TEST_TOOL_FIRST_ARGUMENT=--input-type=module"
@@ -259,9 +273,7 @@ if defined HELIX_TEST_TOOL_STDERR echo %HELIX_TEST_TOOL_STDERR% 1>&2
 if defined HELIX_TEST_TOOL_EXIT_CODE exit /b %HELIX_TEST_TOOL_EXIT_CODE%
 exit /b 0
 "#
-        ),
     )
-    .expect("write fake Windows tool");
 }
 
 #[cfg(not(windows))]
@@ -306,20 +318,30 @@ exit "${{HELIX_TEST_TOOL_EXIT_CODE:-0}}"
     fs::set_permissions(script, permissions).unwrap();
 }
 
-fn install_fake_docker(bin: &Path) -> PathBuf {
-    fs::create_dir_all(bin).expect("create fake docker bin");
-
-    #[cfg(windows)]
-    {
-        let script = bin.join("docker.cmd");
-        fs::write(
-            &script,
-            r#"@echo off
-if defined HELIX_TEST_RUNTIME_LOG echo %*>>"%HELIX_TEST_RUNTIME_LOG%"
+/// The Windows fake runtime, which the CLI runs as `cmd /C call docker.cmd`.
+///
+/// `cmd` expands every `%N` in a parenthesized block before it evaluates the
+/// block's condition, so an argument holding quotes, spaces, or parentheses
+/// aborts the whole script even when the block is skipped. `exec` forwards an
+/// arbitrary in-container command, so it must return before the first block
+/// that reads a positional argument past `%1`.
+///
+/// Nothing may follow `%*` on a line. `cmd` reads a digit that sits between a
+/// delimiter (whitespace, `,`, `;`, or `=`) and `>` as a handle number, so
+/// `echo %*>>log` with a last argument of `-s3.port.lance=0` redirects stdin
+/// (handle 0) to the log and echoes the arguments to stdout instead. With the
+/// redirection first, the arguments end the line just as they ended the
+/// `cmd /C call` line that delivered them, so whatever survived that line
+/// survives this one. `echo(` also prints a first argument such as `off` or
+/// `/?` instead of acting on it.
+#[allow(dead_code)]
+pub const WINDOWS_FAKE_DOCKER: &str = r#"@echo off
+if defined HELIX_TEST_RUNTIME_LOG >>"%HELIX_TEST_RUNTIME_LOG%" echo(%*
 if /I "%1"=="%HELIX_TEST_RUNTIME_FAIL_COMMAND%" (
   echo simulated runtime failure 1>&2
   exit /b 42
 )
+if "%1"=="exec" exit /b 0
 if "%1"=="port" (
   if defined HELIX_TEST_RUNTIME_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_PORT_OUTPUT%
   exit /b 0
@@ -328,12 +350,8 @@ if "%1"=="image" (
   if "%HELIX_TEST_RUNTIME_IMAGE_MISSING%"=="1" (
     if not exist "%HELIX_TEST_RUNTIME_LOG%.pulled" exit /b 1
   )
-  if "%5"=="quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e" (
+  if "%5"=="ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882" (
     echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-    exit /b 0
-  )
-  if "%5"=="quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727" (
-    echo sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
     exit /b 0
   )
   echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -438,9 +456,15 @@ if "%1"=="volume" (
   exit /b 1
 )
 exit /b 0
-"#,
-        )
-        .expect("write fake docker cmd");
+"#;
+
+fn install_fake_docker(bin: &Path) -> PathBuf {
+    fs::create_dir_all(bin).expect("create fake docker bin");
+
+    #[cfg(windows)]
+    {
+        let script = bin.join("docker.cmd");
+        fs::write(&script, WINDOWS_FAKE_DOCKER).expect("write fake docker cmd");
         script
     }
 
@@ -460,12 +484,12 @@ if [ "$1" = "$HELIX_TEST_RUNTIME_FAIL_COMMAND" ]; then
   exit 42
 fi
 case "$1" in
+  exec) exit 0 ;;
   port) printf '%s\n' "$HELIX_TEST_RUNTIME_PORT_OUTPUT"; exit 0 ;;
   image)
     if [ "$HELIX_TEST_RUNTIME_IMAGE_MISSING" = "1" ] && [ ! -f "$HELIX_TEST_RUNTIME_LOG.pulled" ]; then exit 1; fi
     case "$5" in
-      quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e) echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; exit 0 ;;
-      quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727) echo sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd; exit 0 ;;
+      ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882) echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; exit 0 ;;
     esac
     echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     exit 0

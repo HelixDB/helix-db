@@ -1101,6 +1101,7 @@ impl<'db> ExecutionContext<'db> {
                     .len() as usize
                 }
                 exec::ExecCountCursorPlan::Filter { .. }
+                | exec::ExecCountCursorPlan::IndexMembership { .. }
                 | exec::ExecCountCursorPlan::Window { .. }
                 | exec::ExecCountCursorPlan::Union { .. }
                 | exec::ExecCountCursorPlan::Intersect { .. }
@@ -1266,6 +1267,7 @@ impl<'db> ExecutionContext<'db> {
                     dependency,
                 ),
             exec::ExecCountCursorPlan::Filter { .. }
+            | exec::ExecCountCursorPlan::IndexMembership { .. }
             | exec::ExecCountCursorPlan::Window { .. }
             | exec::ExecCountCursorPlan::Union { .. }
             | exec::ExecCountCursorPlan::Intersect { .. }

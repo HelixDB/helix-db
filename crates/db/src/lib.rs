@@ -537,17 +537,26 @@ impl VectorMemoryRefreshTask {
 struct VectorMemoryCache {
     registry: Arc<search::vector::VectorCacheRegistry>,
     simhasher_registry: Arc<search::vector::SimHasherRegistry>,
+    /// How managed searches, mutations and lifecycle builds fetch row batches
+    /// the resident cache does not hold, fixed by whether SlateDB has a block
+    /// cache.
+    batch_reads: search::vector::VectorBatchReads,
     refresh_task: Mutex<Option<VectorMemoryRefreshTask>>,
 }
 
 impl VectorMemoryCache {
     /// Builds all vector runtime caches from one validated, non-persisted policy.
-    fn new(settings: config::VectorMemorySettings) -> Self {
+    fn new(
+        settings: config::VectorMemorySettings,
+        visibility: search::vector::VectorCacheVisibility,
+        batch_reads: search::vector::VectorBatchReads,
+    ) -> Self {
         Self {
-            registry: Arc::new(search::vector::VectorCacheRegistry::default()),
+            registry: Arc::new(search::vector::VectorCacheRegistry::new(visibility)),
             simhasher_registry: Arc::new(search::vector::SimHasherRegistry::new(
                 search::vector::SimHasherRegistryLimits::from_config(settings.simhasher_cache()),
             )),
+            batch_reads,
             refresh_task: Mutex::new(None),
         }
     }
@@ -804,6 +813,12 @@ struct HelixDBInner {
     query_metrics_runtime: Mutex<Option<telemetry::Runtime>>,
     commit_completions: commit_completion::Tracker,
     close_state: Mutex<CloseState>,
+    /// Index membership sets resolved from secondary indexes by any request.
+    ///
+    /// The per-row fallback keeps exactly the same rows, so only this count
+    /// tells tests that a request really read a set.
+    #[cfg(test)]
+    resolved_index_memberships: std::sync::atomic::AtomicUsize,
 }
 
 /// Non-forgeable evidence that planning observed one exact runtime catalog.
@@ -1436,7 +1451,23 @@ impl HelixDB {
         index_scheduling: IndexLifecycleScheduling,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
-        let vector_memory = VectorMemoryCache::new(*config.db().cache().vector_memory());
+        // Every vector commit on a writer passes the registry fence, while
+        // readers observe commits without one and attach only exact sequences.
+        let vector_memory = VectorMemoryCache::new(
+            *config.db().cache().vector_memory(),
+            match storage.handle() {
+                HelixStorage::Writer(_) => search::vector::VectorCacheVisibility::CommitFenced,
+                HelixStorage::Reader(_) => search::vector::VectorCacheVisibility::ExactSequence,
+            },
+            // Concurrent chunks repeat SST filter and index reads that only a
+            // SlateDB block cache deduplicates.
+            match config.db().cache().mode() {
+                CacheMode::VectorMemoryOnly => search::vector::VectorBatchReads::Single,
+                CacheMode::Memory { .. } | CacheMode::Hybrid { .. } => {
+                    search::vector::VectorBatchReads::Concurrent
+                }
+            },
+        );
         let index_scope_gates = Arc::new(index_lifecycle::IndexScopeGates::default());
         let secondary_tuning = config.db().secondary_index_lifecycle();
         let lifecycle_throughput = config.db().index_lifecycle_throughput();
@@ -1463,7 +1494,8 @@ impl HelixDB {
                 Arc::clone(&vector_memory.registry),
                 Arc::clone(&vector_memory.simhasher_registry),
             )
-            .with_scan_tuning(lifecycle_throughput.scan()),
+            .with_scan_tuning(lifecycle_throughput.scan())
+            .with_batch_reads(vector_memory.batch_reads),
         );
         let secondary_scheduling = index_scheduling.resolve(match secondary_tuning.worker_mode() {
             config::SecondaryIndexLifecycleWorkerMode::Enabled => {
@@ -1559,6 +1591,8 @@ impl HelixDB {
                 query_metrics_runtime: Mutex::new(None),
                 commit_completions: commit_completion::Tracker::default(),
                 close_state: Mutex::new(CloseState::Open),
+                #[cfg(test)]
+                resolved_index_memberships: std::sync::atomic::AtomicUsize::new(0),
                 config,
             }),
         }
@@ -2300,15 +2334,27 @@ impl HelixDB {
 
     /// Refresh descriptor-bound vector caches from canonical Active generations.
     ///
-    /// Writer storage supplies the exact snapshot sequence required by cache
-    /// visibility checks. Standalone readers expose no comparable WAL-inclusive
-    /// sequence and therefore remain on durable-storage fallback.
+    /// Writer and reader storage both hydrate from SlateDB snapshots whose
+    /// sequence is the one request read views report, so a published store is
+    /// attached only to request snapshots it is proven current for.
+    ///
+    /// On a reader node this returns [`HelixDbError::RequestReadViewChanged`]
+    /// when the reader applied newer state during a scope's catalog read or a
+    /// store's load: that scope or store was skipped, every other one was
+    /// refreshed, and a retry refreshes the rest.
     pub async fn refresh_vector_memory_cache(&self) -> Result<()> {
-        self.refresh_loaded_vector_memory_caches(
-            self.inner.config.db().cache().vector_memory().budget(),
-            None,
-        )
-        .await
+        match self
+            .refresh_loaded_vector_memory_caches(
+                self.inner.config.db().cache().vector_memory().budget(),
+                None,
+            )
+            .await?
+        {
+            search::vector::VectorCacheHydrationOutcome::Settled => Ok(()),
+            search::vector::VectorCacheHydrationOutcome::Outrun => {
+                Err(HelixDbError::RequestReadViewChanged)
+            }
+        }
     }
 
     /// Snapshot shared FTS split-cache state.
@@ -2564,12 +2610,13 @@ impl HelixDB {
     /// A bounded global budget is divided deterministically across scopes before
     /// per-index admission. The inventory is reread on every pass, so tenant
     /// scopes loaded after task startup participate without restarting the
-    /// worker.
+    /// worker. A reader that advances during one scope's catalog read skips
+    /// only that scope, and the pass reports it as outrun.
     async fn refresh_loaded_vector_memory_caches(
         &self,
         budget: config::VectorMemoryBudget,
         mut shutdown: Option<&mut watch::Receiver<bool>>,
-    ) -> Result<()> {
+    ) -> Result<search::vector::VectorCacheHydrationOutcome> {
         let scopes = self
             .inner
             .runtime_state
@@ -2581,6 +2628,7 @@ impl HelixDB {
                 "vector memory loaded scope count exceeds u64".to_string(),
             )
         })?;
+        let mut outcome = search::vector::VectorCacheHydrationOutcome::Settled;
         for (ordinal, scope) in scopes.into_iter().enumerate() {
             if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
                 break;
@@ -2598,30 +2646,46 @@ impl HelixDB {
                 }
                 None => None,
             };
-            self.refresh_one_vector_memory_scope(
-                scope,
-                search::vector::VectorCacheHydrationBudget::from_optional_bytes(scope_budget),
-                shutdown.as_deref_mut(),
-            )
-            .await?;
+            outcome = outcome.max(
+                self.refresh_one_vector_memory_scope(
+                    scope,
+                    search::vector::VectorCacheHydrationBudget::from_optional_bytes(scope_budget),
+                    shutdown.as_deref_mut(),
+                )
+                .await?,
+            );
         }
-        Ok(())
+        Ok(outcome)
     }
 
-    /// Hydrates one scope from exact Active handles and one stable writer snapshot.
+    /// Hydrates one scope from exact Active handles and this node's snapshots.
     async fn refresh_one_vector_memory_scope(
         &self,
         scope: DataScope,
         budget: search::vector::VectorCacheHydrationBudget,
         shutdown: Option<&mut watch::Receiver<bool>>,
-    ) -> Result<()> {
-        let HelixStorage::Writer(writer) = self.storage() else {
-            return Ok(());
-        };
-        self.refresh_runtime_catalog(scope).await?;
+    ) -> Result<search::vector::VectorCacheHydrationOutcome> {
+        match self.refresh_runtime_catalog(scope).await {
+            Ok(()) => {}
+            // The reader applied newer state during the catalog read, so the
+            // scope keeps its stores until a later pass.
+            Err(HelixDbError::RequestReadViewChanged) => {
+                return Ok(search::vector::VectorCacheHydrationOutcome::Outrun);
+            }
+            Err(error) => return Err(error),
+        }
         let active = self.active_index_handles_loaded(scope);
+        let source = match self.storage() {
+            HelixStorage::Reader(reader) => {
+                search::vector::VectorCacheSnapshotSource::Reader(reader.as_ref())
+            }
+            HelixStorage::Writer(writer) => {
+                search::vector::VectorCacheSnapshotSource::Writer(writer.db())
+            }
+        };
         search::vector::hydrate_active_generations(
-            writer.db(),
+            source,
+            scope,
             active,
             &self.inner.caches.vector_memory.registry,
             budget,
@@ -2635,12 +2699,17 @@ impl HelixDB {
         settings: config::VectorMemorySettings,
         allow_blocking: bool,
     ) -> Result<()> {
-        if matches!(self.storage(), HelixStorage::Reader(_)) {
-            return Ok(());
-        }
         match settings.hydration() {
             config::VectorMemoryHydrationMode::BlockingThenBackground { .. } if allow_blocking => {
-                self.refresh_vector_memory_cache().await?;
+                match self.refresh_vector_memory_cache().await {
+                    Ok(()) => {}
+                    // A reader poller advanced during a catalog read or a
+                    // load; the background loop refreshes what was skipped.
+                    Err(HelixDbError::RequestReadViewChanged) => {
+                        tracing::debug!("reader advanced during blocking vector memory warm");
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             config::VectorMemoryHydrationMode::BlockingThenBackground { .. }
             | config::VectorMemoryHydrationMode::Background { .. } => {}
@@ -2649,43 +2718,73 @@ impl HelixDB {
         let runtime = Arc::downgrade(&self.inner);
         let budget = settings.budget();
         let interval = Duration::from_secs(settings.poll_interval_secs());
-        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let (shutdown, shutdown_rx) = watch::channel(false);
         let (initial_refresh_tx, initial_refresh) = watch::channel(false);
-        let handle = tokio::spawn(async move {
-            let mut initial_refresh_tx = Some(initial_refresh_tx);
-            loop {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-                let Some(inner) = runtime.upgrade() else {
-                    break;
+        let pass_shutdown = shutdown_rx.clone();
+        // A pass holds the database only while it runs, so a waiting loop
+        // never keeps a closed database alive.
+        let refresh = move || {
+            let runtime = runtime.clone();
+            let mut shutdown = pass_shutdown.clone();
+            async move {
+                let database = HelixDB {
+                    inner: runtime.upgrade()?,
                 };
-                let database = HelixDB { inner };
-                let result = database
-                    .refresh_loaded_vector_memory_caches(budget, Some(&mut shutdown_rx))
-                    .await;
-                drop(database);
-                if let Err(err) = result {
-                    tracing::warn!(error = %err, "failed to refresh vector memory stores");
-                }
-                if let Some(initial_refresh_tx) = initial_refresh_tx.take() {
-                    let _ = initial_refresh_tx.send(true);
-                }
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        match changed {
-                            Ok(()) => {
-                                if *shutdown_rx.borrow() {
+                Some(
+                    match database
+                        .refresh_loaded_vector_memory_caches(budget, Some(&mut shutdown))
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to refresh vector memory stores");
+                            search::vector::VectorCacheHydrationOutcome::Settled
+                        }
+                    },
+                )
+            }
+        };
+        let handle = match self.storage() {
+            // Reader snapshots advance only when the poller applies new WAL or
+            // manifest state, and exact-sequence stores attach only at that
+            // state, so readers refresh after each advance, paced by how long
+            // their passes run.
+            HelixStorage::Reader(reader) => tokio::spawn(search::vector::run_reader_refreshes(
+                reader.subscribe(),
+                |status: &slatedb::DbStatus| status.durable_seq,
+                interval,
+                shutdown_rx,
+                initial_refresh_tx,
+                refresh,
+            )),
+            // Commit-fenced writer stores stay attached across sequences, so
+            // the writer refreshes on its interval.
+            HelixStorage::Writer(_) => {
+                let mut shutdown_rx = shutdown_rx;
+                tokio::spawn(async move {
+                    loop {
+                        // Checked on its own so the flag's guard is released
+                        // before the pass awaits.
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                        if refresh().await.is_none() {
+                            break;
+                        }
+                        initial_refresh_tx
+                            .send_if_modified(|refreshed| !std::mem::replace(refreshed, true));
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
                                     break;
                                 }
                             }
-                            Err(_) => break,
+                            () = tokio::time::sleep(interval) => {}
                         }
                     }
-                    _ = tokio::time::sleep(interval) => {}
-                }
+                })
             }
-        });
+        };
         *self.inner.caches.vector_memory.refresh_task.lock().await =
             Some(VectorMemoryRefreshTask {
                 shutdown,
@@ -2921,6 +3020,11 @@ impl HelixDB {
     /// Returns the runtime-owned bounded SimHasher projection registry.
     pub(crate) fn simhasher_registry(&self) -> &Arc<search::vector::SimHasherRegistry> {
         &self.inner.caches.vector_memory.simhasher_registry
+    }
+
+    /// Returns how managed vector reads fetch row batches on this node.
+    pub(crate) fn vector_batch_reads(&self) -> search::vector::VectorBatchReads {
+        self.inner.caches.vector_memory.batch_reads
     }
 
     pub(crate) fn runtime_config_snapshot_loaded(&self, scope: DataScope) -> RuntimeIndexCatalog {
@@ -4325,7 +4429,11 @@ mod tests {
             config::SimHasherCacheSettings::try_new(3 * 64 * core::mem::size_of::<f32>(), 2)
                 .unwrap(),
         );
-        let cache = VectorMemoryCache::new(settings);
+        let cache = VectorMemoryCache::new(
+            settings,
+            search::vector::VectorCacheVisibility::ExactSequence,
+            search::vector::VectorBatchReads::Single,
+        );
         assert!(cache.simhasher_registry.validate_dimension(3).is_ok());
         assert!(cache.simhasher_registry.validate_dimension(4).is_err());
     }
@@ -4421,7 +4529,7 @@ mod tests {
 
         let guard = db
             .vector_cache_registry()
-            .read_guard_for(&generation)
+            .resident_guard_for(&generation)
             .unwrap();
         assert_eq!(
             guard.store().get_upper_vector(7).as_deref(),

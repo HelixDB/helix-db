@@ -441,7 +441,7 @@ pub(in crate::exec) fn predicate_cost_for_rows(
     rows: Option<u64>,
 ) -> cost::CostVector {
     let rows = rows.unwrap_or_else(|| profile.default_unknown_scan_rows.as_rows());
-    profile.predicate_eval(cost::EstimatedRows::rows(rows))
+    profile.stored_predicate_filter(cost::EstimatedRows::rows(rows))
 }
 
 #[cfg(test)]

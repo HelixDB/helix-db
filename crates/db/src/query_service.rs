@@ -773,6 +773,8 @@ impl QueryResponse {
 }
 
 #[cfg(test)]
+mod index_membership_tests;
+#[cfg(test)]
 mod selective_equality_tests;
 
 #[cfg(test)]

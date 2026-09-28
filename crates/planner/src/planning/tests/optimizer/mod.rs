@@ -5,6 +5,7 @@ mod batch_controls;
 mod chosen_plans;
 mod control_flow;
 mod empty_sources;
+mod index_membership;
 mod mutation_ddl;
 mod parameter_specialization;
 mod predicate_limits;

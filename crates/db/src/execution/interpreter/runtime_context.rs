@@ -287,6 +287,8 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) row_mode_max_rows: row_mode::RowModeMaxRowsSetting,
     pub(in crate::execution::interpreter) execution_control:
         crate::execution_control::ExecutionControl,
+    /// Index memberships resolved in the current request state.
+    pub(in crate::execution::interpreter) prepared_memberships: super::stream::PreparedMemberships,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
     #[cfg(test)]
@@ -362,6 +364,7 @@ impl<'db> ExecutionContext<'db> {
             pending_catalog_freshness: catalog_freshness,
             row_mode_max_rows: row_mode::RowModeMaxRowsSetting::default(),
             execution_control,
+            prepared_memberships: super::stream::PreparedMemberships::default(),
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
             #[cfg(test)]

@@ -112,10 +112,16 @@ pub(crate) struct VectorMemoryDirtyRows {
 }
 
 /// Shared, ref-counted rows that are being committed and must bypass memory cache.
+///
+/// One fence exists per cache identity. `pending_commits` counts storage
+/// commits between their pre-commit acquisition and their resolution, and
+/// `generation` advances once per resolved or abandoned commit that may have
+/// changed rows, so a store can be proven current against both.
 pub(crate) struct VectorMemoryPendingDirtyRows {
     dirty_nodes: DashMap<NodeId, usize>,
     dirty_upper_neighbors: DashMap<(u16, NodeId), usize>,
     dirty_all: AtomicUsize,
+    pending_commits: AtomicUsize,
     generation: AtomicU64,
     publish_lock: Mutex<()>,
 }
@@ -471,15 +477,18 @@ impl VectorMemoryPendingDirtyRows {
             dirty_nodes: DashMap::new(),
             dirty_upper_neighbors: DashMap::new(),
             dirty_all: AtomicUsize::new(0),
+            pending_commits: AtomicUsize::new(0),
             generation: AtomicU64::new(0),
             publish_lock: Mutex::new(()),
         }
     }
 
+    /// Registers one storage commit and fences its rows until the guard drops.
     pub(crate) fn acquire(
         self: &Arc<Self>,
         dirty_rows: &VectorMemoryDirtyRows,
     ) -> VectorMemoryPendingDirtyGuard {
+        self.pending_commits.fetch_add(1, Ordering::AcqRel);
         let dirty_nodes = dirty_rows.dirty_nodes();
         let dirty_upper_neighbors = dirty_rows.dirty_upper_neighbors();
 
@@ -516,8 +525,14 @@ impl VectorMemoryPendingDirtyRows {
         self.generation.load(Ordering::Acquire)
     }
 
-    pub(crate) fn bump_generation(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
+    /// Advances the commit generation and returns the generation it replaced.
+    pub(crate) fn bump_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::AcqRel)
+    }
+
+    /// Returns whether a storage commit on this identity is still unresolved.
+    pub(crate) fn has_pending_commits(&self) -> bool {
+        self.pending_commits.load(Ordering::Acquire) > 0
     }
 
     pub(crate) fn is_all_dirty(&self) -> bool {
@@ -571,15 +586,18 @@ impl Default for VectorMemoryPendingDirtyRows {
 
 impl Drop for VectorMemoryPendingDirtyGuard {
     fn drop(&mut self) {
-        if self.dirty_all {
-            self.pending.dirty_all.fetch_sub(1, Ordering::AcqRel);
-        }
         for &node_id in &self.dirty_nodes {
             VectorMemoryPendingDirtyRows::decrement(&self.pending.dirty_nodes, node_id);
         }
         for &row in &self.dirty_upper_neighbors {
             VectorMemoryPendingDirtyRows::decrement(&self.pending.dirty_upper_neighbors, row);
         }
+        let counter = if self.dirty_all {
+            &self.pending.dirty_all
+        } else {
+            &self.pending.pending_commits
+        };
+        counter.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -617,8 +635,10 @@ impl VectorMemoryStore {
         self.visible_seq == snapshot_seq
     }
 
-    /// Return whether this store can be used by a write transaction snapshot.
-    #[cfg(any(test, feature = "production-coverage"))]
+    /// Return whether this store is old enough for a commit-fenced snapshot.
+    ///
+    /// This is only the sequence half of writer visibility; the registry must
+    /// also prove through the commit fence that no newer write is missing.
     pub fn is_usable_for_writer_snapshot(&self, snapshot_seq: u64) -> bool {
         self.visible_seq <= snapshot_seq
     }
@@ -1332,13 +1352,15 @@ mod tests {
         assert!(absent.is_empty(), "decrementing an absent row is a no-op");
 
         assert_eq!(pending.generation(), 0);
-        pending.bump_generation();
+        assert_eq!(pending.bump_generation(), 0);
         assert_eq!(pending.generation(), 1);
         let publish_guard = pending.lock_publish().await;
         drop(publish_guard);
 
+        assert!(!pending.has_pending_commits());
         let first = pending.acquire(&rows);
         let second = pending.acquire(&rows);
+        assert!(pending.has_pending_commits());
         assert!(pending.is_node_dirty(7));
         assert!(pending.is_upper_neighbors_dirty(4, 7));
         assert!(pending.is_upper_neighbors_dirty(2, 9));
@@ -1347,13 +1369,19 @@ mod tests {
             pending.is_node_dirty(7),
             "the second guard still owns the row"
         );
+        assert!(pending.has_pending_commits());
         drop(second);
+        assert!(!pending.has_pending_commits());
         assert!(!pending.is_node_dirty(7));
         assert!(!pending.is_upper_neighbors_dirty(2, 9));
 
         let first_all = pending.acquire_all();
         let second_all = pending.acquire_all();
         assert!(pending.is_all_dirty());
+        assert!(
+            !pending.has_pending_commits(),
+            "retirement fences every row without counting as a storage commit"
+        );
 
         drop(first_all);
         assert!(pending.is_all_dirty());

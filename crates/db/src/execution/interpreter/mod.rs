@@ -265,6 +265,7 @@ impl RequestSideEffects {
             | exec::ExecOp::VectorSearch { .. }
             | exec::ExecOp::TextSearch { .. }
             | exec::ExecOp::Filter { .. }
+            | exec::ExecOp::IndexMembership { .. }
             | exec::ExecOp::Limit { .. }
             | exec::ExecOp::Skip { .. }
             | exec::ExecOp::Range { .. }

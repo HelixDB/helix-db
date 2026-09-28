@@ -102,7 +102,7 @@ enum Commands {
         /// Override local port for this run
         #[arg(long)]
         port: Option<u16>,
-        /// Use on-disk storage backed by a local MinIO container for this run
+        /// Use on-disk storage backed by a local SeaweedFS container for this run
         #[arg(long, conflicts_with = "storage_uri")]
         disk: bool,
         #[command(flatten)]

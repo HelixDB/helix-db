@@ -12,7 +12,7 @@ Stop a background local instance and remove its containers.
 
 `helix stop` is idempotent — if the instance is not running, the CLI exits successfully without error.
 
-For disk-mode instances, `helix stop` removes the Helix and MinIO containers but keeps the persistent local volume. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
+For disk-mode instances, `helix stop` removes the Helix and SeaweedFS containers, and any MinIO sidecar left by an older CLI, but keeps the persistent local volumes. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
 
 ## Usage
 

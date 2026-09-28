@@ -42,6 +42,8 @@ pub enum PhysicalCardinality {
     SetIntersection,
     /// Authoritative predicate filter cursor.
     FilterStream,
+    /// Node secondary-index membership cursor.
+    IndexMembershipStream,
     /// Expansion cursor.
     ExpandStream,
     /// Explicit distinct cursor.
@@ -185,6 +187,9 @@ fn cursor_family(cursor: &exec::ExecCountCursorPlan) -> PhysicalCardinality {
         exec::ExecCountCursorPlan::Union { .. } => PhysicalCardinality::SetUnion,
         exec::ExecCountCursorPlan::Intersect { .. } => PhysicalCardinality::SetIntersection,
         exec::ExecCountCursorPlan::Filter { .. } => PhysicalCardinality::FilterStream,
+        exec::ExecCountCursorPlan::IndexMembership { .. } => {
+            PhysicalCardinality::IndexMembershipStream
+        }
         exec::ExecCountCursorPlan::Window { input, .. } => cursor_family(input),
         exec::ExecCountCursorPlan::Order { .. } => PhysicalCardinality::OrderedStream,
         exec::ExecCountCursorPlan::Expand { .. } => PhysicalCardinality::ExpandStream,
@@ -746,6 +751,25 @@ mod tests {
                     predicate: predicate(),
                 },
                 PhysicalCardinality::FilterStream,
+            ),
+            (
+                exec::ExecCountCursorPlan::IndexMembership {
+                    input: Box::new(direct()),
+                    plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                        &ir::NodeIndexMembershipPlan::new(
+                            ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                                index: catalog::NodeEqualityIndexMeta::new(name("node-equality")),
+                                key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+                                value: ir::IndexValue::Param(name("status")),
+                            })
+                            .unwrap(),
+                            ir::PredicatePlan::new(Predicate::eq_param("status", "status"))
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    )),
+                },
+                PhysicalCardinality::IndexMembershipStream,
             ),
             (
                 exec::ExecCountCursorPlan::Window {

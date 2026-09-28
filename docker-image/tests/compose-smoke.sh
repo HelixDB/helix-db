@@ -46,7 +46,10 @@ fixtures_dir="$script_dir/fixtures"
 compose_file="$fixtures_dir/docker-compose.yml"
 port=${HELIX_IMAGE_COMPOSE_PORT:-18120}
 project="helixdb-image-compose-${RANDOM}-$$"
-mc_image="quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+# Static identity from the Compose fixture's SeaweedFS S3 config.
+s3_bucket="helix-db"
+s3_access_key="helix"
+s3_secret_key="helix-local-secret"
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -117,33 +120,40 @@ if not isinstance(value, (list, dict)) or len(value) == 0:
 PY
 }
 
-assert_minio_objects_present() {
+assert_seaweedfs_objects_present() {
+  local container=$1
   local objects
-  objects=$(docker run --rm \
-    --platform "$platform" \
-    --network "${project}_default" \
-    --entrypoint /bin/sh \
-    "$mc_image" \
-    -c 'until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do sleep 1; done; mc ls --recursive local/helix-db')
-  if [[ "$objects" != *"db/manifest/"* ]]; then
+  objects=$(docker exec "$container" curl -fsS --max-time 30 \
+    --aws-sigv4 aws:amz:us-east-1:s3 --user "${s3_access_key}:${s3_secret_key}" \
+    "http://127.0.0.1:8333/${s3_bucket}?list-type=2&prefix=db/manifest/")
+  if [[ "$objects" != *"<Key>db/manifest/"* ]]; then
     printf '%s\n' "$objects" >&2
-    printf 'expected MinIO to contain db/manifest objects\n' >&2
+    printf 'expected SeaweedFS to contain db/manifest objects\n' >&2
     exit 1
   fi
 }
 
-log "Pulling pinned MinIO dependencies from Quay"
-compose pull minio minio-init
+log "Pulling pinned SeaweedFS and request-trace dependencies"
+compose pull seaweedfs s3-trace
 
-log "Starting pinned MinIO Compose fixture"
+log "Starting pinned SeaweedFS Compose fixture"
 compose up -d >/dev/null
+seaweedfs_container=$(compose ps -q seaweedfs)
+log "Probing S3 conditional writes directly and through the request trace"
+python3 "$script_dir/s3_conditional_writes.py" \
+  --container "$seaweedfs_container" \
+  --endpoint http://127.0.0.1:8333 \
+  --endpoint http://s3-trace:8333 \
+  --bucket "$s3_bucket" \
+  --access-key "$s3_access_key" \
+  --secret-key "$s3_secret_key"
 wait_for_http "http://127.0.0.1:${port}/healthz"
 wait_for_http "http://127.0.0.1:${port}/readyz"
 post_json dynamic-write.json true >/dev/null
 assert_users_nonempty "$(post_json dynamic-read.json)"
-assert_minio_objects_present
+assert_seaweedfs_objects_present "$seaweedfs_container"
 
-log "Replacing Helix while preserving MinIO"
+log "Replacing Helix while preserving SeaweedFS"
 compose up -d --force-recreate helix >/dev/null
 wait_for_http "http://127.0.0.1:${port}/readyz"
 assert_users_nonempty "$(post_json dynamic-read.json)"
@@ -154,5 +164,5 @@ compose up -d >/dev/null
 wait_for_http "http://127.0.0.1:${port}/readyz"
 assert_users_nonempty "$(post_json dynamic-read.json)"
 log "Checking idle vector refresh and post-write search"
-python3 "$script_dir/vector_idle_refresh.py" --port "$port" --project "$project" --mc-image "$mc_image"
+python3 "$script_dir/vector_idle_refresh.py" --port "$port" --project "$project"
 log "S3-compatible Compose smoke test passed"

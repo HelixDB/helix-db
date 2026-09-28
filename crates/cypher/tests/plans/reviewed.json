@@ -14624,7 +14624,7 @@
         "memo_exprs": 5,
         "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 8,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14638,7 +14638,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "dfe07525ef8d8decdff773fa063776ce3f4cfc85f0282abc41b32cd199f6484e"
+      "sha256": "7fc59cec58f94a96704c836f7c5a337af3c617e097e937d6f1aa2dae42d736e9"
     },
     "native/BranchHeavyQueries/scale=1/storage=cold_50ms": {
       "error": null,
@@ -14648,7 +14648,7 @@
         "memo_exprs": 5,
         "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 8,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14662,7 +14662,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "8408b5946f7d9d215782e6f44c09eccf933f82421706c59b336b69a6d93eaa67"
+      "sha256": "72f361014b39b0a82bf5091526ffc864c8ef7de605b84b91017ea6e9b2f8286d"
     },
     "native/BranchHeavyQueries/scale=1/storage=default": {
       "error": null,
@@ -14672,7 +14672,7 @@
         "memo_exprs": 5,
         "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 8,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14686,7 +14686,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "3f7aa5efc62f2900219c0f0045c22d0f8b83c9b7096b0c3b9079439349370295"
+      "sha256": "177b1bab5c7a705084bcf73dd3412560410d0a64564d6096cb45b096a4d94cf2"
     },
     "native/BranchHeavyQueries/scale=32/storage=cold_200ms": {
       "error": null,
@@ -14696,7 +14696,7 @@
         "memo_exprs": 35,
         "memo_groups": 34,
         "rejected_alternatives": 0,
-        "rule_fires": 68,
+        "rule_fires": 100,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14710,7 +14710,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "5a9522fe0b5e5df5b0c4c3a62e3d4016849b7a109d544d92622a100866307e30"
+      "sha256": "2365e1976deacb05c2106fd009c02fa0e7b748843b32bcb935d091a97ca34fdc"
     },
     "native/BranchHeavyQueries/scale=32/storage=cold_50ms": {
       "error": null,
@@ -14720,7 +14720,7 @@
         "memo_exprs": 35,
         "memo_groups": 34,
         "rejected_alternatives": 0,
-        "rule_fires": 68,
+        "rule_fires": 100,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14734,7 +14734,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "1b56f758e2835a66150302dc0ecd5abc637191d25c93fd82e8f1dbf1691b9069"
+      "sha256": "55802c9e6beab9059d66c49a5f71336b3e9556bc5739030acf9847708787f5f5"
     },
     "native/BranchHeavyQueries/scale=32/storage=default": {
       "error": null,
@@ -14744,7 +14744,7 @@
         "memo_exprs": 35,
         "memo_groups": 34,
         "rejected_alternatives": 0,
-        "rule_fires": 68,
+        "rule_fires": 100,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14758,7 +14758,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "d83b48278d5d386b86e49d4c3f0fd7caf0801a99b2deb7cfb3217dcd6dd58f4f"
+      "sha256": "53dc2ff5f519280c0dbb5a3634679ede8c1d72015ff75985c6f8e9a34269c2fc"
     },
     "native/BranchHeavyQueries/scale=8/storage=cold_200ms": {
       "error": null,
@@ -14768,7 +14768,7 @@
         "memo_exprs": 11,
         "memo_groups": 10,
         "rejected_alternatives": 0,
-        "rule_fires": 20,
+        "rule_fires": 28,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14782,7 +14782,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "6de53c901cbc4ddd9d8dac494f609e564b3fc7d155370e5caa01dbc88d261221"
+      "sha256": "91357e162b6ceaf7ebf453fd92bfd12331899063f249396102e64f695d6fa859"
     },
     "native/BranchHeavyQueries/scale=8/storage=cold_50ms": {
       "error": null,
@@ -14792,7 +14792,7 @@
         "memo_exprs": 11,
         "memo_groups": 10,
         "rejected_alternatives": 0,
-        "rule_fires": 20,
+        "rule_fires": 28,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14806,7 +14806,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "cdddf2f00b74eeeaa9e1ce0056035af1228f6332a633be8ab3614e6487f0a4b9"
+      "sha256": "ff850ea7d4a84ba6a6ae12f23dddc1d558c60373c5181edceae2399df0dd653e"
     },
     "native/BranchHeavyQueries/scale=8/storage=default": {
       "error": null,
@@ -14816,7 +14816,7 @@
         "memo_exprs": 11,
         "memo_groups": 10,
         "rejected_alternatives": 0,
-        "rule_fires": 20,
+        "rule_fires": 28,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14830,7 +14830,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "927b7f4551f7ca890323d3103626f017247585b2157accc4ceae7ef00fca5d79"
+      "sha256": "39d49ebb47f23469a0c7047186e8c058feff0fe7e9e4971ed132b24a8dbdb8d8"
     },
     "native/DeepTraversalChain/scale=1/storage=cold_200ms": {
       "error": null,
@@ -14840,7 +14840,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14854,7 +14854,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "9c6db22f31b9205ee2632892245818a7ea34b56a912c260bf121a98d0d55df5d"
+      "sha256": "8f4bdaefe12b268225808b8f9355c66217386c2ee0acc132c2fc1810459fe0cc"
     },
     "native/DeepTraversalChain/scale=1/storage=cold_50ms": {
       "error": null,
@@ -14864,7 +14864,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14878,7 +14878,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "359279bc0df5022fdccbcb62459ca45a5a9b12f80ceb9e1a67896dea27d3e046"
+      "sha256": "5204e6e627de2339f6b93aa2d8a11f365e171aec1381696b67160efc487007d3"
     },
     "native/DeepTraversalChain/scale=1/storage=default": {
       "error": null,
@@ -14888,7 +14888,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14902,7 +14902,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "bf5e1fcccab65b40c1eb3d179c810b4c68d551d0ccc247871a5eb54634bceabd"
+      "sha256": "2a2d4dd7ebf1b33a82b1b5dbef1227121f4468d405b32193cb6bf70e5ffcd836"
     },
     "native/DeepTraversalChain/scale=32/storage=cold_200ms": {
       "error": null,
@@ -14912,7 +14912,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14926,7 +14926,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "4868037ad2bd2cebbc87b004a557d236c81acd9b730015bd259755d8d6f7229c"
+      "sha256": "0b97799b68610c80db25547bf9fdd700fb1862afd8d6141f17aa0e618179e74e"
     },
     "native/DeepTraversalChain/scale=32/storage=cold_50ms": {
       "error": null,
@@ -14936,7 +14936,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14950,7 +14950,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "234bc4632107d24bdd59a4247a455397b54b78415e847c87c484518c2bdab3f2"
+      "sha256": "1be0775f69090fe43c6575d0a4d352ab1d75588357474d0e4adf39be6cdd6258"
     },
     "native/DeepTraversalChain/scale=32/storage=default": {
       "error": null,
@@ -14960,7 +14960,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14974,7 +14974,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "6ef454062600983c31dd1e695cbdbb75045a6564b732e0b5e0e7dd8dadcc3ab1"
+      "sha256": "d59a3c5a64f022ad3ba356f7c4f186a1288a1160498cb7a4393cb75d550b84fb"
     },
     "native/DeepTraversalChain/scale=8/storage=cold_200ms": {
       "error": null,
@@ -14984,7 +14984,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -14998,7 +14998,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "7b9f270d26611ac9470491b284ce01753e86c7a13c4749b6d4cfb96bfb8553cd"
+      "sha256": "f2b724c8c4021d8bba98c510068d8da971f31e82c3182aed8dc4179f15d2c8bc"
     },
     "native/DeepTraversalChain/scale=8/storage=cold_50ms": {
       "error": null,
@@ -15008,7 +15008,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -15022,7 +15022,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "b7e2b7f1458ba966b4e04d693d643213f2bcc07aca2cc28736ad9f5a1d1c9714"
+      "sha256": "638dfee3a13ca3e6792833ad508e63b720d427a86d8f6a5030e63967514e5e64"
     },
     "native/DeepTraversalChain/scale=8/storage=default": {
       "error": null,
@@ -15032,7 +15032,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 2640,
@@ -15046,7 +15046,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "39dafad459bcda4f72c8bb09e36d806113216c5e7e895c87fe984164d714f8f7"
+      "sha256": "4f12831278e26fcce112960a8c072b56e6a5f3536072ce9ccdd4ffa941756420"
     },
     "native/ForEachBodyRootReuse/scale=1/storage=cold_200ms": {
       "error": null,
@@ -15920,7 +15920,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 200,
           "bytes": 153600,
@@ -15934,7 +15934,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "b6e22a11f972f434e309fcd69a02de79799815ab87f8fc8aeb1bd88bb8817b08"
+      "sha256": "991a09d381680bc92cf1a99b11077ced525d4aad764dcaac0d2fbd87d232bf12"
     },
     "native/OrderedRangeWindowPushdown/scale=1/storage=cold_50ms": {
       "error": null,
@@ -15944,7 +15944,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 200,
           "bytes": 153600,
@@ -15958,7 +15958,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "e31435ed766df759554d017bf48152ee3b43cf5283eaccf977cc2e12432dc05d"
+      "sha256": "359791feeedfa8db6558a4693a8268d8bc7fb3b02f6ce97bf49029e9c674efcd"
     },
     "native/OrderedRangeWindowPushdown/scale=1/storage=default": {
       "error": null,
@@ -15968,7 +15968,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 200,
           "bytes": 153600,
@@ -15982,7 +15982,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "ad2ec77bb740be61913c34302676f8bdd3d80dba13ab5b6395de1f50b704eef8"
+      "sha256": "06c617a86b0c61b41a9b36c1198ed6a9a6273fa7d0a367339d580c2557f2316f"
     },
     "native/OrderedRangeWindowPushdown/scale=32/storage=cold_200ms": {
       "error": null,
@@ -15992,7 +15992,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 6400,
           "bytes": 4915200,
@@ -16006,7 +16006,7 @@
           "range_seeks": 32
         }
       },
-      "sha256": "c2770a21bfb7086d246e9f7d765350cc36701e2f6722f1a99662ab0f1e08c123"
+      "sha256": "d18c0535840a15c1e360c0526e45218fe83b00b8432a867a21c860cbd13f8add"
     },
     "native/OrderedRangeWindowPushdown/scale=32/storage=cold_50ms": {
       "error": null,
@@ -16016,7 +16016,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 6400,
           "bytes": 4915200,
@@ -16030,7 +16030,7 @@
           "range_seeks": 32
         }
       },
-      "sha256": "c88e8d23d01e74927e13a71374d8ba23502b3659cbf958f9ccac9d9ac8ce5f9d"
+      "sha256": "73abdbd525c37ba4c9133fd74df27dc32d1ce8e77b885f90f79c77e10cb387e6"
     },
     "native/OrderedRangeWindowPushdown/scale=32/storage=default": {
       "error": null,
@@ -16040,7 +16040,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 6400,
           "bytes": 4915200,
@@ -16054,7 +16054,7 @@
           "range_seeks": 32
         }
       },
-      "sha256": "c813675c6374180aee6d986cb2616d395695b3cf761bac31e0333fed5543a4ea"
+      "sha256": "78dc116d7eff2c7f0b19e801c164ffea5485186115d580f8125bbb0be00be91a"
     },
     "native/OrderedRangeWindowPushdown/scale=8/storage=cold_200ms": {
       "error": null,
@@ -16064,7 +16064,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 1600,
           "bytes": 1228800,
@@ -16078,7 +16078,7 @@
           "range_seeks": 8
         }
       },
-      "sha256": "5c43cd5950425da9d2af959eab8a945bc92b7a42847033abfcb93f14e6bea988"
+      "sha256": "1df41bfb1a35d82923458a0d79af55664d457b97ffa4437f1c4e2fb2809c7789"
     },
     "native/OrderedRangeWindowPushdown/scale=8/storage=cold_50ms": {
       "error": null,
@@ -16088,7 +16088,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 1600,
           "bytes": 1228800,
@@ -16102,7 +16102,7 @@
           "range_seeks": 8
         }
       },
-      "sha256": "e41de5796f07f20be40278028b693b596bc8854739fede91e38491f2abc5acb7"
+      "sha256": "483c1f29475e2d1ece0702a63ac097fa88dfef60e78e1790161bb068bd77865b"
     },
     "native/OrderedRangeWindowPushdown/scale=8/storage=default": {
       "error": null,
@@ -16112,7 +16112,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 5,
+        "rule_fires": 7,
         "selected_cost": {
           "authoritative_graph_reads": 1600,
           "bytes": 1228800,
@@ -16126,7 +16126,7 @@
           "range_seeks": 8
         }
       },
-      "sha256": "f068ae90a16565d19d0bf4162e7f7ab0591867f89f4b3b527c125a35dba432d2"
+      "sha256": "f30f75a7e55b030501139a0768d278a4b0a9e268ccf4505f91ad6e51a0f6016c"
     },
     "native/OverLimitIndexDisjunction/scale=1/storage=cold_200ms": {
       "error": null,
@@ -16210,19 +16210,19 @@
         "rejected_alternatives": 0,
         "rule_fires": 2,
         "selected_cost": {
-          "authoritative_graph_reads": 1000000,
-          "bytes": 520000000,
-          "cpu_units": 4000000,
-          "latency": 200003200050,
+          "authoritative_graph_reads": 2000000,
+          "bytes": 776000000,
+          "cpu_units": 5000000,
+          "latency": 400003200050,
           "multi_get_calls": 0,
-          "object_reads": 1000001,
+          "object_reads": 2000001,
           "parallel_width": 1,
           "peak_memory": 256000000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "0b12dc70bbd82aa72f59a587c76fa6c79e74735ebd036f18c79088edbe93249c"
+      "sha256": "bfcecb499f8d0d9439fa895b5b4789b934e23103aa1810d66f3dcabc347ee014"
     },
     "native/OverLimitIndexDisjunction/scale=32/storage=cold_50ms": {
       "error": null,
@@ -16234,19 +16234,19 @@
         "rejected_alternatives": 0,
         "rule_fires": 2,
         "selected_cost": {
-          "authoritative_graph_reads": 1000000,
-          "bytes": 520000000,
-          "cpu_units": 4000000,
-          "latency": 50003050050,
+          "authoritative_graph_reads": 2000000,
+          "bytes": 776000000,
+          "cpu_units": 5000000,
+          "latency": 100003050050,
           "multi_get_calls": 0,
-          "object_reads": 1000001,
+          "object_reads": 2000001,
           "parallel_width": 1,
           "peak_memory": 256000000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "e59035d7810ba811a99b33d72c43f4c44f1cc314ada6f7e73d8ce345afa180de"
+      "sha256": "75e2fb9d581ae6c4615fee6a3f26968b4d3a5df8bfa66a8ff26f065d604fc4c7"
     },
     "native/OverLimitIndexDisjunction/scale=32/storage=default": {
       "error": null,
@@ -16258,19 +16258,19 @@
         "rejected_alternatives": 0,
         "rule_fires": 2,
         "selected_cost": {
-          "authoritative_graph_reads": 1000000,
-          "bytes": 520000000,
-          "cpu_units": 4000000,
-          "latency": 13005050,
+          "authoritative_graph_reads": 2000000,
+          "bytes": 776000000,
+          "cpu_units": 5000000,
+          "latency": 23005050,
           "multi_get_calls": 0,
-          "object_reads": 1000001,
+          "object_reads": 2000001,
           "parallel_width": 1,
           "peak_memory": 256000000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "b3c4107927feeeea02632e858842bb6c62cc707120e76408435d01ff17a7bb61"
+      "sha256": "3a7cbb27e0b2743c716bc38616064ef15e1161afa09eb49865fdec76f6f65ae2"
     },
     "native/OverLimitIndexDisjunction/scale=8/storage=cold_200ms": {
       "error": null,
@@ -16352,7 +16352,7 @@
         "memo_exprs": 14,
         "memo_groups": 9,
         "rejected_alternatives": 0,
-        "rule_fires": 24,
+        "rule_fires": 30,
         "selected_cost": {
           "authoritative_graph_reads": 200,
           "bytes": 418288,
@@ -16366,7 +16366,7 @@
           "range_seeks": 3
         }
       },
-      "sha256": "5f48cf54faef0666931ec00cdbc49b7f94d5507821e96acef191014035063f78"
+      "sha256": "3df9b724e0b2ee68b8493b263da55ed249dd4ade096f0dff4dc8bf66f8270c0a"
     },
     "native/RuntimeDerivedMixedQueries/scale=1/storage=cold_50ms": {
       "error": null,
@@ -16376,7 +16376,7 @@
         "memo_exprs": 14,
         "memo_groups": 9,
         "rejected_alternatives": 0,
-        "rule_fires": 24,
+        "rule_fires": 30,
         "selected_cost": {
           "authoritative_graph_reads": 200,
           "bytes": 418288,
@@ -16390,7 +16390,7 @@
           "range_seeks": 3
         }
       },
-      "sha256": "ad34c06764114db56580d3b4c20385555ceb213848d50e852b6a9f5a95896962"
+      "sha256": "324d2860cfcdcdae916c0c9fa8d518e7cc412f5f90746bf7daf5514886f56920"
     },
     "native/RuntimeDerivedMixedQueries/scale=1/storage=default": {
       "error": null,
@@ -16400,7 +16400,7 @@
         "memo_exprs": 14,
         "memo_groups": 9,
         "rejected_alternatives": 0,
-        "rule_fires": 24,
+        "rule_fires": 30,
         "selected_cost": {
           "authoritative_graph_reads": 200,
           "bytes": 418288,
@@ -16414,7 +16414,7 @@
           "range_seeks": 3
         }
       },
-      "sha256": "f599fe512ea8e636517d31752a7f7fc0a7f5a8f1addd9a1b47fcadbee91ed71f"
+      "sha256": "1341f896e5b0b637757548580f714292ba720fc5c2e442434e6e08f3a78899dd"
     },
     "native/RuntimeDerivedMixedQueries/scale=32/storage=cold_200ms": {
       "error": null,
@@ -16424,7 +16424,7 @@
         "memo_exprs": 293,
         "memo_groups": 195,
         "rejected_alternatives": 0,
-        "rule_fires": 458,
+        "rule_fires": 557,
         "selected_cost": {
           "authoritative_graph_reads": 6400,
           "bytes": 13385216,
@@ -16438,7 +16438,7 @@
           "range_seeks": 96
         }
       },
-      "sha256": "02bd0aa4d88e4379fdef7f3a87077858a338a3bfc9fb2808aeedc7cffe24bdee"
+      "sha256": "16689a40c57748261d0bf90692a5fcf66f840b303f4344aef26a12a001e66e8b"
     },
     "native/RuntimeDerivedMixedQueries/scale=32/storage=cold_50ms": {
       "error": null,
@@ -16448,7 +16448,7 @@
         "memo_exprs": 293,
         "memo_groups": 195,
         "rejected_alternatives": 0,
-        "rule_fires": 458,
+        "rule_fires": 557,
         "selected_cost": {
           "authoritative_graph_reads": 6400,
           "bytes": 13385216,
@@ -16462,7 +16462,7 @@
           "range_seeks": 96
         }
       },
-      "sha256": "791f2c23e03f038b534bbed2ea75841fd4fad819cbc73a050a7535230a6d6232"
+      "sha256": "7d492c67bac68c67dcc58261e572c6f5cfdf4df828101c1bab3d24e0228215cf"
     },
     "native/RuntimeDerivedMixedQueries/scale=32/storage=default": {
       "error": null,
@@ -16472,7 +16472,7 @@
         "memo_exprs": 293,
         "memo_groups": 195,
         "rejected_alternatives": 0,
-        "rule_fires": 458,
+        "rule_fires": 557,
         "selected_cost": {
           "authoritative_graph_reads": 6400,
           "bytes": 13385216,
@@ -16486,7 +16486,7 @@
           "range_seeks": 96
         }
       },
-      "sha256": "5a0a5c3ab244fa7e79e22aaeaedc84d88a2f3052adf4a9aea0cf84d6c03459cd"
+      "sha256": "5cf96e163cb407e8d483ac0ecda2eb010b132a37531623ecfac025bfbb124995"
     },
     "native/RuntimeDerivedMixedQueries/scale=8/storage=cold_200ms": {
       "error": null,
@@ -16496,7 +16496,7 @@
         "memo_exprs": 77,
         "memo_groups": 51,
         "rejected_alternatives": 0,
-        "rule_fires": 122,
+        "rule_fires": 149,
         "selected_cost": {
           "authoritative_graph_reads": 1600,
           "bytes": 3346304,
@@ -16510,7 +16510,7 @@
           "range_seeks": 24
         }
       },
-      "sha256": "31b1185f8a67adf86a88b5301a37585006634ffbf0f1941f2babb72e8793967f"
+      "sha256": "9f43f4c918ce0bf30b71ae927bc85b033028bdaf053f4d744f48800890717ca2"
     },
     "native/RuntimeDerivedMixedQueries/scale=8/storage=cold_50ms": {
       "error": null,
@@ -16520,7 +16520,7 @@
         "memo_exprs": 77,
         "memo_groups": 51,
         "rejected_alternatives": 0,
-        "rule_fires": 122,
+        "rule_fires": 149,
         "selected_cost": {
           "authoritative_graph_reads": 1600,
           "bytes": 3346304,
@@ -16534,7 +16534,7 @@
           "range_seeks": 24
         }
       },
-      "sha256": "07e0416bc52fafbecb28ee2a6c2cb660b6ba458eed74268e29ca89c0fd21994b"
+      "sha256": "9c717c8efb7a54e3e355303087b99655aa6f106c4c5553a0b8eca60b0b000bf2"
     },
     "native/RuntimeDerivedMixedQueries/scale=8/storage=default": {
       "error": null,
@@ -16544,7 +16544,7 @@
         "memo_exprs": 77,
         "memo_groups": 51,
         "rejected_alternatives": 0,
-        "rule_fires": 122,
+        "rule_fires": 149,
         "selected_cost": {
           "authoritative_graph_reads": 1600,
           "bytes": 3346304,
@@ -16558,7 +16558,7 @@
           "range_seeks": 24
         }
       },
-      "sha256": "c4a9dd38ff77780284bd63614cc22578f9098cfe16fcc647f4fc7082d34897ca"
+      "sha256": "cb03303dab4e2a6db7b46bb323cc4d728cfb908bd4a51283e3ceeaafa774c326"
     },
     "native/SearchIndexDdlWorkloads/scale=1/storage=cold_200ms": {
       "error": null,
@@ -17000,7 +17000,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 264,
@@ -17014,7 +17014,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "5756f79d2b876c7c454b7aa70b0c740c3881e21a1ddbf6622bff195a749d2f78"
+      "sha256": "2becdba929d136f4242691b046747848bb0ba8f3da4e4d6ab735b40174ec8624"
     },
     "native_boundary/membership/count=1/rows=100/storage=cold_50ms": {
       "error": null,
@@ -17024,7 +17024,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 264,
@@ -17038,7 +17038,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "9f229717438afae7c5b666097f1d1ae272700e09effff48576c63ee3bc8ddbb7"
+      "sha256": "4d47da9246cbf822e767fecf596229ffa3e3b0e6c0fb431e3cd77cfffbbdde5e"
     },
     "native_boundary/membership/count=1/rows=100/storage=default": {
       "error": null,
@@ -17048,7 +17048,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 264,
@@ -17062,7 +17062,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "170873f046db773b99d22007764813ca61fdc5a4750c58152de89a33e5967865"
+      "sha256": "631fd119c020e8a5ed6c55a086b55a52b6ea90e348ef572d1d3905a97ed604ae"
     },
     "native_boundary/membership/count=1/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -17072,7 +17072,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 264,
@@ -17086,7 +17086,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "e10badc66d9cd1dca66dc715de40a6375526099cef8c9db9baebbf8837a2ca11"
+      "sha256": "5f548c602706eefdf2c09e61d2e18fee96f82661f7ee8d30d70ef9018293874b"
     },
     "native_boundary/membership/count=1/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -17096,7 +17096,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 264,
@@ -17110,7 +17110,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "ae8194f1c64cd94d1d0ab00fdba532c73e99b9258c02128431e4d5ee74e172d4"
+      "sha256": "0c41c9fd2ab4d1490a3dfb2cc7a4ebaceace046ba055a95ab84f9d20b1c3b5d2"
     },
     "native_boundary/membership/count=1/rows=100000/storage=default": {
       "error": null,
@@ -17120,7 +17120,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 264,
@@ -17134,7 +17134,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "08158f7f557d329da693edf51e1ef9ce4986ca55df4227cb747b280120015f71"
+      "sha256": "f5410e61ffe83a2945d9d21939c07e47f1be60b3619e97178e58215c1b66fdcc"
     },
     "native_boundary/membership/count=2/rows=100/storage=cold_200ms": {
       "error": null,
@@ -17144,7 +17144,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1040,
@@ -17158,7 +17158,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "6a877259794676c7fca171e0a9ac1b3c1ecc2294d439a25bde5657da4ecaf950"
+      "sha256": "7074bfea141bf0b53c06dc8137ce43ddc9627c9c922aca6c9bf4b8a158a10749"
     },
     "native_boundary/membership/count=2/rows=100/storage=cold_50ms": {
       "error": null,
@@ -17168,7 +17168,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1040,
@@ -17182,7 +17182,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "e0fe358bc50ea0e664b19b4e2790073fad68a45027d4ed82c7a4dc515cfa8c42"
+      "sha256": "6e0249214dfb3adbe21412801a49789577189815623cd2cfa3dd558b3496ef55"
     },
     "native_boundary/membership/count=2/rows=100/storage=default": {
       "error": null,
@@ -17192,7 +17192,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1040,
@@ -17206,7 +17206,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "32a2244aba0ceb2249ebffce49bf6c2b8d5610ac55f3b963d34777169120ad6f"
+      "sha256": "0a84c1660c013fad5c80e63aa285fd5dc4a66bed978cf0878f0947a59ed9ce0c"
     },
     "native_boundary/membership/count=2/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -17216,7 +17216,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1040,
@@ -17230,7 +17230,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "19532fca7e15c4c3e4f70f7e10e17a562579bde4d8a35ff1eb51fac3e8ecad21"
+      "sha256": "bc7ad8539e549c4e5f29848bc516d29c0aa19c864a562e343b349fde5d7cd3dd"
     },
     "native_boundary/membership/count=2/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -17240,7 +17240,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1040,
@@ -17254,7 +17254,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "a4f3c11451f7fbe382bcf6712284eaf31fed06ac5ebb2c5e2a8db24186c0757f"
+      "sha256": "ea558704e22b4ae421bb6abed19fe2f61af075d29f4929eb3f76dd4d365e9d02"
     },
     "native_boundary/membership/count=2/rows=100000/storage=default": {
       "error": null,
@@ -17264,7 +17264,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1040,
@@ -17278,7 +17278,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "a3ac1a82bdf466e9cee0046d0e21f6e65c162b44427e739288b17873259a7162"
+      "sha256": "d97b80a23e5a04483e121518ef67dc1061944a0d8cea4dd51966569c5abc29f5"
     },
     "native_boundary/membership/count=64/rows=100/storage=cold_200ms": {
       "error": null,
@@ -17288,7 +17288,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 33280,
@@ -17302,7 +17302,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "c24004ec3b72cc08c067da9813541b2e0daa95b0a2161d0317337583dcdb2eb7"
+      "sha256": "beb25a0c6551100e3d0965eb27671b06cf6b756764b49cf662044fad9a46ce33"
     },
     "native_boundary/membership/count=64/rows=100/storage=cold_50ms": {
       "error": null,
@@ -17312,7 +17312,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 33280,
@@ -17326,7 +17326,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "7fd739832f991c92775bff674193a2f51eef00b8baf36305adb5e70a006d5284"
+      "sha256": "2699c9a2e91671413933b3ffbf6ceaf820030c58752edc2e7eec8ccc589473df"
     },
     "native_boundary/membership/count=64/rows=100/storage=default": {
       "error": null,
@@ -17336,7 +17336,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 33280,
@@ -17350,7 +17350,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "92dbb34f9189fdfaa6b27de9b63f9e9b8f27ecba3fdd1e94fc47260471ba80f3"
+      "sha256": "48ad157135f507fbed1247b1ef8940f3b24e105aedf3e8289923cfd92b0dcaf7"
     },
     "native_boundary/membership/count=64/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -17360,7 +17360,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 33280,
@@ -17374,7 +17374,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "c1966b02e1a8c473a48fb46cd82e869b353fd8fd79665d561012fb6bd4b6a679"
+      "sha256": "991963568a9fa56fda988c49ff801aef727d200a9f1896b0f33f310d885358d3"
     },
     "native_boundary/membership/count=64/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -17384,7 +17384,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 33280,
@@ -17398,7 +17398,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "dac15c0cc00f311da554f334e9270554d0ce3f4e69301d0d175124bd87832955"
+      "sha256": "cf3edc8eb6594fe12263e16606a028cb8618e9d581012d69e9e51833fcb25be9"
     },
     "native_boundary/membership/count=64/rows=100000/storage=default": {
       "error": null,
@@ -17408,7 +17408,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 33280,
@@ -17422,7 +17422,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "521c0c4efded1988d5352d55e3714c21fcd17113c2828584ef1977ee268d2a95"
+      "sha256": "a5ee0dbef0967701e6a2acd0ad44ac796d43e3a322b219276719ad33d5ef9b2d"
     },
     "native_boundary/membership/count=65/rows=100/storage=cold_200ms": {
       "error": null,
@@ -17432,21 +17432,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 20201350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 40201350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "63eb8806de163a52944ef482d54875aa49c2f85e3761c472067af905ecf8f1a0"
+      "sha256": "18b425452d2b83903adf629dbc49678edacb6648419deed4012c787c309951b1"
     },
     "native_boundary/membership/count=65/rows=100/storage=cold_50ms": {
       "error": null,
@@ -17456,21 +17456,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 5051350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 10051350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "6a590525343e1a59fadf3dc9a6ef4c37ba6b904c751fb2d12537dcbc99e4f9b2"
+      "sha256": "0c623f68ce7a4fab76934463be891177c23243b7d23a6cca92d9e82521fa6f6f"
     },
     "native_boundary/membership/count=65/rows=100/storage=default": {
       "error": null,
@@ -17480,21 +17480,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 7350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 8350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "50d06eff309bf21936ce74013e4e73fb7512492afe794b18b16c17e6012d626d"
+      "sha256": "a5a706da300929f7bcb89b481dd5de4370773676d37fb3526905099ac48391a0"
     },
     "native_boundary/membership/count=65/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -17504,21 +17504,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 401000,
-          "latency": 20000501050,
+          "authoritative_graph_reads": 200000,
+          "bytes": 77600000,
+          "cpu_units": 501000,
+          "latency": 40000501050,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 200001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "c2d02939bf77f2cba7126c8a44930c7e38dc57d34b54cdd7453924ecd91474a0"
+      "sha256": "766652eb356a8669623aa4684d9389b261cf31924eec4af4ada519ec116fc215"
     },
     "native_boundary/membership/count=65/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -17528,21 +17528,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 401000,
-          "latency": 5000351050,
+          "authoritative_graph_reads": 200000,
+          "bytes": 77600000,
+          "cpu_units": 501000,
+          "latency": 10000351050,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 200001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "162618d97eaf1382bc799c9ffd2346ba7aaddbfd81e40cf066b2eee43c1c39bd"
+      "sha256": "f9fb4d6385373b75db1a94aafefd8ff321dfe0fba5b592f2abe02ed31defb55b"
     },
     "native_boundary/membership/count=65/rows=100000/storage=default": {
       "error": null,
@@ -17552,21 +17552,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 401000,
-          "latency": 1306050,
+          "authoritative_graph_reads": 200000,
+          "bytes": 77600000,
+          "cpu_units": 501000,
+          "latency": 2306050,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 200001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "2c43388a7444694ce23ff182af6d6b361b7507abc0644a171aa9034e2c4335e5"
+      "sha256": "38ef286e3fd0bde89485800c50ae0750119da348ed93b16e1fec8aecc2880030"
     },
     "native_boundary/shared_disjunction/count=1/rows=100/storage=cold_200ms": {
       "error": null,
@@ -17576,7 +17576,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 464,
@@ -17590,7 +17590,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "7f92a411887f60a76c3e83f8ceb05ffa6d829c121d97e353d1f6c5f915817a18"
+      "sha256": "652ae90141d4c0e62ab8215b874bf149dec7d7fd736a72504436bad1c9731c5a"
     },
     "native_boundary/shared_disjunction/count=1/rows=100/storage=cold_50ms": {
       "error": null,
@@ -17600,7 +17600,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 464,
@@ -17614,7 +17614,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "e6780b8f1405272722a72b01402e3e87955c89423e3bec66864c37d877049be6"
+      "sha256": "6004b1cf656be4cbe7d85d76090f253cbc4a447f244ba890bd9bf91184d89bd4"
     },
     "native_boundary/shared_disjunction/count=1/rows=100/storage=default": {
       "error": null,
@@ -17624,21 +17624,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 7350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 8350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "cd0227c69e7642a3a878345e5309582e06b03ab55c8cbd9e542fbdb507b8166c"
+      "sha256": "f7e3f6299199a005c2c8072da4bcd0dfbd2813bf38f99bf93347b313125086b7"
     },
     "native_boundary/shared_disjunction/count=1/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -17648,7 +17648,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 200264,
@@ -17662,7 +17662,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "7c4f774af6bafdcded3ff6739fc99c74bd45009c6246447d758102cac6bfe898"
+      "sha256": "e8e157990fe8d62b4bf77c0c0c3c635124ec682cffff7fbbe2ac02421ad67c8b"
     },
     "native_boundary/shared_disjunction/count=1/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -17672,7 +17672,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 200264,
@@ -17686,7 +17686,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "c85a00d6e691773797509daa83c78c8c6ddfcbe68d51e9b249533ca88b34e4d6"
+      "sha256": "bdd506fa0672b912b4d0c0216c7e5ce809866ec57c36dda88a1686f16119ff1b"
     },
     "native_boundary/shared_disjunction/count=1/rows=100000/storage=default": {
       "error": null,
@@ -17696,7 +17696,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 200264,
@@ -17710,7 +17710,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "046e22b5fe508233eb6d0e7d5bd744a634f251cb7ed28e5768eb3c07d8096b2d"
+      "sha256": "b0a94175b5bc3a18795e527de6273045dc2ddada8bffdc12ae7fc03340dc4452"
     },
     "native_boundary/shared_disjunction/count=2/rows=100/storage=cold_200ms": {
       "error": null,
@@ -17720,7 +17720,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1240,
@@ -17734,7 +17734,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "fe2bf327b55ddae1afa30f8393307de290ab77fb939ca2a51af9f8067fb0fc58"
+      "sha256": "729ab805f9ace812da672cbf1888001c07f75a9d8a9515638e036c89c1b7509b"
     },
     "native_boundary/shared_disjunction/count=2/rows=100/storage=cold_50ms": {
       "error": null,
@@ -17744,7 +17744,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1240,
@@ -17758,7 +17758,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "d2fbbb508874ea97056b658be93171ebe27c037bd86a6a7336aaa6090ec814d3"
+      "sha256": "9e127410ab2e6c333172154e6ec680a2b2f44590492027747feca17db21d064b"
     },
     "native_boundary/shared_disjunction/count=2/rows=100/storage=default": {
       "error": null,
@@ -17768,7 +17768,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 1240,
@@ -17782,7 +17782,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "aa24345ef63e3fc1432f194a8cd43c981bea5d97d82f0e3458d2acc9de2d2e22"
+      "sha256": "1b988fdb313ff338922aa81d1c4d9dff83b87d19cd4f1daa2702b11eef007eb3"
     },
     "native_boundary/shared_disjunction/count=2/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -17792,7 +17792,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 201040,
@@ -17806,7 +17806,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "9fe2ce814566fc8b32696507ed98ac37af2216875a2f05aec6caae2e752417fb"
+      "sha256": "4e36e2d9cefe1c80a8a07eee3755d31985a17e828b3d47c940d949beaaf829f9"
     },
     "native_boundary/shared_disjunction/count=2/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -17816,7 +17816,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 201040,
@@ -17830,7 +17830,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "28a2df4d41325414bce2069522ec70a1e987fc39fb678dae1ac845d3418b043e"
+      "sha256": "9136492314fb9f756bd8fb69a544b1ac96a1a31e9bb94308fffda58dafa866fa"
     },
     "native_boundary/shared_disjunction/count=2/rows=100000/storage=default": {
       "error": null,
@@ -17840,7 +17840,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 201040,
@@ -17854,7 +17854,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "d86cc7360344bf1d33d39a8e7ccf16087b6f4870e983ae2983688aa1dbde9296"
+      "sha256": "b67d9ff70937bafc493e1ff5b9fe6f6254080aa15942162a9cc1270a39b01150"
     },
     "native_boundary/shared_disjunction/count=64/rows=100/storage=cold_200ms": {
       "error": null,
@@ -17864,7 +17864,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 23496,
@@ -17878,7 +17878,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "a7173fd411e261bbd6d44e821c07d77405871e629e869ad9f0c00cd3f15d3399"
+      "sha256": "3327d555ec5e2fee5cab585b447a3a7e53663e5d147443e6e9224a58c988e63f"
     },
     "native_boundary/shared_disjunction/count=64/rows=100/storage=cold_50ms": {
       "error": null,
@@ -17888,7 +17888,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 23496,
@@ -17902,7 +17902,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "8b0d766eb209ab21d59569ba5be8986613d8e2691e70e15b379bbeb25174e382"
+      "sha256": "a807fafe0dcde5c47ec19adf624397e22485c143d6bb5f5dc47852089d351c71"
     },
     "native_boundary/shared_disjunction/count=64/rows=100/storage=default": {
       "error": null,
@@ -17912,21 +17912,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 7350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 8350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "2c32630d1c5b6ac579e4e931b13d587e975a995fc650ecfd4264b9a3e00434c2"
+      "sha256": "241b6cc1d423439eb6b8ea9a4ffc075ac11bb376a9c00a8ce11670d57bf1224f"
     },
     "native_boundary/shared_disjunction/count=64/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -17936,7 +17936,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 233280,
@@ -17950,7 +17950,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "26921ea6c98a128ace6fc7d080b7c1412a6daae0cd62d2d51306bf22b9a007d4"
+      "sha256": "d5069353dc2e862195a4ee0ed13c7226feb8ae93f50944bcea1b60fa5a34afc5"
     },
     "native_boundary/shared_disjunction/count=64/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -17960,7 +17960,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 233280,
@@ -17974,7 +17974,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "e6f92232f83896586b36527dd003511b0787b56adee9f11a209d331767c5f4e8"
+      "sha256": "1d2773032b8908e4a8c00e912041897213c5da0290c7fd3a237b4f67fb0b0e35"
     },
     "native_boundary/shared_disjunction/count=64/rows=100000/storage=default": {
       "error": null,
@@ -17984,7 +17984,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 0,
           "bytes": 233280,
@@ -17998,7 +17998,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "122dfbc4c0c041e44119f7cde99208bd2d725337ccf86b6f1994631aec94816d"
+      "sha256": "59500d03a3ea78d692b853f2deab5ffa64713d3b163e9dcf4f1d3ff3448271d8"
     },
     "native_boundary/shared_disjunction/count=65/rows=100/storage=cold_200ms": {
       "error": null,
@@ -18008,21 +18008,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 0,
-          "bytes": 6600,
-          "cpu_units": 1075,
-          "latency": 201125,
+          "authoritative_graph_reads": 25,
+          "bytes": 13000,
+          "cpu_units": 1100,
+          "latency": 5201125,
           "multi_get_calls": 0,
-          "object_reads": 1,
+          "object_reads": 26,
           "parallel_width": 1,
           "peak_memory": 6400,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "3e3a11e749e56a6b7a26bd2c388b62c7ea550ead26af8e3f6c7cc1ba1a38b8aa"
+      "sha256": "513f2b16daf5319151856e63adc707ada3d0f2608eb38123dad5f3cc66dc70db"
     },
     "native_boundary/shared_disjunction/count=65/rows=100/storage=cold_50ms": {
       "error": null,
@@ -18032,21 +18032,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 0,
-          "bytes": 6600,
-          "cpu_units": 1075,
-          "latency": 51125,
+          "authoritative_graph_reads": 25,
+          "bytes": 13000,
+          "cpu_units": 1100,
+          "latency": 1301125,
           "multi_get_calls": 0,
-          "object_reads": 1,
+          "object_reads": 26,
           "parallel_width": 1,
           "peak_memory": 6400,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "f1821d5cf0f73e3be04adc20b0301d9d132e59452aede8d059833507b94b16a6"
+      "sha256": "e18061b8f23b96033f1480b3a6a20d57da892c680291288f8bbcaf01e3c92f1e"
     },
     "native_boundary/shared_disjunction/count=65/rows=100/storage=default": {
       "error": null,
@@ -18056,21 +18056,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 0,
-          "bytes": 6600,
-          "cpu_units": 1075,
-          "latency": 6125,
+          "authoritative_graph_reads": 25,
+          "bytes": 13000,
+          "cpu_units": 1100,
+          "latency": 6375,
           "multi_get_calls": 0,
-          "object_reads": 1,
+          "object_reads": 26,
           "parallel_width": 1,
           "peak_memory": 6400,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "43c0b578429c674bfb95296d60ded57ba14632e6376ac2b465c95831faab8301"
+      "sha256": "9971c054a5336c3eb2319713f6cbe6d449374f31b03fe86dc792450577352e59"
     },
     "native_boundary/shared_disjunction/count=65/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -18080,21 +18080,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 0,
-          "bytes": 6600000,
-          "cpu_units": 76000,
-          "latency": 276050,
+          "authoritative_graph_reads": 25000,
+          "bytes": 13000000,
+          "cpu_units": 101000,
+          "latency": 5000276050,
           "multi_get_calls": 0,
-          "object_reads": 1,
+          "object_reads": 25001,
           "parallel_width": 1,
           "peak_memory": 6400000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "17711a1c809f4630e406019c1e968b31d60dbc507bf070f8b3451897a76c681b"
+      "sha256": "08e5d1a0a5d8c6fa6077eb1c10114ceab56457e2571c18b193e206ba3e3bcc50"
     },
     "native_boundary/shared_disjunction/count=65/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -18104,21 +18104,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 0,
-          "bytes": 6600000,
-          "cpu_units": 76000,
-          "latency": 126050,
+          "authoritative_graph_reads": 25000,
+          "bytes": 13000000,
+          "cpu_units": 101000,
+          "latency": 1250126050,
           "multi_get_calls": 0,
-          "object_reads": 1,
+          "object_reads": 25001,
           "parallel_width": 1,
           "peak_memory": 6400000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "1c01121b873022ef7119a215c93fd105ac671cf616916efed0992a13aa755a64"
+      "sha256": "7017dc984e9b9c1279ba0d4e115e063959407388be08a9a31a0297bd284eac3c"
     },
     "native_boundary/shared_disjunction/count=65/rows=100000/storage=default": {
       "error": null,
@@ -18128,21 +18128,21 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
-          "authoritative_graph_reads": 0,
-          "bytes": 6600000,
-          "cpu_units": 76000,
-          "latency": 81050,
+          "authoritative_graph_reads": 25000,
+          "bytes": 13000000,
+          "cpu_units": 101000,
+          "latency": 331050,
           "multi_get_calls": 0,
-          "object_reads": 1,
+          "object_reads": 25001,
           "parallel_width": 1,
           "peak_memory": 6400000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "1dbb5ec2a385f8d18df4f052538caa3289fd72c0536457f96908163920dc07b8"
+      "sha256": "e272485a9b21af9de955bddf449c2df4e0780ad11aa257fe8102e61196c7c57f"
     },
     "native_boundary/unique_membership/count=1/rows=100/storage=cold_200ms": {
       "error": null,
@@ -18152,7 +18152,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 1,
           "bytes": 768,
@@ -18166,7 +18166,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "70f95421b46e3da5d7aeb2ea0053af5395cdc8762701384b6432a8021483a635"
+      "sha256": "b472a04b2e76f4c9f2d8c584657162b79d99f37d42159225cd228af2cac826ed"
     },
     "native_boundary/unique_membership/count=1/rows=100/storage=cold_50ms": {
       "error": null,
@@ -18176,7 +18176,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 1,
           "bytes": 768,
@@ -18190,7 +18190,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "815ec67e862452245c300da7ba05524f90ec51bbde9facc27e5c0b214132c287"
+      "sha256": "aaf6497afdf6a06ac00f09ce3a7ba22dd132d1012ae5a2ae4f7932dd63037955"
     },
     "native_boundary/unique_membership/count=1/rows=100/storage=default": {
       "error": null,
@@ -18200,7 +18200,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 1,
           "bytes": 768,
@@ -18214,7 +18214,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "1d05478f5bafcb61a6a88dd82e38c4aa8eee4e80b0e676370597ba170542fcb4"
+      "sha256": "afc6e7fb0ae44cbb28d8998affd383ee2aa65ac934ceaabf899284da99e175e9"
     },
     "native_boundary/unique_membership/count=1/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -18224,7 +18224,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 1,
           "bytes": 768,
@@ -18238,7 +18238,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "96588125649b31659383c6c2f16aec820cedf0f225599da8eba5459ea07566ca"
+      "sha256": "e357be8b43a4f4f108349fd2cf92b765571eee24f7fe00e374492598f8b5eb60"
     },
     "native_boundary/unique_membership/count=1/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -18248,7 +18248,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 1,
           "bytes": 768,
@@ -18262,7 +18262,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "ecc79dca2a6d617e55c01d2a3a13ab75f17c05c482d770656ac78339d80e8c7c"
+      "sha256": "212f5521a179e6707a012082cf525f95337eb007368d911134e3d70c7c637a1d"
     },
     "native_boundary/unique_membership/count=1/rows=100000/storage=default": {
       "error": null,
@@ -18272,7 +18272,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 1,
           "bytes": 768,
@@ -18286,7 +18286,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "7305c37b171adee0a8b36e94a0e113656a7e5fb1be181e0ad385f65350094542"
+      "sha256": "b682f81c86eddbce50973bcf16c64bb892ddb95d6e23b9558ed0b02043368672"
     },
     "native_boundary/unique_membership/count=2/rows=100/storage=cold_200ms": {
       "error": null,
@@ -18296,7 +18296,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 2,
           "bytes": 1536,
@@ -18310,7 +18310,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "b3e81fa46c13720992223a34dedf2a7ef6aaa093144ed1a9c32787c207fb7256"
+      "sha256": "f0563dc9715ae39840f44b35115d9dcb1ccdacedd604cbcdf125b321c0811020"
     },
     "native_boundary/unique_membership/count=2/rows=100/storage=cold_50ms": {
       "error": null,
@@ -18320,7 +18320,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 2,
           "bytes": 1536,
@@ -18334,7 +18334,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "29396fab4c44e204486f0687fca1c8ce789817ec93adee70cc7e04c7cdb79f0f"
+      "sha256": "4bb367e7cbf54f350bce0cafa33326846fbdee9403ce4a0c6e68381861761c9b"
     },
     "native_boundary/unique_membership/count=2/rows=100/storage=default": {
       "error": null,
@@ -18344,7 +18344,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 2,
           "bytes": 1536,
@@ -18358,7 +18358,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "731f55563b2d35c28cf1c12e37416a045ee80ee65bcf8ec8c828a10ed786180a"
+      "sha256": "d10d791a65888063c49b46b297e3ba549ac548db58c22257b557ad1dc2d7b56a"
     },
     "native_boundary/unique_membership/count=2/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -18368,7 +18368,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 2,
           "bytes": 1536,
@@ -18382,7 +18382,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "7935e70edbf3083bb65c39f5e59286ef3b698c09388a26a29cea9c52833b8709"
+      "sha256": "4ab348097bc610ec01a3424eae64d137c2e0f159f31635fcad2801ec8385f011"
     },
     "native_boundary/unique_membership/count=2/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -18392,7 +18392,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 2,
           "bytes": 1536,
@@ -18406,7 +18406,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "e0172f2489cd52354253bca8e9767650139abd9b66e1e024b6b28596be129e94"
+      "sha256": "39437bf3fe0c55cc84b28bea08560334e57b7cc3dbf477dcb22c81ce7e536ba1"
     },
     "native_boundary/unique_membership/count=2/rows=100000/storage=default": {
       "error": null,
@@ -18416,7 +18416,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 2,
           "bytes": 1536,
@@ -18430,7 +18430,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "7d12ace74c2a0f44de86df34e376962b8da565c12e8c85fc9a23bbc6c7d71666"
+      "sha256": "2812738d48915669b1322171408ee72537d524579256dff78902f184c4591084"
     },
     "native_boundary/unique_membership/count=64/rows=100/storage=cold_200ms": {
       "error": null,
@@ -18440,7 +18440,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 64,
           "bytes": 49152,
@@ -18454,7 +18454,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "b1ac777d498293f7f16d2a48f04ec5cae3e9d02ce32d782f6e61110d60c78e0b"
+      "sha256": "36af33cc932c87cc9d679541b8e39b6dbc595d1f0af9b2dfada92df699e6a742"
     },
     "native_boundary/unique_membership/count=64/rows=100/storage=cold_50ms": {
       "error": null,
@@ -18464,7 +18464,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 64,
           "bytes": 49152,
@@ -18478,7 +18478,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "cce09d6840521b570bd68e2087e5808c9bd7f48c2533b6eed94770dcfc5559b3"
+      "sha256": "17a39036203026c1d76561c874bd55a72c8f486c016f92ff29d434476f077e4f"
     },
     "native_boundary/unique_membership/count=64/rows=100/storage=default": {
       "error": null,
@@ -18488,7 +18488,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 64,
           "bytes": 49152,
@@ -18502,7 +18502,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "f56f5b0b4e1d5101e23ce0f88c0b4500ebe8bfeee54c5d236a9fbb530b640852"
+      "sha256": "d940e8d1ecbfa84e1adce8f8fceff497b689774d7d9f044d3a33903cc2a5340e"
     },
     "native_boundary/unique_membership/count=64/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -18512,7 +18512,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 64,
           "bytes": 49152,
@@ -18526,7 +18526,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "2b0c2fd3f3fc3317818720067006b0babcbc12c1eec92ff22d2c1fa836b7ff41"
+      "sha256": "24b8f7a0bf1d35b95188f1d875710b055e427b0bc240102e7d36d06bab55ef98"
     },
     "native_boundary/unique_membership/count=64/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -18536,7 +18536,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 64,
           "bytes": 49152,
@@ -18550,7 +18550,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "c40ed88cd6c19c15e9ae4488f19aef0eab35c3ba20fc87958ac8e165914d4217"
+      "sha256": "cca8429b517a645b6333513b7aac95bfabf70d0f26daec708f1ef3b93d4f81ab"
     },
     "native_boundary/unique_membership/count=64/rows=100000/storage=default": {
       "error": null,
@@ -18560,7 +18560,7 @@
         "memo_exprs": 2,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 6,
         "selected_cost": {
           "authoritative_graph_reads": 64,
           "bytes": 49152,
@@ -18574,7 +18574,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "37d0a1abeb8c8bce031ef6a954a18d5806fc7362d2fc884d1d63a49948e623b0"
+      "sha256": "780c57c6deeddadc461bad1bee67c14c64b624ad016163425cb9c5eaa0c4d852"
     },
     "native_boundary/unique_membership/count=65/rows=100/storage=cold_200ms": {
       "error": null,
@@ -18584,21 +18584,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 20201350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 40201350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "b38befb41ea3fef6b4a30b0763bda51141fa4556d32720ef00baf3d29b192c13"
+      "sha256": "38dc3772a6dc30f87495a81f5b229840b7bbc71c8efcf9bf9ae8e994e5bb2daa"
     },
     "native_boundary/unique_membership/count=65/rows=100/storage=cold_50ms": {
       "error": null,
@@ -18608,21 +18608,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 5051350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 10051350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "1801e1dc109473125e4d249e3ea88b3dd46a27352f27a5e77b80ad41a7e842d4"
+      "sha256": "9671df38e73e91333bac6b858f792ffed4097a0af812995527d03422a07f97ab"
     },
     "native_boundary/unique_membership/count=65/rows=100/storage=default": {
       "error": null,
@@ -18632,21 +18632,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 1400,
-          "latency": 7350,
+          "authoritative_graph_reads": 200,
+          "bytes": 77600,
+          "cpu_units": 1500,
+          "latency": 8350,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 201,
           "parallel_width": 1,
           "peak_memory": 25600,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "7f2e2e90198c3050926e068bafba66ba1b4ae792917b51f004ce6233a8298c2d"
+      "sha256": "fb579b23880cdd57d608cbd8c30f3771a1a7f462f9f8f6f9649aab0b7f318e10"
     },
     "native_boundary/unique_membership/count=65/rows=100000/storage=cold_200ms": {
       "error": null,
@@ -18656,21 +18656,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 401000,
-          "latency": 20000501050,
+          "authoritative_graph_reads": 200000,
+          "bytes": 77600000,
+          "cpu_units": 501000,
+          "latency": 40000501050,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 200001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "d5684bd07e3155e9b602c8cf5540d2bb9b3602ba7349d949e87dcd65dce1bc01"
+      "sha256": "c43139b4b3169854239ea4f182a28e754f9ea730b8e631a9a8b703c8164b65c1"
     },
     "native_boundary/unique_membership/count=65/rows=100000/storage=cold_50ms": {
       "error": null,
@@ -18680,21 +18680,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 401000,
-          "latency": 5000351050,
+          "authoritative_graph_reads": 200000,
+          "bytes": 77600000,
+          "cpu_units": 501000,
+          "latency": 10000351050,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 200001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "94a5e65fd5bf49212548c794362444d0b7daee53d174da97f43bfa33a408a7e3"
+      "sha256": "66b71a8aea580ad44000d34592f8c3e2571e89f72794b01176adccd74d739c4c"
     },
     "native_boundary/unique_membership/count=65/rows=100000/storage=default": {
       "error": null,
@@ -18704,21 +18704,21 @@
         "memo_exprs": 1,
         "memo_groups": 1,
         "rejected_alternatives": 0,
-        "rule_fires": 2,
+        "rule_fires": 3,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 401000,
-          "latency": 1306050,
+          "authoritative_graph_reads": 200000,
+          "bytes": 77600000,
+          "cpu_units": 501000,
+          "latency": 2306050,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 200001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "a85016bae1bd9049d3a2eac0670f5a40d90f93444e57e9965d64771c863dca93"
+      "sha256": "f79c16e12d9d3dd48b3c890b570e7577934a7cba484232c20d535f6732dd58aa"
     },
     "skew/cycle_skew/exhausted=false/storage=cold_200ms": {
       "error": null,

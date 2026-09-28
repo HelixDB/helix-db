@@ -13,7 +13,7 @@ Remove Helix-owned local containers, networks, disk-mode volumes, and per-instan
 `helix prune` only touches resources the CLI manages:
 
 - The container named `helix-<project>-<instance>`.
-- The disk-mode MinIO sidecar, network, and persistent volume when present.
+- The disk-mode SeaweedFS sidecar, network, and persistent volume when present, plus any MinIO sidecar and volume left by an older CLI.
 - The per-instance directory under `.helix/`.
 
 It never runs a broad `docker system prune` or `podman system prune`.

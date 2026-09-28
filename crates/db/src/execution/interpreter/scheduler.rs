@@ -237,6 +237,7 @@ impl<'db> ExecutionContext<'db> {
             pending_catalog_freshness: runtime_context::PendingCatalogFreshness::Consumed,
             row_mode_max_rows: self.row_mode_max_rows,
             execution_control: self.execution_control.clone(),
+            prepared_memberships: super::stream::PreparedMemberships::default(),
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
             #[cfg(test)]

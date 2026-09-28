@@ -18,8 +18,8 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 | --- | --- | --- |
 | Memory | Lost when the server stops | Fast local iteration and tests |
 | Native directory (`HELIX_DATA_DIR`) | Preserved in a mounted volume or directory | Running the image directly with local persistence |
-| CLI disk (`--disk`) | Preserved in a CLI-managed MinIO volume | Testing restart and persistence through the CLI |
-| Existing S3-compatible store | Owned outside Helix | Reusing MinIO, LocalStack, Ceph, or AWS S3 |
+| CLI disk (`--disk`) | Preserved in a CLI-managed SeaweedFS volume | Testing restart and persistence through the CLI |
+| Existing S3-compatible store | Owned outside Helix | Reusing SeaweedFS, Ceph, LocalStack, or AWS S3 |
 
 ## Start with the CLI
 
@@ -71,13 +71,13 @@ AWS_SECRET_ACCESS_KEY=your-secret-key
 <Warning>Do not commit `.env`.</Warning>
 
 <Tabs>
-  <Tab title="MinIO">
+  <Tab title="S3-compatible">
 
 ```bash
 helix start dev \
   --storage-uri s3://helix-db/my-app \
   --s3-region us-east-1 \
-  --s3-endpoint-url https://minio.example.com \
+  --s3-endpoint-url https://s3.example.com \
   --persist
 ```
 
@@ -137,68 +137,111 @@ docker run --rm --name helixdb \
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
 same volume preserves its database. Removing the volume deletes the data.
-This mode does not require MinIO; the CLI's `--disk` mode still uses MinIO.
+This mode needs no object store; the CLI's `--disk` mode uses SeaweedFS.
 
 The image runs as user and group `65532:65532`. Its `/var/lib/helix` directory
 is prepared for that user, including when initializing a new Docker named volume.
 If you use a bind mount or an existing volume, its directory must be writable by
 that user.
 
-## Run with MinIO persistence
+## Run with SeaweedFS persistence
 
-This Compose configuration creates a bucket and stores HelixDB objects in the
-`minio-data` volume:
+This Compose configuration runs SeaweedFS as a single-node S3 store with a
+static identity, creates the `helix-db` bucket on startup, and stores HelixDB
+objects in the `seaweedfs-data` volume. HelixDB starts once a signed request
+to the bucket succeeds:
 
 ```yaml docker-compose.yaml expandable
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    command: server /data --console-address ":9001"
+  seaweedfs:
+    image: ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+    command:
+      - mini
+      - -dir=/data
+      - -bucket=helix-db
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -master.telemetry=false
+      - -admin.ui=false
+      - -webdav=false
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
     restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+    configs:
+      - source: seaweedfs-s3
+        target: /etc/seaweedfs/s3.json
     volumes:
-      - minio-data:/data
-
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    restart: "no"
-    depends_on:
-      - minio
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
-        mc mb --ignore-existing local/helix-db
+      - seaweedfs-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - -o
+        - /dev/null
+        - --max-time
+        - "2"
+        - -I
+        - --aws-sigv4
+        - aws:amz:us-east-1:s3
+        - --user
+        - helix:helix-local-secret
+        - http://127.0.0.1:8333/helix-db
+      interval: 1s
+      timeout: 5s
+      retries: 120
 
   helix:
     image: ghcr.io/helixdb/helixdb:v0.0.6
     restart: unless-stopped
     depends_on:
-      minio-init:
-        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
     ports:
       - "6969:8080"
     environment:
       S3_BUCKET: helix-db
       S3_REGION: us-east-1
       DB_PATH: db/
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: helix
+      AWS_SECRET_ACCESS_KEY: helix-local-secret
+      AWS_ENDPOINT: http://seaweedfs:8333
       AWS_ALLOW_HTTP: "true"
 
+configs:
+  seaweedfs-s3:
+    content: |
+      {
+        "identities": [
+          {
+            "name": "helix",
+            "credentials": [
+              {"accessKey": "helix", "secretKey": "helix-local-secret"}
+            ],
+            "actions": ["Read:helix-db", "Write:helix-db", "List:helix-db"]
+          }
+        ]
+      }
+
 volumes:
-  minio-data:
+  seaweedfs-data:
 ```
 
+Inline `configs` content needs Docker Compose 2.23.1 or later. The SeaweedFS
+container is not published to the host. Change the example credentials in all
+three places if you expose it.
+
 Run `docker compose down` to replace the HelixDB container without deleting
-the MinIO data. `docker compose down -v` deletes the persisted database.
+the SeaweedFS data. `docker compose down -v` deletes the persisted database.
 
 For an existing object store, use the same HelixDB environment variables and
-omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
+omit the SeaweedFS service. For AWS S3, omit the endpoint and HTTP override.
+
+<Warning>
+HelixDB's storage engine needs S3 conditional writes: `If-None-Match: *` on
+create and `If-Match` on replace must fail with HTTP 412 when the condition
+does not hold. A store that ignores them can silently lose data. AWS S3 and
+SeaweedFS 4.09 or later enforce both.
+</Warning>
 
 | Variable | Purpose |
 | --- | --- |

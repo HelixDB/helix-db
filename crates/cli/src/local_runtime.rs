@@ -29,10 +29,26 @@ const RUNTIME_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const RUNTIME_INFO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Poll cadence for the bounded advisory daemon probe.
 const RUNTIME_INFO_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const MINIO_IMAGE: &str = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
-const MINIO_MC_IMAGE: &str = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727";
-const MINIO_ACCESS_KEY: &str = "minioadmin";
-const MINIO_SECRET_KEY: &str = "minioadmin";
+/// SeaweedFS 4.47, pinned to its multi-platform (amd64 + arm64) index digest in
+/// the project's official GHCR repository. SeaweedFS enforces the S3
+/// conditional writes SlateDB relies on from 4.09.
+const SEAWEEDFS_IMAGE: &str = "ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882";
+const SEAWEEDFS_S3_PORT: u16 = 8333;
+/// Host name Helix uses for the sidecar on the instance's private network.
+///
+/// The container name cannot serve as that host: it is one DNS label, and
+/// resolvers reject labels over 63 bytes, which long or hash-suffixed
+/// project and instance names exceed. Every instance has its own network, so
+/// this fixed alias is unique on it.
+const SEAWEEDFS_NETWORK_ALIAS: &str = "seaweedfs";
+/// Wall-clock budget for the sidecar's bucket to answer a signed HEAD. A
+/// gateway that stalls every request still releases `helix start` one retry
+/// delay and one 2 s attempt after it.
+const SEAWEEDFS_READY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Static credentials for the sidecar's S3 admin identity. The sidecar only
+/// joins the instance's private network and never publishes a host port.
+const LOCAL_S3_ACCESS_KEY: &str = "helix";
+const LOCAL_S3_SECRET_KEY: &str = "helix-local-secret";
 const LOCAL_S3_BUCKET: &str = "helix-db";
 const LOCAL_S3_REGION: &str = "us-east-1";
 const LOCAL_DB_PATH: &str = "db/";
@@ -58,20 +74,22 @@ pub struct LocalStatus {
 pub struct PreparedStart {
     config: LocalInstanceConfig,
     image: String,
-    disk_images: Option<DiskImages>,
-}
-
-#[derive(Debug)]
-struct DiskImages {
-    minio: String,
-    mc: String,
+    /// Resolved SeaweedFS image ID, present exactly when the storage is disk.
+    seaweedfs_image: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct DiskRuntimeResources {
-    minio_container: String,
+    seaweedfs_container: String,
     network: String,
     volume: String,
+    /// Sidecar from MinIO-based CLI releases. It shares `network`, so it is
+    /// removed whenever the disk resources are started or removed.
+    legacy_minio_container: String,
+    /// MinIO data from earlier CLI releases. SeaweedFS cannot read MinIO's
+    /// on-disk format, so start and stop leave the volume for the user to
+    /// migrate and remove; prune deletes it together with `volume`.
+    legacy_minio_volume: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,15 +225,20 @@ impl LocalRuntime {
     }
 
     fn adopts_legacy_name(&self, legacy: &str, identity: &str) -> bool {
-        let minio = format!("{legacy}-minio");
+        let seaweedfs = format!("{legacy}-seaweedfs");
         let network = format!("{legacy}-net");
-        let volume = format!("{legacy}-minio-data");
+        let volume = format!("{legacy}-seaweedfs-data");
+        // Resources left by MinIO-based CLI releases keep the name adopted too.
+        let minio = format!("{legacy}-minio");
+        let minio_volume = format!("{legacy}-minio-data");
         let mut found = false;
         for (kind, owner_format, resource) in [
             ("container", CONTAINER_OWNER_FORMAT, legacy),
+            ("container", CONTAINER_OWNER_FORMAT, &seaweedfs),
             ("container", CONTAINER_OWNER_FORMAT, &minio),
             ("network", RESOURCE_OWNER_FORMAT, &network),
             ("volume", RESOURCE_OWNER_FORMAT, &volume),
+            ("volume", RESOURCE_OWNER_FORMAT, &minio_volume),
         ] {
             let Some(owner) =
                 self.resource_label(&[kind, "inspect", "--format", owner_format, resource])
@@ -245,12 +268,9 @@ impl LocalRuntime {
             .pull
             .unwrap_or_else(|| config.tag.default_pull_policy());
         let id = self.pull_image_ref(&reference, policy)?;
-        let disk_images = if config.storage.is_disk() {
+        let seaweedfs_image = if config.storage.is_disk() {
             let dependency_policy = config.pull.unwrap_or(image::PullPolicy::Missing);
-            Some(DiskImages {
-                minio: self.pull_image_ref(MINIO_IMAGE, dependency_policy)?,
-                mc: self.pull_image_ref(MINIO_MC_IMAGE, dependency_policy)?,
-            })
+            Some(self.pull_image_ref(SEAWEEDFS_IMAGE, dependency_policy)?)
         } else {
             None
         };
@@ -258,7 +278,7 @@ impl LocalRuntime {
         Ok(PreparedStart {
             config: config.clone(),
             image: id,
-            disk_images,
+            seaweedfs_image,
         })
     }
 
@@ -305,16 +325,15 @@ impl LocalRuntime {
         let PreparedStart {
             config,
             image,
-            disk_images,
+            seaweedfs_image,
         } = prepared;
 
         let name = self.container_name(instance_name);
         let _ = self.remove_container(&name);
-        let (network, mut env) = match disk_images {
-            Some(images) => {
-                let resources = self.start_disk_dependencies(instance_name, &images)?;
-                let env = disk_env(&resources);
-                (Some(resources.network), env)
+        let (network, mut env) = match seaweedfs_image {
+            Some(seaweedfs_image) => {
+                let resources = self.start_disk_dependencies(instance_name, &seaweedfs_image)?;
+                (Some(resources.network), disk_env())
             }
             None => {
                 let _ = self.remove_disk_resources(instance_name, false);
@@ -356,16 +375,15 @@ impl LocalRuntime {
         let PreparedStart {
             config,
             image,
-            disk_images,
+            seaweedfs_image,
         } = prepared;
 
         let name = self.container_name(instance_name);
         let _ = self.remove_container(&name);
-        let (network, mut env) = match disk_images {
-            Some(images) => {
-                let resources = self.start_disk_dependencies(instance_name, &images)?;
-                let env = disk_env(&resources);
-                (Some(resources.network), env)
+        let (network, mut env) = match seaweedfs_image {
+            Some(seaweedfs_image) => {
+                let resources = self.start_disk_dependencies(instance_name, &seaweedfs_image)?;
+                (Some(resources.network), disk_env())
             }
             None => {
                 let _ = self.remove_disk_resources(instance_name, false);
@@ -573,39 +591,57 @@ impl LocalRuntime {
     fn disk_resources(&self, instance_name: &str) -> DiskRuntimeResources {
         let base = self.container_name(instance_name);
         DiskRuntimeResources {
-            minio_container: format!("{base}-minio"),
+            seaweedfs_container: format!("{base}-seaweedfs"),
             network: format!("{base}-net"),
-            volume: format!("{base}-minio-data"),
+            volume: format!("{base}-seaweedfs-data"),
+            legacy_minio_container: format!("{base}-minio"),
+            legacy_minio_volume: format!("{base}-minio-data"),
         }
     }
 
     fn start_disk_dependencies(
         &self,
         instance_name: &str,
-        images: &DiskImages,
+        seaweedfs_image: &str,
     ) -> Result<DiskRuntimeResources> {
         let resources = self.disk_resources(instance_name);
         let identity = self.instance_identity(instance_name);
+        let _ = self.remove_container(&resources.legacy_minio_container);
         self.ensure_network(&resources.network, &identity)?;
         self.ensure_volume(&resources.volume, &identity)?;
-        let _ = self.remove_container(&resources.minio_container);
+        if self.resource_exists(&["volume", "inspect", &resources.legacy_minio_volume]) {
+            // Name the command that removes only the old volume: prune also
+            // deletes everything written to the new one since the upgrade.
+            crate::output::warning(&format!(
+                "Volume {legacy} holds data from a MinIO-based Helix CLI, which SeaweedFS \
+                 cannot read. This instance now stores data in {current}. To copy the old \
+                 data, see https://docs.helix-db.com/cli/workflows/local#migrate-minio-disk-data. \
+                 Once you no longer need it, delete only the old volume with \
+                 '{runtime} volume rm {legacy}'; 'helix prune {instance_name}' would also \
+                 delete {current}.",
+                legacy = resources.legacy_minio_volume,
+                current = resources.volume,
+                runtime = self.runtime.binary(),
+            ));
+        }
+        let _ = self.remove_container(&resources.seaweedfs_container);
 
-        let args = minio_run_args(&resources, &images.minio, &identity);
+        let args = seaweedfs_run_args(&resources, seaweedfs_image, &identity);
         let output = self
             .runtime_command()
             .args(&args)
             .output()
-            .map_err(|e| eyre!("Failed to start {}: {e}", resources.minio_container))?;
+            .map_err(|e| eyre!("Failed to start {}: {e}", resources.seaweedfs_container))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(eyre!(
                 "Failed to start {}:\n{stderr}",
-                resources.minio_container
+                resources.seaweedfs_container
             ));
         }
 
-        self.ensure_minio_bucket(&resources, &images.mc)?;
+        self.wait_for_seaweedfs_bucket(&resources)?;
         Ok(resources)
     }
 
@@ -657,42 +693,53 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn ensure_minio_bucket(&self, resources: &DiskRuntimeResources, image: &str) -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let args = minio_bucket_init_args(resources, image);
-        let mut last_stderr = String::new();
-
-        while Instant::now() < deadline {
-            let output = self
-                .runtime_command()
-                .args(&args)
-                .output()
-                .map_err(|e| eyre!("Failed to initialize local MinIO bucket: {e}"))?;
-
-            if output.status.success() {
-                return Ok(());
-            }
-
-            last_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            thread::sleep(Duration::from_millis(500));
+    /// SeaweedFS creates the bucket itself once its S3 gateway is up, so one
+    /// probe inside the sidecar waits for both and fails without host polling.
+    fn wait_for_seaweedfs_bucket(&self, resources: &DiskRuntimeResources) -> Result<()> {
+        let output = self
+            .runtime_command()
+            .args(seaweedfs_ready_args(resources))
+            .output()
+            .map_err(|e| eyre!("Failed to probe {}: {e}", resources.seaweedfs_container))?;
+        if output.status.success() {
+            return Ok(());
         }
 
-        Err(eyre!(
-            "Timed out initializing local MinIO bucket {LOCAL_S3_BUCKET}:\n{last_stderr}"
+        // curl prints one error per failed attempt; the last says why it
+        // gave up, and a runtime failure prints only its own.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last_error = stderr
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or_default();
+        Err(CliError::new(format!(
+            "local SeaweedFS bucket {LOCAL_S3_BUCKET} did not become ready within {} s",
+            SEAWEEDFS_READY_TIMEOUT.as_secs()
         ))
+        .with_context(last_error.to_string())
+        .with_hint(format!(
+            "check its logs with '{} logs {}'",
+            self.runtime.binary(),
+            resources.seaweedfs_container
+        ))
+        .into())
     }
 
     fn remove_disk_resources(&self, instance_name: &str, include_volume: bool) -> Result<bool> {
         let resources = self.disk_resources(instance_name);
-        let removed_minio = self.remove_container(&resources.minio_container)?;
+        let removed_seaweedfs = self.remove_container(&resources.seaweedfs_container)?;
+        let removed_minio = self.remove_container(&resources.legacy_minio_container)?;
         let removed_network = self.remove_network(&resources.network)?;
-        let removed_volume = if include_volume {
-            self.remove_volume(&resources.volume)?
+        let removed_volumes = if include_volume {
+            let removed_volume = self.remove_volume(&resources.volume)?;
+            let removed_minio_volume = self.remove_volume(&resources.legacy_minio_volume)?;
+            removed_volume || removed_minio_volume
         } else {
             false
         };
 
-        Ok(removed_minio || removed_network || removed_volume)
+        Ok(removed_seaweedfs || removed_minio || removed_network || removed_volumes)
     }
 
     fn remove_network(&self, network: &str) -> Result<bool> {
@@ -1257,65 +1304,94 @@ fn helix_run_args(
     args
 }
 
-fn minio_run_args(resources: &DiskRuntimeResources, image: &str, identity: &str) -> Vec<String> {
+/// Runs SeaweedFS's single-process `mini` mode (master, volume, filer, and S3)
+/// with its other gateways and admin UI turned off.
+///
+/// The `AWS_*` variables become SeaweedFS's static admin identity, `-bucket`
+/// creates the bucket on startup, and telemetry to seaweedfs.com is disabled.
+fn seaweedfs_run_args(
+    resources: &DiskRuntimeResources,
+    image: &str,
+    identity: &str,
+) -> Vec<String> {
     vec![
         "run".to_string(),
         "-d".to_string(),
         "--restart".to_string(),
         "unless-stopped".to_string(),
         "--name".to_string(),
-        resources.minio_container.clone(),
+        resources.seaweedfs_container.clone(),
         "--label".to_string(),
         format!("{IDENTITY_LABEL}={identity}"),
         "--network".to_string(),
         resources.network.clone(),
+        "--network-alias".to_string(),
+        SEAWEEDFS_NETWORK_ALIAS.to_string(),
         "-e".to_string(),
-        format!("MINIO_ROOT_USER={MINIO_ACCESS_KEY}"),
+        format!("AWS_ACCESS_KEY_ID={LOCAL_S3_ACCESS_KEY}"),
         "-e".to_string(),
-        format!("MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}"),
+        format!("AWS_SECRET_ACCESS_KEY={LOCAL_S3_SECRET_KEY}"),
         "-v".to_string(),
         format!("{}:/data", resources.volume),
         image.to_string(),
-        "server".to_string(),
-        "/data".to_string(),
-        "--console-address".to_string(),
-        ":9001".to_string(),
+        "mini".to_string(),
+        "-dir=/data".to_string(),
+        format!("-bucket={LOCAL_S3_BUCKET}"),
+        format!("-s3.port={SEAWEEDFS_S3_PORT}"),
+        "-master.telemetry=false".to_string(),
+        "-admin.ui=false".to_string(),
+        "-webdav=false".to_string(),
+        "-s3.port.iceberg=0".to_string(),
+        "-s3.port.lance=0".to_string(),
     ]
 }
 
-fn minio_bucket_init_args(resources: &DiskRuntimeResources, image: &str) -> Vec<String> {
-    let endpoint = format!("http://{}:9000", resources.minio_container);
-    let command = format!(
-        "mc alias set local {} {} {} && mc mb --ignore-existing local/{}",
-        shell_quote(&endpoint),
-        shell_quote(MINIO_ACCESS_KEY),
-        shell_quote(MINIO_SECRET_KEY),
-        LOCAL_S3_BUCKET
-    );
-
+/// Waits inside the sidecar, which ships `curl`, until a signed HEAD of the
+/// bucket succeeds, and prints curl's error for every failed attempt.
+///
+/// curl does the waiting itself. `--retry-all-errors` also retries the
+/// refused connections and 403/404 answers of a gateway that is still
+/// starting, and `--retry-max-time` stops retrying once
+/// [`SEAWEEDFS_READY_TIMEOUT`] has elapsed, however long each attempt took.
+/// `--retry` allows one retry per second of that budget, which the 1 s delay
+/// cannot use up before the budget ends.
+fn seaweedfs_ready_args(resources: &DiskRuntimeResources) -> Vec<String> {
+    let budget_secs = SEAWEEDFS_READY_TIMEOUT.as_secs().to_string();
     vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--network".to_string(),
-        resources.network.clone(),
-        "--entrypoint".to_string(),
-        "/bin/sh".to_string(),
-        image.to_string(),
-        "-c".to_string(),
-        command,
+        "exec".to_string(),
+        resources.seaweedfs_container.clone(),
+        "curl".to_string(),
+        "-fsS".to_string(),
+        "-o".to_string(),
+        "/dev/null".to_string(),
+        "-I".to_string(),
+        "--max-time".to_string(),
+        "2".to_string(),
+        "--retry".to_string(),
+        budget_secs.clone(),
+        "--retry-delay".to_string(),
+        "1".to_string(),
+        "--retry-max-time".to_string(),
+        budget_secs,
+        "--retry-all-errors".to_string(),
+        "--aws-sigv4".to_string(),
+        format!("aws:amz:{LOCAL_S3_REGION}:s3"),
+        "--user".to_string(),
+        format!("{LOCAL_S3_ACCESS_KEY}:{LOCAL_S3_SECRET_KEY}"),
+        format!("http://127.0.0.1:{SEAWEEDFS_S3_PORT}/{LOCAL_S3_BUCKET}"),
     ]
 }
 
-fn disk_env(resources: &DiskRuntimeResources) -> Vec<ContainerEnv> {
+fn disk_env() -> Vec<ContainerEnv> {
     vec![
         ContainerEnv::Literal("S3_BUCKET", LOCAL_S3_BUCKET.to_string()),
         ContainerEnv::Literal("S3_REGION", LOCAL_S3_REGION.to_string()),
         ContainerEnv::Literal("DB_PATH", LOCAL_DB_PATH.to_string()),
-        ContainerEnv::Literal("AWS_ACCESS_KEY_ID", MINIO_ACCESS_KEY.to_string()),
-        ContainerEnv::Literal("AWS_SECRET_ACCESS_KEY", MINIO_SECRET_KEY.to_string()),
+        ContainerEnv::Literal("AWS_ACCESS_KEY_ID", LOCAL_S3_ACCESS_KEY.to_string()),
+        ContainerEnv::Literal("AWS_SECRET_ACCESS_KEY", LOCAL_S3_SECRET_KEY.to_string()),
         ContainerEnv::Literal(
             "AWS_ENDPOINT",
-            format!("http://{}:9000", resources.minio_container),
+            format!("http://{SEAWEEDFS_NETWORK_ALIAS}:{SEAWEEDFS_S3_PORT}"),
         ),
         ContainerEnv::Literal("AWS_ALLOW_HTTP", "true".to_string()),
     ]
@@ -1411,10 +1487,6 @@ impl ContainerEnv {
 fn missing_resource(stderr: &str) -> bool {
     let stderr = stderr.to_ascii_lowercase();
     stderr.contains("no such") || stderr.contains("not found") || stderr.contains("does not exist")
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn sanitize_docker_name(name: &str) -> String {
@@ -1526,9 +1598,11 @@ mod tests {
     fn disk_resources_inherit_the_sanitized_base_name() {
         let base = runtime_for("My Project").container_name("dev");
         let resources = runtime_for("My Project").disk_resources("dev");
-        assert_eq!(resources.minio_container, format!("{base}-minio"));
+        assert_eq!(resources.seaweedfs_container, format!("{base}-seaweedfs"));
         assert_eq!(resources.network, format!("{base}-net"));
-        assert_eq!(resources.volume, format!("{base}-minio-data"));
+        assert_eq!(resources.volume, format!("{base}-seaweedfs-data"));
+        assert_eq!(resources.legacy_minio_container, format!("{base}-minio"));
+        assert_eq!(resources.legacy_minio_volume, format!("{base}-minio-data"));
     }
 
     /// The launcher table and the advisory must never disagree about which
@@ -1759,9 +1833,11 @@ mod tests {
 
     fn disk_resources() -> DiskRuntimeResources {
         DiskRuntimeResources {
-            minio_container: "helix-demo-dev-minio".to_string(),
+            seaweedfs_container: "helix-demo-dev-seaweedfs".to_string(),
             network: "helix-demo-dev-net".to_string(),
-            volume: "helix-demo-dev-minio-data".to_string(),
+            volume: "helix-demo-dev-seaweedfs-data".to_string(),
+            legacy_minio_container: "helix-demo-dev-minio".to_string(),
+            legacy_minio_volume: "helix-demo-dev-minio-data".to_string(),
         }
     }
 
@@ -1812,7 +1888,7 @@ mod tests {
             8080,
             true,
             Some(&resources.network),
-            &disk_env(&resources),
+            &disk_env(),
             "4:demo/dev",
         );
 
@@ -1820,10 +1896,55 @@ mod tests {
         assert!(args.contains(&"S3_BUCKET=helix-db".to_string()));
         assert!(args.contains(&"S3_REGION=us-east-1".to_string()));
         assert!(args.contains(&"DB_PATH=db/".to_string()));
-        assert!(args.contains(&"AWS_ACCESS_KEY_ID=minioadmin".to_string()));
-        assert!(args.contains(&"AWS_SECRET_ACCESS_KEY=minioadmin".to_string()));
-        assert!(args.contains(&"AWS_ENDPOINT=http://helix-demo-dev-minio:9000".to_string()));
+        assert!(args.contains(&"AWS_ACCESS_KEY_ID=helix".to_string()));
+        assert!(args.contains(&"AWS_SECRET_ACCESS_KEY=helix-local-secret".to_string()));
+        assert!(args.contains(&"AWS_ENDPOINT=http://seaweedfs:8333".to_string()));
         assert!(args.contains(&"AWS_ALLOW_HTTP=true".to_string()));
+    }
+
+    /// Helix resolves its S3 endpoint host as one DNS label, and resolvers
+    /// reject labels over 63 bytes before sending a query. This project and
+    /// instance get a hash-suffixed base name whose sidecar container name is
+    /// far past that limit, so the endpoint must name the sidecar's network
+    /// alias, which stays short whatever the project is called.
+    #[test]
+    fn seaweedfs_endpoint_is_a_short_alias_the_sidecar_answers_to() {
+        let resources = runtime_for("My Helix Project").disk_resources("production");
+        assert!(
+            resources.seaweedfs_container.len() > 63,
+            "{}",
+            resources.seaweedfs_container
+        );
+        let args = helix_run_args(
+            "helix-my-helix-project-production",
+            "ghcr.io/helixdb/helixdb:v0.0.6",
+            8080,
+            true,
+            Some(&resources.network),
+            &disk_env(),
+            "16:My Helix Project/production",
+        );
+
+        let Some(endpoint) = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("AWS_ENDPOINT=http://"))
+        else {
+            panic!("disk mode must set an http AWS_ENDPOINT: {args:?}");
+        };
+        let Some((host, port)) = endpoint.split_once(':') else {
+            panic!("the endpoint must name a port: {endpoint}");
+        };
+        assert_eq!(port, "8333");
+        assert!(
+            (1..=63).contains(&host.len()) && !host.contains('.'),
+            "{host}"
+        );
+        let sidecar = seaweedfs_run_args(&resources, "sha256:seaweedfs", "id");
+        assert!(
+            has_pair(&sidecar, "--network", &resources.network)
+                && has_pair(&sidecar, "--network-alias", host),
+            "the sidecar must answer to {host} on the instance network: {sidecar:?}"
+        );
     }
 
     #[test]
@@ -1908,26 +2029,169 @@ mod tests {
     }
 
     #[test]
-    fn minio_args_include_persistent_volume() {
+    fn seaweedfs_args_run_only_s3_on_the_persistent_volume() {
         let resources = disk_resources();
-        let args = minio_run_args(&resources, "sha256:minio", "4:demo/dev");
+        let args = seaweedfs_run_args(&resources, "sha256:seaweedfs", "4:demo/dev");
 
-        assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
-        assert!(has_pair(&args, "--label", "helixdb.identity=4:demo/dev"));
-        assert!(args.contains(&"sha256:minio".to_string()));
-        assert!(args.contains(&"MINIO_ROOT_USER=minioadmin".to_string()));
-        assert!(args.contains(&"MINIO_ROOT_PASSWORD=minioadmin".to_string()));
-        assert!(args.contains(&"helix-demo-dev-minio-data:/data".to_string()));
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "-d",
+                "--restart",
+                "unless-stopped",
+                "--name",
+                "helix-demo-dev-seaweedfs",
+                "--label",
+                "helixdb.identity=4:demo/dev",
+                "--network",
+                "helix-demo-dev-net",
+                "--network-alias",
+                "seaweedfs",
+                "-e",
+                "AWS_ACCESS_KEY_ID=helix",
+                "-e",
+                "AWS_SECRET_ACCESS_KEY=helix-local-secret",
+                "-v",
+                "helix-demo-dev-seaweedfs-data:/data",
+                "sha256:seaweedfs",
+                "mini",
+                "-dir=/data",
+                "-bucket=helix-db",
+                "-s3.port=8333",
+                "-master.telemetry=false",
+                "-admin.ui=false",
+                "-webdav=false",
+                "-s3.port.iceberg=0",
+                "-s3.port.lance=0",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        assert!(
+            !args.iter().any(|arg| arg.contains("minio")),
+            "legacy MinIO resources must never be mounted: {args:?}"
+        );
     }
 
     #[test]
-    fn minio_bucket_init_uses_shell_entrypoint() {
-        let resources = disk_resources();
-        let args = minio_bucket_init_args(&resources, "sha256:mc");
+    fn seaweedfs_ready_probe_is_one_signed_curl_inside_the_sidecar() {
+        let args = seaweedfs_ready_args(&disk_resources());
 
-        assert!(has_pair(&args, "--entrypoint", "/bin/sh"));
-        assert!(args.contains(&"sha256:mc".to_string()));
-        assert!(args.iter().any(|arg| arg.contains("mc alias set local")));
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "helix-demo-dev-seaweedfs",
+                "curl",
+                "-fsS",
+                "-o",
+                "/dev/null",
+                "-I",
+                "--max-time",
+                "2",
+                "--retry",
+                "60",
+                "--retry-delay",
+                "1",
+                "--retry-max-time",
+                "60",
+                "--retry-all-errors",
+                "--aws-sigv4",
+                "aws:amz:us-east-1:s3",
+                "--user",
+                "helix:helix-local-secret",
+                "http://127.0.0.1:8333/helix-db",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    /// A gateway that accepts connections but never answers makes every
+    /// attempt run to `--max-time`. Retries end once the budget has elapsed,
+    /// not after a number of attempts, so the wait still finishes one delay
+    /// and one attempt after the budget however long each attempt hangs.
+    #[test]
+    fn seaweedfs_ready_probe_is_bounded_by_elapsed_time_not_attempts() {
+        let args = seaweedfs_ready_args(&disk_resources());
+        let seconds = |flag: &str| -> u64 {
+            let Some(position) = args.iter().position(|arg| arg == flag) else {
+                panic!("{flag} is missing: {args:?}");
+            };
+            args[position + 1]
+                .parse()
+                .expect("a whole number of seconds")
+        };
+        let budget = SEAWEEDFS_READY_TIMEOUT.as_secs();
+
+        assert!(args.contains(&"--retry-all-errors".to_string()), "{args:?}");
+        assert_eq!(seconds("--retry-max-time"), budget);
+        assert!(
+            seconds("--retry") * seconds("--retry-delay") >= budget,
+            "the retry count must not end the wait before the budget: {args:?}"
+        );
+        assert!(
+            seconds("--retry-max-time") + seconds("--retry-delay") + seconds("--max-time")
+                <= budget + 5,
+            "{args:?}"
+        );
+    }
+
+    /// Runs the probe's curl arguments with the host's curl against a local
+    /// bucket that answers 404 once, as SeaweedFS does before `-bucket` has
+    /// created it, and then 200.
+    #[cfg(unix)]
+    #[test]
+    fn seaweedfs_ready_probe_retries_a_missing_bucket_with_signed_heads() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            ["404 Not Found", "200 OK"].map(|status| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                String::from_utf8(request).unwrap()
+            })
+        });
+
+        let args = seaweedfs_ready_args(&disk_resources());
+        assert_eq!(args[..3], ["exec", "helix-demo-dev-seaweedfs", "curl"]);
+        let output = Command::new("curl")
+            .arg("-q")
+            .args(&args[3..])
+            .args(["--noproxy", "*", "--connect-to"])
+            .arg(format!("127.0.0.1:8333:127.0.0.1:{port}"))
+            .output()
+            .expect("run the host's curl");
+
+        assert!(output.status.success(), "{output:?}");
+        for request in server.join().unwrap() {
+            assert!(
+                request.starts_with("HEAD /helix-db HTTP/1.1\r\n"),
+                "{request}"
+            );
+            assert!(
+                request.lines().any(|line| {
+                    line.starts_with("Authorization: AWS4-HMAC-SHA256 Credential=helix/")
+                        && line.contains("/us-east-1/s3/aws4_request")
+                }),
+                "{request}"
+            );
+        }
     }
 
     fn start_cmd(

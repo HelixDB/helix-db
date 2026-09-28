@@ -4,7 +4,7 @@ use crate::{context, cost, logical, physical, properties};
 
 use super::{access, delivered};
 use crate::rules::physical_contracts::support::{
-    aggregate_output_delivered, estimated_pipeline_rows,
+    aggregate_output_delivered, estimated_pipeline_rows, estimated_rows_after_op,
     physical_pipeline_from_prefix_and_required_suffix,
     physical_pipeline_from_prefix_and_required_tail, project_output_delivered,
     reserved_output_delivered, stream_pipeline_op_contract,
@@ -25,9 +25,9 @@ pub(in crate::rules) fn root_pipeline_physical_contract(
 
     let suffix = pipeline.ops_at_least().map_ref(|op| {
         let (physical_op, next_delivered, op_cost) =
-            stream_pipeline_op_contract(op, contract.delivered.clone(), rows, storage);
+            stream_pipeline_op_contract(op, contract.delivered.clone(), rows, storage, stats);
         contract.delivered = next_delivered;
-        rows = estimated_pipeline_rows(&contract.delivered, rows);
+        rows = estimated_rows_after_op(op, &contract.delivered, rows, storage, stats);
         contract.cost = contract.cost.serial(op_cost);
         physical_op
     });

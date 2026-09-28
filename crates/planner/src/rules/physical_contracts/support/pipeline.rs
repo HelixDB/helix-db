@@ -1,4 +1,4 @@
-use crate::{cost, ir, logical, physical, properties};
+use crate::{context, cost, ir, logical, physical, properties};
 
 use super::cardinality::{
     estimated_rows_bounded_by, stream_bound_upper, stream_range_upper, with_cardinality,
@@ -53,6 +53,7 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
     delivered: properties::DeliveredProperties,
     rows: cost::EstimatedRows,
     storage: &cost::StorageCostProfile,
+    stats: &context::StatsSnapshot,
 ) -> (
     physical::PhysicalPipelineOp,
     properties::DeliveredProperties,
@@ -64,7 +65,25 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
             (
                 physical::PhysicalPipelineOp::ResidualFilter,
                 with_cardinality(delivered, upper),
-                storage.predicate_eval(rows),
+                storage.stored_predicate_filter(rows),
+            )
+        }
+        logical::StreamPipelineOp::IndexMembership { plan } => {
+            let upper = delivered.cardinality.upper();
+            let set = membership_set_contract(plan, storage, stats);
+            (
+                physical::PhysicalPipelineOp::Stream(physical::PhysicalStreamOp::IndexMembership),
+                with_cardinality(delivered, upper),
+                storage.index_membership_filter(
+                    set.secondary_id_cost().unwrap_or(set.cost),
+                    membership_label_domain_cost(
+                        plan.outside_label(),
+                        plan.label(),
+                        stats,
+                        storage,
+                    ),
+                    rows,
+                ),
             )
         }
         logical::StreamPipelineOp::Window { window } => {
@@ -228,6 +247,42 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
                 ..delivered
             },
             storage.explicit_sort(rows),
+        ),
+    }
+}
+
+/// Access contract of a membership set, used for its ID cost and row estimate.
+pub(in crate::rules) fn membership_set_contract(
+    plan: &ir::NodeIndexMembershipPlan,
+    storage: &cost::StorageCostProfile,
+    stats: &context::StatsSnapshot,
+) -> super::super::access::AccessPhysicalContract {
+    super::super::access::access_path_contract(
+        &logical::AccessPath::Node(logical::NodeAccessPath::new(plan.set().clone())),
+        storage,
+        stats,
+    )
+}
+
+/// Label bitmap read needed to drop label nodes outside the set.
+///
+/// Label-scoped predicates reject other labels without the bitmap.
+pub(in crate::rules) fn membership_label_domain_cost(
+    outside_label: ir::NodeMembershipOutsideLabel,
+    label: &ir::NonEmptyString,
+    stats: &context::StatsSnapshot,
+    storage: &cost::StorageCostProfile,
+) -> Option<cost::CostVector> {
+    match outside_label {
+        ir::NodeMembershipOutsideLabel::Reject => None,
+        ir::NodeMembershipOutsideLabel::Evaluate => Some(
+            storage.bitmap_equality_lookup(
+                stats
+                    .node_label_cardinality
+                    .get(label)
+                    .copied()
+                    .map_or(storage.default_unknown_scan_rows, cost::EstimatedRows::rows),
+            ),
         ),
     }
 }

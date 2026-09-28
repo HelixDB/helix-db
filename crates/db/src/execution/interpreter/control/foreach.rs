@@ -36,6 +36,9 @@ impl<'db> ExecutionContext<'db> {
             for frame in frames {
                 self.check_execution_deadline()?;
                 let restore = frame.apply_to(&mut self.params);
+                // Membership sets resolved from the previous bindings may
+                // depend on the parameters this frame replaced.
+                self.prepared_memberships.clear();
                 let iteration = self.execute_subplan(body).await;
                 restore.restore(&mut self.params);
                 last = Some(iteration?);
@@ -44,6 +47,7 @@ impl<'db> ExecutionContext<'db> {
         }
         .await;
         param_restore.restore(&mut self.params);
+        self.prepared_memberships.clear();
         result
     }
 

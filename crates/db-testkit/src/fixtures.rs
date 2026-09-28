@@ -11,7 +11,7 @@ pub enum StorageBackend {
     /// On-disk object store used by the initial launch matrix.
     LocalFileSystem,
     /// S3-compatible local object store reserved for a later matrix extension.
-    MinIo,
+    SeaweedFs,
     /// Amazon S3 reserved for a later matrix extension.
     S3,
     /// Adapter-defined backend name.
@@ -72,7 +72,7 @@ mod tests {
             StorageBackend::LocalFileSystem,
             StorageBackend::LocalFileSystem
         );
-        assert_ne!(StorageBackend::MinIo, StorageBackend::S3);
+        assert_ne!(StorageBackend::SeaweedFs, StorageBackend::S3);
         assert_eq!(
             StorageBackend::Other("fixture".to_string()),
             StorageBackend::Other("fixture".to_string())

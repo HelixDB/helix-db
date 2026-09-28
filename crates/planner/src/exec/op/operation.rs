@@ -34,6 +34,11 @@ pub enum ExecOp {
     },
     /// Residual predicate filter.
     Filter { predicate: ir::PredicatePlan },
+    /// Row-preserving node secondary-index membership filter.
+    IndexMembership {
+        /// Membership set, label, and fallback predicate.
+        plan: Box<super::ExecNodeIndexMembershipPlan>,
+    },
     /// Row limit.
     Limit { count: ir::StreamBoundPlan },
     /// Row skip.

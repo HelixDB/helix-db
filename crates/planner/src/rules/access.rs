@@ -32,7 +32,8 @@ pub use self::{
     },
     path::AccessPathImplementationRule,
     pipeline::{
-        AccessPipelineFilterRule, AccessPipelineImplementationRule, AccessPipelineOrderRule,
+        AccessPipelineFilterRule, AccessPipelineImplementationRule,
+        AccessPipelineMembershipFilterRule, AccessPipelineOrderRule,
         AccessPipelineSimplificationRule,
     },
     sets::{

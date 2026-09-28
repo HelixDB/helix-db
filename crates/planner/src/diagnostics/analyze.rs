@@ -195,6 +195,7 @@ impl<'a> Analyzer<'a> {
                 self.analyze_steps(body.steps(), body.execution_program(), operator_depth, 0);
             }
             exec::ExecOp::Distinct
+            | exec::ExecOp::IndexMembership { .. }
             | exec::ExecOp::VectorSearch { .. }
             | exec::ExecOp::TextSearch { .. }
             | exec::ExecOp::Project { .. }
@@ -720,6 +721,7 @@ fn traversal_depth_for_op(op: &exec::ExecOp, parent_depth: usize) -> usize {
                 .saturating_mul(subplan_maximum_traversal_increment(plan.body.steps())),
         ),
         exec::ExecOp::Filter { .. }
+        | exec::ExecOp::IndexMembership { .. }
         | exec::ExecOp::Count { .. }
         | exec::ExecOp::VectorSearch { .. }
         | exec::ExecOp::TextSearch { .. }
@@ -883,6 +885,7 @@ fn lineage_for_step(
                 .collect(),
         ),
         exec::ExecOp::Filter { .. }
+        | exec::ExecOp::IndexMembership { .. }
         | exec::ExecOp::VectorSearch { .. }
         | exec::ExecOp::TextSearch { .. }
         | exec::ExecOp::Limit { .. }
@@ -929,6 +932,7 @@ fn unbounded_scan_scope(op: &exec::ExecOp) -> Option<AccessScope> {
         | exec::ExecOp::VectorSearch { .. }
         | exec::ExecOp::TextSearch { .. }
         | exec::ExecOp::Filter { .. }
+        | exec::ExecOp::IndexMembership { .. }
         | exec::ExecOp::Limit { .. }
         | exec::ExecOp::Skip { .. }
         | exec::ExecOp::Range { .. }

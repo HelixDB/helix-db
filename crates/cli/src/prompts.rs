@@ -118,7 +118,7 @@ pub fn select_local_disk_mode() -> Result<bool> {
         .item(
             true,
             "On-disk",
-            "Persists local data with a MinIO-backed disk volume",
+            "Persists local data with a SeaweedFS-backed disk volume",
         )
         .interact()?)
 }

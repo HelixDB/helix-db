@@ -112,6 +112,13 @@ enum Node<'a> {
         predicate: &'a ir::PredicatePlan,
         input: Box<Cursor<'a>>,
     },
+    IndexMembership {
+        plan: &'a exec::ExecNodeIndexMembershipPlan,
+        input: Box<Cursor<'a>>,
+        /// Resolved after one record batch of node rows, so short pulls and
+        /// node-free streams never read the set.
+        membership: stream::MembershipCursor,
+    },
     Full {
         op: &'a exec::ExecOp,
         input: Option<Box<Cursor<'a>>>,
@@ -198,6 +205,7 @@ impl ExecutionContext<'_> {
                 | exec::ExecOp::VectorSearch { .. }
                 | exec::ExecOp::TextSearch { .. }
                 | exec::ExecOp::Filter { .. }
+                | exec::ExecOp::IndexMembership { .. }
                 | exec::ExecOp::Limit { .. }
                 | exec::ExecOp::Skip { .. }
                 | exec::ExecOp::Range { .. }

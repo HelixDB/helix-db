@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise idle vector hydration against the disposable Compose MinIO stack."""
+"""Exercise idle vector hydration against the disposable Compose SeaweedFS stack."""
 
 import argparse
 import json
@@ -65,22 +65,24 @@ def run(args):
     expected = {"hits": [{"ordinal": 0}]}
     assert query(args.port, search) == expected
 
-    container = subprocess.check_output([
-        "docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={args.project}",
-        "--filter", "label=com.docker.compose.service=helix",
-    ], text=True).strip()
-    assert container, "disposable Compose server must exist"
-    trace_name = f"{args.project}-vector-trace"
+    def service_container(service):
+        container = subprocess.check_output([
+            "docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={args.project}",
+            "--filter", f"label=com.docker.compose.service={service}",
+        ], text=True).strip()
+        assert container, f"disposable Compose {service} container must exist"
+        return container
+
+    container = service_container("helix")
+    # Helix reaches SeaweedFS through the s3-trace proxy, whose access log has
+    # one JSON line per completed request. `--tail 0` follows new lines only.
     with tempfile.TemporaryFile() as trace_file:
         trace = subprocess.Popen([
-            "docker", "run", "--rm", "--name", trace_name,
-            "--network", f"{args.project}_default", "--entrypoint", "/bin/sh", args.mc_image,
-            "-c", "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && "
-            "mc admin trace --json --verbose --all local",
+            "docker", "logs", "--follow", "--tail", "0", service_container("s3-trace"),
         ], stdout=trace_file, stderr=subprocess.STDOUT)
         try:
             time.sleep(2)
-            assert trace.poll() is None, "MinIO trace must stay connected"
+            assert trace.poll() is None, "S3 request trace must stay connected"
             subprocess.run(["docker", "restart", container], check=True, stdout=subprocess.DEVNULL)
             deadline = time.monotonic() + 120
             while True:
@@ -103,10 +105,10 @@ def run(args):
             time.sleep(17)  # At least three five-second refresh intervals, with no clients.
             assert trace.poll() is None, "trace exited during the idle interval"
         finally:
-            subprocess.run(["docker", "rm", "-f", trace_name], check=False, stdout=subprocess.DEVNULL)
+            trace.terminate()
             trace.wait(timeout=15)
         # Read only after the writer exits. Seeking a shared stdout descriptor
-        # while mc runs can overwrite the trace or split a UTF-8/JSON record.
+        # while docker logs runs can overwrite the trace or split a UTF-8/JSON record.
         trace_file.seek(0)
         captured = trace_file.read()
         warm_end = captured.rfind(b"\n", 0, metadata_start) + 1
@@ -116,12 +118,13 @@ def run(args):
         def sst_ranges(raw):
             ranges = []
             for line in raw.decode().splitlines():
-                # Docker/mc may print startup notices before the JSON stream.
+                # nginx notices and errors share the stream with access lines.
                 if not line.startswith("{"):
                     continue
                 event = json.loads(line)
-                if event["api"] == "s3.GetObject" and "/compacted/" in event["path"]:
-                    ranges.append((event["path"], event["request"]["headers"]["Range"]))
+                # Object GETs carry the key in the path; listings use a query.
+                if event["method"] == "GET" and "/compacted/" in event["uri"]:
+                    ranges.append((event["uri"], event["range"]))
             return ranges
 
         warm = set(sst_ranges(captured[:warm_end]))
@@ -149,5 +152,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--project", required=True)
-    parser.add_argument("--mc-image", required=True)
     run(parser.parse_args())

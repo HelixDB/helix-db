@@ -27,6 +27,7 @@ pub(super) fn empty_pipeline_result(
     for op in pipeline.ops() {
         match op {
             logical::StreamPipelineOp::Filter { .. }
+            | logical::StreamPipelineOp::IndexMembership { .. }
             | logical::StreamPipelineOp::Window { .. }
             | logical::StreamPipelineOp::Limit { .. }
             | logical::StreamPipelineOp::Skip { .. }

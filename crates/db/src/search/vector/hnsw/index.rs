@@ -403,6 +403,15 @@ impl<D: Distance> VectorIndex<D> {
         self
     }
 
+    /// Selects how this handle's row batches are fetched from storage.
+    pub(crate) fn with_batch_reads(
+        mut self,
+        batch_reads: crate::search::vector::storage::VectorBatchReads,
+    ) -> Self {
+        self.rows = self.rows.with_batch_reads(batch_reads);
+        self
+    }
+
     /// Enables directory maintenance for generation-capability tests.
     #[cfg(any(test, feature = "production-coverage"))]
     pub(in crate::search::vector) fn with_simhash_directory(mut self) -> Self {

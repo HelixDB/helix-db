@@ -48,6 +48,7 @@ impl ExecutableDagBuilder<'_> {
                 Some(WindowAccessReadPlan::for_window(access, *window))
             }
             logical::StreamPipelineOp::Filter { .. }
+            | logical::StreamPipelineOp::IndexMembership { .. }
             | logical::StreamPipelineOp::Limit { .. }
             | logical::StreamPipelineOp::Skip { .. }
             | logical::StreamPipelineOp::Range { .. }

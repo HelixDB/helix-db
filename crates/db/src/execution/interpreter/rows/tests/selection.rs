@@ -144,10 +144,17 @@ async fn native_and_cypher_selection_share_execution_and_keep_null_semantics() {
     })
     .unwrap();
     let input = vec![crate::execution::interpreter::ExecutionRow::empty(); 3];
-    assert_eq!(
-        ctx.select_native_rows(input, &native).await.unwrap().len(),
-        3
-    );
+    let crate::execution::interpreter::ExecutionValue::Stream(selected) = ctx
+        .filter(
+            crate::execution::interpreter::ExecutionValue::Stream(input),
+            &native,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("filter keeps a row stream");
+    };
+    assert_eq!(selected.len(), 3);
     let cypher = r::SelectionProgram::new(r::Expression::Binary(
         r::Binary::Equal,
         Box::new(r::Expression::Literal(r::Value::Null)),

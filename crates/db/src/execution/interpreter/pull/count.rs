@@ -96,6 +96,9 @@ impl<'a> Program<'a> {
                     predicate: predicate.clone(),
                 },
             ),
+            C::IndexMembership { input, plan } => {
+                apply(input, exec::ExecOp::IndexMembership { plan: plan.clone() })
+            }
             C::Expand { input, plan } => apply(input, exec::ExecOp::Expand { plan: plan.clone() }),
             C::Order { input, plan } => apply(input, exec::ExecOp::Order { plan: plan.clone() }),
             C::VectorSearch { input, plan } => {

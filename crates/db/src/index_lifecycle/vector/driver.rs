@@ -67,6 +67,8 @@ pub(crate) struct VectorIndexDriver {
     cache_registry: Arc<vector::VectorCacheRegistry>,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     scan_tuning: IndexLifecycleScanTuning,
+    /// How build handles fetch HNSW row batches, fixed by the database's cache mode.
+    batch_reads: vector::VectorBatchReads,
 }
 
 impl core::fmt::Debug for VectorIndexDriver {
@@ -89,12 +91,23 @@ impl VectorIndexDriver {
             cache_registry,
             simhasher_registry,
             scan_tuning: IndexLifecycleScanTuning::default(),
+            batch_reads: vector::VectorBatchReads::Single,
         }
     }
 
     /// Applies runtime source-scan prefetching without admitting blocks to cache.
     pub(crate) const fn with_scan_tuning(mut self, scan_tuning: IndexLifecycleScanTuning) -> Self {
         self.scan_tuning = scan_tuning;
+        self
+    }
+
+    /// Applies the database's row-batch fetch policy to build and catch-up handles.
+    ///
+    /// Builds issue one `multi_get` per batch until the database opts into
+    /// concurrent chunks, which it does only when a SlateDB block cache
+    /// deduplicates their SST filter and index reads.
+    pub(crate) const fn with_batch_reads(mut self, batch_reads: vector::VectorBatchReads) -> Self {
+        self.batch_reads = batch_reads;
         self
     }
 }
@@ -168,6 +181,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
+                            self.batch_reads,
                         )
                         .await?
                     }
@@ -183,6 +197,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
+                            self.batch_reads,
                         )
                         .await?
                     }
@@ -198,6 +213,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
+                            self.batch_reads,
                         )
                         .await?
                     }
@@ -1065,6 +1081,7 @@ async fn step_build<D: Distance>(
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    batch_reads: vector::VectorBatchReads,
 ) -> Result<VectorStepResult> {
     match stage {
         VectorBuildStage::AdoptLegacy(progress) => {
@@ -1103,6 +1120,7 @@ async fn step_build<D: Distance>(
                 limits,
                 scan_tuning,
                 simhasher_registry,
+                batch_reads,
             )
             .await
         }
@@ -1117,6 +1135,7 @@ async fn step_build<D: Distance>(
                 progress,
                 limits,
                 simhasher_registry,
+                batch_reads,
             )
             .await
         }
@@ -1723,6 +1742,7 @@ async fn scan_source<D: Distance>(
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    batch_reads: vector::VectorBatchReads,
 ) -> Result<VectorStepResult> {
     let source_prefix = source_prefix(scope, definition.element_kind());
     let start = cursor_suffix(&source_prefix, progress.cursor.as_ref())?;
@@ -1828,6 +1848,7 @@ async fn scan_source<D: Distance>(
             record,
             definition,
             Arc::clone(&simhasher_registry),
+            batch_reads,
             entity_id,
             None,
             document.as_ref(),
@@ -1915,6 +1936,7 @@ async fn catch_up<D: Distance>(
     progress: &PrefixScanProgress,
     limits: SearchIndexBatchLimits,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    batch_reads: vector::VectorBatchReads,
 ) -> Result<VectorStepResult> {
     let prefix = generation_prefix(
         scope,
@@ -2002,6 +2024,7 @@ async fn catch_up<D: Distance>(
             record,
             definition,
             Arc::clone(&simhasher_registry),
+            batch_reads,
             entity.id,
             previous.as_ref(),
             next.as_ref(),
@@ -2086,6 +2109,7 @@ async fn plan_and_apply<D: Distance>(
     record: &IndexRecordV2,
     definition: &ValidatedVectorIndexDefinition,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    batch_reads: vector::VectorBatchReads,
     entity_id: IndexEntityId,
     previous_partition: Option<&TextPartition>,
     next_document: Option<&VectorIndexedDocument>,
@@ -2128,6 +2152,7 @@ async fn plan_and_apply<D: Distance>(
         record,
         definition,
         Arc::clone(&simhasher_registry),
+        batch_reads,
         entity_id,
         previous_resolution.as_ref(),
         next_resolution.as_ref(),
@@ -2227,6 +2252,7 @@ async fn apply_planned_change<D: Distance>(
     record: &IndexRecordV2,
     definition: &ValidatedVectorIndexDefinition,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    batch_reads: vector::VectorBatchReads,
     entity_id: IndexEntityId,
     previous: Option<&BuildPhysicalResolution>,
     next: Option<&BuildPhysicalResolution>,
@@ -2244,7 +2270,8 @@ async fn apply_planned_change<D: Distance>(
         )
         .map_err(|error| corruption(error.to_string()))?;
         let index = VectorIndex::<D>::from_generation(handle.generation())
-            .with_simhasher_registry(Arc::clone(&simhasher_registry));
+            .with_simhasher_registry(Arc::clone(&simhasher_registry))
+            .with_batch_reads(batch_reads);
         index
             .stage_delete_with_build_session(write, entity_id.get(), build_session)
             .await?;
@@ -2260,7 +2287,8 @@ async fn apply_planned_change<D: Distance>(
     )
     .map_err(|error| corruption(error.to_string()))?;
     let index = VectorIndex::<D>::from_generation(handle.generation())
-        .with_simhasher_registry(simhasher_registry);
+        .with_simhasher_registry(simhasher_registry)
+        .with_batch_reads(batch_reads);
     let metadata = index.get_metadata(write).await?;
     if metadata.is_none() {
         if !next.mapping_is_new
@@ -4220,6 +4248,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                driver.batch_reads,
             )
             .await
             .unwrap()
@@ -4245,6 +4274,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                driver.batch_reads,
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(_))
@@ -4272,6 +4302,7 @@ mod tests {
                 tiny,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                driver.batch_reads,
             )
             .await
             .unwrap()
@@ -4299,6 +4330,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                driver.batch_reads,
             )
             .await
             .unwrap()
@@ -4328,6 +4360,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                driver.batch_reads,
             )
             .await
             .unwrap()
@@ -4359,6 +4392,7 @@ mod tests {
                 limits,
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
+                driver.batch_reads,
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(reason))

@@ -7,7 +7,7 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{catalog, ir};
+use crate::{catalog, exec, ir};
 
 /// Failure to construct a physical equality contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -931,6 +931,13 @@ pub enum ExecCountCursorPlan {
         /// Predicate.
         predicate: ir::PredicatePlan,
     },
+    /// Row-preserving node secondary-index membership filter.
+    IndexMembership {
+        /// Input cursor.
+        input: Box<Self>,
+        /// Membership set, label, and fallback predicate.
+        plan: Box<exec::ExecNodeIndexMembershipPlan>,
+    },
     /// Positioned canonical window that could not cross a semantic barrier.
     Window {
         /// Input cursor.
@@ -1228,6 +1235,7 @@ fn validate_cursor(cursor: &ExecCountCursorPlan) -> Result<(), ExecCountValidati
             rest.iter().try_for_each(validate_cursor)
         }
         ExecCountCursorPlan::Filter { input, .. }
+        | ExecCountCursorPlan::IndexMembership { input, .. }
         | ExecCountCursorPlan::Order { input, .. }
         | ExecCountCursorPlan::Expand { input, .. }
         | ExecCountCursorPlan::VectorSearch { input, .. }
@@ -1294,6 +1302,7 @@ fn cursor_row_input_count(cursor: &ExecCountCursorPlan) -> Result<usize, ExecCou
             count
         }
         ExecCountCursorPlan::Filter { input, .. }
+        | ExecCountCursorPlan::IndexMembership { input, .. }
         | ExecCountCursorPlan::Window { input, .. }
         | ExecCountCursorPlan::Order { input, .. }
         | ExecCountCursorPlan::Expand { input, .. }

@@ -210,7 +210,7 @@ mod tests {
             ("S3_BUCKET", "launch-bucket"),
             ("AWS_REGION", "eu-west-2"),
             ("AWS_DEFAULT_REGION", "ignored"),
-            ("AWS_ENDPOINT_URL_S3", "http://minio:9000"),
+            ("AWS_ENDPOINT_URL_S3", "http://seaweedfs:8333"),
             ("AWS_ALLOW_HTTP", "TRUE"),
         ]);
         let config =
@@ -221,7 +221,7 @@ mod tests {
             StorageConfig::S3 {
                 bucket: "launch-bucket".to_string(),
                 region: "eu-west-2".to_string(),
-                endpoint: Some("http://minio:9000".to_string()),
+                endpoint: Some("http://seaweedfs:8333".to_string()),
                 allow_http: true,
             }
         );

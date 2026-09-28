@@ -3,11 +3,13 @@
 mod contracts;
 mod filter;
 mod implementation;
+mod membership;
 mod order;
 mod simplification;
 mod support;
 
 pub use self::{
     filter::AccessPipelineFilterRule, implementation::AccessPipelineImplementationRule,
-    order::AccessPipelineOrderRule, simplification::AccessPipelineSimplificationRule,
+    membership::AccessPipelineMembershipFilterRule, order::AccessPipelineOrderRule,
+    simplification::AccessPipelineSimplificationRule,
 };

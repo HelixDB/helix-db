@@ -115,8 +115,8 @@ fn selective_equality_retains_full_cost_competition() {
             )
         })
         .unwrap();
-    assert_eq!(scan.alternative.cost.latency.as_micros(), 18_050);
-    assert_eq!(scan.alternative.cost.authoritative_graph_reads, 1000);
+    assert_eq!(scan.alternative.cost.latency.as_micros(), 28_050);
+    assert_eq!(scan.alternative.cost.authoritative_graph_reads, 2000);
     assert_eq!(indexed.alternative.cost.latency.as_micros(), 15_220);
     assert_eq!(indexed.alternative.cost.object_reads, 3);
     assert_eq!(indexed.alternative.cost.cpu_units, 70);

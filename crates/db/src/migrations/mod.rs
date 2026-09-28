@@ -6106,7 +6106,7 @@ pub(crate) mod production_contracts {
             .expect("adopted vector cache refreshes");
         let cache_guard = db
             .vector_cache_registry()
-            .read_guard_for(&generation)
+            .resident_guard_for(&generation)
             .expect("adopted generation is admitted to the vector cache");
         assert!(cache_guard.store().estimated_bytes() > 0);
         drop(cache_guard);

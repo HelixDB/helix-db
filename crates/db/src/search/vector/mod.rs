@@ -177,13 +177,19 @@ pub use benchmarks::{
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::commit::production_contracts::run as run_write_cache_contracts;
-pub(crate) use cache::commit::VectorCacheWriteSet;
+pub(crate) use cache::commit::{commit_fenced, VectorCacheWriteSet};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::hydration::production_contracts::run as run_hydration_contracts;
-pub(crate) use cache::hydration::{hydrate_active_generations, VectorCacheHydrationBudget};
+pub(crate) use cache::hydration::{
+    hydrate_active_generations, VectorCacheHydrationBudget, VectorCacheHydrationOutcome,
+    VectorCacheSnapshotSource,
+};
+pub(crate) use cache::reader_refresh::run_reader_refreshes;
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
-pub(crate) use cache::registry::VectorCacheRegistry;
+pub(crate) use cache::registry::{
+    VectorCachePendingCommit, VectorCacheRegistry, VectorCacheVisibility,
+};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::store::production_contracts::run as run_memory_store_contracts;
 #[cfg(any(test, feature = "production-coverage"))]
@@ -261,7 +267,7 @@ pub(crate) use storage::transaction::{
 pub(crate) use storage::{
     CanonicalVectorDirectoryBackfillOutcome, LegacyVectorValidationMode,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
-    SimHashDirectoryValidationOutcome, VectorCleanupRow,
+    SimHashDirectoryValidationOutcome, VectorBatchReads, VectorCleanupRow,
 };
 pub(crate) use vector_values::metadata::{VectorIndexConfig, VectorIndexMetadata};
 

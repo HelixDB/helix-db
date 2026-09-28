@@ -173,6 +173,7 @@ impl<'a> Cursor<'a> {
                             | exec::ExecCountCursorPlan::Union { .. }
                             | exec::ExecCountCursorPlan::Intersect { .. }
                             | exec::ExecCountCursorPlan::Filter { .. }
+                            | exec::ExecCountCursorPlan::IndexMembership { .. }
                             | exec::ExecCountCursorPlan::Window { .. }
                             | exec::ExecCountCursorPlan::Order { .. }
                             | exec::ExecCountCursorPlan::Expand { .. }
@@ -446,6 +447,28 @@ impl<'a> Cursor<'a> {
                         let rows = ctx.stream_rows(item, "filter")?;
                         let row = rows.first().expect("cursor emits one row");
                         if !ctx.eval_predicate_plan(row, predicate).await? {
+                            continue;
+                        }
+                        Some(ExecutionValue::Stream(rows))
+                    }
+                    Node::IndexMembership {
+                        plan,
+                        input,
+                        membership,
+                    } => {
+                        let Some(item) = input.next(ctx).await? else {
+                            return Ok(None);
+                        };
+                        let rows = ctx.stream_rows(item, "index membership")?;
+                        let row = rows.first().expect("cursor emits one row");
+                        let keep = match membership.decide(ctx, plan, row).await? {
+                            stream::RowDecision::Keep => true,
+                            stream::RowDecision::Drop => false,
+                            stream::RowDecision::Evaluate => {
+                                ctx.eval_predicate_plan(row, &plan.predicate).await?
+                            }
+                        };
+                        if !keep {
                             continue;
                         }
                         Some(ExecutionValue::Stream(rows))

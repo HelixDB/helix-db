@@ -6,6 +6,7 @@
 
 mod condition;
 mod control_flow;
+mod membership;
 mod merge;
 mod mutation;
 mod operation;
@@ -14,6 +15,7 @@ mod variable;
 
 pub use condition::ExecCondition;
 pub use control_flow::{ExecBranchPlan, ExecRepeatPlan};
+pub use membership::ExecNodeIndexMembershipPlan;
 pub use merge::ExecMergeMode;
 pub use mutation::ExecMutationPlan;
 pub use operation::ExecOp;

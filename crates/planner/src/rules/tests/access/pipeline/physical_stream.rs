@@ -54,7 +54,7 @@ fn access_pipeline_implementation_rule_keeps_composed_streams_in_cascades() {
         alternative.cost,
         storage
             .element_scan(rows)
-            .serial(storage.predicate_eval(rows))
+            .serial(storage.stored_predicate_filter(rows))
             .serial(storage.stream_operator(cost::EstimatedRows::rows(2)))
     );
 }

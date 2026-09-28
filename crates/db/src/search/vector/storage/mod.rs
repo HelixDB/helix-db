@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroU64;
 use std::ops::Bound;
 
+use futures::future::try_join_all;
+
 use bytes::Bytes;
 use slatedb::DbReadOps;
 
@@ -50,13 +52,45 @@ use super::{
     SimHash, VectorDimension, VectorIndexConfig, VectorIndexMetadata, VectorWriteMeasurement,
 };
 
+/// How one keyspace resolves a batch of random row keys.
+///
+/// SlateDB reads the filter of every L0 SST, and the index of every candidate
+/// SST, once per `multi_get`. Splitting a batch into concurrent chunks
+/// overlaps block fetches but repeats those metadata reads per chunk, which a
+/// shared SlateDB block cache deduplicates and an uncached database pays from
+/// object storage every time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorBatchReads {
+    /// One `multi_get` per batch, reading SST filters and indexes once.
+    Single,
+    /// Bounded concurrent `multi_get` chunks per batch. Only a database with a
+    /// SlateDB block cache may use this.
+    Concurrent,
+}
+
 /// Bound physical namespace for every current-format row of one vector index.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Equality is namespace identity: the full physical name, its compact row
+/// namespace, and the tenant scope. The batch-read policy only tunes how this
+/// handle fetches rows, so row tokens stay valid across handles of one
+/// namespace whatever policy each was built with.
+#[derive(Debug, Clone)]
 pub(crate) struct VectorRowKeyspace {
     physical_name: String,
     index_id: u64,
     scope: DataScope,
+    batch_reads: VectorBatchReads,
 }
+
+impl PartialEq for VectorRowKeyspace {
+    fn eq(&self, other: &Self) -> bool {
+        self.physical_name == other.physical_name
+            && self.index_id == other.index_id
+            && self.scope == other.scope
+    }
+}
+
+impl Eq for VectorRowKeyspace {}
 
 /// Opaque keyspace-bound identity of one canonical deployed vector payload row.
 ///
@@ -96,6 +130,7 @@ impl VectorRowKeyspace {
             physical_name,
             index_id,
             scope,
+            batch_reads: VectorBatchReads::Single,
         }
     }
 
@@ -106,6 +141,7 @@ impl VectorRowKeyspace {
             physical_name,
             index_id,
             scope,
+            batch_reads: VectorBatchReads::Single,
         }
     }
 
@@ -119,7 +155,18 @@ impl VectorRowKeyspace {
             physical_name,
             index_id: physical_index_id.get(),
             scope,
+            batch_reads: VectorBatchReads::Single,
         }
+    }
+
+    /// Selects how batch reads in this namespace fetch their rows.
+    ///
+    /// Every constructor starts with [`VectorBatchReads::Single`]; only a
+    /// caller that knows its database has a SlateDB block cache opts into
+    /// [`VectorBatchReads::Concurrent`].
+    pub(crate) fn with_batch_reads(mut self, batch_reads: VectorBatchReads) -> Self {
+        self.batch_reads = batch_reads;
+        self
     }
 
     /// Returns the complete physical name bound to this row namespace.
@@ -700,10 +747,45 @@ impl<'a, R: ?Sized> VectorRows<'a, R> {
     }
 }
 
+/// Keys per concurrent `multi_get` chunk for random vector-row batches.
+const CONCURRENT_MULTI_GET_CHUNK_KEYS: usize = 32;
+/// Chunks in flight at once, bounding one batch to 512 outstanding keys.
+const CONCURRENT_MULTI_GET_MAX_CHUNKS: usize = 16;
+
 impl<R> VectorRows<'_, R>
 where
     R: DbReadOps + Send + Sync + ?Sized,
 {
+    /// Batch-reads caller-ordered keys, overlapping fetches when allowed.
+    ///
+    /// SlateDB resolves one `multi_get` by awaiting each non-adjacent block
+    /// range in turn. HNSW row batches are random by construction (neighbor
+    /// IDs, SimHash-ordered payloads), so one large call pays one serial
+    /// round trip per block on a cache miss. Under
+    /// [`VectorBatchReads::Concurrent`], bounded chunks run concurrently to
+    /// overlap those fetches; [`VectorBatchReads::Single`] keeps one call so
+    /// SST filters and indexes are read once. Results keep caller order.
+    async fn multi_get_rows<K>(&self, keys: &[K]) -> Result<Vec<Option<Bytes>>, slatedb::Error>
+    where
+        K: AsRef<[u8]> + Send + Sync,
+    {
+        if self.keyspace.batch_reads == VectorBatchReads::Single
+            || keys.len() <= CONCURRENT_MULTI_GET_CHUNK_KEYS
+        {
+            return self.read.multi_get(keys).await;
+        }
+        let mut rows = Vec::with_capacity(keys.len());
+        for wave in keys.chunks(CONCURRENT_MULTI_GET_CHUNK_KEYS * CONCURRENT_MULTI_GET_MAX_CHUNKS) {
+            let fetched = try_join_all(
+                wave.chunks(CONCURRENT_MULTI_GET_CHUNK_KEYS)
+                    .map(|chunk| self.read.multi_get(chunk)),
+            )
+            .await?;
+            rows.extend(fetched.into_iter().flatten());
+        }
+        Ok(rows)
+    }
+
     /// Reads one legacy payload and accounts every typed point-read byte.
     ///
     /// This is the only migration boundary that combines frozen legacy
@@ -1809,8 +1891,7 @@ where
                     )))
             })
             .collect::<Vec<_>>();
-        self.read
-            .multi_get(&keys)
+        self.multi_get_rows(&keys)
             .await?
             .into_iter()
             .map(|row| {
@@ -1910,8 +1991,7 @@ where
             })
             .collect::<Vec<_>>();
         Ok(self
-            .read
-            .multi_get(&keys)
+            .multi_get_rows(&keys)
             .await?
             .into_iter()
             .map(|row| match row {
@@ -1965,14 +2045,22 @@ where
         let mut upper = Vec::with_capacity(core::mem::size_of::<u64>() * 2);
         upper.extend_from_slice(&max_order_code.to_be_bytes());
         upper.extend_from_slice(&NodeId::MAX.to_be_bytes());
+        // Restricted search probes up to 64 of these windows per query. SlateDB
+        // scans default to `cache_blocks: false`, which would refetch every
+        // directory block from object storage on every query.
+        let options = slatedb::config::ScanOptions {
+            cache_blocks: true,
+            ..slatedb::config::ScanOptions::default()
+        };
         let mut rows = self
             .read
-            .scan_prefix(
+            .scan_prefix_with_options(
                 &prefix,
                 (
                     Bound::Included(Bytes::from(lower)),
                     Bound::Included(Bytes::from(upper)),
                 ),
+                &options,
             )
             .await?;
         let mut entries = Vec::with_capacity(max_rows.min(256));
@@ -2063,8 +2151,7 @@ where
             .iter()
             .map(|key| key.physical_key.clone())
             .collect::<Vec<_>>();
-        self.read
-            .multi_get(&physical_keys)
+        self.multi_get_rows(&physical_keys)
             .await
             .map_err(Into::into)
     }
@@ -3079,6 +3166,176 @@ mod tests {
             Some(Bytes::from_static(b"item-payload"))
         );
         txn.rollback();
+    }
+
+    /// Transaction reader that counts the `multi_get` calls one batch issues.
+    struct CountingMultiGet<'a> {
+        transaction: &'a slatedb::DbTransaction,
+        multi_gets: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DbReadOps for CountingMultiGet<'_> {
+        async fn get_with_options<K: AsRef<[u8]> + Send>(
+            &self,
+            key: K,
+            options: &slatedb::config::ReadOptions,
+        ) -> Result<Option<Bytes>, slatedb::Error> {
+            self.transaction.get_with_options(key, options).await
+        }
+
+        async fn multi_get_with_options<K>(
+            &self,
+            keys: &[K],
+            options: &slatedb::config::ReadOptions,
+        ) -> Result<Vec<Option<Bytes>>, slatedb::Error>
+        where
+            K: AsRef<[u8]> + Send + Sync,
+        {
+            self.multi_gets
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.transaction.multi_get_with_options(keys, options).await
+        }
+
+        async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+            &self,
+            key: K,
+            options: &slatedb::config::ReadOptions,
+        ) -> Result<Option<slatedb::KeyValue>, slatedb::Error> {
+            self.transaction
+                .get_key_value_with_options(key, options)
+                .await
+        }
+
+        async fn scan_with_options<T>(
+            &self,
+            range: T,
+            options: &slatedb::config::ScanOptions,
+        ) -> Result<slatedb::DbIterator, slatedb::Error>
+        where
+            T: slatedb::ByteRangeBounds + Send,
+        {
+            self.transaction.scan_with_options(range, options).await
+        }
+    }
+
+    /// Proves the keyspace's batch policy alone decides how many `multi_get`
+    /// calls one batch issues: a keyspace without a block cache reads SST
+    /// filters and indexes once, while concurrent chunks keep caller order and
+    /// absence across chunk and wave boundaries.
+    #[tokio::test]
+    async fn batch_read_policy_bounds_multi_gets_and_preserves_caller_order() {
+        let db = slatedb::Db::open("concurrent-vector-rows", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        let keyspace =
+            VectorRowKeyspace::new("concurrent-vector-rows".into(), DataScope::LegacyUnscoped);
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let batch_len = CONCURRENT_MULTI_GET_CHUNK_KEYS * CONCURRENT_MULTI_GET_MAX_CHUNKS * 2 + 7;
+        let present = |node_id: NodeId| !node_id.is_multiple_of(3);
+        (1..=batch_len as NodeId)
+            .filter(|node_id| present(*node_id))
+            .for_each(|node_id| {
+                txn.put(
+                    keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+                        keyspace.index_id(),
+                        node_id,
+                    ))),
+                    encode_simhash(node_id),
+                )
+                .unwrap();
+            });
+
+        // Descending order is the opposite of physical key order.
+        let node_ids = (1..=batch_len as NodeId).rev().collect::<Vec<_>>();
+        let expected = node_ids
+            .iter()
+            .map(|node_id| match present(*node_id) {
+                true => SimHashRow::Present(SimHash::from_bits(*node_id)),
+                false => SimHashRow::Missing,
+            })
+            .collect::<Vec<_>>();
+        for (batch_reads, multi_gets) in [
+            (VectorBatchReads::Single, 1),
+            (
+                VectorBatchReads::Concurrent,
+                batch_len.div_ceil(CONCURRENT_MULTI_GET_CHUNK_KEYS),
+            ),
+        ] {
+            let keyspace = keyspace.clone().with_batch_reads(batch_reads);
+            let read = CountingMultiGet {
+                transaction: &txn,
+                multi_gets: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let rows = VectorRows::new(&read, &keyspace)
+                .simhash_rows(&node_ids)
+                .await
+                .unwrap();
+            assert_eq!(rows, expected, "{batch_reads:?}");
+            assert_eq!(
+                read.multi_gets.load(std::sync::atomic::Ordering::Relaxed),
+                multi_gets,
+                "{batch_reads:?}"
+            );
+        }
+        txn.rollback();
+    }
+
+    /// Proves the batch-read policy never distinguishes namespaces: a cleanup
+    /// token scanned through a concurrent handle is deleted through a
+    /// single-fetch handle of the same namespace, while another scope's
+    /// handle still rejects it.
+    #[tokio::test]
+    async fn batch_read_policy_is_not_part_of_keyspace_identity() {
+        let db = database("keyspace-identity").await;
+        let single = VectorRowKeyspace::new("keyspace-identity".into(), DataScope::LegacyUnscoped);
+        let concurrent = single
+            .clone()
+            .with_batch_reads(VectorBatchReads::Concurrent);
+        let foreign = VectorRowKeyspace::new(
+            "keyspace-identity".into(),
+            DataScope::Tenant(TenantId::from_u128(1)),
+        );
+        assert_eq!(single, concurrent);
+        assert_ne!(single, foreign);
+        db.put(
+            single.key(VectorKey::SimHash(VectorSimHashKey::new(
+                single.index_id(),
+                1,
+            ))),
+            encode_simhash(1),
+        )
+        .await
+        .unwrap();
+
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let row = VectorRows::new(&transaction, &concurrent)
+            .cleanup_scan()
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .expect("the namespace holds one row");
+        let write = MeasuredVectorTransaction::new(&transaction);
+        assert!(matches!(
+            VectorWriteRows::new(&write, &foreign).delete_cleanup_row(&row),
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+        VectorWriteRows::new(&write, &single)
+            .delete_cleanup_row(&row)
+            .expect("a token is valid for every handle of its namespace");
+        transaction.commit().await.unwrap();
+
+        assert!(VectorRows::new(&db, &single)
+            .cleanup_scan()
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .is_none());
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

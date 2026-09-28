@@ -28,18 +28,19 @@ async fn main() -> Result<()> {
         .context("usage: storage_audit DATABASE_PREFIX [--gc]")?;
     let run_gc = std::env::args().nth(2).as_deref() == Some("--gc");
     let endpoint =
-        std::env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:9000".to_string());
+        std::env::var("SEAWEEDFS_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:8333".to_string());
     let bucket =
-        std::env::var("MINIO_BUCKET").unwrap_or_else(|_| "helix-migration-parity".to_string());
+        std::env::var("SEAWEEDFS_BUCKET").unwrap_or_else(|_| "helix-migration-parity".to_string());
     let store: Arc<dyn ObjectStore> = Arc::new(
         object_store_014::aws::AmazonS3Builder::new()
             .with_bucket_name(bucket)
             .with_endpoint(&endpoint)
             .with_access_key_id(
-                std::env::var("MINIO_ROOT_USER").unwrap_or_else(|_| "minioadmin".to_string()),
+                std::env::var("SEAWEEDFS_ACCESS_KEY").unwrap_or_else(|_| "helix".to_string()),
             )
             .with_secret_access_key(
-                std::env::var("MINIO_ROOT_PASSWORD").unwrap_or_else(|_| "minioadmin".to_string()),
+                std::env::var("SEAWEEDFS_SECRET_KEY")
+                    .unwrap_or_else(|_| "helix-local-secret".to_string()),
             )
             .with_allow_http(endpoint.starts_with("http://"))
             .with_virtual_hosted_style_request(false)

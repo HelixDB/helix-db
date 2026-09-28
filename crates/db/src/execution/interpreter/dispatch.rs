@@ -59,6 +59,11 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecOp::Filter { predicate } => {
                 execution_control.run(self.filter(input, predicate)).await
             }
+            exec::ExecOp::IndexMembership { plan } => {
+                execution_control
+                    .run(self.index_membership(input, plan))
+                    .await
+            }
             exec::ExecOp::Limit { count } => self.limit(input, count),
             exec::ExecOp::Skip { count } => self.skip(input, count),
             exec::ExecOp::Range { range } => self.range(input, range),
@@ -95,6 +100,9 @@ impl<'db> ExecutionContext<'db> {
             // Keep that state off enclosing query futures and their thread stacks.
             exec::ExecOp::Mutation { plan } => Box::pin(self.execute_mutation(input, plan)).await,
             exec::ExecOp::IndexDdl { plan } => {
+                // DDL changes which indexes serve a set and may start a newer
+                // request snapshot.
+                self.prepared_memberships.clear();
                 if plan.requires_isolated_catalog_transaction() {
                     let resume_request_scope = self.has_request_write_scope();
                     self.check_execution_deadline()?;

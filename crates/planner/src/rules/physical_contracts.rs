@@ -26,7 +26,7 @@ pub(super) use self::{
     stream::{stream_physical_contract, StreamPhysicalContract},
     support::{
         access_delivered, barrier_delivered, cardinality_output_delivered, element_keyspace,
-        empty_delivered, filtered_delivered, ordered_delivered,
+        empty_delivered, filtered_delivered, membership_label_domain_cost, ordered_delivered,
     },
 };
 

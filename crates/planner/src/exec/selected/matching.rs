@@ -43,6 +43,10 @@ fn selected_stream_pipeline_op_matches(
             physical::PhysicalPipelineOp::ResidualFilter,
         )
         | (
+            logical::StreamPipelineOp::IndexMembership { .. },
+            physical::PhysicalPipelineOp::Stream(physical::PhysicalStreamOp::IndexMembership),
+        )
+        | (
             logical::StreamPipelineOp::Limit { .. },
             physical::PhysicalPipelineOp::Stream(physical::PhysicalStreamOp::Limit),
         )

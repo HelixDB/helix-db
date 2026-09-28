@@ -49,16 +49,28 @@ impl Owned {
         })
     }
 
-    /// Called only inside the finite commit owner, which survives cancellation.
+    /// Commit without vector cache fences.
+    #[cfg(test)]
     pub(crate) async fn commit(
         self,
+    ) -> std::result::Result<Option<slatedb::WriteHandle>, slatedb::Error> {
+        self.commit_fenced(Vec::new()).await
+    }
+
+    /// Commit and resolve vector cache fences through
+    /// [`crate::search::vector::commit_fenced`]. Called only inside the finite
+    /// commit owner, which survives cancellation, so the ledgers stay admitted
+    /// until the backend outcome is known.
+    pub(crate) async fn commit_fenced(
+        self,
+        fences: Vec<crate::search::vector::VectorCachePendingCommit>,
     ) -> std::result::Result<Option<slatedb::WriteHandle>, slatedb::Error> {
         let Self {
             raw,
             tracking,
             merges,
         } = self;
-        let result = raw.commit().await;
+        let result = crate::search::vector::commit_fenced(raw, fences).await;
         drop(merges);
         drop(tracking);
         result
