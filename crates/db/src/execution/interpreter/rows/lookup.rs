@@ -101,6 +101,10 @@ impl Probe {
         };
         let literal = ir::SecondaryIndexLiteral::new(value)
             .expect("nonnull scalar literals have native equality semantics");
+        // Storage rejects a lookup key this large; only the scan answers exactly.
+        if literal.may_exceed_index_key() {
+            return Ok(Self::Scan);
+        }
         let operation = exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::exact_equality(

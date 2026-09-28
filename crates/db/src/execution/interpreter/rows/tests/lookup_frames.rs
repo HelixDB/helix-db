@@ -425,3 +425,64 @@ async fn indexed_pattern_boundaries_preserve_writes_and_late_errors() {
     );
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn oversized_string_probes_scan_instead_of_failing_the_lookup() {
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("lookup-oversized-probe")
+            .with_equality_index("A", "key")
+            .with_unique_equality_index("U", "key"),
+    )
+    .await;
+    db.cypher(crate::cypher::Request::new(
+        "CREATE (:A {key:'x'}), (:U {key:'y'})",
+    ))
+    .await
+    .unwrap();
+    // No indexed value can be this long, and storage rejects the lookup key.
+    let big = r::Value::String("z".repeat(helix_planner::ir::MAX_INDEXED_EQUALITY_BYTES));
+    let parameters = BTreeMap::from([("big".to_owned(), big)]);
+    for (text, expected) in [
+        (
+            "WITH $big AS k MATCH (a:A {key: k}) RETURN count(*)",
+            json!([[0]]),
+        ),
+        (
+            "UNWIND [$big, 'x'] AS k MATCH (a:A) WHERE a.key = k RETURN count(*)",
+            json!([[1]]),
+        ),
+        (
+            "WITH $big AS k OPTIONAL MATCH (u:U {key: k}) RETURN count(*), count(u)",
+            json!([[1, 0]]),
+        ),
+    ] {
+        let plan = r::plan(
+            helix_cypher::compile(text).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        assert!(
+            plan.matches().values().any(|plan| plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, r::MatchStep::IndexLookup(_)))),
+            "{text}"
+        );
+        for strategy in [r::RowExecution::Batched, r::RowExecution::Materialized] {
+            let response = Interpreter::new(&db, context::ParamBindings::default())
+                .execute_rows(
+                    &plan.clone().with_execution(strategy),
+                    &parameters,
+                    Limits::default(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text} {strategy:?}: {error}"));
+            assert_eq!(
+                serde_json::to_value(response.rows).unwrap(),
+                expected,
+                "{text} {strategy:?}"
+            );
+        }
+    }
+    db.close().await.unwrap();
+}

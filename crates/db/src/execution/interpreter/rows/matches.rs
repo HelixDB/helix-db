@@ -167,13 +167,16 @@ impl ExecutionContext<'_> {
                                 | r::Value::Entity(_)
                                 | r::Value::Path(_) => None,
                             };
-                            let literal =
-                                value.and_then(|value| ir::SecondaryIndexLiteral::new(value).ok());
+                            // Storage rejects an oversized lookup key, so such a
+                            // probe also takes the exact source scan below.
+                            let literal = value
+                                .and_then(|value| ir::SecondaryIndexLiteral::new(value).ok())
+                                .filter(|literal| !literal.may_exceed_index_key());
                             if let Some(literal) = literal {
                                 self.index_lookup_rows(&row, lookup, literal, &mut next, limits)
                                     .await?;
                             } else {
-                                // Lists/maps cannot be represented by this storage index.
+                                // Lists/maps and oversized strings cannot be looked up.
                                 // Load the original source once, only when such a probe occurs.
                                 let ids = match scans.entry(lookup.slot) {
                                     std::collections::btree_map::Entry::Occupied(entry) => {
