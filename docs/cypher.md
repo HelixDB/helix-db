@@ -163,7 +163,11 @@ element, keeps the label scan. The WHERE of a later `WITH` counts
 too when every clause in between is a `WITH` that only passes variables,
 properties, literals or parameters along, without `DISTINCT`, `ORDER BY`,
 `SKIP`, `LIMIT` or aggregation, so `MATCH (n:User) WITH n AS m WHERE m.email = $e`
-reads the index; it still filters where it is written. A later `WHERE` that can
+reads the index; it still filters where it is written. A later non-optional
+`MATCH` in that chain counts as well when its constraints and WHERE cannot fail:
+the conditions it places on nodes bound before it, as in
+`MATCH (a:User) MATCH (a {uid: 5})-[:FOLLOWS]->(b)`, select the earlier index,
+and its new variables end the chain. A later `WHERE` that can
 fail ends that chain, so it and anything after it select no index. An
 equality with a variable bound by an earlier clause, as in
 `UNWIND $ids AS k MATCH (u:User {uid: k})`, or with a property of a node,

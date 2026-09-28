@@ -1113,3 +1113,58 @@ fn bound_parameter_properties_and_elements_read_indexes() {
         assert_eq!(source(text), expected, "{text}");
     }
 }
+
+#[test]
+fn later_matches_constrain_the_sources_of_earlier_ones() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap());
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "email").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:email")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let context = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let source = |text: &str| {
+        let plan = r::plan(helix_cypher::compile(text).unwrap(), &context).unwrap();
+        let [step] = plan.matches()[&0].sources[0].access.steps() else {
+            panic!("single access step: {text}");
+        };
+        format!("{:?}", step.op)
+            .trim_start_matches("Access { plan: Node(")
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    for (text, expected) in [
+        ("MATCH (a:N) MATCH (a {email: 'x'}) RETURN a", "Unique"),
+        (
+            "MATCH (a:N) MATCH (a)-[:R]->(b) WHERE a.email = 'x' RETURN b",
+            "Unique",
+        ),
+        (
+            "MATCH (a:N) WITH a MATCH (a {key: 1})-[:R]->(b) RETURN b",
+            "Bitmap",
+        ),
+        // A condition on the later MATCH's own variables stays there.
+        (
+            "MATCH (a:N) MATCH (a)-[:R]->(b) WHERE b.email = 'x' RETURN b",
+            "LabelScan",
+        ),
+        // A constraint that can fail, or an optional MATCH, keeps the scan.
+        (
+            "MATCH (a:N) MATCH (a {email: 'x'})-[:R]->(b {v: toString(1 / $z)}) RETURN b",
+            "LabelScan",
+        ),
+        (
+            "MATCH (a:N) OPTIONAL MATCH (a {email: 'x'}) RETURN a",
+            "LabelScan",
+        ),
+    ] {
+        assert_eq!(source(text), expected, "{text}");
+    }
+}

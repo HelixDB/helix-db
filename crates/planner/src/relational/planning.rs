@@ -863,8 +863,10 @@ fn plan_accesses(
 /// Those later predicates drop every row they reject, so a source may skip
 /// such rows as well, provided nothing in between could fail on them: each
 /// projected item must be a total operand, and a later WHERE that can fail,
-/// ordering, SKIP, LIMIT, DISTINCT and aggregation stop the walk. An
-/// OPTIONAL MATCH keeps rows its predicate rejects, so only its own
+/// ordering, SKIP, LIMIT, DISTINCT and aggregation stop the walk. A later
+/// MATCH whose constraints and WHERE cannot fail contributes the conditions
+/// it places on values bound before it, such as `(a {uid: 5})` for a bound
+/// `a`. An OPTIONAL MATCH keeps rows its predicate rejects, so only its own
 /// predicate applies. The caller still requires the result, including the
 /// MATCH's own WHERE, to be total before extracting any lookup.
 fn index_predicate(
@@ -945,6 +947,86 @@ fn index_predicate(
                     continue;
                 };
                 substitute(predicate.expression(), &bindings)
+            }
+            Operator::Match {
+                pattern: later,
+                optional: false,
+                predicate: later_predicate,
+            } => {
+                // A later MATCH drops each row whose bound nodes fail its
+                // constraints, as a WHERE would, unless a constraint can fail
+                // or a variable it names again may not hold a node or
+                // relationship.
+                let later_totality = Totality {
+                    pattern: later,
+                    bindings: query.bindings(),
+                    params: Parameters::Bound(params),
+                };
+                let value_type = |slot: Slot| &query.bindings()[slot.0 as usize].value_type;
+                if !later.nodes.iter().all(|node| {
+                    !bindings.contains_key(&node.slot)
+                        || matches!(
+                            value_type(node.slot),
+                            super::ValueType::Node | super::ValueType::Null
+                        )
+                }) || !later.relationships.iter().all(|rel| {
+                    !bindings.contains_key(&rel.slot)
+                        || matches!(
+                            value_type(rel.slot),
+                            super::ValueType::Relationship | super::ValueType::Null
+                        )
+                }) || !later
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.properties)
+                    .chain(later.relationships.iter().flat_map(|rel| &rel.properties))
+                    .all(|(_, value)| later_totality.operand(value))
+                    || !later_predicate
+                        .as_ref()
+                        .is_none_or(|predicate| later_totality.predicate(predicate.expression()))
+                {
+                    break;
+                }
+                let mut filters = Vec::new();
+                for node in later
+                    .nodes
+                    .iter()
+                    .filter(|node| bindings.contains_key(&node.slot))
+                {
+                    let slot = Box::new(Expression::Slot(node.slot));
+                    filters.extend(
+                        node.label
+                            .iter()
+                            .map(|label| Expression::HasLabel(node.slot, label.clone())),
+                    );
+                    filters.extend(node.properties.iter().map(|(key, value)| {
+                        Expression::Binary(
+                            Binary::Equal,
+                            Box::new(Expression::Property(slot.clone(), key.clone())),
+                            Box::new(value.clone()),
+                        )
+                    }));
+                }
+                if let Some(predicate) = later_predicate {
+                    let mut pending = vec![predicate.expression()];
+                    while let Some(expression) = pending.pop() {
+                        match expression {
+                            Expression::Binary(Binary::And, left, right) => {
+                                pending.extend([left.as_ref(), right.as_ref()]);
+                            }
+                            conjunct => filters.push(conjunct.clone()),
+                        }
+                    }
+                }
+                // Only conditions on values bound before the MATCH apply to
+                // this source; the MATCH's new variables stop later filters.
+                conjuncts.extend(
+                    filters
+                        .iter()
+                        .filter_map(|filter| substitute(filter, &bindings))
+                        .filter(|filter| totality.predicate(filter)),
+                );
+                continue;
             }
             _ => break,
         };

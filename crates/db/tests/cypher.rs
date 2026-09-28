@@ -60,6 +60,9 @@ mod correlated_lookups;
 #[path = "cypher/parameter_access.rs"]
 mod parameter_access;
 
+#[path = "cypher/later_matches.rs"]
+mod later_matches;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;
