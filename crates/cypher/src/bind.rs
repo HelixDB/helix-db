@@ -451,6 +451,19 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                 } else {
                     (r::ProjectionProgram::new(projections)?, ordering)
                 };
+                // WHERE filters the rows a WITH returns, after its SKIP and
+                // LIMIT. Without a window the order is unobservable and
+                // filtering first is cheaper. A predicate over bindings the
+                // WITH does not project cannot follow it and keeps its place.
+                let (predicate, filter) = match predicate {
+                    Some(predicate)
+                        if (skip.is_some() || limit.is_some())
+                            && predicate.references().is_subset(items.outputs()) =>
+                    {
+                        (None, Some(predicate))
+                    }
+                    predicate => (predicate, None),
+                };
                 operators.push(r::Operator::Project {
                     items,
                     distinct: *distinct,
@@ -459,6 +472,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                     skip,
                     limit,
                 });
+                operators.extend(filter.map(r::Operator::Filter));
                 binder.scope = output;
                 anonymous_at_projection = binder.anonymous;
                 if *returning {

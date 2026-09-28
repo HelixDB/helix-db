@@ -106,6 +106,11 @@ instance configuration.
 | Aggregation | `count`, `sum`, `avg`, `min`, `max`, `collect`, including distinct arguments |
 | Writes | `CREATE`, property and map `SET`, property `REMOVE`, `DELETE`, `DETACH DELETE` |
 
+The `WHERE` of a `WITH` filters the rows the clause returns, after its
+`DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
+keeps at most the third row. One exception remains: when such a `WHERE` reads a
+variable the `WITH` does not project, it filters before `SKIP` and `LIMIT`.
+
 `MERGE`, variable-length and shortest paths, `UNION`, subqueries, comprehensions,
 procedures, schema DDL, temporal/spatial functions, and Bolt are outside this
 profile. Unsupported syntax receives a specific `UnsupportedFeature` error. A

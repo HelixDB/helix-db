@@ -61,6 +61,45 @@ fn scalar_precedence_and_null_truth_tables() {
 }
 
 #[test]
+fn windowed_with_where_filters_after_the_window() {
+    let shape = |text: &str| {
+        helix_cypher::compile(text)
+            .unwrap()
+            .operators()
+            .iter()
+            .map(|operator| match operator {
+                r::Operator::Project { predicate, .. } if predicate.is_some() => "project+where",
+                r::Operator::Project { .. } => "project",
+                r::Operator::Filter(_) => "filter",
+                r::Operator::Match { .. } => "match",
+                r::Operator::Unwind { .. } => "unwind",
+                other @ (r::Operator::Create(_)
+                | r::Operator::Update(_)
+                | r::Operator::Delete { .. }) => panic!("unexpected operator {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape("UNWIND [1] AS x WITH x LIMIT 1 WHERE x > 0 RETURN x"),
+        ["unwind", "project", "filter", "project"]
+    );
+    assert_eq!(
+        shape("UNWIND [1] AS x WITH DISTINCT x SKIP 1 WHERE x > 0 RETURN x"),
+        ["unwind", "project", "filter", "project"]
+    );
+    // Without a window the order is unobservable, so WHERE stays inline.
+    assert_eq!(
+        shape("UNWIND [1] AS x WITH x ORDER BY x WHERE x > 0 RETURN x"),
+        ["unwind", "project+where", "project"]
+    );
+    // A WHERE over a binding the WITH drops cannot follow the projection.
+    assert_eq!(
+        shape("MATCH (a) WITH a.x AS x LIMIT 1 WHERE a.y = 1 RETURN x"),
+        ["match", "project+where", "project"]
+    );
+}
+
+#[test]
 fn profile_examples_resolve() {
     for text in [
         "MATCH (a:Person)-[r:KNOWS]->(b) WHERE a.age > $age RETURN a.name, b, r",

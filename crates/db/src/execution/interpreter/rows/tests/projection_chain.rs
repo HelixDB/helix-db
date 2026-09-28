@@ -56,7 +56,8 @@ async fn projection_chains_keep_global_windows_and_bounded_intermediate_memory()
     for (text, expected) in [
         ("UNWIND range(1,20000) AS x WITH x AS a WHERE a%2=0 WITH a+1 AS b RETURN count(*),sum(b)", vec![vec![json!(10000), json!(100020000)]]),
         ("UNWIND range(1,20000) AS x WITH x*2 AS a WITH a+1 AS b RETURN b ORDER BY b DESC LIMIT 3", vec![vec![json!(40001)],vec![json!(39999)],vec![json!(39997)]]),
-        ("UNWIND range(1,20000) AS x WITH x AS a SKIP 3 LIMIT 7 WHERE a%2=0 WITH a+1 AS b RETURN b SKIP 2 LIMIT 3", vec![vec![json!(13)],vec![json!(15)],vec![json!(17)]]),
+        // WHERE filters the window's rows 4..=10, leaving 5, 7, 9 and 11.
+        ("UNWIND range(1,20000) AS x WITH x AS a SKIP 3 LIMIT 7 WHERE a%2=0 WITH a+1 AS b RETURN b SKIP 2 LIMIT 3", vec![vec![json!(9)],vec![json!(11)]]),
         ("UNWIND [1,2,3] AS x WITH x AS a WHERE a<0 WITH a AS b RETURN count(*),sum(b),collect(b)", vec![vec![json!(0),json!(0),json!([])]]),
     ] {
         let selected = r::plan(helix_cypher::compile(text).unwrap(), &db.planner_context(context::ParamBindings::default())).unwrap();
