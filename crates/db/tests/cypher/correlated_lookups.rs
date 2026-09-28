@@ -210,3 +210,59 @@ async fn property_probes_read_the_index_with_scan_semantics() {
     indexed.close().await.unwrap();
     scanned.close().await.unwrap();
 }
+
+/// A probe property whose stored value Cypher cannot read scans the label
+/// instead of failing up front, so it fails only if the scan has a candidate.
+#[tokio::test]
+async fn unreadable_probe_properties_fail_only_where_a_scan_would() {
+    use helix_ast::{batch, query, traversal, value};
+    let indexed = database().await;
+    let scanned = database().await;
+    for db in [&indexed, &scanned] {
+        run(db, "CREATE (:User {uid: 1})").await;
+        db.query(query::QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "p",
+                    traversal::g().add_n(
+                        "Post",
+                        vec![(
+                            "author",
+                            value::PropertyInput::Value(value::PropertyValue::DateTime(1)),
+                        )],
+                    ),
+                )
+                .returning(Vec::<String>::new()),
+        ))
+        .await
+        .unwrap();
+    }
+    create_index(
+        &indexed,
+        index::IndexSpec::node_unique_equality("User", "uid"),
+    )
+    .await;
+    create_index(
+        &indexed,
+        index::IndexSpec::node_unique_equality("Nobody", "uid"),
+    )
+    .await;
+    for query in [
+        "MATCH (p:Post) MATCH (u:Nobody {uid: p.author}) RETURN count(*)",
+        "MATCH (p:Post) MATCH (u:User {uid: p.author}) RETURN count(*)",
+    ] {
+        let direct = indexed.cypher(db::cypher::Request::new(query)).await;
+        let reference = scanned.cypher(db::cypher::Request::new(query)).await;
+        assert_eq!(
+            direct
+                .map(|response| response.rows)
+                .map_err(|error| error.to_string()),
+            reference
+                .map(|response| response.rows)
+                .map_err(|error| error.to_string()),
+            "{query}"
+        );
+    }
+    indexed.close().await.unwrap();
+    scanned.close().await.unwrap();
+}
