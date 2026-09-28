@@ -279,6 +279,12 @@
             ]
           },
           {
+            "group": "Solution guides",
+            "pages": [
+              "learn/guides/enterprise-knowledge-graph"
+            ]
+          },
+          {
             "group": "Graph databases",
             "pages": [
               "learn/graph-databases/what-is-a-graph-database",
@@ -1464,6 +1470,18 @@
     {
       "source": "/what-is-rag",
       "destination": "/learn/ai-memory/what-is-rag"
+    },
+    {
+      "source": "/guides/knowledge-graph",
+      "destination": "/learn/guides/enterprise-knowledge-graph"
+    },
+    {
+      "source": "/enterprise-knowledge-graph",
+      "destination": "/learn/guides/enterprise-knowledge-graph"
+    },
+    {
+      "source": "/knowledge-graph-guide",
+      "destination": "/learn/guides/enterprise-knowledge-graph"
     }
   ],
   "search": {
