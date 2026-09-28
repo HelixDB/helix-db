@@ -167,7 +167,7 @@ fn literal_and_parameter_membership_uses_equality_indexes_with_cypher_semantics(
         .unwrap();
 }
 
-async fn create_index(db: &db::HelixDB, spec: index::IndexSpec) {
+pub(super) async fn create_index(db: &db::HelixDB, spec: index::IndexSpec) {
     let create = batch::write_batch()
         .var_as("operation", traversal::g().create_index_if_not_exists(spec))
         .returning(["operation"]);

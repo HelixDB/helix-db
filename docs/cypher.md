@@ -133,7 +133,11 @@ they need no lookup. A list with a nested member, or with more than 64 distinct
 values, scans the label instead. An indexed equality on the same node takes
 precedence, and its `IN` list is then checked as a filter. A string too large
 to index, about 1 MiB, cannot equal an indexed value, so a lookup of one keeps
-the label scan. Index access also requires every other
+the label scan. A comparison such as `n.age >= 21 AND n.age < $max` against a
+number or string literal or parameter can read a native range index on that
+property, with bounds on one property combined. A boolean, list, null or NaN
+bound, or a string too large to index, keeps the label scan, because such a
+comparison is null or unindexable rather than a range. Index access also requires every other
 conjunct and every property constraint in the pattern to be unable to fail.
 Comparisons, string predicates, label and null tests, and `AND`, `OR`, `XOR`
 and `NOT` over them cannot fail when their operands are pattern properties,

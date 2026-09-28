@@ -6987,12 +6987,12 @@
     "cypher/optional_predicate/rows=100/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 7,
+        "alternatives_considered": 8,
         "guardrail_hit": false,
-        "memo_exprs": 6,
-        "memo_groups": 5,
+        "memo_exprs": 7,
+        "memo_groups": 6,
         "rejected_alternatives": 0,
-        "rule_fires": 9,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 100,
           "bytes": 52256,
@@ -7006,17 +7006,17 @@
           "range_seeks": 1
         }
       },
-      "sha256": "81c2fa16f12c7b2376929165c5e6a8f6a4e6e5b4f52b9e00e674de55531f8195"
+      "sha256": "901538b31d77a98302bc6cd2738c7ba3e31159478e1cfd1f24cb9587dcdc3de6"
     },
     "cypher/optional_predicate/rows=100/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 7,
+        "alternatives_considered": 8,
         "guardrail_hit": false,
-        "memo_exprs": 6,
-        "memo_groups": 5,
+        "memo_exprs": 7,
+        "memo_groups": 6,
         "rejected_alternatives": 0,
-        "rule_fires": 9,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 100,
           "bytes": 52256,
@@ -7030,17 +7030,17 @@
           "range_seeks": 1
         }
       },
-      "sha256": "7239666eb5f61530789b8819ec001ab45f33f65537f2365d5d6bc4a65976d42e"
+      "sha256": "a6508e899898544f7e1911833217804daf9180a2fd4ea61bcd5cf5817057fe1d"
     },
     "cypher/optional_predicate/rows=100/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 7,
+        "alternatives_considered": 8,
         "guardrail_hit": false,
-        "memo_exprs": 6,
-        "memo_groups": 5,
+        "memo_exprs": 7,
+        "memo_groups": 6,
         "rejected_alternatives": 0,
-        "rule_fires": 9,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 100,
           "bytes": 52256,
@@ -7054,7 +7054,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "81601a576bb049a1aba72436a4970a9718bed0a0b5161897593ce24835a75a9f"
+      "sha256": "1ee92f2fa1a1a55fb172cbba53f1af56ee0ad47b10757a6a5d82fdec23fce03d"
     },
     "cypher/optional_predicate/rows=100000/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -7131,12 +7131,12 @@
     "cypher/optional_predicate/rows=100000/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 7,
+        "alternatives_considered": 8,
         "guardrail_hit": false,
-        "memo_exprs": 6,
-        "memo_groups": 5,
+        "memo_exprs": 7,
+        "memo_groups": 6,
         "rejected_alternatives": 0,
-        "rule_fires": 9,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
@@ -7150,17 +7150,17 @@
           "range_seeks": 1
         }
       },
-      "sha256": "3f22772c23037993dba68ada1a0d37a50fad4274ca3d2e180f90bb5d50539c61"
+      "sha256": "66d280738bedc4077c4c2ee52eaa385491d93c44d24646b40afe11e50b26fcae"
     },
     "cypher/optional_predicate/rows=100000/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 7,
+        "alternatives_considered": 8,
         "guardrail_hit": false,
-        "memo_exprs": 6,
-        "memo_groups": 5,
+        "memo_exprs": 7,
+        "memo_groups": 6,
         "rejected_alternatives": 0,
-        "rule_fires": 9,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
@@ -7174,17 +7174,17 @@
           "range_seeks": 1
         }
       },
-      "sha256": "4a6a5a2f3c8b0fafa14389efa8143720fd09d7c66f84b2cb26d00a5878a12257"
+      "sha256": "aa7280697c4773494d4bc3ab0e1a058a961430f2f4a5aceeb4f00f71a037dc01"
     },
     "cypher/optional_predicate/rows=100000/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 7,
+        "alternatives_considered": 8,
         "guardrail_hit": false,
-        "memo_exprs": 6,
-        "memo_groups": 5,
+        "memo_exprs": 7,
+        "memo_groups": 6,
         "rejected_alternatives": 0,
-        "rule_fires": 9,
+        "rule_fires": 10,
         "selected_cost": {
           "authoritative_graph_reads": 100000,
           "bytes": 52204800,
@@ -7198,7 +7198,7 @@
           "range_seeks": 1
         }
       },
-      "sha256": "f05afe0a570206928c1f924279a2d5f937b849200e5b6c0253be04c721808a41"
+      "sha256": "a9341f3c2d6e111d7a6297198ead9a84875cd6e443fdc79ab04720f836720b56"
     },
     "cypher/optional_then_filter/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -8427,74 +8427,74 @@
     "cypher/range/rows=100/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 20202350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 6802396,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "821c621fb950a5b88a6985764cff852a849d1daf181b2166e09567a9874ab9f0"
+      "sha256": "9527ebf6d78bb495f4e5969bbdadf7f4ffc91fffaaaf565b4b4839edf0279def"
     },
     "cypher/range/rows=100/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 5052350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 1702396,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "2f44c901c1abb6662055516678a79d25c289a41055c3d94a56e373c10fdaff43"
+      "sha256": "0b88ee3dc52220406e9946bed1349bfb61efee33b03f1d6768d7093d317ff80d"
     },
     "cypher/range/rows=100/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 8350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 4726,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "a8a6573b377284fdf039ec3940fdba71d8b78bb4a59f770fb3defc255d915173"
+      "sha256": "f6bc99bdcbc18fe902fd4d5b0b9964af56b827b92da30866e3bba54cd0349cf6"
     },
     "cypher/range/rows=100000/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -8571,74 +8571,74 @@
     "cypher/range/rows=100000/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 20000502050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 6667201996,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "9def6a5f72ba43b121ddb3abdc445e1da3245bbb9404a99b92cce39eff7e9a7f"
+      "sha256": "260ce81f138ea9a624f936f1868eef7193399b7b32ceccce3e7b07cf3a8eb806"
     },
     "cypher/range/rows=100000/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 5000352050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 1667101996,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "f1052e78f4c519ac4fab2c4a0dda62e6f52a4ad2e0426333a88727d684889411"
+      "sha256": "6d7b1ae3a9b16ab53977d02d167ad829eae54ec81ba0a9772c81ae64874c6c44"
     },
     "cypher/range/rows=100000/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 1307050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 737326,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "f211027e6abafa0e616502c53caf4419b940fd59909a68b35f38858313ae973d"
+      "sha256": "cabf61295fc1a8457c5a3dc3b37c382ffb092104ba6e9d6a579dcba0b5c93445"
     },
     "cypher/range_ascending/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -8715,74 +8715,74 @@
     "cypher/range_ascending/rows=100/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 20202350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 6802396,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "6426b62817f30bfcd6c901bfcf10b693873250d5b36be706239287bd9655e442"
+      "sha256": "ba7f01aaeeb76bd6408eba3ccaf8a3bd288b57eb615827f4c8aa4dfc31fa823f"
     },
     "cypher/range_ascending/rows=100/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 5052350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 1702396,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "eed5973eb2f4beb580af2c7805123b8c20a59aa96ea17f24272e68d264a99004"
+      "sha256": "0c270ea94cebf3da12bcc5d7db8de619c15e7e8da907f6a325f8464e5d4d72f5"
     },
     "cypher/range_ascending/rows=100/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 8350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 4726,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "ccda05602b2e93d685dc980aed2f07bdf4fef37dee5ef8be0824502593a163b6"
+      "sha256": "641136d55bd74333f5c4e2c67f0044aad3f2d30ecc8d739023b34e128ad00676"
     },
     "cypher/range_ascending/rows=100000/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -8859,74 +8859,74 @@
     "cypher/range_ascending/rows=100000/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 20000502050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 6667201996,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "5c66f45b8c3e1a29f4f3638e262bb8f14c114b88394d6032f901a7e439ae2afb"
+      "sha256": "ad9ee061d703efb11ed8b184f461f58c5e0d1193dee3ced36273e24c815c598f"
     },
     "cypher/range_ascending/rows=100000/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 5000352050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 1667101996,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "cbef91f95d31053f99b59da4076a55987f7ac277378ecd3151b3f28d7a3e4dcd"
+      "sha256": "64400f9b972e7f47731a9a01cd03b8cf2a9cd51842131949845c6786aaec071d"
     },
     "cypher/range_ascending/rows=100000/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 1307050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 737326,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "94ebddc8ecc0f60857ad14fda449597439b81a02c84d811cdc2c049887f9ec71"
+      "sha256": "8fb3da754193a9fea4e30f132b181b38c5dea5d2b81963fa90ba091f3e78012e"
     },
     "cypher/range_descending/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -9003,74 +9003,74 @@
     "cypher/range_descending/rows=100/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 20202350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 6802396,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "ab19fd2e26623b7b65d7f6f11a8722d81a72db12de386c6fbd5159df623f5b55"
+      "sha256": "1a62df67930eb75211c0067ce2925ce1b4dd58a59a4000125d921513c598a728"
     },
     "cypher/range_descending/rows=100/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 5052350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 1702396,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "5c64f6b204e7ef4140f9d41f570e17a21400aadeaa68ac308bc48df5fa58e5c7"
+      "sha256": "4cbd7932ec7f461d126634f99049cd80e7e7f313f877b17674288f6057434995"
     },
     "cypher/range_descending/rows=100/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100,
-          "bytes": 52000,
-          "cpu_units": 2400,
-          "latency": 8350,
+          "authoritative_graph_reads": 33,
+          "bytes": 25344,
+          "cpu_units": 2099,
+          "latency": 4726,
           "multi_get_calls": 0,
-          "object_reads": 101,
+          "object_reads": 33,
           "parallel_width": 1,
           "peak_memory": 61440,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "range_nexts": 33,
+          "range_seeks": 1
         }
       },
-      "sha256": "86d4f2e91743bc7609bf81a0392e793e8c4a67cd4b4f4a283a738062effd3ceb"
+      "sha256": "24ce29230ca2364077d9820201360a385d908c222b518ac7bd942560564ee4f1"
     },
     "cypher/range_descending/rows=100000/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -9147,74 +9147,74 @@
     "cypher/range_descending/rows=100000/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 20000502050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 6667201996,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "9bf82bc41a1a93527ad40df02ef1b925d051d6182052c1a3d358dcae3d1bd3bc"
+      "sha256": "80c22f1d28dc70e4339b0ad8f4bd7e1b40acdaf4d73605a36e142fb23f875542"
     },
     "cypher/range_descending/rows=100000/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 5000352050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 1667101996,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "94181486c1fba1af4cf30aaedbda04a527e91cfb5da7ffd85cda058274619883"
+      "sha256": "069f389211184198ebe538c6e0a788d73fb4831b82707445c3154266ae3864eb"
     },
     "cypher/range_descending/rows=100000/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 4,
+        "alternatives_considered": 5,
         "guardrail_hit": false,
-        "memo_exprs": 3,
-        "memo_groups": 3,
+        "memo_exprs": 4,
+        "memo_groups": 4,
         "rejected_alternatives": 0,
-        "rule_fires": 4,
+        "rule_fires": 5,
         "selected_cost": {
-          "authoritative_graph_reads": 100000,
-          "bytes": 52000000,
-          "cpu_units": 402000,
-          "latency": 1307050,
+          "authoritative_graph_reads": 33333,
+          "bytes": 25599744,
+          "cpu_units": 101999,
+          "latency": 737326,
           "multi_get_calls": 0,
-          "object_reads": 100001,
+          "object_reads": 33333,
           "parallel_width": 1,
-          "peak_memory": 25600000,
-          "range_nexts": 0,
-          "range_seeks": 0
+          "peak_memory": 8533248,
+          "range_nexts": 33333,
+          "range_seeks": 1
         }
       },
-      "sha256": "0f86531a55e2f151318e17b6500a208f9eb33f339ae4aa827e12d37e639719db"
+      "sha256": "a3aa8d1d0ca9f281eac471758d5405cae3f901c0357e2c42af5e44411bda8612"
     },
     "cypher/read_write/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,

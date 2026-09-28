@@ -274,11 +274,13 @@ fn plan_accesses(
             {
                 let mut equalities = node.properties.clone();
                 let mut memberships = Vec::new();
+                let mut ranges = Vec::new();
                 if let Some(predicate) = &predicate
                     && index_predicate_is_total(predicate, pattern, &ctx.params)
                 {
                     collect_equalities(predicate, node.slot, &mut equalities);
                     collect_memberships(predicate, node.slot, &mut memberships);
+                    collect_ranges(predicate, node.slot, &ctx.params, &mut ranges);
                 }
                 let mut exact = BTreeSet::new();
                 let mut unique = false;
@@ -381,6 +383,34 @@ fn plan_accesses(
                         }
                         analysis::EqualityIndexDomain::Many(_)
                         | analysis::EqualityIndexDomain::RuntimeSet(_) => continue,
+                    });
+                }
+                // A range scan reads every value its bounds admit in the
+                // bound's domain; the residual predicate applies strictness.
+                for (property, range) in ranges {
+                    let Some((key, index)) = [
+                        helix_ast::index::RangeIndexDirection::Asc,
+                        helix_ast::index::RangeIndexDirection::Desc,
+                    ]
+                    .into_iter()
+                    .filter_map(|direction| {
+                        catalog::ScopedPropertyDirectionKey::try_new(
+                            label.clone(),
+                            property.clone(),
+                            direction,
+                        )
+                    })
+                    .find_map(|key| {
+                        let index = ctx.indexes.node_range.get(&key)?.clone();
+                        Some((key, index))
+                    }) else {
+                        continue;
+                    };
+                    candidates.push(ir::NodeAccessPlan::RangeIndex {
+                        index,
+                        key,
+                        range,
+                        iteration: ir::RangeScanIteration::Forward,
                     });
                 }
             }
@@ -922,6 +952,77 @@ fn collect_equalities(expression: &Expression, slot: Slot, out: &mut Vec<(String
     }
 }
 
+/// Range bounds on properties of `slot` from the conjuncts of a total
+/// predicate, intersected per property. A parameter resolves to its bound
+/// value at planning time; unorderable, NaN and oversized bounds are skipped,
+/// so a scan never fails where the comparison would yield null.
+fn collect_ranges(
+    expression: &Expression,
+    slot: Slot,
+    params: &context::ParamBindings,
+    out: &mut Vec<(String, ir::IndexRange)>,
+) {
+    let (op, a, b) = match expression {
+        Expression::Binary(Binary::And, a, b) => {
+            collect_ranges(a, slot, params, out);
+            collect_ranges(b, slot, params, out);
+            return;
+        }
+        Expression::Binary(
+            op @ (Binary::Less | Binary::LessEqual | Binary::Greater | Binary::GreaterEqual),
+            a,
+            b,
+        ) => (*op, a, b),
+        _ => return,
+    };
+    let greater = matches!(op, Binary::Greater | Binary::GreaterEqual);
+    // `n.p > v` bounds p below; `v > n.p` bounds it above.
+    for (property, value, lower) in [(a, b, greater), (b, a, !greater)] {
+        let Expression::Property(target, key) = property.as_ref() else {
+            continue;
+        };
+        if target.as_ref() != &Expression::Slot(slot) {
+            continue;
+        }
+        let value = match value.as_ref() {
+            Expression::Literal(value) => literal(value.clone()),
+            Expression::Parameter(name) => params
+                .values
+                .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))
+                .cloned(),
+            _ => None,
+        };
+        // Escaping can double a string's encoded key.
+        let Some(value) = value
+            .filter(|value| {
+                !matches!(value, helix_ast::value::PropertyValue::String(text)
+                    if text.len() > ir::MAX_INDEXED_EQUALITY_BYTES / 2)
+            })
+            .and_then(ir::RangeIndexValue::literal)
+        else {
+            continue;
+        };
+        let bound = match op {
+            Binary::LessEqual | Binary::GreaterEqual => ir::IndexBound::Inclusive(value),
+            _ => ir::IndexBound::Exclusive(value),
+        };
+        let range = if lower {
+            ir::IndexRange::Lower { lower: bound }
+        } else {
+            ir::IndexRange::Upper { upper: bound }
+        };
+        match out.iter_mut().find(|(existing, _)| existing == key) {
+            // Bounds that cannot be combined keep the earlier, wider range.
+            Some((_, existing)) => {
+                if let Some(both) = existing.intersect(&range) {
+                    *existing = both;
+                }
+            }
+            None => out.push((key.clone(), range)),
+        }
+    }
+}
+
 fn collect_memberships(expression: &Expression, slot: Slot, out: &mut Vec<(String, Expression)>) {
     match expression {
         Expression::Binary(Binary::And, a, b) => {
@@ -1068,6 +1169,12 @@ fn access_rows(access: &ir::NodeAccessPlan, config: &optimizer::OptimizerConfig)
             .copied()
             .unwrap_or(config.storage.default_unknown_scan_rows.as_rows()),
         ir::NodeAccessPlan::AllScan => config.storage.default_unknown_scan_rows.as_rows(),
-        _ => unreachable!("candidate construction admits all/label/equality/set access only"),
+        ir::NodeAccessPlan::RangeIndex { key, .. } => config
+            .stats
+            .node_range_cardinality
+            .get(key)
+            .copied()
+            .unwrap_or(config.storage.default_range_index_rows.as_rows()),
+        _ => unreachable!("candidate construction admits all/label/equality/range/set access only"),
     }
 }

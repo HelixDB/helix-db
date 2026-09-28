@@ -64,6 +64,7 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
         Point,
         Unique,
         Union,
+        Range,
         Empty,
     }
     let key = catalog::ScopedPropertyKey::try_new("N", "key").unwrap();
@@ -75,7 +76,14 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             .with_uniqueness(catalog::IndexUniqueness::Unique),
     );
     let region = catalog::ScopedPropertyKey::try_new("N", "region").unwrap();
-    indexes = indexes.with_node_eq(region.clone());
+    indexes = indexes.with_node_eq(region.clone()).with_node_range(
+        catalog::ScopedPropertyDirectionKey::try_new(
+            "N",
+            "age",
+            helix_ast::index::RangeIndexDirection::Desc,
+        )
+        .unwrap(),
+    );
     let source = |text: &str, limit: usize, parameter: Option<helix_ast::value::PropertyValue>| {
         let mut context = context::PlannerContext {
             indexes: indexes.clone(),
@@ -104,6 +112,9 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Unique { .. }) => Source::Unique,
             exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::SecondarySet { .. }) => {
                 Source::Union
+            }
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::RangeIndex { .. }) => {
+                Source::Range
             }
             exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Empty) => Source::Empty,
             other @ (exec::ExecAccessPlan::Node(_)
@@ -310,6 +321,44 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             "{text}"
         );
     }
+    // Orderable literal and bound-parameter comparisons read a range index.
+    let oversized = "x".repeat(ir::MAX_INDEXED_EQUALITY_BYTES / 2 + 1);
+    for (text, expected) in [
+        ("MATCH (n:N) WHERE n.age > 20 RETURN n", Source::Range),
+        (
+            "MATCH (n:N) WHERE 20 < n.age AND n.age <= $keys RETURN n",
+            Source::Range,
+        ),
+        (
+            "MATCH (n:N) WHERE n.age >= 'a' AND n.age < 2.5 RETURN n",
+            Source::Range,
+        ),
+        ("MATCH (n:N) WITH n WHERE n.age < 3 RETURN n", Source::Range),
+        (
+            "MATCH (n:N) WHERE n.email = 'a' AND n.age > 20 RETURN n",
+            Source::Unique,
+        ),
+        ("MATCH (n:N) WHERE n.age > true RETURN n", Source::Scan),
+        ("MATCH (n:N) WHERE n.age > null RETURN n", Source::Scan),
+        ("MATCH (n:N) WHERE n.age > [1] RETURN n", Source::Scan),
+        ("MATCH (n:N) WHERE n.age > $missing RETURN n", Source::Scan),
+        ("MATCH (n:N) WHERE n.age + 1 > 20 RETURN n", Source::Scan),
+        (
+            "MATCH (n:N) WHERE n.age > 20 OR n.age < 1 RETURN n",
+            Source::Scan,
+        ),
+        ("MATCH (n:N) WHERE n.other > 20 RETURN n", Source::Scan),
+    ] {
+        assert_eq!(source(text, 64, Some(P::I64(30))), expected, "{text}");
+    }
+    assert_eq!(
+        source(
+            "MATCH (n:N) WHERE n.age > $keys RETURN n",
+            64,
+            Some(P::String(oversized))
+        ),
+        Source::Scan
+    );
     // Equalities of one property joined by OR read the index like IN.
     for (text, expected) in [
         (
