@@ -63,6 +63,9 @@ mod parameter_access;
 #[path = "cypher/later_matches.rs"]
 mod later_matches;
 
+#[path = "cypher/ordered_ranges.rs"]
+mod ordered_ranges;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

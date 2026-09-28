@@ -41,6 +41,10 @@ pub enum BatchConsumer {
     /// Deduplicate projected batches before retaining the complete relation.
     Distinct,
     TopK,
+    /// A top-k projection whose input already arrives in ORDER BY order, so it
+    /// keeps that order and stops after its window. Only
+    /// `RowPlan::batch_consumer` selects it, from the selected source.
+    OrderedWindow,
     Project {
         termination: Termination,
     },

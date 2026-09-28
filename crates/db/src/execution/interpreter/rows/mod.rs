@@ -162,17 +162,31 @@ impl ExecutionContext<'_> {
             }
             let empty = GraphBatch::default();
             let evaluation = self.evaluate(&[], parameters, &empty, limits);
-            let demand = plan
-                .input_window(index)
-                .map(|window| window.demand(|expression| evaluation.eval(expression)))
-                .transpose()?
-                .unwrap_or(usize::MAX);
+            let demand = match (
+                plan.batch_consumer(index),
+                plan.query().operators().get(index + 1),
+            ) {
+                // An ordered source needs only the rows its window keeps.
+                (
+                    Some(r::BatchConsumer::OrderedWindow),
+                    Some(r::Operator::Project { skip, limit, .. }),
+                ) => r::Window::evaluate(skip.as_ref(), limit.as_ref(), |expression| {
+                    evaluation.eval(expression)
+                })?
+                .retained_rows(),
+                _ => plan
+                    .input_window(index)
+                    .map(|window| window.demand(|expression| evaluation.eval(expression)))
+                    .transpose()?
+                    .unwrap_or(usize::MAX),
+            };
             if let Some(consumer) = plan.batch_consumer(index) {
                 let end = match consumer {
                     r::BatchConsumer::Pipeline { end } => end,
                     r::BatchConsumer::Aggregate
                     | r::BatchConsumer::Distinct
                     | r::BatchConsumer::TopK
+                    | r::BatchConsumer::OrderedWindow
                     | r::BatchConsumer::Project { .. } => index + 1,
                 };
                 for (_, pattern) in plan.matches().range(index..end) {

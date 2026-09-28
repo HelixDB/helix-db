@@ -234,6 +234,7 @@ fn plan_accesses(
     };
     let mut roots = Vec::new();
     let mut nodes = Vec::new();
+    let sort = sort_key(query);
     for (operator_index, operator) in query.operators().iter().enumerate() {
         let Operator::Match { pattern, .. } = operator else {
             continue;
@@ -472,16 +473,47 @@ fn plan_accesses(
                 }
                 // A range scan reads every value its bounds admit in the
                 // bound's domain; the residual predicate applies strictness.
+                let mut ordered = None;
                 for (property, range) in ranges {
                     let Some((key, index)) = range_index(&property) else {
                         continue;
                     };
-                    candidates.push(ir::NodeAccessPlan::RangeIndex {
+                    // Read the sort property in the ORDER BY direction.
+                    let sorted = sort.as_ref().is_some_and(|(slot, sorted, _)| {
+                        operator_index == 0 && *slot == node.slot && *sorted == property
+                    });
+                    let ascending = sort.as_ref().is_none_or(|(_, _, descending)| !descending);
+                    let iteration = if !sorted
+                        || (key.direction == helix_ast::index::RangeIndexDirection::Asc)
+                            == ascending
+                    {
+                        ir::RangeScanIteration::Forward
+                    } else {
+                        ir::RangeScanIteration::Reverse
+                    };
+                    let candidate = ir::NodeAccessPlan::RangeIndex {
                         index,
                         key,
                         range,
-                        iteration: ir::RangeScanIteration::Forward,
-                    });
+                        iteration,
+                    };
+                    if sorted {
+                        ordered = Some(candidate.clone());
+                    }
+                    candidates.push(candidate);
+                }
+                // An ordered range lets the LIMIT stop the scan, unless an
+                // equality, ID read or another range may bound the candidates
+                // more tightly; cost then chooses.
+                if let Some(ordered) = ordered
+                    && candidates.iter().all(|candidate| {
+                        matches!(
+                            candidate,
+                            ir::NodeAccessPlan::LabelScan { .. } | ir::NodeAccessPlan::AllScan
+                        ) || *candidate == ordered
+                    })
+                {
+                    candidates = vec![ordered];
                 }
             }
             let node_roots = candidates
@@ -854,6 +886,40 @@ fn plan_accesses(
     };
     metrics.selected_cost = metrics.selected_cost.serial(pipeline.cost(&ctx.storage));
     Ok((sources, schedules, pipeline, metrics))
+}
+
+/// The node, property and direction that order the rows of a projection
+/// with a LIMIT and a single ORDER BY key that directly follows the first
+/// MATCH, through the item that projects the property when the key is its
+/// alias.
+pub(super) fn sort_key(query: &Query) -> Option<(Slot, String, bool)> {
+    let [Operator::Match { .. }, Operator::Project {
+        items,
+        distinct: false,
+        ordering,
+        limit: Some(_),
+        ..
+    }, ..] = query.operators()
+    else {
+        return None;
+    };
+    let [order] = ordering.as_slice() else {
+        return None;
+    };
+    let expression = match &order.expression {
+        Expression::Slot(output) => items
+            .iter()
+            .find(|item| item.slot == *output)
+            .map_or(&order.expression, |item| &item.expression),
+        expression => expression,
+    };
+    let Expression::Property(value, key) = expression else {
+        return None;
+    };
+    let Expression::Slot(slot) = value.as_ref() else {
+        return None;
+    };
+    Some((*slot, key.clone(), order.descending))
 }
 
 /// The predicate an index source of the MATCH at `index` may use: its own

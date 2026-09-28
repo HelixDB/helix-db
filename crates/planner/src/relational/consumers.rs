@@ -98,12 +98,17 @@ pub(super) fn prepare(
                     r::BatchConsumer::Pipeline { end }
                 };
             }
+            if consumer == r::BatchConsumer::TopK && source == 0 && ordered_input(pipeline, matches)
+            {
+                consumer = r::BatchConsumer::OrderedWindow;
+            }
             let covered = match consumer {
                 r::BatchConsumer::Pipeline { end } => end,
                 r::BatchConsumer::Project { .. }
                 | r::BatchConsumer::Aggregate
                 | r::BatchConsumer::Distinct
-                | r::BatchConsumer::TopK => source + 1,
+                | r::BatchConsumer::TopK
+                | r::BatchConsumer::OrderedWindow => source + 1,
             };
             assert!(
                 pipeline
@@ -114,4 +119,67 @@ pub(super) fn prepare(
             Some((source, consumer))
         })
         .collect()
+}
+
+/// Whether the first MATCH delivers its rows in the order of the top-k
+/// projection that directly consumes it: its one node is read through a
+/// range index on the sort property in the sort direction. The MATCH's WHERE
+/// holds that range, so every row has a non-null value of the range's type,
+/// and values of one type order as the index does. Items and ordering that
+/// cannot fail let the projection stop after its window without skipping an
+/// error a later row would raise.
+fn ordered_input(pipeline: &r::RowPipeline, matches: &BTreeMap<usize, r::MatchPlan>) -> bool {
+    let query = pipeline.query();
+    let Some((slot, property, descending)) = r::planning::sort_key(query) else {
+        return false;
+    };
+    let [r::Operator::Match {
+        pattern,
+        optional: false,
+        predicate,
+    }, r::Operator::Project {
+        items,
+        ordering,
+        predicate: None,
+        ..
+    }, ..] = query.operators()
+    else {
+        return false;
+    };
+    let Some(plan) = matches.get(&0) else {
+        return false;
+    };
+    let ([r::MatchStep::Scan(scanned)], [source]) =
+        (plan.steps.as_slice(), plan.sources.as_slice())
+    else {
+        return false;
+    };
+    let [step] = source.access.steps() else {
+        return false;
+    };
+    let Some(crate::exec::ExecNodeCursor::Range { key, iteration, .. }) =
+        step.op.node_cursor_access()
+    else {
+        return false;
+    };
+    let ascending = (key.direction == helix_ast::index::RangeIndexDirection::Asc)
+        == (iteration == crate::ir::RangeScanIteration::Forward);
+    let totality = r::planning::Totality {
+        pattern,
+        bindings: query.bindings(),
+        params: r::planning::Parameters::Validated,
+    };
+    *scanned == slot
+        && key.property.as_ref() == property
+        && ascending != descending
+        && predicate
+            .as_ref()
+            .is_none_or(|predicate| totality.predicate(predicate.expression()))
+        && items.iter().all(|item| {
+            !item.expression.has_aggregate()
+                && (totality.operand(&item.expression) || totality.predicate(&item.expression))
+        })
+        && ordering
+            .iter()
+            .all(|order| totality.operand(&order.expression))
 }

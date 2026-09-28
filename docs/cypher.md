@@ -150,9 +150,16 @@ the label scan. A comparison such as `n.age >= 21 AND n.age < $max` against a
 number or string literal or parameter can read a native range index on that
 property, with bounds on one property combined. It reads and verifies index
 entries in index order only as far as the query consumes them, so a `LIMIT`
-reads a few entries rather than the whole range. A boolean, list, null or NaN
-bound, or a string too large to index, keeps the label scan, because such a
-comparison is null or unindexable rather than a range. Index access also requires every other
+reads a few entries rather than the whole range. `ORDER BY` that property alone
+with a `LIMIT`, directly after a single-node `MATCH`, as in
+`MATCH (u:User) WHERE u.rank >= 0 RETURN u.name ORDER BY u.rank DESC LIMIT 10`,
+reads the index in that direction and stops after the window when the
+returned items and the sort key cannot fail. The range bound is required:
+without it, nodes that lack the property sort first in descending order and
+values of other types sort by type, which the index does not deliver. A
+boolean, list, null or NaN bound, or a string too large to index, keeps the
+label scan, because such a comparison is null or unindexable rather than a
+range. Index access also requires every other
 conjunct and every property constraint in the pattern to be unable to fail.
 Comparisons, string predicates, label and null tests, and `AND`, `OR`, `XOR`
 and `NOT` over them cannot fail when their operands are literals, parameters,

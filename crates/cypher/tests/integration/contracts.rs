@@ -799,6 +799,7 @@ fn mixed_batch_spans_stop_at_blocking_and_effect_boundaries() {
             r::BatchConsumer::Aggregate
             | r::BatchConsumer::Distinct
             | r::BatchConsumer::TopK
+            | r::BatchConsumer::OrderedWindow
             | r::BatchConsumer::Project { .. } => 1,
         });
         assert_eq!(actual, end, "{text}");
@@ -1166,5 +1167,86 @@ fn later_matches_constrain_the_sources_of_earlier_ones() {
         ),
     ] {
         assert_eq!(source(text), expected, "{text}");
+    }
+}
+
+#[test]
+fn ordered_range_sources_end_top_k_projections_early() {
+    let indexes = |direction| {
+        catalog::IndexCatalogSnapshot::default()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap())
+            .with_node_range(
+                catalog::ScopedPropertyDirectionKey::try_new("N", "age", direction).unwrap(),
+            )
+    };
+    let consumer = |text: &str, direction| {
+        let context = context::PlannerContext {
+            indexes: indexes(direction),
+            ..context::PlannerContext::default()
+        };
+        let plan = r::plan(helix_cypher::compile(text).unwrap(), &context).unwrap();
+        let iteration = plan.matches()[&0].sources[0].access.steps()[0]
+            .op
+            .node_cursor_access()
+            .and_then(|cursor| match cursor {
+                exec::ExecNodeCursor::Range { iteration, .. } => Some(iteration),
+                exec::ExecNodeCursor::Empty
+                | exec::ExecNodeCursor::AllScan
+                | exec::ExecNodeCursor::LabelScan { .. }
+                | exec::ExecNodeCursor::Bitmap { .. }
+                | exec::ExecNodeCursor::Unique { .. }
+                | exec::ExecNodeCursor::SecondarySet { .. } => None,
+            });
+        (plan.batch_consumer(0), iteration)
+    };
+    use helix_ast::index::RangeIndexDirection::{Asc, Desc};
+    use ir::RangeScanIteration::{Forward, Reverse};
+    let ordered = Some(r::BatchConsumer::OrderedWindow);
+    for (text, direction, expected) in [
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age DESC LIMIT 3",
+            Asc,
+            (ordered, Some(Reverse)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age LIMIT 3",
+            Asc,
+            (ordered, Some(Forward)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age DESC SKIP 2 LIMIT $k",
+            Desc,
+            (ordered, Some(Forward)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age < 'z' RETURN u.age AS a ORDER BY a LIMIT 3",
+            Desc,
+            (ordered, Some(Reverse)),
+        ),
+        // Without a range bound, nulls and other types would order differently.
+        (
+            "MATCH (u:N) RETURN u.key ORDER BY u.age DESC LIMIT 3",
+            Asc,
+            (Some(r::BatchConsumer::TopK), None),
+        ),
+        // A second key, an item that can fail, or a range on another property
+        // needs every row.
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age, u.key LIMIT 3",
+            Asc,
+            (Some(r::BatchConsumer::TopK), Some(Forward)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN 1 / u.key ORDER BY u.age LIMIT 3",
+            Asc,
+            (Some(r::BatchConsumer::TopK), Some(Forward)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.key LIMIT 3",
+            Asc,
+            (Some(r::BatchConsumer::TopK), Some(Forward)),
+        ),
+    ] {
+        assert_eq!(consumer(text, direction), expected, "{text}");
     }
 }

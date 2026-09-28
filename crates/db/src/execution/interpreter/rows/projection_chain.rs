@@ -72,6 +72,7 @@ impl ExecutionContext<'_> {
             r::BatchConsumer::Aggregate
             | r::BatchConsumer::Distinct
             | r::BatchConsumer::TopK
+            | r::BatchConsumer::OrderedWindow
             | r::BatchConsumer::Project { .. } => source + 1,
         };
         let r::Operator::Project {
@@ -137,6 +138,23 @@ impl ExecutionContext<'_> {
                         projection,
                         parameters,
                         limits,
+                    ))?
+                    .await?,
+                ConsumedProjection::Complete(end),
+            )),
+            // The source already delivers ORDER BY order; nothing to sort.
+            r::BatchConsumer::OrderedWindow => Ok((
+                self.row_budget()
+                    .admitted_future(self.project_batches(
+                        batches,
+                        width,
+                        Projection {
+                            ordering: &[],
+                            ..projection
+                        },
+                        parameters,
+                        limits,
+                        r::Termination::AfterFirstBatch,
                     ))?
                     .await?,
                 ConsumedProjection::Complete(end),
