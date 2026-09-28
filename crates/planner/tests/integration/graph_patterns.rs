@@ -253,6 +253,7 @@ fn correlated_lookup_contracts_and_scan_alternatives_share_the_memo() {
         slot: r::Slot(0),
         probe: r::Slot(1),
         probe_property: None,
+        matches: r::LookupMatch::Value,
         index: catalog::NodeEqualityIndexMeta::try_new("n-key").unwrap(),
         key: catalog::ScopedPropertyKey::try_new("N", "key").unwrap(),
         estimated_rows: 1,

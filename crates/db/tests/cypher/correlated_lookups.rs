@@ -266,3 +266,54 @@ async fn unreadable_probe_properties_fail_only_where_a_scan_would() {
     indexed.close().await.unwrap();
     scanned.close().await.unwrap();
 }
+
+/// IN over a list bound by an earlier clause reads the index for every member
+/// at once. Each result equals the same query on a database without indexes.
+#[tokio::test]
+async fn membership_lookups_read_each_member_once() {
+    let indexed = database().await;
+    let scanned = database().await;
+    for db in [&indexed, &scanned] {
+        run(
+            db,
+            "UNWIND range(0, 199) AS i CREATE (:User {uid: i, tier: i % 3})",
+        )
+        .await;
+    }
+    create_index(
+        &indexed,
+        index::IndexSpec::node_unique_equality("User", "uid"),
+    )
+    .await;
+    create_index(&indexed, index::IndexSpec::node_equality("User", "tier")).await;
+    for query in [
+        "WITH [5, 7, 7, null, 9.0, 'x'] AS ids MATCH (u:User) WHERE u.uid IN ids \
+         RETURN u.uid ORDER BY u.uid",
+        "MATCH (a:User) WHERE a.uid < 3 WITH collect(a.uid) AS ids \
+         MATCH (u:User) WHERE u.uid IN ids RETURN u.uid ORDER BY u.uid",
+        "WITH [0, 2, 0] AS tiers MATCH (u:User) WHERE u.tier IN tiers RETURN count(*)",
+        "WITH [5, [6]] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN u.uid",
+        "WITH [5, 0.0 / 0.0] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN u.uid",
+        "WITH [] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN count(*)",
+        "WITH [7] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN u.uid",
+        "UNWIND [[1, 2], [2, 3]] AS ids MATCH (u:User) WHERE u.uid IN ids \
+         RETURN u.uid ORDER BY u.uid",
+    ] {
+        let direct = run(&indexed, query).await;
+        assert_eq!(direct.rows, run(&scanned, query).await.rows, "{query}");
+    }
+    let direct = run(
+        &indexed,
+        "UNWIND [1, 2, 3] AS x MATCH (a:User {uid: x}) WITH collect(a.uid + 10) AS ids \
+         MATCH (u:User) WHERE u.uid IN ids RETURN count(*)",
+    )
+    .await;
+    assert_eq!(direct.rows, vec![vec![json!(3)]]);
+    let reads = &direct.resources.reads;
+    assert!(
+        reads.point_gets + reads.multi_get_keys + reads.scan_rows < 40,
+        "{reads:?}"
+    );
+    indexed.close().await.unwrap();
+    scanned.close().await.unwrap();
+}

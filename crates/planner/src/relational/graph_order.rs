@@ -42,9 +42,27 @@ pub struct PatternLookup {
     pub probe: Slot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_property: Option<String>,
+    #[serde(default, skip_serializing_if = "LookupMatch::is_value")]
+    pub matches: LookupMatch,
     pub index: catalog::NodeEqualityIndexMeta,
     pub key: catalog::ScopedPropertyKey,
     pub estimated_rows: u64,
+}
+
+/// Which index values a lookup's probe selects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LookupMatch {
+    /// The probe value itself, as in `n.key = k`.
+    #[default]
+    Value,
+    /// Each member of the probe list, as in `n.key IN keys`; a node that
+    /// several members select appears once.
+    Member,
+}
+impl LookupMatch {
+    fn is_value(&self) -> bool {
+        *self == Self::Value
+    }
 }
 
 /// A validated graph conjunction and traversal priorities. Deserialization checks

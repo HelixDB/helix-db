@@ -1250,3 +1250,58 @@ fn ordered_range_sources_end_top_k_projections_early() {
         assert_eq!(consumer(text, direction), expected, "{text}");
     }
 }
+
+#[test]
+fn membership_lookups_probe_list_variables() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap());
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "uid").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:uid")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let context = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let lookups = |text: &str| {
+        r::plan(helix_cypher::compile(text).unwrap(), &context)
+            .unwrap()
+            .matches()
+            .values()
+            .flat_map(|plan| &plan.steps)
+            .filter_map(|step| match step {
+                r::MatchStep::IndexLookup(lookup) => {
+                    Some((lookup.key.property.as_ref().to_owned(), lookup.matches))
+                }
+                r::MatchStep::Scan(_)
+                | r::MatchStep::Expand { .. }
+                | r::MatchStep::HashJoin { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let member = |property: &str| vec![(property.to_owned(), r::LookupMatch::Member)];
+    for (text, expected) in [
+        (
+            "WITH [1, 2] AS ids MATCH (n:N) WHERE n.uid IN ids RETURN n",
+            member("uid"),
+        ),
+        (
+            "MATCH (m:M) WITH collect(m.k) AS ids MATCH (n:N) WHERE n.key IN ids RETURN n",
+            member("key"),
+        ),
+        // An equality on a unique index keys the lookup before a list.
+        (
+            "WITH [1, 2] AS ids, 3 AS k MATCH (n:N) WHERE n.key IN ids AND n.uid = k RETURN n",
+            vec![("uid".to_owned(), r::LookupMatch::Value)],
+        ),
+        // IN fails on a value that may not be a list, so the label is scanned.
+        (
+            "UNWIND [1, [2]] AS ids MATCH (n:N) WHERE n.uid IN ids RETURN n",
+            Vec::new(),
+        ),
+    ] {
+        assert_eq!(lookups(text), expected, "{text}");
+    }
+}

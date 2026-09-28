@@ -1,44 +1,9 @@
 //! A correlated probe uses the selected native equality kernel and bounded
 //! cursors. Binding and predicate validation remain owned by the MATCH contract.
-use super::{ExecutionContext, GraphBatch, Limits, Result, RowBuffer};
-use futures::StreamExt;
+use super::{ExecutionContext, GraphBatch, Limits, Result};
 use helix_planner::{exec, ir, relational as r};
 use r::GraphValues;
 use std::collections::BTreeMap;
-
-impl ExecutionContext<'_> {
-    pub(super) async fn index_lookup_rows(
-        &mut self,
-        row: &r::Row,
-        lookup: &r::PatternLookup,
-        literal: ir::SecondaryIndexLiteral,
-        output: &mut RowBuffer,
-        limits: Limits,
-    ) -> Result<()> {
-        let access = exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::exact_equality(
-            lookup.index.clone(),
-            lookup.key.clone(),
-            ir::IndexValue::Literal(literal),
-        ));
-        let operation = exec::ExecOp::Access {
-            plan: Box::new(access),
-        };
-        self.flush_required_mutations(super::super::mutation::visibility::required_for(&operation))
-            .await?;
-        let cursor = self
-            .node_cursor(&operation)
-            .await?
-            .expect("nonnull literal equality has a bitmap, unique, or empty cursor");
-        let batches = self.node_id_batches(cursor, 1, r::Slot(0), limits);
-        futures::pin_mut!(batches);
-        while let Some(batch) = batches.next().await {
-            for found in batch? {
-                output.push_replacing(row, lookup.slot, found[0].clone())?;
-            }
-        }
-        Ok(())
-    }
-}
 
 /// The probe of each parent row of one lookup, visited in order. A probe
 /// property reads the parents' records a batch at a time, as a hash-join
@@ -117,6 +82,9 @@ impl Probe {
         probe: &r::Value,
     ) -> Result<Self> {
         use helix_ast::value::PropertyValue as P;
+        if lookup.matches == r::LookupMatch::Member {
+            return Self::members(context, lookup, probe).await;
+        }
         let string_bytes = match probe {
             r::Value::Null => return Ok(Self::Empty),
             r::Value::String(value) => value.len(),
@@ -183,6 +151,137 @@ impl Probe {
             .node_cursor(&operation)
             .await?
             .expect("nonnull scalar equality has an exact node cursor");
+        Ok(Self::Index(Box::new(IndexedCursor { cursor, memory })))
+    }
+
+    /// Candidates for every member of a probe list, read through one batched
+    /// lookup. Null and NaN members select nothing. A member the index cannot
+    /// answer exactly, such as a list or a string too large to index, scans
+    /// the source instead.
+    async fn members(
+        context: &ExecutionContext<'_>,
+        lookup: &r::PatternLookup,
+        probe: &r::Value,
+    ) -> Result<Self> {
+        use helix_ast::value::PropertyValue as P;
+        let members = match probe {
+            r::Value::Null => return Ok(Self::Empty),
+            r::Value::List(members) => members,
+            r::Value::Boolean(_)
+            | r::Value::Integer(_)
+            | r::Value::Float(_)
+            | r::Value::String(_)
+            | r::Value::Map(_)
+            | r::Value::Entity(_)
+            | r::Value::Path(_) => return Ok(Self::Scan),
+        };
+        // The literals, the executable values and the plan's metadata live
+        // together until the cursor has read the owners.
+        let _scratch = context.row_budget().reserve(
+            size_of::<exec::ExecAccessPlan>()
+                .saturating_add(lookup.index.index_id.len())
+                .saturating_add(lookup.key.label.len())
+                .saturating_add(lookup.key.property.len())
+                .saturating_add(members.iter().fold(0_usize, |bytes, member| {
+                    bytes
+                        .saturating_add(2 * size_of::<exec::ExecIndexedEqualityValue>())
+                        .saturating_add(match member {
+                            r::Value::String(value) => 2 * value.len(),
+                            r::Value::Null
+                            | r::Value::Boolean(_)
+                            | r::Value::Integer(_)
+                            | r::Value::Float(_)
+                            | r::Value::List(_)
+                            | r::Value::Map(_)
+                            | r::Value::Entity(_)
+                            | r::Value::Path(_) => 0,
+                        })
+                })),
+        )?;
+        let mut literals = Vec::with_capacity(members.len());
+        for member in members {
+            let value = match member {
+                r::Value::Null => continue,
+                r::Value::Boolean(value) => P::Bool(*value),
+                r::Value::Integer(value) => P::I64(*value),
+                r::Value::Float(value) => P::F64(*value),
+                r::Value::String(value) => P::String(value.clone()),
+                r::Value::List(_) | r::Value::Map(_) | r::Value::Entity(_) | r::Value::Path(_) => {
+                    return Ok(Self::Scan);
+                }
+            };
+            let literal = ir::SecondaryIndexLiteral::new(value)
+                .expect("nonnull scalar literals have native equality semantics");
+            if literal.may_exceed_index_key() {
+                return Ok(Self::Scan);
+            }
+            match literal.semantics() {
+                ir::LiteralEqualityIndexValueSemantics::Indexed => literals.push(literal),
+                ir::LiteralEqualityIndexValueSemantics::NonReflexive => {}
+                ir::LiteralEqualityIndexValueSemantics::AuthoritativeNull => {
+                    unreachable!("null members are skipped")
+                }
+            }
+        }
+        let access = match literals.len() {
+            0 => return Ok(Self::Empty),
+            1 => exec::ExecNodeAccessPlan::exact_equality(
+                lookup.index.clone(),
+                lookup.key.clone(),
+                ir::IndexValue::Literal(literals.pop().expect("one member")),
+            ),
+            _ => {
+                let values = ir::AtLeast::try_from_vec(
+                    literals
+                        .into_iter()
+                        .map(|literal| {
+                            exec::ExecIndexedEqualityValue::try_from(literal)
+                                .expect("indexed equality semantics produce an executable value")
+                        })
+                        .collect(),
+                )
+                .expect("at least two members");
+                let key = lookup.key.clone();
+                exec::ExecNodeAccessPlan::SecondarySet {
+                    set: match lookup.index.uniqueness {
+                        helix_planner::catalog::IndexUniqueness::Unique => {
+                            exec::ExecNodeSecondarySetPlan::UniqueUnion {
+                                index: exec::ExecNodeUniqueEqualityIndex::try_from(
+                                    lookup.index.clone(),
+                                )
+                                .expect("unique metadata produces a unique executable index"),
+                                key,
+                                values,
+                            }
+                        }
+                        helix_planner::catalog::IndexUniqueness::NonUnique => {
+                            exec::ExecNodeSecondarySetPlan::Bitmap(
+                                exec::ExecNodeBitmapExpr::BatchedUnionRead {
+                                    index: exec::ExecNodeNonUniqueEqualityIndex::try_from(
+                                        lookup.index.clone(),
+                                    )
+                                    .expect(
+                                        "non-unique metadata produces a non-unique executable index",
+                                    ),
+                                    key,
+                                    values,
+                                },
+                            )
+                        }
+                    },
+                }
+            }
+        };
+        let operation = exec::ExecOp::Access {
+            plan: Box::new(exec::ExecAccessPlan::Node(access)),
+        };
+        let memory = context
+            .row_budget()
+            .reserve(2 * size_of::<IndexedCursor>())?;
+        let cursor = context
+            .node_cursor(&operation)
+            .await?
+            .expect("an equality set has an exact node cursor");
         Ok(Self::Index(Box::new(IndexedCursor { cursor, memory })))
     }
 }

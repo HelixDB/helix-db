@@ -184,7 +184,12 @@ relationship or map bound by one, as in
 `MATCH (p:Post) MATCH (u:User {uid: p.author})`, can probe an equality index
 once per incoming row. So can a property of another node or relationship in
 the same pattern, as in `MATCH (p:Post {pid: 10}), (u:User {uid: p.author})`,
-once the plan has bound it. A probe property that cannot be read, such as a
+once the plan has bound it. `IN` over a variable that holds a list, as in
+`WITH collect(f.uid) AS ids MATCH (p:Post) WHERE p.author IN ids`, reads the
+index for every member of the list in one batched lookup per row; a member
+the index cannot answer, such as a nested list, scans the label for that row.
+IN over a variable that may hold something other than a list keeps the scan,
+because it would fail. A probe property that cannot be read, such as a
 property of a deleted node, scans the label instead, so it fails only where a
 scan would. With several such equalities, a unique index keys the probe, since
 it matches at most one node per row, whichever equality is written first.

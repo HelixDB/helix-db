@@ -686,22 +686,33 @@ fn plan_accesses(
                     .iter()
                     .flat_map(|node| node.properties.iter().cloned())
                     .collect();
+                let mut memberships = Vec::new();
                 if let Some(predicate) = &lookup_predicate {
                     collect_equalities(predicate, slot, &mut equalities);
+                    collect_memberships(predicate, slot, &mut memberships);
                 }
-                // The most selective indexed equality, a unique one first,
-                // keys the lookup regardless of written order.
+                // The most selective indexed equality or membership, a unique
+                // one first, keys the lookup regardless of written order.
                 let lookup = equalities
                     .into_iter()
-                    .filter_map(|(property, expression)| {
+                    .map(|(property, expression)| (property, expression, LookupMatch::Value))
+                    .chain(
+                        memberships
+                            .into_iter()
+                            .map(|(property, list)| (property, list, LookupMatch::Member)),
+                    )
+                    .filter_map(|(property, expression, matches)| {
                         // Totality admitted a property only of a slot that
-                        // holds a node, relationship or map.
-                        let (probe, probe_property) = match expression {
-                            Expression::Slot(probe) => (probe, None),
-                            Expression::Property(value, key) => match *value {
-                                Expression::Slot(probe) => (probe, Some(key)),
-                                _ => return None,
-                            },
+                        // holds a node, relationship or map, and IN over a
+                        // slot only when that slot holds a list or null.
+                        let (probe, probe_property) = match (expression, matches) {
+                            (Expression::Slot(probe), _) => (probe, None),
+                            (Expression::Property(value, key), LookupMatch::Value) => {
+                                match *value {
+                                    Expression::Slot(probe) => (probe, Some(key)),
+                                    _ => return None,
+                                }
+                            }
                             _ => return None,
                         };
                         // A node or relationship of this pattern probes once
@@ -720,21 +731,28 @@ fn plan_accesses(
                         let key = catalog::ScopedPropertyKey::try_new(label.clone(), property)?;
                         let index = ctx.indexes.node_eq.get(&key)?.clone();
                         // A unique index holds at most one node per value.
-                        let estimated_rows = if index.uniqueness == catalog::IndexUniqueness::Unique
-                        {
-                            1
-                        } else {
-                            config
-                                .storage
-                                .equality_index_rows(
-                                    config.stats.node_eq_cardinality.get(&key).copied(),
-                                )
-                                .as_rows()
-                        };
+                        // Without statistics a probe list is taken to hold
+                        // ten members.
+                        let estimated_rows =
+                            if index.uniqueness == catalog::IndexUniqueness::Unique {
+                                1
+                            } else {
+                                config
+                                    .storage
+                                    .equality_index_rows(
+                                        config.stats.node_eq_cardinality.get(&key).copied(),
+                                    )
+                                    .as_rows()
+                            }
+                            .saturating_mul(match matches {
+                                LookupMatch::Value => 1,
+                                LookupMatch::Member => 10,
+                            });
                         Some(PatternLookup {
                             slot,
                             probe,
                             probe_property,
+                            matches,
                             index,
                             key,
                             estimated_rows,
@@ -1229,6 +1247,10 @@ impl Totality<'_> {
                 self.operand(value)
                     && match list.as_ref() {
                         Expression::Literal(Value::List(_) | Value::Null) => true,
+                        Expression::Slot(slot) => matches!(
+                            self.bindings[slot.0 as usize].value_type,
+                            super::ValueType::List | super::ValueType::Null
+                        ),
                         Expression::List(items) => items.iter().all(|item| match item {
                             Expression::Literal(_) | Expression::Parameter(_) => self.operand(item),
                             item => matches!(self.params, Parameters::Bound(params)

@@ -154,65 +154,74 @@ impl ExecutionContext<'_> {
                         }
                     }
                     r::MatchStep::IndexLookup(lookup) => {
+                        self.flush_required_mutations(
+                            super::super::mutation::visibility::required_for_pattern(plan),
+                        )
+                        .await?;
                         let mut probes = super::lookup::ProbeValues::default();
                         for (parent, row) in candidates.iter().enumerate() {
-                            use helix_ast::value::PropertyValue as P;
-                            let probe = probes
+                            let probe = match probes
                                 .value(self, lookup, &candidates, parent, limits)
-                                .await?;
-                            let value = match probe {
-                                Some(r::Value::Null) => continue,
-                                Some(r::Value::Boolean(value)) => Some(P::Bool(*value)),
-                                Some(r::Value::Integer(value)) => Some(P::I64(*value)),
-                                Some(r::Value::Float(value)) => Some(P::F64(*value)),
-                                Some(r::Value::String(value)) => Some(P::String(value.clone())),
-                                Some(
-                                    r::Value::List(_)
-                                    | r::Value::Map(_)
-                                    | r::Value::Entity(_)
-                                    | r::Value::Path(_),
-                                )
-                                | None => None,
+                                .await?
+                            {
+                                Some(value) => {
+                                    super::lookup::Probe::new(self, lookup, value).await?
+                                }
+                                None => super::lookup::Probe::Scan,
                             };
-                            // Storage rejects an oversized lookup key, so such a
-                            // probe also takes the exact source scan below.
-                            let literal = value
-                                .and_then(|value| ir::SecondaryIndexLiteral::new(value).ok())
-                                .filter(|literal| !literal.may_exceed_index_key());
-                            if let Some(literal) = literal {
-                                self.index_lookup_rows(row, lookup, literal, &mut next, limits)
-                                    .await?;
-                            } else {
-                                // Lists, maps, oversized strings and unreadable
-                                // probe properties cannot be looked up.
-                                // Load the original source once, only when such a probe occurs.
-                                let ids = match scans.entry(lookup.slot) {
-                                    std::collections::btree_map::Entry::Occupied(entry) => {
-                                        entry.into_mut()
+                            match probe {
+                                // Null probes and members match nothing.
+                                super::lookup::Probe::Empty => {}
+                                super::lookup::Probe::Index(cursor) => {
+                                    let super::lookup::IndexedCursor {
+                                        cursor,
+                                        memory: _memory,
+                                    } = *cursor;
+                                    let batches =
+                                        self.node_id_batches(cursor, 1, r::Slot(0), limits);
+                                    futures::pin_mut!(batches);
+                                    while let Some(batch) = batches.next().await {
+                                        for found in batch? {
+                                            next.push_replacing(
+                                                row,
+                                                lookup.slot,
+                                                found[0].clone(),
+                                            )?;
+                                        }
                                     }
-                                    std::collections::btree_map::Entry::Vacant(entry) => {
-                                        let source = plan
-                                            .sources
-                                            .iter()
-                                            .find(|source| source.slot == lookup.slot)
-                                            .expect("validated lookup has a fallback source");
-                                        let ids = self
-                                            .match_source_ids(source, usize::MAX, limits)
-                                            .await?;
-                                        scan_bytes = scan_bytes.saturating_add(1024);
-                                        scan_memory.resize(scan_bytes)?;
-                                        entry.insert(ids)
+                                }
+                                super::lookup::Probe::Scan => {
+                                    // Lists, maps, oversized strings and unreadable
+                                    // probe properties cannot be looked up.
+                                    // Load the original source once, only when such a probe occurs.
+                                    let ids = match scans.entry(lookup.slot) {
+                                        std::collections::btree_map::Entry::Occupied(entry) => {
+                                            entry.into_mut()
+                                        }
+                                        std::collections::btree_map::Entry::Vacant(entry) => {
+                                            let source = plan
+                                                .sources
+                                                .iter()
+                                                .find(|source| source.slot == lookup.slot)
+                                                .expect("validated lookup has a fallback source");
+                                            let ids = self
+                                                .match_source_ids(source, usize::MAX, limits)
+                                                .await?;
+                                            scan_bytes = scan_bytes.saturating_add(1024);
+                                            scan_memory.resize(scan_bytes)?;
+                                            entry.insert(ids)
+                                        }
+                                    };
+                                    for id in ids.iter() {
+                                        if next.len().is_multiple_of(limits.batch_rows) {
+                                            self.check_execution_deadline()?;
+                                        }
+                                        next.push_replacing(
+                                            row,
+                                            lookup.slot,
+                                            r::Value::Entity(r::Entity::Node(id)),
+                                        )?;
                                     }
-                                };
-                                for id in ids.iter() {
-                                    if next.len().is_multiple_of(limits.batch_rows) {
-                                        self.check_execution_deadline()?;
-                                    }
-                                    next.push_replacing(
-                                        row,
-                                        lookup.slot,
-                                        r::Value::Entity(r::Entity::Node(id)),
-                                    )?;
                                 }
                             }
                         }
