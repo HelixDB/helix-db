@@ -52,12 +52,14 @@ const DATABASE_GROUP_PREFIXES = new Map([
   ["Learn/Full-text search", "learn/full-text-search/"],
   ["Learn/AI memory and RAG", "learn/ai-memory/"],
   ["Learn/Database architecture", "learn/database-architecture/"],
+  ["Learn/Solution guides", "learn/guides/"],
 ]);
 const CLIENT_SETUP_MARKER = "{/* client-setup: no JSON representation */}";
 const PACKAGE_INSTALL_MARKER =
   "{/* package-install: no JSON representation */}";
 const SDK_COMMANDS_MARKER = "{/* sdk-commands: no JSON representation */}";
-const SINGLE_SDK_EXAMPLES_MARKER = "{/* single-sdk-examples: TypeScript */}";
+// Groups that show only some SDKs name them, e.g. {/* sdk-examples: TypeScript, Python */}.
+const SDK_EXAMPLES_MARKER = /\{\/\* sdk-examples: ([^*]+) \*\/\}$/;
 const EXAMPLE_LANGUAGES = [
   ["Rust", "```rust Rust"],
   ["TypeScript", "```ts TypeScript"],
@@ -260,7 +262,22 @@ for (const slug of navigable) {
       );
     }
   }
-  if (slug.startsWith("learn/")) {
+  if (slug.startsWith("learn/guides/")) {
+    if (pageType !== "Guide") {
+      errors.push(`${slug}: solution guides must use pageType Guide`);
+    }
+    if (!body.includes('<div className="learn-objectives">')) {
+      errors.push(`${slug}: solution guide is missing the what-you-will-build block`);
+    }
+    for (const section of ["Frequently asked questions", "Next steps"]) {
+      if (!body.includes(`\n## ${section}\n`)) {
+        errors.push(`${slug}: solution guide is missing ## ${section}`);
+      }
+    }
+    if (body.includes("<Accordion")) {
+      errors.push(`${slug}: guide FAQs use visible ### questions, not accordions`);
+    }
+  } else if (slug.startsWith("learn/")) {
     if (!body.includes('<div className="learn-objectives">')) {
       errors.push(`${slug}: Learn page is missing the learning-objectives block`);
     }
@@ -371,19 +388,24 @@ for (const file of docsFiles) {
       const isClientSetup = beforeCodeGroup.endsWith(CLIENT_SETUP_MARKER);
       const isPackageInstall = beforeCodeGroup.endsWith(PACKAGE_INSTALL_MARKER);
       const isSdkCommands = beforeCodeGroup.endsWith(SDK_COMMANDS_MARKER);
-      const isSingleSdkExamples = beforeCodeGroup.endsWith(
-        SINGLE_SDK_EXAMPLES_MARKER,
-      );
-      if (isSingleSdkExamples) {
-        const fences = [
-          ...match[1].matchAll(/^```([^\s\n]+)(?:\s[^\n]+)?$/gm),
-        ].map((fence) => fence[1]);
-        if (
-          fences.length === 0 ||
-          fences.some((language) => language !== "ts")
-        ) {
+      const sdkExamples = beforeCodeGroup.match(SDK_EXAMPLES_MARKER);
+      if (sdkExamples) {
+        const languages = sdkExamples[1].split(",").map((name) => name.trim());
+        const fenceTokens = new Map(
+          EXAMPLE_LANGUAGES.map(([language, fence]) => [
+            language,
+            fence.slice(3).split(" ")[0],
+          ]),
+        );
+        const allowed = languages.map((language) => fenceTokens.get(language));
+        const used = [...match[1].matchAll(/^```(\S+)/gm)].map((fence) => fence[1]);
+        const valid =
+          !allowed.includes(undefined) &&
+          allowed.every((token) => used.includes(token)) &&
+          used.every((token) => allowed.includes(token));
+        if (!valid) {
           errors.push(
-            `${relative}: CodeGroup ${index + 1} single-SDK examples must contain only TypeScript fences`,
+            `${relative}: CodeGroup ${index + 1} must contain only, and at least one of each, ${languages.join(", ")} examples`,
           );
         }
         continue;
@@ -411,7 +433,10 @@ for (const file of docsFiles) {
       }
     }
 
-    if (relative.startsWith("database/") && !SDK_SETUP_FILES.has(relative)) {
+    if (
+      (relative.startsWith("database/") || relative.startsWith("learn/guides/")) &&
+      !SDK_SETUP_FILES.has(relative)
+    ) {
       const outsideCodeGroups = content.replace(
         /<CodeGroup>[\s\S]*?<\/CodeGroup>/g,
         "",

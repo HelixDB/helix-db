@@ -34,7 +34,7 @@ any name a reader is likely to type. Shortcut sources must not match a live rout
 | HelixDB | Start Here, Core Concepts, Query Guides | The engine in every run mode: setup, SDKs, data model, queries, indexes and search, HTTP API, error codes, troubleshooting |
 | Helix Cloud | Start Here, Connect and automate, Operate | Managed deployments only: account setup, connecting, architecture, MCP, security, tenancy, limits, gateway errors |
 | CLI Reference | Using the helix CLI, CLI Command Reference | The `helix` CLI: workflows, configuration, and one page per command |
-| Learn | One group per topic | Vendor-neutral explainers that answer one broad question each, such as "What is BM25?" |
+| Learn | One group per topic, plus Solution guides | Vendor-neutral explainers that answer one broad question each, such as "What is BM25?", and solution guides that show how to build a complete system, such as enterprise search, with HelixDB |
 
 Put engine behavior that applies outside Cloud in the HelixDB tab, even when Cloud
 users also need it. Link to it from Cloud pages instead of duplicating it.
@@ -79,6 +79,27 @@ structure is fixed:
 - Add every new page as a question link on the `/learn` tile page, link it from the related
   guide, and add shortcut redirects for its obvious names.
 
+### Solution guides
+
+Solution guides live in the Learn tab's "Solution guides" group under `learn/guides/`.
+Each one shows an engineer evaluating HelixDB how to build one complete system, such as a
+knowledge graph or agent memory. The design carries the argument, not feature claims.
+
+- Use `pageType: "Guide"` and a "How to build ..." title.
+- After a 3-5 sentence opening, add the objectives block (`<div className="learn-objectives">`
+  wrapping a `Card` titled "What you will build").
+- Use this section order: `## The scenario`, `## Requirements`, `## Architecture`,
+  `## Data model`, `## Load and update data`, one section per business question, then
+  `## Connect an agent`, `## Limits and when this is not a fit`,
+  `## Frequently asked questions`, and `## Next steps`.
+- Use a generic fictional company. Tie every design choice to a requirement, compare
+  against categories of systems rather than vendors, and say plainly when the design is
+  not a fit.
+- Link concepts to their Learn pages instead of re-explaining them.
+- Show queries as TypeScript and Python code groups marked
+  `{/* sdk-examples: TypeScript, Python */}`, and run every snippet against a local server
+  before publishing.
+
 ## Local checks
 
 ```bash
@@ -95,6 +116,9 @@ Client-construction groups may omit JSON when immediately marked with
 `{/* client-setup: no JSON representation */}`.
 Package-install groups use Bash snippets for each SDK and
 `{/* package-install: no JSON representation */}`.
+Groups that show only some SDKs name them in a marker, such as
+`{/* sdk-examples: TypeScript, Python */}`. The group must then contain only those
+languages, with at least one example of each.
 
 The shared SDK parity suite verifies that Rust, TypeScript, Go, and Python serialize
 the same operation-tree requests:

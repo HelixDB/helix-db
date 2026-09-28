@@ -60,7 +60,7 @@ function loadPage(slug) {
 
       let markdown = segment.replace(/^import\s+[^\n]*\n/gm, '');
       markdown = markdown.replace(
-        /^\{\/\* (?:(?:client-setup|package-install): no JSON representation|single-sdk-examples: TypeScript) \*\/\}\s*$/gm,
+        /^\{\/\* (?:(?:client-setup|package-install): no JSON representation|sdk-examples: [^*]+) \*\/\}\s*$/gm,
         '',
       );
       markdown = markdown.replace(
