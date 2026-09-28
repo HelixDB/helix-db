@@ -54,10 +54,15 @@ impl InputWindow {
         let termination = match query.operators().first()? {
             Operator::Unwind { .. } => Termination::AfterFirstBatch,
             Operator::Match {
-                pattern,
-                predicate: None,
-                ..
-            } => {
+                pattern, predicate, ..
+            } if predicate.as_ref().is_none_or(|predicate| {
+                super::planning::index_predicate_is_total(
+                    predicate.expression(),
+                    pattern,
+                    super::planning::Parameters::Validated,
+                )
+            }) =>
+            {
                 entities.extend(
                     pattern
                         .nodes
@@ -80,7 +85,7 @@ impl InputWindow {
                             .iter()
                             .flat_map(|edge| &edge.properties),
                     );
-                if constraints.clone().next().is_none() {
+                if predicate.is_none() && constraints.clone().next().is_none() {
                     Termination::BeforeInput
                 } else if constraints.all(|(_, expression)| {
                     matches!(
@@ -88,10 +93,11 @@ impl InputWindow {
                         Expression::Literal(_) | Expression::Parameter(_)
                     )
                 }) {
-                    // A complete match has evaluated every immutable constraint.
-                    // Parameters cannot fail on a later row once that succeeds.
-                    // Demand at least one result even for LIMIT 0, so a missing
-                    // parameter is never hidden by skipping source evaluation.
+                    // A complete match has evaluated every immutable constraint
+                    // and a WHERE that cannot fail on any row. Parameters cannot
+                    // fail on a later row once that succeeds. Demand at least one
+                    // result even for LIMIT 0, so a missing parameter is never
+                    // hidden by skipping source evaluation.
                     Termination::AfterFirstBatch
                 } else {
                     return None;

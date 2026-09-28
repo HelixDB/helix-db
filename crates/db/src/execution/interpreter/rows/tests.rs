@@ -30,6 +30,7 @@ mod row_layout;
 mod selection;
 mod unwind;
 mod values;
+mod where_windows;
 
 #[tokio::test]
 async fn cancellation_at_execution_checkpoints_rolls_back_rows() {

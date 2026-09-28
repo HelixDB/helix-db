@@ -4,7 +4,7 @@ use super::super::*;
 use helix_planner::context;
 use serde_json::json;
 
-async fn execute(
+pub(super) async fn execute(
     db: &crate::HelixDB,
     plan: &r::RowPlan,
     strategy: r::RowExecution,
@@ -22,7 +22,7 @@ async fn execute(
         .await
 }
 
-fn plan(db: &crate::HelixDB, text: &str) -> r::RowPlan {
+pub(super) fn plan(db: &crate::HelixDB, text: &str) -> r::RowPlan {
     r::plan(
         helix_cypher::compile(text).unwrap(),
         &db.planner_context(context::ParamBindings::default()),

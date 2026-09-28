@@ -276,7 +276,7 @@ fn plan_accesses(
                 let mut memberships = Vec::new();
                 let mut ranges = Vec::new();
                 if let Some(predicate) = &predicate
-                    && index_predicate_is_total(predicate, pattern, &ctx.params)
+                    && index_predicate_is_total(predicate, pattern, Parameters::Bound(&ctx.params))
                 {
                     collect_equalities(predicate, node.slot, &mut equalities);
                     collect_memberships(predicate, node.slot, &mut memberships);
@@ -559,9 +559,9 @@ fn plan_accesses(
                 Expression::Slot(slot) => incoming.contains(slot),
                 _ => false,
             });
-        let predicate_total = lookup_predicate
-            .as_ref()
-            .is_none_or(|expression| index_predicate_is_total(expression, pattern, &ctx.params));
+        let predicate_total = lookup_predicate.as_ref().is_none_or(|expression| {
+            index_predicate_is_total(expression, pattern, Parameters::Bound(&ctx.params))
+        });
         let mut lookups = Vec::new();
         if constraints_total && predicate_total {
             // Group repeated bindings once; do not rescan the whole pattern
@@ -827,7 +827,8 @@ fn index_predicate(
                     .iter()
                     .map(|item| {
                         let value = substitute(&item.expression, &bindings)?;
-                        total_operand(&value, pattern, params).then_some((item.slot, value))
+                        total_operand(&value, pattern, Parameters::Bound(params))
+                            .then_some((item.slot, value))
                     })
                     .collect::<Option<BTreeMap<_, _>>>()
                 else {
@@ -851,15 +852,28 @@ fn index_predicate(
         .reduce(|left, right| Expression::Binary(Binary::And, Box::new(left), Box::new(right)))
 }
 
+/// What a totality proof knows about query parameters.
+#[derive(Clone, Copy)]
+pub(super) enum Parameters<'a> {
+    /// Planning-time values; an unbound parameter could fail on any row.
+    Bound(&'a context::ParamBindings),
+    /// Execution rejects a missing parameter before reading any row, but the
+    /// values, and so an `IN $list` operand's type, are unknown.
+    Validated,
+}
+
 /// An operand that evaluates without failing: a literal, a slot, a bound
 /// parameter, or a property of a node or relationship of `pattern`.
-fn total_operand(operand: &Expression, pattern: &Pattern, params: &context::ParamBindings) -> bool {
+fn total_operand(operand: &Expression, pattern: &Pattern, params: Parameters<'_>) -> bool {
     match operand {
         Expression::Literal(_) | Expression::Slot(_) => true,
-        Expression::Parameter(name) => {
-            let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
-            params.values.contains_key(&name) || params.query_values.contains_key(&name)
-        }
+        Expression::Parameter(name) => match params {
+            Parameters::Bound(params) => {
+                let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
+                params.values.contains_key(&name) || params.query_values.contains_key(&name)
+            }
+            Parameters::Validated => true,
+        },
         Expression::Property(value, _) => matches!(value.as_ref(), Expression::Slot(slot)
             if pattern.nodes.iter().any(|node| node.slot == *slot)
                 || pattern.relationships.iter().any(|rel| rel.slot == *slot)),
@@ -874,10 +888,10 @@ fn total_operand(operand: &Expression, pattern: &Pattern, params: &context::Para
 // label and null tests, and IN over pattern properties, literals and bound
 // parameters: these return null for mismatched types instead of failing. Keep
 // potentially failing arithmetic, functions, and dynamic access above a scan.
-fn index_predicate_is_total(
+pub(super) fn index_predicate_is_total(
     expression: &Expression,
     pattern: &Pattern,
-    params: &context::ParamBindings,
+    params: Parameters<'_>,
 ) -> bool {
     let operand = |operand: &Expression| total_operand(operand, pattern, params);
     match expression {
@@ -903,7 +917,8 @@ fn index_predicate_is_total(
                         matches!(item, Expression::Literal(_) | Expression::Parameter(_))
                             && operand(item)
                     }),
-                    Expression::Parameter(name) => matches!(
+                    Expression::Parameter(name) => matches!(params, Parameters::Bound(params)
+                    if matches!(
                         params.values.get(
                             &ir::NonEmptyString::new(name.clone()).expect("validated parameter")
                         ),
@@ -911,7 +926,7 @@ fn index_predicate_is_total(
                             helix_ast::value::PropertyValue::Array(_)
                                 | helix_ast::value::PropertyValue::Null
                         )
-                    ),
+                    )),
                     _ => false,
                 }
         }

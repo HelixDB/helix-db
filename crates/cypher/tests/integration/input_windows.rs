@@ -71,9 +71,11 @@ fn source_demand_never_crosses_error_ordering_or_multiplicity_boundaries() {
         "UNWIND [1] AS x WITH x UNWIND [x] AS y RETURN y LIMIT 1",
         "CREATE (:N) WITH 1 AS x RETURN x LIMIT 1",
         "MATCH (n {key:1/0}) WITH n RETURN n LIMIT 1",
-        "MATCH (n) WHERE n.key=1 WITH n RETURN n LIMIT 1",
+        "MATCH (n) WHERE n.key/0=1 WITH n RETURN n LIMIT 1",
+        "MATCH (n) WHERE toLower(n.name)='a' RETURN n LIMIT 1",
+        "MATCH (n) WHERE n.key IN $keys RETURN n LIMIT 1",
         "MATCH (n)-[:R {key:1/0}]->() WITH n RETURN n LIMIT 1",
-        "MATCH (n)-[:R]->() WHERE n.key=1 WITH n RETURN n LIMIT 1",
+        "MATCH (n)-[:R]->() WHERE n.key+1=1 WITH n RETURN n LIMIT 1",
         "MATCH (n) WITH n RETURN 1+1 LIMIT 1",
         "RETURN 1 LIMIT 1",
         "UNWIND [1] AS x WITH x RETURN x",
@@ -96,6 +98,19 @@ fn source_demand_never_crosses_error_ordering_or_multiplicity_boundaries() {
             2,
             r::Termination::AfterFirstBatch,
             1,
+        ),
+        // A WHERE that cannot fail is checked like a property constraint.
+        (
+            "MATCH (n) WHERE n.key=1 WITH n RETURN n LIMIT 1",
+            2,
+            r::Termination::AfterFirstBatch,
+            1,
+        ),
+        (
+            "MATCH (n)-[r:R]->(m) WHERE n.key > $low AND (m.name STARTS WITH 'a' OR r.w IS NULL) RETURN m LIMIT 2",
+            1,
+            r::Termination::AfterFirstBatch,
+            2,
         ),
         (
             "MATCH (n)-[:R {key:$key}]->(m) RETURN m LIMIT 1",

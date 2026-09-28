@@ -338,10 +338,15 @@ values in its deterministic value order; `LIMIT 0` retains none. Without a limit
 retention scales with unique results. All input is still evaluated, preserving
 late errors and the same subset as materialised execution. This bounds retained
 state, not path enumeration or storage work.
-Initial fixed-length matches with literal or parameter property constraints can
-stop at a downstream limit when intervening projections preserve rows and cannot
-fail. The engine evaluates enough input to validate those constraints even for
-`LIMIT 0`; correlated inputs and potentially failing expressions remain barriers.
+Initial fixed-length matches with literal or parameter property constraints, and
+a `WHERE` that cannot fail, can stop at a downstream limit when intervening
+projections preserve rows and cannot fail. A `WHERE` cannot fail under the same
+rule as index selection: comparisons, string predicates, label and null tests,
+and their boolean combinations over pattern properties, literals and
+parameters. The engine evaluates enough input to validate those constraints even
+for `LIMIT 0`; correlated inputs and potentially failing expressions remain
+barriers. Candidate batches start at the remaining demand and double up to the
+batch width, so a selective `WHERE` needs only a few more batches than a scan.
 Consecutive total `WITH`/`RETURN` windows can stop when any earlier or later
 limit is exhausted. Literal windows compose their skips and caps into a tighter
 source bound. Later parameterized windows keep their existing validation point

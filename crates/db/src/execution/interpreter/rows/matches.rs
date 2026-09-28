@@ -376,13 +376,25 @@ impl ExecutionContext<'_> {
             step,
             r::MatchStep::Scan(_) | r::MatchStep::Expand { .. } | r::MatchStep::HashJoin { .. }
         )));
-        // Demand bounds candidate/probe batches, not blocking source builds.
-        // The consumer decides when enough complete result rows have arrived.
-        let candidate_limits = Limits {
-            batch_rows: limits.batch_rows.min(operation.demand.max(1)),
-            ..limits
-        };
-        let roots = self.node_id_batches(cursor, width, *slot, candidate_limits);
+        // Demand sizes the first candidate/probe batch, not blocking source
+        // builds; each later batch doubles up to the batch width, so a WHERE
+        // that rejects most candidates costs at most log2(width / demand)
+        // extra round trips. The consumer decides when enough complete result
+        // rows have arrived.
+        let first = limits.batch_rows.min(operation.demand.max(1));
+        let grow = move |rows: usize| rows.saturating_mul(2).min(limits.batch_rows);
+        let slot = *slot;
+        let roots =
+            futures::stream::try_unfold((cursor, first), move |(cursor, rows)| async move {
+                let batch_limits = Limits {
+                    batch_rows: rows,
+                    ..limits
+                };
+                Ok(cursor
+                    .next_batch(self, width, slot, batch_limits)
+                    .await?
+                    .map(|(batch, cursor)| (batch, (cursor, grow(rows)))))
+            });
         let stack = super::expansion_stack::ExpansionStack::new(
             operation.pattern,
             plan,
@@ -402,10 +414,15 @@ impl ExecutionContext<'_> {
             ))
         });
         futures::stream::try_unfold(
-            (stack, operation.optional),
-            move |(stack, unmatched_optional)| async move {
+            (stack, operation.optional, first),
+            move |(stack, unmatched_optional, mut rows)| async move {
                 let (mut stack, mut cache) = stack?;
                 loop {
+                    let candidate_limits = Limits {
+                        batch_rows: rows,
+                        ..limits
+                    };
+                    rows = grow(rows);
                     let candidates = self
                         .row_budget()
                         .admitted_future(stack.next_batch(self, candidate_limits, &mut cache))?
@@ -418,7 +435,10 @@ impl ExecutionContext<'_> {
                                     .saturating_add(width.saturating_mul(size_of::<r::Value>())),
                                 || vec![r::Value::Null; width],
                             )?;
-                            return Ok(Some((candidates.finish(), (Ok((stack, cache)), false))));
+                            return Ok(Some((
+                                candidates.finish(),
+                                (Ok((stack, cache)), false, rows),
+                            )));
                         }
                         return Ok(None);
                     };
@@ -434,7 +454,7 @@ impl ExecutionContext<'_> {
                         ))?
                         .await?;
                     if output.len() > 0 {
-                        return Ok(Some((output.finish(), (Ok((stack, cache)), false))));
+                        return Ok(Some((output.finish(), (Ok((stack, cache)), false, rows))));
                     }
                 }
             },

@@ -397,6 +397,11 @@ async fn measure(db: &HelixDB, size: usize) -> Result<Vec<serde_json::Value>> {
             json!([[1]]),
         ),
         (
+            "where_limit",
+            "MATCH (a:Left) WHERE a.key >= 0 AND a.key IS NOT NULL WITH a LIMIT 3 RETURN count(*)".into(),
+            json!([[3]]),
+        ),
+        (
             "bound_chain",
             "MATCH (a:Chain) OPTIONAL MATCH p=(a)-[:NEXT]->(b)-[:NEXT]->(c) RETURN count(*),count(p),sum(length(p))".into(),
             // NEXT forms one directed cycle. Every start has exactly one
@@ -585,6 +590,18 @@ async fn measure_cases(
             {
                 return Err(format!(
                     "{case} expanded beyond its demanded parents at size {size}: {:?}",
+                    response.resources.reads,
+                )
+                .into());
+            }
+            // A WHERE that cannot fail stops its source at the demanded rows.
+            if case == "where_limit"
+                && (response.resources.reads.scans != 0
+                    || response.resources.reads.point_gets > 4
+                    || response.resources.reads.multi_get_keys > 16)
+            {
+                return Err(format!(
+                    "{case} read beyond its demanded candidates at size {size}: {:?}",
                     response.resources.reads,
                 )
                 .into());
