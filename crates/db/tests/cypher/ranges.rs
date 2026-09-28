@@ -106,17 +106,18 @@ async fn range_comparisons_read_range_indexes_with_cypher_semantics() {
             .to_string(),
         error
     );
-    // A range source streams, so a limit hydrates only the demanded nodes.
+    // A range source streams, so a limit reads and verifies only the index
+    // entries it needs and hydrates only the demanded nodes.
     let limited = run(
         &db,
         "MATCH (n:R) WHERE n.v >= 10 WITH n LIMIT 3 RETURN count(*) AS c",
     )
     .await;
     assert_eq!(limited.rows, vec![vec![json!(3)]]);
+    let reads = &limited.resources.reads;
     assert!(
-        limited.resources.reads.multi_get_keys <= 32,
-        "{:?}",
-        limited.resources.reads
+        reads.multi_get_keys <= 32 && reads.scan_rows <= 16 && reads.point_gets <= 16,
+        "{reads:?}"
     );
     // The label scan validates every R node; the range reads only its bounds.
     let indexed = run(&db, cases[0].0).await;

@@ -22,6 +22,12 @@ impl<'db> ExecutionContext<'db> {
         range: &ir::IndexRange,
         iteration: ir::RangeScanIteration,
     ) -> Result<crate::index_lifecycle::secondary::OrderedRangeCursor> {
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            })
+        });
         let identity =
             secondary_range_identity(element, key.label.as_ref(), key.property.as_ref())?;
         let direction = storage_range_direction(key.direction);
@@ -218,6 +224,12 @@ impl<'db> ExecutionContext<'db> {
         limit: Option<properties::PositiveUsize>,
     ) -> Result<Vec<u64>> {
         self.check_execution_deadline()?;
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            })
+        });
         let direction = storage_range_direction(key.direction);
         let limit = limit.map(properties::PositiveUsize::get);
         let query = range_query(self, range)?;
@@ -473,13 +485,29 @@ impl crate::index_lifecycle::secondary::ExactRangeScanProgress for ExecutionCont
     fn checkpoint(&self) -> Result<()> {
         self.check_execution_deadline()
     }
-    #[cfg(test)]
+    // A Cypher request reports each index entry as a scanned row and each
+    // authoritative verification as a point read.
     fn entry_visited(&self) {
+        #[cfg(test)]
         self.range_reads.entry_visited();
+        let Some(budget) = &self.row_memory else {
+            return;
+        };
+        budget.record_reads(crate::cypher::StorageReadUsage {
+            scan_rows: 1,
+            ..Default::default()
+        });
     }
-    #[cfg(test)]
     fn authoritative_read(&self) {
+        #[cfg(test)]
         self.range_reads.authoritative_read();
+        let Some(budget) = &self.row_memory else {
+            return;
+        };
+        budget.record_reads(crate::cypher::StorageReadUsage {
+            point_gets: 1,
+            ..Default::default()
+        });
     }
     #[cfg(test)]
     fn authoritative_decode(&self) {

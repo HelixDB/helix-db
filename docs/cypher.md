@@ -148,7 +148,9 @@ nodes than several. A string too large
 to index, about 64 KiB (the storage key limit), cannot equal an indexed value, so a lookup of one keeps
 the label scan. A comparison such as `n.age >= 21 AND n.age < $max` against a
 number or string literal or parameter can read a native range index on that
-property, with bounds on one property combined. A boolean, list, null or NaN
+property, with bounds on one property combined. It reads and verifies index
+entries in index order only as far as the query consumes them, so a `LIMIT`
+reads a few entries rather than the whole range. A boolean, list, null or NaN
 bound, or a string too large to index, keeps the label scan, because such a
 comparison is null or unindexable rather than a range. Index access also requires every other
 conjunct and every property constraint in the pattern to be unable to fail.

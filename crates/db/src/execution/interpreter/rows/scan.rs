@@ -13,6 +13,9 @@ pub(super) enum NodeCursor {
         ids: bitmap::IntoIter,
         verify_existence: bool,
     },
+    /// Verified owners of one range-index range in index order, read only as
+    /// far as the consumer asks.
+    Range(Box<crate::index_lifecycle::secondary::OrderedRangeCursor>),
 }
 
 impl ExecutionContext<'_> {
@@ -81,22 +84,21 @@ impl ExecutionContext<'_> {
                 (self.node_secondary_bitmap(set).await?, false)
             }
             exec::ExecNodeCursor::Range {
-                index,
+                index: _,
                 key,
                 range,
                 iteration,
-            } => (
-                self.node_secondary_bitmap(&exec::ExecNodeSecondarySetPlan::Range(
-                    exec::ExecNodeSecondaryRangePlan {
-                        index: index.clone(),
-                        key: key.clone(),
-                        range: range.clone(),
+            } => {
+                let cursor = self
+                    .open_range_cursor(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        range,
                         iteration,
-                    },
-                ))
-                .await?,
-                false,
-            ),
+                    )
+                    .await?;
+                return Ok(Some(NodeCursor::Range(Box::new(cursor))));
+            }
             exec::ExecNodeCursor::Empty => (bitmap::Bitmap::empty(Some(self.row_budget()))?, false),
         };
         Ok(Some(NodeCursor::Indexed {
@@ -213,6 +215,14 @@ impl NodeCursor {
                         if ids.is_empty() {
                             continue;
                         }
+                    }
+                }
+                NodeCursor::Range(cursor) => {
+                    while ids.len() < batch_rows {
+                        let Some(id) = context.next_range_cursor(cursor).await? else {
+                            break;
+                        };
+                        ids.push(id);
                     }
                 }
             }
