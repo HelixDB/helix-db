@@ -246,6 +246,16 @@ async fn verify_indexed_membership() {
         ("MATCH (a:Item)-[:NEXT]->(b:Item) WHERE a.key IN [10, 12, 13] RETURN a.name AS a, b.name AS b ORDER BY a", json!({})),
         ("UNWIND [1, 2] AS x MATCH (b:Item) WHERE b.key = x AND b.name IN ['n1', 'n2', 'zz'] RETURN b.name AS v ORDER BY v", json!({})),
         ("MATCH (n:Item) WHERE n.key IN $keys RETURN count(*) AS v", json!({"keys": repeated})),
+        // Conjuncts that cannot fail keep the index source; every candidate
+        // is still checked against the complete predicate.
+        ("MATCH (n:Item) WHERE n.key = 5 AND n.alt > 4.0 RETURN n.name AS v", json!({})),
+        ("MATCH (n:Item) WHERE n.key = 7 AND (n.name STARTS WITH 'z' OR n.alt IS NOT NULL) RETURN n.name AS v", json!({})),
+        ("MATCH (n:Item) WHERE n.key = 1 AND NOT (n.name = 'float-one') RETURN n.name AS v", json!({})),
+        ("MATCH (n:Item) WHERE n.key = 9 AND n.key > 'a' RETURN n.name AS v", json!({})),
+        ("MATCH (n:Item) WHERE n.key = 2 OR n.key = 'x' OR n.key = null RETURN n.name AS v ORDER BY v", json!({})),
+        ("MATCH (n:Item) WHERE n.key = 1 OR 3 = n.key RETURN n.name AS v ORDER BY v", json!({})),
+        ("MATCH (a:Account) WHERE a.email = 'a' OR a.email = $e RETURN a.email AS v ORDER BY v", json!({"e": "b"})),
+        ("UNWIND [1, 2] AS x MATCH (b:Item) WHERE b.key = x AND b.name <> $skip RETURN b.name AS v ORDER BY v", json!({"skip": "n2"})),
     ];
     let request = |text: &str, parameters: &serde_json::Value| -> cypher::Request {
         serde_json::from_value(json!({"query": text, "parameters": parameters})).unwrap()
@@ -342,6 +352,25 @@ async fn verify_indexed_membership() {
     assert_eq!(rows(&reference[23]).len(), 2);
     // 64 distinct keys, where the stored float 1.0 also equals 1.
     assert_eq!(rows(&reference[25]), vec![vec![json!(65)]]);
+    let names = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| vec![json!(value)])
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        reference[26..34].iter().map(rows).collect::<Vec<_>>(),
+        [
+            names(&["n5"]),
+            names(&["n7"]),
+            names(&["n1"]),
+            names(&[]),
+            names(&["n2", "string"]),
+            names(&["float-one", "n1", "n3"]),
+            names(&["a", "b"]),
+            names(&["float-one", "n1"]),
+        ]
+    );
 
     create_index(&db, index::IndexSpec::node_equality("Item", "key")).await;
     create_index(&db, index::IndexSpec::node_equality("Item", "name")).await;
@@ -383,6 +412,16 @@ async fn verify_indexed_membership() {
         "{:?}",
         reference[0].resources.reads
     );
+    for (text, reference) in [(cases[26].0, &reference[26]), (cases[31].0, &reference[31])] {
+        let indexed = run(&db, text).await;
+        assert!(
+            indexed.resources.reads.multi_get_keys <= 16
+                && reference.resources.reads.multi_get_keys >= 200,
+            "{text}: {:?} vs {:?}",
+            indexed.resources.reads,
+            reference.resources.reads
+        );
+    }
 
     assert_eq!(
         run(&db, "CREATE (:Item {key:500, name:'new'}) WITH 1 AS x MATCH (n:Item) WHERE n.key IN [500, 501] RETURN n.name AS v")

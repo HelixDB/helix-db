@@ -74,11 +74,14 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             .unwrap()
             .with_uniqueness(catalog::IndexUniqueness::Unique),
     );
+    let region = catalog::ScopedPropertyKey::try_new("N", "region").unwrap();
+    indexes = indexes.with_node_eq(region.clone());
     let source = |text: &str, limit: usize, parameter: Option<helix_ast::value::PropertyValue>| {
         let mut context = context::PlannerContext {
             indexes: indexes.clone(),
             stats: context::StatsSnapshot::default()
-                .with_node_label_cardinality(ir::NonEmptyString::new("N").unwrap(), 1_000_000),
+                .with_node_label_cardinality(ir::NonEmptyString::new("N").unwrap(), 1_000_000)
+                .with_node_eq_cardinality(region.clone(), 250_000),
             ..context::PlannerContext::default()
         };
         context.limits.max_index_union_branches = context::IndexUnionBranchLimit::from_usize(limit);
@@ -179,6 +182,19 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             "MATCH (n:N) WHERE n.email IN ['a', 'b'] RETURN n",
             Source::Union,
         ),
+        // A set on another property competes with an unselective equality.
+        (
+            "MATCH (n:N) WHERE n.region = 'eu' AND n.key IN [1, 2] RETURN n",
+            Source::Union,
+        ),
+        (
+            "MATCH (n:N) WHERE n.region = 'eu' AND (n.key = 1 OR n.key = 2) RETURN n",
+            Source::Union,
+        ),
+        (
+            "MATCH (n:N) WHERE n.region = 'eu' AND n.email IN ['a', 'b'] RETURN n",
+            Source::Union,
+        ),
     ] {
         assert_eq!(source(text, 64, None), expected, "{text}");
     }
@@ -203,6 +219,98 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
         ),
         Source::Scan
     );
+    // Comparisons, string predicates, label and null tests, and their boolean
+    // combinations return null for mismatched types, so they keep the index.
+    for sibling in [
+        "n.age > 20",
+        "n.age <= $keys",
+        "n.age < n.limit AND n.age <> 3",
+        "n.name STARTS WITH 'a'",
+        "n.name ENDS WITH 'a' OR n.name CONTAINS 'b'",
+        "n.nick IS NULL OR n.nick IS NOT NULL",
+        "NOT (n.age >= 1)",
+        "n:N XOR n.age = 1",
+        "null",
+    ] {
+        for (predicate, expected) in [
+            ("n.email = 'a'", Source::Unique),
+            ("n.key IN [1, 2]", Source::Union),
+        ] {
+            let text = format!("MATCH (n:N) WHERE {predicate} AND ({sibling}) RETURN n");
+            assert_eq!(source(&text, 64, Some(P::I64(3))), expected, "{text}");
+        }
+    }
+    // Arithmetic, functions, non-boolean operands and unbound parameters can fail.
+    for sibling in [
+        "n.age + 1 > 20",
+        "toLower(n.name) = 'a'",
+        "NOT n.flag",
+        "n.flag AND true",
+        "n.age > $missing",
+        "n.age IN [1, $missing]",
+    ] {
+        let text = format!("MATCH (n:N) WHERE n.email = 'a' AND ({sibling}) RETURN n");
+        assert_eq!(source(&text, 64, None), Source::Scan, "{text}");
+    }
+    // Equalities of one property joined by OR read the index like IN.
+    for (text, expected) in [
+        (
+            "MATCH (n:N) WHERE n.key = 1 OR n.key = 2 RETURN n",
+            Source::Union,
+        ),
+        (
+            "MATCH (n:N) WHERE n.email = 'a' OR 'b' = n.email RETURN n",
+            Source::Union,
+        ),
+        (
+            "MATCH (n:N) WHERE n.key = 1 OR (n.key = 1 OR n.key = null) RETURN n",
+            Source::Point,
+        ),
+        (
+            "MATCH (n:N) WHERE (n.key = 1 OR n.key = $keys) AND n.age > 1 RETURN n",
+            Source::Union,
+        ),
+        (
+            "MATCH (n:N) WHERE n.key = 1 OR n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) WHERE n.key = 1 OR n.key > 2 RETURN n",
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) WHERE n.key = 1 OR n.key = n.age RETURN n",
+            Source::Scan,
+        ),
+    ] {
+        assert_eq!(source(text, 64, Some(P::I64(3))), expected, "{text}");
+    }
+}
+
+#[test]
+fn correlated_lookups_accept_bound_parameters_in_the_predicate() {
+    let mut context = context::PlannerContext {
+        indexes: catalog::IndexCatalogSnapshot::default()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap()),
+        ..context::PlannerContext::default()
+    };
+    let lookups = |context: &context::PlannerContext| {
+        let text = "UNWIND [1, 2, 3] AS k MATCH (n:N {key: k}) WHERE n.region = $r RETURN n";
+        r::plan(helix_cypher::compile(text).unwrap(), context)
+            .unwrap()
+            .matches()
+            .values()
+            .flat_map(|plan| &plan.steps)
+            .filter(|step| matches!(step, r::MatchStep::IndexLookup(_)))
+            .count()
+    };
+    // An unbound parameter could fail on a row the lookup would skip.
+    assert_eq!(lookups(&context), 0);
+    context.params.values.insert(
+        ir::NonEmptyString::new("r").unwrap(),
+        helix_ast::value::PropertyValue::from("us"),
+    );
+    assert_eq!(lookups(&context), 1);
 }
 
 #[test]

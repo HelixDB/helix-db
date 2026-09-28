@@ -282,8 +282,11 @@ fn plan_accesses(
                     collect_equalities(predicate, node.slot, &mut equalities);
                     collect_memberships(predicate, node.slot, &mut memberships);
                 }
+                let mut exact = BTreeSet::new();
+                let mut unique = false;
                 for (property, value) in equalities {
-                    let Some(key) = catalog::ScopedPropertyKey::try_new(label.clone(), property)
+                    let Some(key) =
+                        catalog::ScopedPropertyKey::try_new(label.clone(), property.clone())
                     else {
                         continue;
                     };
@@ -313,6 +316,8 @@ fn plan_accesses(
                     if value.may_exceed_index_key() {
                         continue;
                     }
+                    unique |= index.uniqueness == catalog::IndexUniqueness::Unique;
+                    exact.insert(property);
                     candidates.push(ir::NodeAccessPlan::EqualityIndex {
                         index: index.clone(),
                         key,
@@ -322,11 +327,10 @@ fn plan_accesses(
                 // The residual predicate still checks every candidate, so each
                 // membership source only needs to contain the matching nodes.
                 // Without value statistics a small batched lookup is estimated
-                // below one point read, so an existing equality candidate keeps
-                // its exact lookup instead of competing with a set.
-                if candidates.len() > 1 {
-                    memberships.clear();
-                }
+                // below one point read. A unique lookup, or an equality on the
+                // list's own property, is at least as selective as the set, so
+                // it keeps its exact lookup; other sets compete on cost.
+                memberships.retain(|(property, _)| !unique && !exact.contains(property));
                 for (property, list) in memberships {
                     let Some(key) = catalog::ScopedPropertyKey::try_new(label.clone(), property)
                     else {
@@ -335,7 +339,7 @@ fn plan_accesses(
                     let Some(index) = ctx.indexes.node_eq.get(&key) else {
                         continue;
                     };
-                    let Some(values) = membership_values(list, &ctx.params) else {
+                    let Some(values) = membership_values(&list, &ctx.params) else {
                         continue;
                     };
                     let Some(domain) = analysis::literal_equality_domain(values) else {
@@ -513,7 +517,7 @@ fn plan_accesses(
             query.contracts()[operator_index].input().slots(),
         )?;
         // Probe extraction may eliminate candidates before final validation.
-        // Only total constraints can cross that boundary: missing parameters,
+        // Only total constraints can cross that boundary: unbound parameters,
         // arithmetic, functions and dynamic property access retain their order.
         let incoming = query.contracts()[operator_index].input().slots();
         let constraints_total = pattern
@@ -526,16 +530,9 @@ fn plan_accesses(
                 Expression::Slot(slot) => incoming.contains(slot),
                 _ => false,
             });
-        let mut predicate_total = predicate
+        let predicate_total = predicate
             .as_deref()
             .is_none_or(|expression| index_predicate_is_total(expression, pattern, &ctx.params));
-        if let Some(predicate) = predicate {
-            predicate.visit(&mut |expression| {
-                if matches!(expression, Expression::Parameter(_)) {
-                    predicate_total = false;
-                }
-            });
-        }
         let mut lookups = Vec::new();
         if constraints_total && predicate_total {
             // Group repeated bindings once; do not rescan the whole pattern
@@ -732,19 +729,39 @@ fn plan_accesses(
 
 // Extracting an index equality from AND may otherwise suppress an observable
 // error in another conjunct. In particular NULL AND an error still evaluates
-// that error; treating NULL as an early false result would be incorrect. Keep
+// that error; treating NULL as an early false result would be incorrect. A
+// total predicate is a boolean combination of comparisons, string predicates,
+// label and null tests, and IN over pattern properties, literals and bound
+// parameters: these return null for mismatched types instead of failing. Keep
 // potentially failing arithmetic, functions, and dynamic access above a scan.
 fn index_predicate_is_total(
     expression: &Expression,
     pattern: &Pattern,
     params: &context::ParamBindings,
 ) -> bool {
+    let bound = |name: &String| {
+        let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
+        params.values.contains_key(&name) || params.query_values.contains_key(&name)
+    };
+    let operand = |operand: &Expression| match operand {
+        Expression::Literal(_) | Expression::Slot(_) => true,
+        Expression::Parameter(name) => bound(name),
+        Expression::Property(value, _) => matches!(value.as_ref(), Expression::Slot(slot)
+            if pattern.nodes.iter().any(|node| node.slot == *slot)
+                || pattern.relationships.iter().any(|rel| rel.slot == *slot)),
+        _ => false,
+    };
     match expression {
         Expression::Literal(Value::Boolean(_) | Value::Null) => true,
-        Expression::Binary(Binary::And, left, right) => {
+        Expression::Binary(Binary::And | Binary::Or | Binary::Xor, left, right) => {
             index_predicate_is_total(left, pattern, params)
                 && index_predicate_is_total(right, pattern, params)
         }
+        Expression::Unary(Unary::Not, negated) => {
+            index_predicate_is_total(negated, pattern, params)
+        }
+        Expression::Unary(Unary::IsNull | Unary::IsNotNull, value) => operand(value),
+        Expression::HasLabel(slot, _) => pattern.nodes.iter().any(|node| node.slot == *slot),
         // IN fails only for a right operand that is neither a list nor null;
         // comparing a property with list members cannot fail.
         Expression::Binary(Binary::In, value, list) => {
@@ -753,8 +770,10 @@ fn index_predicate_is_total(
                     if pattern.nodes.iter().any(|node| node.slot == *slot)))
                 && match list.as_ref() {
                     Expression::Literal(Value::List(_) | Value::Null) => true,
-                    Expression::List(items) => items.iter().all(|item| {
-                        matches!(item, Expression::Literal(_) | Expression::Parameter(_))
+                    Expression::List(items) => items.iter().all(|item| match item {
+                        Expression::Literal(_) => true,
+                        Expression::Parameter(name) => bound(name),
+                        _ => false,
                     }),
                     Expression::Parameter(name) => matches!(
                         params.values.get(
@@ -768,14 +787,19 @@ fn index_predicate_is_total(
                     _ => false,
                 }
         }
-        Expression::Binary(Binary::Equal, left, right) => {
-            [left, right].iter().all(|operand| match operand.as_ref() {
-                Expression::Literal(_) | Expression::Parameter(_) | Expression::Slot(_) => true,
-                Expression::Property(value, _) => matches!(value.as_ref(), Expression::Slot(slot)
-                    if pattern.nodes.iter().any(|node| node.slot == *slot)),
-                _ => false,
-            })
-        }
+        Expression::Binary(
+            Binary::Equal
+            | Binary::NotEqual
+            | Binary::Less
+            | Binary::LessEqual
+            | Binary::Greater
+            | Binary::GreaterEqual
+            | Binary::StartsWith
+            | Binary::EndsWith
+            | Binary::Contains,
+            left,
+            right,
+        ) => operand(left) && operand(right),
         _ => false,
     }
 }
@@ -800,11 +824,7 @@ fn collect_equalities(expression: &Expression, slot: Slot, out: &mut Vec<(String
     }
 }
 
-fn collect_memberships<'a>(
-    expression: &'a Expression,
-    slot: Slot,
-    out: &mut Vec<(String, &'a Expression)>,
-) {
+fn collect_memberships(expression: &Expression, slot: Slot, out: &mut Vec<(String, Expression)>) {
     match expression {
         Expression::Binary(Binary::And, a, b) => {
             collect_memberships(a, slot, out);
@@ -815,10 +835,55 @@ fn collect_memberships<'a>(
                 return;
             };
             if value.as_ref() == &Expression::Slot(slot) {
-                out.push((key.clone(), list.as_ref()));
+                out.push((key.clone(), list.as_ref().clone()));
+            }
+        }
+        // `n.p = a OR n.p = b` has the three-valued result of `n.p IN [a, b]`.
+        Expression::Binary(Binary::Or, ..) => {
+            let mut key = None;
+            let mut members = Vec::new();
+            if equality_disjuncts(expression, slot, &mut key, &mut members)
+                && let Some(key) = key
+            {
+                out.push((key, Expression::List(members)));
             }
         }
         _ => {}
+    }
+}
+
+/// Whether `expression` is a disjunction of equalities between one property of
+/// `slot` and literals or parameters; collects that property and the members.
+fn equality_disjuncts(
+    expression: &Expression,
+    slot: Slot,
+    key: &mut Option<String>,
+    members: &mut Vec<Expression>,
+) -> bool {
+    match expression {
+        Expression::Binary(Binary::Or, a, b) => {
+            equality_disjuncts(a, slot, key, members) && equality_disjuncts(b, slot, key, members)
+        }
+        Expression::Binary(Binary::Equal, a, b) => {
+            [(a, b), (b, a)].into_iter().any(|(property, member)| {
+                let Expression::Property(value, name) = property.as_ref() else {
+                    return false;
+                };
+                if value.as_ref() != &Expression::Slot(slot)
+                    || !matches!(
+                        member.as_ref(),
+                        Expression::Literal(_) | Expression::Parameter(_)
+                    )
+                    || key.as_ref().is_some_and(|key| key != name)
+                {
+                    return false;
+                }
+                *key = Some(name.clone());
+                members.push(member.as_ref().clone());
+                true
+            })
+        }
+        _ => false,
     }
 }
 
