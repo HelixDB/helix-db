@@ -1,18 +1,74 @@
 ---
 title: "helix project"
+sidebarTitle: "project"
 description: "Discover, manage, and link Helix Cloud projects"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+List, inspect, create, and delete Helix Cloud projects, and link the current `helix.toml` to one.
+Cloud only.
+
+## Usage
+
 ```bash
-helix project list --workspace-id <id> [--format human|json]
+helix project list [--workspace-id <id>] [--format human|json]
 helix project get [<project-id>] [--format human|json]
 helix project create --workspace <id> --slug <slug> --name <name>
 helix project delete [<project-id>] [--yes]
 helix project link <project-id> [--workspace <id>]
 ```
 
-`link` persists the stable project/workspace IDs only in the current project's `helix.toml`.
-It does not create global selection state. `project update` is not supported.
+## Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `list` | List projects in a workspace. |
+| `get` | Show one project. |
+| `create` | Create a project in a workspace. |
+| `delete` | Delete a project. |
+| `link` | Link the current `helix.toml` to a project. |
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `PROJECT_ID` | Project to act on. Required for `link`; `get` and `delete` default to the project linked in `helix.toml`. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--workspace-id <ID>` | `list`: workspace whose projects to list. | Workspace linked in `helix.toml` |
+| `--workspace <ID>` | `create`: owning workspace (required). `link`: fail unless the project belongs to this workspace. | — |
+| `--slug <SLUG>` | `create`: project slug. Required. | — |
+| `--name <NAME>` | `create`: project display name. Required. | — |
+| `-y`, `--yes` | `delete`: skip the confirmation prompt. Required in non-interactive shells. | Off |
+| `--format <FORMAT>` | `list`, `get`, `create`: `human` or `json`. | `human` |
+
+## Behavior
+
+- `link` persists the stable project/workspace IDs only in the current project's `helix.toml`, and sets `[project] name` to the Cloud project's display name.
+- `link` does not create global selection state.
+- `delete` asks for confirmation in a terminal.
+- `project update` is not supported.
+
+## Examples
+
+```bash
+# List projects in a workspace
+helix project list --workspace-id <id>
+
+# Create a project and print it as JSON
+helix project create --workspace <id> --slug demo --name "Demo" --format json
+
+# Link this directory's helix.toml to an existing project
+helix project link <project-id>
+```
+
+## Related
+
+- [`helix workspace`](/cli/command-reference/workspace) — find workspace IDs.
+- [`helix database`](/cli/command-reference/database) — manage the project's databases.
+- [CLI configuration](/cli/configuration) — how the link is stored in `helix.toml`.

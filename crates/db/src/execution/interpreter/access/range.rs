@@ -15,6 +15,96 @@ use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDir
 use crate::HelixStorage;
 
 impl<'db> ExecutionContext<'db> {
+    pub(in crate::execution::interpreter) async fn open_range_cursor(
+        &self,
+        element: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyDirectionKey,
+        range: &ir::IndexRange,
+        iteration: ir::RangeScanIteration,
+    ) -> Result<crate::index_lifecycle::secondary::OrderedRangeCursor> {
+        let identity =
+            secondary_range_identity(element, key.label.as_ref(), key.property.as_ref())?;
+        let direction = storage_range_direction(key.direction);
+        let query = match range_query(self, range)? {
+            OwnedRangeQuery::All => None,
+            OwnedRangeQuery::Bounded(query) => Some(query),
+        };
+        if let Some(active) = self.active_write_tx() {
+            let handle =
+                active_range_handle_in_view(self, &active.txn, &identity, direction).await?;
+            return crate::index_lifecycle::secondary::OrderedRangeCursor::open(
+                &active.txn,
+                handle,
+                query,
+                iteration,
+            )
+            .await;
+        }
+        if let Some(view) = self.request_read_view() {
+            let handle = active_range_handle_in_view(self, view, &identity, direction).await?;
+            return crate::index_lifecycle::secondary::OrderedRangeCursor::open(
+                view, handle, query, iteration,
+            )
+            .await;
+        }
+        #[cfg(test)]
+        {
+            match self.db.storage() {
+                HelixStorage::Reader(reader) => {
+                    let handle =
+                        active_range_handle_in_view(self, reader.as_ref(), &identity, direction)
+                            .await?;
+                    crate::index_lifecycle::secondary::OrderedRangeCursor::open(
+                        reader.as_ref(),
+                        handle,
+                        query,
+                        iteration,
+                    )
+                    .await
+                }
+                HelixStorage::Writer(writer) => {
+                    let handle =
+                        active_range_handle_in_view(self, writer.db(), &identity, direction)
+                            .await?;
+                    crate::index_lifecycle::secondary::OrderedRangeCursor::open(
+                        writer.db(),
+                        handle,
+                        query,
+                        iteration,
+                    )
+                    .await
+                }
+            }
+        }
+        #[cfg(not(test))]
+        Err(HelixDbError::InvariantViolation(
+            "range cursor escaped request read view".into(),
+        ))
+    }
+
+    pub(in crate::execution::interpreter) async fn next_range_cursor(
+        &self,
+        cursor: &mut crate::index_lifecycle::secondary::OrderedRangeCursor,
+    ) -> Result<Option<u64>> {
+        if let Some(active) = self.active_write_tx() {
+            return cursor.next(&active.txn, self).await;
+        }
+        if let Some(view) = self.request_read_view() {
+            return cursor.next(view, self).await;
+        }
+        #[cfg(test)]
+        {
+            match self.db.storage() {
+                HelixStorage::Reader(reader) => cursor.next(reader.as_ref(), self).await,
+                HelixStorage::Writer(writer) => cursor.next(writer.db(), self).await,
+            }
+        }
+        #[cfg(not(test))]
+        Err(HelixDbError::InvariantViolation(
+            "range cursor escaped request read view".into(),
+        ))
+    }
+
     pub(in crate::execution::interpreter) async fn node_range_index_count_with_membership(
         &self,
         key: &catalog::ScopedPropertyDirectionKey,

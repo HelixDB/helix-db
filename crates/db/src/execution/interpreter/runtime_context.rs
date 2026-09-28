@@ -283,8 +283,12 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) row_mode_max_rows: row_mode::RowModeMaxRowsSetting,
     pub(in crate::execution::interpreter) execution_control:
         crate::execution_control::ExecutionControl,
+    /// Index memberships resolved in the current request state.
+    pub(in crate::execution::interpreter) prepared_memberships: super::stream::PreparedMemberships,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) pull_work: Arc<super::pull::metrics::WorkCounters>,
     #[cfg(test)]
     pub(in crate::execution::interpreter) range_reads:
         Arc<crate::index_lifecycle::secondary::RangeScanCounters>,
@@ -354,8 +358,11 @@ impl<'db> ExecutionContext<'db> {
             pending_catalog_freshness: catalog_freshness,
             row_mode_max_rows: row_mode::RowModeMaxRowsSetting::default(),
             execution_control,
+            prepared_memberships: super::stream::PreparedMemberships::default(),
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
+            #[cfg(test)]
+            pull_work: Arc::new(super::pull::metrics::WorkCounters::default()),
             #[cfg(test)]
             range_reads: Arc::new(crate::index_lifecycle::secondary::RangeScanCounters::default()),
             #[cfg(test)]

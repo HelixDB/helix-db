@@ -41,7 +41,7 @@ pub enum ExecMutationPlan {
         /// Property name.
         name: ir::NonEmptyString,
     },
-    /// Drop input stream nodes.
+    /// Delete current edges, or nodes and their incident edges.
     Drop,
     /// Drop edges from the input stream.
     DropEdge {

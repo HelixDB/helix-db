@@ -102,7 +102,7 @@ enum Commands {
         /// Override local port for this run
         #[arg(long)]
         port: Option<u16>,
-        /// Use on-disk storage backed by a local MinIO container for this run
+        /// Use on-disk storage backed by a local SeaweedFS container for this run
         #[arg(long, conflicts_with = "storage_uri")]
         disk: bool,
         #[command(flatten)]
@@ -142,10 +142,10 @@ enum Commands {
         /// Query historical logs with time range for Enterprise Cloud
         #[arg(long, short = 'r')]
         range: bool,
-        /// Start time (ISO 8601)
+        /// Start time (RFC 3339, e.g. 2026-01-02T15:04:05Z)
         #[arg(long, requires = "range")]
         start: Option<String>,
-        /// End time (ISO 8601)
+        /// End time (RFC 3339, e.g. 2026-01-02T15:04:05Z)
         #[arg(long, requires = "range")]
         end: Option<String>,
     },

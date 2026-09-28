@@ -177,13 +177,17 @@ pub use benchmarks::{
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::commit::production_contracts::run as run_write_cache_contracts;
-pub(crate) use cache::commit::VectorCacheWriteSet;
+pub(crate) use cache::commit::{commit_fenced, VectorCacheWriteSet};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::hydration::production_contracts::run as run_hydration_contracts;
-pub(crate) use cache::hydration::{hydrate_active_generations, VectorCacheHydrationBudget};
+pub(crate) use cache::hydration::{
+    hydrate_active_generations, VectorCacheHydrationBudget, VectorCacheHydrationOutcome,
+    VectorCacheSnapshotSource,
+};
+pub(crate) use cache::reader_refresh::run_reader_refreshes;
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
-pub(crate) use cache::registry::VectorCacheRegistry;
+pub(crate) use cache::registry::{VectorCacheRegistry, VectorCacheVisibility};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::store::production_contracts::run as run_memory_store_contracts;
 #[cfg(any(test, feature = "production-coverage"))]
@@ -213,11 +217,13 @@ pub(crate) use hnsw::mutation::{
 pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::restricted::run_production_contracts as run_restricted_contracts;
+#[cfg(feature = "production-coverage")]
+pub use hnsw::restricted::RestrictedSearchStrategy;
 pub(crate) use hnsw::restricted::RestrictedVectorCandidates;
 #[cfg(feature = "production-scale")]
 pub(crate) use hnsw::restricted::{
     observe_restricted_search, RestrictedBeamOverrideGuard, RestrictedBeamScale,
-    RestrictedSearchStrategy, RestrictedSearchTermination,
+    RestrictedSearchTermination,
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::search::production_contracts::run as run_search_contracts;
@@ -261,7 +267,7 @@ pub(crate) use storage::transaction::{
 pub(crate) use storage::{
     CanonicalVectorDirectoryBackfillOutcome, LegacyVectorValidationMode,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
-    SimHashDirectoryValidationOutcome, VectorCleanupRow,
+    SimHashDirectoryValidationOutcome, VectorBatchReads, VectorCleanupRow,
 };
 pub(crate) use vector_values::metadata::{VectorIndexConfig, VectorIndexMetadata};
 

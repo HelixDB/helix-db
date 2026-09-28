@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use super::*;
 
 impl<'db> ExecutionContext<'db> {
-    pub(in crate::execution::interpreter::stream) fn element_set(
+    pub(in crate::execution::interpreter) fn element_set(
         &self,
         value: &ExecutionValue,
     ) -> Result<BTreeSet<ElementRef>> {

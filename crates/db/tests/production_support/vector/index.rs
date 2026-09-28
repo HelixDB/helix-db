@@ -698,6 +698,22 @@ async fn run_row_contracts(db: &Db) {
         .is_err());
     txn.rollback();
 
+    // A failed SimHash batch read crosses the cached resolver unchanged.
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    measured.fail_read_after(0);
+    let mut unread = MutationOpCache::<Cosine>::default();
+    assert!(index
+        .resolve_canonical_vector_key_cached(
+            &measured,
+            1,
+            &mut unread,
+            "checking a failed SimHash batch read",
+        )
+        .await
+        .is_err());
+    txn.rollback();
+
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     index
         .simhash_cache(3)

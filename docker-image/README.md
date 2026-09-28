@@ -15,6 +15,7 @@ to images built from your checkout.
 - HTTP listens on `0.0.0.0:8080`; internal gRPC listens on `127.0.0.1:8081` and is not exposed.
 - `GET /healthz`, `GET /readyz`, and `POST /v2/query` are the supported container probes and query endpoint.
 - Storage is in memory unless local-disk or S3-compatible configuration is supplied.
+- `/var/lib/helix` (data) and `/var/cache/helix` (optional disk cache) are owned by the runtime user, so new named volumes mounted there are writable.
 - Docker sends `SIGTERM`; the server drains both listeners and closes storage before exiting.
 
 ## Build
@@ -76,6 +77,88 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 Leave both variables unset for memory storage. Bind mounts and existing volumes
 must be writable by the container's `65532:65532` user and group.
 
+### Disk cache
+
+By default the server caches SlateDB blocks and full-text splits in memory only,
+so every cold read goes to the object store. Set `HELIX_DISK_CACHE_DIR` with S3 or
+`HELIX_DATA_DIR` storage to add memory-plus-disk caches on local disk, ideally
+NVMe. Published images up to and including v0.0.6 predate this and ignore these
+variables; use an image built from this checkout or a later release.
+
+```bash
+sudo mkdir -p /data/helix-cache
+sudo chown 65532:65532 /data/helix-cache
+docker run --rm -p 8080:8080 \
+  -e S3_BUCKET=my-bucket -e S3_REGION=us-east-1 \
+  -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
+  -e HELIX_DISK_CACHE_BYTES=107374182400 \
+  -v /data/helix-cache:/var/cache/helix \
+  ghcr.io/helixdb/helixdb:local-amd64
+```
+
+A named volume (`--mount type=volume,source=helixdb-cache,target=/var/cache/helix`)
+needs no `chown`. The cache survives restarts, so a restarted server reads recently
+used data from local disk instead of the object store. Use one cache directory per
+running server and per database: changing `DB_PATH` on the same directory leaves the
+old database's full-text cache behind.
+
+Changing `HELIX_DISK_CACHE_BYTES` usually changes the block cache's block size, and
+then the whole block tier (`slate/`) is discarded at startup and refills from the
+object store; only budgets that keep the block size keep it. The object-store tier
+keeps its files and evicts down to a smaller budget as it admits new data; the
+full-text tier evicts down to its new share at startup.
+
+The full-text tier fills on demand: a split is copied into `fts/` once searches have
+used it twice, and startup downloads nothing into it. Startup and every admission
+trim the tier, evicting the least recently used splits down to its share. A trim
+spares splits admitted or recorded as used in the second before it (a split's use is
+recorded at most once a minute) and splits still open in running searches or the
+64 MiB full-text memory cache, so the tier can stay over its share by those splits
+until the next admission. A split larger than the whole share is never copied.
+After a restart, the first search to use each split in `fts/` reads and checksums
+the whole split, up to 64 MiB, before it answers.
+
+On a miss the object-store tier fetches and keeps a whole part of an SST: 4 MiB, or
+less for budgets under 2 GiB so that the tier always holds at least 256 parts. Budget
+at least twice the data the server reads often. Once that data outgrows half the
+budget, parts keep evicting each other and cold reads fetch more from the object
+store than memory-only caches would.
+
+The budget must also fit on the cache's filesystem. At startup the server logs a
+warning when `HELIX_DISK_CACHE_BYTES` exceeds the free space there plus what the
+cache already occupies: the cache can then fill the filesystem, and if
+`HELIX_DATA_DIR` shares it, durable writes fail too.
+
+| Variable | Purpose |
+| --- | --- |
+| `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it and its `slate/`, `object-store/` and `fts/` subdirectories if needed; unset keeps memory-only caches. Rejected with memory storage. |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 32 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). With S3, `object-store/` also keeps the SSTs the server writes; with `HELIX_DATA_DIR` those are already on local disk, so it keeps only SSTs the server reads. |
+| `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the SlateDB block cache in bytes; defaults to 640 MiB, the memory-only default. |
+
+Size the container's memory for more than `HELIX_DISK_CACHE_MEMORY_BYTES`: the block
+cache also indexes everything in `slate/` in memory. Once `slate/` fills, that index
+takes roughly 2–9 MiB of RAM per GiB of `HELIX_DISK_CACHE_BYTES`, about 70–280 MiB
+at the 32 GiB default and 2–9 GiB at 1 TiB. A restart rebuilds it from disk before
+the server listens, briefly using about twice as much memory.
+
+The block cache holds one file open per partition: its 3/8 share divided by a
+power-of-two block of 64 KiB to 16 MiB, at most 32,768 files. With 2,024 more for
+the object-store tier and the rest of the server, the minimum is 26,600 open files
+at the default budget and never more than 34,792; open full-text split files come
+on top. The server raises its soft open-file limit to the hard limit at startup. If
+the hard limit is below the minimum, startup fails naming `HELIX_DISK_CACHE_BYTES`;
+raise the hard limit with `--ulimit nofile=65536:65536`. Lowering the budget is not
+a reliable fix, since the file count does not fall steadily with it. Run natively on
+macOS, the limit is also capped by `sysctl kern.maxfilesperproc`.
+
+Startup also fails with a message naming the variable when a size is not a positive
+integer (including non-UTF-8 text) or is out of range, a size is set without
+`HELIX_DISK_CACHE_DIR`, the directory or a tier subdirectory cannot be created or
+written, the directory cannot be locked (some network and FUSE filesystems do not
+support locks), or another running server already uses the directory. A server holds
+a lock on `.helix-cache.lock` in the directory until its storage closes, so stop the
+old container before starting its replacement on the same cache.
+
 ## Test
 
 After loading a native image, run the full packaging and runtime suite:
@@ -86,20 +169,42 @@ docker-image/test.sh \
   --image ghcr.io/helixdb/helixdb:local-amd64
 ```
 
-The suite inspects the saved image metadata and filesystem, scans it for credential material, exercises memory and native-volume behavior, rejects invalid configuration, checks clean `SIGTERM` shutdown, and verifies S3-compatible persistence with digest-pinned MinIO images. It creates only `helixdb-image-*` Docker resources and removes them on exit.
+The suite inspects the saved image metadata and filesystem, scans it for credential material, exercises memory, native-volume, and disk-cache behavior, rejects invalid configuration, checks clean `SIGTERM` shutdown, and verifies S3-compatible persistence with a digest-pinned SeaweedFS image. It creates only `helixdb-image-*` Docker resources and removes them on exit.
 
-MinIO and `mc` use the upstream `quay.io/minio` repositories. The server
-`RELEASE.2025-09-07T16-13-09Z` and client `RELEASE.2025-08-13T08-35-41Z`
-are pinned to multi-platform index digests shared with the CLI disk runtime.
-These are the same digests previously used through Docker Hub, whose MinIO
-repositories no longer allow anonymous pulls. Both pins contain Linux amd64
-and arm64 images. The Compose suite explicitly pulls both dependencies for the
-requested platform before startup and fails if either pull fails, even when
-images are cached. It does not remove or retag cached images.
+The Compose stage runs SeaweedFS `weed mini` with a static S3 identity config
+and a startup-created `helix-db` bucket. Before Helix writes anything, it
+probes S3 conditional writes, which SlateDB needs to avoid silent data loss:
+`If-None-Match: *` on an existing key and `If-Match` with a wrong ETag must both
+return HTTP 412 and leave the object unchanged, and the matching create and
+replace must succeed. SlateDB's writer and compactor race to advance the same
+manifest, so the probe then sends eight concurrent creates of one new key, and
+eight concurrent replaces carrying its current ETag, from one parallel curl
+process: each race must end with exactly one HTTP 200, HTTP 412 for the rest,
+and the winner's body stored. A passing race cannot prove the store atomic, but
+a store that checks the condition and then writes without a lock is likely to
+fail it. The probe runs against SeaweedFS directly and through the
+request-logging proxy Helix uses. The stage then seeds a vector index, reopens
+flushed data, and checks that three idle refresh intervals produce no
+vector-data SST GETs (catalog polling is measured separately) while search
+remains correct before and after a write. A test-only nginx proxy logs each
+S3 request's method, path, and `Range` header for that check.
 
-When updating a pin, keep the Compose fixture, object-check client in
-`compose-smoke.sh`, CLI defaults, CLI test fixtures, and local-server docs aligned.
-Verify anonymous pulls and run the full suite on both platforms.
+| Dependency | Pinned reference |
+| --- | --- |
+| SeaweedFS 4.47 | `ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882` |
+| nginx 1.30.5 (request log) | `ghcr.io/nginx/nginx-unprivileged:1.30.5-alpine@sha256:4714e0b1b2577eaa1a6131d07c958b67f0eb68e6d0521e90c6e5287db8cf0bc5` |
+
+Both pins are multi-platform index digests from the projects' official GHCR
+repositories and contain Linux amd64 and arm64 images; the SeaweedFS pin is
+shared with the CLI disk runtime. SeaweedFS enforces S3 conditional writes from
+4.09. MinIO's community images were withdrawn from Quay and Docker Hub, which is
+why the suite no longer uses them. The Compose suite explicitly pulls both
+dependencies for the requested platform before startup and fails if either pull
+fails, even when images are cached. It does not remove or retag cached images.
+
+When updating a pin, keep the Compose fixture, CLI defaults, CLI test fixtures,
+and local-server docs aligned. Verify anonymous pulls and run the full suite on
+both platforms.
 
 Archive and secret-scanner unit tests can be run without Docker:
 

@@ -1,16 +1,64 @@
 ---
 title: "helix logs"
+sidebarTitle: "logs"
 description: "View local logs or recent Cloud query errors"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+Show container logs for a local instance, or list recent query errors for a Helix Cloud database.
+Local and Cloud.
+
+## Usage
+
 ```bash
 helix logs [INSTANCE] [--follow]
-helix logs [CLOUD_INSTANCE] [--range] [--start <RFC3339>] [--end <RFC3339>]
+helix logs [CLOUD_INSTANCE] [--range [--start <RFC3339>] [--end <RFC3339>]]
 ```
 
-Local logs use Docker/Podman and may follow. Cloud logs use the WorkOS session and the linked
-database's recent query-error WFE endpoint; they never contact the gateway. Cloud follow is not
-supported. Without explicit times, the Cloud range is the last hour.
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Instance name from `helix.toml`. If omitted, the CLI prompts in a TTY when there are several instances; otherwise it uses `dev` or the only instance. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-f`, `--follow` | Local only: keep streaming new log lines. | Off |
+| `-r`, `--range` | Cloud only: enable `--start` and `--end`. | Off |
+| `--start <TIME>` | Cloud only: start of the range, as an RFC 3339 timestamp. Requires `--range`. | One hour before `--end` |
+| `--end <TIME>` | Cloud only: end of the range, as an RFC 3339 timestamp. Requires `--range`. | Now |
+
+## Behavior
+
+- Local logs use Docker/Podman and may follow. `--range`, `--start`, and `--end` are rejected for local instances.
+- Cloud logs use the WorkOS session and the linked database's recent query-error endpoint on the Helix Cloud API; they never contact the database gateway that applications use.
+- Each Cloud error prints as one line: timestamp, query name, and error output.
+- Cloud follow is not supported.
+- Without explicit times, the Cloud range is the last hour.
+
+## Examples
+
+```bash
+# Print the logs of the local 'dev' instance
+helix logs dev
+
+# Follow local logs
+helix logs dev --follow
+
+# Recent query errors for a Cloud instance (last hour)
+helix logs production
+
+# Query errors in an explicit window
+helix logs production --range --start 2026-01-01T00:00:00Z --end 2026-01-01T06:00:00Z
+```
+
+## Related
+
+- [`helix status`](/cli/command-reference/status) — check whether an instance is running.
+- [`helix start`](/cli/command-reference/start) — start with `--foreground` to stream startup logs.
+- [Local workflow](/cli/workflows/local) — run and debug a local instance.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

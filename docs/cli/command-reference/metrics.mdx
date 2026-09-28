@@ -1,14 +1,14 @@
 ---
 title: "helix metrics"
 sidebarTitle: "metrics"
+description: "Configure CLI telemetry and usage metrics collection"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Configure CLI telemetry and usage metrics collection. Settings are stored in the per-user metrics config.
+Configure CLI telemetry and usage metrics collection. Settings are stored in the per-user metrics
+config and apply to every project on this machine.
 
 ## Usage
 
@@ -16,21 +16,27 @@ Configure CLI telemetry and usage metrics collection. Settings are stored in the
 helix metrics <SUBCOMMAND>
 ```
 
-## Available sub-commands
+## Subcommands
 
-| Sub-command | Description |
-|-------------|-------------|
+| Subcommand | Description |
+| --- | --- |
 | `full` | Enable full metrics collection (prompts for an email address). |
 | `basic` | Enable minimal anonymous metrics. |
 | `off` | Disable all metrics collection. |
 | `status` | Show current metrics configuration and when it was last updated. |
 
-## `helix metrics status` output
+## Behavior
+
+- The setting is saved in `~/.helix/metrics.toml` (or `$HELIX_HOME/metrics.toml`).
+- `full` asks for an email address and repeats the prompt until the address is valid.
+- Local instances started by the CLI receive the same telemetry level.
+
+### `helix metrics status` output
 
 `status` prints the metrics level, your user ID (if logged in), and a relative `Last updated` time:
 
 | Age | Format |
-|-----|--------|
+| --- | --- |
 | 0–4 seconds | `just now` |
 | 5–59 seconds | `<n>s ago` |
 | 1–59 minutes | `<n>m ago` |
@@ -52,3 +58,9 @@ helix metrics off
 # Show current state
 helix metrics status
 ```
+
+## Related
+
+- [`helix update`](/cli/command-reference/update) — update the CLI.
+- [`helix feedback`](/cli/command-reference/feedback) — send feedback to the Helix team.
+- [CLI configuration](/cli/configuration) — other files the CLI keeps under `~/.helix/`.

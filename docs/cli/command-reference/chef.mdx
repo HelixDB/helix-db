@@ -1,14 +1,13 @@
 ---
 title: "helix chef"
 sidebarTitle: "chef"
+description: "Bootstrap a first HelixDB app with a coding agent"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Bootstrap a first HelixDB app for a coding agent. `helix chef` installs agent context, scaffolds a local project, starts the local database, seeds starter data, writes a build prompt, and launches your coding agent to generate the app.
+Bootstrap a first HelixDB app for a coding agent. `helix chef` installs agent context, scaffolds a local project, starts the local database, seeds starter data, writes a build prompt, and launches your coding agent to generate the app. Local only.
 
 ## Usage
 
@@ -22,19 +21,16 @@ helix chef
 `helix chef` uses `npx`, so **Node.js/npm must be on `PATH`** for the skills and docs-MCP install, and it needs **Docker or Podman running** to start the local database. It is intended for local development inside a coding-agent environment.
 </Note>
 
-## Authentication
-
-`helix chef` is a local workflow and does not require Cloud authentication. It neither uploads a
-project snapshot nor reads Cloud credentials. Use `helix auth login` separately only when you later
-run a Cloud command.
-
-## What it does
+## Behavior
 
 1. Installs the Helix skills (`npx skills add HelixDB/skills`) and docs MCP.
 2. Initializes a local project (`helix init local`) with a `dev` instance on port `6969`, then starts it in-memory.
 3. Writes `HELIX_CHEF_PROMPT.md` (your build intent, or a Personal CRM default) and, for the default build, starter query files under `examples/` — then seeds the data.
 4. Detects an installed coding agent (Claude Code → OpenAI Codex → OpenCode → Cursor Agent), asks for a permission mode, and launches it against the build prompt.
 5. Opens the generated app at `http://localhost:3000` once the agent's frontend is running.
+
+- `helix chef` is a local workflow and does not require Cloud authentication. It neither uploads a project snapshot nor reads Cloud credentials. Use `helix auth login` separately only when you later run a Cloud command.
+- Without a TTY, setup runs with defaults and no agent is launched; point your own agent at `HELIX_CHEF_PROMPT.md`.
 
 <Note>
 `helix chef` does **not** start a local dashboard — port `3000` is reserved for the Next.js app the agent builds.
@@ -53,9 +49,11 @@ Leave this blank to use the default Personal CRM build. If you provide an app id
 Next, choose a setup mode:
 
 | Mode | Behavior |
-|------|----------|
+| --- | --- |
 | Automatic setup | Runs every setup step with defaults. |
 | Manual setup | Lets you choose the project path and confirm each setup step. |
+
+Before launching the agent, the CLI asks how much autonomy to give it: full autonomy, ask before each shell command, or don't launch (print the prompt path instead).
 
 ## Examples
 
@@ -72,3 +70,4 @@ helix cook
 - [`helix init`](/cli/command-reference/init) — initialize a project without agent setup.
 - [`helix start`](/cli/command-reference/start) — start a local instance.
 - [`helix query`](/cli/command-reference/query) — send dynamic JSON requests.
+- [`helix skills`](/cli/command-reference/skills) — manage the agent skills that `chef` installs.

@@ -91,6 +91,36 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             .properties())
     }
 
+    /// Load the stored records of `elements` with one multi-get.
+    ///
+    /// Elements already visited by this resolver and repeated elements are
+    /// read once, so a batch of rows costs one read per distinct element.
+    pub(in crate::execution::interpreter::stream) async fn prefetch<'e>(
+        &mut self,
+        elements: impl IntoIterator<Item = &'e ElementRef>,
+    ) -> Result<()> {
+        let missing = elements
+            .into_iter()
+            .filter(|element| !self.property_blobs.contains_key(*element))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let keys = missing
+            .iter()
+            .map(|element| self.context.property_blob_key(element))
+            .collect::<Vec<_>>();
+        let values = self.context.multi_get_raw(&keys).await?;
+        for (element, value) in missing.into_iter().zip(values) {
+            #[cfg(test)]
+            self.context.record_property_get();
+            let blob = self.context.decode_property_blob(value)?;
+            self.property_blobs.insert(element, blob);
+        }
+        Ok(())
+    }
+
     async fn edge_endpoints(&mut self, edge_id: u64) -> Result<Option<(u64, u64)>> {
         if let Some(endpoints) = self.edge_endpoints.get(&edge_id) {
             return Ok(*endpoints);
@@ -123,6 +153,14 @@ impl<'db> ExecutionContext<'db> {
     }
 
     async fn load_property_blob(&self, element: &ElementRef) -> Result<CachedPropertyBlob> {
+        let key = self.property_blob_key(element);
+        #[cfg(test)]
+        self.record_property_get();
+        let value = self.get_raw(&key).await?;
+        self.decode_property_blob(value)
+    }
+
+    fn property_blob_key(&self, element: &ElementRef) -> bytes::Bytes {
         let kind = match element {
             ElementRef::Node(id) => {
                 keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id))
@@ -131,14 +169,15 @@ impl<'db> ExecutionContext<'db> {
                 keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(*id))
             }
         };
-        let key = keys::DataKey::Data {
+        keys::DataKey::Data {
             scope: self.tenant_scope,
             kind,
         }
-        .to_bytes();
-        #[cfg(test)]
-        self.record_property_get();
-        let Some(value) = self.get_raw(&key).await? else {
+        .to_bytes()
+    }
+
+    fn decode_property_blob(&self, value: Option<bytes::Bytes>) -> Result<CachedPropertyBlob> {
+        let Some(value) = value else {
             return Ok(CachedPropertyBlob::Missing);
         };
         #[cfg(test)]

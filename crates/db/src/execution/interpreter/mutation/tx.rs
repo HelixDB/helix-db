@@ -108,6 +108,7 @@ impl<'db> ExecutionContext<'db> {
                 scope_permit,
                 mutation_catalog,
                 std::sync::Arc::clone(self.db.simhasher_registry()),
+                self.db.vector_batch_reads(),
                 self.db
                     .config()
                     .db()
@@ -123,6 +124,9 @@ impl<'db> ExecutionContext<'db> {
     /// Direct focused mutation calls that did not enable a request scope open an
     /// isolated transaction. Request execution already owns its transaction.
     pub(super) async fn take_or_begin_write_scope(&mut self) -> Result<MutationWriteScope> {
+        // Every mutation enters here, and any of them can change a resolved
+        // membership set.
+        self.prepared_memberships.clear();
         let state = std::mem::replace(
             &mut self.request_write_scope,
             RequestWriteScopeState::Disabled,
@@ -258,7 +262,9 @@ impl<'db> ExecutionContext<'db> {
             .iter()
             .filter_map(|write| write.retirement().cloned())
             .collect::<Vec<_>>();
-        let committed = match txn.commit().await {
+        let fenced = !pending_vector_cache.is_empty();
+        let committed = match crate::search::vector::commit_fenced(txn, pending_vector_cache).await
+        {
             Ok(committed) => committed,
             Err(error) => {
                 return Err(prepared_index_context
@@ -266,23 +272,10 @@ impl<'db> ExecutionContext<'db> {
                     .await);
             }
         };
-        let committed_sequence = committed.map(|committed| committed.seqnum());
-        let committed_sequence = if pending_vector_cache.is_empty() {
-            None
-        } else {
-            Some(committed_sequence.ok_or_else(|| {
-                HelixDbError::InvariantViolation(
-                    "dirty vector cache rows committed without a storage sequence".to_string(),
-                )
-            })?)
-        };
-        for pending in pending_vector_cache {
-            let Some(committed_sequence) = committed_sequence else {
-                return Err(HelixDbError::InvariantViolation(
-                    "vector cache eviction lost its committed storage sequence".to_string(),
-                ));
-            };
-            pending.evict_after_commit(committed_sequence).await;
+        if fenced && committed.is_none() {
+            return Err(HelixDbError::InvariantViolation(
+                "dirty vector cache rows committed without a storage sequence".to_string(),
+            ));
         }
         self.apply_vector_cache_retirements(vector_cache_retirements)
             .await?;
@@ -721,7 +714,10 @@ mod additional_tests {
                 if message.contains("dirty vector cache rows committed without a storage sequence")
         ));
         assert!(store.get_upper_vector(7).is_some());
-        let guard = db.vector_cache_registry().read_guard_for(&handle).unwrap();
+        let guard = db
+            .vector_cache_registry()
+            .resident_guard_for(&handle)
+            .unwrap();
         assert!(!guard.pending_dirty().is_node_dirty(7));
     }
 
@@ -779,7 +775,10 @@ mod additional_tests {
         .to_bytes();
         assert!(db.inner_db().get(key).await.unwrap().is_none());
         assert!(store.get_upper_vector(7).is_some());
-        let guard = db.vector_cache_registry().read_guard_for(&handle).unwrap();
+        let guard = db
+            .vector_cache_registry()
+            .resident_guard_for(&handle)
+            .unwrap();
         assert!(!guard.pending_dirty().is_node_dirty(7));
     }
 
@@ -818,7 +817,10 @@ mod additional_tests {
         let error = context.commit_request_write_scope().await.unwrap_err();
         assert!(error.is_transaction_conflict());
         assert!(store.get_upper_vector(7).is_some());
-        let guard = db.vector_cache_registry().read_guard_for(&handle).unwrap();
+        let guard = db
+            .vector_cache_registry()
+            .resident_guard_for(&handle)
+            .unwrap();
         assert!(!guard.pending_dirty().is_node_dirty(7));
         assert_eq!(
             db.inner_db().get(key).await.unwrap(),
@@ -842,7 +844,10 @@ mod additional_tests {
 
         context.commit_request_write_scope().await.unwrap();
         assert!(store.get_upper_vector(7).is_none());
-        assert!(db.vector_cache_registry().read_guard_for(&handle).is_err());
+        assert!(db
+            .vector_cache_registry()
+            .resident_guard_for(&handle)
+            .is_err());
         let (_, owns_hydration) = db.vector_cache_registry().entry_for(&handle);
         assert!(owns_hydration, "committed retirement forgets its tombstone");
         db.close().await.unwrap();
@@ -864,7 +869,10 @@ mod additional_tests {
 
         context.abort_request_write_scope();
         assert!(store.get_upper_vector(7).is_some());
-        assert!(db.vector_cache_registry().read_guard_for(&handle).is_ok());
+        assert!(db
+            .vector_cache_registry()
+            .resident_guard_for(&handle)
+            .is_ok());
         db.close().await.unwrap();
     }
 
@@ -902,7 +910,10 @@ mod additional_tests {
         let error = context.commit_request_write_scope().await.unwrap_err();
         assert!(error.is_transaction_conflict());
         assert!(store.get_upper_vector(7).is_some());
-        assert!(db.vector_cache_registry().read_guard_for(&handle).is_ok());
+        assert!(db
+            .vector_cache_registry()
+            .resident_guard_for(&handle)
+            .is_ok());
         db.close().await.unwrap();
     }
 

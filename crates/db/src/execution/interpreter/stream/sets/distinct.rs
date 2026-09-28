@@ -37,7 +37,7 @@ pub(in crate::execution::interpreter::stream) fn distinct_rows(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum RowDistinctKey {
+pub(in crate::execution::interpreter) enum RowDistinctKey {
     Current(ElementRef),
     Empty {
         bindings: Vec<(ir::NonEmptyString, ElementRef)>,

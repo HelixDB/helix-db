@@ -1,26 +1,55 @@
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+  seaweedfs:
+    image: ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
     platform: ${HELIX_IMAGE_PLATFORM:?HELIX_IMAGE_PLATFORM must be set}
-    command: server /data --console-address ":9001"
+    command:
+      - mini
+      - -dir=/data
+      - -bucket=helix-db
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -master.telemetry=false
+      - -admin.ui=false
+      - -webdav=false
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
     restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+    configs:
+      - source: seaweedfs-s3
+        target: /etc/seaweedfs/s3.json
     volumes:
-      - minio-data:/data
+      - seaweedfs-data:/data
+    healthcheck:
+      # A signed HEAD proves the S3 gateway, the static identity, and the
+      # startup-created bucket are all ready before Helix opens its store.
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - -o
+        - /dev/null
+        - --max-time
+        - "2"
+        - -I
+        - --aws-sigv4
+        - aws:amz:us-east-1:s3
+        - --user
+        - helix:helix-local-secret
+        - http://127.0.0.1:8333/helix-db
+      interval: 1s
+      timeout: 5s
+      retries: 120
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+  # Test-only request logger. Helix reaches SeaweedFS through it so the idle
+  # refresh regression can observe every object GET and its Range header.
+  s3-trace:
+    image: ghcr.io/nginx/nginx-unprivileged:1.30.5-alpine@sha256:4714e0b1b2577eaa1a6131d07c958b67f0eb68e6d0521e90c6e5287db8cf0bc5
     platform: ${HELIX_IMAGE_PLATFORM:?HELIX_IMAGE_PLATFORM must be set}
+    restart: unless-stopped
     depends_on:
-      - minio
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
-        mc mb --ignore-existing local/helix-db
+      seaweedfs:
+        condition: service_healthy
+    volumes:
+      - ./s3-trace.conf:/etc/nginx/conf.d/default.conf:ro
 
   helix:
     image: ${HELIX_IMAGE_REF:?HELIX_IMAGE_REF must be set}
@@ -28,18 +57,35 @@ services:
     pull_policy: never
     restart: unless-stopped
     depends_on:
-      minio-init:
-        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
+      s3-trace:
+        condition: service_started
     ports:
       - "${HELIX_IMAGE_TEST_PORT:-18120}:8080"
     environment:
       S3_BUCKET: helix-db
       S3_REGION: us-east-1
       DB_PATH: db/
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: helix
+      AWS_SECRET_ACCESS_KEY: helix-local-secret
+      AWS_ENDPOINT: http://s3-trace:8333
       AWS_ALLOW_HTTP: "true"
 
+configs:
+  seaweedfs-s3:
+    content: |
+      {
+        "identities": [
+          {
+            "name": "helix",
+            "credentials": [
+              {"accessKey": "helix", "secretKey": "helix-local-secret"}
+            ],
+            "actions": ["Read:helix-db", "Write:helix-db", "List:helix-db"]
+          }
+        ]
+      }
+
 volumes:
-  minio-data:
+  seaweedfs-data:

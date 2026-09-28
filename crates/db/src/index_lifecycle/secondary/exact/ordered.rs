@@ -329,3 +329,159 @@ impl ExactRangeScanProgress for RangeScanCounters {
             .fetch_max(count, std::sync::atomic::Ordering::Relaxed);
     }
 }
+
+/// Resumable ordered serving for consumers whose accepted-row demand is not
+/// known in advance (for example a filter). Reverse iteration prepares one tie
+/// group's identifiers to retain ascending entity-ID ties, then verifies only
+/// the owners actually requested. It never reopens a growing prefix scan.
+pub(crate) struct OrderedRangeCursor {
+    handle: ActiveIndexHandle,
+    query: Option<SecondaryRangeQuery>,
+    iteration: RangeScanIteration,
+    rows: Option<slatedb::DbIterator>,
+    pending: Vec<CheckedEntry>,
+    lookahead: Option<CheckedEntry>,
+    membership: Vec<roaring::RoaringTreemap>,
+}
+
+impl OrderedRangeCursor {
+    pub(crate) fn with_membership(mut self, membership: Vec<roaring::RoaringTreemap>) -> Self {
+        if membership.iter().any(roaring::RoaringTreemap::is_empty) {
+            self.rows = None;
+            self.pending.clear();
+            self.lookahead = None;
+        }
+        self.membership = membership;
+        self
+    }
+
+    pub(crate) async fn open(
+        reader: &(impl DbReadOps + Sync),
+        handle: ActiveIndexHandle,
+        query: Option<SecondaryRangeQuery>,
+        iteration: RangeScanIteration,
+    ) -> Result<Self> {
+        let Some(definition) = handle.secondary_definition() else {
+            return Err(corruption(
+                "range cursor received a non-secondary Active handle",
+            ));
+        };
+        if !matches!(
+            definition,
+            ValidatedSecondaryIndexDefinition::NodeRange { .. }
+                | ValidatedSecondaryIndexDefinition::EdgeRange { .. }
+        ) {
+            return Err(corruption("range cursor received an equality definition"));
+        }
+        let direction = match definition.direction() {
+            RangeIndexDirection::Asc => StorageRangeIndexDirection::Asc,
+            RangeIndexDirection::Desc => StorageRangeIndexDirection::Desc,
+        };
+        let bounds = match &query {
+            Some(query) => secondary_range_scan_bounds(direction, query)?,
+            None => Some((Bound::Unbounded, Bound::Unbounded)),
+        };
+        let rows = match bounds {
+            None => None,
+            Some(bounds) => {
+                let prefix = IndexKey::data_prefix(
+                    handle.scope(),
+                    ScopedKey::secondary_lane_prefix(
+                        handle.index_id(),
+                        handle.generation(),
+                        definition_lane(definition),
+                    ),
+                );
+                let options = slatedb::config::ScanOptions::default().with_order(match iteration {
+                    RangeScanIteration::Forward => slatedb::IterationOrder::Ascending,
+                    RangeScanIteration::Reverse => slatedb::IterationOrder::Descending,
+                });
+                Some(
+                    reader
+                        .scan_prefix_with_options(prefix, bounds, &options)
+                        .await?,
+                )
+            }
+        };
+        Ok(Self {
+            handle,
+            query,
+            iteration,
+            rows,
+            pending: Vec::new(),
+            lookahead: None,
+            membership: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn next(
+        &mut self,
+        reader: &(impl DbReadOps + Sync),
+        progress: &dyn ExactRangeScanProgress,
+    ) -> Result<Option<u64>> {
+        let definition = self
+            .handle
+            .secondary_definition()
+            .expect("range definition validated on open");
+        let direction = match definition.direction() {
+            RangeIndexDirection::Asc => StorageRangeIndexDirection::Asc,
+            RangeIndexDirection::Desc => StorageRangeIndexDirection::Desc,
+        };
+        let scan = RangeScan {
+            reader,
+            handle: &self.handle,
+            definition,
+            direction,
+            lane: definition_lane(definition),
+            query: self.query.as_ref(),
+            membership: &self.membership,
+            progress,
+        };
+        loop {
+            progress.checkpoint()?;
+            if let Some(entry) = self.pending.pop() {
+                if scan.contains(entry.owner) && scan.verify(entry.owner, &entry.value).await? {
+                    return Ok(Some(entry.owner.get()));
+                }
+                continue;
+            }
+            let first = match self.lookahead.take() {
+                Some(entry) => entry,
+                None => {
+                    let Some(rows) = &mut self.rows else {
+                        return Ok(None);
+                    };
+                    let Some(row) = rows.next().await? else {
+                        self.rows = None;
+                        return Ok(None);
+                    };
+                    scan.checked_entry(row)?
+                }
+            };
+            if self.iteration == RangeScanIteration::Forward {
+                if scan.contains(first.owner) && scan.verify(first.owner, &first.value).await? {
+                    return Ok(Some(first.owner.get()));
+                }
+                continue;
+            }
+            self.pending.push(first);
+            loop {
+                progress.checkpoint()?;
+                let Some(rows) = &mut self.rows else {
+                    break;
+                };
+                let Some(row) = rows.next().await? else {
+                    self.rows = None;
+                    break;
+                };
+                let entry = scan.checked_entry(row)?;
+                if self.pending[0].value != entry.value {
+                    self.lookahead = Some(entry);
+                    break;
+                }
+                self.pending.push(entry);
+                progress.retained_ids(self.pending.len());
+            }
+        }
+    }
+}

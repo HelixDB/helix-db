@@ -20,7 +20,32 @@ impl ExecutableDagBuilder<'_> {
                 },
                 schedule: ExecSchedule::Pipeline,
                 delivered: filtered_delivered_properties(delivered),
-                cost: self.profile.predicate_eval(rows),
+                cost: self.profile.stored_predicate_filter(rows),
+            },
+            logical::StreamPipelineOp::IndexMembership { plan } => StepDraft {
+                dependencies: vec![input_id],
+                output,
+                condition,
+                op: ExecOp::IndexMembership {
+                    plan: Box::new(crate::exec::ExecNodeIndexMembershipPlan::from(
+                        plan.as_ref(),
+                    )),
+                },
+                schedule: ExecSchedule::Pipeline,
+                delivered: filtered_delivered_properties(delivered),
+                // Lowering has no statistics; selection already priced the set.
+                cost: self.profile.index_membership_filter(
+                    self.profile
+                        .bitmap_equality_lookup(self.profile.default_equality_index_rows),
+                    match plan.outside_label() {
+                        ir::NodeMembershipOutsideLabel::Reject => None,
+                        ir::NodeMembershipOutsideLabel::Evaluate => Some(
+                            self.profile
+                                .bitmap_equality_lookup(self.profile.default_unknown_scan_rows),
+                        ),
+                    },
+                    rows,
+                ),
             },
             logical::StreamPipelineOp::Window { window } => selected_access_window_step_draft(
                 *window,

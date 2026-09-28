@@ -75,11 +75,11 @@ use crate::search::vector::storage::{
     VectorRows, VectorSimHashDirectoryCleanupScan, VectorWriteRows,
 };
 use crate::search::vector::{
-    decode_item, encode_item, MeasuredVectorTransaction, SearchParams, SearchResult,
-    VectorIndexConfig, VectorIndexMetadata, VectorWriteMeasurement,
+    decode_item, MeasuredVectorTransaction, SearchParams, SearchResult, VectorIndexConfig,
+    VectorIndexMetadata, VectorWriteMeasurement,
 };
 #[cfg(test)]
-use crate::search::vector::{encode_metadata, index_id_from_name, SimHashMode};
+use crate::search::vector::{encode_item, encode_metadata, index_id_from_name, SimHashMode};
 
 /// Read accounting for one canonical vector payload lookup.
 #[derive(Debug, Default, Clone, Copy)]
@@ -403,9 +403,18 @@ impl<D: Distance> VectorIndex<D> {
         self
     }
 
+    /// Selects how this handle's row batches are fetched from storage.
+    pub(crate) fn with_batch_reads(
+        mut self,
+        batch_reads: crate::search::vector::storage::VectorBatchReads,
+    ) -> Self {
+        self.rows = self.rows.with_batch_reads(batch_reads);
+        self
+    }
+
     /// Enables directory maintenance for generation-capability tests.
     #[cfg(any(test, feature = "production-coverage"))]
-    pub(in crate::search::vector) fn with_simhash_directory(mut self) -> Self {
+    pub(crate) fn with_simhash_directory(mut self) -> Self {
         self.simhash_directory_enabled = true;
         self
     }
@@ -999,7 +1008,8 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Cached absence remains authoritative for the operation. Reaching the
     /// item limit clears only this disposable operation cache; persisted and
-    /// shared memory state are not changed.
+    /// shared memory state are not changed. A miss uses the same batched
+    /// resolver as multi-item loads, so a cached SimHash avoids its row read.
     pub(in crate::search::vector) async fn get_item_for_layer_cached(
         &self,
         txn: &DbTransaction,
@@ -1017,25 +1027,10 @@ impl<D: Distance> VectorIndex<D> {
         if let Some(cached) = mutation_cache.item(layer, node_id) {
             return Ok(cached);
         }
-
-        while mutation_cache.enforces_local_limits()
-            && mutation_cache.item_count() >= super::mutation::VECTOR_BUILD_ITEM_CACHE_LIMIT
-        {
-            if !mutation_cache.evict_oldest_item() {
-                break;
-            }
-        }
-
-        let loaded = self
-            .get_item_for_layer(txn, layer, node_id)
-            .await?
-            .map(Arc::new);
-        let payload_bytes = loaded
-            .as_ref()
-            .map(|item| encode_item(item.as_ref()).len())
-            .unwrap_or(0);
-        mutation_cache.put_item(layer, node_id, loaded.clone(), payload_bytes);
-        Ok(loaded)
+        let mut loaded = HashMap::with_capacity(1);
+        self.load_uncached_items_for_layer(txn, layer, vec![node_id], mutation_cache, &mut loaded)
+            .await?;
+        Ok(loaded.remove(&node_id))
     }
 
     /// Batch-loads layer-specific items without overwriting staged cache state.
@@ -1062,8 +1057,6 @@ impl<D: Distance> VectorIndex<D> {
             }
         }
 
-        let expected_dimension = self.expected_dimension(txn).await?;
-
         let mut missing = Vec::new();
         let mut seen_missing = HashSet::new();
         for &node_id in node_ids {
@@ -1078,10 +1071,28 @@ impl<D: Distance> VectorIndex<D> {
                 missing.push(node_id);
             }
         }
+        self.load_uncached_items_for_layer(txn, layer, missing, mutation_cache, &mut result)
+            .await?;
+        Ok(result)
+    }
 
+    /// Reads unique cache-missed items with one bounded I/O chain and caches them.
+    ///
+    /// Upper layers try hot rows before canonical payloads. Canonical keys are
+    /// resolved through cached SimHash state, and absent nodes are cached as
+    /// authoritative negative lookups. Present items are inserted in `result`.
+    async fn load_uncached_items_for_layer(
+        &self,
+        txn: &DbTransaction,
+        layer: u16,
+        mut missing: Vec<NodeId>,
+        mutation_cache: &mut MutationOpCache<D>,
+        result: &mut HashMap<NodeId, Arc<Item<'static, D>>>,
+    ) -> Result<(), HelixDbError> {
         if missing.is_empty() {
-            return Ok(result);
+            return Ok(());
         }
+        let expected_dimension = self.expected_dimension(txn).await?;
 
         if layer > 0 {
             let upper_rows = self
@@ -1110,7 +1121,7 @@ impl<D: Distance> VectorIndex<D> {
             missing = layer_zero_fallback;
 
             if missing.is_empty() {
-                return Ok(result);
+                return Ok(());
             }
         }
 
@@ -1155,7 +1166,7 @@ impl<D: Distance> VectorIndex<D> {
 
         vector_fetches.sort_by(|a, b| a.1.physical_order(&b.1));
         if vector_fetches.is_empty() {
-            return Ok(result);
+            return Ok(());
         }
         let vector_keys = vector_fetches
             .iter()
@@ -1195,7 +1206,7 @@ impl<D: Distance> VectorIndex<D> {
                 }
             }
         }
-        Ok(result)
+        Ok(())
     }
 
     /// Load upper-layer neighbors.

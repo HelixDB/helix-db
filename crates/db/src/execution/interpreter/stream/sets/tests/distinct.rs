@@ -94,3 +94,83 @@ fn distinct_rows_use_current_element_and_preserve_first_row_payload() {
         Some(&ElementRef::Node(1))
     );
 }
+
+/// DISTINCT must use the engine's numeric identity (`PropertyValue::total_order`, the
+/// same identity `WHERE`, `ORDER BY`, GROUP BY and secondary indexes use), not the
+/// `Debug` rendering of the storage variant. The SDKs store integral JSON numbers as
+/// I64 and fractional ones as F64, so mixed-variant columns arise without any tuning.
+#[tokio::test]
+async fn distinct_scalars_unify_numerically_equal_values_across_storage_variants() {
+    use crate::encoding::property::property_value::PropertyValue;
+
+    let db = test_support::open_db("stream-sets-distinct-numeric-identity").await;
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let values = ExecutionValue::Scalars(vec![
+        ExecutionScalar::Value(PropertyValue::I64(42)),
+        ExecutionScalar::Value(PropertyValue::F64(42.0)),
+        ExecutionScalar::Value(PropertyValue::F32(42.0)),
+        ExecutionScalar::Value(PropertyValue::I64(7)),
+    ]);
+    assert_eq!(
+        ctx.distinct(values).unwrap(),
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::Value(PropertyValue::I64(42)),
+            ExecutionScalar::Value(PropertyValue::I64(7)),
+        ]),
+        "DISTINCT over scalars must collapse numerically equal I64/F64/F32 values"
+    );
+}
+
+/// Same contract for `value_map(...).dedup()`, which dedups `ExecutionScalar::Object`.
+#[tokio::test]
+async fn distinct_objects_unify_numerically_equal_property_values() {
+    use std::collections::BTreeMap;
+
+    use crate::encoding::property::property_value::PropertyValue;
+
+    let db = test_support::open_db("stream-sets-distinct-numeric-identity-objects").await;
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let object = |value: PropertyValue| {
+        ExecutionScalar::Object(BTreeMap::from([("score".to_string(), value)]))
+    };
+    let values = ExecutionValue::Scalars(vec![
+        object(PropertyValue::I64(42)),
+        object(PropertyValue::F64(42.0)),
+        object(PropertyValue::F32(42.0)),
+        object(PropertyValue::I64(7)),
+    ]);
+    assert_eq!(
+        ctx.distinct(values).unwrap(),
+        ExecutionValue::Scalars(vec![
+            object(PropertyValue::I64(42)),
+            object(PropertyValue::I64(7)),
+        ]),
+        "DISTINCT over value_map objects must collapse numerically equal I64/F64/F32 values"
+    );
+}
+
+/// Numeric identity does not leak across types: the string `"42"` is not the number
+/// `42`, and `true` is not `1`. This mirrors `WHERE`, where `score = "42"` matches no
+/// I64 row.
+#[tokio::test]
+async fn distinct_keeps_numeric_string_and_bool_forms_apart() {
+    use crate::encoding::property::property_value::PropertyValue;
+
+    let db = test_support::open_db("stream-sets-distinct-type-boundary").await;
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let values = vec![
+        ExecutionScalar::Value(PropertyValue::I64(42)),
+        ExecutionScalar::Value(PropertyValue::String("42".to_string())),
+        ExecutionScalar::Value(PropertyValue::Bool(true)),
+        ExecutionScalar::Value(PropertyValue::I64(1)),
+    ];
+    assert_eq!(
+        ctx.distinct(ExecutionValue::Scalars(values.clone()))
+            .unwrap(),
+        ExecutionValue::Scalars(values),
+        "DISTINCT must keep a number, its string form and a bool as separate values"
+    );
+}

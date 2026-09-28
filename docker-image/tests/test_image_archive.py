@@ -36,6 +36,7 @@ class ArchiveFixture:
         include_binary: bool,
         tmp_mode: int,
         data_owner: tuple,
+        cache_owner: tuple,
         binary_suffix: bytes,
         binary_payload,
         extra_files: dict,
@@ -52,6 +53,12 @@ class ArchiveFixture:
             data.mode = 0o755
             data.uid, data.gid = data_owner
             layer.addfile(data)
+
+            cache = tarfile.TarInfo("var/cache/helix/")
+            cache.type = tarfile.DIRTYPE
+            cache.mode = 0o755
+            cache.uid, cache.gid = cache_owner
+            layer.addfile(cache)
 
             if include_binary:
                 loader = {
@@ -81,6 +88,7 @@ class ArchiveFixture:
         include_binary=True,
         tmp_mode=0o1777,
         data_owner=(65532, 65532),
+        cache_owner=(65532, 65532),
         binary_suffix=b"",
         binary_payload=None,
         extra_files=None,
@@ -119,6 +127,7 @@ class ArchiveFixture:
             include_binary,
             tmp_mode,
             data_owner,
+            cache_owner,
             binary_suffix,
             binary_payload,
             extra_files or {},
@@ -242,7 +251,12 @@ class ImageInspectionTests(unittest.TestCase):
         self.assert_inspection_error("mode-1777", bad_tmp)
 
         bad_owner = self.fixture.write(data_owner=(0, 0))
-        self.assert_inspection_error("not owned by the non-root", bad_owner)
+        self.assert_inspection_error("/var/lib/helix is not owned by the non-root", bad_owner)
+
+        bad_cache_owner = self.fixture.write(cache_owner=(0, 0))
+        self.assert_inspection_error(
+            "/var/cache/helix is not owned by the non-root", bad_cache_owner
+        )
 
     def test_binary_contract_rejects_wrong_linkage_and_contents(self) -> None:
         unsupported = self.fixture.write(architecture="ppc64le")

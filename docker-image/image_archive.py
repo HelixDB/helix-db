@@ -27,7 +27,8 @@ EXPECTED_LABELS = {
     "org.opencontainers.image.source": "https://github.com/HelixDB/helix-db",
     "org.opencontainers.image.base.name": "gcr.io/distroless/cc-debian12:nonroot",
 }
-REQUIRED_PATHS = {"bin/helix-server", "tmp", "var/lib/helix"}
+RUNTIME_OWNED_DIRECTORIES = ("var/lib/helix", "var/cache/helix")
+REQUIRED_PATHS = {"bin/helix-server", "tmp", *RUNTIME_OWNED_DIRECTORIES}
 FORBIDDEN_LEGACY_PATHS = {
     "bin/bash",
     "bin/gateway",
@@ -250,7 +251,7 @@ def inspect_archive(image_path: Path, expected_image_reference: Optional[str] = 
                 for member in layer.getmembers():
                     member_name = _normalize(member.name)
                     layer_paths.add(member_name)
-                    if member.isdir() and member_name in {"tmp", "var/lib/helix"}:
+                    if member.isdir() and member_name in {"tmp", *RUNTIME_OWNED_DIRECTORIES}:
                         directory_metadata[member_name] = member
                     if member_name == "bin/helix-server" and member.isfile():
                         extracted = layer.extractfile(member)
@@ -271,9 +272,15 @@ def inspect_archive(image_path: Path, expected_image_reference: Optional[str] = 
         tmp_metadata = directory_metadata.get("tmp")
         if tmp_metadata is None or stat.S_IMODE(tmp_metadata.mode) != 0o1777:
             raise ImageArchiveError("/tmp is not a mode-1777 directory")
-        data_metadata = directory_metadata.get("var/lib/helix")
-        if data_metadata is None or (data_metadata.uid, data_metadata.gid) != (65532, 65532):
-            raise ImageArchiveError("/var/lib/helix is not owned by the non-root runtime user")
+        for owned_path in RUNTIME_OWNED_DIRECTORIES:
+            owned_metadata = directory_metadata.get(owned_path)
+            if owned_metadata is None or (owned_metadata.uid, owned_metadata.gid) != (
+                65532,
+                65532,
+            ):
+                raise ImageArchiveError(
+                    "/{} is not owned by the non-root runtime user".format(owned_path)
+                )
 
         if server_binary is None:
             raise ImageArchiveError("could not read bin/helix-server from the image")

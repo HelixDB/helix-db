@@ -2590,6 +2590,15 @@ async fn run_partitioned_search_edge_tenant_moves() {
         assert_edge_indexed_read(&db, family, ordinal, "tenant-building", []).await;
         assert_edge_indexed_read(&db, family, ordinal, "tenant-active", [edge_id]).await;
 
+        db.query(helix_ast::query::QueryRequest::write(
+            helix_ast::batch::write_batch()
+                .var_as("gone", helix_ast::traversal::g().e(edge_id).drop())
+                .returning(Vec::<String>::new()),
+        ))
+        .await
+        .expect("edge stream drop removes active search index entries");
+        assert_edge_indexed_read(&db, family, ordinal, "tenant-active", []).await;
+
         execute_write_with_retry(&db, &public_drop_edge_plan(edge_id))
             .await
             .expect("partitioned edge delete commits while Active");

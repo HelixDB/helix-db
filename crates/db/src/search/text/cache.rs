@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,6 +42,11 @@ const METADATA_DIR: &str = "metadata";
 const STAGING_DIR: &str = "staging";
 const DEMAND_TRACKER_LIMIT: usize = 4096;
 const ACCESS_WRITE_INTERVAL: Duration = Duration::from_secs(60);
+/// Age past which `cleanup_disk` removes a staging file. A download writes
+/// its staging file as each chunk arrives and a hydration removes it
+/// however it ends, so one untouched this long was left by a killed
+/// process, never by a download still in flight in any handle.
+const STAGING_ORPHAN_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Validated cache tier retained by the FTS runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,7 +264,8 @@ pub struct FtsCacheStateSnapshot {
     pub singleflight_followers: u64,
     /// Full-artifact hydration attempts.
     pub hydration_attempts: u64,
-    /// Successful full-artifact hydrations.
+    /// Successful full-artifact hydrations, each counted after the disk trim
+    /// that follows it.
     pub hydration_completions: u64,
     /// Failed full-artifact hydrations.
     pub hydration_failures: u64,
@@ -312,6 +318,34 @@ impl Drop for DiskArtifactLease {
     }
 }
 
+/// Removes a hydration's staging file when dropped, which includes an
+/// aborted hydration dropped mid-download. After the rename that publishes
+/// it, the staging name no longer exists and the removal finds nothing.
+/// Only a killed process leaves a staging file, which `cleanup_disk`
+/// removes once it is [`STAGING_ORPHAN_AGE`] old.
+///
+/// The unlink is synchronous because `Drop` cannot await, and one unlink is
+/// short enough to run on a runtime thread.
+struct StagingFileGuard(PathBuf);
+
+impl Drop for StagingFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Whether a cache still runs disk cleanups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskCleanup {
+    Open,
+    /// [`FtsCache::close`] has waited out every cleanup; none runs again.
+    Closed,
+}
+
+/// Test hook that `cleanup_disk` calls with an eviction candidate's hash.
+#[cfg(test)]
+type EvictionHook = Box<dyn FnMut([u8; 32]) + Send>;
+
 pub(crate) struct FtsCache {
     db_path: String,
     object_store: Arc<dyn ObjectStore>,
@@ -325,9 +359,17 @@ pub(crate) struct FtsCache {
     access_writes: Mutex<HashMap<[u8; 32], Instant>>,
     demand: Mutex<DemandTracker>,
     tasks: AsyncMutex<Vec<JoinHandle<()>>>,
+    /// Held by a disk cleanup until its blocking work ends, which outlives
+    /// an abort of the task awaiting it.
+    cleanup: Arc<AsyncMutex<DiskCleanup>>,
     stats: FtsStats,
     disk_artifact_count: AtomicU64,
     disk_artifact_bytes: AtomicU64,
+    /// Called by `cleanup_disk` with each eviction candidate's hash just
+    /// before it checks that candidate's lease, so a test can lease or
+    /// remove the artifact at that exact point.
+    #[cfg(test)]
+    before_eviction: Mutex<Option<EvictionHook>>,
 }
 
 impl FtsCache {
@@ -377,9 +419,12 @@ impl FtsCache {
             access_writes: Mutex::new(HashMap::new()),
             demand: Mutex::new(DemandTracker::default()),
             tasks: AsyncMutex::new(Vec::new()),
+            cleanup: Arc::new(AsyncMutex::new(DiskCleanup::Open)),
             stats: FtsStats::default(),
             disk_artifact_count: AtomicU64::new(disk_artifact_count),
             disk_artifact_bytes: AtomicU64::new(disk_artifact_bytes),
+            #[cfg(test)]
+            before_eviction: Mutex::new(None),
         })
     }
 
@@ -437,7 +482,12 @@ impl FtsCache {
     }
 
     pub(crate) async fn after_successful_search(self: &Arc<Self>, split: TextSplitRef) {
-        if self.config.disk().is_none() {
+        // A split larger than the whole disk tier would only evict the rest.
+        if self
+            .config
+            .disk()
+            .is_none_or(|disk| split.blob.size_bytes > disk.bytes() as u64)
+        {
             return;
         }
         let key = TextSplitCacheKey::from(&split);
@@ -455,13 +505,15 @@ impl FtsCache {
                 .fetch_add(1, Ordering::Relaxed);
             match cache.ensure_artifact(&split).await {
                 Ok(_) => {
+                    if let Err(error) = cache.cleanup_disk().await {
+                        tracing::warn!(%error, "FTS disk cleanup failed after demand hydration");
+                    }
+                    // Last, so a completion seen in a snapshot means the
+                    // task, trim included, has finished.
                     cache
                         .stats
                         .hydration_completions
                         .fetch_add(1, Ordering::Relaxed);
-                    if let Err(error) = cache.cleanup_disk().await {
-                        tracing::warn!(%error, "FTS disk cleanup failed after demand hydration");
-                    }
                 }
                 Err(error) => {
                     cache
@@ -501,7 +553,11 @@ impl FtsCache {
                 let hydrated_bytes = Arc::clone(&hydrated_bytes);
                 let errors = Arc::clone(&errors);
                 async move {
-                    if cache.config.disk().is_some() {
+                    if cache
+                        .config
+                        .disk()
+                        .is_some_and(|disk| split.blob.size_bytes <= disk.bytes() as u64)
+                    {
                         match cache.ensure_artifact(&split).await {
                             Ok(bytes) => {
                                 if bytes > 0 {
@@ -587,6 +643,9 @@ impl FtsCache {
         for handle in handles {
             let _ = handle.await;
         }
+        // An aborted task's blocking cleanup still holds the lock, so every
+        // deletion ends before the caller releases the cache directory.
+        *self.cleanup.lock().await = DiskCleanup::Closed;
     }
 
     fn memory_hit(&self, key: &TextSplitCacheKey) -> Option<Arc<OpenedTextSplit>> {
@@ -679,6 +738,9 @@ impl FtsCache {
         let Some(path) = self.artifact_path(split.blob.sha256) else {
             return Ok(None);
         };
+        // Leased before the first check, so eviction cannot delete the
+        // artifact while it is hashed and then report it corrupt.
+        let lease = DiskArtifactLease::acquire(split.blob.sha256, &self.artifact_leases);
         if !tokio_fs::try_exists(&path).await.unwrap_or(false) {
             self.stats.disk_misses.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
@@ -687,7 +749,6 @@ impl FtsCache {
             .await?;
         let path_for_open = path.clone();
         let split_for_open = split.clone();
-        let lease = DiskArtifactLease::acquire(split.blob.sha256, &self.artifact_leases);
         let opened = tokio::task::spawn_blocking(move || {
             let footer = read_footer_cache_entry_from_file(&path_for_open, &split_for_open)?;
             let directory = open_split_directory_from_file(&path_for_open)?;
@@ -708,6 +769,9 @@ impl FtsCache {
         Ok(Some(opened))
     }
 
+    /// Accepts a published artifact whose key this cache has recorded as
+    /// hashed in full, if its length still matches, and otherwise verifies
+    /// it in full and records the key.
     async fn validate_artifact(
         &self,
         path: PathBuf,
@@ -723,39 +787,7 @@ impl FtsCache {
                 return Ok(());
             }
         }
-        tokio::task::spawn_blocking(move || {
-            validate_split_bundle_file(&path, &split)?;
-            let mut file = fs::File::open(&path).map_err(|error| {
-                HelixDbError::Config(format!(
-                    "failed to hash FTS artifact '{}': {error}",
-                    path.display()
-                ))
-            })?;
-            let mut digest = Sha256::new();
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let read = file.read(&mut buffer).map_err(|error| {
-                    HelixDbError::Config(format!(
-                        "failed to hash FTS artifact '{}': {error}",
-                        path.display()
-                    ))
-                })?;
-                if read == 0 {
-                    break;
-                }
-                digest.update(&buffer[..read]);
-            }
-            let actual: [u8; 32] = digest.finalize().into();
-            if actual != split.blob.sha256 {
-                return Err(HelixDbError::Config(format!(
-                    "cached FTS split '{}' hash mismatch",
-                    path.display()
-                )));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|error| HelixDbError::Config(format!("FTS validation task failed: {error}")))??;
+        verify_artifact(path, split).await?;
         self.validated.lock().insert(key);
         Ok(())
     }
@@ -770,6 +802,9 @@ impl FtsCache {
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone();
         let guard = gate.lock().await;
+        // Held until the artifact has metadata: eviction would otherwise
+        // delete it mid-validation, or once published, as never used.
+        let _lease = DiskArtifactLease::acquire(split.blob.sha256, &self.artifact_leases);
         let key = TextSplitCacheKey::from(split);
         if let Some(path) = self.artifact_path(split.blob.sha256)
             && tokio_fs::try_exists(&path).await.unwrap_or(false)
@@ -787,6 +822,9 @@ impl FtsCache {
             }
             self.remove_artifact(split.blob.sha256).await;
         }
+        // No valid copy is published, so an earlier validation of this key,
+        // say before another cache evicted it, vouches for nothing.
+        self.validated.lock().remove(&key);
 
         let final_path = self
             .artifact_path(split.blob.sha256)
@@ -799,16 +837,24 @@ impl FtsCache {
                 sha_hex(split.blob.sha256),
                 uuid::Uuid::new_v4()
             ));
+        let _staging_guard = StagingFileGuard(staging.clone());
         let object_path = blob_object_store_path(&self.db_path, split.blob.sha256);
         let result = async {
             let response = self.object_store.get(&object_path).await?;
             let mut stream = response.into_stream();
-            let mut file = tokio_fs::File::create(&staging).await.map_err(|error| {
-                HelixDbError::Config(format!(
-                    "failed to create FTS staging file '{}': {error}",
-                    staging.display()
-                ))
-            })?;
+            // Created synchronously, with no await between the guard and the
+            // file. An abort during an asynchronous create would run the
+            // guard first, and the create would then finish on the blocking
+            // pool and leave the file. One create is short enough to run on
+            // a runtime thread.
+            let mut file = fs::File::create(&staging)
+                .map(tokio_fs::File::from_std)
+                .map_err(|error| {
+                    HelixDbError::Config(format!(
+                        "failed to create FTS staging file '{}': {error}",
+                        staging.display()
+                    ))
+                })?;
             while let Some(chunk) = stream.try_next().await? {
                 file.write_all(&chunk).await.map_err(|error| {
                     HelixDbError::Config(format!(
@@ -824,12 +870,13 @@ impl FtsCache {
                 ))
             })?;
             drop(file);
-            self.validate_artifact(staging.clone(), split.clone(), key)
-                .await?;
+            // Always hashed in full, never vouched for by `validated`: a
+            // concurrent open may have recorded this key for another
+            // handle's published copy, which says nothing about this file.
+            verify_artifact(staging.clone(), split.clone()).await?;
             let published = match tokio_fs::rename(&staging, &final_path).await {
                 Ok(()) => true,
                 Err(error) if tokio_fs::try_exists(&final_path).await.unwrap_or(false) => {
-                    let _ = tokio_fs::remove_file(&staging).await;
                     tracing::debug!(%error, "FTS artifact won publication race");
                     false
                 }
@@ -843,6 +890,7 @@ impl FtsCache {
             };
             sync_parent(final_path.clone()).await?;
             if published {
+                self.validated.lock().insert(key);
                 let size = tokio_fs::metadata(&final_path)
                     .await
                     .map_err(|error| HelixDbError::Config(error.to_string()))?
@@ -855,53 +903,116 @@ impl FtsCache {
             Ok(split.blob.size_bytes)
         }
         .await;
-        if result.is_err() {
-            let _ = tokio_fs::remove_file(&staging).await;
-        }
         drop(guard);
         self.hydration_inflight.remove(&split.blob.sha256);
         result
     }
 
-    async fn cleanup_disk(&self) -> Result<(), HelixDbError> {
-        let Some(disk) = self.config.disk() else {
+    /// Evicts the least recently used disk artifacts down to the disk budget,
+    /// skipping leased ones and any used within the grace period. First it
+    /// removes staging files older than [`STAGING_ORPHAN_AGE`], which only
+    /// a killed process leaves behind.
+    ///
+    /// Runs on the blocking pool, because each eviction unlinks
+    /// synchronously while it holds the lease lock. Aborting the calling task
+    /// does not stop that work, so it holds the cleanup lock until it ends:
+    /// [`Self::close`] waits for it, and once closed no cleanup runs.
+    pub(crate) async fn cleanup_disk(self: &Arc<Self>) -> Result<(), HelixDbError> {
+        let (Some(disk), Some(blob_dir), Some(staging_dir)) =
+            (self.config.disk(), self.blob_dir(), self.staging_dir())
+        else {
             return Ok(());
         };
-        let Some(blob_dir) = self.blob_dir() else {
-            return Ok(());
-        };
-        let entries = read_disk_entries(&blob_dir, self.metadata_dir().as_deref()).await?;
-        let mut total = entries.iter().map(|entry| entry.size).sum::<u64>();
-        if total <= disk.bytes() as u64 {
+        let cleanup = Arc::clone(&self.cleanup).lock_owned().await;
+        if *cleanup == DiskCleanup::Closed {
             return Ok(());
         }
-        let now = SystemTime::now();
-        let leased = self.artifact_leases.lock().clone();
-        for entry in entries {
-            if total <= disk.bytes() as u64 {
-                break;
+        let budget = disk.bytes() as u64;
+        let cache = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let _cleanup = cleanup;
+            let now = SystemTime::now();
+            fs::read_dir(&staging_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().is_some_and(|extension| extension == "tmp")
+                        && fs::metadata(path)
+                            .and_then(|metadata| metadata.modified())
+                            .is_ok_and(|modified| {
+                                now.duration_since(modified).unwrap_or_default()
+                                    >= STAGING_ORPHAN_AGE
+                            })
+                })
+                .for_each(|path| {
+                    let _ = fs::remove_file(path);
+                });
+
+            let entries = read_disk_entries(&blob_dir, cache.metadata_dir().as_deref())?;
+            let mut total = entries.iter().map(|entry| entry.size).sum::<u64>();
+            for entry in entries {
+                if total <= budget {
+                    break;
+                }
+                if now.duration_since(entry.last_access).unwrap_or_default()
+                    < cache.config.generation_grace_period()
+                {
+                    continue;
+                }
+                #[cfg(test)]
+                {
+                    if let Some(hook) = cache.before_eviction.lock().as_mut() {
+                        hook(entry.sha256);
+                    }
+                }
+                // The lease check and the unlinks happen under the lease
+                // lock, which `DiskArtifactLease::acquire` also takes. A
+                // reader that leases this artifact at any point either
+                // finds it gone at its first check, a plain miss, or has
+                // its lease seen here. A copy of the leases taken earlier
+                // would miss a later lease and delete the file while it is
+                // hashed or opened.
+                let removed = {
+                    let leases = cache.artifact_leases.lock();
+                    if leases.contains_key(&entry.sha256) {
+                        continue;
+                    }
+                    let removed = fs::remove_file(&entry.path);
+                    if removed.is_ok()
+                        && let Some(metadata) = cache.metadata_path(entry.sha256)
+                    {
+                        let _ = fs::remove_file(metadata);
+                    }
+                    removed
+                };
+                match removed {
+                    Ok(()) => {
+                        atomic_saturating_sub(&cache.disk_artifact_count, 1);
+                        atomic_saturating_sub(&cache.disk_artifact_bytes, entry.size);
+                        cache.stats.disk_evictions.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Another trim listed it too and evicted it first, so
+                    // that trim counts the eviction; this one carries on.
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(HelixDbError::Config(format!(
+                            "failed to evict FTS artifact '{}': {error}",
+                            entry.path.display()
+                        )));
+                    }
+                }
+                cache
+                    .validated
+                    .lock()
+                    .retain(|key| key.sha256 != entry.sha256);
+                total = total.saturating_sub(entry.size);
             }
-            if leased.contains_key(&entry.sha256)
-                || now.duration_since(entry.last_access).unwrap_or_default()
-                    < self.config.generation_grace_period()
-            {
-                continue;
-            }
-            tokio_fs::remove_file(&entry.path).await.map_err(|error| {
-                HelixDbError::Config(format!(
-                    "failed to evict FTS artifact '{}': {error}",
-                    entry.path.display()
-                ))
-            })?;
-            atomic_saturating_sub(&self.disk_artifact_count, 1);
-            atomic_saturating_sub(&self.disk_artifact_bytes, entry.size);
-            if let Some(metadata) = self.metadata_path(entry.sha256) {
-                let _ = tokio_fs::remove_file(metadata).await;
-            }
-            total = total.saturating_sub(entry.size);
-            self.stats.disk_evictions.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|error| HelixDbError::Config(format!("FTS disk cleanup task failed: {error}")))?
     }
 
     async fn note_access(&self, sha256: [u8; 32], size: u64) {
@@ -1022,6 +1133,43 @@ fn open_entry_from_directory(
     })
 }
 
+/// Checks a split file's bundle layout and its full SHA-256.
+async fn verify_artifact(path: PathBuf, split: TextSplitRef) -> Result<(), HelixDbError> {
+    tokio::task::spawn_blocking(move || {
+        validate_split_bundle_file(&path, &split)?;
+        let mut file = fs::File::open(&path).map_err(|error| {
+            HelixDbError::Config(format!(
+                "failed to hash FTS artifact '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| {
+                HelixDbError::Config(format!(
+                    "failed to hash FTS artifact '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        let actual: [u8; 32] = digest.finalize().into();
+        if actual != split.blob.sha256 {
+            return Err(HelixDbError::Config(format!(
+                "cached FTS split '{}' hash mismatch",
+                path.display()
+            )));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| HelixDbError::Config(format!("FTS validation task failed: {error}")))?
+}
+
 fn split_range_cache(size_bytes: u64) -> Result<RangeCache<PathBuf>, HelixDbError> {
     let cache_bytes = usize::try_from(size_bytes)
         .map_err(|_| HelixDbError::Config("text split size exceeds platform limits".into()))?;
@@ -1037,52 +1185,45 @@ struct DiskEntry {
     last_access: SystemTime,
 }
 
-async fn read_disk_entries(
+fn read_disk_entries(
     blob_dir: &Path,
     metadata_dir: Option<&Path>,
 ) -> Result<Vec<DiskEntry>, HelixDbError> {
-    let blob_dir = blob_dir.to_path_buf();
-    let metadata_dir = metadata_dir.map(Path::to_path_buf);
-    tokio::task::spawn_blocking(move || {
-        let mut entries = Vec::new();
-        for entry in fs::read_dir(&blob_dir).map_err(|error| {
-            HelixDbError::Config(format!(
-                "failed to scan FTS cache '{}': {error}",
-                blob_dir.display()
-            ))
-        })? {
-            let entry = entry.map_err(|error| HelixDbError::Config(error.to_string()))?;
-            let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            let Some(sha256) = parse_sha(stem) else {
-                continue;
-            };
-            let size = entry
-                .metadata()
-                .map_err(|error| HelixDbError::Config(error.to_string()))?
-                .len();
-            let metadata = metadata_dir
-                .as_ref()
-                .map(|dir| dir.join(format!("{stem}.json")))
-                .and_then(|path| fs::read(path).ok())
-                .and_then(|bytes| serde_json::from_slice::<ArtifactMetadata>(&bytes).ok());
-            let last_access = metadata
-                .map(|metadata| UNIX_EPOCH + Duration::from_millis(metadata.last_access_unix_ms))
-                .unwrap_or(UNIX_EPOCH);
-            entries.push(DiskEntry {
-                sha256,
-                path,
-                size,
-                last_access,
-            });
-        }
-        entries.sort_by_key(|entry| entry.last_access);
-        Ok(entries)
-    })
-    .await
-    .map_err(|error| HelixDbError::Config(format!("FTS disk scan task failed: {error}")))?
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(blob_dir).map_err(|error| {
+        HelixDbError::Config(format!(
+            "failed to scan FTS cache '{}': {error}",
+            blob_dir.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| HelixDbError::Config(error.to_string()))?;
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(sha256) = parse_sha(stem) else {
+            continue;
+        };
+        let size = entry
+            .metadata()
+            .map_err(|error| HelixDbError::Config(error.to_string()))?
+            .len();
+        let metadata = metadata_dir
+            .map(|dir| dir.join(format!("{stem}.json")))
+            .and_then(|path| fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<ArtifactMetadata>(&bytes).ok());
+        let last_access = metadata
+            .map(|metadata| UNIX_EPOCH + Duration::from_millis(metadata.last_access_unix_ms))
+            .unwrap_or(UNIX_EPOCH);
+        entries.push(DiskEntry {
+            sha256,
+            path,
+            size,
+            last_access,
+        });
+    }
+    entries.sort_by_key(|entry| entry.last_access);
+    Ok(entries)
 }
 
 fn disk_usage_sync(root: Option<&Path>) -> Result<(u64, u64), HelixDbError> {
@@ -1172,11 +1313,20 @@ mod tests {
     use super::*;
     use crate::search::text::{build_split_bundle, TextBlobRef};
     use bytes::Bytes;
-    use slatedb::object_store::{memory::InMemory, PutPayload};
+    use futures::stream::BoxStream;
+    use slatedb::object_store::path::Path as ObjectPath;
+    use slatedb::object_store::throttle::{ThrottleConfig, ThrottledStore};
+    use slatedb::object_store::{
+        memory::InMemory, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload,
+        ObjectMeta, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        Result as ObjectStoreResult,
+    };
+    use std::fmt;
     use tantivy::schema::{
         IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions,
     };
     use tantivy::{doc, Index};
+    use tokio::sync::{Notify, Semaphore};
 
     fn split(seed: u8) -> TextSplitRef {
         TextSplitRef {
@@ -1280,6 +1430,81 @@ mod tests {
             )
             .await
             .expect("put split");
+    }
+
+    /// Holds every read until the test adds a permit to `gate`, so a
+    /// hydration can be paused mid-download at a known point.
+    #[derive(Debug)]
+    struct GatedStore {
+        inner: InMemory,
+        reading: Notify,
+        gate: Semaphore,
+    }
+
+    impl fmt::Display for GatedStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("gated-memory")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for GatedStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> ObjectStoreResult<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            options: PutMultipartOptions,
+        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> ObjectStoreResult<GetResult> {
+            self.reading.notify_one();
+            let _permit = self.gate.acquire().await.expect("the gate is never closed");
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, ObjectStoreResult<ObjectPath>>,
+        ) -> BoxStream<'static, ObjectStoreResult<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> ObjectStoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: CopyOptions,
+        ) -> ObjectStoreResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
     }
 
     #[test]
@@ -1476,6 +1701,501 @@ mod tests {
         drop(lease);
     }
 
+    /// A restarted cache hashes an artifact on first use. Eviction running
+    /// meanwhile, with the artifact over budget and never recorded as used,
+    /// must skip it as leased rather than delete it mid-validation.
+    #[tokio::test]
+    async fn cleanup_spares_artifacts_while_they_are_validated() {
+        let database = "fts-cache-validation-lease";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(17);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let restarted = || {
+            cache(
+                database,
+                Arc::clone(&store),
+                Some(disk.path().to_path_buf()),
+                split.total_size_bytes,
+                split.total_size_bytes - 1,
+                Duration::from_secs(1),
+            )
+        };
+        let publisher = restarted();
+        publisher
+            .ensure_artifact(&split)
+            .await
+            .expect("first hydration");
+        let metadata = publisher
+            .metadata_path(split.blob.sha256)
+            .expect("metadata path");
+
+        tokio_fs::remove_file(&metadata)
+            .await
+            .expect("forget the first use");
+        let opening = restarted();
+        let (opened, cleanup) =
+            tokio::join!(opening.get_or_open_split(&split), opening.cleanup_disk());
+        assert_eq!(opened.expect("disk open").total_docs(), 1);
+        cleanup.expect("cleanup");
+        let state = opening.snapshot();
+        assert_eq!(
+            (
+                state.disk_hits,
+                state.disk_corruptions,
+                state.disk_evictions
+            ),
+            (1, 0, 0)
+        );
+
+        tokio_fs::remove_file(&metadata)
+            .await
+            .expect("forget the disk open");
+        let hydrating = restarted();
+        let (reused, cleanup) =
+            tokio::join!(hydrating.ensure_artifact(&split), hydrating.cleanup_disk());
+        assert_eq!(
+            reused.expect("reuse"),
+            0,
+            "the artifact is not downloaded again"
+        );
+        cleanup.expect("cleanup");
+        assert_eq!(hydrating.snapshot().disk_evictions, 0);
+        assert!(tokio_fs::try_exists(
+            hydrating
+                .artifact_path(split.blob.sha256)
+                .expect("artifact path")
+        )
+        .await
+        .expect("artifact status"));
+    }
+
+    /// Cleanup checks each lease as it unlinks that artifact, so a lease
+    /// taken after cleanup listed its victims, here while it evicts an
+    /// older one, still keeps the artifact for the open that took it.
+    #[tokio::test]
+    async fn cleanup_spares_artifacts_leased_after_its_scan() {
+        let database = "fts-cache-late-lease";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(20);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            1,
+            Duration::from_secs(1),
+        );
+        cache
+            .ensure_artifact(&split)
+            .await
+            .expect("first hydration");
+        let older = [0xa0; 32];
+        tokio_fs::write(cache.artifact_path(older).expect("older path"), b"aa")
+            .await
+            .expect("older artifact");
+        for (last_access_unix_ms, (hash, size_bytes)) in
+            [(older, 2), (split.blob.sha256, split.blob.size_bytes)]
+                .into_iter()
+                .enumerate()
+        {
+            let metadata = serde_json::to_vec(&ArtifactMetadata {
+                size_bytes,
+                last_access_unix_ms: last_access_unix_ms as u64,
+            })
+            .expect("serialize metadata");
+            tokio_fs::write(cache.metadata_path(hash).expect("metadata path"), metadata)
+                .await
+                .expect("write metadata");
+        }
+        let late_lease = Arc::new(Mutex::new(None));
+        *cache.before_eviction.lock() = Some(Box::new({
+            let leases = Arc::clone(&cache.artifact_leases);
+            let late_lease = Arc::clone(&late_lease);
+            move |sha256| {
+                if sha256 == split.blob.sha256 {
+                    *late_lease.lock() = Some(DiskArtifactLease::acquire(sha256, &leases));
+                }
+            }
+        }));
+
+        cache.cleanup_disk().await.expect("cleanup");
+        assert!(
+            late_lease.lock().is_some(),
+            "cleanup reached the split after evicting the older artifact"
+        );
+        let opened = cache.get_or_open_split(&split).await.expect("disk open");
+        assert_eq!(opened.total_docs(), 1);
+        let state = cache.snapshot();
+        assert_eq!(
+            (
+                state.disk_hits,
+                state.disk_corruptions,
+                state.disk_evictions
+            ),
+            (1, 0, 1),
+            "only the older artifact is evicted"
+        );
+    }
+
+    /// Concurrent trims, such as the startup trim and one after an
+    /// admission, can list the same victim. The one that finds it already
+    /// gone neither fails nor counts it, and still trims to the budget.
+    #[tokio::test]
+    async fn cleanup_continues_past_artifacts_another_trim_evicted() {
+        let database = "fts-cache-concurrent-trims";
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            Arc::new(InMemory::new()),
+            Some(disk.path().to_path_buf()),
+            1,
+            2,
+            Duration::from_secs(1),
+        );
+        let [gone, evicted, kept] = [[0xb0; 32], [0xb1; 32], [0xb2; 32]];
+        for (last_access_unix_ms, hash) in [gone, evicted, kept].into_iter().enumerate() {
+            tokio_fs::write(cache.artifact_path(hash).expect("artifact path"), b"aa")
+                .await
+                .expect("artifact");
+            let metadata = serde_json::to_vec(&ArtifactMetadata {
+                size_bytes: 2,
+                last_access_unix_ms: last_access_unix_ms as u64,
+            })
+            .expect("serialize metadata");
+            tokio_fs::write(cache.metadata_path(hash).expect("metadata path"), metadata)
+                .await
+                .expect("write metadata");
+        }
+        *cache.before_eviction.lock() = Some(Box::new({
+            let other_trim = [
+                cache.artifact_path(gone).expect("artifact path"),
+                cache.metadata_path(gone).expect("metadata path"),
+            ];
+            move |sha256| {
+                if sha256 == gone {
+                    for path in &other_trim {
+                        fs::remove_file(path).expect("the other trim evicts it first");
+                    }
+                }
+            }
+        }));
+
+        cache
+            .cleanup_disk()
+            .await
+            .expect("a victim that is already gone does not fail the trim");
+        let remaining = [gone, evicted, kept].map(|hash| {
+            cache
+                .artifact_path(hash)
+                .expect("artifact path")
+                .try_exists()
+                .expect("artifact status")
+        });
+        assert_eq!(remaining, [false, false, true]);
+        assert_eq!(cache.snapshot().disk_evictions, 1);
+    }
+
+    /// Shutdown aborts a trim's task but not the blocking eviction it
+    /// started. Close waits for that eviction, so its caller can release the
+    /// cache directory, and no trim runs once the cache is closed.
+    #[tokio::test]
+    async fn close_waits_for_an_aborted_trim_and_stops_later_ones() {
+        let database = "fts-cache-close-aborted-trim";
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            Arc::new(InMemory::new()),
+            Some(disk.path().to_path_buf()),
+            1,
+            2,
+            Duration::from_secs(1),
+        );
+        let [evicted, kept, late] = [[0xc0; 32], [0xc1; 32], [0xc2; 32]];
+        for (last_access_unix_ms, hash) in [evicted, kept].into_iter().enumerate() {
+            tokio_fs::write(cache.artifact_path(hash).expect("artifact path"), b"aa")
+                .await
+                .expect("artifact");
+            let metadata = serde_json::to_vec(&ArtifactMetadata {
+                size_bytes: 2,
+                last_access_unix_ms: last_access_unix_ms as u64,
+            })
+            .expect("serialize metadata");
+            tokio_fs::write(cache.metadata_path(hash).expect("metadata path"), metadata)
+                .await
+                .expect("write metadata");
+        }
+        let (entered, entered_signal) = std::sync::mpsc::channel();
+        let (release, release_signal) = std::sync::mpsc::channel::<()>();
+        *cache.before_eviction.lock() = Some(Box::new(move |_| {
+            let _ = entered.send(());
+            let _ = release_signal.recv();
+        }));
+
+        let trim = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move { cache.cleanup_disk().await }
+        });
+        tokio::task::spawn_blocking(move || entered_signal.recv())
+            .await
+            .expect("wait for the eviction")
+            .expect("the trim reached its eviction");
+        trim.abort();
+        assert!(trim
+            .await
+            .expect_err("the trim task was aborted")
+            .is_cancelled());
+
+        let closing = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move { cache.close().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let evicted_path = cache.artifact_path(evicted).expect("artifact path");
+        assert!(
+            !closing.is_finished(),
+            "close waits for the blocked eviction"
+        );
+        assert!(evicted_path.try_exists().expect("artifact status"));
+
+        release.send(()).expect("release the eviction");
+        drop(release);
+        closing.await.expect("close");
+        assert!(
+            !evicted_path.try_exists().expect("artifact status"),
+            "the eviction ended before close returned"
+        );
+        assert_eq!(cache.snapshot().disk_evictions, 1);
+
+        let late_path = cache.artifact_path(late).expect("artifact path");
+        tokio_fs::write(&late_path, b"aa")
+            .await
+            .expect("artifact over budget");
+        cache.cleanup_disk().await.expect("cleanup after close");
+        assert!(late_path.try_exists().expect("artifact status"));
+        assert_eq!(cache.snapshot().disk_evictions, 1);
+    }
+
+    /// Validation is remembered per key, but only while the validated file
+    /// stays published: after an eviction, by this cache or another on the
+    /// same directory, the next copy is hashed in full.
+    #[tokio::test]
+    async fn evicted_splits_are_hashed_in_full_again() {
+        let database = "fts-cache-evicted-rehash";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(18);
+        let mut corrupt = bytes.clone();
+        // Outside the footer, so only the hash can tell.
+        corrupt[0] ^= 0xff;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let open_cache = || {
+            cache(
+                database,
+                Arc::clone(&store),
+                Some(disk.path().to_path_buf()),
+                split.total_size_bytes,
+                split.total_size_bytes - 1,
+                Duration::from_secs(1),
+            )
+        };
+        let (hydrating, evicting) = (open_cache(), open_cache());
+        let artifact = hydrating
+            .artifact_path(split.blob.sha256)
+            .expect("artifact path");
+        let metadata = hydrating
+            .metadata_path(split.blob.sha256)
+            .expect("metadata path");
+
+        put_split(&store, database, bytes.clone(), &split).await;
+        hydrating
+            .ensure_artifact(&split)
+            .await
+            .expect("first hydration");
+        tokio_fs::remove_file(&metadata)
+            .await
+            .expect("forget the use");
+        evicting.cleanup_disk().await.expect("cleanup");
+        assert_eq!(evicting.snapshot().disk_evictions, 1);
+        put_split(&store, database, corrupt.clone(), &split).await;
+        assert!(
+            hydrating.ensure_artifact(&split).await.is_err(),
+            "a corrupt download is rejected after another cache's eviction"
+        );
+        assert!(!tokio_fs::try_exists(&artifact)
+            .await
+            .expect("artifact status"));
+
+        put_split(&store, database, bytes, &split).await;
+        hydrating
+            .ensure_artifact(&split)
+            .await
+            .expect("second hydration");
+        tokio_fs::remove_file(&metadata)
+            .await
+            .expect("forget the use");
+        hydrating.cleanup_disk().await.expect("cleanup");
+        tokio_fs::write(&artifact, corrupt)
+            .await
+            .expect("corrupt artifact of the same length");
+        let opened = hydrating
+            .get_or_open_split(&split)
+            .await
+            .expect("remote fallback");
+        assert_eq!(opened.total_docs(), 1);
+        let state = hydrating.snapshot();
+        assert_eq!(
+            (state.disk_evictions, state.disk_corruptions),
+            (1, 1),
+            "a file reappearing after this cache's own eviction is hashed"
+        );
+    }
+
+    /// Another handle on the same directory can publish a split while this
+    /// cache downloads it, and an open here then records the split's key as
+    /// hashed. That record vouches for the other handle's copy only, so the
+    /// download is still hashed in full: a corrupt copy of the same length
+    /// is rejected and the published copy stays.
+    #[tokio::test]
+    async fn downloads_are_hashed_in_full_after_a_concurrent_open() {
+        let database = "fts-cache-staging-rehash";
+        let (bytes, split) = valid_split(21);
+        let mut corrupt = bytes.clone();
+        // Outside the footer, so only the hash can tell.
+        corrupt[0] ^= 0xff;
+        let gated = Arc::new(GatedStore {
+            inner: InMemory::new(),
+            reading: Notify::new(),
+            gate: Semaphore::new(0),
+        });
+        let gated_store: Arc<dyn ObjectStore> = Arc::<GatedStore>::clone(&gated);
+        put_split(&gated_store, database, corrupt, &split).await;
+        let valid_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        put_split(&valid_store, database, bytes.clone(), &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let open_cache = |store: Arc<dyn ObjectStore>| {
+            cache(
+                database,
+                store,
+                Some(disk.path().to_path_buf()),
+                split.total_size_bytes,
+                split.total_size_bytes * 2,
+                Duration::from_secs(1),
+            )
+        };
+        let (downloading, other_handle) = (open_cache(gated_store), open_cache(valid_store));
+
+        let (download, ()) = tokio::join!(downloading.ensure_artifact(&split), async {
+            gated.reading.notified().await;
+            other_handle
+                .ensure_artifact(&split)
+                .await
+                .expect("the other handle publishes");
+            downloading
+                .get_or_open_split(&split)
+                .await
+                .expect("disk open of the published copy");
+            gated.gate.add_permits(1);
+        });
+        assert!(download.is_err(), "the corrupt download is rejected");
+        let published = tokio_fs::read(
+            downloading
+                .artifact_path(split.blob.sha256)
+                .expect("artifact path"),
+        )
+        .await
+        .expect("published artifact");
+        assert!(published == bytes, "the published copy stays");
+        assert_eq!(downloading.snapshot().disk_hits, 1);
+    }
+
+    /// Closing the cache aborts a hydration that is still downloading; the
+    /// partial download must not stay behind in `staging/`.
+    #[tokio::test]
+    async fn aborted_hydration_leaves_no_staging_file() {
+        let database = "fts-cache-aborted-hydration";
+        // Holds each chunk back a second per byte, so the download stalls
+        // once its staging file exists.
+        let store: Arc<dyn ObjectStore> = Arc::new(ThrottledStore::new(
+            InMemory::new(),
+            ThrottleConfig {
+                wait_get_per_byte: Duration::from_secs(1),
+                ..ThrottleConfig::default()
+            },
+        ));
+        let (bytes, split) = valid_split(19);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.total_size_bytes * 2,
+            Duration::from_secs(1),
+        );
+        let staging = cache.staging_dir().expect("staging directory");
+        let staged = || fs::read_dir(&staging).expect("staging directory").count();
+
+        for _ in 0..2 {
+            cache.after_successful_search(split.clone()).await;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while staged() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the download creates its staging file");
+        cache.close().await;
+        assert_eq!(staged(), 0, "closing removed the partial download");
+        let state = cache.snapshot();
+        assert_eq!(
+            (
+                state.hydration_attempts,
+                state.hydration_completions,
+                state.disk_artifact_count
+            ),
+            (1, 0, 0)
+        );
+    }
+
+    /// A process killed mid-download leaves its staging file behind. A trim
+    /// removes one nothing has written to for an hour, even with the blobs
+    /// under budget, and keeps a younger one a download may still own.
+    #[tokio::test]
+    async fn cleanup_removes_only_abandoned_staging_files() {
+        let database = "fts-cache-staging-sweep";
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            Arc::new(InMemory::new()),
+            Some(disk.path().to_path_buf()),
+            1,
+            1,
+            Duration::from_secs(1),
+        );
+        let staging = cache.staging_dir().expect("staging directory");
+        let [abandoned, in_flight] =
+            ["abandoned", "in-flight"].map(|name| staging.join(format!("{name}.tmp")));
+        for path in [&abandoned, &in_flight] {
+            fs::write(path, b"partial").expect("staging file");
+        }
+        fs::File::options()
+            .write(true)
+            .open(&abandoned)
+            .and_then(|file| {
+                file.set_modified(SystemTime::now() - STAGING_ORPHAN_AGE - Duration::from_secs(60))
+            })
+            .expect("age the abandoned download");
+
+        cache.cleanup_disk().await.expect("cleanup");
+        let remaining =
+            [&abandoned, &in_flight].map(|path| path.try_exists().expect("staging status"));
+        assert_eq!(remaining, [false, true]);
+    }
+
     #[tokio::test]
     async fn oversized_memory_entries_remain_usable_without_retention() {
         let database = "fts-cache-oversized-memory";
@@ -1601,6 +2321,52 @@ mod tests {
         })
         .await
         .expect("second success hydrates");
+        cache.close().await;
+    }
+
+    #[tokio::test]
+    async fn splits_larger_than_the_disk_tier_are_never_admitted() {
+        let database = "fts-cache-oversized-disk";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(16);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.blob.size_bytes - 1,
+            Duration::from_secs(1),
+        );
+
+        for _ in 0..2 {
+            cache.after_successful_search(split.clone()).await;
+        }
+        assert!(
+            cache.tasks.lock().await.is_empty(),
+            "a second search schedules no hydration"
+        );
+        let warmed = cache.warm_splits(1, vec![split.clone()]).await;
+        assert_eq!(
+            (
+                warmed.opened_splits,
+                warmed.hydrated_splits,
+                warmed.warm_errors
+            ),
+            (1, 0, 0),
+            "the warm still opens the split remotely"
+        );
+        let state = cache.snapshot();
+        assert_eq!(state.hydration_attempts, 0);
+        assert_eq!(state.disk_artifact_count, 0);
+        assert!(!tokio_fs::try_exists(
+            cache
+                .artifact_path(split.blob.sha256)
+                .expect("artifact path")
+        )
+        .await
+        .expect("artifact status"));
         cache.close().await;
     }
 

@@ -1,19 +1,54 @@
 ---
 title: "helix shell"
+sidebarTitle: "shell"
 description: "Run line-oriented Helix v3 JSON requests"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+Open an interactive prompt that sends one v3 JSON query request per line to a local instance or a
+Helix Cloud database. Local and Cloud.
+
+## Usage
+
 ```bash
 helix shell [INSTANCE] [--compact]
 ```
 
-Enter one complete v3 query request per line. Use `:quit` or `:exit` to stop. The request's
-`request_type` selects read or write execution.
+## Arguments
 
-Local instances use the existing auth-disabled local endpoint. With no target, the CLI uses local
-`dev` or the sole linked instance; ambiguous projects must specify an instance or an explicit
-`tenant:<id>` / `cluster:<id>` reference. Cloud requests use the backend query broker and the current
-WorkOS session; the CLI never contacts the Cloud gateway directly.
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Instance name from `helix.toml`, or an explicit `tenant:<id>` / `cluster:<id>` reference. Defaults to `dev` or the sole linked instance. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--compact` | Print compact single-line JSON responses. | Off (pretty-printed) |
+
+## Behavior
+
+- Enter one complete v3 query request per line at the `helix>` prompt. The request's `request_type` selects read or write execution.
+- Use `:quit` or `:exit` (or `quit`, `exit`, or end of input) to stop.
+- Blank lines are ignored. Invalid JSON and query errors are printed, and the shell keeps running.
+- With no target, the CLI uses the `dev` instance (local or Cloud) or the sole linked instance; ambiguous projects must specify an instance or an explicit `tenant:<id>` / `cluster:<id>` reference.
+- Local instances use the existing auth-disabled local endpoint.
+- Cloud requests use the backend query broker (the Helix Cloud service that forwards CLI queries) and the current WorkOS session; the CLI never contacts the Cloud gateway (the database endpoint that applications use) directly.
+
+## Examples
+
+```bash
+# Open a shell against the local 'dev' instance
+helix shell dev
+
+# Run newline-delimited requests from a file
+helix shell dev --compact < requests.jsonl
+```
+
+## Related
+
+- [`helix query`](/cli/command-reference/query) — send one request, including TypeScript DSL input.
+- [Local workflow](/cli/workflows/local) — iterate on queries locally.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — query a Cloud database.

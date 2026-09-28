@@ -9,6 +9,7 @@ use futures::FutureExt;
 use helix_planner::{exec, properties};
 
 use super::super::ExecutionContext;
+use crate::encoding::v2::values::property::equality_index_value;
 use crate::error::Result;
 
 enum SecondaryIds {
@@ -34,7 +35,7 @@ impl SecondaryIds {
 }
 
 impl<'db> ExecutionContext<'db> {
-    pub(super) async fn node_secondary_set_ids(
+    pub(in crate::execution::interpreter) async fn node_secondary_set_ids(
         &self,
         set: &exec::ExecNodeSecondarySetPlan,
         limit: Option<properties::PositiveUsize>,
@@ -44,7 +45,71 @@ impl<'db> ExecutionContext<'db> {
             .map(|ids| ids.into_vec(limit))
     }
 
-    pub(super) async fn edge_secondary_set_ids(
+    /// Resolve a node secondary set to an unordered ID bitmap.
+    pub(in crate::execution::interpreter) async fn node_secondary_set_bitmap(
+        &self,
+        set: &exec::ExecNodeSecondarySetPlan,
+    ) -> Result<roaring::RoaringTreemap> {
+        self.node_secondary_ids(set, None)
+            .await
+            .map(SecondaryIds::into_bitmap)
+    }
+
+    /// Whether `set` resolves from index reads alone in this request.
+    ///
+    /// Literal null equality, runtime parameters that bind null or values
+    /// without an exact index encoding, and runtime domains over their bound
+    /// all require an authoritative keyspace scan, so they return `false`.
+    /// Range scans verify every in-range record of the label with its own
+    /// authoritative read, and runtime bounds may have no range encoding at
+    /// all, so any set with a range scan returns `false` as well.
+    ///
+    /// An unbound runtime parameter also returns `false`: the per-row filter
+    /// reads a parameter only for rows that reach it, so the request must fail
+    /// only when such a row exists, not when the set is resolved up front.
+    pub(in crate::execution::interpreter) fn node_secondary_set_is_index_served(
+        &self,
+        set: &exec::ExecNodeSecondarySetPlan,
+    ) -> Result<bool> {
+        match set {
+            exec::ExecNodeSecondarySetPlan::Empty
+            | exec::ExecNodeSecondarySetPlan::Bitmap(_)
+            | exec::ExecNodeSecondarySetPlan::UniqueUnion { .. }
+            | exec::ExecNodeSecondarySetPlan::Unique { .. } => Ok(true),
+            exec::ExecNodeSecondarySetPlan::AuthoritativeScan(_)
+            | exec::ExecNodeSecondarySetPlan::Range(_)
+            | exec::ExecNodeSecondarySetPlan::OrderedIntersect { .. } => Ok(false),
+            exec::ExecNodeSecondarySetPlan::DynamicEquality { param, .. } => {
+                let Ok(value) = self.param_value(param) else {
+                    return Ok(false);
+                };
+                Ok(matches!(
+                    equality_index_value::project_equality_value(&value),
+                    equality_index_value::EqualityValueProjection::Indexed(_)
+                        | equality_index_value::EqualityValueProjection::NonReflexive
+                ))
+            }
+            exec::ExecNodeSecondarySetPlan::DynamicMembership { values, .. } => {
+                let Ok(domain) = self.runtime_equality_domain(values) else {
+                    return Ok(false);
+                };
+                Ok(matches!(
+                    domain,
+                    super::membership::RuntimeEqualityDomain::Indexed(_)
+                ))
+            }
+            exec::ExecNodeSecondarySetPlan::Intersect { driver, rest }
+            | exec::ExecNodeSecondarySetPlan::Union { driver, rest } => {
+                core::iter::once(driver.as_ref())
+                    .chain(rest.iter())
+                    .try_fold(true, |served, child| {
+                        Ok(served && self.node_secondary_set_is_index_served(child)?)
+                    })
+            }
+        }
+    }
+
+    pub(in crate::execution::interpreter) async fn edge_secondary_set_ids(
         &self,
         set: &exec::ExecEdgeSecondarySetPlan,
         limit: Option<properties::PositiveUsize>,

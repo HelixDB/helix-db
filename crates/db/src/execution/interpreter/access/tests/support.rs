@@ -12,7 +12,6 @@ use slatedb::IsolationLevel;
 
 pub(super) use super::super::super::test_support;
 pub(super) use super::super::super::{ExecutionScalar, ExecutionValue};
-pub(super) use super::super::indexes::limited_index_ids;
 pub(super) use super::super::search::{
     db_value_to_query_vector, limited_search_k, validate_query_vector,
     validate_vector_search_tenant,

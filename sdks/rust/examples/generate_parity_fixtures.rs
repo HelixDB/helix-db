@@ -2419,10 +2419,7 @@ fn runtime_fixtures() -> Vec<Fixture> {
                         g().e_with_label("FOLLOWS")
                             .where_(Predicate::eq("note", "dropitemedge")),
                     )
-                    .var_as(
-                        "edges",
-                        g().drop_edge_by_id(EdgeRef::var("edge_matches")).count(),
-                    )
+                    .var_as("edges", g().e(EdgeRef::var("edge_matches")).drop().count())
                     .var_as(
                         "source",
                         g().n_with_label("ParityUser")

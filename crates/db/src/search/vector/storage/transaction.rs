@@ -536,17 +536,30 @@ impl VectorWriteState {
     }
 
     /// Captures one sorted plan and its measurement under the same state lock.
+    ///
+    /// Only keys whose final write is newer than `checkpoint` are visited, so
+    /// successive per-entity plans cost their own write count rather than the
+    /// cumulative batch size. The revision index holds each final key exactly
+    /// once; sorting restores the deterministic encoded-key plan order.
     fn plan_after(
         &self,
         checkpoint: &VectorWriteCheckpoint,
     ) -> Result<PlannedVectorMutation, VectorWriteMeasurementError> {
+        let mut touched = self
+            .writes_by_revision
+            .range((Bound::Excluded(checkpoint.revision), Bound::Unbounded))
+            .map(|(_, key)| {
+                let write = self
+                    .writes
+                    .get(key)
+                    .expect("revision index references one final vector write");
+                (key, write)
+            })
+            .collect::<Vec<_>>();
+        touched.sort_unstable_by_key(|&(key, _)| key);
         let mut measurement = VectorWriteMeasurement::zero();
-        let mut planned = Vec::new();
-        for (key, write) in self
-            .writes
-            .iter()
-            .filter(|(_, write)| write.revision > checkpoint.revision)
-        {
+        let mut planned = Vec::with_capacity(touched.len());
+        for (key, write) in touched {
             let key_bytes = u64::try_from(key.len())
                 .map_err(|_| VectorWriteMeasurementError::ArithmeticOverflow)?;
             let planned_write = match &write.kind {
@@ -783,6 +796,73 @@ mod tests {
             plan.writes.last(),
             Some(PlannedVectorWrite::Put { value, .. }) if value.as_ref() == b"final"
         ));
+    }
+
+    proptest::proptest! {
+        /// The revision-range plan equals a brute-force last-write-wins model
+        /// for every checkpoint, including keys rewritten across checkpoints.
+        #[test]
+        fn revision_range_plans_match_the_last_write_wins_model(
+            operations in proptest::collection::vec((0_u8..6, 0_u8..3, proptest::bool::ANY), 0..64),
+            checkpoint_positions in proptest::collection::vec(0_usize..65, 1..6),
+        ) {
+            let mut state = VectorWriteState::default();
+            let mut model = Vec::<(u64, Bytes, Option<Bytes>)>::new();
+            let mut checkpoints = Vec::new();
+            for (position, (key, value, delete)) in operations.iter().copied().enumerate() {
+                if checkpoint_positions.contains(&position) {
+                    checkpoints.push(state.revision);
+                }
+                let key = Bytes::from(vec![b'k', key]);
+                let kind = if delete {
+                    FinalVectorWriteKind::Delete
+                } else {
+                    FinalVectorWriteKind::Put {
+                        value: Bytes::from(vec![b'v'; usize::from(value) + 1]),
+                    }
+                };
+                let value = match &kind {
+                    FinalVectorWriteKind::Put { value } => Some(value.clone()),
+                    FinalVectorWriteKind::Delete => None,
+                };
+                state.record(key.clone(), kind);
+                model.retain(|(_, existing, _)| existing != &key);
+                model.push((state.revision, key, value));
+            }
+            checkpoints.push(state.revision);
+            let identity = Arc::new(());
+            for revision in checkpoints {
+                let plan = state
+                    .plan_after(&VectorWriteCheckpoint {
+                        recorder_identity: Arc::clone(&identity),
+                        revision,
+                    })
+                    .unwrap();
+                let mut expected = model
+                    .iter()
+                    .filter(|(written, _, _)| *written > revision)
+                    .map(|(_, key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                expected.sort();
+                let actual = plan
+                    .writes
+                    .iter()
+                    .map(|write| match write {
+                        PlannedVectorWrite::Put { key, value } => (key.clone(), Some(value.clone())),
+                        PlannedVectorWrite::Delete { key } => (key.clone(), None),
+                    })
+                    .collect::<Vec<_>>();
+                let expected_bytes = expected
+                    .iter()
+                    .map(|(key, value)| (key.len() + value.as_ref().map_or(0, Bytes::len)) as u64)
+                    .sum::<u64>();
+                proptest::prop_assert_eq!(&actual, &expected);
+                proptest::prop_assert_eq!(
+                    plan.measurement(),
+                    VectorWriteMeasurement::from_exact_parts(expected.len() as u64, expected_bytes)
+                );
+            }
+        }
     }
 
     #[tokio::test]

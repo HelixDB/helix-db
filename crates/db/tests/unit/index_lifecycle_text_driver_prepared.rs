@@ -96,6 +96,7 @@ struct HeadState {
     peak: usize,
     released: bool,
     transient: HashSet<Path>,
+    fail_put: bool,
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +168,12 @@ impl ObjectStore for ControlledHeadStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> ObjectStoreResult<PutResult> {
+        if self.state.lock().unwrap().fail_put {
+            return Err(slatedb::object_store::Error::Generic {
+                store: "fixture",
+                source: std::io::Error::other("temporary upload failure").into(),
+            });
+        }
         self.inner.put_opts(location, payload, options).await
     }
 
@@ -844,9 +851,9 @@ async fn build_upload_classifies_limits_and_encodes_partition_and_catch_up_resum
     let unclaimed_operation = operation();
     let operation = claimed_operation();
     let definition = definition();
-    let object_store = Arc::new(InMemory::new());
+    let object_store = Arc::new(ControlledHeadStore::default());
     let runtime = TextStorageRuntime {
-        object_store,
+        object_store: object_store.clone(),
         db_path: "text-driver-build-upload-contracts".to_string(),
         compaction_limits: crate::config::SearchIndexBackfillLimits::default().text_compaction(),
     };
@@ -950,6 +957,23 @@ async fn build_upload_classifies_limits_and_encodes_partition_and_catch_up_resum
         IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
             TextBuildStage::CatchUp(_)
         ))
+    ));
+
+    object_store.state.lock().unwrap().fail_put = true;
+    assert!(matches!(
+        prepare_build_upload(
+            &operation,
+            DataScope::LegacyUnscoped,
+            &definition,
+            limits(u64::MAX),
+            &runtime,
+            split_input(
+                OperationCounters::default(),
+                PreparedTextUploadSource::CatchUp
+            ),
+        )
+        .await,
+        Err(HelixDbError::ObjectStore(_))
     ));
 
     assert!(prepare_build_upload(
@@ -1620,8 +1644,9 @@ async fn compaction_preparation_requires_a_claim_and_exhaustion_advances_exactly
             sequence: ClaimSequence::new(1).unwrap(),
         })
         .unwrap();
+    let object_store = Arc::new(ControlledHeadStore::default());
     let runtime = TextStorageRuntime {
-        object_store: Arc::new(InMemory::new()),
+        object_store: object_store.clone(),
         db_path: "text-driver-empty-compaction".to_string(),
         compaction_limits: crate::config::SearchIndexBackfillLimits::default().text_compaction(),
     };
@@ -1824,6 +1849,12 @@ async fn compaction_preparation_requires_a_claim_and_exhaustion_advances_exactly
     )
     .await
     .unwrap();
+    object_store.state.lock().unwrap().fail_put = true;
+    assert!(matches!(
+        prepare_compaction_step(&db, scope, &claimed, &progress, limits(u64::MAX), &runtime).await,
+        Err(HelixDbError::ObjectStore(_))
+    ));
+    object_store.state.lock().unwrap().fail_put = false;
     let PreparedTextOperationStep::CompactionUpload(prepared) =
         prepare_compaction_step(&db, scope, &claimed, &progress, limits(u64::MAX), &runtime)
             .await

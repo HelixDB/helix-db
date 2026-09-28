@@ -127,6 +127,12 @@ async function sendReadWithRetry<T>(client: Client, readRequest: QueryRequest): 
 }
 ```
 
+Version **3.1.0** publishes these structured HTTP error fields; the npm **3.0.4**
+package does not expose them. Docker **v0.0.5** already returns confirmed
+transaction conflicts as HTTP **409** with `error: "transaction_conflict"` and
+a separate diagnostic in `msg`. This combination does not require a new server
+image or an embedded package upgrade.
+
 For write conflicts, reload the current state before rebuilding the mutation.
 Do not blindly retry writes after server errors because the commit may have
 succeeded before the response failed:
@@ -135,15 +141,50 @@ succeeded before the response failed:
 try {
   await client.query(writeRequest).send();
 } catch (error) {
-  if (error instanceof HelixError && error.isConflict()) {
+  if (error instanceof HelixError && error.statusCode === 409 && error.code === "transaction_conflict") {
     console.error("write conflict", error.serverMessage);
   }
+  throw error;
 }
 ```
+
+An explicit `writer_fenced_commit_outcome_unknown` (or legacy Cloud
+`WRITE_OUTCOME_UNKNOWN`) response is distinct from a confirmed conflict and can
+carry `retryable: false`. A `Network` error after sending a write has no known
+commit outcome. Reconcile application state before retrying; the SDK does not
+automatically replay mutations. Unknown future codes are preserved. Legacy
+message-only responses retain their diagnostic without inventing a code.
 
 Validation and authentication failures should be handled directly rather than
 retried. `rawBody` retains the decoded response text before message fallbacks;
 `details` preserves the previous fallback behavior.
+
+## Release checks
+
+The TypeScript SDK workflow builds and tests the npm artifact independently of
+native bindings, PyPI, and crates.io. Run the installed-package checks locally:
+
+```sh
+npm ci
+npm run check
+npm run test:coverage
+npm run test:package
+node scripts/package-smoke.mjs --image ghcr.io/helixdb/helixdb:v0.0.5 --platform linux/arm64
+node scripts/package-smoke.mjs --image ghcr.io/helixdb/helixdb:v0.0.5 --platform linux/amd64
+```
+
+The image checks start and remove an isolated memory-only container. They check
+real conflicts through an installed tarball, successful writes, and atomicity.
+The package checks also compile its public declarations and verify legacy errors,
+future codes, explicit unknown outcomes, and a dropped response without replay.
+
+Publish the validated `helix-db-typescript-node-24` artifact from the TypeScript
+SDK workflow for the release commit using `npm publish <tarball> --access public`.
+Then verify a fresh registry install with:
+
+```sh
+node scripts/package-smoke.mjs --package @helix-db/helix-db@3.1.0
+```
 
 ## Parameter Schemas
 

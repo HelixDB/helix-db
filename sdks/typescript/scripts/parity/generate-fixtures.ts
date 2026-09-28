@@ -661,7 +661,7 @@ export function runtimeFixtures(): Fixture[] {
       QueryRequest.write(
         writeBatch()
           .varAs("edge_matches", g().eWithLabel("FOLLOWS").where(Predicate.eq("note", "dropitemedge")))
-          .varAs("edges", g().dropEdgeById(EdgeRef.var("edge_matches")).count())
+          .varAs("edges", g().e(EdgeRef.var("edge_matches")).drop().count())
           .varAs("source", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "drop-text-source")).drop().count())
           .varAs("target", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "drop-text-target")).drop().count())
           .varAs("active_source", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "active-text-source")).drop().count())

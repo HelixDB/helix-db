@@ -1,14 +1,23 @@
 ---
-title: 'Release Notes'
-description: 'HelixDB Cloud Release Notes'
-icon: ''
+title: 'Release notes'
+description: 'New features and changes in HelixDB, Helix Cloud, the SDKs, and the CLI'
 rss: true
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
+<Update
+  label="September 2026"
+  rss={{
+    title: "TypeScript SDK 3.1.0: structured transaction errors",
+    description: "Stable error codes and HTTP status metadata in the npm package"
+  }}
+>
+- **[TypeScript SDK 3.1.0](/database/helix-db/start-here/sdk-setup/typescript-project-setup)** exposes `HelixError.code`, `statusCode`, `serverMessage`, `rawBody`, and explicit `retryable` metadata. npm 3.0.4 did not expose these fields. Legacy response formats and unknown future codes remain readable.
+- **[Transaction conflicts](/database/helix-db/query-guides/error-handling#typescript-release-compatibility)** can be recognized with `error.statusCode === 409` and `error.code === "transaction_conflict"`. Docker v0.0.5 already supplies this contract; no Docker or CLI release is required. A lost response remains distinct from a confirmed abort, and mutations are never automatically replayed.
+- This release updates the TypeScript SDK only. Embedded runtime packages and the Rust, Python, and Go SDK versions are unchanged.
+</Update>
 
 <Update
   label="August 2026"
@@ -31,7 +40,7 @@ pageType: "Reference"
 - **Open-source database** — the engine moved out of `helix-hyperscale` into the public, modular `helix-db` workspace.
 - **New query planner** — a dedicated logical and physical planning layer optimizes the typed operation-tree AST before execution.
 - **[Embedded database](/database/helix-db/start-here/local-development/embedded-database)** — run the same engine and queries in process with memory, disk, or object storage.
-- **[Vector prefiltering](/database/helix-db/query-guides/filtering#vector-prefiltering)** — traverse and filter an exact candidate set before vector ranking, so results cannot escape graph or permission boundaries.
+- **[Vector prefiltering](/database/helix-db/query-guides/prefiltering#vector-prefiltering)** — traverse and filter an exact candidate set before vector ranking, so results cannot escape graph or permission boundaries.
 </Update>
 
 <Update
@@ -64,7 +73,7 @@ pageType: "Reference"
   label="April 2026"
   rss={{
     title: "Better, Faster, Stronger",
-    description: "Major performancy improvements and better reliability"
+    description: "Major performance improvements and better reliability"
   }}
 >
 - **Local docker deployment**

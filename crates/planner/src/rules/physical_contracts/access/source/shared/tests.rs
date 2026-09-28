@@ -217,7 +217,7 @@ fn set_and_filter_contracts_reuse_shared_child_costs() {
         storage
             .secondary_range_lookup(range_rows)
             .serial(storage.secondary_row_materialization(range_rows))
-            .serial(storage.predicate_eval(range_rows))
+            .serial(storage.stored_predicate_filter(range_rows))
     );
     assert_eq!(
         intersection.delivered.cardinality,

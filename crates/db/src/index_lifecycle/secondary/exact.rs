@@ -4,7 +4,8 @@ use super::*;
 
 mod ordered;
 pub(crate) use ordered::{
-    scan_active_range_generation_ordered, ExactRangeScanProgress, UnobservedRangeScan,
+    scan_active_range_generation_ordered, ExactRangeScanProgress, OrderedRangeCursor,
+    UnobservedRangeScan,
 };
 
 #[async_trait]

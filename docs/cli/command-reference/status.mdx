@@ -1,14 +1,45 @@
 ---
 title: "helix status"
+sidebarTitle: "status"
 description: "Inspect local runtime or current Cloud database state"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+Show the project and the state of its instances: container state for local instances and database
+state for Helix Cloud links. Local and Cloud.
+
+## Usage
+
 ```bash
 helix status [INSTANCE]
 ```
 
-Local status comes from the configured Docker/Podman runtime. Cloud status uses the WorkOS session
-and fetches the linked tenant or dedicated cluster; cluster status also includes current topology.
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Instance to show. If omitted, the CLI prompts in a TTY when there are several instances (with an "All instances" option); otherwise it shows all instances. |
+
+## Behavior
+
+- Prints the project name and root directory, then one line per instance.
+- Local status comes from the configured Docker/Podman runtime: URL, container state (`not created` if there is no container), and storage mode.
+- Cloud status uses the WorkOS session and fetches the linked tenant or dedicated cluster; cluster status also includes current topology.
+
+## Examples
+
+```bash
+# Show every instance in the project
+helix status
+
+# Show one instance
+helix status dev
+```
+
+## Related
+
+- [`helix logs`](/cli/command-reference/logs) — view logs or Cloud query errors.
+- [`helix start`](/cli/command-reference/start) — start a stopped local instance.
+- [Local workflow](/cli/workflows/local) — run and debug a local instance.

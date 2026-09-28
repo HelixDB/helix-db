@@ -29,6 +29,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 };
 use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
 use crate::encoding::v2::values::indexes::vector::markers::encode_simhash_directory_marker_v1;
+use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
 use crate::search::vector::distance::{Cosine, Euclidean, Manhattan};
 use crate::search::vector::simhash::{order_code_from_simhash_bits, SimHashCache};
 use crate::search::vector::{encode_item, encode_metadata, VectorIndexConfig, VectorIndexMetadata};
@@ -310,8 +311,11 @@ async fn seed_empty_graph_directory(
     (db, index)
 }
 
-async fn seed_three_edge_filtered_gulf<D: Distance>(
+/// Seeds an explicit directoryless layer-zero graph of `(id, vector, neighbors)` rows.
+async fn seed_filtered_graph<D: Distance>(
     name: &str,
+    entry_point: NodeId,
+    rows: &[(NodeId, Vec<f32>, Vec<NodeId>)],
 ) -> (Arc<slatedb::Db>, VectorIndex<D>) {
     let db = Arc::new(
         slatedb::Db::open(name, Arc::new(InMemory::new()))
@@ -321,22 +325,17 @@ async fn seed_three_edge_filtered_gulf<D: Distance>(
     let index = VectorIndex::<D>::new(name);
     let simhash = SimHashCache::new(index.id(), 2);
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    for (entity_id, vector, neighbors) in [
-        (1, vec![0.0, 1.0], vec![2]),
-        (2, vec![0.0, 1.0], vec![3]),
-        (3, vec![0.0, 1.0], vec![1_001]),
-        (1_001, vec![1.0, 0.0], Vec::new()),
-    ] {
-        let hash = simhash.compute_and_cache(&txn, entity_id, &vector).unwrap();
+    for (entity_id, vector, neighbors) in rows {
+        let hash = simhash.compute_and_cache(&txn, *entity_id, vector).unwrap();
         txn.put(
             index
                 .row_keyspace()
                 .key(VectorKey::Vector(VectorItemKey::new(
                     index.id(),
                     order_code_from_simhash_bits(hash.bits()),
-                    entity_id,
+                    *entity_id,
                 ))),
-            encode_item(&Item::<D>::new(vector)),
+            encode_item(&Item::<D>::new(vector.clone())),
         )
         .unwrap();
         txn.put(
@@ -344,15 +343,15 @@ async fn seed_three_edge_filtered_gulf<D: Distance>(
                 .row_keyspace()
                 .key(VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(
                     index.id(),
-                    entity_id,
+                    *entity_id,
                 ))),
-            encode_layer0_neighbors(&neighbors),
+            encode_layer0_neighbors(neighbors),
         )
         .unwrap();
     }
     let mut metadata = VectorIndexMetadata::new(VectorIndexConfig::new(name, "embedding", 2));
-    metadata.entry_point = Some(1);
-    metadata.count = 4;
+    metadata.entry_point = Some(entry_point);
+    metadata.count = rows.len() as u64;
     txn.put(
         index
             .row_keyspace()
@@ -366,59 +365,68 @@ async fn seed_three_edge_filtered_gulf<D: Distance>(
     (db, index)
 }
 
-async fn seed_competing_filtered_bridges(name: &str) -> (Arc<slatedb::Db>, VectorIndex<Cosine>) {
-    let db = Arc::new(
-        slatedb::Db::open(name, Arc::new(InMemory::new()))
-            .await
-            .unwrap(),
-    );
-    let index = VectorIndex::<Cosine>::new(name);
-    let simhash = SimHashCache::new(index.id(), 2);
-    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    for (entity_id, vector, neighbors) in [
-        (1, vec![0.0, 1.0], vec![2, 3]),
-        (2, vec![1.0, 0.0], vec![1_001]),
-        (3, vec![-1.0, 0.0], vec![1_002]),
-        (1_001, vec![1.0, 0.0], Vec::new()),
-        (1_002, vec![1.0, 0.0], Vec::new()),
-    ] {
-        let hash = simhash.compute_and_cache(&txn, entity_id, &vector).unwrap();
-        txn.put(
-            index
-                .row_keyspace()
-                .key(VectorKey::Vector(VectorItemKey::new(
-                    index.id(),
-                    order_code_from_simhash_bits(hash.bits()),
-                    entity_id,
-                ))),
-            encode_item(&Item::<Cosine>::new(vector)),
-        )
-        .unwrap();
-        txn.put(
-            index
-                .row_keyspace()
-                .key(VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(
-                    index.id(),
-                    entity_id,
-                ))),
-            encode_layer0_neighbors(&neighbors),
-        )
-        .unwrap();
-    }
-    let mut metadata = VectorIndexMetadata::new(VectorIndexConfig::new(name, "embedding", 2));
-    metadata.entry_point = Some(1);
-    metadata.count = 5;
-    txn.put(
-        index
-            .row_keyspace()
-            .key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
-                index.id(),
-            ))),
-        encode_metadata(&metadata),
+async fn seed_three_edge_filtered_gulf<D: Distance>(
+    name: &str,
+) -> (Arc<slatedb::Db>, VectorIndex<D>) {
+    seed_filtered_graph::<D>(
+        name,
+        1,
+        &[
+            (1, vec![0.0, 1.0], vec![2]),
+            (2, vec![0.0, 1.0], vec![3]),
+            (3, vec![0.0, 1.0], vec![1_001]),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+        ],
     )
-    .unwrap();
-    txn.commit().await.unwrap();
-    (db, index)
+    .await
+}
+
+/// Runs the production filtered walk over `allowed`, bypassing exact admission.
+async fn filtered_search<D: Distance>(
+    index: &VectorIndex<D>,
+    read: &(impl DbReadOps + Send + Sync),
+    query: &[f32],
+    params: &SearchParams,
+    allowed: &RestrictedVectorCandidates,
+) -> Result<(Vec<SearchResult>, RestrictedSearchStats), HelixDbError> {
+    let RestrictedVectorCandidates::NonEmpty(allowed) = allowed else {
+        panic!("filtered walks run over non-empty candidates");
+    };
+    let metadata = index
+        .get_metadata(read)
+        .await?
+        .expect("seeded index has metadata");
+    let k = RestrictedResultCount::try_new(params.k(), allowed.len()).unwrap();
+    let budgets =
+        FilteredGraphBudgets::with_beam_percent(params, k, allowed.len(), FILTERED_BEAM_PERCENT);
+    let vector = UnalignedVector::<D::VectorCodec>::from_slice(query);
+    let item = Item::<D> {
+        header: D::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats {
+        strategy: Some(RestrictedSearchStrategy::FilteredGraph),
+        ef_filtered: budgets.ef_filtered,
+        ..RestrictedSearchStats::default()
+    };
+    let results = index
+        .restricted_filter_aware_search(
+            read,
+            RestrictedQuery {
+                vector: query,
+                item: &item,
+                dimension: VectorDimension::try_new(metadata.config.dimension).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: metadata.validated_state()?,
+                k,
+                budgets,
+                allowed,
+            },
+            &mut stats,
+        )
+        .await?;
+    Ok((results, stats))
 }
 
 fn exact_ids(
@@ -456,38 +464,49 @@ fn exact_ids(
 }
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), test)]
-fn admission_bounds_exact_work_by_cardinality_or_bytes() {
+fn admission_scans_exactly_by_candidate_cardinality_and_bytes() {
     let params = SearchParams::new(10).unwrap();
-    let exact = RestrictedVectorCandidates::from_ids(1..=256).unwrap();
-    let RestrictedVectorCandidates::NonEmpty(exact) = exact else {
-        panic!("non-empty input must produce a non-empty candidate set");
+    let candidates = |count: u64| {
+        let RestrictedVectorCandidates::NonEmpty(candidates) =
+            RestrictedVectorCandidates::from_ids(1..=count).unwrap()
+        else {
+            panic!("non-empty input must produce a non-empty candidate set");
+        };
+        candidates
     };
-    assert!(matches!(
-        restricted_execution_plan(&exact, 1_536, &params),
-        RestrictedExecutionPlan::Exact { .. }
-    ));
-    assert!(matches!(
-        restricted_execution_plan(&exact, 5_000, &params),
-        RestrictedExecutionPlan::FilteredGraph { .. }
-    ));
-    let filtered = RestrictedVectorCandidates::from_ids(1..=257).unwrap();
-    let RestrictedVectorCandidates::NonEmpty(filtered) = filtered else {
-        panic!("non-empty input must produce a non-empty candidate set");
+    let is_exact = |count: u64, dimension: usize| {
+        matches!(
+            restricted_execution_plan(&candidates(count), dimension, &params),
+            RestrictedExecutionPlan::Exact { .. }
+        )
     };
-    assert!(matches!(
-        restricted_execution_plan(&filtered, 2, &params),
-        RestrictedExecutionPlan::FilteredGraph { .. }
-    ));
+    // Sets the walk could read entirely are exact at any dimension.
+    let payload_sized = FILTERED_VECTOR_PAYLOAD_LIMIT as u64;
+    assert!(is_exact(payload_sized, 16_384));
+    assert!(!is_exact(payload_sized + 1, 16_384));
+    // At 768-d the byte budget and the cardinality cap coincide: 8,192
+    // vectors fill 24 MiB exactly.
+    let vector_bytes = 768 * core::mem::size_of::<f32>() as u64;
+    assert_eq!(EXACT_VECTOR_BYTES_THRESHOLD / vector_bytes, 8_192);
+    assert!(is_exact(8_192, 768));
+    assert!(!is_exact(8_193, 768));
+    // Higher dimensions reach the byte budget sooner.
+    assert!(is_exact(4_096, 1_536));
+    assert!(!is_exact(4_097, 1_536));
+    // Below 768-d only the 8,192-candidate cap binds; 8,193 vectors at 128-d
+    // are 4 MiB, far under the byte budget.
+    assert!(8_193 * 128 * (core::mem::size_of::<f32>() as u64) < EXACT_VECTOR_BYTES_THRESHOLD);
+    for dimension in [2, 128] {
+        assert!(is_exact(8_192, dimension));
+        assert!(!is_exact(8_193, dimension));
+    }
 
-    let benchmark = RestrictedVectorCandidates::from_ids(1..=1_000).unwrap();
-    let RestrictedVectorCandidates::NonEmpty(benchmark) = benchmark else {
-        panic!("non-empty input must produce a non-empty candidate set");
-    };
+    let benchmark = candidates(20_000);
     assert_eq!(params.ef(), 100);
     let RestrictedExecutionPlan::FilteredGraph { budgets, .. } =
         restricted_execution_plan(&benchmark, 1_536, &params)
     else {
-        panic!("1,000 DBpedia vectors use the bounded filtered graph");
+        panic!("20,000 DBpedia vectors use the bounded filtered graph");
     };
     assert_eq!(budgets.ef_filtered, 150);
     assert_eq!(budgets.sampled_seeds, FILTERED_SAMPLED_SEEDS);
@@ -503,7 +522,7 @@ fn admission_bounds_exact_work_by_cardinality_or_bytes() {
                 beam_multiplier,
             )
         else {
-            panic!("1,000 DBpedia vectors use the bounded filtered graph");
+            panic!("20,000 DBpedia vectors use the bounded filtered graph");
         };
         assert_eq!(budgets.ef_filtered, expected_ef);
         assert_eq!(budgets.sampled_seeds, FILTERED_SAMPLED_SEEDS);
@@ -521,7 +540,7 @@ fn admission_bounds_exact_work_by_cardinality_or_bytes() {
                 beam_percent,
             )
         else {
-            panic!("1,000 DBpedia vectors use the bounded filtered graph");
+            panic!("20,000 DBpedia vectors use the bounded filtered graph");
         };
         assert_eq!(budgets.ef_filtered, expected_ef);
         assert_eq!(budgets.sampled_seeds, FILTERED_SAMPLED_SEEDS);
@@ -575,14 +594,14 @@ fn restricted_result_count_clamps_before_enforcing_the_payload_limit() {
     );
 
     let params = SearchParams::new(MAX_RESTRICTED_RESULT_COUNT).unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1..=1_000).unwrap();
+    let candidates = RestrictedVectorCandidates::from_ids(1..=20_000).unwrap();
     let RestrictedVectorCandidates::NonEmpty(candidates) = candidates else {
         panic!("non-empty input must produce a non-empty candidate set");
     };
     let RestrictedExecutionPlan::FilteredGraph { k, budgets, .. } =
         restricted_execution_plan(&candidates, 1_536, &params)
     else {
-        panic!("1,000 candidates use the bounded filtered graph");
+        panic!("20,000 candidates use the bounded filtered graph");
     };
     assert_eq!(k.get(), MAX_RESTRICTED_RESULT_COUNT);
     assert_eq!(budgets.vector_payloads, MAX_RESTRICTED_RESULT_COUNT);
@@ -847,6 +866,198 @@ async fn exact_scan_omits_absent_ids_but_rejects_missing_companion_rows() {
 }
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn exact_scan_spans_fetch_batches_and_fails_closed_in_later_batches() {
+    const ENTITY_COUNT: u64 = 2 * FETCH_BATCH_SIZE as u64 + 1;
+    const DIMENSION: usize = 8;
+    const K: usize = 10;
+    let candidates = RestrictedVectorCandidates::from_ids(1..=ENTITY_COUNT).unwrap();
+    let params = SearchParams::new(K).unwrap();
+    let ids = |results: &[SearchResult]| {
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>()
+    };
+
+    let (db, index) = seed_index("restricted-multi-batch-exact", ENTITY_COUNT, DIMENSION).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    // Queries whose true neighbours sit in the first, second, and last batch.
+    for query_id in [1, FETCH_BATCH_SIZE as u64 + 7, ENTITY_COUNT] {
+        let query = vector_for(query_id, ENTITY_COUNT, DIMENSION);
+        let (results, stats) = index
+            .search_restricted_with_stats(&txn, &query, &params, &candidates)
+            .await
+            .unwrap();
+        assert_eq!(stats.strategy, Some(RestrictedSearchStrategy::Exact));
+        assert_eq!(stats.vector_payload_requests, ENTITY_COUNT as usize);
+        assert_eq!(stats.vector_multi_get_calls, 3);
+        assert_eq!(
+            ids(&results),
+            exact_ids(&query, ENTITY_COUNT, DIMENSION, &candidates, K)
+        );
+    }
+    drop(txn);
+
+    // A SimHash row missing from the second batch fails the scan closed.
+    let missing_simhash = FETCH_BATCH_SIZE as u64 + 5;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    txn.delete(
+        index
+            .row_keyspace()
+            .key(VectorKey::SimHash(VectorSimHashKey::new(
+                index.id(),
+                missing_simhash,
+            ))),
+    )
+    .unwrap();
+    txn.commit().await.unwrap();
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let error = index
+        .search_restricted_with_stats(
+            &txn,
+            &vector_for(1, ENTITY_COUNT, DIMENSION),
+            &params,
+            &candidates,
+        )
+        .await
+        .expect_err("a second-batch SimHash gap must fail closed");
+    assert!(error
+        .to_string()
+        .contains(&format!("missing simhash for node {missing_simhash}")));
+    drop(txn);
+
+    // A canonical payload missing from the last batch also fails closed.
+    let (db, index) = seed_index(
+        "restricted-multi-batch-exact-payload",
+        ENTITY_COUNT,
+        DIMENSION,
+    )
+    .await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let simhash = index
+        .simhash_cache(DIMENSION)
+        .unwrap()
+        .get(&txn, ENTITY_COUNT)
+        .await
+        .unwrap()
+        .unwrap();
+    txn.delete(
+        index
+            .row_keyspace()
+            .key(VectorKey::Vector(VectorItemKey::new(
+                index.id(),
+                order_code_from_simhash_bits(simhash.bits()),
+                ENTITY_COUNT,
+            ))),
+    )
+    .unwrap();
+    txn.commit().await.unwrap();
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let error = index
+        .search_restricted_with_stats(
+            &txn,
+            &vector_for(1, ENTITY_COUNT, DIMENSION),
+            &params,
+            &candidates,
+        )
+        .await
+        .expect_err("a last-batch payload gap must fail closed");
+    assert!(error.to_string().contains(&format!(
+        "missing canonical vector payload for node {ENTITY_COUNT}"
+    )));
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn wide_payload_sized_exact_scans_fetch_within_the_byte_budget() {
+    // Payload-sized scopes are exact at any width. At 16,384-d the byte budget
+    // holds 384 vectors, so a 385-candidate scope needs a second fetch instead
+    // of holding every payload in one.
+    const DIMENSION: usize = 16_384;
+    const K: usize = 10;
+    const NAME: &str = "restricted-wide-exact-fetch";
+    let per_fetch = EXACT_VECTOR_BYTES_THRESHOLD / (DIMENSION * core::mem::size_of::<f32>()) as u64;
+    assert_eq!(per_fetch, 384);
+    let entity_count = per_fetch + 1;
+    assert!(entity_count <= FILTERED_VECTOR_PAYLOAD_LIMIT as u64);
+
+    let db = Arc::new(
+        slatedb::Db::open(NAME, Arc::new(InMemory::new()))
+            .await
+            .unwrap(),
+    );
+    let index = VectorIndex::<Cosine>::new(NAME);
+    for first in (1..=entity_count).step_by(64) {
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        for entity_id in first..=entity_count.min(first + 63) {
+            // An exact scan only needs each SimHash row to locate its payload,
+            // so a synthetic rank avoids hashing 16,384-d vectors.
+            txn.put(
+                index
+                    .row_keyspace()
+                    .key(VectorKey::SimHash(VectorSimHashKey::new(
+                        index.id(),
+                        entity_id,
+                    ))),
+                encode_simhash(entity_id),
+            )
+            .unwrap();
+            txn.put(
+                index
+                    .row_keyspace()
+                    .key(VectorKey::Vector(VectorItemKey::new(
+                        index.id(),
+                        order_code_from_simhash_bits(entity_id),
+                        entity_id,
+                    ))),
+                encode_item(&Item::<Cosine>::new(vector_for(
+                    entity_id,
+                    entity_count,
+                    DIMENSION,
+                ))),
+            )
+            .unwrap();
+        }
+        txn.commit().await.unwrap();
+    }
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let mut metadata =
+        VectorIndexMetadata::new(VectorIndexConfig::new(NAME, "embedding", DIMENSION));
+    metadata.entry_point = Some(1);
+    metadata.count = entity_count;
+    txn.put(
+        index
+            .row_keyspace()
+            .key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
+                index.id(),
+            ))),
+        encode_metadata(&metadata),
+    )
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let query = vector_for(entity_count / 2, entity_count, DIMENSION);
+    let params = SearchParams::new(K).unwrap();
+    for (candidate_count, fetches) in [(per_fetch, 1), (entity_count, 2)] {
+        let candidates = RestrictedVectorCandidates::from_ids(1..=candidate_count).unwrap();
+        let (results, stats) = index
+            .search_restricted_with_stats(&txn, &query, &params, &candidates)
+            .await
+            .unwrap();
+        assert_eq!(stats.strategy, Some(RestrictedSearchStrategy::Exact));
+        assert_eq!(stats.vector_payload_requests, candidate_count as usize);
+        assert_eq!(stats.vector_multi_get_calls, fetches);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.entity_id())
+                .collect::<Vec<_>>(),
+            exact_ids(&query, entity_count, DIMENSION, &candidates, K)
+        );
+    }
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn directory_lifecycle_tracks_insert_upsert_and_delete() {
     let db = Arc::new(
         slatedb::Db::open("restricted-directory-lifecycle", Arc::new(InMemory::new()))
@@ -938,15 +1149,15 @@ async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() 
         seed_empty_graph_directory("restricted-directory-direct-token", ENTITY_COUNT, 8).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let candidates = RestrictedVectorCandidates::from_ids(1..=ENTITY_COUNT).unwrap();
-    let (results, stats) = index
-        .search_restricted_with_stats(
-            &txn,
-            &vector_for(7, ENTITY_COUNT, 8),
-            &SearchParams::new(10).unwrap(),
-            &candidates,
-        )
-        .await
-        .unwrap();
+    let (results, stats) = filtered_search(
+        &index,
+        &txn,
+        &vector_for(7, ENTITY_COUNT, 8),
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .unwrap();
 
     assert!(!results.is_empty());
     assert!(stats.directory_hits >= FILTERED_DIRECTORY_SEEDS);
@@ -964,7 +1175,9 @@ async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() 
 async fn directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors() {
     let (db, index) = seed_three_edge_filtered_gulf::<Cosine>("restricted-three-edge-gulf").await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    // One past the exact-scan cap routes production dispatch to the walk.
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
     let (results, stats) = index
         .search_restricted_with_stats(
             &txn,
@@ -1006,7 +1219,8 @@ async fn directoryless_bridge_missing_simhash_fails_closed() {
     transaction.commit().await.unwrap();
 
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
     let error = index
         .search_restricted_with_stats(
             &transaction,
@@ -1019,10 +1233,225 @@ async fn directoryless_bridge_missing_simhash_fails_closed() {
     assert!(error.to_string().contains("missing simhash for node 2"));
 }
 
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn directoryless_bridge_corrupt_simhash_fails_closed() {
+    let (db, index) =
+        seed_three_edge_filtered_gulf::<Cosine>("restricted-bridge-corrupt-simhash").await;
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    transaction
+        .put(
+            index
+                .row_keyspace()
+                .key(VectorKey::SimHash(VectorSimHashKey::new(index.id(), 2))),
+            b"corrupt",
+        )
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
+    let error = index
+        .search_restricted_with_stats(
+            &transaction,
+            &[1.0, 0.0],
+            &SearchParams::new(10).unwrap(),
+            &candidates,
+        )
+        .await
+        .expect_err("ranking a bridge with a corrupt SimHash row must fail closed");
+    assert!(error.to_string().contains("invalid simhash row for node 2"));
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+fn bridge_enqueue_prefers_known_ranks_and_queues_each_node_once() {
+    let query_hash = crate::search::vector::SimHash::from_bits(0);
+    let mut bridge_state = RestrictedBridgeState {
+        simhash_cache: HashMap::from([
+            (1, Some(crate::search::vector::SimHash::from_bits(0b111))),
+            (2, None),
+        ]),
+        known_hamming: HashMap::from([(2, 5)]),
+        queue: BridgeQueue::default(),
+    };
+    let mut stats = RestrictedSearchStats::default();
+
+    bridge_state.enqueue(query_hash, [(1, 60), (2, 61), (3, 62), (1, 0)], &mut stats);
+
+    assert_eq!(stats.bridge_frontier_pushes, 3);
+    assert_eq!(bridge_state.queue.len(), 3);
+    let ranked = std::iter::from_fn(|| bridge_state.queue.pop_ranked_ahead_of_estimates())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ranked,
+        vec![
+            RankedBridge {
+                hamming: 3,
+                node_id: 1,
+            },
+            RankedBridge {
+                hamming: 5,
+                node_id: 2,
+            },
+        ]
+    );
+    assert_eq!(bridge_state.queue.pop_estimated(usize::MAX), vec![3]);
+    assert!(bridge_state.queue.is_empty());
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+fn estimated_bridges_keep_their_lowest_rediscovered_estimate() {
+    // Node 1 has rank 4. Node 7 is first reached from a far row and node 8
+    // from a row whose estimate ties node 1's rank.
+    let query_hash = crate::search::vector::SimHash::from_bits(0);
+    let mut bridge_state = RestrictedBridgeState {
+        simhash_cache: HashMap::from([(
+            1,
+            Some(crate::search::vector::SimHash::from_bits(0b1111)),
+        )]),
+        known_hamming: HashMap::new(),
+        queue: BridgeQueue::default(),
+    };
+    let mut stats = RestrictedSearchStats::default();
+    bridge_state.enqueue(query_hash, [(1, 60), (7, 36), (8, 4)], &mut stats);
+
+    // A close row rediscovers 7 and lowers its estimate; a farther row cannot
+    // raise 8's, and a ranked bridge ignores estimates.
+    bridge_state.enqueue(query_hash, [(7, 3), (8, 30), (1, 0)], &mut stats);
+    assert_eq!(stats.bridge_frontier_pushes, 4);
+    assert_eq!(bridge_state.queue.len(), 3);
+
+    // Estimate 3 undercuts rank 4, so the ranked bridge waits for 7.
+    assert_eq!(bridge_state.queue.pop_ranked_ahead_of_estimates(), None);
+    assert_eq!(bridge_state.queue.pop_estimated(1), vec![7]);
+    // A ranked bridge wins a tie with an estimate.
+    assert_eq!(
+        bridge_state.queue.pop_ranked_ahead_of_estimates(),
+        Some(RankedBridge {
+            hamming: 4,
+            node_id: 1,
+        })
+    );
+    assert_eq!(bridge_state.queue.pop_ranked_ahead_of_estimates(), None);
+    // 7's superseded estimate of 36 is skipped rather than popped twice.
+    assert_eq!(bridge_state.queue.pop_estimated(usize::MAX), vec![8]);
+    assert!(bridge_state.queue.is_empty());
+    assert_eq!(bridge_state.queue.best_estimate(), None);
+
+    // Popped bridges are never queued again.
+    bridge_state.enqueue(query_hash, [(1, 0), (7, 0), (8, 0)], &mut stats);
+    assert!(bridge_state.queue.is_empty());
+    assert_eq!(stats.bridge_frontier_pushes, 4);
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn bridges_beyond_the_rank_window_are_ranked_before_expansion() {
+    // Entry 5 faces the query, so bridges 100, 101, and 102 all inherit a low
+    // estimate. The rank window ranks 100 and 101 as orthogonal; 102 still
+    // holds the lowest estimate but faces away. Only one more bridge row is
+    // affordable: expanding 102 on its estimate would reach only 1003.
+    let rows = [
+        (5, vec![1.0, 0.05], vec![100, 101, 102]),
+        (100, vec![0.0, 1.0], vec![1_002]),
+        (101, vec![0.0, 1.0], Vec::new()),
+        (102, vec![-1.0, 0.0], vec![1_003]),
+        (1_002, vec![1.0, 0.0], Vec::new()),
+        (1_003, vec![-1.0, 0.0], Vec::new()),
+    ];
+    let (results, stats) = explicit_budget_search(
+        "restricted-bridge-ranked-before-expansion",
+        5,
+        &rows,
+        [1_002, 1_003],
+        FilteredGraphBudgets {
+            ef_filtered: 1,
+            routing_rows: 100,
+            bridge_rows: 2,
+            vector_payloads: 10,
+            sampled_seeds: 0,
+            directory_seeds: 0,
+        },
+    )
+    .await;
+
+    assert_eq!(results, vec![1_002]);
+    assert_eq!(stats.bridge_rows, 2);
+    assert_eq!(stats.vector_payload_requests, 1);
+    // Entry 5, the window of 100 and 101, the open slot for 102, and the
+    // payload key of 1002.
+    assert_eq!(stats.simhash_row_requests, 5);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::BridgeBudget)
+    );
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn later_rank_reads_rank_one_bridge_per_slot_still_open() {
+    // Bridges 10 to 13 hold the lowest estimate and fill the first read's
+    // window of two per slot, but only 10 faces the query. Bridges 14 and 15
+    // also face it and wait behind a higher estimate.
+    let rows = [
+        (10, vec![1.0, 0.0], Vec::new()),
+        (11, vec![-1.0, 0.0], Vec::new()),
+        (12, vec![-1.0, 0.0], Vec::new()),
+        (13, vec![-1.0, 0.0], Vec::new()),
+        (14, vec![1.0, 0.0], Vec::new()),
+        (15, vec![1.0, 0.0], Vec::new()),
+    ];
+    let (db, index) =
+        seed_filtered_graph::<Cosine>("restricted-later-rank-read-window", 10, &rows).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let query_hash = index
+        .simhash_cache(2)
+        .unwrap()
+        .simhasher()
+        .hash_from_slice(&[1.0, 0.0])
+        .unwrap();
+    let mut bridge_state = RestrictedBridgeState {
+        simhash_cache: HashMap::new(),
+        known_hamming: HashMap::new(),
+        queue: BridgeQueue::default(),
+    };
+    let mut stats = RestrictedSearchStats::default();
+    bridge_state.enqueue(
+        query_hash,
+        [(10, 0), (11, 0), (12, 0), (13, 0), (14, 5), (15, 5)],
+        &mut stats,
+    );
+
+    let selected = index
+        .restricted_select_bridges(&txn, query_hash, 2, &mut bridge_state, &mut stats)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        selected,
+        vec![
+            RankedBridge {
+                hamming: 0,
+                node_id: 10,
+            },
+            RankedBridge {
+                hamming: 0,
+                node_id: 14,
+            },
+        ]
+    );
+    // The first read ranks 10 to 13 and 10 takes a slot, so the second read
+    // ranks only 14 for the one slot still open; 15 keeps its estimate.
+    assert_eq!(stats.simhash_multi_get_calls, 2);
+    assert_eq!(stats.simhash_row_requests, 2 * BRIDGE_RANK_WINDOW + 1);
+    assert_eq!(bridge_state.queue.best_estimate(), Some(5));
+    assert_eq!(bridge_state.queue.len(), 4);
+}
+
 async fn assert_directoryless_filtered_metric<D: Distance>(name: &str) {
     let (db, index) = seed_three_edge_filtered_gulf::<D>(name).await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let candidates = RestrictedVectorCandidates::from_ids(1_000..=1_256).unwrap();
+    // One past the exact-scan cap routes production dispatch to the walk.
+    let candidates =
+        RestrictedVectorCandidates::from_ids(1_000..=1_000 + EXACT_CARDINALITY_THRESHOLD).unwrap();
     let (results, stats) = index
         .search_restricted_with_stats(
             &txn,
@@ -1045,7 +1474,18 @@ async fn assert_directoryless_filtered_metric<D: Distance>(name: &str) {
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_region() {
-    let (db, index) = seed_competing_filtered_bridges("restricted-guided-bridge").await;
+    let (db, index) = seed_filtered_graph::<Cosine>(
+        "restricted-guided-bridge",
+        1,
+        &[
+            (1, vec![0.0, 1.0], vec![2, 3]),
+            (2, vec![1.0, 0.0], vec![1_001]),
+            (3, vec![-1.0, 0.0], vec![1_002]),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+            (1_002, vec![1.0, 0.0], Vec::new()),
+        ],
+    )
+    .await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let candidates = RestrictedVectorCandidates::from_ids(1_001..=1_257).unwrap();
     let RestrictedVectorCandidates::NonEmpty(candidates) = candidates else {
@@ -1097,6 +1537,499 @@ async fn simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_regi
     assert_eq!(stats.vector_payload_requests, 1);
     assert_eq!(stats.distance_computations, 1);
     assert!(stats.bridge_frontier_pushes >= 3);
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id() {
+    // Both bridges inherit the same rank from node 1; only their own SimHash
+    // rows can put node 3 (towards the query) ahead of node 2.
+    let (db, index) = seed_filtered_graph::<Cosine>(
+        "restricted-guided-bridge-reversed",
+        1,
+        &[
+            (1, vec![0.0, 1.0], vec![2, 3]),
+            (2, vec![-1.0, 0.0], vec![1_002]),
+            (3, vec![1.0, 0.0], vec![1_001]),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+            (1_002, vec![-1.0, 0.0], Vec::new()),
+        ],
+    )
+    .await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids(1_001..=1_257).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<Cosine> {
+        header: Cosine::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point: 1,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets: FilteredGraphBudgets {
+                    ef_filtered: 1,
+                    routing_rows: 2,
+                    bridge_rows: 2,
+                    vector_payloads: 1,
+                    sampled_seeds: 0,
+                    directory_seeds: 0,
+                },
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![1_001]
+    );
+    assert_eq!(stats.bridge_rows, 2);
+    assert_eq!(stats.vector_payload_requests, 1);
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn bridge_simhash_reads_stay_within_the_rank_window() {
+    // Every seventh ring node is allowed and no power-of-two skip is a
+    // multiple of seven, so allowed nodes are only reachable through bridges.
+    let entity_count = 2_048;
+    let (db, index) = seed_index("restricted-bridge-read-bound", entity_count, 8).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let candidates = RestrictedVectorCandidates::from_ids((1..=entity_count).step_by(7)).unwrap();
+    let (results, stats) = filtered_search(
+        &index,
+        &txn,
+        &vector_for(1_000, entity_count, 8),
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(results.len(), 10);
+    assert!(stats.bridge_rows > 0);
+    // Candidate key resolution reads at most one SimHash per scored payload,
+    // sampled seed, and the entry point; bridges read only their rank window.
+    assert!(
+        stats.simhash_row_requests
+            <= (BRIDGE_RANK_WINDOW + 1) * stats.bridge_rows
+                + stats.vector_payload_requests
+                + FILTERED_SAMPLED_SEEDS
+                + 1,
+        "{stats:?}"
+    );
+    assert!(results
+        .iter()
+        .all(|result| candidates.contains(result.entity_id())));
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+fn bridge_batches_grow_from_the_expanded_batch_and_halve_back_to_the_floor() {
+    let floor = BridgeBatchSize::FLOOR;
+    assert_eq!(floor.get(), BRIDGE_BATCH_SIZE);
+    // Rounds that find fewer candidates than their quota double the batch they
+    // expanded, so short rounds grow it geometrically from the floor.
+    let grown = [0, 149].into_iter().fold(floor, |size, eligible| {
+        BridgeBatchSize::after_round(size.get(), eligible, 150)
+    });
+    assert_eq!(grown.get(), 4 * BRIDGE_BATCH_SIZE);
+    // A round the queue or the budgets cut short grows from its own length,
+    // not from the size it was allowed.
+    assert_eq!(BridgeBatchSize::after_round(21, 0, 150).get(), 42);
+    assert_eq!(BridgeBatchSize::after_round(1, 0, 150), floor);
+    // Rounds that fill their quota halve it, never below the floor.
+    assert_eq!(
+        BridgeBatchSize::after_round(grown.get(), 150, 150).get(),
+        2 * BRIDGE_BATCH_SIZE
+    );
+    assert_eq!(
+        [150, 151, 1_000].into_iter().fold(grown, |size, eligible| {
+            BridgeBatchSize::after_round(size.get(), eligible, 150)
+        }),
+        floor
+    );
+    // No batch exceeds twice the one expanded before it, or the floor.
+    for expanded in 0..=8 * BRIDGE_BATCH_SIZE {
+        for eligible in [0, 149, 150, 151] {
+            let next = BridgeBatchSize::after_round(expanded, eligible, 150).get();
+            assert!(next >= BRIDGE_BATCH_SIZE);
+            assert!(next <= (2 * expanded).max(BRIDGE_BATCH_SIZE));
+        }
+    }
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn disconnected_walks_spend_the_bridge_budget_in_logarithmic_rounds() {
+    // No allowed node is in the graph, so every bridge round finds nothing and
+    // the walk can only spend its bridge budget. A fixed 32-bridge batch would
+    // need one dependent round per 32 bridge rows.
+    const ENTITY_COUNT: u64 = 2_048;
+    let (db, index) = seed_index("restricted-disconnected-bridges", ENTITY_COUNT, 8).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let candidates =
+        RestrictedVectorCandidates::from_ids(ENTITY_COUNT + 1..=ENTITY_COUNT + 1_000).unwrap();
+    let (results, stats) = filtered_search(
+        &index,
+        &txn,
+        &vector_for(1, ENTITY_COUNT, 8),
+        &SearchParams::new(10).unwrap(),
+        &candidates,
+    )
+    .await
+    .unwrap();
+
+    assert!(results.is_empty());
+    assert_eq!(stats.vector_payload_requests, 0);
+    let bridge_budget = stats.ef_filtered * 8;
+    assert_eq!(stats.bridge_rows, bridge_budget);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::BridgeBudget)
+    );
+    // One companion-row check for the absent sampled seeds, then bridge rounds
+    // of 1 (the entry) and 21 (its whole row). Each later round doubles the one
+    // it follows, so the short second round leads to 42 rather than to a size
+    // inflated by the rounds the queue cut short: 42, 84, 168, 336, and the
+    // last 548 of the budget.
+    assert_eq!(bridge_budget, 1 + 21 + 42 + 84 + 168 + 336 + 548);
+    assert_eq!(stats.neighbor_multi_get_calls, 1 + 7);
+    assert!(stats.neighbor_multi_get_calls < bridge_budget / BRIDGE_BATCH_SIZE);
+}
+
+/// Seeds a full cosine-close beam behind a chain of opposite-direction bridges.
+async fn early_exit_search<D: Distance>(name: &str) -> (Vec<SearchResult>, RestrictedSearchStats) {
+    let (db, index) = seed_filtered_graph::<D>(
+        name,
+        5,
+        &[
+            (5, vec![-1.0, 0.0], vec![7]),
+            (7, vec![-1.0, 0.0], vec![9]),
+            (9, vec![-1.0, 0.0], Vec::new()),
+            (1_001, vec![1.0, 0.0], Vec::new()),
+            (1_002, vec![0.9, 0.1], Vec::new()),
+        ],
+    )
+    .await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids([1_001, 1_002]).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<D> {
+        header: D::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point: 5,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets: FilteredGraphBudgets {
+                    ef_filtered: 2,
+                    routing_rows: 100,
+                    bridge_rows: 100,
+                    vector_payloads: 10,
+                    sampled_seeds: 2,
+                    directory_seeds: 0,
+                },
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+    (results, stats)
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn beam_completion_waits_for_every_queued_bridge_for_every_metric() {
+    // SimHash ranks do not bound distance for any metric, so the walk expands
+    // the whole opposite-facing bridge chain before stopping.
+    for (results, stats) in [
+        early_exit_search::<Cosine>("restricted-cosine-bridge-chain").await,
+        early_exit_search::<Euclidean>("restricted-euclidean-bridge-chain").await,
+    ] {
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.entity_id())
+                .collect::<Vec<_>>(),
+            vec![1_001]
+        );
+        assert_eq!(
+            stats.termination,
+            Some(RestrictedSearchTermination::Exhausted)
+        );
+        assert_eq!(stats.bridge_rows, 3);
+    }
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn queued_bridges_are_expanded_whatever_their_rank_estimate() {
+    // Entry 5 faces away from the query. Its 32 far neighbours resolve to high
+    // SimHash ranks and bridge 200 inherits a high rank from 5, yet 200 lies
+    // next to the query and is the only path to the best allowed node.
+    const FAR_BRIDGES: std::ops::RangeInclusive<NodeId> = 100..=131;
+    let rows = [
+        (5, vec![-1.0, 0.0], FAR_BRIDGES.chain([200]).collect()),
+        (200, vec![1.0, 0.05], vec![1_002]),
+        (1_001, vec![0.9, 0.3], Vec::new()),
+        (1_002, vec![1.0, 0.0], Vec::new()),
+        (1_003, vec![0.8, 0.4], Vec::new()),
+    ]
+    .into_iter()
+    .chain(FAR_BRIDGES.map(|node_id| (node_id, vec![-1.0, 0.01], Vec::new())))
+    .collect::<Vec<_>>();
+    let (db, index) =
+        seed_filtered_graph::<Cosine>("restricted-bridge-rank-estimates", 5, &rows).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids([1_001, 1_002, 1_003]).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    // Two sampled seeds are the first and last candidate, filling the beam
+    // without the hidden best node.
+    assert_eq!(candidates.deterministic_sample_ids(2), vec![1_001, 1_003]);
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<Cosine> {
+        header: Cosine::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point: 5,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets: FilteredGraphBudgets {
+                    ef_filtered: 2,
+                    routing_rows: 100,
+                    bridge_rows: 100,
+                    vector_payloads: 10,
+                    sampled_seeds: 2,
+                    directory_seeds: 0,
+                },
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        vec![1_002]
+    );
+    // The entry point, every far bridge, and bridge 200.
+    assert_eq!(stats.bridge_rows, 34);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::Exhausted)
+    );
+}
+
+/// Runs a directoryless cosine k=1 walk towards `[1, 0]` with explicit budgets.
+async fn explicit_budget_search(
+    name: &str,
+    entry_point: NodeId,
+    rows: &[(NodeId, Vec<f32>, Vec<NodeId>)],
+    allowed: impl IntoIterator<Item = u64>,
+    budgets: FilteredGraphBudgets,
+) -> (Vec<NodeId>, RestrictedSearchStats) {
+    let (db, index) = seed_filtered_graph::<Cosine>(name, entry_point, rows).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids(allowed).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    let vector = UnalignedVector::from_slice(&[1.0, 0.0]);
+    let item = Item::<Cosine> {
+        header: Cosine::new_header(&vector),
+        vector,
+    };
+    let mut stats = RestrictedSearchStats::default();
+    let results = index
+        .restricted_filter_aware_search(
+            &txn,
+            RestrictedQuery {
+                vector: &[1.0, 0.0],
+                item: &item,
+                dimension: VectorDimension::try_new(2).unwrap(),
+            },
+            FilteredGraphPlan {
+                state: VectorIndexState::Populated {
+                    entry_point,
+                    max_layer: 0,
+                },
+                k: RestrictedResultCount::try_new(1, candidates.len()).unwrap(),
+                budgets,
+                allowed: &candidates,
+            },
+            &mut stats,
+        )
+        .await
+        .unwrap();
+    (
+        results.iter().map(|result| result.entity_id()).collect(),
+        stats,
+    )
+}
+
+/// A full beam {1001, 1004} whose seed 1001 reveals the far allowed node 1003,
+/// while the nearest node 1002 is reachable only through bridges 5 -> 200.
+fn beam_behind_bridge_rows() -> Vec<(NodeId, Vec<f32>, Vec<NodeId>)> {
+    vec![
+        (5, vec![-1.0, 0.0], vec![200]),
+        (200, vec![1.0, 0.05], vec![1_002]),
+        (1_001, vec![0.9, 0.3], vec![1_003]),
+        (1_002, vec![1.0, 0.0], Vec::new()),
+        (1_003, vec![0.0, 1.0], Vec::new()),
+        (1_004, vec![0.8, 0.4], Vec::new()),
+    ]
+}
+
+const BEAM_BEHIND_BRIDGE_BUDGETS: FilteredGraphBudgets = FilteredGraphBudgets {
+    ef_filtered: 2,
+    routing_rows: 100,
+    bridge_rows: 100,
+    vector_payloads: 10,
+    sampled_seeds: 2,
+    directory_seeds: 0,
+};
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn beam_completion_waits_for_a_queued_bridge_to_the_nearest_node() {
+    let allowed = [1_001, 1_002, 1_003, 1_004];
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_ids(allowed).unwrap()
+    else {
+        panic!("non-empty input must produce a non-empty candidate set");
+    };
+    assert_eq!(candidates.deterministic_sample_ids(2), vec![1_001, 1_004]);
+    // After round one the beam is full, the frontier head 1003 is worse than
+    // its worst member, and bridge 200 is still queued: only the bridge-queue
+    // guard keeps the walk going until 200 reveals 1002.
+    let (results, stats) = explicit_budget_search(
+        "restricted-beam-behind-bridge",
+        5,
+        &beam_behind_bridge_rows(),
+        allowed,
+        BEAM_BEHIND_BRIDGE_BUDGETS,
+    )
+    .await;
+
+    assert_eq!(results, vec![1_002]);
+    assert_eq!(stats.bridge_rows, 2);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::Exhausted)
+    );
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn spent_bridge_budget_lets_a_complete_beam_stop_the_walk() {
+    // With only the entry bridge affordable, bridge 200 can never be
+    // expanded, so the queued bridge no longer holds the beam open.
+    let (results, stats) = explicit_budget_search(
+        "restricted-spent-bridge-budget",
+        5,
+        &beam_behind_bridge_rows(),
+        [1_001, 1_002, 1_003, 1_004],
+        FilteredGraphBudgets {
+            bridge_rows: 1,
+            ..BEAM_BEHIND_BRIDGE_BUDGETS
+        },
+    )
+    .await;
+
+    assert_eq!(results, vec![1_001]);
+    assert_eq!(stats.bridge_rows, 1);
+    assert_eq!(stats.vector_payload_requests, 3);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::BeamComplete)
+    );
+}
+
+#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+async fn routing_budget_stops_before_popping_unreadable_frontier_candidates() {
+    // Thirty-two allowed seeds with empty rows fill the beam. A 20-row routing
+    // budget expands 16 and then 4 of them, and the 12 left unexpanded must
+    // end the walk on the routing budget rather than be dropped.
+    let rows = (1..=32_u64)
+        .map(|node_id| {
+            let angle = node_id as f32 * 0.01;
+            (node_id, vec![angle.cos(), angle.sin()], Vec::new())
+        })
+        .collect::<Vec<_>>();
+    let (results, stats) = explicit_budget_search(
+        "restricted-routing-budget-pop",
+        1,
+        &rows,
+        1..=32,
+        FilteredGraphBudgets {
+            ef_filtered: 32,
+            routing_rows: 20,
+            bridge_rows: 100,
+            vector_payloads: 100,
+            sampled_seeds: 32,
+            directory_seeds: 0,
+        },
+    )
+    .await;
+
+    assert_eq!(results, vec![1]);
+    assert_eq!(stats.routing_rows, 20);
+    assert_eq!(stats.neighbor_multi_get_calls, 2);
+    assert_eq!(
+        stats.termination,
+        Some(RestrictedSearchTermination::RoutingBudget)
+    );
 }
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
@@ -1224,7 +2157,7 @@ async fn explicit_filtered_budgets_record_the_exact_termination_reason() {
 
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
-    const ENTITY_COUNT: u64 = 512;
+    const ENTITY_COUNT: u64 = 2_048;
     const DIMENSION: usize = 8;
     const K: usize = 10;
     let (db, index) =
@@ -1258,8 +2191,7 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
     let mut observed = 0_usize;
     for query_id in [1, 43, 87, 129, 211, 307, 401, 509] {
         let query = vector_for(query_id, ENTITY_COUNT, DIMENSION);
-        let (results, stats) = index
-            .search_restricted_with_stats(&txn, &query, &params, &allowed)
+        let (results, stats) = filtered_search(&index, &txn, &query, &params, &allowed)
             .await
             .unwrap();
         let exact = exact_ids(&query, ENTITY_COUNT, DIMENSION, &allowed, K);
@@ -1277,7 +2209,7 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
         assert!(stats.directory_decoded_bytes <= DIRECTORY_MAX_DECODED_BYTES);
         assert!(stats.routing_rows <= stats.ef_filtered * 16);
         assert!(stats.bridge_rows <= stats.ef_filtered * 8);
-        assert!(stats.vector_payload_requests <= stats.ef_filtered * 8);
+        assert!(stats.vector_payload_requests <= FILTERED_VECTOR_PAYLOAD_LIMIT);
         assert_eq!(stats.distance_computations, stats.vector_payload_requests);
     }
     let recall_at_10 = matched as f64 / observed as f64;
@@ -1286,7 +2218,7 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
 
 #[cfg(feature = "production-coverage")]
 pub(crate) async fn run() {
-    admission_bounds_exact_work_by_cardinality_or_bytes();
+    admission_scans_exactly_by_candidate_cardinality_and_bytes();
     restricted_result_count_clamps_before_enforcing_the_payload_limit();
     candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit();
     oversized_result_count_rejects_before_index_metadata_io().await;
@@ -1294,21 +2226,38 @@ pub(crate) async fn run() {
     unbound_metric_rejects_after_metadata_without_vector_reads().await;
     exact_scan_is_correct_and_tie_stable_for_every_active_metric().await;
     exact_scan_omits_absent_ids_but_rejects_missing_companion_rows().await;
+    exact_scan_spans_fetch_batches_and_fails_closed_in_later_batches().await;
+    wide_payload_sized_exact_scans_fetch_within_the_byte_budget().await;
     directory_lifecycle_tracks_insert_upsert_and_delete().await;
     directory_entries_seed_vectors_without_re_reading_point_simhash_rows().await;
     directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors().await;
     directoryless_bridge_missing_simhash_fails_closed().await;
+    directoryless_bridge_corrupt_simhash_fails_closed().await;
+    bridge_enqueue_prefers_known_ranks_and_queues_each_node_once();
+    estimated_bridges_keep_their_lowest_rediscovered_estimate();
+    bridges_beyond_the_rank_window_are_ranked_before_expansion().await;
+    later_rank_reads_rank_one_bridge_per_slot_still_open().await;
     simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_region().await;
+    simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id().await;
+    bridge_simhash_reads_stay_within_the_rank_window().await;
+    bridge_batches_grow_from_the_expanded_batch_and_halve_back_to_the_floor();
+    disconnected_walks_spend_the_bridge_budget_in_logarithmic_rounds().await;
+    beam_completion_waits_for_every_queued_bridge_for_every_metric().await;
+    queued_bridges_are_expanded_whatever_their_rank_estimate().await;
+    beam_completion_waits_for_a_queued_bridge_to_the_nearest_node().await;
+    spent_bridge_budget_lets_a_complete_beam_stop_the_walk().await;
+    routing_budget_stops_before_popping_unreadable_frontier_candidates().await;
     explicit_filtered_budgets_record_the_exact_termination_reason().await;
     exact_and_filter_aware_paths_enforce_membership_and_recall_budgets().await;
+    const FULL_BATCH: u64 = FETCH_BATCH_SIZE as u64;
     let (exact_db, exact_index) =
-        seed_index("restricted-production-full-exact-batch", 256, 8).await;
+        seed_index("restricted-production-full-exact-batch", FULL_BATCH, 8).await;
     let exact_txn = exact_db.begin(IsolationLevel::Snapshot).await.unwrap();
-    let exact_candidates = RestrictedVectorCandidates::from_ids(1..=256).unwrap();
+    let exact_candidates = RestrictedVectorCandidates::from_ids(1..=FULL_BATCH).unwrap();
     let (exact_results, exact_stats) = exact_index
         .search_restricted_with_stats(
             &exact_txn,
-            &vector_for(1, 256, 8),
+            &vector_for(1, FULL_BATCH, 8),
             &SearchParams::new(10).unwrap(),
             &exact_candidates,
         )
@@ -1316,6 +2265,29 @@ pub(crate) async fn run() {
         .unwrap();
     assert_eq!(exact_results.len(), 10);
     assert_eq!(exact_stats.strategy, Some(RestrictedSearchStrategy::Exact));
+    // One full fetch batch, flushed inside the scan loop.
+    assert_eq!(exact_stats.vector_payload_requests, FULL_BATCH as usize);
+    assert_eq!(exact_stats.vector_multi_get_calls, 1);
+    // The deployed entry point reports the same ranking through its diagnostics.
+    let traced = exact_index
+        .search_restricted(
+            &exact_txn,
+            &vector_for(1, FULL_BATCH, 8),
+            &SearchParams::new(10).unwrap(),
+            &exact_candidates,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        traced
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>(),
+        exact_results
+            .iter()
+            .map(|result| result.entity_id())
+            .collect::<Vec<_>>()
+    );
 
     assert!(!RestrictedVectorCandidates::Empty.contains(1));
     assert_eq!(RestrictedVectorCandidates::Empty.iter().count(), 0);
@@ -1554,7 +2526,7 @@ async fn benchmark_exact_scan(
 )]
 async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
     let entity_counts = std::env::var("HELIX_RESTRICTED_SCALE_COUNTS")
-        .unwrap_or_else(|_| "100,1000,10000,100000,1000000".to_string());
+        .unwrap_or_else(|_| "100,1000,4096,8192,10000,100000,1000000".to_string());
     let dimensions = std::env::var("HELIX_RESTRICTED_SCALE_DIMENSIONS")
         .unwrap_or_else(|_| "128,768,1536".to_string());
     let query_count = std::env::var("HELIX_RESTRICTED_SCALE_QUERIES")
@@ -1629,6 +2601,7 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
                     let mut filtered_latencies = Vec::new();
                     let mut exact_latencies = Vec::new();
+                    let mut walk_latencies = Vec::new();
                     let mut matched = 0_usize;
                     let mut observed = 0_usize;
                     let mut filtered_vector_bytes = 0_usize;
@@ -1644,6 +2617,7 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                     let mut scored_candidates = 0_usize;
                     let mut vector_payload_requests = 0_usize;
                     let mut termination_counts = [0_usize; 6];
+                    let mut strategy = None;
                     for query_index in 0..query_count {
                         let query_id = shape.query_id(query_index, query_count, candidate_count);
                         let query = vector_for(query_id, entity_count, dimension);
@@ -1672,6 +2646,17 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                             .await
                             .unwrap();
                         filtered_latencies.push(filtered_started.elapsed());
+                        // Scopes admitted to the exact scan beyond the walk's
+                        // payload budget are timed against the walk too.
+                        if stats.strategy == Some(RestrictedSearchStrategy::Exact)
+                            && candidate_count > FILTERED_VECTOR_PAYLOAD_LIMIT as u64
+                        {
+                            let walk_started = Instant::now();
+                            filtered_search(&index, &txn, &query, &params, &allowed)
+                                .await
+                                .unwrap();
+                            walk_latencies.push(walk_started.elapsed());
+                        }
 
                         assert_eq!(results.len(), params.k());
                         assert!(results
@@ -1755,6 +2740,7 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                         };
                         termination_counts[termination_index] =
                             termination_counts[termination_index].saturating_add(1);
+                        strategy = stats.strategy;
                         assert!(stats.directory_scan_calls <= DIRECTORY_MAX_PROBES);
                         assert!(stats.directory_rows <= DIRECTORY_MAX_ROWS);
                         assert!(stats.directory_decoded_bytes <= DIRECTORY_MAX_DECODED_BYTES);
@@ -1776,7 +2762,10 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                         candidate_count,
                         shape.name()
                     );
-                    if candidate_count >= 10_000 && !skip_performance_gates {
+                    if candidate_count >= 10_000
+                        && !skip_performance_gates
+                        && strategy == Some(RestrictedSearchStrategy::FilteredGraph)
+                    {
                         assert!(
                             filtered_p95.saturating_mul(2) <= exact_p95,
                             "filtered p95 must be at least 2x faster than exact scan"
@@ -1786,13 +2775,28 @@ async fn restricted_search_scale_gate_reports_accuracy_latency_and_io() {
                             "filtered search must save at least 50% of vector bytes"
                         );
                     }
+                    // Exact admission trades CPU for recall: on this in-memory
+                    // store the walk is at its fastest, and an exact scan at the
+                    // 8,192-candidate cap measured up to 2.8x the walk at 128-d
+                    // and 3.7x at 768-d, while with object-store latency it was
+                    // faster than the walk. The bound catches regressions in
+                    // exact-scan cost.
+                    let walk_p95 =
+                        (!walk_latencies.is_empty()).then(|| percentile(walk_latencies, 95));
+                    assert!(
+                        skip_performance_gates
+                            || walk_p95
+                                .is_none_or(|walk_p95| filtered_p95 <= walk_p95.saturating_mul(5)),
+                        "exact admission p95 {filtered_p95:?} must stay within 5x of the walk's {walk_p95:?}"
+                    );
                     eprintln!(
-                    "RESTRICTED_VECTOR_SCALE candidates={candidate_count} dimension={dimension} shape={} beam_multiplier={beam_multiplier} recall_at_10={recall:.6} filtered_p50_us={} filtered_p95_us={} filtered_p99_us={} exact_p95_us={} scored_candidates={scored_candidates} vector_payload_requests={vector_payload_requests} filtered_vector_bytes={filtered_vector_bytes} exact_vector_bytes={exact_vector_bytes} logical_rows={logical_rows} multi_get_calls={multi_get_calls} scan_calls={scan_calls} directory_rows={directory_rows} directory_hits={directory_hits} routing_rows={routing_rows} bridge_rows={bridge_rows} bridge_frontier_pushes={bridge_frontier_pushes} terminations_exhausted_beam_routing_bridge_vector_exact={termination_counts:?} cold_object_gets={cold_gets} cold_object_bytes={cold_bytes} warm_object_gets={warm_gets} warm_object_bytes={warm_bytes}",
+                    "RESTRICTED_VECTOR_SCALE candidates={candidate_count} dimension={dimension} shape={} beam_multiplier={beam_multiplier} recall_at_10={recall:.6} filtered_p50_us={} filtered_p95_us={} filtered_p99_us={} exact_p95_us={} walk_p95_us={} scored_candidates={scored_candidates} vector_payload_requests={vector_payload_requests} filtered_vector_bytes={filtered_vector_bytes} exact_vector_bytes={exact_vector_bytes} logical_rows={logical_rows} multi_get_calls={multi_get_calls} scan_calls={scan_calls} directory_rows={directory_rows} directory_hits={directory_hits} routing_rows={routing_rows} bridge_rows={bridge_rows} bridge_frontier_pushes={bridge_frontier_pushes} terminations_exhausted_beam_routing_bridge_vector_exact={termination_counts:?} cold_object_gets={cold_gets} cold_object_bytes={cold_bytes} warm_object_gets={warm_gets} warm_object_bytes={warm_bytes}",
                     shape.name(),
                     percentile(filtered_latencies.clone(), 50).as_micros(),
                     filtered_p95.as_micros(),
                     percentile(filtered_latencies, 99).as_micros(),
                     exact_p95.as_micros(),
+                    walk_p95.map_or(0, |walk_p95| walk_p95.as_micros()),
                 );
                 }
             }

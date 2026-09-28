@@ -75,6 +75,50 @@ pub(in crate::execution::interpreter) fn required_for(
         exec::ExecOp::Expand { .. } | exec::ExecOp::ShortestPath { .. } => {
             RequiredMutationVisibility::one(DeferredMutationFamily::Topology)
         }
+        // Membership reads the secondary set and the node-label bitmap.
+        exec::ExecOp::IndexMembership { .. } => RequiredMutationVisibility(
+            RequiredMutationVisibility::one(DeferredMutationFamily::Secondary).0
+                | RequiredMutationVisibility::one(DeferredMutationFamily::Topology).0,
+        ),
+        exec::ExecOp::Branch { plan } => {
+            let subplan = |plan: &exec::ExecutableSubplan| {
+                plan.steps()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, step| {
+                        RequiredMutationVisibility(mask.0 | required_for(&step.op).0)
+                    })
+            };
+            match plan {
+                exec::ExecBranchPlan::Union(branches) => branches
+                    .as_ref()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, plan| {
+                        RequiredMutationVisibility(mask.0 | subplan(plan).0)
+                    }),
+                exec::ExecBranchPlan::Coalesce(branches) => branches
+                    .as_ref()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, plan| {
+                        RequiredMutationVisibility(mask.0 | subplan(plan).0)
+                    }),
+                exec::ExecBranchPlan::Optional(plan)
+                | exec::ExecBranchPlan::Choose {
+                    then_plan: plan, ..
+                } => subplan(plan),
+                exec::ExecBranchPlan::ChooseElse {
+                    then_plan,
+                    else_plan,
+                    ..
+                } => RequiredMutationVisibility(subplan(then_plan).0 | subplan(else_plan).0),
+            }
+        }
+        exec::ExecOp::Repeat { plan } => plan
+            .body
+            .steps()
+            .iter()
+            .fold(RequiredMutationVisibility::NONE, |mask, step| {
+                RequiredMutationVisibility(mask.0 | required_for(&step.op).0)
+            }),
         exec::ExecOp::Filter { .. }
         | exec::ExecOp::Limit { .. }
         | exec::ExecOp::Skip { .. }
@@ -84,8 +128,6 @@ pub(in crate::execution::interpreter) fn required_for(
         | exec::ExecOp::Project { .. }
         | exec::ExecOp::Aggregate { .. }
         | exec::ExecOp::Variable { .. }
-        | exec::ExecOp::Branch { .. }
-        | exec::ExecOp::Repeat { .. }
         | exec::ExecOp::Mutation { .. }
         | exec::ExecOp::Merge { .. }
         | exec::ExecOp::ForEach { .. }
@@ -215,6 +257,46 @@ mod tests {
         assert!(!vector.contains(DeferredMutationFamily::Secondary));
         assert!(vector.contains(DeferredMutationFamily::Vector));
         assert!(!vector.contains(DeferredMutationFamily::Text));
+    }
+
+    #[test]
+    fn index_membership_requires_secondary_and_label_topology() {
+        let key = helix_planner::catalog::ScopedPropertyKey::try_new("Item", "kind").unwrap();
+        let plan = helix_planner::ir::NodeIndexMembershipPlan::new(
+            helix_planner::ir::NodeAccessSourcePlan::new(
+                helix_planner::ir::NodeAccessPlan::EqualityIndex {
+                    index: helix_planner::catalog::IndexCatalogSnapshot::default()
+                        .with_node_eq(key.clone())
+                        .node_eq[&key]
+                        .clone(),
+                    key,
+                    value: helix_planner::ir::IndexValue::Literal(
+                        helix_planner::ir::SecondaryIndexLiteral::new(
+                            helix_ast::value::PropertyValue::from("B"),
+                        )
+                        .unwrap(),
+                    ),
+                },
+            )
+            .unwrap(),
+            helix_planner::ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B"))
+                .unwrap(),
+        )
+        .unwrap();
+        let required = required_for(&exec::ExecOp::IndexMembership {
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(&plan)),
+        });
+
+        assert!(required.contains(DeferredMutationFamily::Secondary));
+        assert!(required.contains(DeferredMutationFamily::Topology));
+        assert!(!required.contains(DeferredMutationFamily::Vector));
+        assert!(!required.contains(DeferredMutationFamily::Text));
+        assert_eq!(
+            required_for(&exec::ExecOp::Filter {
+                predicate: plan.predicate().clone(),
+            }),
+            RequiredMutationVisibility::NONE
+        );
     }
 
     #[test]

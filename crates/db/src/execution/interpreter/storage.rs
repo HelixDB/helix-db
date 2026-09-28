@@ -36,6 +36,10 @@ impl<'db> ExecutionContext<'db> {
         key: &[u8],
     ) -> Result<Option<Bytes>> {
         self.check_execution_deadline()?;
+        #[cfg(test)]
+        self.pull_work
+            .raw_gets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = Bytes::copy_from_slice(key);
         if let Some(active) = self.active_write_tx() {
             return Ok(active.txn.get(&key).await?);
@@ -66,6 +70,10 @@ impl<'db> ExecutionContext<'db> {
         K: AsRef<[u8]> + Send + Sync,
     {
         self.check_execution_deadline()?;
+        #[cfg(test)]
+        self.pull_work
+            .multi_get_keys
+            .fetch_add(keys.len(), std::sync::atomic::Ordering::Relaxed);
         match (
             self.active_write_tx(),
             self.request_read_view(),
@@ -99,40 +107,39 @@ impl<'db> ExecutionContext<'db> {
         end: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        let mut iter = self.open_raw_range(start, end).await?;
+        collect_limited(
+            &mut iter,
+            limit,
+            self.tenant_scope,
+            self.execution_control.clone(),
+        )
+        .await
+    }
+
+    /// Opens a resumable scan in the same request snapshot or write transaction.
+    pub(in crate::execution::interpreter) async fn open_raw_range(
+        &self,
+        start: Bytes,
+        end: Bytes,
+    ) -> Result<slatedb::DbIterator> {
+        self.check_execution_deadline()?;
         let (start, end) = keys::DataKey::data_range(self.tenant_scope, start, end);
         if let Some(active) = self.active_write_tx() {
-            let mut iter = active.txn.scan(start..end).await?;
-            return collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-            )
-            .await;
+            return Ok(active.txn.scan(start..end).await?);
         }
         if let Some(view) = self.request_read_view() {
-            let mut iter = view.scan(start..end).await?;
-            return collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-            )
-            .await;
+            return Ok(view.scan(start..end).await?);
         }
         #[cfg(test)]
         {
-            let mut iter = match self.db.storage() {
+            Ok(match self.db.storage() {
                 HelixStorage::Reader(reader) => reader.scan(start..end).await?,
                 HelixStorage::Writer(writer) => writer.scan(start..end).await?,
-            };
-            collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-            )
-            .await
+            })
         }
         #[cfg(not(test))]
         {
@@ -155,40 +162,38 @@ impl<'db> ExecutionContext<'db> {
         prefix: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        let mut iter = self.open_raw_prefix(prefix).await?;
+        collect_limited(
+            &mut iter,
+            limit,
+            self.tenant_scope,
+            self.execution_control.clone(),
+        )
+        .await
+    }
+
+    /// Opens a resumable scan in the same request snapshot or write transaction.
+    pub(in crate::execution::interpreter) async fn open_raw_prefix(
+        &self,
+        prefix: Bytes,
+    ) -> Result<slatedb::DbIterator> {
+        self.check_execution_deadline()?;
         let prefix = keys::DataKey::data_prefix(self.tenant_scope, prefix);
         if let Some(active) = self.active_write_tx() {
-            let mut iter = active.txn.scan_prefix(prefix, ..).await?;
-            return collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-            )
-            .await;
+            return Ok(active.txn.scan_prefix(prefix, ..).await?);
         }
         if let Some(view) = self.request_read_view() {
-            let mut iter = view.scan_prefix(prefix, ..).await?;
-            return collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-            )
-            .await;
+            return Ok(view.scan_prefix(prefix, ..).await?);
         }
         #[cfg(test)]
         {
-            let mut iter = match self.db.storage() {
+            Ok(match self.db.storage() {
                 HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
                 HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
-            };
-            collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-            )
-            .await
+            })
         }
         #[cfg(not(test))]
         {

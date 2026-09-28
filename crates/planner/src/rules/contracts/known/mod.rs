@@ -81,6 +81,8 @@ pub enum KnownRuleId {
     SeedAccessDistinct,
     /// Rewrite a leading access-pipeline filter.
     AccessPipelineFilter,
+    /// Rewrite a node-stream filter behind the source into index membership.
+    AccessPipelineMembershipFilter,
     /// Rewrite or elide access-pipeline ordering.
     AccessPipelineOrder,
     /// Simplify access-rooted pipelines.

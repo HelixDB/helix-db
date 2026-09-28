@@ -1,4 +1,4 @@
-use crate::{cost, ir, properties};
+use crate::{context, cost, ir, logical, properties};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::rules) enum StreamRowUpperBound {
@@ -39,6 +39,41 @@ pub(in crate::rules) fn estimated_pipeline_rows(
         .upper()
         .map(|upper| cost::EstimatedRows::rows(upper as u64))
         .unwrap_or(fallback)
+}
+
+/// Row estimate after one stream-pipeline operator.
+///
+/// An index membership keeps at most as many rows as its set is estimated to
+/// hold. Every other operator, including an expansion, keeps its input
+/// estimate unless it proves a tighter bound. An expansion's fan-out is
+/// unknown without statistics, and an unknown fan-out alone must never make
+/// the label-sized reads of an index membership look cheaper than the
+/// per-row filter they replace.
+pub(in crate::rules) fn estimated_rows_after_op(
+    op: &logical::StreamPipelineOp,
+    delivered: &properties::DeliveredProperties,
+    rows: cost::EstimatedRows,
+    storage: &cost::StorageCostProfile,
+    stats: &context::StatsSnapshot,
+) -> cost::EstimatedRows {
+    let fallback = match op {
+        logical::StreamPipelineOp::IndexMembership { plan } => {
+            rows.min(super::pipeline::membership_set_contract(plan, storage, stats).estimated_rows)
+        }
+        logical::StreamPipelineOp::Expand { .. }
+        | logical::StreamPipelineOp::Filter { .. }
+        | logical::StreamPipelineOp::Window { .. }
+        | logical::StreamPipelineOp::Limit { .. }
+        | logical::StreamPipelineOp::Skip { .. }
+        | logical::StreamPipelineOp::Range { .. }
+        | logical::StreamPipelineOp::Order { .. }
+        | logical::StreamPipelineOp::VectorSearch { .. }
+        | logical::StreamPipelineOp::TextSearch { .. }
+        | logical::StreamPipelineOp::Variable { .. }
+        | logical::StreamPipelineOp::VariableWrite { .. }
+        | logical::StreamPipelineOp::Distinct => rows,
+    };
+    estimated_pipeline_rows(delivered, fallback)
 }
 
 pub(in crate::rules) fn with_cardinality(

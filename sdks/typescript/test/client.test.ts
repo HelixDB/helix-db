@@ -26,7 +26,7 @@ interface CaptureServer {
  * and replies with the supplied status/body. Analogue of the Rust
  * `spawn_capture_server` helper in `lib.rs`.
  */
-function spawnCaptureServer(response: { status?: number; body?: string } = {}): Promise<CaptureServer> {
+function spawnCaptureServer(response: { status?: number; body?: string; dropResponse?: boolean } = {}): Promise<CaptureServer> {
   return new Promise((resolveServer) => {
     let requestCount = 0;
     const server: Server = createServer((req, res) => {
@@ -40,6 +40,10 @@ function spawnCaptureServer(response: { status?: number; body?: string } = {}): 
           headers: req.headers,
           body: Buffer.concat(chunks).toString("utf8"),
         });
+        if (response.dropResponse) {
+          res.destroy();
+          return;
+        }
         res.writeHead(response.status ?? 200, { "Content-Type": "application/json" });
         res.end(response.body ?? "{}");
       });
@@ -279,6 +283,48 @@ assert.throws(
   assert.equal(error.isRateLimited(), false);
   assert.equal(error.retryable, undefined);
   assert.equal(error.isRetryable(), false);
+}
+
+for (const message of ["db error: Storage error: Transaction error: transaction conflict", "The asset changed concurrently"]) {
+  const body = JSON.stringify({ error: "transaction_conflict", msg: message });
+  const server = await spawnCaptureServer({ status: 409, body });
+  try {
+    await assert.rejects(
+      new Client(server.base).query(sampleWriteRequest()).send(),
+      (error: unknown) =>
+        error instanceof HelixError &&
+        error.kind === "Remote" &&
+        error.statusCode === 409 &&
+        error.code === "transaction_conflict" &&
+        error.serverMessage === message &&
+        error.rawBody === body &&
+        error.isConflict(),
+    );
+    assert.equal(server.requestCount(), 1);
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  // The server consumed the mutation before the connection disappeared. The
+  // client cannot infer an abort or safely replay the write from this failure.
+  const server = await spawnCaptureServer({ dropResponse: true });
+  try {
+    await assert.rejects(
+      new Client(server.base).query(sampleWriteRequest()).send(),
+      (error: unknown) =>
+        error instanceof HelixError &&
+        error.kind === "Network" &&
+        error.statusCode === undefined &&
+        error.code === undefined &&
+        !error.isConflict() &&
+        !error.isRetryable(),
+    );
+    assert.equal(server.requestCount(), 1);
+  } finally {
+    await server.close();
+  }
 }
 
 for (const [body, expectedCode] of [

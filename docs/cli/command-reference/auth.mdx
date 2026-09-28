@@ -1,10 +1,16 @@
 ---
 title: "helix auth"
-description: "Manage the CLI WorkOS session"
+sidebarTitle: "auth"
+description: "Log in to Helix Cloud, check the session, or log out"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+Manage the WorkOS login session that every Helix Cloud command uses. Cloud only; local commands
+never need it.
+
+## Usage
 
 ```bash
 helix auth login
@@ -12,12 +18,49 @@ helix auth status
 helix auth logout
 ```
 
-`login` starts WorkOS PKCE in a browser, receives the loopback callback, hydrates all current
-workspace memberships, and stores only the rotating WorkOS session in `~/.helix/credentials`.
-The CLI refreshes tokens within 60 seconds of expiry and serializes refreshes across processes.
+## Subcommands
 
-`status` verifies the session and reports its user and membership count. `logout` asks WFE to
-revoke the session when possible and always deletes the local file.
+| Subcommand | Description |
+| --- | --- |
+| `login` | Sign in through WorkOS in your browser and store the session. |
+| `status` | Verify the session and show the signed-in user and workspace membership count. |
+| `logout` | Revoke the session when possible and delete the local credential file. |
 
-The credential file is mode `0600` and rejects old key fields. Cloud commands do not accept
-environment API keys, service credentials, legacy user/admin keys, or custom authorization headers.
+## Behavior
+
+### Login
+
+- `login` requires an interactive terminal.
+- It starts WorkOS PKCE in a browser (and prints the URL in case the browser does not open), then receives the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
+- If WorkOS requires email verification, the CLI prompts for the code.
+- It hydrates all current workspace memberships and stores only the rotating WorkOS session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`).
+
+### Session handling
+
+- The CLI refreshes tokens within 60 seconds of expiry and serializes refreshes across processes.
+- The credential file is mode `0600` and rejects old key fields.
+- Cloud commands do not accept environment API keys, service credentials, legacy user/admin keys, or custom authorization headers.
+
+### Status and logout
+
+- `status` verifies the session with the Helix Cloud API and reports the signed-in email and membership count.
+- `logout` asks the Helix Cloud API to revoke the session when possible and always deletes the local file.
+
+## Examples
+
+```bash
+# Sign in (opens a browser)
+helix auth login
+
+# Check who is signed in
+helix auth status
+
+# Sign out and delete the local session
+helix auth logout
+```
+
+## Related
+
+- [CLI configuration](/cli/configuration) — where the session file lives.
+- [`helix workspace`](/cli/command-reference/workspace) — list the workspaces your session can access.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

@@ -266,6 +266,72 @@ impl StorageCostProfile {
         }
     }
 
+    /// Cost a residual filter whose predicate reads each row's stored record.
+    ///
+    /// Every input row pays one authoritative record read and decode before
+    /// the predicate is evaluated, so the cost grows with the input stream.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.stored_predicate_filter(EstimatedRows::rows(1_000));
+    /// assert_eq!(cost.authoritative_graph_reads, 1_000);
+    /// assert_eq!(cost.object_reads, 1_000);
+    /// ```
+    pub fn stored_predicate_filter(&self, rows: EstimatedRows) -> CostVector {
+        self.authoritative_verification(rows)
+            .serial(self.predicate_eval(rows))
+    }
+
+    /// Cost a row-preserving node index membership filter.
+    ///
+    /// The secondary set is read once and each input row pays one in-memory
+    /// probe. A label-scoped predicate rejects other labels without reads.
+    /// An unscoped predicate passes the `label_domain` bitmap read, which runs
+    /// concurrently with the set read, and evaluates every row of another
+    /// label per row. The planner cannot see which labels an expansion
+    /// reaches, so half of the input is charged the stored-record filter as
+    /// a heuristic share of those rows. An unscoped membership therefore wins
+    /// only once the stream is large enough to amortize both bitmap reads,
+    /// even though the stream may never reach the label and then evaluates
+    /// every row after reading them.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let set = profile.bitmap_equality_lookup(EstimatedRows::rows(10));
+    /// let label = profile.bitmap_equality_lookup(EstimatedRows::rows(1_000));
+    /// let rows = EstimatedRows::rows(1_000);
+    /// let scoped = profile.index_membership_filter(set, None, rows);
+    /// let unscoped = profile.index_membership_filter(set, Some(label), rows);
+    /// assert_eq!(scoped.authoritative_graph_reads, 0);
+    /// assert_eq!(unscoped.authoritative_graph_reads, 500);
+    /// assert_eq!(unscoped.object_reads, 2 + 500);
+    /// assert!(scoped.latency < profile.stored_predicate_filter(rows).latency);
+    /// assert!(unscoped.latency > profile.stored_predicate_filter(rows).latency);
+    ///
+    /// // A larger stream amortizes the bitmap reads.
+    /// let rows = EstimatedRows::rows(5_000);
+    /// let unscoped = profile.index_membership_filter(set, Some(label), rows);
+    /// assert!(unscoped.latency < profile.stored_predicate_filter(rows).latency);
+    /// ```
+    pub fn index_membership_filter(
+        &self,
+        set: CostVector,
+        label_domain: Option<CostVector>,
+        rows: EstimatedRows,
+    ) -> CostVector {
+        match label_domain {
+            Some(label_domain) => self
+                .parallel(&[set, label_domain], PositiveUsize::at_least_one(2))
+                .serial(self.secondary_set_operation(rows))
+                .serial(
+                    self.stored_predicate_filter(EstimatedRows::rows(rows.as_rows().div_ceil(2))),
+                ),
+            None => set.serial(self.secondary_set_operation(rows)),
+        }
+    }
+
     /// Cost residual predicate evaluation for a row estimate.
     pub fn predicate_eval(&self, rows: EstimatedRows) -> CostVector {
         let rows = rows.as_rows();

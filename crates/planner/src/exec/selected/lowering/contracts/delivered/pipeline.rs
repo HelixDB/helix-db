@@ -8,7 +8,10 @@ pub(in crate::exec::selected::lowering) fn selected_stream_pipeline_delivered_pr
     op: &logical::StreamPipelineOp,
 ) -> properties::DeliveredProperties {
     match op {
-        logical::StreamPipelineOp::Filter { .. } => filtered_delivered_properties(delivered),
+        logical::StreamPipelineOp::Filter { .. }
+        | logical::StreamPipelineOp::IndexMembership { .. } => {
+            filtered_delivered_properties(delivered)
+        }
         logical::StreamPipelineOp::Window { window } => match window.end() {
             Some(end) => range_delivered_properties(delivered, Some((window.start(), end))),
             None if window.start() > 0 => {

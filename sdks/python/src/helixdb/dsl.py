@@ -337,7 +337,12 @@ class PropertyValue:
 
     @classmethod
     def bytes(cls, value: bytes | bytearray | Sequence[int]) -> "PropertyValue":
-        return cls("Bytes", [int(byte) for byte in value])
+        normalized: list[int] = []
+        for index, byte in enumerate(value):
+            if isinstance(byte, bool) or not isinstance(byte, int) or not 0 <= byte <= 255:
+                raise TypeError(f"byte at index {index} must be an integer from 0 to 255: {byte!r}")
+            normalized.append(byte)
+        return cls("Bytes", normalized)
 
     @classmethod
     def i64_array(cls, values: Iterable[int]) -> "PropertyValue":
@@ -3047,7 +3052,8 @@ class Traversal:
         return self._push(Step.remove_property(name), "nodes", "write")
 
     def drop(self) -> "Traversal":
-        return self._push(Step.drop(), "nodes", "write")
+        """Delete current edges, or nodes and their incident edges; return an empty stream."""
+        return self._push(Step.drop(), self.state, "write")
 
     def drop_edge(self, to: NodeRef | NodeId | Iterable[NodeId] | str) -> "Traversal":
         return self._push(Step.drop_edge(NodeRef.from_value(to)), "nodes", "write")

@@ -92,7 +92,7 @@ pub(crate) use exact::{
     count_active_range_generation_with_membership,
     lookup_active_equality_literal_batch_with_compatibility,
     lookup_active_equality_point_literal_with_compatibility, record_equality_graph_read,
-    scan_active_range_generation_ordered, ExactRangeScanProgress,
+    scan_active_range_generation_ordered, ExactRangeScanProgress, OrderedRangeCursor,
 };
 #[cfg(test)]
 pub(crate) use exact::{
@@ -7740,3 +7740,9 @@ use test_read_counters::{
     ThreadLocalCounter, BENCHMARK_GRAPH_READS, BENCHMARK_MULTI_GETS, BENCHMARK_POINT_READS,
     BENCHMARK_SCANS,
 };
+
+#[cfg(all(feature = "production-coverage", not(test)))]
+#[path = "../../tests/production_support/secondary_unique_batch.rs"]
+mod unique_batch_contracts;
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) use unique_batch_contracts::run as run_unique_batch_production_contracts;

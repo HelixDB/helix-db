@@ -159,7 +159,7 @@ pub enum MutationPlan<T = PhysicalOp> {
         /// Name.
         name: NonEmptyString,
     },
-    /// Drop nodes.
+    /// Delete current edges, or nodes and their incident edges.
     Drop {
         /// Input plan.
         input: Box<T>,

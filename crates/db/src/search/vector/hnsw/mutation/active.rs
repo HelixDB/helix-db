@@ -500,7 +500,8 @@ impl<D: Distance> ActiveMetricSession<D> {
             cache_writes.dirty_rows_for(generation),
             cache_writes.simhasher_registry(),
         )
-        .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))?;
+        .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))?
+        .with_batch_reads(cache_writes.batch_reads());
         #[cfg(test)]
         let index = match benchmark_layers.take() {
             Some(layers) => index.with_scripted_layers(layers).map_err(|error| {

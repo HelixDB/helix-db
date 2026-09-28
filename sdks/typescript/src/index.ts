@@ -18,7 +18,7 @@ const QUERY_PATH = "/v2/query";
  * Error raised by the network {@link Client}.
  *
  * Strict port of the Rust `HelixError` enum:
- * - `Network` ↔ `ReqwestError` (the request failed to reach the server)
+ * - `Network` ↔ `ReqwestError` (transport failure; a write may already have committed)
  * - `Remote` ↔ `RemoteError` (the server returned neither query success `200`
  *   nor Cloud warm success `204`)
  * - `Serialization` ↔ `SerializationError` (request/response (de)serialization failed)

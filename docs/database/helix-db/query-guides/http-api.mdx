@@ -7,8 +7,6 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
 The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
 same contract is available from a local server and a Helix Cloud gateway.
 
@@ -151,11 +149,13 @@ durability waits on reads are rejected with `400 Bad Request`.
 Local servers and Helix Cloud gateways return
 `{ "error": "<code>", "msg": "<message>" }`. Clients should branch on
 `error` and treat `msg` as diagnostic text. An oversized Cloud request uses
-`payload_too_large` as its stable error code. See
-[Error handling](/database/helix-db/query-guides/error-handling) for local error
-codes and retry guidance.
+`payload_too_large` as its stable error code. See the
+[query error reference](/database/helix-db/query-guides/error-handling) for engine
+error codes and retry guidance, and
+[Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for
+gateway codes.
 
-## Related resources
+## Next steps
 
 - [`helix query`](/cli/command-reference/query) builds and sends requests from JSON or the TypeScript DSL.
 - [Build and run a query](/database/helix-db/core-concepts/overview) explains the operation tree.

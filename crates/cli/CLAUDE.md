@@ -7,7 +7,7 @@ The Helix CLI — binary `helix`, crate `helix-cli` (v3.0.1). It is a **runtime 
 This CLI has **no `helix compile` and no `helix check`**, and there is **no `.hx` query workflow** in it. (Older notes/memory that mention those commands describe the v2 CLI and are stale.) In v3:
 
 - **Queries are JSON requests** sent to a *running* instance via `POST /v2/query` (`helix query`). Validation happens server-side, in the instance.
-- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.6`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (MinIO-backed) with `--disk`.
+- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.6`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (SeaweedFS-backed) with `--disk`.
 - **Cloud instances are linked resources.** The CLI authenticates only with a rotating WorkOS session and sends Cloud queries through WFE's backend broker. It does not deploy query bundles or call Cloud gateways directly.
 
 The Rust DSL builder lives in `sdks/rust/` (a client library), not in this CLI.
@@ -23,7 +23,7 @@ The Rust DSL builder lives in `sdks/rust/` (a client library), not in this CLI.
 - `cloud.rs` — strict WorkOS session loading, locked refresh rotation, and WFE requests.
 - `config.rs` — `helix.toml` (`HelixConfig`) load/save/validation; stable project and typed database linkage only.
 - `project.rs` — `ProjectContext::find_and_load()` walks up the tree to find `helix.toml`; resolves `.helix/<instance>` state dirs. `get_helix_cache_dir()` honors `HELIX_CACHE_DIR`.
-- `local_runtime.rs` — `LocalRuntime`: Docker/Podman container lifecycle (`check_available`, `container_name` = `helix-<project>-<instance>`, pull/run/stop/restart/status/prune). Disk mode also spins up MinIO container + volume + network; memory mode is the Helix container alone. Health-checks via TCP probe.
+- `local_runtime.rs` — `LocalRuntime`: Docker/Podman container lifecycle (`check_available`, `container_name` = `helix-<project>-<instance>`, pull/run/stop/restart/status/prune). Disk mode also spins up a SeaweedFS S3 container + volume + network (and removes MinIO sidecars left by older releases); memory mode is the Helix container alone. Health-checks via TCP probe.
 - `service_endpoints.rs` — resolves the WFE base URL from `CLOUD_AUTHORITY` or the production default.
 - `metrics_sender.rs` — `MetricsSender` + `MetricsConfig` (level Full/Basic/Off, user_id, email). Async event sender to the logs endpoint; created in `main`, `shutdown()` on exit.
 - `port.rs` — `is_port_available`, `find_available_port`, `ensure_port_available` (scans up to 100 ports).
@@ -43,7 +43,7 @@ All instance args default to `dev` (or prompt interactively when ambiguous). Ent
 - `add [--path <dir>] (local|cloud)` — add an instance to an existing `helix.toml` without clobbering others. Cloud resolves and stores a typed database link.
 
 **Local lifecycle**
-- `start [instance] [--foreground] [--port <p>] [--disk] [--persist]` (alias `run`) — start a local container (background by default; `--detach` is a hidden alias). `--disk` forces on-disk/MinIO storage for this run; `--persist` writes the resolved port/storage back to `helix.toml`. The in-memory data-loss warning is shown only once per instance (tracked by a `.warned-memory` marker in the instance workspace).
+- `start [instance] [--foreground] [--port <p>] [--disk] [--persist]` (alias `run`) — start a local container (background by default; `--detach` is a hidden alias). `--disk` forces on-disk/SeaweedFS storage for this run; `--persist` writes the resolved port/storage back to `helix.toml`. The in-memory data-loss warning is shown only once per instance (tracked by a `.warned-memory` marker in the instance workspace).
 - `stop [instance]` / `restart [instance]` — stop/restart a background container.
 - `status [instance]` — project + per-instance details (URL, cluster id, storage mode, container state). Omit instance for all.
 - `logs [instance] [-f] [-r --start <iso> --end <iso>]` — local: Docker/Podman logs (`-f` follows). Enterprise: time-range fetch from cloud (`-r`, ISO-8601, defaults to last hour).

@@ -44,6 +44,7 @@ impl MutationIndexContext {
         scope_permit: crate::index_lifecycle::IndexScopeMutationPermit,
         loaded: crate::index_lifecycle::mutation_catalog::MutationIndexCatalog,
         simhasher_registry: Arc<vector::SimHasherRegistry>,
+        vector_batch_reads: vector::VectorBatchReads,
         vector_retained_payload_limit: std::num::NonZeroU64,
     ) -> Self {
         let (active, secondary, vector, text, routes) = loaded.into_components();
@@ -62,7 +63,8 @@ impl MutationIndexContext {
             active_vector_runtime: vector::ActiveVectorMutationRuntime::new(
                 vector_retained_payload_limit,
             ),
-            vector_cache_writes: vector::VectorCacheWriteSet::new(simhasher_registry),
+            vector_cache_writes: vector::VectorCacheWriteSet::new(simhasher_registry)
+                .with_batch_reads(vector_batch_reads),
             text_compaction_staged: false,
         }
     }

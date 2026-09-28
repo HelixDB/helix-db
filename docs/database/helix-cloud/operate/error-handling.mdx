@@ -1,11 +1,11 @@
 ---
-title: "Handle query errors"
+title: "Helix Cloud gateway errors"
 description: "Use stable Helix Cloud error codes, HTTP statuses, and SDK error metadata"
-sidebarTitle: "Error handling"
+sidebarTitle: "Gateway errors"
 pageType: "Reference"
 ---
 
-<div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Reference</Badge><Badge color="gray" size="sm">Helix Cloud</Badge></div>
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
 Helix Cloud query failures use one JSON envelope:
 
@@ -21,6 +21,10 @@ Helix Cloud query failures use one JSON envelope:
   its exact text.
 - The HTTP status remains part of the contract. Use it with `error` when deciding
   whether and how to retry.
+
+The table below lists codes produced by the Cloud gateway itself. Errors raised by the
+database engine behind it use the same envelope; see the
+[query error reference](/database/helix-db/query-guides/error-handling) for those codes.
 
 ## Gateway error reference
 

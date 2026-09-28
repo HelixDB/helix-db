@@ -1,7 +1,7 @@
 mod dispatch;
-mod expand;
+pub(super) mod expand;
 mod indexes;
-mod kv;
+pub(super) mod kv;
 mod membership;
 mod params;
 mod range;

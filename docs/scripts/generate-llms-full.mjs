@@ -70,12 +70,18 @@ function loadPage(slug) {
 
       // Remove JSX presentation while retaining nested Markdown. Code fences
       // are split out above so language imports and examples remain exact.
-      markdown = markdown.replace(/^<[A-Z][A-Za-z0-9]*\b[\s\S]*?\/>\s*$/gm, '');
+      markdown = markdown.replace(/^[ \t]*<[A-Z][A-Za-z0-9]*\b[\s\S]*?\/>\s*$/gm, '');
       markdown = markdown.replace(
-        /^<([A-Z][A-Za-z0-9]*)\b[^>]*>.*<\/\1>\s*$/gm,
+        /^[ \t]*<([A-Z][A-Za-z0-9]*)\b[^>]*>.*<\/\1>\s*$/gm,
         '',
       );
-      markdown = markdown.replace(/^<\/?[A-Z][A-Za-z0-9]*\b[^>]*>\s*$/gm, '');
+      markdown = markdown.replace(/^[ \t]*<\/?[A-Z][A-Za-z0-9]*\b[^>]*>\s*$/gm, '');
+      // Layout wrappers and the rendered page-type badge; the page type is
+      // already written as plain-text metadata above the body.
+      markdown = markdown.replace(
+        /^\s*<\/?div\b[^>]*>(?:<Badge\b[^>]*>[^<]*<\/Badge>)*(?:<\/div>)?\s*$/gm,
+        '',
+      );
       return markdown;
     })
     .join('');

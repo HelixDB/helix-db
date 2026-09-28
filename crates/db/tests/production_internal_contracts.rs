@@ -7,6 +7,12 @@
 //! implementations and production codecs. Default builds expose none of this
 //! support surface.
 
+/// Verifies permanent object-store errors block while temporary errors retain retry.
+#[tokio::test]
+async fn index_driver_failure_classification_preserves_retry_boundaries() {
+    db::production_coverage::index_driver_failure_classification_contract().await;
+}
+
 /// Verifies graph mutation no-op detection preserves exact V1 representation.
 #[test]
 fn graph_mutation_representation_is_recursive_and_bit_exact() {
@@ -160,6 +166,12 @@ async fn vector_storage_exercises_all_current_row_families() {
 #[tokio::test]
 async fn vector_missing_partition_mapping_delete_fails_closed() {
     db::production_coverage::vector_missing_partition_mapping_delete_contract().await;
+}
+
+/// Keeps retained vector build planning state bound to its committed checkpoint.
+#[tokio::test]
+async fn vector_build_cache_reuses_only_exact_committed_checkpoints() {
+    db::production_coverage::vector_build_cache_contracts().await;
 }
 
 /// Characterizes safe finite-score limits independently of production validation.
@@ -427,4 +439,10 @@ fn process_local_runtime_dependencies_preserve_identity_and_readiness() {
     assert!(debug.contains("ProcessLocalDatabaseToken"));
     assert!(debug.contains("production-runtime-dependencies"));
     assert!(!debug.contains("object_store"));
+}
+
+/// Exercises the production unique batch reader, including its failure boundaries.
+#[tokio::test]
+async fn secondary_unique_batch_validates_inputs_storage_and_owners() {
+    db::production_coverage::secondary_unique_batch_contracts().await;
 }

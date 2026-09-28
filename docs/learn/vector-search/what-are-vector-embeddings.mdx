@@ -1,0 +1,223 @@
+---
+title: "What are vector embeddings?"
+description: "A vector embedding is a fixed-length list of numbers from a machine learning model that places inputs with similar meaning close together."
+sidebarTitle: "Vector embeddings"
+pageType: "Concept"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+A vector embedding is a fixed-length list of floating-point numbers, produced by a
+machine learning model, that represents an input such as a sentence, an image, or a
+product as a point in a high-dimensional space. The model is trained so that inputs with
+similar meaning land close together, which lets software compare meaning by measuring
+the distance between vectors. Embeddings are the input to vector search, recommendation,
+clustering, and retrieval-augmented generation (RAG).
+
+<div className="learn-objectives">
+  <Card title="Learning objectives" icon="graduation-cap">
+    After reading this article you will be able to:
+
+    - Explain how an embedding model turns inputs into vectors that encode similarity
+    - Calculate how much storage a collection of embeddings needs from its dimension
+    - Explain why a change of embedding model requires re-embedding the whole collection
+    - Distinguish dense embeddings from sparse embeddings
+  </Card>
+</div>
+
+## How does an embedding represent meaning?
+
+An embedding represents meaning through position: related inputs get nearby vectors, and
+unrelated inputs get distant ones. The toy example below uses only three dimensions.
+
+```text
+Input                               Vector (toy)       Cosine similarity to query
+"login failure"          (query)    (0.8, 0.5, 0.1)    -
+"can't sign in to my account"       (0.9, 0.4, 0.1)    0.99
+"password reset not working"        (0.7, 0.6, 0.2)    0.98
+"refund for a damaged item"         (0.1, 0.2, 0.9)    0.31
+```
+
+The first two tickets share no words with the query, yet their vectors point in nearly
+the same direction. Individual dimensions rarely mean anything a person could name.
+What matters is the geometry: how close vectors are under a distance function such as
+cosine similarity, covered in
+[vector distance metrics](/learn/vector-search/vector-distance-metrics).
+
+## How are embedding models trained?
+
+Most modern embedding models are neural networks, usually transformers, trained with a
+contrastive objective. Training data consists of pairs that should match, such as a
+question and its answer or an image and its caption. The model is rewarded for placing
+each pair close together and for pushing unrelated examples, often the other items in
+the same training batch, farther apart.
+
+- **Inputs are embedded independently.** In the common dual-encoder setup, a
+  collection can be embedded once, ahead of time, and only the query is embedded at
+  search time.
+- **Token vectors are pooled.** A transformer outputs one vector per token, and a
+  pooling step combines them into one fixed-length vector, for example by averaging them
+  or by taking the vector of a special first or last token.
+- **Some models are asymmetric.** They expect a different prefix for queries than for
+  documents, because a short question and a long passage play different roles.
+
+Earlier methods such as word2vec learned one vector per word, whatever its context.
+Transformer-based models produce context-dependent token representations, so "bank" in
+"river bank" and "bank account" is represented differently before pooling.
+
+## How many dimensions does an embedding have?
+
+Text embedding models typically output a few hundred to a few thousand dimensions. A
+given model, at a given output setting, always outputs vectors of the same length (its
+dimension). Some models let you choose a shorter output dimension, and vectors of
+different lengths are not comparable. More dimensions can hold more detail, but a
+well-trained model with fewer dimensions can outperform one with more, so measure
+quality on your own data.
+
+Dimension drives storage directly. A 32-bit float takes 4 bytes, so one vector takes
+`4 × dimension` bytes before any index structure or metadata:
+
+| Dimension | Bytes per vector (float32) | Raw size of 1 million vectors |
+| --- | --- | --- |
+| 384 | 1,536 | about 1.5 GB |
+| 768 | 3,072 | about 3.1 GB |
+| 1,536 | 6,144 | about 6.1 GB |
+| 3,072 | 12,288 | about 12.3 GB |
+
+An approximate nearest neighbor index adds overhead on top of the raw vectors.
+Some systems reduce the footprint with lower-precision numbers or quantization, which
+trades some accuracy for space; see [what is HNSW?](/learn/vector-search/what-is-hnsw).
+
+## What happens when you change embedding models?
+
+Changing models means re-embedding every item and rebuilding the index, because
+vectors are only comparable when they come from the same model and version. Two models
+can share a dimension and still arrange their spaces completely differently, so a query
+vector from one model is meaningless against documents embedded by another. A common
+sequence:
+
+<Steps>
+  <Step title="Record the model">
+    Store the model name and version alongside each vector, so mixed data is detectable.
+  </Step>
+  <Step title="Embed into a new index">
+    Re-embed the collection with the new model into a separate property or index, while
+    queries keep using the old one. Embed new and updated items with both models until
+    the switch, so the new index does not miss writes made during the backfill.
+  </Step>
+  <Step title="Switch queries">
+    Once the new index is complete, switch queries to the new model and index together.
+  </Step>
+  <Step title="Remove the old vectors">
+    Drop the old index and vectors after the new ones are verified.
+  </Step>
+</Steps>
+
+Changing preprocessing, such as chunk size or text cleanup, also changes the vectors
+and calls for the same process.
+
+## Should embeddings be normalized?
+
+Often, yes. Normalizing rescales a vector to length 1 without changing its direction.
+For unit-length vectors, cosine similarity, dot product, and Euclidean distance all rank
+results in the same order, so the choice of metric matters less. Many models return
+normalized vectors already. A vector of all zeros has no direction and cannot be
+normalized, which is why cosine similarity is undefined for it. See
+[vector distance metrics](/learn/vector-search/vector-distance-metrics).
+
+## How should long documents be chunked for embeddings?
+
+Split long documents into passages, called chunks, and embed each one separately.
+Every model has a maximum input length and typically truncates longer input silently,
+and one vector for a 40-page manual would blur every topic in it together. Chunks often
+follow headings or paragraphs, with some overlap so text cut at a boundary also appears
+with its surrounding context in the neighboring chunk. See
+[what is RAG?](/learn/ai-memory/what-is-rag) for how chunks are retrieved and passed
+to a language model.
+
+## Can images and other data be embedded?
+
+Yes. Embedding models exist for images, audio, code, and structured records. Multimodal
+models are trained on paired data, such as images and captions, so different input
+types share one vector space. A text query like "red running shoes" can then find
+product photos with no text at all. As with text, only vectors from the same multimodal
+model can be compared.
+
+## What is the difference between dense and sparse embeddings?
+
+Dense embeddings have a few hundred to a few thousand dimensions, almost all non-zero,
+with no dimension tied to a specific word. Sparse embeddings have one dimension per term
+in a vocabulary, often tens of thousands, and almost all are zero. Each non-zero value
+weights a term, and learned sparse models can also add weight to related terms that do
+not appear in the text.
+
+Dense vectors capture paraphrase well. Sparse vectors behave more like keyword search
+and match exact terms, names, and identifiers well. Keyword ranking with
+[BM25](/learn/full-text-search/what-is-bm25) covers much of the same ground, and many
+systems combine it with dense vectors in
+[hybrid search](/learn/full-text-search/hybrid-search).
+
+## How does HelixDB store vector embeddings?
+
+HelixDB stores embeddings as vector properties on nodes or edges and indexes them. The
+application computes the embeddings with the model it chooses.
+
+- A vector index covers one label and one top-level property, with a fixed dimension
+  and one distance metric: cosine, Euclidean, or Manhattan.
+- Creating an index backfills existing data asynchronously, and the index becomes
+  visible only after validation and atomic activation.
+- With cosine distance, an all-zero (zero-norm) vector is rejected with a
+  `zero_norm_cosine_vector` error, because cosine similarity is undefined for it.
+
+See [vector indexes](/database/helix-db/query-guides/vector-indexes) for creating an
+index and running a search.
+
+## Frequently asked questions
+
+### Are embeddings the same as vectors?
+
+Every embedding is a vector, but not every vector is an embedding. An embedding is a
+vector produced by a model to represent an input so that closeness reflects similarity.
+
+### Can an embedding be turned back into the original text?
+
+Not reliably for long text, but research has shown that short texts can sometimes be
+reconstructed exactly or nearly exactly from their embeddings. Protect embeddings of
+sensitive content as carefully as the content itself.
+
+### Do I need to re-embed a document when it changes?
+
+Yes. Re-chunk the document, re-embed the chunks whose text changed, and delete vectors
+for chunks that no longer exist, or search keeps matching the old content. With
+fixed-size chunking, one edit can shift every later boundary, so often the whole
+document has to be re-embedded.
+
+### How do I choose an embedding model?
+
+Test retrieval quality on a sample of your own queries and documents, since general
+rankings may not reflect your data. Then check the practical limits: maximum input
+length, dimension and the storage it implies, and support for your languages and
+input types.
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="What is vector search?" icon="magnifying-glass" href="/learn/vector-search/what-is-vector-search">
+    How embeddings are searched to find results by meaning.
+  </Card>
+  <Card title="Vector distance metrics" icon="ruler" href="/learn/vector-search/vector-distance-metrics">
+    Cosine, Euclidean, Manhattan, and dot product compared.
+  </Card>
+  <Card title="What is HNSW?" icon="diagram-project" href="/learn/vector-search/what-is-hnsw">
+    A widely used graph-based index for approximate nearest neighbor search.
+  </Card>
+  <Card title="What is RAG?" icon="book-open" href="/learn/ai-memory/what-is-rag">
+    How retrieved chunks give a language model grounded context.
+  </Card>
+  <Card title="Hybrid search" icon="code-merge" href="/learn/full-text-search/hybrid-search">
+    Combine embedding-based search with keyword search.
+  </Card>
+  <Card title="Vector indexes" icon="vector-square" href="/database/helix-db/query-guides/vector-indexes">
+    Create a vector index and run nearest neighbor search in HelixDB.
+  </Card>
+</CardGroup>

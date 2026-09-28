@@ -169,16 +169,28 @@
             "pages": [
               "database/helix-db/query-guides/writing-data",
               "database/helix-db/query-guides/reading-data",
-              "database/helix-db/query-guides/secondary-indexes",
-              "database/helix-db/query-guides/vector-indexes",
-              "database/helix-db/query-guides/text-indexes",
               "database/helix-db/query-guides/traversals",
               "database/helix-db/query-guides/filtering",
               "database/helix-db/query-guides/projections",
-              "database/helix-db/query-guides/advanced",
               "database/helix-db/query-guides/parameters",
-              "database/helix-db/query-guides/http-api",
-              "database/helix-db/query-guides/error-handling"
+              "database/helix-db/query-guides/advanced",
+              {
+                "group": "INDEXES AND SEARCH",
+                "pages": [
+                  "database/helix-db/query-guides/secondary-indexes",
+                  "database/helix-db/query-guides/vector-indexes",
+                  "database/helix-db/query-guides/text-indexes",
+                  "database/helix-db/query-guides/prefiltering"
+                ]
+              },
+              {
+                "group": "REFERENCE",
+                "pages": [
+                  "database/helix-db/query-guides/http-api",
+                  "database/helix-db/query-guides/error-handling",
+                  "database/helix-db/query-guides/troubleshooting"
+                ]
+              }
             ]
           }
         ]
@@ -189,8 +201,8 @@
           {
             "group": "Start Here",
             "pages": [
-              "database/helix-cloud/start-here/working-with-enterprise",
               "database/helix-cloud/start-here/using-the-cloud",
+              "database/helix-cloud/start-here/working-with-enterprise",
               "database/helix-cloud/start-here/architecture"
             ]
           },
@@ -203,13 +215,12 @@
           {
             "group": "Operate",
             "pages": [
+              "database/helix-cloud/operate/security",
               "database/helix-cloud/operate/multi-tenancy",
               "database/helix-cloud/operate/guarantees",
-              "database/helix-cloud/operate/security",
-              "database/helix-cloud/operate/tradeoffs",
               "database/helix-cloud/operate/limits",
-              "database/helix-cloud/operate/error-handling",
-              "database/helix-cloud/operate/troubleshooting"
+              "database/helix-cloud/operate/tradeoffs",
+              "database/helix-cloud/operate/error-handling"
             ]
           }
         ]
@@ -254,6 +265,62 @@
               "cli/command-reference/shell",
               "cli/command-reference/update",
               "cli/command-reference/workspace"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Learn",
+        "groups": [
+          {
+            "group": "Learning center",
+            "pages": [
+              "learn/index"
+            ]
+          },
+          {
+            "group": "Graph databases",
+            "pages": [
+              "learn/graph-databases/what-is-a-graph-database",
+              "learn/graph-databases/graph-vs-relational-database",
+              "learn/graph-databases/what-is-a-knowledge-graph",
+              "learn/graph-databases/what-is-a-property-graph",
+              "learn/graph-databases/property-graph-vs-rdf"
+            ]
+          },
+          {
+            "group": "Vector search",
+            "pages": [
+              "learn/vector-search/what-is-vector-search",
+              "learn/vector-search/what-are-vector-embeddings",
+              "learn/vector-search/what-is-a-vector-database",
+              "learn/vector-search/what-is-hnsw",
+              "learn/vector-search/filtered-vector-search",
+              "learn/vector-search/vector-distance-metrics"
+            ]
+          },
+          {
+            "group": "Full-text search",
+            "pages": [
+              "learn/full-text-search/what-is-full-text-search",
+              "learn/full-text-search/what-is-bm25",
+              "learn/full-text-search/hybrid-search"
+            ]
+          },
+          {
+            "group": "AI memory and RAG",
+            "pages": [
+              "learn/ai-memory/what-is-rag",
+              "learn/ai-memory/what-is-graphrag",
+              "learn/ai-memory/what-is-ai-agent-memory",
+              "learn/ai-memory/long-term-memory-for-ai-agents"
+            ]
+          },
+          {
+            "group": "Database architecture",
+            "pages": [
+              "learn/database-architecture/object-storage-databases",
+              "learn/database-architecture/one-database-for-graph-vector-and-text"
             ]
           }
         ]
@@ -304,7 +371,7 @@
     },
     {
       "source": "/database/indexing/restricted-vector",
-      "destination": "/database/helix-db/query-guides/filtering#vector-prefiltering"
+      "destination": "/database/helix-db/query-guides/prefiltering#vector-prefiltering"
     },
     {
       "source": "/database/introduction",
@@ -440,19 +507,19 @@
     },
     {
       "source": "/database/indexing/vector-prefiltering",
-      "destination": "/database/helix-db/query-guides/filtering#vector-prefiltering"
+      "destination": "/database/helix-db/query-guides/prefiltering#vector-prefiltering"
     },
     {
       "source": "/database/helix-db/indexes-and-search/vector-prefiltering",
-      "destination": "/database/helix-db/query-guides/filtering#vector-prefiltering"
+      "destination": "/database/helix-db/query-guides/prefiltering#vector-prefiltering"
     },
     {
       "source": "/database/indexing/backfills",
-      "destination": "/database/helix-cloud/operate/troubleshooting#index-operation-is-blocked"
+      "destination": "/database/helix-db/query-guides/troubleshooting#index-operation-is-blocked"
     },
     {
       "source": "/database/helix-db/indexes-and-search/backfills",
-      "destination": "/database/helix-cloud/operate/troubleshooting#index-operation-is-blocked"
+      "destination": "/database/helix-db/query-guides/troubleshooting#index-operation-is-blocked"
     },
     {
       "source": "/database/embedded",
@@ -492,7 +559,911 @@
     },
     {
       "source": "/database/troubleshooting",
-      "destination": "/database/helix-cloud/operate/troubleshooting"
+      "destination": "/database/helix-db/query-guides/troubleshooting"
+    },
+    {
+      "source": "/database/helix-cloud/operate/troubleshooting",
+      "destination": "/database/helix-db/query-guides/troubleshooting"
+    },
+    {
+      "source": "/helix-ts",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/helixts",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/helix-js",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/helixjs",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/typescript",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/ts",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/javascript",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/js",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/node",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/nodejs",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/sdks/typescript",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/sdk/typescript",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/sdks/helix-ts",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/documentation/sdks/helix-ts",
+      "destination": "/database/helix-db/start-here/sdk-setup/typescript-project-setup"
+    },
+    {
+      "source": "/helix-rs",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/helixrs",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/rust",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/rs",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/rust-sdk",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/rust-dsl",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/sdks/rust",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/sdk/rust",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/sdks/helix-rs",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/documentation/sdks/helix-rs",
+      "destination": "/database/helix-db/start-here/sdk-setup/rust-project-setup"
+    },
+    {
+      "source": "/helix-py",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/helixpy",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/python",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/py",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/sdks/python",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/sdk/python",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/sdks/helix-py",
+      "destination": "/database/helix-db/start-here/sdk-setup/python-project-setup"
+    },
+    {
+      "source": "/helix-go",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/helixgo",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/go",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/golang",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/sdks/go",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/sdk/go",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/sdks/helix-go",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/documentation/sdks/helix-go",
+      "destination": "/database/helix-db/start-here/sdk-setup/go-project-setup"
+    },
+    {
+      "source": "/sdks",
+      "destination": "/database/helix-db/start-here/sdk-setup/overview"
+    },
+    {
+      "source": "/sdk",
+      "destination": "/database/helix-db/start-here/sdk-setup/overview"
+    },
+    {
+      "source": "/sdk-setup",
+      "destination": "/database/helix-db/start-here/sdk-setup/overview"
+    },
+    {
+      "source": "/clients",
+      "destination": "/database/helix-db/start-here/sdk-setup/overview"
+    },
+    {
+      "source": "/intro",
+      "destination": "/database/helix-db/start-here/introduction"
+    },
+    {
+      "source": "/introduction",
+      "destination": "/database/helix-db/start-here/introduction"
+    },
+    {
+      "source": "/overview",
+      "destination": "/database/helix-db/start-here/introduction"
+    },
+    {
+      "source": "/what-is-helixdb",
+      "destination": "/database/helix-db/start-here/introduction"
+    },
+    {
+      "source": "/quickstart",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/quick-start",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/getting-started",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/get-started",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/start",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/install",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/installation",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/setup",
+      "destination": "/database/helix-db/start-here/quickstart"
+    },
+    {
+      "source": "/deployment",
+      "destination": "/database/helix-db/start-here/run-modes"
+    },
+    {
+      "source": "/deployment-options",
+      "destination": "/database/helix-db/start-here/run-modes"
+    },
+    {
+      "source": "/run-modes",
+      "destination": "/database/helix-db/start-here/run-modes"
+    },
+    {
+      "source": "/local",
+      "destination": "/database/helix-db/start-here/local-development/local-server"
+    },
+    {
+      "source": "/local-server",
+      "destination": "/database/helix-db/start-here/local-development/local-server"
+    },
+    {
+      "source": "/local-development",
+      "destination": "/database/helix-db/start-here/local-development/local-server"
+    },
+    {
+      "source": "/docker",
+      "destination": "/database/helix-db/start-here/local-development/local-server"
+    },
+    {
+      "source": "/self-hosting",
+      "destination": "/database/helix-db/start-here/local-development/local-server"
+    },
+    {
+      "source": "/self-host",
+      "destination": "/database/helix-db/start-here/local-development/local-server"
+    },
+    {
+      "source": "/embedded",
+      "destination": "/database/helix-db/start-here/local-development/embedded-database"
+    },
+    {
+      "source": "/embedded-database",
+      "destination": "/database/helix-db/start-here/local-development/embedded-database"
+    },
+    {
+      "source": "/database/native-graph",
+      "destination": "/database/helix-db/start-here/local-development/embedded-database"
+    },
+    {
+      "source": "/database/helix-db/embedded-and-analytics/native-graph",
+      "destination": "/database/helix-db/start-here/local-development/embedded-database"
+    },
+    {
+      "source": "/release-notes",
+      "destination": "/database/helix-db/start-here/release-notes"
+    },
+    {
+      "source": "/changelog",
+      "destination": "/database/helix-db/start-here/release-notes"
+    },
+    {
+      "source": "/change-log",
+      "destination": "/database/helix-db/start-here/release-notes"
+    },
+    {
+      "source": "/releases",
+      "destination": "/database/helix-db/start-here/release-notes"
+    },
+    {
+      "source": "/whats-new",
+      "destination": "/database/helix-db/start-here/release-notes"
+    },
+    {
+      "source": "/roadmap",
+      "destination": "/database/helix-db/start-here/roadmap"
+    },
+    {
+      "source": "/data-model",
+      "destination": "/database/helix-db/core-concepts/data-model"
+    },
+    {
+      "source": "/schema",
+      "destination": "/database/helix-db/core-concepts/data-model"
+    },
+    {
+      "source": "/graph-model",
+      "destination": "/database/helix-db/core-concepts/data-model"
+    },
+    {
+      "source": "/database/helix-db/migration-guides/from-neo4j",
+      "destination": "/database/helix-db/core-concepts/data-model"
+    },
+    {
+      "source": "/indexes",
+      "destination": "/database/helix-db/core-concepts/data-model#indexes"
+    },
+    {
+      "source": "/indexing",
+      "destination": "/database/helix-db/core-concepts/data-model#indexes"
+    },
+    {
+      "source": "/query",
+      "destination": "/database/helix-db/core-concepts/overview"
+    },
+    {
+      "source": "/queries",
+      "destination": "/database/helix-db/core-concepts/overview"
+    },
+    {
+      "source": "/querying",
+      "destination": "/database/helix-db/core-concepts/overview"
+    },
+    {
+      "source": "/query-walkthrough",
+      "destination": "/database/helix-db/core-concepts/overview"
+    },
+    {
+      "source": "/tutorial",
+      "destination": "/database/helix-db/core-concepts/overview"
+    },
+    {
+      "source": "/ast",
+      "destination": "/database/helix-db/core-concepts/overview"
+    },
+    {
+      "source": "/database/migration/v3-ast",
+      "destination": "/database/helix-db/core-concepts/overview"
+    },
+    {
+      "source": "/writing-data",
+      "destination": "/database/helix-db/query-guides/writing-data"
+    },
+    {
+      "source": "/writes",
+      "destination": "/database/helix-db/query-guides/writing-data"
+    },
+    {
+      "source": "/mutations",
+      "destination": "/database/helix-db/query-guides/writing-data"
+    },
+    {
+      "source": "/reading-data",
+      "destination": "/database/helix-db/query-guides/reading-data"
+    },
+    {
+      "source": "/reads",
+      "destination": "/database/helix-db/query-guides/reading-data"
+    },
+    {
+      "source": "/traversals",
+      "destination": "/database/helix-db/query-guides/traversals"
+    },
+    {
+      "source": "/traversal",
+      "destination": "/database/helix-db/query-guides/traversals"
+    },
+    {
+      "source": "/filtering",
+      "destination": "/database/helix-db/query-guides/filtering"
+    },
+    {
+      "source": "/filters",
+      "destination": "/database/helix-db/query-guides/filtering"
+    },
+    {
+      "source": "/predicates",
+      "destination": "/database/helix-db/query-guides/filtering"
+    },
+    {
+      "source": "/projections",
+      "destination": "/database/helix-db/query-guides/projections"
+    },
+    {
+      "source": "/projection",
+      "destination": "/database/helix-db/query-guides/projections"
+    },
+    {
+      "source": "/parameters",
+      "destination": "/database/helix-db/query-guides/parameters"
+    },
+    {
+      "source": "/params",
+      "destination": "/database/helix-db/query-guides/parameters"
+    },
+    {
+      "source": "/advanced",
+      "destination": "/database/helix-db/query-guides/advanced"
+    },
+    {
+      "source": "/branching",
+      "destination": "/database/helix-db/query-guides/advanced"
+    },
+    {
+      "source": "/conditions",
+      "destination": "/database/helix-db/query-guides/advanced"
+    },
+    {
+      "source": "/secondary-indexes",
+      "destination": "/database/helix-db/query-guides/secondary-indexes"
+    },
+    {
+      "source": "/secondary-index",
+      "destination": "/database/helix-db/query-guides/secondary-indexes"
+    },
+    {
+      "source": "/range-indexes",
+      "destination": "/database/helix-db/query-guides/secondary-indexes"
+    },
+    {
+      "source": "/unique-indexes",
+      "destination": "/database/helix-db/query-guides/secondary-indexes"
+    },
+    {
+      "source": "/vector-search",
+      "destination": "/database/helix-db/query-guides/vector-indexes"
+    },
+    {
+      "source": "/vector",
+      "destination": "/database/helix-db/query-guides/vector-indexes"
+    },
+    {
+      "source": "/vectors",
+      "destination": "/database/helix-db/query-guides/vector-indexes"
+    },
+    {
+      "source": "/vector-index",
+      "destination": "/database/helix-db/query-guides/vector-indexes"
+    },
+    {
+      "source": "/vector-indexes",
+      "destination": "/database/helix-db/query-guides/vector-indexes"
+    },
+    {
+      "source": "/embeddings",
+      "destination": "/learn/vector-search/what-are-vector-embeddings"
+    },
+    {
+      "source": "/semantic-search",
+      "destination": "/learn/vector-search/what-is-vector-search"
+    },
+    {
+      "source": "/similarity-search",
+      "destination": "/learn/vector-search/what-is-vector-search"
+    },
+    {
+      "source": "/full-text-search",
+      "destination": "/database/helix-db/query-guides/text-indexes"
+    },
+    {
+      "source": "/fts",
+      "destination": "/database/helix-db/query-guides/text-indexes"
+    },
+    {
+      "source": "/text-search",
+      "destination": "/database/helix-db/query-guides/text-indexes"
+    },
+    {
+      "source": "/bm25",
+      "destination": "/learn/full-text-search/what-is-bm25"
+    },
+    {
+      "source": "/keyword-search",
+      "destination": "/database/helix-db/query-guides/text-indexes"
+    },
+    {
+      "source": "/text-index",
+      "destination": "/database/helix-db/query-guides/text-indexes"
+    },
+    {
+      "source": "/text-indexes",
+      "destination": "/database/helix-db/query-guides/text-indexes"
+    },
+    {
+      "source": "/prefiltering",
+      "destination": "/database/helix-db/query-guides/prefiltering"
+    },
+    {
+      "source": "/prefilter",
+      "destination": "/database/helix-db/query-guides/prefiltering"
+    },
+    {
+      "source": "/vector-prefiltering",
+      "destination": "/database/helix-db/query-guides/prefiltering"
+    },
+    {
+      "source": "/filtered-search",
+      "destination": "/database/helix-db/query-guides/prefiltering"
+    },
+    {
+      "source": "/http-api",
+      "destination": "/database/helix-db/query-guides/http-api"
+    },
+    {
+      "source": "/rest-api",
+      "destination": "/database/helix-db/query-guides/http-api"
+    },
+    {
+      "source": "/api-reference",
+      "destination": "/database/helix-db/query-guides/http-api"
+    },
+    {
+      "source": "/openapi",
+      "destination": "/database/helix-db/query-guides/http-api"
+    },
+    {
+      "source": "/database/reference/ast",
+      "destination": "/database/helix-db/query-guides/http-api"
+    },
+    {
+      "source": "/errors",
+      "destination": "/database/helix-db/query-guides/error-handling"
+    },
+    {
+      "source": "/error-codes",
+      "destination": "/database/helix-db/query-guides/error-handling"
+    },
+    {
+      "source": "/error-handling",
+      "destination": "/database/helix-db/query-guides/error-handling"
+    },
+    {
+      "source": "/troubleshooting",
+      "destination": "/database/helix-db/query-guides/troubleshooting"
+    },
+    {
+      "source": "/troubleshoot",
+      "destination": "/database/helix-db/query-guides/troubleshooting"
+    },
+    {
+      "source": "/cloud",
+      "destination": "/database/helix-cloud/start-here/using-the-cloud"
+    },
+    {
+      "source": "/helix-cloud",
+      "destination": "/database/helix-cloud/start-here/using-the-cloud"
+    },
+    {
+      "source": "/dashboard",
+      "destination": "/database/helix-cloud/start-here/using-the-cloud"
+    },
+    {
+      "source": "/enterprise",
+      "destination": "/database/helix-cloud/start-here/using-the-cloud"
+    },
+    {
+      "source": "/managed",
+      "destination": "/database/helix-cloud/start-here/using-the-cloud"
+    },
+    {
+      "source": "/database/helix-cloud/start-here/using-the-dashboard",
+      "destination": "/database/helix-cloud/start-here/using-the-cloud"
+    },
+    {
+      "source": "/connect",
+      "destination": "/database/helix-cloud/start-here/working-with-enterprise"
+    },
+    {
+      "source": "/api-keys",
+      "destination": "/database/helix-cloud/start-here/working-with-enterprise"
+    },
+    {
+      "source": "/architecture",
+      "destination": "/database/helix-cloud/start-here/architecture"
+    },
+    {
+      "source": "/mcp",
+      "destination": "/database/helix-cloud/connect/mcp"
+    },
+    {
+      "source": "/helix-mcp",
+      "destination": "/database/helix-cloud/connect/mcp"
+    },
+    {
+      "source": "/security",
+      "destination": "/database/helix-cloud/operate/security"
+    },
+    {
+      "source": "/authentication",
+      "destination": "/database/helix-cloud/operate/security"
+    },
+    {
+      "source": "/multi-tenancy",
+      "destination": "/database/helix-cloud/operate/multi-tenancy"
+    },
+    {
+      "source": "/multitenancy",
+      "destination": "/database/helix-cloud/operate/multi-tenancy"
+    },
+    {
+      "source": "/tenancy",
+      "destination": "/database/helix-cloud/operate/multi-tenancy"
+    },
+    {
+      "source": "/tenants",
+      "destination": "/database/helix-cloud/operate/multi-tenancy"
+    },
+    {
+      "source": "/guarantees",
+      "destination": "/database/helix-cloud/operate/guarantees"
+    },
+    {
+      "source": "/acid",
+      "destination": "/database/helix-cloud/operate/guarantees"
+    },
+    {
+      "source": "/transactions",
+      "destination": "/database/helix-cloud/operate/guarantees"
+    },
+    {
+      "source": "/consistency",
+      "destination": "/database/helix-cloud/operate/guarantees"
+    },
+    {
+      "source": "/limits",
+      "destination": "/database/helix-cloud/operate/limits"
+    },
+    {
+      "source": "/rate-limits",
+      "destination": "/database/helix-cloud/operate/limits"
+    },
+    {
+      "source": "/rate-limiting",
+      "destination": "/database/helix-cloud/operate/limits"
+    },
+    {
+      "source": "/quotas",
+      "destination": "/database/helix-cloud/operate/limits"
+    },
+    {
+      "source": "/tradeoffs",
+      "destination": "/database/helix-cloud/operate/tradeoffs"
+    },
+    {
+      "source": "/gateway-errors",
+      "destination": "/database/helix-cloud/operate/error-handling"
+    },
+    {
+      "source": "/cloud-errors",
+      "destination": "/database/helix-cloud/operate/error-handling"
+    },
+    {
+      "source": "/cli",
+      "destination": "/cli/getting-started"
+    },
+    {
+      "source": "/helix-cli",
+      "destination": "/cli/getting-started"
+    },
+    {
+      "source": "/install-cli",
+      "destination": "/cli/getting-started"
+    },
+    {
+      "source": "/commands",
+      "destination": "/cli/command-reference"
+    },
+    {
+      "source": "/cli/commands",
+      "destination": "/cli/command-reference"
+    },
+    {
+      "source": "/cli-reference",
+      "destination": "/cli/command-reference"
+    },
+    {
+      "source": "/cli/command-reference/push",
+      "destination": "/cli/command-reference"
+    },
+    {
+      "source": "/cli/command-reference/sync",
+      "destination": "/cli/command-reference"
+    },
+    {
+      "source": "/chef",
+      "destination": "/cli/command-reference/chef"
+    },
+    {
+      "source": "/helix-chef",
+      "destination": "/cli/command-reference/chef"
+    },
+    {
+      "source": "/helix-toml",
+      "destination": "/cli/configuration"
+    },
+    {
+      "source": "/helix.toml",
+      "destination": "/cli/configuration"
+    },
+    {
+      "source": "/hql",
+      "destination": "/legacy/hql"
+    },
+    {
+      "source": "/helixql",
+      "destination": "/legacy/hql"
+    },
+    {
+      "source": "/helix-ql",
+      "destination": "/legacy/hql"
+    },
+    {
+      "source": "/hql-v1",
+      "destination": "/legacy/hql"
+    },
+    {
+      "source": "/graph-database",
+      "destination": "/learn/graph-databases/what-is-a-graph-database"
+    },
+    {
+      "source": "/graph-databases",
+      "destination": "/learn/graph-databases/what-is-a-graph-database"
+    },
+    {
+      "source": "/what-is-a-graph-database",
+      "destination": "/learn/graph-databases/what-is-a-graph-database"
+    },
+    {
+      "source": "/graph-vs-relational",
+      "destination": "/learn/graph-databases/graph-vs-relational-database"
+    },
+    {
+      "source": "/graph-vs-sql",
+      "destination": "/learn/graph-databases/graph-vs-relational-database"
+    },
+    {
+      "source": "/knowledge-graph",
+      "destination": "/learn/graph-databases/what-is-a-knowledge-graph"
+    },
+    {
+      "source": "/knowledge-graphs",
+      "destination": "/learn/graph-databases/what-is-a-knowledge-graph"
+    },
+    {
+      "source": "/property-graph",
+      "destination": "/learn/graph-databases/what-is-a-property-graph"
+    },
+    {
+      "source": "/labeled-property-graph",
+      "destination": "/learn/graph-databases/what-is-a-property-graph"
+    },
+    {
+      "source": "/what-is-vector-search",
+      "destination": "/learn/vector-search/what-is-vector-search"
+    },
+    {
+      "source": "/vector-database",
+      "destination": "/learn/vector-search/what-is-a-vector-database"
+    },
+    {
+      "source": "/vector-databases",
+      "destination": "/learn/vector-search/what-is-a-vector-database"
+    },
+    {
+      "source": "/vector-db",
+      "destination": "/learn/vector-search/what-is-a-vector-database"
+    },
+    {
+      "source": "/filtered-vector-search",
+      "destination": "/learn/vector-search/filtered-vector-search"
+    },
+    {
+      "source": "/vector-filtering",
+      "destination": "/learn/vector-search/filtered-vector-search"
+    },
+    {
+      "source": "/distance-metrics",
+      "destination": "/learn/vector-search/vector-distance-metrics"
+    },
+    {
+      "source": "/cosine-similarity",
+      "destination": "/learn/vector-search/vector-distance-metrics"
+    },
+    {
+      "source": "/what-is-full-text-search",
+      "destination": "/learn/full-text-search/what-is-full-text-search"
+    },
+    {
+      "source": "/inverted-index",
+      "destination": "/learn/full-text-search/what-is-full-text-search"
+    },
+    {
+      "source": "/hybrid-search",
+      "destination": "/learn/full-text-search/hybrid-search"
+    },
+    {
+      "source": "/rrf",
+      "destination": "/learn/full-text-search/hybrid-search"
+    },
+    {
+      "source": "/reciprocal-rank-fusion",
+      "destination": "/learn/full-text-search/hybrid-search"
+    },
+    {
+      "source": "/memory",
+      "destination": "/learn/ai-memory/what-is-ai-agent-memory"
+    },
+    {
+      "source": "/agent-memory",
+      "destination": "/learn/ai-memory/what-is-ai-agent-memory"
+    },
+    {
+      "source": "/ai-memory",
+      "destination": "/learn/ai-memory/what-is-ai-agent-memory"
+    },
+    {
+      "source": "/ai-agent-memory",
+      "destination": "/learn/ai-memory/what-is-ai-agent-memory"
+    },
+    {
+      "source": "/llm-memory",
+      "destination": "/learn/ai-memory/what-is-ai-agent-memory"
+    },
+    {
+      "source": "/long-term-memory",
+      "destination": "/learn/ai-memory/long-term-memory-for-ai-agents"
+    },
+    {
+      "source": "/memory-architecture",
+      "destination": "/learn/ai-memory/long-term-memory-for-ai-agents"
+    },
+    {
+      "source": "/graphrag",
+      "destination": "/learn/ai-memory/what-is-graphrag"
+    },
+    {
+      "source": "/graph-rag",
+      "destination": "/learn/ai-memory/what-is-graphrag"
+    },
+    {
+      "source": "/object-storage",
+      "destination": "/learn/database-architecture/object-storage-databases"
+    },
+    {
+      "source": "/storage-compute-separation",
+      "destination": "/learn/database-architecture/object-storage-databases"
+    },
+    {
+      "source": "/graph-vector-database",
+      "destination": "/learn/database-architecture/one-database-for-graph-vector-and-text"
+    },
+    {
+      "source": "/multi-model-database",
+      "destination": "/learn/database-architecture/one-database-for-graph-vector-and-text"
+    },
+    {
+      "source": "/vector-embeddings",
+      "destination": "/learn/vector-search/what-are-vector-embeddings"
+    },
+    {
+      "source": "/what-are-embeddings",
+      "destination": "/learn/vector-search/what-are-vector-embeddings"
+    },
+    {
+      "source": "/hnsw",
+      "destination": "/learn/vector-search/what-is-hnsw"
+    },
+    {
+      "source": "/ann-index",
+      "destination": "/learn/vector-search/what-is-hnsw"
+    },
+    {
+      "source": "/rdf",
+      "destination": "/learn/graph-databases/property-graph-vs-rdf"
+    },
+    {
+      "source": "/property-graph-vs-rdf",
+      "destination": "/learn/graph-databases/property-graph-vs-rdf"
+    },
+    {
+      "source": "/rag",
+      "destination": "/learn/ai-memory/what-is-rag"
+    },
+    {
+      "source": "/retrieval-augmented-generation",
+      "destination": "/learn/ai-memory/what-is-rag"
+    },
+    {
+      "source": "/what-is-rag",
+      "destination": "/learn/ai-memory/what-is-rag"
     }
   ],
   "search": {
@@ -529,12 +1500,12 @@
   "seo": {
     "indexing": "all",
     "metatags": {
-      "description": "HelixDB Documentation to get you started with HelixDB",
-      "keywords": "HelixDB, Documentation, Getting Started, CLI, SDK, Guides, Features, Blogs, RAG, Database, Database, Graph Database, Vector Database, AI, Agents, LLMs, Knowledge Graphs, Retrieval Augmented Generation, Knowledge Graphs, AI Agents, Document databases",
+      "description": "HelixDB is an open-source graph database with native vector search and BM25 full-text search, built on object storage. Guides for graph data, vector search, hybrid search, and AI agent memory.",
+      "keywords": "HelixDB, graph database, open source graph database, vector database, vector search, filtered vector search, full-text search, BM25, hybrid search, knowledge graph, GraphRAG, RAG, AI agent memory, long-term memory for LLMs, memory infrastructure, object storage database, property graph, SDK, CLI",
       "robots": "all",
       "googlebot": "index, follow",
       "og:title": "HelixDB Docs",
-      "og:description": "HelixDB Documentation",
+      "og:description": "Documentation and learning center for HelixDB, the open-source graph database with native vector and full-text search.",
       "og:type": "website",
       "og:site_name": "HelixDB Documentation",
       "category": "Technology",

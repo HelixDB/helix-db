@@ -17,6 +17,9 @@ const PAGE_TYPES = new Set([
   "Troubleshooting",
 ]);
 const MATURITY_STATUSES = new Set(["Preview", "Beta", "Deprecated"]);
+// Tile-grid landing pages render no body text before their cards, so they carry
+// pageType metadata without a rendered badge.
+const LANDING_PAGES = new Set(["learn/index"]);
 const CORE_MULTI_SDK_PAGES = [
   "database/helix-db/core-concepts/overview",
   "database/helix-db/query-guides/reading-data",
@@ -24,6 +27,7 @@ const CORE_MULTI_SDK_PAGES = [
   "database/helix-db/query-guides/secondary-indexes",
   "database/helix-db/query-guides/vector-indexes",
   "database/helix-db/query-guides/text-indexes",
+  "database/helix-db/query-guides/prefiltering",
   "database/helix-db/query-guides/traversals",
   "database/helix-db/query-guides/filtering",
   "database/helix-db/query-guides/projections",
@@ -43,6 +47,11 @@ const DATABASE_GROUP_PREFIXES = new Map([
   ["Helix Cloud/Start Here", "database/helix-cloud/start-here/"],
   ["Helix Cloud/Connect and automate", "database/helix-cloud/connect/"],
   ["Helix Cloud/Operate", "database/helix-cloud/operate/"],
+  ["Learn/Graph databases", "learn/graph-databases/"],
+  ["Learn/Vector search", "learn/vector-search/"],
+  ["Learn/Full-text search", "learn/full-text-search/"],
+  ["Learn/AI memory and RAG", "learn/ai-memory/"],
+  ["Learn/Database architecture", "learn/database-architecture/"],
 ]);
 const CLIENT_SETUP_MARKER = "{/* client-setup: no JSON representation */}";
 const PACKAGE_INSTALL_MARKER =
@@ -162,7 +171,7 @@ function lineNumber(content, offset) {
 
 const config = JSON.parse(fs.readFileSync(DOCS_JSON, "utf8"));
 const tabNames = (config.navigation?.tabs ?? []).map((tab) => tab.tab);
-const expectedTabs = ["HelixDB", "Helix Cloud", "CLI Reference"];
+const expectedTabs = ["HelixDB", "Helix Cloud", "CLI Reference", "Learn"];
 if (JSON.stringify(tabNames) !== JSON.stringify(expectedTabs)) {
   errors.push(`docs.json: tabs must be exactly ${expectedTabs.join(", ")}`);
 }
@@ -230,6 +239,7 @@ for (const slug of navigable) {
 
   const body = content.slice(match[0].length);
   const bodyLines = body.split("\n").filter((line) => line.trim().length > 0);
+  if (LANDING_PAGES.has(slug)) continue;
   if (pageType !== null) {
     if (countBadge(body, pageType) !== 1) {
       errors.push(
@@ -248,6 +258,25 @@ for (const slug of navigable) {
       errors.push(
         `${slug}: rendered ${maturity} badge does not match frontmatter`,
       );
+    }
+  }
+  if (slug.startsWith("learn/")) {
+    if (!body.includes('<div className="learn-objectives">')) {
+      errors.push(`${slug}: Learn page is missing the learning-objectives block`);
+    }
+    for (const section of ["Frequently asked questions", "Related topics"]) {
+      if (!body.includes(`\n## ${section}\n`)) {
+        errors.push(`${slug}: Learn page is missing ## ${section}`);
+      }
+    }
+    for (const [, heading] of body.matchAll(/^## (.+)$/gm)) {
+      const fixed = heading === "Frequently asked questions" || heading === "Related topics";
+      if (!fixed && !heading.trim().endsWith("?")) {
+        errors.push(`${slug}: Learn section heading is not a question: ${heading}`);
+      }
+    }
+    if (body.includes("<Accordion")) {
+      errors.push(`${slug}: Learn FAQs use visible ### questions, not accordions`);
     }
   }
   if (status !== null) {
@@ -292,11 +321,14 @@ const docsFiles = filesUnder(DOCS_ROOT).filter(
 );
 for (const file of docsFiles) {
   const relative = path.relative(DOCS_ROOT, file);
-  if (relative.startsWith("database/") && relative.endsWith(".mdx")) {
+  if (
+    (relative.startsWith("database/") || relative.startsWith("learn/")) &&
+    relative.endsWith(".mdx")
+  ) {
     const route = relative.slice(0, -".mdx".length);
     if (!routeCounts.has(route)) {
       errors.push(
-        `${relative}: database page is not present in sidebar navigation`,
+        `${relative}: documentation page is not present in sidebar navigation`,
       );
     }
   }

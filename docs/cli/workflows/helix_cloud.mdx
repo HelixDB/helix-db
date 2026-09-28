@@ -6,6 +6,10 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
+Use the CLI to sign in to Helix Cloud, link a project to a Cloud database, and run
+queries against it. You need a Helix Cloud account and at least one database; see
+[Get started with Helix Cloud](/database/helix-cloud/start-here/using-the-cloud).
+
 <Steps>
   <Step title="Authenticate with WorkOS">
     ```bash
@@ -34,16 +38,37 @@ pageType: "Guide"
   </Step>
 </Steps>
 
-The WorkOS session identifies the user. `database.query.read` or `database.query.write` independently
-authorizes the selected database; project-management access does not imply query access. The backend
-forwards the authorized request using the existing cluster-scoped operational gateway key and, for a
-tenant database, the exact tenant header. The CLI never receives that key and never contacts the
-gateway directly.
+## How Cloud queries are authorized
 
-Owners/admins have both query scopes by default. Members have neither unless explicitly granted.
-Local queries keep the current local auth-disabled path.
+- `helix auth login` creates a WorkOS session that identifies you. The CLI never uses
+  database API keys.
+- Cloud queries go through the Helix Cloud backend (the broker), not directly to the
+  database gateway. The broker forwards each authorized request with its own gateway
+  credentials, which the CLI never receives.
+- Reads require the `database.query.read` scope and writes require
+  `database.query.write` on the selected database. Project-management access does not
+  imply query access.
+- Owners and admins have both query scopes by default. Members have neither unless
+  explicitly granted.
+- Local queries are unaffected and run without authentication.
 
-Use `helix database key` only to create application keys for direct gateway clients. Use
-`helix service-credential` to manage headless HTTP API and unified MCP credentials. MCP tool
-access follows project grants; service credentials do not receive Cloud discovery or observability
-tools. Neither is a CLI login method.
+## Keys and credentials are not logins
+
+- `helix database key` creates application keys for your own services that call the
+  gateway directly.
+- `helix service-credential` manages headless HTTP API and unified MCP credentials.
+  MCP tool access follows the credential's project grants, and these sessions do not
+  get Cloud discovery or observability tools.
+
+Neither can be used to sign in to the CLI.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="CLI configuration" icon="gear" href="/cli/configuration">
+    How `helix.toml` stores project and database links.
+  </Card>
+  <Card title="helix query" icon="terminal" href="/cli/command-reference/query">
+    Request formats and Cloud query behavior.
+  </Card>
+</CardGroup>

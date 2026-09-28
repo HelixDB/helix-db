@@ -32,6 +32,7 @@ from helixdb import (
     VectorDistanceMetric,
     WhenThen,
     WriteBatch,
+    bytes_,
     define_params,
     g,
     param,
@@ -47,6 +48,15 @@ from helixdb import (
 
 def parsed(value: object) -> object:
     return json.loads(stringify_json(value))
+
+
+class EdgeDropTests(unittest.TestCase):
+    def test_drop_preserves_element_state(self):
+        dropped = g().e([1, 2]).drop()
+        self.assertEqual(dropped.state, "edges")
+        self.assertEqual(dropped.mode, "write")
+        self.assertEqual(g().n(1).drop().state, "nodes")
+        self.assertEqual(dropped.into_ast(), {"drop": {"input": g().e([1, 2]).into_ast()}})
 
 
 class DslAstTests(unittest.TestCase):
@@ -231,7 +241,20 @@ class DslAstTests(unittest.TestCase):
             structural_json_equal(b'{"n":9223372036854775807}', b'{"n":9223372036854775807}')
         )
         self.assertEqual(parsed(PropertyValue.null()), "null")
-        self.assertEqual(parsed(PropertyValue.bytes(b"\x01\x02")), {"bytes": [1, 2]})
+        self.assertEqual(parsed(PropertyValue.bytes(bytes([0, 255]))), {"bytes": [0, 255]})
+        self.assertEqual(
+            parsed(PropertyValue.from_value(bytes_(bytearray([0, 255])))),
+            {"bytes": [0, 255]},
+        )
+        for value in (-1, 1.5, 256, "7", True):
+            with self.assertRaisesRegex(
+                TypeError, "byte at index 0 must be an integer from 0 to 255"
+            ):
+                PropertyValue.bytes([value])
+            with self.assertRaisesRegex(
+                TypeError, "byte at index 0 must be an integer from 0 to 255"
+            ):
+                PropertyValue.from_value(bytes_([value]))
         self.assertEqual(parsed(PropertyInput.param("limit")), {"expr": {"param": "limit"}})
         self.assertEqual(parsed(NodeRef.param("node_ids")), {"param": "node_ids"})
         self.assertEqual(

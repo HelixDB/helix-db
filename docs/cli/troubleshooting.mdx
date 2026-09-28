@@ -8,9 +8,10 @@ pageType: "Troubleshooting"
 
 ## Authentication required
 
-Run `helix auth login`. If an access token is near expiry, the CLI refreshes it through WFE while
-holding the credential-file lock. Only a typed WFE rejection before handler dispatch can trigger one
-refresh-and-retry. A normal authorization denial or any post-dispatch failure is not retried.
+Run `helix auth login`. The CLI refreshes a nearly expired session automatically
+through the Helix Cloud API. It retries once only when the API rejects the expired
+token before running the command; a normal authorization denial or any failure after
+the command runs is not retried.
 
 Old credential/config fields are intentionally rejected. Remove legacy user/admin keys, arbitrary
 authorization headers, gateway URLs, and query-key fields. Service credentials and application keys

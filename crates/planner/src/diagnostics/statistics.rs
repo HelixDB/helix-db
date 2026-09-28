@@ -28,6 +28,14 @@ pub struct AccessStatistics {
 /// Stable planner work and selected executable-plan shape statistics.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannerStatistics {
+    /// Exclusive demand-driven execution regions, including nested plans.
+    pub pull_regions: usize,
+    /// Operators executed inside those regions without storing every intermediate.
+    pub pull_operators: usize,
+    /// Operators whose positive output demand requires their complete input.
+    pub full_input_operators: usize,
+    /// Operators that preserve effects, captures, or unproven control-flow scopes.
+    pub observable_boundaries: usize,
     /// Memo groups explored.
     pub memo_groups: usize,
     /// Memo expressions explored.

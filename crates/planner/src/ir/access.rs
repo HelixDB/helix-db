@@ -17,7 +17,10 @@ mod node;
 pub use self::{
     edge::{EdgeAccessPlan, EdgeAccessSourcePlan},
     iteration::RangeScanIteration,
-    node::{NodeAccessPlan, NodeAccessSourcePlan},
+    node::{
+        NodeAccessPlan, NodeAccessSourcePlan, NodeIndexMembershipError, NodeIndexMembershipPlan,
+        NodeMembershipOutsideLabel,
+    },
 };
 
 fn search_limit_hard_cardinality_upper_bound(k: &super::SearchLimitPlan) -> Option<usize> {

@@ -1013,7 +1013,7 @@ def base_runtime_fixtures() -> list[RuntimeFixture]:
                 )
                 .var_as(
                     "edges",
-                    g().drop_edge_by_id(EdgeRef.var("edge_matches")).count(),
+                    g().e(EdgeRef.var("edge_matches")).drop().count(),
                 )
                 .var_as(
                     "source",

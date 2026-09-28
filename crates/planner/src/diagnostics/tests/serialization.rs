@@ -23,6 +23,10 @@ fn empty_access_json() -> Value {
 
 fn empty_statistics_json() -> Value {
     json!({
+        "pull_regions": 0,
+        "pull_operators": 0,
+        "full_input_operators": 0,
+        "observable_boundaries": 0,
         "memo_groups": 0,
         "memo_expressions": 0,
         "rules_fired": 0,

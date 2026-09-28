@@ -30,7 +30,7 @@ impl<'a> Analyzer<'a> {
 
     pub(super) fn analyze(mut self, plan: &exec::ExecutablePlan) -> PlannerDiagnostics {
         self.copy_planner_work(plan.metrics());
-        self.analyze_steps(plan.steps(), 0, 0);
+        self.analyze_steps(plan.steps(), plan.execution_program(), 0, 0);
         let insights = self.finish_insights();
         PlannerDiagnostics {
             statistics: self.statistics,
@@ -51,9 +51,21 @@ impl<'a> Analyzer<'a> {
     fn analyze_steps(
         &mut self,
         steps: &[exec::ExecStep],
+        program: &exec::ExecProgram,
         base_operator_depth: usize,
         base_traversal_depth: usize,
     ) {
+        for (_, region) in program.regions() {
+            self.statistics.pull_regions += 1;
+            self.statistics.pull_operators += region.steps().len();
+        }
+        for step in steps {
+            match exec::ExecPullCapability::of(&step.op) {
+                exec::ExecPullCapability::FullInput => self.statistics.full_input_operators += 1,
+                exec::ExecPullCapability::Boundary => self.statistics.observable_boundaries += 1,
+                exec::ExecPullCapability::Incremental | exec::ExecPullCapability::Prepared => {}
+            }
+        }
         let steps_by_id = steps
             .iter()
             .map(|step| (step.id, step))
@@ -171,13 +183,19 @@ impl<'a> Analyzer<'a> {
             }
             exec::ExecOp::Repeat { plan } => {
                 self.statistics.repeats = self.statistics.repeats.saturating_add(1);
-                self.analyze_steps(plan.body.steps(), operator_depth, parent_traversal_depth);
+                self.analyze_steps(
+                    plan.body.steps(),
+                    plan.body.execution_program(),
+                    operator_depth,
+                    parent_traversal_depth,
+                );
             }
             exec::ExecOp::ForEach { body, .. } => {
                 self.statistics.for_each = self.statistics.for_each.saturating_add(1);
-                self.analyze_steps(body.steps(), operator_depth, 0);
+                self.analyze_steps(body.steps(), body.execution_program(), operator_depth, 0);
             }
             exec::ExecOp::Distinct
+            | exec::ExecOp::IndexMembership { .. }
             | exec::ExecOp::VectorSearch { .. }
             | exec::ExecOp::TextSearch { .. }
             | exec::ExecOp::Project { .. }
@@ -203,24 +221,54 @@ impl<'a> Analyzer<'a> {
     ) {
         match plan {
             exec::ExecBranchPlan::Union(plans) => plans.iter().for_each(|plan| {
-                self.analyze_steps(plan.steps(), operator_depth, base_traversal_depth)
+                self.analyze_steps(
+                    plan.steps(),
+                    plan.execution_program(),
+                    operator_depth,
+                    base_traversal_depth,
+                )
             }),
             exec::ExecBranchPlan::Choose { then_plan, .. } => {
-                self.analyze_steps(then_plan.steps(), operator_depth, base_traversal_depth);
+                self.analyze_steps(
+                    then_plan.steps(),
+                    then_plan.execution_program(),
+                    operator_depth,
+                    base_traversal_depth,
+                );
             }
             exec::ExecBranchPlan::ChooseElse {
                 then_plan,
                 else_plan,
                 ..
             } => {
-                self.analyze_steps(then_plan.steps(), operator_depth, base_traversal_depth);
-                self.analyze_steps(else_plan.steps(), operator_depth, base_traversal_depth);
+                self.analyze_steps(
+                    then_plan.steps(),
+                    then_plan.execution_program(),
+                    operator_depth,
+                    base_traversal_depth,
+                );
+                self.analyze_steps(
+                    else_plan.steps(),
+                    else_plan.execution_program(),
+                    operator_depth,
+                    base_traversal_depth,
+                );
             }
             exec::ExecBranchPlan::Coalesce(plans) => plans.iter().for_each(|plan| {
-                self.analyze_steps(plan.steps(), operator_depth, base_traversal_depth)
+                self.analyze_steps(
+                    plan.steps(),
+                    plan.execution_program(),
+                    operator_depth,
+                    base_traversal_depth,
+                )
             }),
             exec::ExecBranchPlan::Optional(plan) => {
-                self.analyze_steps(plan.steps(), operator_depth, base_traversal_depth);
+                self.analyze_steps(
+                    plan.steps(),
+                    plan.execution_program(),
+                    operator_depth,
+                    base_traversal_depth,
+                );
             }
         }
     }
@@ -673,6 +721,7 @@ fn traversal_depth_for_op(op: &exec::ExecOp, parent_depth: usize) -> usize {
                 .saturating_mul(subplan_maximum_traversal_increment(plan.body.steps())),
         ),
         exec::ExecOp::Filter { .. }
+        | exec::ExecOp::IndexMembership { .. }
         | exec::ExecOp::Count { .. }
         | exec::ExecOp::VectorSearch { .. }
         | exec::ExecOp::TextSearch { .. }
@@ -836,6 +885,7 @@ fn lineage_for_step(
                 .collect(),
         ),
         exec::ExecOp::Filter { .. }
+        | exec::ExecOp::IndexMembership { .. }
         | exec::ExecOp::VectorSearch { .. }
         | exec::ExecOp::TextSearch { .. }
         | exec::ExecOp::Limit { .. }
@@ -882,6 +932,7 @@ fn unbounded_scan_scope(op: &exec::ExecOp) -> Option<AccessScope> {
         | exec::ExecOp::VectorSearch { .. }
         | exec::ExecOp::TextSearch { .. }
         | exec::ExecOp::Filter { .. }
+        | exec::ExecOp::IndexMembership { .. }
         | exec::ExecOp::Limit { .. }
         | exec::ExecOp::Skip { .. }
         | exec::ExecOp::Range { .. }
