@@ -280,6 +280,24 @@ fn plan_accesses(
                 },
                 None => ir::NodeAccessPlan::AllScan,
             }];
+            // Point reads of the admitted IDs, labelled or not; pattern
+            // validation still checks each node's label and existence.
+            if constraints_total
+                && let Some(ids) = total_predicate
+                    .and_then(|predicate| conjunct_ids(predicate, node.slot, &ctx.params))
+            {
+                // A scan's source cost omits reading each scanned node, so a
+                // few point reads would lose to it on cost alone.
+                if ids.len() <= union_branches {
+                    candidates.clear();
+                }
+                candidates.push(match ir::AtLeast::try_from_vec(ids.into_iter().collect()) {
+                    Some(ids) => ir::NodeAccessPlan::PointIds {
+                        ids: ir::ElementIds::new(ids).expect("a set holds distinct IDs"),
+                    },
+                    None => ir::NodeAccessPlan::Empty,
+                });
+            }
             if let Some(label) = label
                 && constraints_total
             {
@@ -976,6 +994,18 @@ impl Totality<'_> {
             Expression::Property(value, _) => {
                 matches!(value.as_ref(), Expression::Slot(slot) if self.has_properties(*slot))
             }
+            // id() of a node, relationship or null cannot fail.
+            Expression::Function(Function::Id, arguments) => matches!(
+                arguments.as_slice(),
+                [Expression::Slot(slot)] if self.pattern.nodes.iter().any(|node| node.slot == *slot)
+                    || self.pattern.relationships.iter().any(|rel| rel.slot == *slot)
+                    || matches!(
+                        self.bindings[slot.0 as usize].value_type,
+                        super::ValueType::Node
+                            | super::ValueType::Relationship
+                            | super::ValueType::Null
+                    )
+            ),
             _ => false,
         }
     }
@@ -1058,6 +1088,68 @@ impl Totality<'_> {
             ) => self.operand(left) && self.operand(right),
             _ => false,
         }
+    }
+}
+
+/// Node IDs that a conjunct `id(slot) = v` or `id(slot) IN [...]` of
+/// `expression` admits, from integer literals and bound integer parameters.
+/// Null and negative values admit nothing; other values are not handled.
+fn conjunct_ids(
+    expression: &Expression,
+    slot: Slot,
+    params: &context::ParamBindings,
+) -> Option<BTreeSet<u64>> {
+    let is_id = |expression: &Expression| {
+        matches!(expression, Expression::Function(Function::Id, arguments)
+            if matches!(arguments.as_slice(), [Expression::Slot(target)] if *target == slot))
+    };
+    // `Some(None)` is a value that admits no ID.
+    let id = |value: &Value| match value {
+        Value::Integer(id) => Some(u64::try_from(*id).ok()),
+        Value::Null => Some(None),
+        _ => None,
+    };
+    let ids = |values: &[Value]| {
+        values
+            .iter()
+            .map(id)
+            .collect::<Option<Vec<_>>>()
+            .map(|ids| ids.into_iter().flatten().collect::<BTreeSet<_>>())
+    };
+    match expression {
+        Expression::Binary(Binary::And, a, b) => {
+            conjunct_ids(a, slot, params).or_else(|| conjunct_ids(b, slot, params))
+        }
+        Expression::Binary(Binary::Equal, a, b) => [(a, b), (b, a)]
+            .into_iter()
+            .filter(|(target, _)| is_id(target))
+            .find_map(|(_, value)| match value.as_ref() {
+                Expression::Literal(value) => ids(std::slice::from_ref(value)),
+                Expression::Parameter(name) => match params
+                    .values
+                    .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))?
+                {
+                    helix_ast::value::PropertyValue::I64(value) => {
+                        ids(std::slice::from_ref(&Value::Integer(*value)))
+                    }
+                    helix_ast::value::PropertyValue::Null => Some(BTreeSet::new()),
+                    _ => None,
+                },
+                _ => None,
+            }),
+        Expression::Binary(Binary::In, value, list) if is_id(value) => match list.as_ref() {
+            Expression::Literal(Value::List(values)) => ids(values),
+            Expression::List(items) => ids(&items
+                .iter()
+                .map(|item| match item {
+                    Expression::Literal(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?),
+            Expression::Literal(Value::Null) => Some(BTreeSet::new()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1309,6 +1401,7 @@ fn access_rows(access: &ir::NodeAccessPlan, config: &optimizer::OptimizerConfig)
             .copied()
             .unwrap_or(config.storage.default_unknown_scan_rows.as_rows()),
         ir::NodeAccessPlan::AllScan => config.storage.default_unknown_scan_rows.as_rows(),
+        ir::NodeAccessPlan::PointIds { ids } => ids.as_ref().len() as u64,
         ir::NodeAccessPlan::RangeIndex { key, .. } => config
             .stats
             .node_range_cardinality

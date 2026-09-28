@@ -128,6 +128,8 @@ A label test in WHERE, such as `MATCH (n) WHERE n:User`, labels the node for
 this purpose, and every occurrence of a repeated node variable contributes its
 property map. An equality with null matches nothing, so it reads no nodes. With
 only a range index on a property, an equality reads the closed range `[v, v]`.
+`id(n) = v` and `id(n) IN [...]` with integer literals or parameters read those
+nodes directly, labelled or not; the pattern still checks each node's label.
 For a labeled node, a WHERE conjunct such as `n.email = $email` or
 `n.key IN [1, 2, 3]` can read a native equality index on that property instead
 of scanning the label, and so can equalities of one property joined by `OR`,

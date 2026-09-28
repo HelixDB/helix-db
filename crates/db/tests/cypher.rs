@@ -51,6 +51,9 @@ mod index_limits;
 #[path = "cypher/native_counts.rs"]
 mod native_counts;
 
+#[path = "cypher/ids.rs"]
+mod ids;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;
