@@ -117,6 +117,9 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 ## Learning center
 - [Learning center](https://docs.helix-db.com/learn/index): Plain-language answers about graph databases, vector search, full-text search, AI agent memory, and modern database architecture. — Page type: Concept
 
+## Solution guides
+- [How to build an enterprise knowledge graph with an ontology](https://docs.helix-db.com/learn/guides/enterprise-knowledge-graph): Design an enterprise knowledge graph that resolves records to one entity, keeps each fact's history and source, and gives AI agents permission-filtered context. — Page type: Guide
+
 ## Graph databases
 - [What is a graph database?](https://docs.helix-db.com/learn/graph-databases/what-is-a-graph-database): A graph database stores things as nodes and the connections between them as edges, and answers questions by following those connections. — Page type: Concept
 - [What is the difference between a graph database and a relational database?](https://docs.helix-db.com/learn/graph-databases/graph-vs-relational-database): A relational database keeps data in tables and rebuilds connections with joins; a graph database stores connections as edges and follows them. — Page type: Concept
