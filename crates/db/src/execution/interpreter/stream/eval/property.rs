@@ -4,12 +4,13 @@ use std::collections::{btree_map::Entry, BTreeMap};
 
 use super::*;
 
-/// Lazy stored-value resolver owned by one input row's evaluation.
+/// Lazy stored-value resolver owned by one row's evaluation or one record batch.
 ///
 /// Cache absence means an element has not been visited. [`CachedPropertyBlob::Missing`]
 /// records a completed negative lookup, so repeated missing fields remain lazy without
 /// repeating storage I/O. Resolved values are deliberately not cached because virtual
-/// properties belong to the row or binding that requested them.
+/// properties belong to the row or binding that requested them. A batch operator
+/// prefetches with [`Self::prefetch_rows`], so rows sharing an element read it once.
 pub(in crate::execution::interpreter::stream) struct RowValueResolver<'ctx, 'db> {
     context: &'ctx ExecutionContext<'db>,
     property_blobs: BTreeMap<ElementRef, CachedPropertyBlob>,
@@ -32,51 +33,58 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         row: &ExecutionRow,
         property: &ir::NonEmptyString,
     ) -> Result<Option<DbPropertyValue>> {
-        if let Some(ElementRef::Edge(edge_id)) = row.current.as_ref() {
-            let property_name = property.as_ref();
-            match property_name {
-                "$from" | "$to" => {
-                    let Some((from, to)) = self.edge_endpoints(*edge_id).await? else {
-                        return Ok(None);
-                    };
-                    let endpoint = if property_name == "$from" { from } else { to };
+        self.element_property(
+            row.current.as_ref(),
+            Some(&row.virtual_properties),
+            property,
+        )
+        .await
+    }
+
+    /// Read `property` of `element`, whose virtual properties shadow its record.
+    pub(in crate::execution::interpreter::stream) async fn element_property(
+        &mut self,
+        element: Option<&ElementRef>,
+        virtual_properties: Option<&RowVirtualProperties>,
+        property: &ir::NonEmptyString,
+    ) -> Result<Option<DbPropertyValue>> {
+        match PropertySource::of(element, virtual_properties, property) {
+            PropertySource::EdgeEndpoint {
+                edge_id,
+                endpoint,
+                path,
+            } => {
+                let Some((from, to)) = self.edge_endpoints(edge_id).await? else {
+                    return Ok(None);
+                };
+                let endpoint_id = endpoint.node_id(from, to);
+                let Some(path) = path else {
                     return Ok(Some(DbPropertyValue::I64(
-                        endpoint.try_into().unwrap_or(i64::MAX),
+                        endpoint_id.try_into().unwrap_or(i64::MAX),
                     )));
-                }
-                _ => {
-                    if let Some((endpoint, path)) = edge_endpoint_property(property_name) {
-                        let Some((from, to)) = self.edge_endpoints(*edge_id).await? else {
-                            return Ok(None);
-                        };
-                        let endpoint_id = endpoint.node_id(from, to);
-                        if path == "$id" {
-                            return Ok(Some(DbPropertyValue::I64(
-                                endpoint_id.try_into().unwrap_or(i64::MAX),
-                            )));
-                        }
-                        let properties = self
-                            .element_properties(&ElementRef::Node(endpoint_id))
-                            .await?;
-                        return Ok(property_value(properties, path));
-                    }
-                }
+                };
+                let properties = self
+                    .element_properties(&ElementRef::Node(endpoint_id))
+                    .await?;
+                Ok(property_value(properties, path))
+            }
+            PropertySource::Known(value) => Ok(value),
+            PropertySource::Record(element) => {
+                let properties = self.element_properties(element).await?;
+                Ok(property_value(properties, property.as_ref()))
             }
         }
-        if property.as_ref() == "$id" {
-            return Ok(row
-                .current
-                .as_ref()
-                .map(|element| DbPropertyValue::I64(element.id().try_into().unwrap_or(i64::MAX))));
-        }
-        if let Some(value) = row.virtual_properties.get(property) {
-            return Ok(Some(value));
-        }
+    }
+
+    /// All stored properties of the row element, read through the cache.
+    pub(in crate::execution::interpreter::stream) async fn row_properties(
+        &mut self,
+        row: &ExecutionRow,
+    ) -> Result<Vec<Property>> {
         let Some(element) = row.current.as_ref() else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
-        let properties = self.element_properties(element).await?;
-        Ok(property_value(properties, property.as_ref()))
+        Ok(self.element_properties(element).await?.to_vec())
     }
 
     async fn element_properties(&mut self, element: &ElementRef) -> Result<&[Property]> {
@@ -121,7 +129,73 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         Ok(())
     }
 
-    async fn edge_endpoints(&mut self, edge_id: u64) -> Result<Option<(u64, u64)>> {
+    /// Prefetch what reading any of `properties` from each row always loads:
+    /// the row element's record and its edge endpoints, each with one
+    /// multi-get. Records the per-row lookup would skip are never read.
+    pub(in crate::execution::interpreter::stream) async fn prefetch_rows(
+        &mut self,
+        rows: &[ExecutionRow],
+        properties: &[&ir::NonEmptyString],
+    ) -> Result<()> {
+        let mut edges = Vec::new();
+        let mut records = Vec::new();
+        for row in rows {
+            for property in properties {
+                match PropertySource::of(
+                    row.current.as_ref(),
+                    Some(&row.virtual_properties),
+                    property,
+                ) {
+                    PropertySource::EdgeEndpoint { edge_id, .. } => edges.push(edge_id),
+                    PropertySource::Record(element) => records.push(element),
+                    PropertySource::Known(_) => {}
+                }
+            }
+        }
+        self.prefetch_edge_endpoints(&edges).await?;
+        self.prefetch(records).await
+    }
+
+    /// Load the endpoints of `edges` not yet visited with one multi-get.
+    pub(in crate::execution::interpreter::stream) async fn prefetch_edge_endpoints(
+        &mut self,
+        edges: &[u64],
+    ) -> Result<()> {
+        let missing = edges
+            .iter()
+            .copied()
+            .filter(|edge_id| !self.edge_endpoints.contains_key(edge_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let keys = missing
+            .iter()
+            .map(|edge_id| {
+                self.context.storage_key(keys::DataKeyKind::EdgeEndpoints(
+                    keys::EdgeEndpointsKey::new(*edge_id),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let values = self.context.multi_get_raw(&keys).await?;
+        for (edge_id, value) in missing.into_iter().zip(values) {
+            #[cfg(test)]
+            self.context.record_endpoint_get();
+            let endpoints = value
+                .map(|bytes| {
+                    crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue::decode(&bytes)
+                        .map(|endpoints| (endpoints.source(), endpoints.target()))
+                })
+                .transpose()?;
+            self.edge_endpoints.insert(edge_id, endpoints);
+        }
+        Ok(())
+    }
+
+    pub(in crate::execution::interpreter::stream) async fn edge_endpoints(
+        &mut self,
+        edge_id: u64,
+    ) -> Result<Option<(u64, u64)>> {
         if let Some(endpoints) = self.edge_endpoints.get(&edge_id) {
             return Ok(*endpoints);
         }
@@ -140,16 +214,6 @@ impl<'db> ExecutionContext<'db> {
         RowValueResolver::new(self)
             .row_property(row, property)
             .await
-    }
-
-    pub(in crate::execution::interpreter) async fn row_properties(
-        &self,
-        row: &ExecutionRow,
-    ) -> Result<Vec<Property>> {
-        let Some(element) = row.current.as_ref() else {
-            return Ok(Vec::new());
-        };
-        Ok(self.load_property_blob(element).await?.into_properties())
     }
 
     async fn load_property_blob(&self, element: &ElementRef) -> Result<CachedPropertyBlob> {
@@ -213,6 +277,77 @@ impl<'db> ExecutionContext<'db> {
     }
 }
 
+/// Where [`RowValueResolver::element_property`] finds one property.
+///
+/// Classifying before reading lets batch operators prefetch exactly the
+/// storage the per-row lookup reads.
+enum PropertySource<'r> {
+    /// An endpoint of the element's edge: its id, or the endpoint node's
+    /// property at `path`.
+    EdgeEndpoint {
+        edge_id: u64,
+        endpoint: EdgeEndpoint,
+        path: Option<&'r str>,
+    },
+    /// A value known without reading storage.
+    Known(Option<DbPropertyValue>),
+    /// A property of the element's stored record.
+    Record(&'r ElementRef),
+}
+
+impl<'r> PropertySource<'r> {
+    fn of(
+        element: Option<&'r ElementRef>,
+        virtual_properties: Option<&RowVirtualProperties>,
+        property: &'r ir::NonEmptyString,
+    ) -> Self {
+        let name = property.as_ref();
+        if let Some(ElementRef::Edge(edge_id)) = element {
+            let endpoint = match name {
+                "$from" => Some((EdgeEndpoint::From, None)),
+                "$to" => Some((EdgeEndpoint::To, None)),
+                _ => edge_endpoint_property(name)
+                    .map(|(endpoint, path)| (endpoint, (path != "$id").then_some(path))),
+            };
+            if let Some((endpoint, path)) = endpoint {
+                return Self::EdgeEndpoint {
+                    edge_id: *edge_id,
+                    endpoint,
+                    path,
+                };
+            }
+        }
+        if name == "$id" {
+            return Self::Known(
+                element.map(|element| {
+                    DbPropertyValue::I64(element.id().try_into().unwrap_or(i64::MAX))
+                }),
+            );
+        }
+        if let Some(value) = virtual_properties.and_then(|properties| properties.get(property)) {
+            return Self::Known(Some(value));
+        }
+        element.map_or(Self::Known(None), Self::Record)
+    }
+
+    /// The stored record this lookup always reads.
+    fn record(self) -> Option<&'r ElementRef> {
+        match self {
+            Self::Record(element) => Some(element),
+            Self::EdgeEndpoint { .. } | Self::Known(_) => None,
+        }
+    }
+}
+
+/// The stored record that reading `property` of `element` always loads.
+pub(in crate::execution::interpreter::stream) fn record_read<'r>(
+    element: Option<&'r ElementRef>,
+    virtual_properties: Option<&RowVirtualProperties>,
+    property: &'r ir::NonEmptyString,
+) -> Option<&'r ElementRef> {
+    PropertySource::of(element, virtual_properties, property).record()
+}
+
 enum CachedPropertyBlob {
     Missing,
     Decoded(Vec<Property>),
@@ -222,13 +357,6 @@ impl CachedPropertyBlob {
     fn properties(&self) -> &[Property] {
         match self {
             Self::Missing => &[],
-            Self::Decoded(properties) => properties,
-        }
-    }
-
-    fn into_properties(self) -> Vec<Property> {
-        match self {
-            Self::Missing => Vec::new(),
             Self::Decoded(properties) => properties,
         }
     }

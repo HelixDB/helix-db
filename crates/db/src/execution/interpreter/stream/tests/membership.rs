@@ -8,7 +8,7 @@ use helix_ast::expr::Predicate;
 use helix_planner::catalog;
 
 use super::super::super::ExecutionContext;
-use super::super::filter::RECORD_BATCH_ROWS;
+use super::super::RECORD_BATCH_ROWS;
 use super::support::*;
 
 /// Repetitions of [`traversal_pattern`], whose eight node rows per copy then

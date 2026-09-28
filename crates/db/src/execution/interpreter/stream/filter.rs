@@ -21,11 +21,6 @@ use helix_ast::expr::{Expr, Predicate};
 use super::eval::RowValueResolver;
 use super::*;
 
-/// Rows evaluated per stored-record batch. This bounds the decoded records a
-/// filter holds at once while amortizing one multi-get over many rows. Index
-/// membership also resolves its bitmaps only for streams with more node rows.
-pub(super) const RECORD_BATCH_ROWS: usize = 256;
-
 /// Decision for one row of a row-preserving filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::execution::interpreter) enum RowDecision {

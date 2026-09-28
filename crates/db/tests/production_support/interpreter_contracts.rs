@@ -691,17 +691,28 @@ async fn run_value_dependency_and_row_contracts() {
         context.row_property(&empty_row, &label).await.unwrap(),
         None
     );
-    assert!(context.row_properties(&empty_row).await.unwrap().is_empty());
     let missing_node = ExecutionRow::current(ElementRef::Node(u64::MAX));
     assert_eq!(
         context.row_property(&missing_node, &label).await.unwrap(),
         None
     );
-    assert!(context
-        .row_properties(&missing_node)
-        .await
-        .unwrap()
-        .is_empty());
+    // Neither an empty row nor a missing record has stored properties.
+    assert_eq!(
+        context
+            .project(
+                ExecutionValue::Stream(vec![empty_row, missing_node]),
+                &ir::ProjectionPlan::ValueMap(ir::PropertySelection::All),
+            )
+            .await
+            .unwrap(),
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::Object(std::collections::BTreeMap::new()),
+            ExecutionScalar::Object(std::collections::BTreeMap::from([(
+                "$id".to_string(),
+                DbPropertyValue::I64(i64::MAX),
+            )])),
+        ])
+    );
     let missing_edge = ExecutionRow::current(ElementRef::Edge(u64::MAX));
     for property in ["$from", "$to", "$from.$id", "$to.$label"] {
         let property = ir::NonEmptyString::new(property).unwrap();

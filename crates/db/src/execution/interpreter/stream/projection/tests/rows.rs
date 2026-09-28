@@ -457,7 +457,7 @@ async fn inline_and_virtual_projection_fields_do_not_load_stored_properties() {
 }
 
 #[tokio::test]
-async fn missing_property_blobs_are_cached_only_for_the_current_row() {
+async fn missing_property_blobs_are_negative_cached_within_a_record_batch() {
     let db = test_support::open_db("projection-missing-blob-row-scope").await;
     let projection = ir::ProjectionPlan::Project(projection_items(vec![
         ir::ProjectionItem::Property {
@@ -489,11 +489,11 @@ async fn missing_property_blobs_are_cached_only_for_the_current_row() {
             ExecutionScalar::Object(BTreeMap::new()),
         ])
     );
-    assert_projection_reads(&ctx, 2, 0, 0);
+    assert_projection_reads(&ctx, 1, 0, 0);
 }
 
 #[tokio::test]
-async fn missing_edge_endpoints_are_negative_cached_for_the_current_row() {
+async fn missing_edge_endpoints_are_negative_cached_within_a_record_batch() {
     let db = test_support::open_db("projection-missing-endpoint-row-scope").await;
     let projection = ir::ProjectionPlan::Project(projection_items(
         [

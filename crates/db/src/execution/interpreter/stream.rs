@@ -14,6 +14,11 @@ mod values;
 #[cfg(test)]
 mod tests;
 
+/// Rows evaluated per stored-record batch. This bounds the decoded records an
+/// operator holds at once while amortizing one multi-get over many rows. Index
+/// membership also resolves its bitmaps only for streams with more node rows.
+const RECORD_BATCH_ROWS: usize = 256;
+
 pub(super) use self::eval::property_value_is_in;
 pub(super) use self::filter::{MembershipCursor, PreparedMemberships, RowDecision};
 pub(super) use self::values::ast_to_db_value;

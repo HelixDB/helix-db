@@ -56,12 +56,19 @@ async fn row_property_reads_id_stored_properties_and_missing_values() {
         ctx.row_property(&row, &name("missing")).await.unwrap(),
         None
     );
+    let mut resolver = RowValueResolver::new(&ctx);
     assert_eq!(
-        ctx.row_properties(&ExecutionRow::empty()).await.unwrap(),
+        resolver
+            .row_properties(&ExecutionRow::empty())
+            .await
+            .unwrap(),
         Vec::new()
     );
     assert_eq!(
-        ctx.row_properties(&current_node(u64::MAX)).await.unwrap(),
+        resolver
+            .row_properties(&current_node(u64::MAX))
+            .await
+            .unwrap(),
         Vec::new()
     );
 }

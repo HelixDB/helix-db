@@ -13,7 +13,7 @@ mod resolved;
 mod sets;
 
 pub(in crate::execution::interpreter) use predicate::property_value_is_in;
-pub(in crate::execution::interpreter::stream) use property::RowValueResolver;
+pub(in crate::execution::interpreter::stream) use property::{record_read, RowValueResolver};
 
 #[cfg(test)]
 mod tests;

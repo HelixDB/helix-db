@@ -6,12 +6,12 @@ use super::super::values::DistinctKey;
 use super::*;
 use helix_planner::relational as r;
 
-struct NativeProjectionEvaluator<'row, 'db> {
-    context: &'row ExecutionContext<'db>,
-    row: &'row ExecutionRow,
-    resolver: eval::RowValueResolver<'row, 'db>,
+struct NativeProjectionEvaluator<'a, 'ctx, 'db> {
+    context: &'ctx ExecutionContext<'db>,
+    row: &'a ExecutionRow,
+    resolver: &'a mut eval::RowValueResolver<'ctx, 'db>,
 }
-impl r::ProjectionEvaluator<ir::ResolvedProjection> for NativeProjectionEvaluator<'_, '_> {
+impl r::ProjectionEvaluator<ir::ResolvedProjection> for NativeProjectionEvaluator<'_, '_, '_> {
     type Value = Option<DbPropertyValue>;
     type Error = HelixDbError;
 
@@ -27,7 +27,7 @@ impl r::ProjectionEvaluator<ir::ResolvedProjection> for NativeProjectionEvaluato
             }
             ir::ResolvedProjectionKind::Expression(expression) => Box::pin(
                 self.context
-                    .eval_resolved(self.row, expression, &mut self.resolver),
+                    .eval_resolved(self.row, expression, self.resolver),
             )
             .await
             .map(Some),
@@ -74,19 +74,23 @@ impl<'db> ExecutionContext<'db> {
         rows: &[ExecutionRow],
         names: &ir::PropertyNames,
     ) -> Result<ExecutionValue> {
+        let properties = names.as_ref().iter().collect::<Vec<_>>();
         let mut scalars = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
             let mut resolver = eval::RowValueResolver::new(self);
-            let mut object = BTreeMap::new();
-            for name in names.as_ref() {
+            resolver.prefetch_rows(batch, &properties).await?;
+            for row in batch {
                 self.check_execution_deadline()?;
-                if let Some(value) = resolver.row_property(row, name).await? {
-                    object.insert(name.as_ref().to_string(), value);
+                let mut object = BTreeMap::new();
+                for name in names.as_ref() {
+                    self.check_execution_deadline()?;
+                    if let Some(value) = resolver.row_property(row, name).await? {
+                        object.insert(name.as_ref().to_string(), value);
+                    }
                 }
-            }
-            if !object.is_empty() {
-                scalars.push(ExecutionScalar::Object(object));
+                if !object.is_empty() {
+                    scalars.push(ExecutionScalar::Object(object));
+                }
             }
         }
         Ok(ExecutionValue::Scalars(scalars))
@@ -98,32 +102,47 @@ impl<'db> ExecutionContext<'db> {
         selection: &ir::PropertySelection,
     ) -> Result<ExecutionValue> {
         let mut scalars = Vec::with_capacity(rows.len());
-        for row in rows {
-            self.check_execution_deadline()?;
-            let object = match selection {
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut resolver = eval::RowValueResolver::new(self);
+            match selection {
                 ir::PropertySelection::All => {
-                    let mut object = helpers::properties_to_object(self.row_properties(row).await?);
-                    if let Some(element) = row.current.as_ref() {
-                        object.insert(
-                            "$id".to_string(),
-                            DbPropertyValue::I64(element.id().try_into().unwrap_or(i64::MAX)),
-                        );
-                    }
-                    object
+                    resolver
+                        .prefetch(batch.iter().filter_map(|row| row.current.as_ref()))
+                        .await?;
                 }
                 ir::PropertySelection::Selected(names) => {
-                    let mut resolver = eval::RowValueResolver::new(self);
-                    let mut object = BTreeMap::new();
-                    for name in names.as_ref() {
-                        self.check_execution_deadline()?;
-                        if let Some(value) = resolver.row_property(row, name).await? {
-                            object.insert(name.as_ref().to_string(), value);
-                        }
-                    }
-                    object
+                    resolver
+                        .prefetch_rows(batch, &names.as_ref().iter().collect::<Vec<_>>())
+                        .await?;
                 }
-            };
-            scalars.push(ExecutionScalar::Object(object));
+            }
+            for row in batch {
+                self.check_execution_deadline()?;
+                let object = match selection {
+                    ir::PropertySelection::All => {
+                        let mut object =
+                            helpers::properties_to_object(resolver.row_properties(row).await?);
+                        if let Some(element) = row.current.as_ref() {
+                            object.insert(
+                                "$id".to_string(),
+                                DbPropertyValue::I64(element.id().try_into().unwrap_or(i64::MAX)),
+                            );
+                        }
+                        object
+                    }
+                    ir::PropertySelection::Selected(names) => {
+                        let mut object = BTreeMap::new();
+                        for name in names.as_ref() {
+                            self.check_execution_deadline()?;
+                            if let Some(value) = resolver.row_property(row, name).await? {
+                                object.insert(name.as_ref().to_string(), value);
+                            }
+                        }
+                        object
+                    }
+                };
+                scalars.push(ExecutionScalar::Object(object));
+            }
         }
         Ok(ExecutionValue::Scalars(scalars))
     }
@@ -133,25 +152,39 @@ impl<'db> ExecutionContext<'db> {
         rows: &[ExecutionRow],
         items: &ir::ProjectionItems,
     ) -> Result<ExecutionValue> {
+        // Every property column is evaluated for every row; expression columns
+        // may short-circuit, so only property columns decide the prefetch.
+        let properties = items
+            .program()
+            .iter()
+            .filter_map(|projection| match projection.expression.kind() {
+                ir::ResolvedProjectionKind::Property { source, .. } => Some(source),
+                ir::ResolvedProjectionKind::Expression(_) => None,
+            })
+            .collect::<Vec<_>>();
         let mut scalars = Vec::with_capacity(rows.len());
-        for row in rows {
-            self.check_execution_deadline()?;
-            let mut evaluator = NativeProjectionEvaluator {
-                context: self,
-                row,
-                resolver: eval::RowValueResolver::new(self),
-            };
-            let values = items.program().evaluate(&mut evaluator).await?;
-            let mut object = BTreeMap::new();
-            for (item, value) in items.as_ref().iter().zip(values) {
-                let Some(value) = value else {
-                    continue;
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut resolver = eval::RowValueResolver::new(self);
+            resolver.prefetch_rows(batch, &properties).await?;
+            for row in batch {
+                self.check_execution_deadline()?;
+                let mut evaluator = NativeProjectionEvaluator {
+                    context: self,
+                    row,
+                    resolver: &mut resolver,
                 };
-                let (ir::ProjectionItem::Property { alias, .. }
-                | ir::ProjectionItem::Expr { alias, .. }) = item;
-                object.insert(alias.as_ref().to_string(), value);
+                let values = items.program().evaluate(&mut evaluator).await?;
+                let mut object = BTreeMap::new();
+                for (item, value) in items.as_ref().iter().zip(values) {
+                    let Some(value) = value else {
+                        continue;
+                    };
+                    let (ir::ProjectionItem::Property { alias, .. }
+                    | ir::ProjectionItem::Expr { alias, .. }) = item;
+                    object.insert(alias.as_ref().to_string(), value);
+                }
+                scalars.push(ExecutionScalar::Object(object));
             }
-            scalars.push(ExecutionScalar::Object(object));
         }
         Ok(ExecutionValue::Scalars(scalars))
     }
@@ -166,26 +199,53 @@ impl<'db> ExecutionContext<'db> {
         // DISTINCT drops duplicates as rows are projected so only the first
         // occurrence of each object is retained, never every duplicate payload.
         let mut seen = BTreeSet::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            let mut resolver = eval::RowValueResolver::new(self);
-            let mut object = BTreeMap::new();
-            for projection in projections.as_ref() {
-                self.check_execution_deadline()?;
-                if let Some((alias, value)) = self
-                    .binding_projection_with_resolver(row, projection, &mut resolver)
-                    .await?
-                {
-                    object.insert(alias, value);
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut records = Vec::new();
+            for row in batch {
+                for projection in projections.as_ref() {
+                    let (target, source) = match projection {
+                        ir::BindingProjectionPlan::Property { target, source, .. } => {
+                            (target, source)
+                        }
+                        // Only the first bound reference is always read.
+                        ir::BindingProjectionPlan::Coalesce { refs, .. } => {
+                            let Some(value_ref) = refs.as_ref().iter().find(|value_ref| {
+                                self.binding_target(row, &value_ref.target).is_some()
+                            }) else {
+                                continue;
+                            };
+                            (&value_ref.target, &value_ref.source)
+                        }
+                    };
+                    let Some((element, virtual_properties)) = self.binding_target(row, target)
+                    else {
+                        continue;
+                    };
+                    records.extend(eval::record_read(Some(element), virtual_properties, source));
                 }
             }
-            let scalar = ExecutionScalar::Object(object);
-            if matches!(dedup, ir::ProjectionDedupMode::Distinct)
-                && !seen.insert(DistinctKey(scalar.clone()))
-            {
-                continue;
+            let mut resolver = eval::RowValueResolver::new(self);
+            resolver.prefetch(records).await?;
+            for row in batch {
+                self.check_execution_deadline()?;
+                let mut object = BTreeMap::new();
+                for projection in projections.as_ref() {
+                    self.check_execution_deadline()?;
+                    if let Some((alias, value)) = self
+                        .binding_projection_with_resolver(row, projection, &mut resolver)
+                        .await?
+                    {
+                        object.insert(alias, value);
+                    }
+                }
+                let scalar = ExecutionScalar::Object(object);
+                if matches!(dedup, ir::ProjectionDedupMode::Distinct)
+                    && !seen.insert(DistinctKey(scalar.clone()))
+                {
+                    continue;
+                }
+                scalars.push(scalar);
             }
-            scalars.push(scalar);
         }
         Ok(ExecutionValue::Scalars(scalars))
     }
@@ -193,20 +253,14 @@ impl<'db> ExecutionContext<'db> {
     async fn project_labels(&self, rows: &[ExecutionRow]) -> Result<ExecutionValue> {
         let label = helpers::label_property_name();
         let mut scalars = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            if let Some(value) = row.virtual_properties.get(&label) {
-                scalars.push(ExecutionScalar::Value(value));
-                continue;
-            }
-            if let Some(value) = self
-                .row_properties(row)
-                .await?
-                .into_iter()
-                .find(|property| property.name == label.as_ref())
-                .map(|property| property.value)
-            {
-                scalars.push(ExecutionScalar::Value(value));
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut resolver = eval::RowValueResolver::new(self);
+            resolver.prefetch_rows(batch, &[&label]).await?;
+            for row in batch {
+                self.check_execution_deadline()?;
+                if let Some(value) = resolver.row_property(row, &label).await? {
+                    scalars.push(ExecutionScalar::Value(value));
+                }
             }
         }
         Ok(ExecutionValue::Scalars(scalars))
@@ -214,28 +268,47 @@ impl<'db> ExecutionContext<'db> {
 
     async fn project_edge_properties(&self, rows: &[ExecutionRow]) -> Result<ExecutionValue> {
         let mut scalars = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            let Some(ElementRef::Edge(edge_id)) = row.current.as_ref() else {
-                continue;
-            };
-            let Some((from, to)) = self.get_edge_endpoints(*edge_id).await? else {
-                continue;
-            };
-            let mut object = helpers::properties_to_object(self.row_properties(row).await?);
-            object.insert(
-                "$id".to_string(),
-                DbPropertyValue::I64((*edge_id).try_into().unwrap_or(i64::MAX)),
-            );
-            object.insert(
-                "$from".to_string(),
-                DbPropertyValue::I64(from.try_into().unwrap_or(i64::MAX)),
-            );
-            object.insert(
-                "$to".to_string(),
-                DbPropertyValue::I64(to.try_into().unwrap_or(i64::MAX)),
-            );
-            scalars.push(ExecutionScalar::Object(object));
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut resolver = eval::RowValueResolver::new(self);
+            let edges = batch
+                .iter()
+                .filter_map(|row| match row.current {
+                    Some(ElementRef::Edge(edge_id)) => Some(edge_id),
+                    Some(ElementRef::Node(_)) | None => None,
+                })
+                .collect::<Vec<_>>();
+            resolver.prefetch_edge_endpoints(&edges).await?;
+            // Records of edges without endpoints are never projected.
+            let mut present = Vec::new();
+            for edge_id in edges {
+                if resolver.edge_endpoints(edge_id).await?.is_some() {
+                    present.push(ElementRef::Edge(edge_id));
+                }
+            }
+            resolver.prefetch(&present).await?;
+            for row in batch {
+                self.check_execution_deadline()?;
+                let Some(ElementRef::Edge(edge_id)) = row.current.as_ref() else {
+                    continue;
+                };
+                let Some((from, to)) = resolver.edge_endpoints(*edge_id).await? else {
+                    continue;
+                };
+                let mut object = helpers::properties_to_object(resolver.row_properties(row).await?);
+                object.insert(
+                    "$id".to_string(),
+                    DbPropertyValue::I64((*edge_id).try_into().unwrap_or(i64::MAX)),
+                );
+                object.insert(
+                    "$from".to_string(),
+                    DbPropertyValue::I64(from.try_into().unwrap_or(i64::MAX)),
+                );
+                object.insert(
+                    "$to".to_string(),
+                    DbPropertyValue::I64(to.try_into().unwrap_or(i64::MAX)),
+                );
+                scalars.push(ExecutionScalar::Object(object));
+            }
         }
         Ok(ExecutionValue::Scalars(scalars))
     }

@@ -8,5 +8,6 @@ mod bounds_sets;
 mod dependencies;
 mod membership;
 mod projection_order;
+mod record_batches;
 mod support;
 mod terminals;

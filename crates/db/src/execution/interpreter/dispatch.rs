@@ -68,13 +68,21 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecOp::Skip { count } => self.skip(input, count),
             exec::ExecOp::Range { range } => self.range(input, range),
             exec::ExecOp::Distinct => self.distinct(input),
-            exec::ExecOp::Order { plan } => execution_control.run(self.order(input, plan)).await,
+            // Record-batch operators hold a prefetch across awaits; boxing keeps
+            // their state off the stack of recursive subplan execution.
+            exec::ExecOp::Order { plan } => {
+                execution_control
+                    .run(Box::pin(self.order(input, plan)))
+                    .await
+            }
             exec::ExecOp::Project { projection } => {
-                execution_control.run(self.project(input, projection)).await
+                execution_control
+                    .run(Box::pin(self.project(input, projection)))
+                    .await
             }
             exec::ExecOp::Aggregate { aggregate } => {
                 execution_control
-                    .run(self.aggregate(input, aggregate))
+                    .run(Box::pin(self.aggregate(input, aggregate)))
                     .await
             }
             exec::ExecOp::Variable { op } => self.variable(input, op),
