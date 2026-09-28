@@ -666,8 +666,15 @@ fn plan_accesses(
                 let lookup = equalities
                     .into_iter()
                     .filter_map(|(property, expression)| {
-                        let Expression::Slot(probe) = expression else {
-                            return None;
+                        // Totality admitted a property only of a slot that
+                        // holds a node, relationship or map.
+                        let (probe, probe_property) = match expression {
+                            Expression::Slot(probe) => (probe, None),
+                            Expression::Property(value, key) => match *value {
+                                Expression::Slot(probe) => (probe, Some(key)),
+                                _ => return None,
+                            },
+                            _ => return None,
                         };
                         if !incoming.contains(&probe) {
                             return None;
@@ -689,6 +696,7 @@ fn plan_accesses(
                         Some(PatternLookup {
                             slot,
                             probe,
+                            probe_property,
                             index,
                             key,
                             estimated_rows,

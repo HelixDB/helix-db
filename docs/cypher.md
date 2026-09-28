@@ -162,13 +162,17 @@ properties, literals or parameters along, without `DISTINCT`, `ORDER BY`,
 reads the index; it still filters where it is written. A later `WHERE` that can
 fail ends that chain, so it and anything after it select no index. An
 equality with a variable bound by an earlier clause, as in
-`UNWIND $ids AS k MATCH (u:User {uid: k})`, can probe an equality index once
-per incoming row. With several such equalities, a unique index keys the probe,
-since it matches at most one node per row, whichever equality is written
-first. Every candidate is still checked against the complete predicate. Nodes the index excludes are not
-read, so their unsupported stored values, such as temporal or binary data,
-cannot fail the query, and an `IN` list that is never evaluated is not charged
-against collection limits.
+`UNWIND $ids AS k MATCH (u:User {uid: k})`, or with a property of a node,
+relationship or map bound by one, as in
+`MATCH (p:Post) MATCH (u:User {uid: p.author})`, can probe an equality index
+once per incoming row. A probe property that cannot be read, such as a
+property of a deleted node, scans the label instead, so it fails only where a
+scan would. With several such equalities, a unique index keys the probe, since
+it matches at most one node per row, whichever equality is written first.
+Every candidate is still checked against the complete predicate. Nodes the
+index excludes are not read, so their unsupported stored values, such as
+temporal or binary data, cannot fail the query, and an `IN` list that is never
+evaluated is not charged against collection limits.
 
 ## Numeric conversions
 

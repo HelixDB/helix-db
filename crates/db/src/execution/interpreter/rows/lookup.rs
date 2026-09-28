@@ -1,8 +1,10 @@
 //! A correlated probe uses the selected native equality kernel and bounded
 //! cursors. Binding and predicate validation remain owned by the MATCH contract.
-use super::{ExecutionContext, Limits, Result, RowBuffer};
+use super::{ExecutionContext, GraphBatch, Limits, Result, RowBuffer};
 use futures::StreamExt;
 use helix_planner::{exec, ir, relational as r};
+use r::GraphValues;
+use std::collections::BTreeMap;
 
 impl ExecutionContext<'_> {
     pub(super) async fn index_lookup_rows(
@@ -35,6 +37,64 @@ impl ExecutionContext<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// The probe of each parent row of one lookup, visited in order. A probe
+/// property reads the parents' records a batch at a time, as a hash-join
+/// probe does.
+#[derive(Default)]
+pub(super) struct ProbeValues {
+    graph: GraphBatch,
+    hydrated_end: usize,
+}
+impl ProbeValues {
+    /// The probe of `rows[parent]`, or `None` to scan the source instead. The
+    /// scan checks the pattern against each candidate, as a plan without the
+    /// index would, so a stored value that cannot be read fails only if a
+    /// candidate exists.
+    pub(super) async fn value<'a>(
+        &'a mut self,
+        context: &ExecutionContext<'_>,
+        lookup: &r::PatternLookup,
+        rows: &'a [r::Row],
+        parent: usize,
+        limits: Limits,
+    ) -> Result<Option<&'a r::Value>> {
+        let value = &rows[parent][lookup.probe.0 as usize];
+        let Some(property) = &lookup.probe_property else {
+            return Ok(Some(value));
+        };
+        match value {
+            r::Value::Null => Ok(Some(value)),
+            r::Value::Map(map) => Ok(Some(map.get(property).unwrap_or(&r::Value::Null))),
+            r::Value::Entity(entity) => {
+                if parent >= self.hydrated_end {
+                    let end = rows.len().min(parent.saturating_add(limits.batch_rows));
+                    let _demand_memory = context.row_budget().reserve(
+                        r::allocation::btree_bytes::<r::Slot, r::PropertyDemand>(1)
+                            .saturating_add(r::allocation::btree_bytes::<String, ()>(1))
+                            .saturating_add(property.len()),
+                    )?;
+                    let demand = BTreeMap::from([(
+                        lookup.probe,
+                        r::PropertyDemand::Keys([property.clone()].into_iter().collect()),
+                    )]);
+                    self.graph = GraphBatch::default();
+                    self.graph = context
+                        .graph_batch_required(&rows[parent..end], &demand)
+                        .await?;
+                    self.hydrated_end = end;
+                }
+                Ok(self.graph.property(*entity, property).ok())
+            }
+            r::Value::Boolean(_)
+            | r::Value::Integer(_)
+            | r::Value::Float(_)
+            | r::Value::String(_)
+            | r::Value::List(_)
+            | r::Value::Path(_) => Ok(None),
+        }
     }
 }
 

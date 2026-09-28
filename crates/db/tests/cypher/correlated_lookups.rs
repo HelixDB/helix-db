@@ -96,3 +96,97 @@ async fn correlated_lookups_validate_bound_nodes_in_the_same_pattern() {
     }
     db.close().await.unwrap();
 }
+
+/// A property of a node, relationship or map bound by an earlier clause can
+/// probe an equality index once per row. Each result equals the same query
+/// on a database without indexes, including null, missing, list, map and
+/// mistyped probes.
+#[tokio::test]
+async fn property_probes_read_the_index_with_scan_semantics() {
+    let indexed = database().await;
+    let scanned = database().await;
+    for db in [&indexed, &scanned] {
+        run(
+            db,
+            "UNWIND range(0, 299) AS i CREATE (:User {uid: i, tier: i % 3})",
+        )
+        .await;
+        run(
+            db,
+            "UNWIND range(0, 19) AS i \
+             CREATE (:Post {pid: i, author: i * 7, tags: [i]})",
+        )
+        .await;
+        run(
+            db,
+            "CREATE (:Post {pid: 100}), (:Post {pid: 101, author: 'x'})",
+        )
+        .await;
+        run(
+            db,
+            "MATCH (p:Post) WHERE p.pid < 5 CREATE (p)-[:BY {uid: p.pid * 3}]->(:Tag)",
+        )
+        .await;
+    }
+    create_index(
+        &indexed,
+        index::IndexSpec::node_unique_equality("User", "uid"),
+    )
+    .await;
+    create_index(&indexed, index::IndexSpec::node_equality("User", "tier")).await;
+    for query in [
+        "MATCH (p:Post) MATCH (u:User {uid: p.author}) RETURN p.pid, u.uid ORDER BY p.pid",
+        "MATCH (p:Post) MATCH (u:User) WHERE u.uid = p.author RETURN p.pid, u.uid ORDER BY p.pid",
+        "MATCH (p:Post) OPTIONAL MATCH (u:User {uid: p.author}) \
+         RETURN p.pid, u.uid ORDER BY p.pid",
+        "MATCH (p:Post) MATCH (u:User {tier: p.pid}) RETURN p.pid, count(u) ORDER BY p.pid",
+        "MATCH (p:Post) MATCH (u:User {uid: p.tags}) RETURN count(*)",
+        "MATCH ()-[r:BY]->() MATCH (u:User {uid: r.uid}) RETURN u.uid ORDER BY u.uid",
+        "MATCH (p:Post) MATCH (p), (u:User {uid: p.author}) RETURN p.pid, u.uid ORDER BY p.pid",
+        "WITH {id: 7} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
+        "WITH {id: null} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
+        "WITH {} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
+    ] {
+        let direct = run(&indexed, query).await;
+        assert_eq!(direct.rows, run(&scanned, query).await.rows, "{query}");
+    }
+    for query in [
+        "MATCH (p:Post) MATCH (u:User {uid: p.author}) SET u.seen = p.pid RETURN count(*)",
+        "MATCH (u:User) WHERE u.seen IS NOT NULL RETURN u.uid, u.seen ORDER BY u.uid",
+    ] {
+        let direct = run(&indexed, query).await;
+        assert_eq!(direct.rows, run(&scanned, query).await.rows, "{query}");
+    }
+    // One unique key and one node per post, not every user per post.
+    let direct = run(
+        &indexed,
+        "MATCH (p:Post) WHERE p.pid < 20 MATCH (u:User {uid: p.author}) RETURN count(*) AS c",
+    )
+    .await;
+    assert_eq!(direct.rows, vec![vec![json!(20)]]);
+    let reads = &direct.resources.reads;
+    assert!(reads.point_gets + reads.multi_get_keys < 300, "{reads:?}");
+    // A deleted node's properties cannot be read. The scan fails only when it
+    // has a candidate to check, and so does the lookup.
+    create_index(&indexed, index::IndexSpec::node_equality("Nobody", "uid")).await;
+    for query in [
+        "MATCH (p:Post {pid: 1}) DETACH DELETE p WITH p MATCH (u:User {uid: p.author}) RETURN u",
+        "MATCH (p:Post {pid: 1}) DETACH DELETE p WITH p MATCH (u:Nobody {uid: p.author}) RETURN u",
+    ] {
+        let direct = indexed.cypher(db::cypher::Request::new(query)).await;
+        let reference = scanned.cypher(db::cypher::Request::new(query)).await;
+        assert_eq!(
+            direct
+                .as_ref()
+                .map(|response| &response.rows)
+                .map_err(ToString::to_string),
+            reference
+                .as_ref()
+                .map(|response| &response.rows)
+                .map_err(ToString::to_string),
+            "{query}"
+        );
+    }
+    indexed.close().await.unwrap();
+    scanned.close().await.unwrap();
+}

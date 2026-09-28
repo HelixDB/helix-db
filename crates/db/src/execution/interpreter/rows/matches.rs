@@ -154,18 +154,25 @@ impl ExecutionContext<'_> {
                         }
                     }
                     r::MatchStep::IndexLookup(lookup) => {
-                        for row in candidates {
+                        let mut probes = super::lookup::ProbeValues::default();
+                        for (parent, row) in candidates.iter().enumerate() {
                             use helix_ast::value::PropertyValue as P;
-                            let value = match &row[lookup.probe.0 as usize] {
-                                r::Value::Null => continue,
-                                r::Value::Boolean(value) => Some(P::Bool(*value)),
-                                r::Value::Integer(value) => Some(P::I64(*value)),
-                                r::Value::Float(value) => Some(P::F64(*value)),
-                                r::Value::String(value) => Some(P::String(value.clone())),
-                                r::Value::List(_)
-                                | r::Value::Map(_)
-                                | r::Value::Entity(_)
-                                | r::Value::Path(_) => None,
+                            let probe = probes
+                                .value(self, lookup, &candidates, parent, limits)
+                                .await?;
+                            let value = match probe {
+                                Some(r::Value::Null) => continue,
+                                Some(r::Value::Boolean(value)) => Some(P::Bool(*value)),
+                                Some(r::Value::Integer(value)) => Some(P::I64(*value)),
+                                Some(r::Value::Float(value)) => Some(P::F64(*value)),
+                                Some(r::Value::String(value)) => Some(P::String(value.clone())),
+                                Some(
+                                    r::Value::List(_)
+                                    | r::Value::Map(_)
+                                    | r::Value::Entity(_)
+                                    | r::Value::Path(_),
+                                )
+                                | None => None,
                             };
                             // Storage rejects an oversized lookup key, so such a
                             // probe also takes the exact source scan below.
@@ -173,10 +180,11 @@ impl ExecutionContext<'_> {
                                 .and_then(|value| ir::SecondaryIndexLiteral::new(value).ok())
                                 .filter(|literal| !literal.may_exceed_index_key());
                             if let Some(literal) = literal {
-                                self.index_lookup_rows(&row, lookup, literal, &mut next, limits)
+                                self.index_lookup_rows(row, lookup, literal, &mut next, limits)
                                     .await?;
                             } else {
-                                // Lists/maps and oversized strings cannot be looked up.
+                                // Lists, maps, oversized strings and unreadable
+                                // probe properties cannot be looked up.
                                 // Load the original source once, only when such a probe occurs.
                                 let ids = match scans.entry(lookup.slot) {
                                     std::collections::btree_map::Entry::Occupied(entry) => {
@@ -201,7 +209,7 @@ impl ExecutionContext<'_> {
                                         self.check_execution_deadline()?;
                                     }
                                     next.push_replacing(
-                                        &row,
+                                        row,
                                         lookup.slot,
                                         r::Value::Entity(r::Entity::Node(id)),
                                     )?;

@@ -21,6 +21,7 @@ pub(super) struct NodeMatch<'a> {
 pub(super) struct MatchCursor {
     input: correlated_batch::Parents,
     parent: usize,
+    probes: lookup::ProbeValues,
     active: Option<Candidates>,
     pending_error: Option<crate::cypher::Error>,
 }
@@ -35,6 +36,7 @@ impl MatchCursor {
         Ok(Self {
             input: correlated_batch::Parents::new(input, budget)?,
             parent: 0,
+            probes: lookup::ProbeValues::default(),
             active: None,
             pending_error: None,
         })
@@ -68,17 +70,19 @@ impl<'a> NodeMatch<'a> {
     async fn candidates(
         &mut self,
         outer: &r::Row,
+        probe: Option<&r::Value>,
         context: &ExecutionContext<'_>,
     ) -> Result<Candidates> {
-        match context
-            .row_budget()
-            .admitted_future(lookup::Probe::new(
-                context,
-                self.lookup,
-                &outer[self.lookup.probe.0 as usize],
-            ))?
-            .await?
-        {
+        let probe = match probe {
+            Some(value) => {
+                context
+                    .row_budget()
+                    .admitted_future(lookup::Probe::new(context, self.lookup, value))?
+                    .await?
+            }
+            None => lookup::Probe::Scan,
+        };
+        match probe {
             lookup::Probe::Empty => Ok(Candidates::Exhausted),
             lookup::Probe::Index(cursor) => Ok(Candidates::Nodes(cursor)),
             lookup::Probe::Scan => {
@@ -123,10 +127,20 @@ impl<'a> NodeMatch<'a> {
                         break;
                     };
                     if cursor.active.is_none() {
+                        let probe = context
+                            .row_budget()
+                            .admitted_future(cursor.probes.value(
+                                context,
+                                self.lookup,
+                                cursor.input.rows(),
+                                cursor.parent,
+                                limits,
+                            ))?
+                            .await?;
                         cursor.active = Some(
                             context
                                 .row_budget()
-                                .admitted_future(self.candidates(outer, context))?
+                                .admitted_future(self.candidates(outer, probe, context))?
                                 .await?,
                         );
                     }

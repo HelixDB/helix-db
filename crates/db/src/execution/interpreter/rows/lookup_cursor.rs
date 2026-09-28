@@ -18,6 +18,7 @@ enum Active {
 pub(super) struct LookupCursor {
     input: memory::Rows,
     parent: usize,
+    probes: lookup::ProbeValues,
     active: Active,
     pending_error: Option<crate::cypher::Error>,
     _memory: memory::Reservation,
@@ -28,6 +29,7 @@ impl LookupCursor {
         Ok(Box::new(Self {
             input,
             parent: 0,
+            probes: lookup::ProbeValues::default(),
             active: Active::Ready,
             pending_error: None,
             _memory: memory,
@@ -58,23 +60,36 @@ impl LookupCursor {
                     ..limits
                 };
                 self.active = match active {
-                    Active::Ready => match context
-                        .row_budget()
-                        .admitted_future(lookup::Probe::new(
-                            context,
-                            lookup,
-                            &row[lookup.probe.0 as usize],
-                        ))?
-                        .await?
-                    {
-                        lookup::Probe::Empty => Active::Complete,
-                        lookup::Probe::Index(cursor) => Active::Index(cursor),
-                        lookup::Probe::Scan => {
-                            let mut seed = RowBuffer::new(context.row_budget())?;
-                            seed.push_with(super::row_bytes(row), || row.clone())?;
-                            Active::Scan(ScanCursor::new(seed.finish(), lookup.slot))
+                    Active::Ready => {
+                        let probe = match context
+                            .row_budget()
+                            .admitted_future(self.probes.value(
+                                context,
+                                lookup,
+                                &self.input,
+                                self.parent,
+                                limits,
+                            ))?
+                            .await?
+                        {
+                            Some(value) => {
+                                context
+                                    .row_budget()
+                                    .admitted_future(lookup::Probe::new(context, lookup, value))?
+                                    .await?
+                            }
+                            None => lookup::Probe::Scan,
+                        };
+                        match probe {
+                            lookup::Probe::Empty => Active::Complete,
+                            lookup::Probe::Index(cursor) => Active::Index(cursor),
+                            lookup::Probe::Scan => {
+                                let mut seed = RowBuffer::new(context.row_budget())?;
+                                seed.push_with(super::row_bytes(row), || row.clone())?;
+                                Active::Scan(ScanCursor::new(seed.finish(), lookup.slot))
+                            }
                         }
-                    },
+                    }
                     Active::Index(cursor) => {
                         let lookup::IndexedCursor { cursor, memory } = *cursor;
                         match context

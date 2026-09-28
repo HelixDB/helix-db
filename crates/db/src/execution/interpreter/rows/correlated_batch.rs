@@ -36,6 +36,9 @@ impl Parents {
     pub(super) fn len(&self) -> usize {
         self.rows.len()
     }
+    pub(super) fn rows(&self) -> &[r::Row] {
+        &self.rows
+    }
 }
 
 enum Event {

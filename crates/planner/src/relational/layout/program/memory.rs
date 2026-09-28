@@ -81,7 +81,8 @@ impl RowProgram {
                             .index_id
                             .len()
                             .saturating_add(lookup.key.label.len())
-                            .saturating_add(lookup.key.property.len()),
+                            .saturating_add(lookup.key.property.len())
+                            .saturating_add(lookup.probe_property.as_ref().map_or(0, String::len)),
                     })
                 })
             },

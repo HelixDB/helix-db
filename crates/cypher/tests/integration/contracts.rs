@@ -928,3 +928,58 @@ fn unique_correlated_lookups_beat_static_sources_and_other_keys() {
         assert_eq!(lookups(text), ["uid"], "{text}");
     }
 }
+
+#[test]
+fn correlated_lookups_probe_properties_of_bound_values() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default();
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "uid").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:uid")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let context = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let probes = |text: &str| {
+        r::plan(helix_cypher::compile(text).unwrap(), &context)
+            .unwrap()
+            .matches()
+            .values()
+            .flat_map(|plan| &plan.steps)
+            .filter_map(|step| match step {
+                r::MatchStep::IndexLookup(lookup) => Some(lookup.probe_property.clone()),
+                r::MatchStep::Scan(_)
+                | r::MatchStep::Expand { .. }
+                | r::MatchStep::HashJoin { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    for (text, property) in [
+        ("MATCH (p:P) MATCH (n:N {uid: p.author}) RETURN n", "author"),
+        (
+            "MATCH (p:P) MATCH (n:N) WHERE n.uid = p.author RETURN n",
+            "author",
+        ),
+        ("MATCH ()-[r:R]->() MATCH (n:N {uid: r.w}) RETURN n", "w"),
+        ("WITH {id: 1} AS m MATCH (n:N {uid: m.id}) RETURN n", "id"),
+        (
+            "MATCH (p:P) MATCH (p), (n:N {uid: p.author}) RETURN n",
+            "author",
+        ),
+        (
+            "MATCH (p:P) MATCH (n:N {uid: p.author}) SET n.seen = 1",
+            "author",
+        ),
+    ] {
+        assert_eq!(probes(text), [Some(property.to_owned())], "{text}");
+    }
+    // A variable probes as before.
+    assert_eq!(
+        probes("UNWIND [1, 2] AS k MATCH (n:N {uid: k}) RETURN n"),
+        [None]
+    );
+    // A property of a value of unknown type can fail, so the label is scanned.
+    assert!(probes("UNWIND [{id: 1}, 2] AS row MATCH (n:N {uid: row.id}) RETURN n").is_empty());
+}

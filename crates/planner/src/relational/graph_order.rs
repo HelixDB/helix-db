@@ -32,12 +32,16 @@ pub struct PatternEquality {
     pub right_key: String,
 }
 
-/// Equality access correlated with a previously resolved scalar binding. The
-/// probe is a slot, so evaluating it cannot expose a later expression error.
+/// Equality access correlated with a previously resolved binding: the value of
+/// the `probe` slot, or its `probe_property` when that slot holds a node,
+/// relationship or map. A probe property whose stored value cannot be read
+/// scans the source instead, so the lookup exposes no error a scan would not.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PatternLookup {
     pub slot: Slot,
     pub probe: Slot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_property: Option<String>,
     pub index: catalog::NodeEqualityIndexMeta,
     pub key: catalog::ScopedPropertyKey,
     pub estimated_rows: u64,
