@@ -884,3 +884,47 @@ fn properties_of_bound_nodes_cannot_fail() {
         assert_eq!(indexed(text), 0, "{text}");
     }
 }
+
+#[test]
+fn unique_correlated_lookups_beat_static_sources_and_other_keys() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "tier").unwrap());
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "uid").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:uid")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let context = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let lookups = |text: &str| {
+        r::plan(helix_cypher::compile(text).unwrap(), &context)
+            .unwrap()
+            .matches()
+            .values()
+            .flat_map(|plan| &plan.steps)
+            .filter_map(|step| match step {
+                r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
+                r::MatchStep::Scan(_)
+                | r::MatchStep::Expand { .. }
+                | r::MatchStep::HashJoin { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // A unique lookup per row reads one node; a static bitmap is re-read per row.
+    for text in [
+        "UNWIND [1, 2] AS k MATCH (n:N {uid: k, tier: 0}) RETURN n",
+        "UNWIND [1, 2] AS k MATCH (n:N {tier: 0}) WHERE n.uid = k RETURN n",
+    ] {
+        assert_eq!(lookups(text), ["uid"], "{text}");
+    }
+    // The unique key wins whichever equality is written first.
+    for text in [
+        "UNWIND [1, 2] AS k MATCH (n:N {tier: k, uid: k}) RETURN n",
+        "UNWIND [1, 2] AS k MATCH (n:N) WHERE n.tier = k AND n.uid = k RETURN n",
+    ] {
+        assert_eq!(lookups(text), ["uid"], "{text}");
+    }
+}

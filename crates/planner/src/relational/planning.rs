@@ -661,33 +661,41 @@ fn plan_accesses(
                 if let Some(predicate) = &lookup_predicate {
                     collect_equalities(predicate, slot, &mut equalities);
                 }
-                for (property, expression) in equalities {
-                    let Expression::Slot(probe) = expression else {
-                        continue;
-                    };
-                    if !incoming.contains(&probe) {
-                        continue;
-                    }
-                    let Some(key) = catalog::ScopedPropertyKey::try_new(label.clone(), property)
-                    else {
-                        continue;
-                    };
-                    let Some(index) = ctx.indexes.node_eq.get(&key) else {
-                        continue;
-                    };
-                    let estimated_rows = config
-                        .storage
-                        .equality_index_rows(config.stats.node_eq_cardinality.get(&key).copied())
-                        .as_rows();
-                    lookups.push(PatternLookup {
-                        slot,
-                        probe,
-                        index: index.clone(),
-                        key,
-                        estimated_rows,
-                    });
-                    break;
-                }
+                // The most selective indexed equality, a unique one first,
+                // keys the lookup regardless of written order.
+                let lookup = equalities
+                    .into_iter()
+                    .filter_map(|(property, expression)| {
+                        let Expression::Slot(probe) = expression else {
+                            return None;
+                        };
+                        if !incoming.contains(&probe) {
+                            return None;
+                        }
+                        let key = catalog::ScopedPropertyKey::try_new(label.clone(), property)?;
+                        let index = ctx.indexes.node_eq.get(&key)?.clone();
+                        // A unique index holds at most one node per value.
+                        let estimated_rows = if index.uniqueness == catalog::IndexUniqueness::Unique
+                        {
+                            1
+                        } else {
+                            config
+                                .storage
+                                .equality_index_rows(
+                                    config.stats.node_eq_cardinality.get(&key).copied(),
+                                )
+                                .as_rows()
+                        };
+                        Some(PatternLookup {
+                            slot,
+                            probe,
+                            index,
+                            key,
+                            estimated_rows,
+                        })
+                    })
+                    .min_by_key(|lookup| lookup.estimated_rows);
+                lookups.extend(lookup);
             }
         }
         order = order.with_lookups(lookups)?;
@@ -1390,6 +1398,12 @@ fn access_rows(access: &ir::NodeAccessPlan, config: &optimizer::OptimizerConfig)
             .iter()
             .map(|child| access_rows(child.as_ref(), config))
             .fold(0, u64::saturating_add),
+        // A unique index holds at most one node per value.
+        ir::NodeAccessPlan::EqualityIndex { index, .. }
+            if index.uniqueness == catalog::IndexUniqueness::Unique =>
+        {
+            1
+        }
         ir::NodeAccessPlan::EqualityIndex { key, .. } => config
             .storage
             .equality_index_rows(config.stats.node_eq_cardinality.get(key).copied())
