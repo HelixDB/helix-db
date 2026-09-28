@@ -80,6 +80,23 @@ impl ExecutionContext<'_> {
             exec::ExecNodeCursor::SecondarySet { set } => {
                 (self.node_secondary_bitmap(set).await?, false)
             }
+            exec::ExecNodeCursor::Range {
+                index,
+                key,
+                range,
+                iteration,
+            } => (
+                self.node_secondary_bitmap(&exec::ExecNodeSecondarySetPlan::Range(
+                    exec::ExecNodeSecondaryRangePlan {
+                        index: index.clone(),
+                        key: key.clone(),
+                        range: range.clone(),
+                        iteration,
+                    },
+                ))
+                .await?,
+                false,
+            ),
             exec::ExecNodeCursor::Empty => (bitmap::Bitmap::empty(Some(self.row_budget()))?, false),
         };
         Ok(Some(NodeCursor::Indexed {

@@ -22,6 +22,13 @@ pub enum ExecNodeCursor<'a> {
     SecondarySet {
         set: &'a exec::ExecNodeSecondarySetPlan,
     },
+    /// Verified node IDs within one range-index range.
+    Range {
+        index: &'a catalog::NodeRangeIndexMeta,
+        key: &'a catalog::ScopedPropertyDirectionKey,
+        range: &'a ir::IndexRange,
+        iteration: ir::RangeScanIteration,
+    },
 }
 
 impl exec::ExecOp {
@@ -66,6 +73,17 @@ impl exec::ExecOp {
                 verification,
             },
             ExecNodeAccessPlan::SecondarySet { set } => ExecNodeCursor::SecondarySet { set },
+            ExecNodeAccessPlan::RangeIndex {
+                index,
+                key,
+                range,
+                iteration,
+            } => ExecNodeCursor::Range {
+                index,
+                key,
+                range,
+                iteration: *iteration,
+            },
             _ => return None,
         })
     }
