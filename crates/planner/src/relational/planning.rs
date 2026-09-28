@@ -256,13 +256,24 @@ fn plan_accesses(
             if !seen.insert(node.slot) {
                 continue;
             }
-            let label = node.label.as_ref().or_else(|| {
-                pattern
-                    .nodes
-                    .iter()
-                    .find(|n| n.slot == node.slot && n.label.is_some())
-                    .and_then(|n| n.label.as_ref())
-            });
+            let total_predicate = predicate
+                .as_ref()
+                .filter(|predicate| totality.predicate(predicate));
+            // A WHERE label test rejects every node without the label, so it
+            // can name the label a source reads when the pattern has none.
+            let label = node
+                .label
+                .as_ref()
+                .or_else(|| {
+                    pattern
+                        .nodes
+                        .iter()
+                        .find(|n| n.slot == node.slot && n.label.is_some())
+                        .and_then(|n| n.label.as_ref())
+                })
+                .or_else(|| {
+                    total_predicate.and_then(|predicate| conjunct_label(predicate, node.slot))
+                });
             let mut candidates = vec![match label {
                 Some(label) => ir::NodeAccessPlan::LabelScan {
                     label: ir::NonEmptyString::new(label.clone()).expect("validated label"),
@@ -272,12 +283,34 @@ fn plan_accesses(
             if let Some(label) = label
                 && constraints_total
             {
-                let mut equalities = node.properties.clone();
+                // Every occurrence of a repeated variable constrains the node.
+                let mut equalities = pattern
+                    .nodes
+                    .iter()
+                    .filter(|n| n.slot == node.slot)
+                    .flat_map(|n| n.properties.iter().cloned())
+                    .collect::<Vec<_>>();
                 let mut memberships = Vec::new();
                 let mut ranges = Vec::new();
-                if let Some(predicate) = &predicate
-                    && totality.predicate(predicate)
-                {
+                let range_index = |property: &str| {
+                    [
+                        helix_ast::index::RangeIndexDirection::Asc,
+                        helix_ast::index::RangeIndexDirection::Desc,
+                    ]
+                    .into_iter()
+                    .filter_map(|direction| {
+                        catalog::ScopedPropertyDirectionKey::try_new(
+                            label.clone(),
+                            property.to_owned(),
+                            direction,
+                        )
+                    })
+                    .find_map(|key| {
+                        let index = ctx.indexes.node_range.get(&key)?.clone();
+                        Some((key, index))
+                    })
+                };
+                if let Some(predicate) = total_predicate {
                     collect_equalities(predicate, node.slot, &mut equalities);
                     collect_memberships(predicate, node.slot, &mut memberships);
                     collect_ranges(predicate, node.slot, &ctx.params, &mut ranges);
@@ -285,14 +318,6 @@ fn plan_accesses(
                 let mut exact = BTreeSet::new();
                 let mut unique = false;
                 for (property, value) in equalities {
-                    let Some(key) =
-                        catalog::ScopedPropertyKey::try_new(label.clone(), property.clone())
-                    else {
-                        continue;
-                    };
-                    let Some(index) = ctx.indexes.node_eq.get(&key) else {
-                        continue;
-                    };
                     let value = match value {
                         Expression::Literal(v) => literal(v),
                         Expression::Parameter(name) => ctx
@@ -305,9 +330,43 @@ fn plan_accesses(
                     let Some(value) = value else {
                         continue;
                     };
+                    // Null never equals a value, so the conjunct rejects every node.
                     if value == helix_ast::value::PropertyValue::Null {
+                        candidates.push(ir::NodeAccessPlan::Empty);
                         continue;
                     }
+                    let Some(key) =
+                        catalog::ScopedPropertyKey::try_new(label.clone(), property.clone())
+                    else {
+                        continue;
+                    };
+                    let Some(index) = ctx.indexes.node_eq.get(&key) else {
+                        // A range index orders every indexable value, so the
+                        // closed range [v, v] holds the nodes equal to v.
+                        let point =
+                            (!matches!(&value, helix_ast::value::PropertyValue::String(text)
+                            if text.len() > ir::MAX_INDEXED_EQUALITY_BYTES / 2))
+                            .then(|| ir::RangeIndexValue::literal(value))
+                            .flatten()
+                            .and_then(|value| {
+                                ir::IndexBetweenRange::new(
+                                    ir::IndexBound::Inclusive(value.clone()),
+                                    ir::IndexBound::Inclusive(value),
+                                )
+                            });
+                        if let Some(range) = point
+                            && let Some((key, index)) = range_index(&property)
+                        {
+                            exact.insert(property);
+                            candidates.push(ir::NodeAccessPlan::RangeIndex {
+                                index,
+                                key,
+                                range: ir::IndexRange::Between(range),
+                                iteration: ir::RangeScanIteration::Forward,
+                            });
+                        }
+                        continue;
+                    };
                     // Storage rejects an oversized lookup, while no indexed
                     // element can hold one, so only the scan answers exactly.
                     let Ok(value) = ir::SecondaryIndexLiteral::new(value) else {
@@ -400,22 +459,7 @@ fn plan_accesses(
                 // A range scan reads every value its bounds admit in the
                 // bound's domain; the residual predicate applies strictness.
                 for (property, range) in ranges {
-                    let Some((key, index)) = [
-                        helix_ast::index::RangeIndexDirection::Asc,
-                        helix_ast::index::RangeIndexDirection::Desc,
-                    ]
-                    .into_iter()
-                    .filter_map(|direction| {
-                        catalog::ScopedPropertyDirectionKey::try_new(
-                            label.clone(),
-                            property.clone(),
-                            direction,
-                        )
-                    })
-                    .find_map(|key| {
-                        let index = ctx.indexes.node_range.get(&key)?.clone();
-                        Some((key, index))
-                    }) else {
+                    let Some((key, index)) = range_index(&property) else {
                         continue;
                     };
                     candidates.push(ir::NodeAccessPlan::RangeIndex {
@@ -1014,6 +1058,17 @@ impl Totality<'_> {
             ) => self.operand(left) && self.operand(right),
             _ => false,
         }
+    }
+}
+
+/// A label that a conjunct of `expression` requires `slot` to carry.
+fn conjunct_label(expression: &Expression, slot: Slot) -> Option<&String> {
+    match expression {
+        Expression::Binary(Binary::And, a, b) => {
+            conjunct_label(a, slot).or_else(|| conjunct_label(b, slot))
+        }
+        Expression::HasLabel(target, label) if *target == slot => Some(label),
+        _ => None,
     }
 }
 

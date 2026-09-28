@@ -420,6 +420,45 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
         ),
         Source::Scan
     );
+    // A WHERE label test names the source label; null never equals a value;
+    // every occurrence of a repeated variable constrains its source; and a
+    // range index answers an equality with the closed range [v, v].
+    for (text, parameter, expected) in [
+        ("MATCH (n) WHERE n:N RETURN n", P::Null, Source::Scan),
+        (
+            "MATCH (n) WHERE n:N AND n.key = 1 RETURN n",
+            P::Null,
+            Source::Point,
+        ),
+        (
+            "MATCH (n) WHERE n.key = 1 AND (n:N) RETURN n",
+            P::Null,
+            Source::Point,
+        ),
+        (
+            "MATCH (n:N) WHERE n.key = null RETURN n",
+            P::Null,
+            Source::Empty,
+        ),
+        ("MATCH (n:N {key: $keys}) RETURN n", P::Null, Source::Empty),
+        (
+            "MATCH (n:N)-[:R]->(m), (n {email: 'a'}) RETURN n",
+            P::Null,
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WHERE n.age = 5 RETURN n",
+            P::Null,
+            Source::Range,
+        ),
+        (
+            "MATCH (n:N {age: $keys}) RETURN n",
+            P::I64(5),
+            Source::Range,
+        ),
+    ] {
+        assert_eq!(source(text, 64, Some(parameter)), expected, "{text}");
+    }
     // Equalities of one property joined by OR read the index like IN.
     for (text, expected) in [
         (

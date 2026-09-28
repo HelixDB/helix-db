@@ -269,6 +269,10 @@ async fn verify_indexed_membership() {
         ("MATCH (n:Item) WHERE n.key = 7 AND $flag RETURN n.name AS v", json!({"flag": true})),
         ("MATCH (n:Item) WHERE n.key = 7 AND $flag RETURN n.name AS v", json!({"flag": false})),
         ("MATCH (n:Item) WITH n, n.alt > 3.0 AS big WHERE big AND n.key = 9 RETURN n.name AS v", json!({})),
+        // WHERE labels, null equality and repeated variables.
+        ("MATCH (n) WHERE n:Item AND n.key = 3 RETURN n.name AS v ORDER BY v", json!({})),
+        ("MATCH (n:Item) WHERE n.key = null RETURN count(*) AS v", json!({})),
+        ("MATCH (a:Item)-[:NEXT]->(b), (a {key: 12}) RETURN b.name AS v", json!({})),
     ];
     let request = |text: &str, parameters: &serde_json::Value| -> cypher::Request {
         serde_json::from_value(json!({"query": text, "parameters": parameters})).unwrap()
@@ -378,7 +382,7 @@ async fn verify_indexed_membership() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        reference[26..43].iter().map(rows).collect::<Vec<_>>(),
+        reference[26..46].iter().map(rows).collect::<Vec<_>>(),
         [
             names(&["n5"]),
             names(&["n7"]),
@@ -397,6 +401,9 @@ async fn verify_indexed_membership() {
             names(&["n7"]),
             names(&[]),
             names(&["n9"]),
+            names(&["n3"]),
+            vec![vec![json!(0)]],
+            names(&["n13"]),
         ]
     );
 
@@ -446,6 +453,7 @@ async fn verify_indexed_membership() {
         (cases[34].0, &reference[34]),
         (cases[37].0, &reference[37]),
         (cases[39].0, &reference[39]),
+        (cases[43].0, &reference[43]),
     ] {
         let indexed = run(&db, text).await;
         assert!(

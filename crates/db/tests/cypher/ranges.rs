@@ -37,6 +37,11 @@ async fn range_comparisons_read_range_indexes_with_cypher_semantics() {
         ("MATCH (n:R) WHERE n.v > 5 AND n.v < 'z' RETURN n.name AS v", json!({})),
         ("MATCH (n:R) WITH n WHERE n.v < 1 RETURN n.name AS v", json!({})),
         ("MATCH (n:R) WHERE n.v > 196 AND n.name <> 'i199' RETURN n.name AS v ORDER BY v", json!({})),
+        // Equalities read the closed range [v, v] with Cypher equality.
+        ("MATCH (n:R) WHERE n.v = 150 RETURN n.name AS v", json!({})),
+        ("MATCH (n:R {v: 2.5}) RETURN n.name AS v", json!({})),
+        ("MATCH (n:R) WHERE n.v = $s RETURN n.name AS v", json!({"s": "m"})),
+        ("MATCH (n:R) WHERE n.v = 9007199254740993 RETURN n.name AS v", json!({})),
     ];
     let request = |text: &str, parameters: &serde_json::Value| -> cypher::Request {
         serde_json::from_value(json!({"query": text, "parameters": parameters})).unwrap()
@@ -78,6 +83,10 @@ async fn range_comparisons_read_range_indexes_with_cypher_semantics() {
             names(&[]),
             names(&["i0"]),
             names(&["big-float", "big-int", "i197", "i198"]),
+            names(&["i150"]),
+            names(&["fraction"]),
+            names(&["m"]),
+            names(&["big-int"]),
         ]
     );
     assert!(error.contains("DivisionByZero"), "{error}");
