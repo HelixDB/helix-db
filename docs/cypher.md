@@ -406,6 +406,9 @@ with many followers once the limit is reached. Returning `a.name` instead of
 candidate rows regardless of preceding skips; sources that require initial
 validation still run, and invalid offsets still fail. Filters, ordering, aggregation
 and mutations still end the proof.
+An expansion reads the adjacency of each relationship type it names, so
+`-[:WROTE|LIVES_IN]->` does not read a node's other relationships; a step
+without a type reads them all.
 Rows reuse execution cells after bindings leave scope, so successive `WITH`
 aliases do not widen every retained row. Logical binding IDs remain stable in
 validation and explain output. Simultaneous inputs, outputs and sort expressions

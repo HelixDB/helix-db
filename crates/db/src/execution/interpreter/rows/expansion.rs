@@ -9,6 +9,8 @@ use helix_planner::{ir, relational as r};
 struct ActiveParent {
     cursor: EdgeCursor,
     pending: Option<(EdgeIdBatch, usize)>,
+    /// The relationship type the cursor reads, among the step's types.
+    label: usize,
 }
 
 impl ExecutionContext<'_> {
@@ -38,16 +40,33 @@ impl ExecutionContext<'_> {
             }
             (r::Direction::Undirected, _) => ir::ExpandDirection::Both,
         };
-        let label = if relationship.types.len() == 1 {
-            ir::ExpandLabelPlan::Label(
-                ir::NonEmptyString::new(relationship.types[0].clone()).expect("validated type"),
-            )
+        // Each distinct type reads only its own adjacency; an untyped step
+        // reads every relationship.
+        let labels = if relationship.types.is_empty() {
+            vec![ir::ExpandLabelPlan::Any]
         } else {
-            ir::ExpandLabelPlan::Any
+            relationship
+                .types
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|label| {
+                    ir::ExpandLabelPlan::Label(
+                        ir::NonEmptyString::new(label.clone()).expect("validated type"),
+                    )
+                })
+                .collect::<Vec<_>>()
         };
         futures::stream::try_unfold(
-            (rows, 0_usize, 0_usize, None::<ActiveParent>, label),
-            move |(mut rows, mut parent, mut released, mut active, label)| {
+            (
+                rows,
+                0_usize,
+                0_usize,
+                None::<ActiveParent>,
+                0_usize,
+                labels,
+            ),
+            move |(mut rows, mut parent, mut released, mut active, mut next_label, labels)| {
                 // Only an active poll owns the async storage-operation state.
                 // Suspended expansion levels retain their compact continuation.
                 let poll = async move {
@@ -70,6 +89,7 @@ impl ExecutionContext<'_> {
                                         row[from.0 as usize]
                                     else {
                                         parent += 1;
+                                        next_label = 0;
                                         continue;
                                     };
                                     let target = match row[to.0 as usize] {
@@ -91,12 +111,13 @@ impl ExecutionContext<'_> {
                                                 self,
                                                 source,
                                                 direction,
-                                                &label,
+                                                &labels[next_label],
                                                 target,
                                                 limits.batch_rows,
                                             ))?
                                             .await?,
                                         pending: None,
+                                        label: next_label,
                                     }
                                 }
                             };
@@ -121,12 +142,18 @@ impl ExecutionContext<'_> {
                                         .admitted_future(current.cursor.next_batch(self))?
                                         .await?
                                     else {
-                                        parent += 1;
+                                        // The parent's next type, then the next parent.
+                                        next_label = current.label + 1;
+                                        if next_label == labels.len() {
+                                            parent += 1;
+                                            next_label = 0;
+                                        }
                                         continue;
                                     };
                                     active = Some(ActiveParent {
                                         cursor,
                                         pending: Some((batch, 0)),
+                                        label: current.label,
                                     });
                                 }
                             }
@@ -229,7 +256,7 @@ impl ExecutionContext<'_> {
                         if output.len() > 0 {
                             return Ok(Some((
                                 output.finish(),
-                                (rows, parent, released, active, label),
+                                (rows, parent, released, active, next_label, labels),
                             )));
                         }
                     }
