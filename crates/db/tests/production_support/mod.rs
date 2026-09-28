@@ -15,6 +15,8 @@ use std::sync::Once;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
+#[cfg(feature = "production-scale")]
+pub use crate::search::vector::RestrictedSearchStrategy;
 pub use crate::search::vector::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
@@ -580,6 +582,23 @@ pub async fn traversal_vector_prefilter_1m_scale_contract() {
 #[cfg(feature = "production-scale")]
 pub async fn index_lifecycle_blocked_limit_scale_contracts() {
     index_lifecycle_scale::run_blocked_limits().await;
+}
+
+/// Runs `query` and returns the strategy of the restricted vector search it ran.
+///
+/// `None` means `query` ran no traversal-scoped vector search; when it ran
+/// several, the last one is reported. Release gates use this to prove which
+/// restricted execution a scoped shape's recall measures, so an exact scan
+/// cannot stand in for the filtered graph walk.
+#[cfg(feature = "production-scale")]
+pub async fn observe_restricted_vector_strategy<F>(
+    query: F,
+) -> (F::Output, Option<RestrictedSearchStrategy>)
+where
+    F: std::future::Future,
+{
+    let (output, stats) = crate::search::vector::observe_restricted_search(query).await;
+    (output, stats.and_then(|stats| stats.strategy))
 }
 
 /// Runs vector property materialization and physical retirement for 100k rows.

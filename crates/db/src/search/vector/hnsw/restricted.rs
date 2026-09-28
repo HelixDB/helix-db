@@ -146,7 +146,7 @@ fn effective_filtered_beam_percent() -> usize {
 
 /// Restricted-search execution selected by exact candidate cardinality and bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RestrictedSearchStrategy {
+pub enum RestrictedSearchStrategy {
     /// Locality-sorted exact vector scan.
     Exact,
     /// Bounded directory/sample-seeded filtered graph traversal.

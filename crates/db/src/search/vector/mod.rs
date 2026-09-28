@@ -218,7 +218,7 @@ pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::restricted::run_production_contracts as run_restricted_contracts;
 #[cfg(feature = "production-coverage")]
-pub(crate) use hnsw::restricted::RestrictedSearchStrategy;
+pub use hnsw::restricted::RestrictedSearchStrategy;
 pub(crate) use hnsw::restricted::RestrictedVectorCandidates;
 #[cfg(feature = "production-scale")]
 pub(crate) use hnsw::restricted::{
