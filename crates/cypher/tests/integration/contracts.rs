@@ -741,3 +741,59 @@ fn correlated_graph_batches_require_a_supported_physical_schedule() {
         assert_eq!(plan.batch_consumer(0).is_some(), batched, "{text}");
     }
 }
+
+#[test]
+fn properties_of_bound_nodes_cannot_fail() {
+    let context = context::PlannerContext {
+        indexes: catalog::IndexCatalogSnapshot::default()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap()),
+        stats: context::StatsSnapshot::default()
+            .with_node_label_cardinality(ir::NonEmptyString::new("N").unwrap(), 1_000_000),
+        ..context::PlannerContext::default()
+    };
+    // Every node source and correlated lookup that reads the key index.
+    let indexed = |text: &str| {
+        let plan = r::plan(helix_cypher::compile(text).unwrap(), &context).unwrap();
+        plan.matches()
+            .values()
+            .map(|plan| {
+                plan.steps
+                    .iter()
+                    .filter(|step| matches!(step, r::MatchStep::IndexLookup(_)))
+                    .count()
+                    + plan
+                        .sources
+                        .iter()
+                        .filter(|source| {
+                            source.access.steps().iter().any(|step| {
+                                matches!(
+                                    &step.op,
+                                    exec::ExecOp::Access { plan } if matches!(
+                                        plan.as_ref(),
+                                        exec::ExecAccessPlan::Node(
+                                            exec::ExecNodeAccessPlan::Bitmap { .. }
+                                        )
+                                    )
+                                )
+                            })
+                        })
+                        .count()
+            })
+            .sum::<usize>()
+    };
+    for text in [
+        "MATCH (a:N {key: 1})-[:R]->(b:N {region: a.region}) RETURN b",
+        "MATCH (a:N {key: 1}) MATCH (b:N) WHERE b.key = 2 AND b.age > a.age RETURN b",
+        "MATCH (a:N {key: 1}) WITH a MATCH (b:N {key: 2}) WHERE a.region IN ['x'] RETURN b",
+        "MATCH (a:N {key: 1})-[r:R]->(b) WHERE r.w > a.age AND a:N RETURN b",
+    ] {
+        assert!(indexed(text) >= 1, "{text}");
+    }
+    // A value of unknown type may be a scalar, whose property access fails.
+    for text in [
+        "UNWIND [1] AS row MATCH (b:N) WHERE b.key = 2 AND b.age > row.age RETURN b",
+        "UNWIND [1] AS row MATCH (b:N {key: 2, age: row.age}) RETURN b",
+    ] {
+        assert_eq!(indexed(text), 0, "{text}");
+    }
+}

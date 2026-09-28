@@ -56,11 +56,12 @@ impl InputWindow {
             Operator::Match {
                 pattern, predicate, ..
             } if predicate.as_ref().is_none_or(|predicate| {
-                super::planning::index_predicate_is_total(
-                    predicate.expression(),
+                super::planning::Totality {
                     pattern,
-                    super::planning::Parameters::Validated,
-                )
+                    bindings: query.bindings(),
+                    params: super::planning::Parameters::Validated,
+                }
+                .predicate(predicate.expression())
             }) =>
             {
                 entities.extend(

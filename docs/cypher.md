@@ -140,9 +140,11 @@ bound, or a string too large to index, keeps the label scan, because such a
 comparison is null or unindexable rather than a range. Index access also requires every other
 conjunct and every property constraint in the pattern to be unable to fail.
 Comparisons, string predicates, label and null tests, and `AND`, `OR`, `XOR`
-and `NOT` over them cannot fail when their operands are pattern properties,
-literals and parameters, because mismatched types compare as null; arithmetic
-or a function call there keeps the label scan. The WHERE of a later `WITH` counts
+and `NOT` over them cannot fail when their operands are literals, parameters,
+variables, or properties of nodes, relationships and maps, including those bound
+by earlier clauses, because mismatched types compare as null. Arithmetic, a
+function call, or a property of a value of unknown type, such as an `UNWIND`
+element, keeps the label scan. The WHERE of a later `WITH` counts
 too when every clause in between is a `WITH` that only passes variables,
 properties, literals or parameters along, without `DISTINCT`, `ORDER BY`,
 `SKIP`, `LIMIT` or aggregation, so `MATCH (n:User) WITH n AS m WHERE m.email = $e`
@@ -343,8 +345,8 @@ Initial fixed-length matches with literal or parameter property constraints, and
 a `WHERE` that cannot fail, can stop at a downstream limit when intervening
 projections preserve rows and cannot fail. A `WHERE` cannot fail under the same
 rule as index selection: comparisons, string predicates, label and null tests,
-and their boolean combinations over pattern properties, literals and
-parameters. The engine evaluates enough input to validate those constraints even
+and their boolean combinations over literals, parameters, variables and
+properties of nodes, relationships and maps. The engine evaluates enough input to validate those constraints even
 for `LIMIT 0`; correlated inputs and potentially failing expressions remain
 barriers. Candidate batches start at the remaining demand and double up to the
 batch width, so a selective `WHERE` needs only a few more batches than a scan.

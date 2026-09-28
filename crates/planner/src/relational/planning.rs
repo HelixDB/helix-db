@@ -238,6 +238,11 @@ fn plan_accesses(
             continue;
         };
         let predicate = index_predicate(query, operator_index, pattern, &ctx.params);
+        let totality = Totality {
+            pattern,
+            bindings: query.bindings(),
+            params: Parameters::Bound(&ctx.params),
+        };
         // An index source skips candidate nodes, so it must not hide an error
         // that another property constraint of this pattern could raise.
         let constraints_total = pattern
@@ -245,12 +250,7 @@ fn plan_accesses(
             .iter()
             .flat_map(|node| &node.properties)
             .chain(pattern.relationships.iter().flat_map(|rel| &rel.properties))
-            .all(|(_, expression)| {
-                matches!(
-                    expression,
-                    Expression::Literal(_) | Expression::Parameter(_) | Expression::Slot(_)
-                )
-            });
+            .all(|(_, expression)| totality.operand(expression));
         let mut seen = BTreeSet::new();
         for node in &pattern.nodes {
             if !seen.insert(node.slot) {
@@ -276,7 +276,7 @@ fn plan_accesses(
                 let mut memberships = Vec::new();
                 let mut ranges = Vec::new();
                 if let Some(predicate) = &predicate
-                    && index_predicate_is_total(predicate, pattern, Parameters::Bound(&ctx.params))
+                    && totality.predicate(predicate)
                 {
                     collect_equalities(predicate, node.slot, &mut equalities);
                     collect_memberships(predicate, node.slot, &mut memberships);
@@ -549,19 +549,23 @@ fn plan_accesses(
         // Only total constraints can cross that boundary: unbound parameters,
         // arithmetic, functions and dynamic property access retain their order.
         let incoming = query.contracts()[operator_index].input().slots();
+        let totality = Totality {
+            pattern,
+            bindings: query.bindings(),
+            params: Parameters::Bound(&ctx.params),
+        };
         let constraints_total = pattern
             .nodes
             .iter()
             .flat_map(|node| &node.properties)
             .chain(pattern.relationships.iter().flat_map(|rel| &rel.properties))
             .all(|(_, expression)| match expression {
-                Expression::Literal(_) => true,
                 Expression::Slot(slot) => incoming.contains(slot),
-                _ => false,
+                expression => totality.operand(expression),
             });
-        let predicate_total = lookup_predicate.as_ref().is_none_or(|expression| {
-            index_predicate_is_total(expression, pattern, Parameters::Bound(&ctx.params))
-        });
+        let predicate_total = lookup_predicate
+            .as_ref()
+            .is_none_or(|expression| totality.predicate(expression));
         let mut lookups = Vec::new();
         if constraints_total && predicate_total {
             // Group repeated bindings once; do not rescan the whole pattern
@@ -781,6 +785,11 @@ fn index_predicate(
     else {
         unreachable!("index predicates belong to a MATCH");
     };
+    let totality = Totality {
+        pattern,
+        bindings: query.bindings(),
+        params: Parameters::Bound(params),
+    };
     let mut conjuncts = predicate
         .iter()
         .map(|predicate| predicate.expression().clone())
@@ -828,8 +837,7 @@ fn index_predicate(
                     .iter()
                     .map(|item| {
                         let value = substitute(&item.expression, &bindings)?;
-                        total_operand(&value, pattern, Parameters::Bound(params))
-                            .then_some((item.slot, value))
+                        totality.operand(&value).then_some((item.slot, value))
                     })
                     .collect::<Option<BTreeMap<_, _>>>()
                 else {
@@ -845,9 +853,7 @@ fn index_predicate(
         };
         // A later WHERE that can fail may raise an error on a row the source
         // would skip, so neither it nor anything after it can select an index.
-        let Some(next) =
-            next.filter(|next| index_predicate_is_total(next, pattern, Parameters::Bound(params)))
-        else {
+        let Some(next) = next.filter(|next| totality.predicate(next)) else {
             break;
         };
         conjuncts.push(next);
@@ -867,88 +873,116 @@ pub(super) enum Parameters<'a> {
     Validated,
 }
 
-/// An operand that evaluates without failing: a literal, a slot, a bound
-/// parameter, or a property of a node or relationship of `pattern`.
-fn total_operand(operand: &Expression, pattern: &Pattern, params: Parameters<'_>) -> bool {
-    match operand {
-        Expression::Literal(_) | Expression::Slot(_) => true,
-        Expression::Parameter(name) => match params {
-            Parameters::Bound(params) => {
-                let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
-                params.values.contains_key(&name) || params.query_values.contains_key(&name)
-            }
-            Parameters::Validated => true,
-        },
-        Expression::Property(value, _) => matches!(value.as_ref(), Expression::Slot(slot)
-            if pattern.nodes.iter().any(|node| node.slot == *slot)
-                || pattern.relationships.iter().any(|rel| rel.slot == *slot)),
-        _ => false,
-    }
+/// What a totality proof over one MATCH knows: its pattern, the query's
+/// binding types and its parameters.
+#[derive(Clone, Copy)]
+pub(super) struct Totality<'a> {
+    pub(super) pattern: &'a Pattern,
+    pub(super) bindings: &'a [super::Binding],
+    pub(super) params: Parameters<'a>,
 }
 
-// Extracting an index equality from AND may otherwise suppress an observable
-// error in another conjunct. In particular NULL AND an error still evaluates
-// that error; treating NULL as an early false result would be incorrect. A
-// total predicate is a boolean combination of comparisons, string predicates,
-// label and null tests, and IN over pattern properties, literals and bound
-// parameters: these return null for mismatched types instead of failing. Keep
-// potentially failing arithmetic, functions, and dynamic access above a scan.
-pub(super) fn index_predicate_is_total(
-    expression: &Expression,
-    pattern: &Pattern,
-    params: Parameters<'_>,
-) -> bool {
-    let operand = |operand: &Expression| total_operand(operand, pattern, params);
-    match expression {
-        Expression::Literal(Value::Boolean(_) | Value::Null) => true,
-        Expression::Binary(Binary::And | Binary::Or | Binary::Xor, left, right) => {
-            index_predicate_is_total(left, pattern, params)
-                && index_predicate_is_total(right, pattern, params)
-        }
-        Expression::Unary(Unary::Not, negated) => {
-            index_predicate_is_total(negated, pattern, params)
-        }
-        Expression::Unary(Unary::IsNull | Unary::IsNotNull, value) => operand(value),
-        Expression::HasLabel(slot, _) => pattern.nodes.iter().any(|node| node.slot == *slot),
-        // IN fails only for a right operand that is neither a list nor null;
-        // comparing a property with list members cannot fail.
-        Expression::Binary(Binary::In, value, list) => {
-            matches!(value.as_ref(), Expression::Property(value, _)
-                if matches!(value.as_ref(), Expression::Slot(slot)
-                    if pattern.nodes.iter().any(|node| node.slot == *slot)))
-                && match list.as_ref() {
-                    Expression::Literal(Value::List(_) | Value::Null) => true,
-                    Expression::List(items) => items.iter().all(|item| {
-                        matches!(item, Expression::Literal(_) | Expression::Parameter(_))
-                            && operand(item)
-                    }),
-                    Expression::Parameter(name) => matches!(params, Parameters::Bound(params)
-                    if matches!(
-                        params.values.get(
-                            &ir::NonEmptyString::new(name.clone()).expect("validated parameter")
-                        ),
-                        Some(
-                            helix_ast::value::PropertyValue::Array(_)
-                                | helix_ast::value::PropertyValue::Null
-                        )
-                    )),
-                    _ => false,
+impl Totality<'_> {
+    /// Whether `slot` holds a node, relationship or map, or null: property
+    /// access on those cannot fail.
+    fn has_properties(self, slot: Slot) -> bool {
+        self.pattern.nodes.iter().any(|node| node.slot == slot)
+            || self
+                .pattern
+                .relationships
+                .iter()
+                .any(|rel| rel.slot == slot)
+            || matches!(
+                self.bindings[slot.0 as usize].value_type,
+                super::ValueType::Node
+                    | super::ValueType::Relationship
+                    | super::ValueType::Map
+                    | super::ValueType::Null
+            )
+    }
+
+    /// An operand that evaluates without failing: a literal, a slot, a bound
+    /// parameter, or a property of a slot that holds properties.
+    pub(super) fn operand(self, operand: &Expression) -> bool {
+        match operand {
+            Expression::Literal(_) | Expression::Slot(_) => true,
+            Expression::Parameter(name) => match self.params {
+                Parameters::Bound(params) => {
+                    let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
+                    params.values.contains_key(&name) || params.query_values.contains_key(&name)
                 }
+                Parameters::Validated => true,
+            },
+            Expression::Property(value, _) => {
+                matches!(value.as_ref(), Expression::Slot(slot) if self.has_properties(*slot))
+            }
+            _ => false,
         }
-        Expression::Binary(
-            Binary::Equal
-            | Binary::NotEqual
-            | Binary::Less
-            | Binary::LessEqual
-            | Binary::Greater
-            | Binary::GreaterEqual
-            | Binary::StartsWith
-            | Binary::EndsWith
-            | Binary::Contains,
-            left,
-            right,
-        ) => operand(left) && operand(right),
-        _ => false,
+    }
+
+    // Extracting an index equality from AND may otherwise suppress an
+    // observable error in another conjunct. In particular NULL AND an error
+    // still evaluates that error; treating NULL as an early false result would
+    // be incorrect. A total predicate is a boolean combination of comparisons,
+    // string predicates, label and null tests, and IN over total operands:
+    // these return null for mismatched types instead of failing. Keep
+    // potentially failing arithmetic, functions, and dynamic access above a scan.
+    pub(super) fn predicate(self, expression: &Expression) -> bool {
+        match expression {
+            Expression::Literal(Value::Boolean(_) | Value::Null) => true,
+            Expression::Binary(Binary::And | Binary::Or | Binary::Xor, left, right) => {
+                self.predicate(left) && self.predicate(right)
+            }
+            Expression::Unary(Unary::Not, negated) => self.predicate(negated),
+            Expression::Unary(Unary::IsNull | Unary::IsNotNull, value) => self.operand(value),
+            Expression::HasLabel(slot, _) => {
+                self.pattern.nodes.iter().any(|node| node.slot == *slot)
+                    || matches!(
+                        self.bindings[slot.0 as usize].value_type,
+                        super::ValueType::Node | super::ValueType::Null
+                    )
+            }
+            // IN fails only for a right operand that is neither a list nor
+            // null; comparing a value with list members cannot fail.
+            Expression::Binary(Binary::In, value, list) => {
+                self.operand(value)
+                    && match list.as_ref() {
+                        Expression::Literal(Value::List(_) | Value::Null) => true,
+                        Expression::List(items) => items.iter().all(|item| {
+                            matches!(item, Expression::Literal(_) | Expression::Parameter(_))
+                                && self.operand(item)
+                        }),
+                        Expression::Parameter(name) => {
+                            matches!(self.params, Parameters::Bound(params)
+                            if matches!(
+                                params.values.get(
+                                    &ir::NonEmptyString::new(name.clone())
+                                        .expect("validated parameter")
+                                ),
+                                Some(
+                                    helix_ast::value::PropertyValue::Array(_)
+                                        | helix_ast::value::PropertyValue::Null
+                                )
+                            ))
+                        }
+                        _ => false,
+                    }
+            }
+            Expression::Binary(
+                Binary::Equal
+                | Binary::NotEqual
+                | Binary::Less
+                | Binary::LessEqual
+                | Binary::Greater
+                | Binary::GreaterEqual
+                | Binary::StartsWith
+                | Binary::EndsWith
+                | Binary::Contains,
+                left,
+                right,
+            ) => self.operand(left) && self.operand(right),
+            _ => false,
+        }
     }
 }
 
