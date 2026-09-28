@@ -676,7 +676,17 @@ fn plan_accesses(
                             },
                             _ => return None,
                         };
-                        if !incoming.contains(&probe) {
+                        // A node or relationship of this pattern probes once
+                        // the schedule has bound it.
+                        if !incoming.contains(&probe)
+                            && (probe == slot
+                                || !pattern
+                                    .nodes
+                                    .iter()
+                                    .map(|node| node.slot)
+                                    .chain(pattern.relationships.iter().map(|rel| rel.slot))
+                                    .any(|bound| bound == probe))
+                        {
                             return None;
                         }
                         let key = catalog::ScopedPropertyKey::try_new(label.clone(), property)?;

@@ -983,3 +983,47 @@ fn correlated_lookups_probe_properties_of_bound_values() {
     // A property of a value of unknown type can fail, so the label is scanned.
     assert!(probes("UNWIND [{id: 1}, 2] AS row MATCH (n:N {uid: row.id}) RETURN n").is_empty());
 }
+
+#[test]
+fn lookups_probe_properties_bound_earlier_in_the_pattern() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default();
+    for (label, property) in [("N", "uid"), ("P", "pid")] {
+        indexes.node_eq.insert(
+            catalog::ScopedPropertyKey::try_new(label, property).unwrap(),
+            catalog::NodeEqualityIndexMeta::try_new(format!("node_eq:{label}:{property}"))
+                .unwrap()
+                .with_uniqueness(catalog::IndexUniqueness::Unique),
+        );
+    }
+    let context = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let steps = |text: &str| {
+        r::plan(helix_cypher::compile(text).unwrap(), &context)
+            .unwrap()
+            .matches()
+            .values()
+            .flat_map(|plan| plan.steps.clone())
+            .collect::<Vec<_>>()
+    };
+    for text in [
+        "MATCH (p:P {pid: 1}), (n:N {uid: p.author}) RETURN n",
+        "MATCH (n:N {uid: p.author}), (p:P {pid: 1}) RETURN n",
+        "MATCH (p:P {pid: 1}), (n:N) WHERE n.uid = p.author RETURN n",
+    ] {
+        let steps = steps(text);
+        let [r::MatchStep::Scan(_), r::MatchStep::IndexLookup(lookup)] = steps.as_slice() else {
+            panic!("{text}: {steps:?}");
+        };
+        assert_eq!(lookup.probe_property.as_deref(), Some("author"), "{text}");
+    }
+    // A relationship probes once an expansion binds it.
+    let steps = steps("MATCH (a:P {pid: 1})-[r:R]->(b), (n:N {uid: r.w}) RETURN n");
+    let [r::MatchStep::Scan(_), r::MatchStep::Expand { .. }, r::MatchStep::IndexLookup(lookup)] =
+        steps.as_slice()
+    else {
+        panic!("{steps:?}");
+    };
+    assert_eq!(lookup.probe_property.as_deref(), Some("w"));
+}

@@ -157,13 +157,22 @@ impl GraphPatternOrder {
         if lookups.iter().any(|lookup| {
             !targets.insert(lookup.slot)
                 || self.incoming.contains(&lookup.slot)
-                || !self.incoming.contains(&lookup.probe)
+                || lookup.probe == lookup.slot
+                || !(self.incoming.contains(&lookup.probe)
+                    || self
+                        .sources
+                        .iter()
+                        .any(|source| source.slot == lookup.probe)
+                    || self
+                        .relationships
+                        .iter()
+                        .any(|rel| rel.relationship == lookup.probe))
                 || !self.sources.iter().any(|source| source.slot == lookup.slot)
         }) {
             return Err(QueryError::compile(
                 "InternalPlannerError",
                 "InvalidPatternLookup",
-                "correlated lookups require an incoming probe and a distinct unbound node",
+                "lookups require a distinct unbound node and a probe bound before it",
             ));
         }
         self.lookups = lookups;
@@ -249,7 +258,7 @@ impl GraphPatternOrder {
             if let Some(lookup) = self
                 .lookups
                 .iter()
-                .find(|lookup| lookup.slot == source.slot)
+                .find(|lookup| lookup.slot == source.slot && known.contains(&lookup.probe))
             {
                 let cardinality = cost::EstimatedRows::rows(lookup.estimated_rows);
                 let lookup_cost = match lookup.index.uniqueness {
@@ -333,33 +342,36 @@ impl optimizer::OptimizerRule for GraphPatternImplementationRule {
         let logical::LogicalExpr::GraphPattern(pattern) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        let schedule = pattern.schedule(input.storage);
+        // Every lookup, only those keyed on incoming values, or none: a lookup
+        // keyed on this pattern's own binding competes with a hash join there.
+        let mut alternatives = vec![pattern.clone()];
         if !pattern.lookups.is_empty() {
+            let mut correlated = pattern.clone();
+            correlated
+                .lookups
+                .retain(|lookup| pattern.incoming.contains(&lookup.probe));
+            if !correlated.lookups.is_empty() && correlated.lookups.len() < pattern.lookups.len() {
+                alternatives.push(correlated);
+            }
             let mut scan = pattern.clone();
             scan.lookups.clear();
-            let scan_cost = scan.schedule(input.storage).cost;
-            return optimizer::RuleResult::Applied(optimizer::RuleEffect::Physical(
-                crate::ir::AtLeast::try_from_vec(vec![
-                    physical::PhysicalAlternative::new(
-                        physical::PhysicalExpr::GraphPattern(pattern.clone()),
-                        properties::DeliveredProperties::unknown(),
-                        schedule.cost,
-                    ),
-                    physical::PhysicalAlternative::new(
-                        physical::PhysicalExpr::GraphPattern(scan),
-                        properties::DeliveredProperties::unknown(),
-                        scan_cost,
-                    ),
-                ])
-                .expect("indexed and scan implementations"),
-            ));
+            alternatives.push(scan);
         }
         optimizer::RuleResult::Applied(optimizer::RuleEffect::Physical(
-            crate::ir::AtLeast::from_one(physical::PhysicalAlternative::new(
-                physical::PhysicalExpr::GraphPattern(pattern.clone()),
-                properties::DeliveredProperties::unknown(),
-                schedule.cost,
-            )),
+            crate::ir::AtLeast::try_from_vec(
+                alternatives
+                    .into_iter()
+                    .map(|order| {
+                        let cost = order.schedule(input.storage).cost;
+                        physical::PhysicalAlternative::new(
+                            physical::PhysicalExpr::GraphPattern(order),
+                            properties::DeliveredProperties::unknown(),
+                            cost,
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("the pattern's own implementation"),
         ))
     }
 }

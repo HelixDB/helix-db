@@ -165,7 +165,9 @@ equality with a variable bound by an earlier clause, as in
 `UNWIND $ids AS k MATCH (u:User {uid: k})`, or with a property of a node,
 relationship or map bound by one, as in
 `MATCH (p:Post) MATCH (u:User {uid: p.author})`, can probe an equality index
-once per incoming row. A probe property that cannot be read, such as a
+once per incoming row. So can a property of another node or relationship in
+the same pattern, as in `MATCH (p:Post {pid: 10}), (u:User {uid: p.author})`,
+once the plan has bound it. A probe property that cannot be read, such as a
 property of a deleted node, scans the label instead, so it fails only where a
 scan would. With several such equalities, a unique index keys the probe, since
 it matches at most one node per row, whichever equality is written first.

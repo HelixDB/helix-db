@@ -385,7 +385,10 @@ impl ExecutionContext<'_> {
         assert!(plan.incoming.is_empty());
         assert!(plan.steps[1..].iter().all(|step| matches!(
             step,
-            r::MatchStep::Scan(_) | r::MatchStep::Expand { .. } | r::MatchStep::HashJoin { .. }
+            r::MatchStep::Scan(_)
+                | r::MatchStep::Expand { .. }
+                | r::MatchStep::HashJoin { .. }
+                | r::MatchStep::IndexLookup(_)
         )));
         // Demand sizes the first candidate/probe batch, not blocking source
         // builds; each later batch doubles up to the batch width, so a WHERE

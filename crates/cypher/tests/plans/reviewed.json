@@ -4107,7 +4107,7 @@
     "cypher/equality_join/rows=100/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 5,
+        "alternatives_considered": 7,
         "guardrail_hit": false,
         "memo_exprs": 4,
         "memo_groups": 3,
@@ -4126,12 +4126,12 @@
           "range_seeks": 0
         }
       },
-      "sha256": "927507b5c61bc68d07dea9d90128c4570950759a6d2ae06e107946b9f2b53e5a"
+      "sha256": "1adb9aeb4be96fb8dce675cfba64dcd51c1a1a07b9fbdeac8be996820839e515"
     },
     "cypher/equality_join/rows=100/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 5,
+        "alternatives_considered": 7,
         "guardrail_hit": false,
         "memo_exprs": 4,
         "memo_groups": 3,
@@ -4150,12 +4150,12 @@
           "range_seeks": 0
         }
       },
-      "sha256": "727e59d59d92b94e032a53e53392004bbe7411cfdea3024cbbf25635bceb00de"
+      "sha256": "5d7bc0663ff18da8828ec3a78a646ff7a2fb22de92b15613a885a6227121cce4"
     },
     "cypher/equality_join/rows=100/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 5,
+        "alternatives_considered": 7,
         "guardrail_hit": false,
         "memo_exprs": 4,
         "memo_groups": 3,
@@ -4174,7 +4174,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "42eaa24ebb63862bb4d4fbf3c3c5ebafd4380a3f3c7146481be95f0e70314a5d"
+      "sha256": "83b7dca480f5082d65a6ea857d1f9bf2aa15c72988d6c4bc5a6622436814ef82"
     },
     "cypher/equality_join/rows=100000/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -4251,7 +4251,7 @@
     "cypher/equality_join/rows=100000/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 5,
+        "alternatives_considered": 7,
         "guardrail_hit": false,
         "memo_exprs": 4,
         "memo_groups": 3,
@@ -4270,12 +4270,12 @@
           "range_seeks": 0
         }
       },
-      "sha256": "313789d2f055f5ade6db38949c5214c5e6b83930ff867c066349efa7298319c1"
+      "sha256": "dcde036e35c628d67b32052d64de3c011e1a459f2271f45fbe49d8906610cf13"
     },
     "cypher/equality_join/rows=100000/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 5,
+        "alternatives_considered": 7,
         "guardrail_hit": false,
         "memo_exprs": 4,
         "memo_groups": 3,
@@ -4294,12 +4294,12 @@
           "range_seeks": 0
         }
       },
-      "sha256": "693a2ed028e903ee240e04f44dbfea9aa438c307da138f5baec56383ad15e185"
+      "sha256": "94f609f43410efe0678898d4c2d110edce27a17dd4f3942e688d2d7c82f53c72"
     },
     "cypher/equality_join/rows=100000/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 5,
+        "alternatives_considered": 7,
         "guardrail_hit": false,
         "memo_exprs": 4,
         "memo_groups": 3,
@@ -4318,7 +4318,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "a7290a1dde639b0e950de32a9885bf4499b7857d498386e3cf9b782a83476bc7"
+      "sha256": "b0451dea56c9cdb0d34d113cd3a634c575d4ec0209c2275a3c0eb4f7a5c2a17e"
     },
     "cypher/filter_limit/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -6123,7 +6123,7 @@
     "cypher/multi_join/rows=100/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 6,
+        "alternatives_considered": 9,
         "guardrail_hit": false,
         "memo_exprs": 5,
         "memo_groups": 3,
@@ -6142,12 +6142,12 @@
           "range_seeks": 0
         }
       },
-      "sha256": "667860d02d6b1db8d7508b14950778a8cc41727712994fd4f84e19c7db48c553"
+      "sha256": "fd17b611d3485f9f20ecb4bfd387ef1e1cb904218665430be9e8f3fed54b346e"
     },
     "cypher/multi_join/rows=100/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 6,
+        "alternatives_considered": 9,
         "guardrail_hit": false,
         "memo_exprs": 5,
         "memo_groups": 3,
@@ -6166,12 +6166,12 @@
           "range_seeks": 0
         }
       },
-      "sha256": "47a7e79e097d83fffd715585436d85e0190496a6d0b9a6f411bf429fd9ebc3ab"
+      "sha256": "20d074fe134ede97355a60a03094f6940a441c8d229ab5124802582eab749b62"
     },
     "cypher/multi_join/rows=100/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 6,
+        "alternatives_considered": 9,
         "guardrail_hit": false,
         "memo_exprs": 5,
         "memo_groups": 3,
@@ -6190,7 +6190,7 @@
           "range_seeks": 0
         }
       },
-      "sha256": "ddbf6e9aea1c18289a2743c67b7bbf978c2eace28dd36e96f5d54474fa514c01"
+      "sha256": "437fbd4a179a98c2c88c6ad43b3e9875d803cef53a0bc34337b14907130de59d"
     },
     "cypher/multi_join/rows=100000/indexed=false/storage=cold_200ms": {
       "error": null,
@@ -6267,74 +6267,74 @@
     "cypher/multi_join/rows=100000/indexed=true/storage=cold_200ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 6,
+        "alternatives_considered": 9,
         "guardrail_hit": false,
         "memo_exprs": 5,
         "memo_groups": 3,
         "rejected_alternatives": 0,
         "rule_fires": 8,
         "selected_cost": {
-          "authoritative_graph_reads": 300000,
-          "bytes": 156000000,
-          "cpu_units": 1000010001002000,
-          "latency": 1000070001302150,
+          "authoritative_graph_reads": 2500200000,
+          "bytes": 660078400000,
+          "cpu_units": 5000602000,
+          "latency": 500082510602050,
           "multi_get_calls": 0,
-          "object_reads": 300003,
+          "object_reads": 2500400001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "35fd7937f407814bee5fe18bc14557671c3fe0da26b6c7d63b613a1d72c00902"
+      "sha256": "e178a3ca7b6ca7872374b1177c9aef847575df9d51f746051906fae278f6f6f0"
     },
     "cypher/multi_join/rows=100000/indexed=true/storage=cold_50ms": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 6,
+        "alternatives_considered": 9,
         "guardrail_hit": false,
         "memo_exprs": 5,
         "memo_groups": 3,
         "rejected_alternatives": 0,
         "rule_fires": 8,
         "selected_cost": {
-          "authoritative_graph_reads": 300000,
-          "bytes": 156000000,
-          "cpu_units": 1000010001002000,
-          "latency": 1000025000852150,
+          "authoritative_graph_reads": 2500200000,
+          "bytes": 660078400000,
+          "cpu_units": 5000602000,
+          "latency": 125022510452050,
           "multi_get_calls": 0,
-          "object_reads": 300003,
+          "object_reads": 2500400001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "cdbf58b9d4349007651ab8dec6c1f5a6a1b509c8253a8ea42277e1919eaf2c0f"
+      "sha256": "ea4ceb80473b6ac19cda8a7587ac4b1a8160d1e3bf4f6ac85944df52ae615092"
     },
     "cypher/multi_join/rows=100000/indexed=true/storage=default": {
       "error": null,
       "metrics": {
-        "alternatives_considered": 6,
+        "alternatives_considered": 9,
         "guardrail_hit": false,
         "memo_exprs": 5,
         "memo_groups": 3,
         "rejected_alternatives": 0,
         "rule_fires": 8,
         "selected_cost": {
-          "authoritative_graph_reads": 300000,
-          "bytes": 156000000,
-          "cpu_units": 1000010001002000,
-          "latency": 1000010003717150,
+          "authoritative_graph_reads": 2500200000,
+          "bytes": 660078400000,
+          "cpu_units": 5000602000,
+          "latency": 28512407050,
           "multi_get_calls": 0,
-          "object_reads": 300003,
+          "object_reads": 2500400001,
           "parallel_width": 1,
           "peak_memory": 25600000,
           "range_nexts": 0,
           "range_seeks": 0
         }
       },
-      "sha256": "2751b27c956da06d15c0039ed0cca7b1062cee762d02cc179defe0787849a554"
+      "sha256": "80f61300315230d334214cd83a27738de244d3a4333c86d7cffa2cf0f08d6cd8"
     },
     "cypher/optional/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,

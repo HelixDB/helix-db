@@ -134,6 +134,11 @@ async fn property_probes_read_the_index_with_scan_semantics() {
     )
     .await;
     create_index(&indexed, index::IndexSpec::node_equality("User", "tier")).await;
+    create_index(
+        &indexed,
+        index::IndexSpec::node_unique_equality("Post", "pid"),
+    )
+    .await;
     for query in [
         "MATCH (p:Post) MATCH (u:User {uid: p.author}) RETURN p.pid, u.uid ORDER BY p.pid",
         "MATCH (p:Post) MATCH (u:User) WHERE u.uid = p.author RETURN p.pid, u.uid ORDER BY p.pid",
@@ -143,6 +148,12 @@ async fn property_probes_read_the_index_with_scan_semantics() {
         "MATCH (p:Post) MATCH (u:User {uid: p.tags}) RETURN count(*)",
         "MATCH ()-[r:BY]->() MATCH (u:User {uid: r.uid}) RETURN u.uid ORDER BY u.uid",
         "MATCH (p:Post) MATCH (p), (u:User {uid: p.author}) RETURN p.pid, u.uid ORDER BY p.pid",
+        // A node or relationship bound earlier in the same pattern.
+        "MATCH (p:Post {pid: 3}), (u:User {uid: p.author}) RETURN u.uid",
+        "MATCH (p:Post), (u:User {uid: p.author}) RETURN p.pid, u.uid ORDER BY p.pid",
+        "MATCH (p:Post), (u:User) WHERE u.uid = p.author RETURN p.pid, u.uid ORDER BY p.pid",
+        "MATCH (p:Post)-[r:BY]->(), (u:User {uid: r.uid}) RETURN p.pid, u.uid ORDER BY p.pid",
+        "MATCH (p:Post), (u:User {uid: p.tags}) RETURN count(*)",
         "WITH {id: 7} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
         "WITH {id: null} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
         "WITH {} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
@@ -166,6 +177,14 @@ async fn property_probes_read_the_index_with_scan_semantics() {
     assert_eq!(direct.rows, vec![vec![json!(20)]]);
     let reads = &direct.resources.reads;
     assert!(reads.point_gets + reads.multi_get_keys < 300, "{reads:?}");
+    let direct = run(
+        &indexed,
+        "MATCH (p:Post {pid: 3}), (u:User {uid: p.author}) RETURN u.uid",
+    )
+    .await;
+    assert_eq!(direct.rows, vec![vec![json!(21)]]);
+    let reads = &direct.resources.reads;
+    assert!(reads.point_gets + reads.multi_get_keys < 20, "{reads:?}");
     // A deleted node's properties cannot be read. The scan fails only when it
     // has a candidate to check, and so does the lookup.
     create_index(&indexed, index::IndexSpec::node_equality("Nobody", "uid")).await;
