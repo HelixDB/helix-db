@@ -2,6 +2,7 @@
 //! the production Cascades rules and executable lowering, not frontend ASTs.
 use super::*;
 use crate::{analysis, catalog, context, exec, ir, logical, optimizer, rules, trace};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -338,12 +339,7 @@ fn plan_accesses(
                 for (property, value) in equalities {
                     let value = match value {
                         Expression::Literal(v) => literal(v),
-                        Expression::Parameter(name) => ctx
-                            .params
-                            .values
-                            .get(&ir::NonEmptyString::new(name).expect("validated parameter"))
-                            .cloned(),
-                        _ => None,
+                        value => bound_value(&value, &ctx.params).map(Cow::into_owned),
                     };
                     let Some(value) = value else {
                         continue;
@@ -1019,6 +1015,12 @@ impl Totality<'_> {
             },
             Expression::Property(value, _) => {
                 matches!(value.as_ref(), Expression::Slot(slot) if self.has_properties(*slot))
+                    || matches!(self.params, Parameters::Bound(params)
+                        if bound_value(operand, params).is_some())
+            }
+            Expression::Index(..) => {
+                matches!(self.params, Parameters::Bound(params)
+                    if bound_value(operand, params).is_some())
             }
             // id() of a node, relationship or null cannot fail.
             Expression::Function(Function::Id, arguments) => matches!(
@@ -1051,16 +1053,16 @@ impl Totality<'_> {
                 self.bindings[slot.0 as usize].value_type,
                 super::ValueType::Boolean | super::ValueType::Null
             ),
-            Expression::Parameter(name) => matches!(self.params, Parameters::Bound(params)
-            if matches!(
-                params
-                    .values
-                    .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter")),
-                Some(
-                    helix_ast::value::PropertyValue::Bool(_)
-                        | helix_ast::value::PropertyValue::Null
-                )
-            )),
+            Expression::Parameter(_) | Expression::Property(..) | Expression::Index(..) => {
+                matches!(self.params, Parameters::Bound(params)
+                if matches!(
+                    bound_value(expression, params).as_deref(),
+                    Some(
+                        helix_ast::value::PropertyValue::Bool(_)
+                            | helix_ast::value::PropertyValue::Null
+                    )
+                ))
+            }
             Expression::Binary(Binary::And | Binary::Or | Binary::Xor, left, right) => {
                 self.predicate(left) && self.predicate(right)
             }
@@ -1079,17 +1081,17 @@ impl Totality<'_> {
                 self.operand(value)
                     && match list.as_ref() {
                         Expression::Literal(Value::List(_) | Value::Null) => true,
-                        Expression::List(items) => items.iter().all(|item| {
-                            matches!(item, Expression::Literal(_) | Expression::Parameter(_))
-                                && self.operand(item)
+                        Expression::List(items) => items.iter().all(|item| match item {
+                            Expression::Literal(_) | Expression::Parameter(_) => self.operand(item),
+                            item => matches!(self.params, Parameters::Bound(params)
+                                if bound_value(item, params).is_some()),
                         }),
-                        Expression::Parameter(name) => {
+                        list @ (Expression::Parameter(_)
+                        | Expression::Property(..)
+                        | Expression::Index(..)) => {
                             matches!(self.params, Parameters::Bound(params)
                             if matches!(
-                                params.values.get(
-                                    &ir::NonEmptyString::new(name.clone())
-                                        .expect("validated parameter")
-                                ),
+                                bound_value(list, params).as_deref(),
                                 Some(
                                     helix_ast::value::PropertyValue::Array(_)
                                         | helix_ast::value::PropertyValue::Null
@@ -1151,17 +1153,13 @@ fn conjunct_ids(
             .filter(|(target, _)| is_id(target))
             .find_map(|(_, value)| match value.as_ref() {
                 Expression::Literal(value) => ids(std::slice::from_ref(value)),
-                Expression::Parameter(name) => match params
-                    .values
-                    .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))?
-                {
+                value => match bound_value(value, params)?.as_ref() {
                     helix_ast::value::PropertyValue::I64(value) => {
                         ids(std::slice::from_ref(&Value::Integer(*value)))
                     }
                     helix_ast::value::PropertyValue::Null => Some(BTreeSet::new()),
                     _ => None,
                 },
-                _ => None,
             }),
         Expression::Binary(Binary::In, value, list) if is_id(value) => match list.as_ref() {
             Expression::Literal(Value::List(values)) => ids(values),
@@ -1244,11 +1242,7 @@ fn collect_ranges(
         }
         let value = match value.as_ref() {
             Expression::Literal(value) => literal(value.clone()),
-            Expression::Parameter(name) => params
-                .values
-                .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))
-                .cloned(),
-            _ => None,
+            value => bound_value(value, params).map(Cow::into_owned),
         };
         // Escaping can double a string's encoded key.
         let Some(value) = value
@@ -1329,7 +1323,10 @@ fn equality_disjuncts(
                 if value.as_ref() != &Expression::Slot(slot)
                     || !matches!(
                         member.as_ref(),
-                        Expression::Literal(_) | Expression::Parameter(_)
+                        Expression::Literal(_)
+                            | Expression::Parameter(_)
+                            | Expression::Property(..)
+                            | Expression::Index(..)
                     )
                     || key.as_ref().is_some_and(|key| key != name)
                 {
@@ -1344,6 +1341,60 @@ fn equality_disjuncts(
     }
 }
 
+/// The value of a bound parameter, or of a property or element of one, as
+/// `$p`, `$p.key`, `$p['key']` and `$ids[1]` evaluate. Access that could
+/// fail, such as a property of a list, has no value here.
+fn bound_value<'a>(
+    expression: &Expression,
+    params: &'a context::ParamBindings,
+) -> Option<Cow<'a, helix_ast::value::PropertyValue>> {
+    use helix_ast::value::PropertyValue as P;
+    let entry = |value: Cow<'a, P>, key: &str| match value {
+        Cow::Borrowed(P::Object(map)) => {
+            Some(map.get(key).map_or(Cow::Owned(P::Null), Cow::Borrowed))
+        }
+        Cow::Owned(P::Object(mut map)) => Some(Cow::Owned(map.remove(key).unwrap_or(P::Null))),
+        value if *value == P::Null => Some(Cow::Owned(P::Null)),
+        _ => None,
+    };
+    match expression {
+        Expression::Parameter(name) => params
+            .values
+            .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))
+            .map(Cow::Borrowed),
+        Expression::Property(value, key) => entry(bound_value(value, params)?, key),
+        Expression::Index(value, index) => {
+            let value = bound_value(value, params)?;
+            match index.as_ref() {
+                Expression::Literal(Value::String(key)) => entry(value, key),
+                Expression::Literal(Value::Integer(index)) => {
+                    // A negative index counts from the end; beyond either end is null.
+                    let element = |len: usize| {
+                        let len = i64::try_from(len).ok()?;
+                        let position = if *index < 0 { len + index } else { *index };
+                        usize::try_from(position).ok().filter(|_| position < len)
+                    };
+                    let element = match value.as_ref() {
+                        P::Array(values) => element(values.len()).map(|i| values[i].clone()),
+                        P::I64Array(values) => element(values.len()).map(|i| P::I64(values[i])),
+                        P::F64Array(values) => element(values.len()).map(|i| P::F64(values[i])),
+                        P::F32Array(values) => element(values.len()).map(|i| P::F32(values[i])),
+                        P::StringArray(values) => {
+                            element(values.len()).map(|i| P::String(values[i].clone()))
+                        }
+                        P::Null => None,
+                        _ => return None,
+                    };
+                    Some(Cow::Owned(element.unwrap_or(P::Null)))
+                }
+                Expression::Literal(Value::Null) if *value == P::Null => Some(Cow::Owned(P::Null)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Non-null members of a total IN list operand. Cypher null never equals a
 /// member, and a member that is not a scalar literal prevents index access.
 fn membership_values(
@@ -1351,11 +1402,6 @@ fn membership_values(
     params: &context::ParamBindings,
 ) -> Option<Vec<helix_ast::value::PropertyValue>> {
     use helix_ast::value::PropertyValue as P;
-    let parameter = |name: &String| {
-        params
-            .values
-            .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))
-    };
     let members = match list {
         Expression::Literal(Value::List(values)) => values
             .iter()
@@ -1366,17 +1412,16 @@ fn membership_values(
             .iter()
             .map(|item| match item {
                 Expression::Literal(value) => literal(value.clone()),
-                Expression::Parameter(name) => parameter(name).cloned(),
-                _ => None,
+                item => bound_value(item, params).map(Cow::into_owned),
             })
             .collect::<Option<Vec<_>>>()?,
-        Expression::Parameter(name) => match parameter(name)? {
-            P::Array(values) => values.clone(),
-            P::Null => Vec::new(),
+        Expression::Literal(Value::Null) => Vec::new(),
+        list => match bound_value(list, params)? {
+            Cow::Borrowed(P::Array(values)) => values.clone(),
+            Cow::Owned(P::Array(values)) => values,
+            value if *value == P::Null => Vec::new(),
             _ => return None,
         },
-        Expression::Literal(Value::Null) => Vec::new(),
-        _ => return None,
     };
     Some(
         members

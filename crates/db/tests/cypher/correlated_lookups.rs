@@ -154,6 +154,7 @@ async fn property_probes_read_the_index_with_scan_semantics() {
         "MATCH (p:Post), (u:User) WHERE u.uid = p.author RETURN p.pid, u.uid ORDER BY p.pid",
         "MATCH (p:Post)-[r:BY]->(), (u:User {uid: r.uid}) RETURN p.pid, u.uid ORDER BY p.pid",
         "MATCH (p:Post), (u:User {uid: p.tags}) RETURN count(*)",
+        "OPTIONAL MATCH (q:Post {pid: 999}) WITH q MATCH (u:User {uid: q.author}) RETURN u.uid",
         "WITH {id: 7} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
         "WITH {id: null} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",
         "WITH {} AS m MATCH (u:User {uid: m.id}) RETURN u.uid",

@@ -134,7 +134,11 @@ For a labeled node, a WHERE conjunct such as `n.email = $email` or
 `n.key IN [1, 2, 3]` can read a native equality index on that property instead
 of scanning the label, and so can equalities of one property joined by `OR`,
 such as `n.key = 1 OR n.key = 2`. An `IN` list may be a literal, a list of
-literals and parameters, or a parameter bound to a list. Null and NaN members never match, so
+literals and parameters, or a parameter bound to a list. A property or element
+of a parameter, such as `$p.email`, `$p['email']` or `$ids[0]`, counts as the
+value it holds, and a missing key or an element beyond the list is null. Such
+access on a value without properties or elements keeps the label scan, so it
+fails only where a scan would. Null and NaN members never match, so
 they need no lookup. A list with a nested member, or with more than 64 distinct
 values, scans the label instead. An indexed unique equality on the same node,
 or an equality on the list's own property, takes precedence, and the `IN` list

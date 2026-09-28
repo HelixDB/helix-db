@@ -1027,3 +1027,89 @@ fn lookups_probe_properties_bound_earlier_in_the_pattern() {
     };
     assert_eq!(lookup.probe_property.as_deref(), Some("w"));
 }
+
+#[test]
+fn bound_parameter_properties_and_elements_read_indexes() {
+    use helix_ast::value::PropertyValue as P;
+    let mut indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap())
+        .with_node_range(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "N",
+                "age",
+                helix_ast::index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+        );
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "email").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:email")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let mut context = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    for (name, value) in [
+        (
+            "p",
+            P::Object(BTreeMap::from([
+                ("email".to_owned(), P::String("a".to_owned())),
+                ("key".to_owned(), P::I64(1)),
+                ("keys".to_owned(), P::Array(vec![P::I64(1), P::I64(2)])),
+                ("min".to_owned(), P::I64(30)),
+                ("id".to_owned(), P::I64(7)),
+                ("flag".to_owned(), P::Bool(true)),
+            ])),
+        ),
+        ("ids", P::Array(vec![P::I64(1), P::I64(2)])),
+        ("s", P::I64(5)),
+    ] {
+        context
+            .params
+            .values
+            .insert(ir::NonEmptyString::new(name).unwrap(), value);
+    }
+    let source = |text: &str| {
+        let plan = r::plan(helix_cypher::compile(text).unwrap(), &context).unwrap();
+        let [step] = plan.matches()[&0].sources[0].access.steps() else {
+            panic!("single access step: {text}");
+        };
+        format!("{:?}", step.op)
+            .trim_start_matches("Access { plan: Node(")
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    for (text, expected) in [
+        ("MATCH (n:N {email: $p.email}) RETURN n", "Unique"),
+        ("MATCH (n:N {email: $p['email']}) RETURN n", "Unique"),
+        ("MATCH (n:N) WHERE n.key = $ids[1] RETURN n", "Bitmap"),
+        ("MATCH (n:N) WHERE n.key = $ids[-2] RETURN n", "Bitmap"),
+        // A missing member or an element beyond the list is null.
+        ("MATCH (n:N) WHERE n.key = $ids[5] RETURN n", "Empty"),
+        ("MATCH (n:N) WHERE n.key = $p.missing RETURN n", "Empty"),
+        (
+            "MATCH (n:N) WHERE n.key IN $p.keys RETURN n",
+            "SecondarySet",
+        ),
+        (
+            "MATCH (n:N) WHERE n.key = $p.key OR n.key = $ids[1] RETURN n",
+            "SecondarySet",
+        ),
+        ("MATCH (n:N) WHERE n.age > $p.min RETURN n", "RangeIndex"),
+        (
+            "MATCH (n:N) WHERE $p.flag AND n.email = 'a' RETURN n",
+            "Unique",
+        ),
+        ("MATCH (n:N) WHERE id(n) = $p.id RETURN n", "KvRead"),
+        // Access that could fail keeps the label scan.
+        ("MATCH (n:N {email: $s.email}) RETURN n", "LabelScan"),
+        ("MATCH (n:N) WHERE n.email = $p[0] RETURN n", "LabelScan"),
+        ("MATCH (n:N {email: 'a', key: $s.x}) RETURN n", "LabelScan"),
+    ] {
+        assert_eq!(source(text), expected, "{text}");
+    }
+}
