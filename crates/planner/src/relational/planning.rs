@@ -234,12 +234,10 @@ fn plan_accesses(
     let mut roots = Vec::new();
     let mut nodes = Vec::new();
     for (operator_index, operator) in query.operators().iter().enumerate() {
-        let Operator::Match {
-            pattern, predicate, ..
-        } = operator
-        else {
+        let Operator::Match { pattern, .. } = operator else {
             continue;
         };
+        let predicate = index_predicate(query, operator_index, pattern, &ctx.params);
         // An index source skips candidate nodes, so it must not hide an error
         // that another property constraint of this pattern could raise.
         let constraints_total = pattern
@@ -276,7 +274,7 @@ fn plan_accesses(
             {
                 let mut equalities = node.properties.clone();
                 let mut memberships = Vec::new();
-                if let Some(predicate) = predicate.as_deref()
+                if let Some(predicate) = &predicate
                     && index_predicate_is_total(predicate, pattern, &ctx.params)
                 {
                     collect_equalities(predicate, node.slot, &mut equalities);
@@ -420,6 +418,7 @@ fn plan_accesses(
         else {
             continue;
         };
+        let lookup_predicate = index_predicate(query, operator_index, pattern, &ctx.params);
         let pattern_sources = nodes
             .iter()
             .filter(|(index, _, _)| *index == operator_index)
@@ -530,8 +529,8 @@ fn plan_accesses(
                 Expression::Slot(slot) => incoming.contains(slot),
                 _ => false,
             });
-        let predicate_total = predicate
-            .as_deref()
+        let predicate_total = lookup_predicate
+            .as_ref()
             .is_none_or(|expression| index_predicate_is_total(expression, pattern, &ctx.params));
         let mut lookups = Vec::new();
         if constraints_total && predicate_total {
@@ -551,7 +550,7 @@ fn plan_accesses(
                     .iter()
                     .flat_map(|node| node.properties.iter().cloned())
                     .collect();
-                if let Some(predicate) = predicate {
+                if let Some(predicate) = &lookup_predicate {
                     collect_equalities(predicate, slot, &mut equalities);
                 }
                 for (property, expression) in equalities {
@@ -727,6 +726,117 @@ fn plan_accesses(
     Ok((sources, schedules, pipeline, metrics))
 }
 
+/// The predicate an index source of the MATCH at `index` may use: its own
+/// WHERE conjoined with the WHERE of directly following filters and
+/// pass-through WITH clauses, rewritten over the MATCH's slots.
+///
+/// Those later predicates drop every row they reject, so a source may skip
+/// such rows as well, provided nothing in between could fail on them: each
+/// projected item must be a total operand, and ordering, SKIP, LIMIT,
+/// DISTINCT and aggregation stop the walk. An OPTIONAL MATCH keeps rows its
+/// predicate rejects, so only its own predicate applies. The caller still
+/// requires the result to be total before extracting any lookup.
+fn index_predicate(
+    query: &Query,
+    index: usize,
+    pattern: &Pattern,
+    params: &context::ParamBindings,
+) -> Option<Expression> {
+    let Operator::Match {
+        optional,
+        predicate,
+        ..
+    } = &query.operators()[index]
+    else {
+        unreachable!("index predicates belong to a MATCH");
+    };
+    let mut conjuncts = predicate
+        .iter()
+        .map(|predicate| predicate.expression().clone())
+        .collect::<Vec<_>>();
+    // Each visible slot bound to its value over the MATCH output.
+    let mut bindings = query.contracts()[index]
+        .output()
+        .slots()
+        .into_iter()
+        .map(|slot| (slot, Expression::Slot(slot)))
+        .collect::<BTreeMap<_, _>>();
+    let substitute = |expression: &Expression, bindings: &BTreeMap<Slot, Expression>| {
+        expression
+            .rewrite(&mut |value| match value {
+                Expression::Slot(slot) => bindings
+                    .get(slot)
+                    .cloned()
+                    .map(Some)
+                    .ok_or_else(|| planning_error("unbound slot")),
+                Expression::HasLabel(slot, label) => match bindings.get(slot) {
+                    Some(Expression::Slot(source)) => {
+                        Ok(Some(Expression::HasLabel(*source, label.clone())))
+                    }
+                    _ => Err(planning_error("label test of a derived value")),
+                },
+                _ => Ok(None),
+            })
+            .ok()
+    };
+    for operator in query.operators()[index + 1..]
+        .iter()
+        .take_while(|_| !optional)
+    {
+        let next = match operator {
+            Operator::Filter(predicate) => substitute(predicate.expression(), &bindings),
+            Operator::Project {
+                items,
+                distinct: false,
+                ordering,
+                predicate,
+                skip: None,
+                limit: None,
+            } if ordering.is_empty() => {
+                let Some(projected) = items
+                    .iter()
+                    .map(|item| {
+                        let value = substitute(&item.expression, &bindings)?;
+                        total_operand(&value, pattern, params).then_some((item.slot, value))
+                    })
+                    .collect::<Option<BTreeMap<_, _>>>()
+                else {
+                    break;
+                };
+                bindings = projected;
+                let Some(predicate) = predicate else {
+                    continue;
+                };
+                substitute(predicate.expression(), &bindings)
+            }
+            _ => break,
+        };
+        let Some(next) = next else {
+            break;
+        };
+        conjuncts.push(next);
+    }
+    conjuncts
+        .into_iter()
+        .reduce(|left, right| Expression::Binary(Binary::And, Box::new(left), Box::new(right)))
+}
+
+/// An operand that evaluates without failing: a literal, a slot, a bound
+/// parameter, or a property of a node or relationship of `pattern`.
+fn total_operand(operand: &Expression, pattern: &Pattern, params: &context::ParamBindings) -> bool {
+    match operand {
+        Expression::Literal(_) | Expression::Slot(_) => true,
+        Expression::Parameter(name) => {
+            let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
+            params.values.contains_key(&name) || params.query_values.contains_key(&name)
+        }
+        Expression::Property(value, _) => matches!(value.as_ref(), Expression::Slot(slot)
+            if pattern.nodes.iter().any(|node| node.slot == *slot)
+                || pattern.relationships.iter().any(|rel| rel.slot == *slot)),
+        _ => false,
+    }
+}
+
 // Extracting an index equality from AND may otherwise suppress an observable
 // error in another conjunct. In particular NULL AND an error still evaluates
 // that error; treating NULL as an early false result would be incorrect. A
@@ -739,18 +849,7 @@ fn index_predicate_is_total(
     pattern: &Pattern,
     params: &context::ParamBindings,
 ) -> bool {
-    let bound = |name: &String| {
-        let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
-        params.values.contains_key(&name) || params.query_values.contains_key(&name)
-    };
-    let operand = |operand: &Expression| match operand {
-        Expression::Literal(_) | Expression::Slot(_) => true,
-        Expression::Parameter(name) => bound(name),
-        Expression::Property(value, _) => matches!(value.as_ref(), Expression::Slot(slot)
-            if pattern.nodes.iter().any(|node| node.slot == *slot)
-                || pattern.relationships.iter().any(|rel| rel.slot == *slot)),
-        _ => false,
-    };
+    let operand = |operand: &Expression| total_operand(operand, pattern, params);
     match expression {
         Expression::Literal(Value::Boolean(_) | Value::Null) => true,
         Expression::Binary(Binary::And | Binary::Or | Binary::Xor, left, right) => {
@@ -770,10 +869,9 @@ fn index_predicate_is_total(
                     if pattern.nodes.iter().any(|node| node.slot == *slot)))
                 && match list.as_ref() {
                     Expression::Literal(Value::List(_) | Value::Null) => true,
-                    Expression::List(items) => items.iter().all(|item| match item {
-                        Expression::Literal(_) => true,
-                        Expression::Parameter(name) => bound(name),
-                        _ => false,
+                    Expression::List(items) => items.iter().all(|item| {
+                        matches!(item, Expression::Literal(_) | Expression::Parameter(_))
+                            && operand(item)
                     }),
                     Expression::Parameter(name) => matches!(
                         params.values.get(

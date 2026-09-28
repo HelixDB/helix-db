@@ -252,6 +252,64 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
         let text = format!("MATCH (n:N) WHERE n.email = 'a' AND ({sibling}) RETURN n");
         assert_eq!(source(&text, 64, None), Source::Scan, "{text}");
     }
+    // WHERE after a pass-through WITH drops the same rows as a MATCH WHERE.
+    for (text, expected) in [
+        (
+            "MATCH (n:N) WITH n WHERE n.email = 'a' RETURN n",
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WITH n AS m WHERE m.email = 'a' RETURN m",
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WITH n.email AS e, n WHERE e = $keys RETURN n",
+            Source::Unique,
+        ),
+        (
+            "MATCH (n:N) WHERE n.age > 1 WITH n WITH n WHERE n.key IN [1, 2] RETURN n",
+            Source::Union,
+        ),
+        (
+            "MATCH (n:N) WITH n, 'x' AS c WHERE n.key = 1 OR n.key = 2 RETURN n",
+            Source::Union,
+        ),
+        // A window, DISTINCT, aggregation or a failing item runs first.
+        (
+            "MATCH (n:N) WITH n ORDER BY n.age LIMIT 3 WHERE n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) WITH DISTINCT n WHERE n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) WITH n, count(*) AS c WHERE n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) WITH n, 1 / n.age AS x WHERE n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) WITH n WHERE n.email = 'a' AND toLower(n.name) = 'x' RETURN n",
+            Source::Scan,
+        ),
+        (
+            "MATCH (n:N) UNWIND [1] AS x WITH n WHERE n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
+        (
+            "OPTIONAL MATCH (n:N) WITH n WHERE n.email = 'a' RETURN n",
+            Source::Scan,
+        ),
+    ] {
+        assert_eq!(
+            source(text, 64, Some(P::String("a".into()))),
+            expected,
+            "{text}"
+        );
+    }
     // Equalities of one property joined by OR read the index like IN.
     for (text, expected) in [
         (
