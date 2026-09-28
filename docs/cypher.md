@@ -130,8 +130,11 @@ of scanning the label, and so can equalities of one property joined by `OR`,
 such as `n.key = 1 OR n.key = 2`. An `IN` list may be a literal, a list of
 literals and parameters, or a parameter bound to a list. Null and NaN members never match, so
 they need no lookup. A list with a nested member, or with more than 64 distinct
-values, scans the label instead. An indexed equality on the same node takes
-precedence, and its `IN` list is then checked as a filter. A string too large
+values, scans the label instead. An indexed unique equality on the same node,
+or an equality on the list's own property, takes precedence, and the `IN` list
+is then checked as a filter. Another equality wins unless statistics estimate
+fewer rows for the list, since without them one value is taken to match fewer
+nodes than several. A string too large
 to index, about 1 MiB, cannot equal an indexed value, so a lookup of one keeps
 the label scan. A comparison such as `n.age >= 21 AND n.age < $max` against a
 number or string literal or parameter can read a native range index on that

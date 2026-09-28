@@ -326,11 +326,19 @@ fn plan_accesses(
                 }
                 // The residual predicate still checks every candidate, so each
                 // membership source only needs to contain the matching nodes.
-                // Without value statistics a small batched lookup is estimated
-                // below one point read. A unique lookup, or an equality on the
-                // list's own property, is at least as selective as the set, so
-                // it keeps its exact lookup; other sets compete on cost.
+                // A small batched lookup is priced below one point read, so
+                // cost alone would always pick a set. A unique lookup, or an
+                // equality on the list's own property, is at least as selective
+                // as the set; any other set must also estimate fewer rows than
+                // the most selective equality.
                 memberships.retain(|(property, _)| !unique && !exact.contains(property));
+                let equality_rows = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(candidate, ir::NodeAccessPlan::EqualityIndex { .. })
+                    })
+                    .map(|candidate| access_rows(candidate, &config))
+                    .min();
                 for (property, list) in memberships {
                     let Some(key) = catalog::ScopedPropertyKey::try_new(label.clone(), property)
                     else {
@@ -361,7 +369,7 @@ fn plan_accesses(
                         key: key.clone(),
                         value,
                     };
-                    candidates.push(match domain {
+                    let candidate = match domain {
                         analysis::EqualityIndexDomain::Empty => ir::NodeAccessPlan::Empty,
                         analysis::EqualityIndexDomain::One(value) => equality(value),
                         analysis::EqualityIndexDomain::Many(values)
@@ -383,7 +391,11 @@ fn plan_accesses(
                         }
                         analysis::EqualityIndexDomain::Many(_)
                         | analysis::EqualityIndexDomain::RuntimeSet(_) => continue,
-                    });
+                    };
+                    if equality_rows.is_some_and(|rows| access_rows(&candidate, &config) >= rows) {
+                        continue;
+                    }
+                    candidates.push(candidate);
                 }
                 // A range scan reads every value its bounds admit in the
                 // bound's domain; the residual predicate applies strictness.

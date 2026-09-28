@@ -76,14 +76,17 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
             .with_uniqueness(catalog::IndexUniqueness::Unique),
     );
     let region = catalog::ScopedPropertyKey::try_new("N", "region").unwrap();
-    indexes = indexes.with_node_eq(region.clone()).with_node_range(
-        catalog::ScopedPropertyDirectionKey::try_new(
-            "N",
-            "age",
-            helix_ast::index::RangeIndexDirection::Desc,
-        )
-        .unwrap(),
-    );
+    indexes = indexes
+        .with_node_eq(region.clone())
+        .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "name").unwrap())
+        .with_node_range(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "N",
+                "age",
+                helix_ast::index::RangeIndexDirection::Desc,
+            )
+            .unwrap(),
+        );
     let source = |text: &str, limit: usize, parameter: Option<helix_ast::value::PropertyValue>| {
         let mut context = context::PlannerContext {
             indexes: indexes.clone(),
@@ -192,6 +195,15 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
         (
             "MATCH (n:N) WHERE n.email IN ['a', 'b'] RETURN n",
             Source::Union,
+        ),
+        // Without statistics a set never estimates fewer rows than one equality.
+        (
+            "MATCH (n:N) WHERE n.name = 'x' AND n.key IN [1, 2] RETURN n",
+            Source::Point,
+        ),
+        (
+            "MATCH (n:N) WHERE n.name = 'x' AND (n.key = 1 OR n.key = 2) RETURN n",
+            Source::Point,
         ),
         // A set on another property competes with an unselective equality.
         (
