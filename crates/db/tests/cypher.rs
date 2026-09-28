@@ -54,6 +54,9 @@ mod native_counts;
 #[path = "cypher/ids.rs"]
 mod ids;
 
+#[path = "cypher/correlated_lookups.rs"]
+mod correlated_lookups;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

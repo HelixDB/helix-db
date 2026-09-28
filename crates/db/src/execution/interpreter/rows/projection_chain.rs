@@ -273,7 +273,12 @@ impl ExecutionContext<'_> {
                         demand: usize::MAX,
                     };
                     let physical = &plan.matches()[&(start + offset)];
-                    if matches!(physical.steps.as_slice(), [r::MatchStep::IndexLookup(_)]) {
+                    // The indexed adapter binds one fresh node. A pattern that
+                    // also names a bound variable validates it on the graph stack.
+                    if matches!(physical.steps.as_slice(), [r::MatchStep::IndexLookup(_)])
+                        && physical.incoming.is_empty()
+                        && pattern.single_node().is_some()
+                    {
                         Stage::Match(NodeMatch::new(operation, physical))
                     } else {
                         Stage::BoundMatch(BoundMatch::new(operation, physical))
