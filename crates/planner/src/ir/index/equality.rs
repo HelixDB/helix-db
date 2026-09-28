@@ -5,10 +5,11 @@ use std::num::NonZeroUsize;
 
 use crate::ir::NonEmptyString;
 
-/// Largest canonical secondary-equality value that storage indexes. Storage
-/// rejects indexing a larger value, so no indexed element can equal one. The
-/// database codec asserts that this equals its own bound.
-pub const MAX_INDEXED_EQUALITY_BYTES: usize = 1024 * 1024 - 64;
+/// Largest canonical secondary-equality value that storage indexes: a
+/// `u16::MAX` storage key less a 17-byte tenant envelope and a 64-byte key
+/// header. Storage rejects indexing a larger value, so no indexed element can
+/// equal one. The database codec asserts that this equals its own bound.
+pub const MAX_INDEXED_EQUALITY_BYTES: usize = u16::MAX as usize - 17 - 64;
 
 /// Invalid literal payload for a secondary index lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

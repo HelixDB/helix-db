@@ -45,6 +45,9 @@ mod with_where;
 #[path = "cypher/ranges.rs"]
 mod ranges;
 
+#[path = "cypher/index_limits.rs"]
+mod index_limits;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

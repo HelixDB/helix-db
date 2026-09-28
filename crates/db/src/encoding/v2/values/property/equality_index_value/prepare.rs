@@ -303,7 +303,10 @@ mod tests {
             );
         }
         for value in [
-            PropertyValue::I64Array(vec![1; MAX_EQUALITY_CANONICAL_LEN / size_of::<i64>()]),
+            PropertyValue::I64Array(vec![
+                1;
+                MAX_EQUALITY_CANONICAL_LEN.div_ceil(size_of::<i64>())
+            ]),
             PropertyValue::F64Array(vec![1.0; MAX_EQUALITY_CANONICAL_LEN / 11]),
             PropertyValue::F32Array(vec![1.0; MAX_EQUALITY_CANONICAL_LEN / 11]),
             PropertyValue::StringArray(vec![largest, "".into()]),

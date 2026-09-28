@@ -13,7 +13,9 @@ use super::property_value::PropertyValue;
 use crate::encoding::error::EncodingError;
 use crate::encoding::indexes::range::RangeIndexDirection;
 
-pub(crate) const MAX_RANGE_ENCODED_LEN: usize = 1024 * 1024 - 32;
+/// Largest encoded value whose complete range key, header and entity id
+/// included, fits the storage key limit.
+pub(crate) const MAX_RANGE_ENCODED_LEN: usize = crate::encoding::v2::keys::KEY_MAX_LEN - 32;
 
 const NUMERIC_DOMAIN: u8 = 0x01;
 const DATETIME_DOMAIN: u8 = 0x02;
