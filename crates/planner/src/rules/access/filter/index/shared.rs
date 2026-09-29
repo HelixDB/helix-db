@@ -151,6 +151,7 @@ pub(super) fn visit_equality_seed_filters<F>(
     if terms.len() < 2 {
         return;
     }
+    let mut seeds = Vec::<F::Source>::new();
     terms
         .iter()
         .enumerate()
@@ -168,6 +169,11 @@ pub(super) fn visit_equality_seed_filters<F>(
                 return None;
             };
             let source = index_source_for_atom::<F>(&label, atom, indexes).ok()?;
+            // Repeated equalities read the same source; one seed covers them.
+            if seeds.contains(&source) {
+                return None;
+            }
+            seeds.push(source.clone());
             let residual = terms
                 .iter()
                 .enumerate()
@@ -180,8 +186,15 @@ pub(super) fn visit_equality_seed_filters<F>(
                     .expect("conjuncts of a validated predicate remain valid"),
             ))
         })
+        .take(MAX_EQUALITY_SEEDS)
         .for_each(|(source, residual)| emit(source, residual));
 }
+
+/// Equality seeds considered for one conjunction. Each seed carries the rest
+/// of the conjunction as its residual and is priced over it, so considering
+/// every one would cost work quadratic in the conjunction's width; the first
+/// distinct seeds in written order stand in for the rest.
+const MAX_EQUALITY_SEEDS: usize = 32;
 
 /// Index source for one feasible predicate under one proven label.
 ///

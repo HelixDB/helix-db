@@ -150,6 +150,50 @@ mod tests {
         ))
     }
 
+    /// Each equality seed carries the rest of its conjunction and is priced
+    /// over it, so a wide conjunction of indexed equalities builds a bounded
+    /// number of distinct seeds rather than one per conjunct, and repeated
+    /// equalities share one.
+    #[test]
+    fn wide_indexed_conjunctions_build_a_bounded_number_of_seeds() {
+        let indexes = (0..4096).fold(
+            crate::catalog::IndexCatalogSnapshot::default(),
+            |indexes, index| {
+                indexes.with_node_eq(
+                    crate::catalog::ScopedPropertyKey::try_new("User", format!("p{index}"))
+                        .unwrap(),
+                )
+            },
+        );
+        let access = logical::AccessPath::Node(logical::NodeAccessPath::new(
+            ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::LabelScan {
+                label: ir::NonEmptyString::new("User").unwrap(),
+            }),
+        ));
+        for (conjuncts, seeds) in [
+            (
+                (0..4096)
+                    .map(|index| helix_ast::expr::Predicate::eq(format!("p{index}"), index as i64))
+                    .collect::<Vec<_>>(),
+                32,
+            ),
+            (vec![helix_ast::expr::Predicate::eq("p0", 0_i64); 4096], 1),
+        ] {
+            let filter = logical::AccessFilter::new(
+                access.clone(),
+                ir::PredicatePlan::new(helix_ast::expr::Predicate::and(conjuncts)).unwrap(),
+            );
+            let mut built = 0;
+            index::visit_equality_seed_rewrites(
+                &filter,
+                &indexes,
+                &crate::context::PlannerLimits::default(),
+                |_| built += 1,
+            );
+            assert_eq!(built, seeds);
+        }
+    }
+
     #[test]
     fn access_filter_rewrite_or_else_uses_fallback_only_when_needed() {
         let access = node_access();
