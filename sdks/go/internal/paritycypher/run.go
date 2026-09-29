@@ -65,7 +65,11 @@ func writeCase(client *helix.Client, f fixture, root string) error {
 		var sdkError *helix.HelixError
 		if errors.As(err, &sdkError) {
 			output["code"] = sdkError.Code
-			output["details"] = sdkError.ServerDetails
+			var details json.RawMessage
+			if sdkError.ServerDetails != "" {
+				details = json.RawMessage(sdkError.ServerDetails)
+			}
+			output["details"] = details
 		}
 	}
 	body, err := json.Marshal(output)

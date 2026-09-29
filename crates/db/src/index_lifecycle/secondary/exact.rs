@@ -1129,7 +1129,7 @@ mod tests {
     #[tokio::test]
     async fn equality_key_admission_precedes_large_allocations_and_storage_reads() {
         let db = super::super::tests::test_db("secondary-key-admission").await;
-        let value = PropertyValue::String("x".repeat(60 * 1024));
+        let value = PropertyValue::String("x".repeat(64 * 1024));
         let values = [value.clone(), value.clone()];
         let definitions = [
             crate::config::SecondaryIndexDefinition::node_equality("User", "value").unwrap(),

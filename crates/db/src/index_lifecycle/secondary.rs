@@ -36,7 +36,7 @@ use crate::encoding::v2::keys::GlobalKeyKind;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, IndexEntity, IndexEntityStateKey, RecordKind, ScopedKey,
-    SecondaryEntryKey, SecondaryEntryLane, SecondaryEqualityBitmapKey,
+    SecondaryEntryKey, SecondaryEntryLane, SecondaryEqualityBitmapKey, STORAGE_KEY_MAX_LEN,
 };
 use crate::encoding::v2::keys::{
     DataKey, DataKeyKind, EdgePropertyByIdKey, KeyPrefix, NodePropertyKey,
@@ -310,10 +310,24 @@ impl SecondaryMutationRuntime {
             let target = mutations.targets.get(ordinal).ok_or_else(|| {
                 corruption("secondary mutation route named a target outside its catalog")
             })?;
-            let old_value = canonical_value(&target.definition, before, entity.id)
-                .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
-            let new_value = canonical_value(&target.definition, after, entity.id)
-                .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
+            let old_value = canonical_value(
+                scope,
+                target.index_id,
+                target.generation,
+                &target.definition,
+                before,
+                entity.id,
+            )
+            .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
+            let new_value = canonical_value(
+                scope,
+                target.index_id,
+                target.generation,
+                &target.definition,
+                after,
+                entity.id,
+            )
+            .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
             if old_value == new_value {
                 continue;
             }
@@ -620,10 +634,24 @@ pub(crate) async fn maintain_entity(
         .iter()
         .filter(|target| target.definition.element_kind() == entity_kind)
     {
-        let old_value = canonical_value(&target.definition, before, entity_id)
-            .map_err(|error| mutation_value_error(&target.definition, entity_id, error))?;
-        let new_value = canonical_value(&target.definition, after, entity_id)
-            .map_err(|error| mutation_value_error(&target.definition, entity_id, error))?;
+        let old_value = canonical_value(
+            scope,
+            target.index_id,
+            target.generation,
+            &target.definition,
+            before,
+            entity_id,
+        )
+        .map_err(|error| mutation_value_error(&target.definition, entity_id, error))?;
+        let new_value = canonical_value(
+            scope,
+            target.index_id,
+            target.generation,
+            &target.definition,
+            after,
+            entity_id,
+        )
+        .map_err(|error| mutation_value_error(&target.definition, entity_id, error))?;
         if old_value == new_value {
             continue;
         }
@@ -1057,7 +1085,14 @@ async fn scan_source(
                 ));
             }
         };
-        let value = match canonical_value(definition, &properties, entity_id) {
+        let value = match canonical_value(
+            scope,
+            operation.index_id(),
+            operation.generation(),
+            definition,
+            &properties,
+            entity_id,
+        ) {
             Ok(value) => value,
             Err(_) => {
                 return Ok(IndexOperationStepResult::Blocked(
@@ -1296,7 +1331,14 @@ async fn catch_up(
         }
         let properties = read_authoritative_properties(transaction, scope, entity).await?;
         let next_value = match properties {
-            Some(properties) => match canonical_value(definition, &properties, entity.id) {
+            Some(properties) => match canonical_value(
+                scope,
+                operation.index_id(),
+                operation.generation(),
+                definition,
+                &properties,
+                entity.id,
+            ) {
                 Ok(value) => value,
                 Err(_) => {
                     return Ok(IndexOperationStepResult::Blocked(
@@ -1459,7 +1501,14 @@ async fn catch_up_exact(
         let next_value = match property_value.as_ref() {
             Some(properties) => {
                 let properties = decode_properties(properties)?;
-                match canonical_value(definition, &properties, entity.id) {
+                match canonical_value(
+                    scope,
+                    operation.index_id(),
+                    operation.generation(),
+                    definition,
+                    &properties,
+                    entity.id,
+                ) {
                     Ok(value) => value,
                     Err(_) => {
                         return Ok(IndexOperationStepResult::Blocked(
@@ -1678,8 +1727,15 @@ async fn validate_and_release_applied(
             let properties = read_authoritative_properties(transaction, scope, entity)
                 .await?
                 .ok_or_else(|| corruption("unique secondary owner source row disappeared"))?;
-            let authoritative = canonical_value(definition, &properties, entity.id)
-                .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
+            let authoritative = canonical_value(
+                scope,
+                operation.index_id(),
+                operation.generation(),
+                definition,
+                &properties,
+                entity.id,
+            )
+            .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
             if authoritative.as_ref() != Some(&value) {
                 return Err(corruption(
                     "unique secondary applied state differs from authoritative source",
@@ -2687,10 +2743,17 @@ impl BatchAccounting {
     }
 }
 
+/// Project an entity's indexed value. A value whose entry key storage cannot
+/// write in this scope is oversized, so a statement writing it fails and a
+/// build over it blocks. Such a key was never written, and reads of it find
+/// nothing, so only this write path checks the storage limit.
 pub(crate) fn canonical_value(
+    scope: DataScope,
+    index_id: IndexId,
+    generation: IndexGenerationId,
     definition: &ValidatedSecondaryIndexDefinition,
     properties: &[Property],
-    _entity_id: IndexEntityId,
+    entity_id: IndexEntityId,
 ) -> std::result::Result<Option<CanonicalSecondaryValue>, SecondaryValueError> {
     let matches_label = properties.iter().any(|property| {
         property.name == "$label" && property.value.as_str() == Some(definition.label().as_str())
@@ -2704,7 +2767,7 @@ pub(crate) fn canonical_value(
     else {
         return Ok(None);
     };
-    Ok(match definition {
+    let value = match definition {
         ValidatedSecondaryIndexDefinition::NodeEquality { .. }
         | ValidatedSecondaryIndexDefinition::EdgeEquality { .. } => {
             match project_equality_value(&property.value) {
@@ -2754,7 +2817,27 @@ pub(crate) fn canonical_value(
                 }
             }
         }
-    })
+    };
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let encoded_len = prepare_secondary_entry_key(
+        scope,
+        index_id,
+        generation,
+        definition,
+        value.clone(),
+        entity_id,
+    )
+    .expect("a value within its format limit forms a valid entry key")
+    .encoded_len();
+    if encoded_len > STORAGE_KEY_MAX_LEN {
+        return Err(SecondaryValueError::Oversized {
+            encoded_len,
+            maximum: STORAGE_KEY_MAX_LEN,
+        });
+    }
+    Ok(Some(value))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5047,6 +5130,56 @@ mod tests {
         db.close().await.expect("secondary test database closes");
     }
 
+    /// Storage writes keys of at most `u16::MAX` bytes and a tenant envelope
+    /// takes 17 of them, so the longest indexable string depends on the scope.
+    #[test]
+    fn canonical_values_fit_the_storage_key_limit_of_their_scope() {
+        let tenant = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(7));
+        for (definition, unscoped) in [
+            (
+                SecondaryIndexDefinition::node_equality("User", "email"),
+                65_499,
+            ),
+            (
+                SecondaryIndexDefinition::node_unique_equality("User", "email"),
+                65_499,
+            ),
+            (
+                SecondaryIndexDefinition::node_range("User", "email"),
+                65_505,
+            ),
+        ] {
+            let ValidatedDynamicIndexDefinition::Secondary(definition) =
+                validated(definition.expect("test definition is valid"))
+            else {
+                unreachable!("test definition is secondary");
+            };
+            for (scope, longest) in [
+                (DataScope::LegacyUnscoped, unscoped),
+                (tenant, unscoped - 17),
+            ] {
+                let project = |length: usize| {
+                    canonical_value(
+                        scope,
+                        IndexId::initial(),
+                        IndexGenerationId::initial(),
+                        &definition,
+                        &user_properties(&"x".repeat(length)),
+                        IndexEntityId::initial(),
+                    )
+                };
+                assert!(matches!(project(longest), Ok(Some(_))));
+                assert!(matches!(
+                    project(longest + 1),
+                    Err(SecondaryValueError::Oversized {
+                        encoded_len,
+                        maximum: STORAGE_KEY_MAX_LEN,
+                    }) if encoded_len == STORAGE_KEY_MAX_LEN + 1
+                ));
+            }
+        }
+    }
+
     fn user_properties(value: &str) -> Vec<Property> {
         vec![
             Property::string("$label", "User"),
@@ -6870,9 +7003,16 @@ mod tests {
             index_id,
             generation,
             secondary_definition,
-            canonical_value(secondary_definition, &after, IndexEntityId::initial())
-                .expect("updated value is supported")
-                .expect("updated value is indexed"),
+            canonical_value(
+                scope,
+                index_id,
+                generation,
+                secondary_definition,
+                &after,
+                IndexEntityId::initial(),
+            )
+            .expect("updated value is supported")
+            .expect("updated value is indexed"),
             IndexEntityId::initial(),
         )
         .expect("expected active entry key is valid");

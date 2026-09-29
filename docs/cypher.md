@@ -145,7 +145,7 @@ or an equality on the list's own property, takes precedence, and the `IN` list
 is then checked as a filter. Another equality wins unless statistics estimate
 fewer rows for the list, since without them one value is taken to match fewer
 nodes than several. A string too large
-to index, about 64 KiB (the storage key limit), cannot equal an indexed value, so a lookup of one keeps
+to index, about 1 MiB, cannot equal an indexed value, so a lookup of one keeps
 the label scan. A comparison such as `n.age >= 21 AND n.age < $max` against a
 number or string literal or parameter can read a native range index on that
 property, with bounds on one property combined. It reads and verifies index
@@ -279,8 +279,9 @@ Stored properties support scalars and homogeneous scalar lists. Maps and nested
 lists can be expression values but cannot be stored as properties. Native index
 value restrictions also apply; an incompatible indexed value fails the statement
 atomically, as does one whose index key would exceed the storage key limit of
-64 KiB, such as a string of about 65,500 bytes. Creating an index over such an
-existing value leaves the index blocked.
+65,535 bytes: a string of more than 65,499 bytes for an equality index or
+65,505 bytes for a range index, and 17 bytes less in a tenant scope. Creating an
+index over such an existing value leaves the index blocked.
 
 ```cypher
 MATCH (n:Person {name:'Ada'})

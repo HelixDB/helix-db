@@ -46,7 +46,7 @@ impl SecondaryEqualityEntryKey {
             + entity_id.map_or(0, |_| U64_LEN);
         if encoded_len > KEY_MAX_LEN {
             return Err(EncodingError::InvalidKey(
-                "secondary equality key exceeds the key limit".to_string(),
+                "secondary equality key exceeds 1 MiB".to_string(),
             ));
         }
         Ok(Self {
@@ -114,7 +114,7 @@ impl SecondaryEqualityBitmapKey {
             + value.canonical().len();
         if encoded_len > KEY_MAX_LEN {
             return Err(EncodingError::InvalidKey(
-                "secondary equality bitmap key exceeds the key limit".to_string(),
+                "secondary equality bitmap key exceeds 1 MiB".to_string(),
             ));
         }
         Ok(Self {
@@ -174,7 +174,7 @@ impl SecondaryRangeEntryKey {
             PREFIX_LEN + KIND_LEN + U64_LEN + U64_LEN + KIND_LEN + value.encoded().len() + U64_LEN;
         if encoded_len > KEY_MAX_LEN {
             return Err(EncodingError::InvalidKey(
-                "secondary range key exceeds the key limit".to_string(),
+                "secondary range key exceeds 1 MiB".to_string(),
             ));
         }
         Ok(Self {

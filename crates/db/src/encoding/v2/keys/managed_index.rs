@@ -36,11 +36,12 @@ pub(crate) const U32_LEN: usize = core::mem::size_of::<u32>();
 pub(crate) const U64_LEN: usize = core::mem::size_of::<u64>();
 pub(crate) const UUID_LEN: usize = 16;
 pub(crate) const HASH_LEN: usize = 32;
-/// Maximum cursor, logical-owner, or global reference key length before a
-/// scope envelope. SlateDB panics on a physical key longer than `u16::MAX`
-/// bytes, and a tenant scope prepends its envelope, so every logical key
-/// leaves room for one and a value indexable in one scope is in every scope.
-pub(crate) const KEY_MAX_LEN: usize = u16::MAX as usize - TENANT_ENVELOPE_LEN;
+/// Maximum complete cursor, logical-owner, or global reference key length.
+pub(crate) const KEY_MAX_LEN: usize = 1024 * 1024;
+/// Longest physical key storage writes: SlateDB panics on a longer one. Keys
+/// between this and [`KEY_MAX_LEN`] still parse, and reads of them find
+/// nothing, so only a write checks it.
+pub(crate) const STORAGE_KEY_MAX_LEN: usize = u16::MAX as usize;
 const DATA_PREFIX: u8 = 0x06;
 /// Complete physical key for one lifecycle-managed index record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -343,7 +344,7 @@ impl ScopedKey {
             + value.canonical().len();
         if encoded_len + U64_LEN > KEY_MAX_LEN {
             return Err(EncodingError::InvalidKey(
-                "V3 equality value prefix exceeds the complete key limit".to_string(),
+                "V3 equality value prefix exceeds the complete 1 MiB key limit".to_string(),
             ));
         }
         Ok(PreparedEqualityPrefix {

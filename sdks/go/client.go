@@ -29,13 +29,16 @@ var ErrConflict = errors.New("helix: conflict")
 var ErrNativeBindingsUnavailable = errors.New("helix embedded native bindings are not linked")
 
 type HelixError struct {
-	ServerDetails json.RawMessage
-	Kind          ErrorKind
-	Code          QueryErrorCode
-	Details       string
-	StatusCode    int
-	Retryable     *bool
-	Err           error
+	Kind       ErrorKind
+	Code       QueryErrorCode
+	Details    string
+	StatusCode int
+	Retryable  *bool
+	Err        error
+	// ServerDetails holds the raw JSON of the server's structured error
+	// details, or is empty when the server sent none. A string keeps
+	// HelixError comparable.
+	ServerDetails string
 }
 
 func (e *HelixError) Error() string {
@@ -386,7 +389,7 @@ func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError
 				Details:       *envelope.Msg,
 				StatusCode:    statusCode,
 				Retryable:     envelope.Retryable,
-				ServerDetails: envelope.Details,
+				ServerDetails: string(envelope.Details),
 			}
 		}
 		code := QueryErrorCode("")
@@ -399,7 +402,7 @@ func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError
 			Details:       envelope.Error,
 			StatusCode:    statusCode,
 			Retryable:     envelope.Retryable,
-			ServerDetails: envelope.Details,
+			ServerDetails: string(envelope.Details),
 		}
 	}
 	details := string(body)

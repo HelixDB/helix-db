@@ -14,9 +14,7 @@ mod prepare;
 pub(crate) use prepare::{prepare_equality_value, PreparedEqualityValue};
 
 pub(crate) const EQUALITY_DIGEST_LEN: usize = core::mem::size_of::<u64>();
-/// Largest canonical value whose complete equality key, header and entity id
-/// included, fits the storage key limit.
-pub(crate) const MAX_EQUALITY_CANONICAL_LEN: usize = crate::encoding::v2::keys::KEY_MAX_LEN - 64;
+pub(crate) const MAX_EQUALITY_CANONICAL_LEN: usize = 1024 * 1024 - 64;
 
 const BOOL_TAG: u8 = 0x01;
 const NUMBER_TAG: u8 = 0x02;

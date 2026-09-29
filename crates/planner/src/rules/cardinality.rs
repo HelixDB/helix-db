@@ -131,7 +131,13 @@ fn access_count_plans(
                         );
                     }
                     super::access::AccessFilterRewrite::RewrittenPipeline(pipeline) => {
-                        return access_pipeline_count(&pipeline, rule);
+                        // A source with no row cursor, such as a range read
+                        // filtered by an equality bitmap, counts through the
+                        // filter below.
+                        let plans = access_pipeline_count(&pipeline, rule);
+                        if plans.is_ok() {
+                            return plans;
+                        }
                     }
                     super::access::AccessFilterRewrite::NotApplicable => {}
                 }

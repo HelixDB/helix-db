@@ -54,7 +54,7 @@ async fn runtime_domains_fold_keys_and_retain_admission_through_iteration() {
             drop(iter);
             assert_eq!(budget.available(), 1024 * 1024);
         }
-        let values = [PropertyValue::String("x".repeat(60 * 1024))];
+        let values = [PropertyValue::String("x".repeat(65536))];
         let budget = query_resources::Budget::new(1024);
         let mut future = std::pin::pin!(lookup_active_equality_generations_admitted(
             &db,
@@ -524,13 +524,13 @@ async fn pending_and_failed_storage_reads_release_prepared_keys_and_domain_state
     for (operation, values) in [
         (
             InterruptedRead::Point,
-            vec![PropertyValue::String("a".repeat(60 * 1024))],
+            vec![PropertyValue::String("a".repeat(65536))],
         ),
         (
             InterruptedRead::Batch,
             vec![
-                PropertyValue::String("a".repeat(60 * 1024)),
-                PropertyValue::String("b".repeat(60 * 1024)),
+                PropertyValue::String("a".repeat(65536)),
+                PropertyValue::String("b".repeat(65536)),
             ],
         ),
         (InterruptedRead::Scan, vec![PropertyValue::Null]),
