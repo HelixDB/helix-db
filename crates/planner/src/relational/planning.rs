@@ -235,11 +235,24 @@ fn plan_accesses(
     let mut roots = Vec::new();
     let mut nodes = Vec::new();
     let sort = sort_key(query);
+    // Every MATCH's walk through the later clauses draws on this budget, so
+    // the copies substitution makes stay bounded however many MATCHes a
+    // query holds; each walk runs once and serves both source and lookup
+    // selection.
+    let mut substitution_budget = MAX_EXPRESSION_NODES;
+    let mut index_predicates = BTreeMap::new();
     for (operator_index, operator) in query.operators().iter().enumerate() {
         let Operator::Match { pattern, .. } = operator else {
             continue;
         };
-        let predicate = index_predicate(query, operator_index, pattern, &ctx.params);
+        let predicate = index_predicate(
+            query,
+            operator_index,
+            pattern,
+            &ctx.params,
+            &mut substitution_budget,
+        );
+        index_predicates.insert(operator_index, predicate.clone());
         let totality = Totality {
             pattern,
             bindings: query.bindings(),
@@ -552,7 +565,9 @@ fn plan_accesses(
         else {
             continue;
         };
-        let lookup_predicate = index_predicate(query, operator_index, pattern, &ctx.params);
+        let lookup_predicate = index_predicates
+            .remove(&operator_index)
+            .expect("every MATCH has its index predicate");
         let pattern_sources = nodes
             .iter()
             .filter(|(index, _, _)| *index == operator_index)
@@ -981,11 +996,18 @@ pub(super) fn sort_key(query: &Query) -> Option<(Slot, String, bool)> {
 /// `a`. An OPTIONAL MATCH keeps rows its predicate rejects, so only its own
 /// predicate applies. The caller still requires the result, including the
 /// MATCH's own WHERE, to be total before extracting any lookup.
+///
+/// Substitution copies the value each named slot is bound to. Each copied
+/// node is charged to `budget`, shared by every walk of one plan, counting
+/// owned text as the nodes its bytes would fill. A substitution stops before
+/// any copy that would exceed the budget and fails like any other: it ends
+/// the walk or drops that filter.
 fn index_predicate(
     query: &Query,
     index: usize,
     pattern: &Pattern,
     params: &context::ParamBindings,
+    budget: &mut usize,
 ) -> Option<Expression> {
     let Operator::Match {
         optional,
@@ -1004,35 +1026,73 @@ fn index_predicate(
         .iter()
         .map(|predicate| predicate.expression().clone())
         .collect::<Vec<_>>();
-    // Each visible slot bound to its value over the MATCH output.
+    // Each visible slot bound to its value over the MATCH output, with the
+    // nodes a copy of that value costs.
     let mut bindings = query.contracts()[index]
         .output()
         .slots()
         .into_iter()
-        .map(|slot| (slot, Expression::Slot(slot)))
+        .map(|slot| (slot, (Expression::Slot(slot), 1)))
         .collect::<BTreeMap<_, _>>();
-    let substitute = |expression: &Expression, bindings: &BTreeMap<Slot, Expression>| {
-        expression
-            .rewrite(&mut |value| match value {
-                Expression::Slot(slot) => bindings
-                    .get(slot)
-                    .cloned()
-                    .map(Some)
-                    .ok_or_else(|| planning_error("unbound slot")),
-                Expression::HasLabel(slot, label) => match bindings.get(slot) {
-                    Some(Expression::Slot(source)) => {
-                        Ok(Some(Expression::HasLabel(*source, label.clone())))
+    // An item naming a slot m times is m copies of its binding, so clause
+    // after clause the copies could grow with the square of the query. Every
+    // node is charged to the plan's budget before it is copied, which also
+    // bounds many items, filters or MATCHes that each copy a large binding.
+    let remaining = budget;
+    let mut substitute = |expression: &Expression,
+                          bindings: &BTreeMap<Slot, (Expression, usize)>| {
+        let budget = *remaining;
+        let value = expression
+            .rewrite(&mut |value| {
+                // A slot copies its binding; any other node copies itself and
+                // the text it owns.
+                let (nodes, bytes) = match value {
+                    Expression::Slot(slot) => {
+                        (bindings.get(slot).map_or(0, |(_, nodes)| *nodes), 0)
                     }
-                    _ => Err(planning_error("label test of a derived value")),
-                },
-                _ => Ok(None),
+                    Expression::Literal(literal) => {
+                        (1, literal.allocated_bytes() - size_of::<Value>())
+                    }
+                    Expression::Parameter(text)
+                    | Expression::Property(_, text)
+                    | Expression::HasLabel(_, text) => (1, text.len()),
+                    Expression::Map(entries) => (1, entries.iter().map(|(key, _)| key.len()).sum()),
+                    Expression::Index(..)
+                    | Expression::Slice { .. }
+                    | Expression::Unary(..)
+                    | Expression::Binary(..)
+                    | Expression::Connective(..)
+                    | Expression::Function(..)
+                    | Expression::Aggregate { .. }
+                    | Expression::List(_)
+                    | Expression::Case { .. }
+                    | Expression::SimpleCase(_) => (1, 0),
+                };
+                *remaining = remaining
+                    .checked_sub(nodes + bytes.div_ceil(size_of::<Expression>()))
+                    .ok_or_else(|| planning_error("substitution exceeds the expression budget"))?;
+                match value {
+                    Expression::Slot(slot) => bindings
+                        .get(slot)
+                        .map(|(bound, _)| Some(bound.clone()))
+                        .ok_or_else(|| planning_error("unbound slot")),
+                    Expression::HasLabel(slot, label) => match bindings.get(slot) {
+                        Some((Expression::Slot(source), _)) => {
+                            Ok(Some(Expression::HasLabel(*source, label.clone())))
+                        }
+                        _ => Err(planning_error("label test of a derived value")),
+                    },
+                    _ => Ok(None),
+                }
             })
             .ok()
             // A substituted value nests the values its slots are bound to, so
             // clause after clause it could deepen without bound. Checking the
             // shape iteratively keeps every binding, and so every copy and walk
-            // of one, within the expression limit; a deeper value ends the walk.
-            .filter(|value| value.validate_shape().is_ok())
+            // of one, within the depth limit; a deeper value ends the walk.
+            .filter(|value| value.validate_shape().is_ok())?;
+        // The nodes charged for this value are what a copy of it will cost.
+        Some((value, budget - *remaining))
     };
     for operator in query.operators()[index + 1..]
         .iter()
@@ -1051,9 +1111,9 @@ fn index_predicate(
                 let Some(projected) = items
                     .iter()
                     .map(|item| {
-                        let value = substitute(&item.expression, &bindings)?;
+                        let (value, nodes) = substitute(&item.expression, &bindings)?;
                         (totality.operand(&value) || totality.predicate(&value))
-                            .then_some((item.slot, value))
+                            .then_some((item.slot, (value, nodes)))
                     })
                     .collect::<Option<BTreeMap<_, _>>>()
                 else {
@@ -1110,7 +1170,6 @@ fn index_predicate(
                     .iter()
                     .filter(|node| bindings.contains_key(&node.slot))
                 {
-                    let slot = Box::new(Expression::Slot(node.slot));
                     filters.extend(
                         node.label
                             .iter()
@@ -1119,7 +1178,10 @@ fn index_predicate(
                     filters.extend(node.properties.iter().map(|(key, value)| {
                         Expression::Binary(
                             Binary::Equal,
-                            Box::new(Expression::Property(slot.clone(), key.clone())),
+                            Box::new(Expression::Property(
+                                Box::new(Expression::Slot(node.slot)),
+                                key.clone(),
+                            )),
                             Box::new(value.clone()),
                         )
                     }));
@@ -1141,6 +1203,7 @@ fn index_predicate(
                     filters
                         .iter()
                         .filter_map(|filter| substitute(filter, &bindings))
+                        .map(|(filter, _)| filter)
                         .filter(|filter| totality.predicate(filter)),
                 );
                 continue;
@@ -1149,7 +1212,7 @@ fn index_predicate(
         };
         // A later WHERE that can fail may raise an error on a row the source
         // would skip, so neither it nor anything after it can select an index.
-        let Some(next) = next.filter(|next| totality.predicate(next)) else {
+        let Some((next, _)) = next.filter(|(next, _)| totality.predicate(next)) else {
             break;
         };
         conjuncts.push(next);

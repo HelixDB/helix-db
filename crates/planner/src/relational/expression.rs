@@ -255,7 +255,7 @@ impl Expression {
         let mut count = 0;
         while let Some((expression, depth)) = pending.pop() {
             count += 1;
-            if depth >= super::MAX_EXPRESSION_DEPTH || count > 200_000 {
+            if depth >= super::MAX_EXPRESSION_DEPTH || count > super::MAX_EXPRESSION_NODES {
                 return Err(super::QueryError::compile(
                     "ResourceLimit",
                     "ExpressionDepth",

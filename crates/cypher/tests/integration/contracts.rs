@@ -1,3 +1,4 @@
+use crate::allocations;
 use helix_planner::{catalog, context, exec, ir, properties, relational as r};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -722,6 +723,106 @@ fn long_conjunctions_and_substitution_chains_plan_without_deep_recursion() {
             &context::PlannerContext::default(),
         )
         .unwrap();
+    }
+}
+
+/// Substituting bindings through the clauses after a MATCH copies each named
+/// slot's value, so naming a large binding many times once made planning
+/// memory grow with the square of the query: over a gigabyte for each of
+/// these. A plan now copies at most `MAX_EXPRESSION_NODES` nodes, however the
+/// copies are spread over items, clauses, filters and MATCH clauses.
+#[test]
+fn repeated_references_to_large_bindings_plan_in_bounded_memory() {
+    let list = |name: &str| format!("[{}]", vec![name; 5_000].join(", "));
+    let (n, a) = (list("n"), list("a"));
+    let items = (0..2_000)
+        .map(|i| format!("a AS b{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = "x".repeat(500_000);
+    for query in [
+        format!("MATCH (n) WITH {n} AS a WITH {a} AS a RETURN 1 AS x"),
+        format!("MATCH (n) WITH {n} AS a WHERE {a} = [] RETURN 1 AS x"),
+        format!("MATCH (n) WITH {n} AS a, n AS n MATCH (n {{p: {a}}}) RETURN 1 AS x"),
+        // Items and clauses that each copy the binding share one budget.
+        format!("MATCH (n) WITH {n} AS a WITH {items} RETURN 1 AS x"),
+        format!(
+            "MATCH (n) WITH {n} AS a{} RETURN 1 AS x",
+            " WITH a AS a WHERE a = []".repeat(500)
+        ),
+        // Owned text costs the nodes its bytes would fill.
+        format!(
+            "MATCH (n) WITH '{text}' AS s WITH {} AS a RETURN 1 AS x",
+            list("s")
+        ),
+        // Every MATCH walks the clauses after it, all from one budget.
+        format!(
+            "MATCH (n){} WITH {n} AS a WITH {a} AS a RETURN 1 AS x",
+            " MATCH (n)".repeat(4_000)
+        ),
+    ] {
+        let compiled = helix_cypher::compile(&query).unwrap();
+        let (plan, count) =
+            allocations::observe(|| r::plan(compiled, &context::PlannerContext::default()));
+        plan.unwrap();
+        // Growing vectors and the rest of planning stay within a small
+        // multiple of the plan's substitution budget.
+        assert!(
+            count.bytes < 8 * r::MAX_EXPRESSION_NODES * size_of::<r::Expression>(),
+            "{}: {count:?}",
+            &query[..80]
+        );
+    }
+}
+
+/// The budget admits a walk that copies exactly `MAX_EXPRESSION_NODES` nodes,
+/// so a later WHERE still selects the index; one node more ends the walk
+/// before that WHERE, as any failed substitution does. Owned text costs the
+/// nodes its bytes would fill.
+#[test]
+fn substitution_budget_ends_the_walk_only_past_its_limit() {
+    let context = context::PlannerContext {
+        indexes: catalog::IndexCatalogSnapshot::default()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap()),
+        ..context::PlannerContext::default()
+    };
+    // Each MATCH output slot costs one node, and each copy of `a` its list
+    // and 2,856 slots. The walk charges n, a and z, then n and b, then the
+    // WHERE's equality, property (one more for its key's text), slot and
+    // literal, which leaves two nodes for z.
+    assert_eq!(
+        (1 + 2_857 + 2) + (1 + 1 + 69 * 2_857) + (1 + 2 + 1 + 1),
+        r::MAX_EXPRESSION_NODES
+    );
+    let source = |z: &str| {
+        let text = format!(
+            "MATCH (n:N) WITH n, [{}] AS a, {z} AS z WITH n, [{}] AS b WHERE n.key = 1 RETURN n",
+            vec!["n"; 2_856].join(", "),
+            vec!["a"; 69].join(", "),
+        );
+        let plan = r::plan(helix_cypher::compile(&text).unwrap(), &context).unwrap();
+        let [step] = plan.matches()[&0].sources[0].access.steps() else {
+            panic!("single access step: {z}");
+        };
+        format!("{:?}", step.op)
+            .trim_start_matches("Access { plan: Node(")
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let text = |bytes| format!("'{}'", "x".repeat(bytes));
+    for (z, expected) in [
+        ("0".to_owned(), "Bitmap"),
+        ("[0]".to_owned(), "Bitmap"),
+        ("[0, 0]".to_owned(), "LabelScan"),
+        // A label test keeps its label, and a map its keys.
+        ("n:N".to_owned(), "Bitmap"),
+        ("{k: 0}".to_owned(), "LabelScan"),
+        (text(size_of::<r::Expression>()), "Bitmap"),
+        (text(size_of::<r::Expression>() + 1), "LabelScan"),
+    ] {
+        assert_eq!(source(&z), expected, "{z}");
     }
 }
 

@@ -110,6 +110,18 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 /// bound is exercised on Rust's default test-thread stack as well as workers.
 pub const MAX_EXPRESSION_DEPTH: usize = 48;
 
+/// Maximum nodes one expression may hold. Planning also spends at most this
+/// many nodes, across all of a query's MATCH clauses, on the values it copies
+/// while substituting bindings through the clauses after each MATCH.
+///
+/// ```
+/// use helix_planner::relational as r;
+/// let list = |nodes: usize| r::Expression::List(vec![r::Expression::Slot(r::Slot(0)); nodes - 1]);
+/// list(r::MAX_EXPRESSION_NODES).validate_shape().unwrap();
+/// assert!(list(r::MAX_EXPRESSION_NODES + 1).validate_shape().is_err());
+/// ```
+pub const MAX_EXPRESSION_NODES: usize = 200_000;
+
 mod program;
 pub use program::*;
 mod selection;
