@@ -310,8 +310,12 @@ impl SecondaryMutationRuntime {
             let target = mutations.targets.get(ordinal).ok_or_else(|| {
                 corruption("secondary mutation route named a target outside its catalog")
             })?;
+            // A value the index cannot hold never had an entry, so there is nothing
+            // to remove; failing on it would keep an entity that blocks a build from
+            // being fixed or deleted.
             let old_value = canonical_value(&target.definition, before, entity.id)
-                .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
+                .ok()
+                .flatten();
             let new_value = storable_value(
                 scope,
                 target.index_id,
@@ -627,8 +631,12 @@ pub(crate) async fn maintain_entity(
         .iter()
         .filter(|target| target.definition.element_kind() == entity_kind)
     {
+        // A value the index cannot hold never had an entry, so there is nothing
+        // to remove; failing on it would keep an entity that blocks a build from
+        // being fixed or deleted.
         let old_value = canonical_value(&target.definition, before, entity_id)
-            .map_err(|error| mutation_value_error(&target.definition, entity_id, error))?;
+            .ok()
+            .flatten();
         let new_value = storable_value(
             scope,
             target.index_id,
@@ -7047,6 +7055,47 @@ mod tests {
                     .await
                     .is_empty());
             }
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// An entity whose value an index cannot hold at all, too large for the
+    /// format or of an unsupported type, blocks a build over it, yet can
+    /// still be fixed or deleted while that build exists.
+    #[tokio::test]
+    async fn values_an_index_cannot_hold_can_be_fixed_while_its_build_is_blocked() {
+        for (definition, value) in [
+            (
+                SecondaryIndexDefinition::node_equality("User", "email"),
+                PropertyValue::String("x".repeat(1_100_000)),
+            ),
+            (
+                SecondaryIndexDefinition::node_range("User", "email"),
+                PropertyValue::Bool(true),
+            ),
+        ] {
+            let db = test_db("secondary-blocked-source-fix").await;
+            let scope = DataScope::LegacyUnscoped;
+            let definition = validated(definition.expect("test definition is valid"));
+            let before = vec![
+                Property::string("$label", "User"),
+                Property::new("email", value),
+            ];
+            put_source(&db, scope, IndexElementKind::Node, 0, &before).await;
+            let (operation_id, _, _) = create_build(&db, scope, &definition, 0).await;
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let mut claim_sequence = 1;
+            assert!(matches!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Blocked
+            ));
+            let fixed = user_properties("fixed@example.com");
+            mutate_source(&db, scope, IndexElementKind::Node, 0, &before, &fixed)
+                .await
+                .expect("the blocking value can be replaced");
+            mutate_source(&db, scope, IndexElementKind::Node, 0, &fixed, &[])
+                .await
+                .expect("the entity can then be deleted");
             db.close().await.expect("secondary test database closes");
         }
     }
