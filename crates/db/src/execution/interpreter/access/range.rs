@@ -224,12 +224,6 @@ impl<'db> ExecutionContext<'db> {
         limit: Option<properties::PositiveUsize>,
     ) -> Result<Vec<u64>> {
         self.check_execution_deadline()?;
-        self.row_memory.iter().for_each(|budget| {
-            budget.record_reads(crate::cypher::StorageReadUsage {
-                scans: 1,
-                ..Default::default()
-            })
-        });
         let direction = storage_range_direction(key.direction);
         let limit = limit.map(properties::PositiveUsize::get);
         let query = range_query(self, range)?;

@@ -296,6 +296,11 @@ async fn membership_lookups_read_each_member_once() {
         "WITH [5, 0.0 / 0.0] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN u.uid",
         "WITH [] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN count(*)",
         "WITH [7] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN u.uid",
+        "WITH null AS ids MATCH (u:User) WHERE u.uid IN ids RETURN count(*)",
+        "WITH [true, 5] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN u.uid",
+        // A member too large to index scans the label for its row.
+        "WITH 'xxxxxxxxxxxxxxxx' AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s WITH s + s AS s \
+         WITH [5, substring(s, 0, 65500)] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN u.uid",
         "UNWIND [[1, 2], [2, 3]] AS ids MATCH (u:User) WHERE u.uid IN ids \
          RETURN u.uid ORDER BY u.uid",
     ] {
