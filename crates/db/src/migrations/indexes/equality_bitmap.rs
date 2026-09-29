@@ -570,15 +570,9 @@ fn authoritative_bitmap_key(
     properties: &[u8],
 ) -> Result<Option<Bytes>> {
     let properties = decode_properties(properties)?;
-    let canonical = index_lifecycle::secondary::canonical_value(
-        generation.scope,
-        generation.index_id,
-        generation.generation,
-        &generation.definition,
-        &properties,
-        entity_id,
-    )
-    .map_err(|_| corruption("authoritative equality value cannot be indexed"))?;
+    let canonical =
+        index_lifecycle::secondary::canonical_value(&generation.definition, &properties, entity_id)
+            .map_err(|_| corruption("authoritative equality value cannot be indexed"))?;
     match canonical {
         Some(CanonicalSecondaryValue::Equality(value)) => Ok(Some(
             ManagedIndexKey::Data {

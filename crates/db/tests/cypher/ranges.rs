@@ -162,3 +162,30 @@ async fn range_sources_in_index_order_feed_every_consumer() {
     indexed.close().await.unwrap();
     scanned.close().await.unwrap();
 }
+
+/// A later cartesian step replays a range source by position, so a limit
+/// reads and verifies only the index entries it consumes, as the range
+/// source does on its own.
+#[tokio::test]
+async fn limited_products_read_range_sources_lazily() {
+    let db = database().await;
+    run(
+        &db,
+        "UNWIND range(0, 4999) AS i CREATE (:R {v: 4999 - i}) WITH count(*) AS n CREATE (:C {c: n})",
+    )
+    .await;
+    create_index(&db, index::IndexSpec::node_range("R", "v")).await;
+    for query in [
+        "MATCH (n:R) WHERE n.v >= 0 WITH n LIMIT 3 RETURN count(*) AS c",
+        "MATCH (c:C), (n:R) WHERE n.v >= 0 WITH n LIMIT 3 RETURN count(*) AS c",
+    ] {
+        let response = run(&db, query).await;
+        assert_eq!(response.rows, vec![vec![json!(3)]], "{query}");
+        let reads = &response.resources.reads;
+        assert!(
+            reads.scan_rows <= 16 && reads.multi_get_keys + reads.point_gets <= 32,
+            "{query}: {reads:?}"
+        );
+    }
+    db.close().await.unwrap();
+}

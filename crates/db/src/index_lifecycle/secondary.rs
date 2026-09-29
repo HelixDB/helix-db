@@ -310,16 +310,9 @@ impl SecondaryMutationRuntime {
             let target = mutations.targets.get(ordinal).ok_or_else(|| {
                 corruption("secondary mutation route named a target outside its catalog")
             })?;
-            let old_value = canonical_value(
-                scope,
-                target.index_id,
-                target.generation,
-                &target.definition,
-                before,
-                entity.id,
-            )
-            .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
-            let new_value = canonical_value(
+            let old_value = canonical_value(&target.definition, before, entity.id)
+                .map_err(|error| mutation_value_error(&target.definition, entity.id, error))?;
+            let new_value = storable_value(
                 scope,
                 target.index_id,
                 target.generation,
@@ -634,16 +627,9 @@ pub(crate) async fn maintain_entity(
         .iter()
         .filter(|target| target.definition.element_kind() == entity_kind)
     {
-        let old_value = canonical_value(
-            scope,
-            target.index_id,
-            target.generation,
-            &target.definition,
-            before,
-            entity_id,
-        )
-        .map_err(|error| mutation_value_error(&target.definition, entity_id, error))?;
-        let new_value = canonical_value(
+        let old_value = canonical_value(&target.definition, before, entity_id)
+            .map_err(|error| mutation_value_error(&target.definition, entity_id, error))?;
+        let new_value = storable_value(
             scope,
             target.index_id,
             target.generation,
@@ -1085,7 +1071,7 @@ async fn scan_source(
                 ));
             }
         };
-        let value = match canonical_value(
+        let value = match storable_value(
             scope,
             operation.index_id(),
             operation.generation(),
@@ -1331,7 +1317,7 @@ async fn catch_up(
         }
         let properties = read_authoritative_properties(transaction, scope, entity).await?;
         let next_value = match properties {
-            Some(properties) => match canonical_value(
+            Some(properties) => match storable_value(
                 scope,
                 operation.index_id(),
                 operation.generation(),
@@ -1501,7 +1487,7 @@ async fn catch_up_exact(
         let next_value = match property_value.as_ref() {
             Some(properties) => {
                 let properties = decode_properties(properties)?;
-                match canonical_value(
+                match storable_value(
                     scope,
                     operation.index_id(),
                     operation.generation(),
@@ -1727,15 +1713,8 @@ async fn validate_and_release_applied(
             let properties = read_authoritative_properties(transaction, scope, entity)
                 .await?
                 .ok_or_else(|| corruption("unique secondary owner source row disappeared"))?;
-            let authoritative = canonical_value(
-                scope,
-                operation.index_id(),
-                operation.generation(),
-                definition,
-                &properties,
-                entity.id,
-            )
-            .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
+            let authoritative = canonical_value(definition, &properties, entity.id)
+                .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
             if authoritative.as_ref() != Some(&value) {
                 return Err(corruption(
                     "unique secondary applied state differs from authoritative source",
@@ -2471,6 +2450,11 @@ fn reconciliation_plan_from_observations(
             };
             let key =
                 secondary_entry_key(scope, index_id, generation, definition, previous, entity_id)?;
+            // A build delta keeps the value an entity had, including one
+            // whose entry key storage could never write.
+            if key.len() > STORAGE_KEY_MAX_LEN {
+                break 'delete_previous;
+            }
             if definition.unique() {
                 'verify_previous: {
                     let Some(value) = unique_entries.get(&key).and_then(Option::as_ref) else {
@@ -2743,17 +2727,10 @@ impl BatchAccounting {
     }
 }
 
-/// Project an entity's indexed value. A value whose entry key storage cannot
-/// write in this scope is oversized, so a statement writing it fails and a
-/// build over it blocks. Such a key was never written, and reads of it find
-/// nothing, so only this write path checks the storage limit.
 pub(crate) fn canonical_value(
-    scope: DataScope,
-    index_id: IndexId,
-    generation: IndexGenerationId,
     definition: &ValidatedSecondaryIndexDefinition,
     properties: &[Property],
-    entity_id: IndexEntityId,
+    _entity_id: IndexEntityId,
 ) -> std::result::Result<Option<CanonicalSecondaryValue>, SecondaryValueError> {
     let matches_label = properties.iter().any(|property| {
         property.name == "$label" && property.value.as_str() == Some(definition.label().as_str())
@@ -2767,7 +2744,7 @@ pub(crate) fn canonical_value(
     else {
         return Ok(None);
     };
-    let value = match definition {
+    Ok(match definition {
         ValidatedSecondaryIndexDefinition::NodeEquality { .. }
         | ValidatedSecondaryIndexDefinition::EdgeEquality { .. } => {
             match project_equality_value(&property.value) {
@@ -2817,8 +2794,23 @@ pub(crate) fn canonical_value(
                 }
             }
         }
-    };
-    let Some(value) = value else {
+    })
+}
+
+/// Project a value about to be written. Storage writes keys of at most
+/// [`STORAGE_KEY_MAX_LEN`] bytes, so a value whose entry key in this scope is
+/// longer is oversized: a statement writing it fails and a build over it
+/// blocks. A value being replaced was written or never had a key, and reads
+/// of a longer key find nothing, so only values being written check it.
+pub(crate) fn storable_value(
+    scope: DataScope,
+    index_id: IndexId,
+    generation: IndexGenerationId,
+    definition: &ValidatedSecondaryIndexDefinition,
+    properties: &[Property],
+    entity_id: IndexEntityId,
+) -> std::result::Result<Option<CanonicalSecondaryValue>, SecondaryValueError> {
+    let Some(value) = canonical_value(definition, properties, entity_id)? else {
         return Ok(None);
     };
     let encoded_len = prepare_secondary_entry_key(
@@ -5159,7 +5151,7 @@ mod tests {
                 (tenant, unscoped - 17),
             ] {
                 let project = |length: usize| {
-                    canonical_value(
+                    storable_value(
                         scope,
                         IndexId::initial(),
                         IndexGenerationId::initial(),
@@ -7003,16 +6995,9 @@ mod tests {
             index_id,
             generation,
             secondary_definition,
-            canonical_value(
-                scope,
-                index_id,
-                generation,
-                secondary_definition,
-                &after,
-                IndexEntityId::initial(),
-            )
-            .expect("updated value is supported")
-            .expect("updated value is indexed"),
+            canonical_value(secondary_definition, &after, IndexEntityId::initial())
+                .expect("updated value is supported")
+                .expect("updated value is indexed"),
             IndexEntityId::initial(),
         )
         .expect("expected active entry key is valid");
@@ -7022,6 +7007,48 @@ mod tests {
             .expect("updated active entry is readable")
             .is_some());
         db.close().await.expect("secondary test database closes");
+    }
+
+    /// An entity whose value is too long to index can still be deleted while
+    /// a build runs, and catch-up never removes the key that value could not
+    /// have had.
+    #[tokio::test]
+    async fn catch_up_skips_previous_values_storage_could_not_index() {
+        for definition in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+            SecondaryIndexDefinition::node_range("User", "email"),
+        ] {
+            let db = test_db("secondary-build-delta-unindexable").await;
+            let scope = DataScope::LegacyUnscoped;
+            let definition = validated(definition.expect("test definition is valid"));
+            let before = user_properties(&"x".repeat(70_000));
+            put_source(&db, scope, IndexElementKind::Node, 0, &before).await;
+            let (operation_id, index_id, generation) =
+                create_build(&db, scope, &definition, 0).await;
+            mutate_source(&db, scope, IndexElementKind::Node, 0, &before, &[])
+                .await
+                .expect("an unindexable entity can be deleted during a build");
+            assert_eq!(
+                generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                    .await
+                    .len(),
+                1
+            );
+
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let mut claim_sequence = 1;
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            for kind in [RecordKind::BuildDelta, RecordKind::AppliedState] {
+                assert!(generation_rows(&db, scope, kind, index_id, generation)
+                    .await
+                    .is_empty());
+            }
+            db.close().await.expect("secondary test database closes");
+        }
     }
 
     #[tokio::test]

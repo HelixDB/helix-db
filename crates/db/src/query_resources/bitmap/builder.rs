@@ -55,6 +55,11 @@ impl Builder {
         self.bitmap.iter()
     }
 
+    /// The member of rank `n`, if there are more than `n` members.
+    pub(crate) fn select(&self, n: u64) -> Option<u64> {
+        self.bitmap.select(n)
+    }
+
     pub(crate) fn finish(self) -> Bitmap {
         // Keep the conservative construction reservation with the result. This
         // also bounds its consuming iterator without another allocation pass.

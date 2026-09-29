@@ -120,37 +120,35 @@ fn access_count_plans(
             let (_, late_bound_params) = rule
                 .cardinality_bindings()
                 .expect("cardinality helpers are only called by the cardinality rule");
-            if !late_bound_params.is_empty() {
+            // An index rewrite with no row cursor, such as a range read
+            // filtered by an equality bitmap, counts through the filter.
+            let rewritten = if late_bound_params.is_empty() {
+                None
+            } else {
                 match super::access::index_access_filter(filter, rule.indexes, rule.planner_limits)
                 {
                     super::access::AccessFilterRewrite::Rewritten(access) => {
-                        return direct_access_plans(
-                            &access,
-                            exec::ExecCountWindowPlan::identity(),
-                            rule,
-                        );
+                        direct_access_plans(&access, exec::ExecCountWindowPlan::identity(), rule)
+                            .ok()
                     }
                     super::access::AccessFilterRewrite::RewrittenPipeline(pipeline) => {
-                        // A source with no row cursor, such as a range read
-                        // filtered by an equality bitmap, counts through the
-                        // filter below.
-                        let plans = access_pipeline_count(&pipeline, rule);
-                        if plans.is_ok() {
-                            return plans;
-                        }
+                        access_pipeline_count(&pipeline, rule).ok()
                     }
-                    super::access::AccessFilterRewrite::NotApplicable => {}
+                    super::access::AccessFilterRewrite::NotApplicable => None,
                 }
-            }
-            Ok(vec![exec::ExecCountPlan::Stream(
-                exec::ExecCountStreamPlan {
-                    cursor: exec::ExecCountCursorPlan::Filter {
-                        input: Box::new(access_cursor(filter.access(), rule)?),
-                        predicate: filter.predicate().clone(),
+            };
+            match rewritten {
+                Some(plans) => Ok(plans),
+                None => Ok(vec![exec::ExecCountPlan::Stream(
+                    exec::ExecCountStreamPlan {
+                        cursor: exec::ExecCountCursorPlan::Filter {
+                            input: Box::new(access_cursor(filter.access(), rule)?),
+                            predicate: filter.predicate().clone(),
+                        },
+                        window: exec::ExecCountWindowPlan::identity(),
                     },
-                    window: exec::ExecCountWindowPlan::identity(),
-                },
-            )])
+                )]),
+            }
         }
         logical::AccessStream::Pipeline(pipeline) if has_variable_write(pipeline.ops()) => {
             Ok(vec![exec::ExecCountPlan::InputRows {

@@ -3,6 +3,16 @@ use crate::execution::interpreter::{rows, test_support};
 use helix_planner::context;
 use serde_json::json;
 
+/// Every ID the source has delivered, in replay order.
+fn cached(source: &ScanCache) -> Result<Vec<u64>> {
+    let mut ids = Vec::new();
+    source.replay(0, usize::MAX, |id| {
+        ids.push(id);
+        Ok(())
+    })?;
+    Ok(ids)
+}
+
 #[tokio::test]
 async fn product_positions_handle_sparse_ids_duplicates_empty_inputs_and_drop() {
     let db = test_support::open_db("product-positions").await;
@@ -71,7 +81,7 @@ async fn product_positions_handle_sparse_ids_duplicates_empty_inputs_and_drop() 
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected);
             assert_eq!(
-                source.iter().unwrap().collect::<Vec<_>>(),
+                cached(&source).unwrap(),
                 if parents > 0 && populated {
                     expected_ids.to_vec()
                 } else {
@@ -112,10 +122,7 @@ async fn product_positions_handle_sparse_ids_duplicates_empty_inputs_and_drop() 
                 .unwrap()
                 .unwrap(),
         );
-        assert_eq!(
-            source.iter().unwrap().collect::<Vec<_>>(),
-            expected_ids[..2].to_vec()
-        );
+        assert_eq!(cached(&source).unwrap(), expected_ids[..2].to_vec());
         let retained = limits.memory_bytes - context.row_budget().available();
         assert!(retained >= 4 * 16 * 1024);
         if stop == "drop" {
@@ -214,10 +221,10 @@ async fn cached_product_source_extends_only_on_demand_and_closes_failed_continua
     drop(source.extend(&context, limits));
     assert!(matches!(source.source, Source::Open { .. }));
     assert!(source.extend(&context, limits).await.unwrap());
-    assert_eq!(source.iter().unwrap().count(), 3);
+    assert_eq!(cached(&source).unwrap().len(), 3);
     assert_eq!(context.row_budget().reads().scan_rows, 3);
     while source.extend(&context, limits).await.unwrap() {}
-    assert_eq!(source.iter().unwrap().count(), 17);
+    assert_eq!(cached(&source).unwrap().len(), 17);
     assert!(matches!(source.source, Source::Complete(_)));
     assert!(!source.extend(&context, limits).await.unwrap());
     drop(source);
@@ -238,7 +245,7 @@ async fn cached_product_source_extends_only_on_demand_and_closes_failed_continua
         .unwrap();
         while source.extend(&context, limits).await.unwrap() {}
         assert_eq!(
-            source.iter().unwrap().collect::<Vec<_>>(),
+            cached(&source).unwrap(),
             if populated { vec![u64::MAX] } else { vec![] }
         );
         drop(source);
@@ -283,7 +290,7 @@ async fn cached_product_source_extends_only_on_demand_and_closes_failed_continua
             )
             .await
             .unwrap());
-        assert_eq!(source.iter().unwrap().collect::<Vec<_>>(), vec![7]);
+        assert_eq!(cached(&source).unwrap(), vec![7]);
         let held = if failure == "memory" {
             Some(
                 context
@@ -298,7 +305,7 @@ async fn cached_product_source_extends_only_on_demand_and_closes_failed_continua
         assert!(source.extend(&context, limits).await.is_err());
         assert!(matches!(source.source, Source::Closed));
         assert!(matches!(
-            source.iter(),
+            cached(&source),
             Err(crate::cypher::Error::Storage(
                 crate::HelixDbError::InvariantViolation(_)
             ))

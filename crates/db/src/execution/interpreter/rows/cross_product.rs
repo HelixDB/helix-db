@@ -4,13 +4,84 @@ use super::{memory, scan::NodeCursor, ExecutionContext, Limits, Result, RowBuffe
 use crate::query_resources::bitmap;
 use helix_planner::relational as r;
 
-enum Source {
-    Open {
+/// IDs a source has delivered, replayed to each parent by position.
+enum Delivered {
+    /// A source yielding increasing IDs, kept compressed. Position `n` is the
+    /// ID of rank `n`, which later IDs never move.
+    Increasing {
         ids: bitmap::Builder,
-        cursor: Box<NodeCursor>,
         last: Option<u64>,
     },
-    Complete(bitmap::Bitmap),
+    /// A range source yields its owners in index order, so they stay in the
+    /// order they arrived.
+    Arrival {
+        ids: Vec<u64>,
+        memory: memory::Reservation,
+    },
+}
+
+impl Delivered {
+    /// Visit up to `limit` IDs from `position` on and return how many.
+    fn replay(
+        &self,
+        position: usize,
+        limit: usize,
+        mut visit: impl FnMut(u64) -> Result<()>,
+    ) -> Result<usize> {
+        let mut replayed = 0;
+        match self {
+            Self::Increasing { ids, .. } => {
+                let Some(first) = ids.select(position as u64) else {
+                    return Ok(0);
+                };
+                let mut ids = ids.iter();
+                ids.advance_to(first);
+                for id in ids.take(limit) {
+                    visit(id)?;
+                    replayed += 1;
+                }
+            }
+            Self::Arrival { ids, .. } => {
+                for &id in ids.iter().skip(position).take(limit) {
+                    visit(id)?;
+                    replayed += 1;
+                }
+            }
+        }
+        Ok(replayed)
+    }
+
+    fn push(&mut self, id: u64) -> Result<()> {
+        match self {
+            Self::Increasing { ids, last } => {
+                assert!(
+                    last.is_none_or(|previous| previous < id),
+                    "node source IDs increase"
+                );
+                ids.insert(id)?;
+                *last = Some(id);
+            }
+            Self::Arrival { ids, memory } => {
+                if ids.len() == ids.capacity() {
+                    // Admit the old and new buffers together before growing.
+                    let capacity = ids.capacity().saturating_mul(2).max(64);
+                    memory.resize((ids.capacity() + capacity) * size_of::<u64>())?;
+                    ids.reserve_exact(capacity - ids.len());
+                    memory.resize(ids.capacity() * size_of::<u64>())?;
+                }
+                ids.push(id);
+            }
+        }
+        Ok(())
+    }
+}
+
+enum Source {
+    Open {
+        delivered: Delivered,
+        cursor: Box<NodeCursor>,
+    },
+    Complete(Delivered),
     // Taking the continuation across an await closes it until success restores
     // ownership. A cancelled or failed poll cannot be resumed or reopened.
     Closed,
@@ -23,23 +94,37 @@ pub(super) struct ScanCache {
 impl ScanCache {
     pub(super) fn new(cursor: NodeCursor, budget: &memory::Budget) -> Result<Box<Self>> {
         // Keep the enum compact. Cover the cache box and cursor boxes during
-        // continuation transfer; bitmap payloads own separate reservations.
+        // continuation transfer; ID payloads own separate reservations.
         let memory = budget.reserve(size_of::<Self>() + 2 * size_of::<NodeCursor>())?;
-        let ids = bitmap::Builder::new(Some(budget))?;
+        let delivered = match cursor {
+            NodeCursor::Range(_) => Delivered::Arrival {
+                ids: Vec::new(),
+                memory: budget.reserve(0)?,
+            },
+            NodeCursor::Scan(_) | NodeCursor::Indexed { .. } => Delivered::Increasing {
+                ids: bitmap::Builder::new(Some(budget))?,
+                last: None,
+            },
+        };
         Ok(Box::new(Self {
             source: Source::Open {
-                ids,
+                delivered,
                 cursor: Box::new(cursor),
-                last: None,
             },
             _memory: memory,
         }))
     }
 
-    fn iter(&self) -> Result<roaring::treemap::Iter<'_>> {
+    fn replay(
+        &self,
+        position: usize,
+        limit: usize,
+        visit: impl FnMut(u64) -> Result<()>,
+    ) -> Result<usize> {
         match &self.source {
-            Source::Open { ids, .. } => Ok(ids.iter()),
-            Source::Complete(ids) => Ok(ids.iter()),
+            Source::Open { delivered, .. } | Source::Complete(delivered) => {
+                delivered.replay(position, limit, visit)
+            }
             Source::Closed => Err(crate::HelixDbError::InvariantViolation(
                 "a failed or cancelled source continuation cannot resume".into(),
             )
@@ -49,10 +134,10 @@ impl ScanCache {
 
     async fn extend(&mut self, context: &ExecutionContext<'_>, limits: Limits) -> Result<bool> {
         let source = std::mem::replace(&mut self.source, Source::Closed);
-        let (mut ids, cursor, mut last) = match source {
-            Source::Open { ids, cursor, last } => (ids, cursor, last),
-            Source::Complete(ids) => {
-                self.source = Source::Complete(ids);
+        let (mut delivered, cursor) = match source {
+            Source::Open { delivered, cursor } => (delivered, cursor),
+            Source::Complete(delivered) => {
+                self.source = Source::Complete(delivered);
                 return Ok(false);
             }
             Source::Closed => {
@@ -62,51 +147,23 @@ impl ScanCache {
                 .into())
             }
         };
-        // Parents resume through the prefix in increasing ID order, but a range
-        // source yields its owners in index order, so read all of it first.
-        if matches!(*cursor, NodeCursor::Range(_)) {
-            let mut cursor = *cursor;
-            let mut extended = false;
-            while let Some((batch, next)) = context
-                .row_budget()
-                .admitted_future(cursor.next_batch(context, 1, r::Slot(0), limits))?
-                .await?
-            {
-                for row in batch {
-                    let r::Value::Entity(r::Entity::Node(id)) = row[0] else {
-                        unreachable!("a node source yields node references");
-                    };
-                    ids.insert(id)?;
-                }
-                extended = true;
-                cursor = next;
-            }
-            self.source = Source::Complete(ids.finish());
-            return Ok(extended);
-        }
         let Some((batch, cursor)) = context
             .row_budget()
             .admitted_future((*cursor).next_batch(context, 1, r::Slot(0), limits))?
             .await?
         else {
-            self.source = Source::Complete(ids.finish());
+            self.source = Source::Complete(delivered);
             return Ok(false);
         };
         for row in batch {
             let r::Value::Entity(r::Entity::Node(id)) = row[0] else {
                 unreachable!("a node source yields node references");
             };
-            assert!(
-                last.is_none_or(|previous| previous < id),
-                "node source IDs increase"
-            );
-            ids.insert(id)?;
-            last = Some(id);
+            delivered.push(id)?;
         }
         self.source = Source::Open {
-            ids,
+            delivered,
             cursor: Box::new(cursor),
-            last,
         };
         Ok(true)
     }
@@ -116,7 +173,8 @@ pub(super) struct ScanCursor {
     input: memory::Rows,
     slot: r::Slot,
     parent: usize,
-    last: Option<u64>,
+    /// Delivered IDs already paired with the current parent.
+    position: usize,
 }
 impl ScanCursor {
     pub(super) fn new(input: memory::Rows, slot: r::Slot) -> Self {
@@ -124,7 +182,7 @@ impl ScanCursor {
             input,
             slot,
             parent: 0,
-            last: None,
+            position: 0,
         }
     }
 
@@ -140,26 +198,10 @@ impl ScanCursor {
             let Some(row) = self.input.get(self.parent) else {
                 break;
             };
-            {
-                let mut ids = source.iter()?;
-                if let Some(previous) = self.last {
-                    // Seek to an existing ID, then exclude it. Seeking last+1
-                    // overflows at u64::MAX and can skip sparse tree partitions.
-                    ids.advance_to(previous);
-                    assert_eq!(
-                        ids.next(),
-                        Some(previous),
-                        "cursor belongs to this source prefix"
-                    );
-                }
-                while output.len() < limits.batch_rows {
-                    let Some(id) = ids.next() else {
-                        break;
-                    };
-                    output.push_replacing(row, self.slot, r::Value::Entity(r::Entity::Node(id)))?;
-                    self.last = Some(id);
-                }
-            }
+            self.position +=
+                source.replay(self.position, limits.batch_rows - output.len(), |id| {
+                    output.push_replacing(row, self.slot, r::Value::Entity(r::Entity::Node(id)))
+                })?;
             if output.len() == limits.batch_rows {
                 break;
             }
@@ -178,7 +220,7 @@ impl ScanCursor {
             }
             self.input.release_rows(self.parent..self.parent + 1);
             self.parent += 1;
-            self.last = None;
+            self.position = 0;
         }
         Ok((output.len() > 0).then(|| output.finish()))
     }
