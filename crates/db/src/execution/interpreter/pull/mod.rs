@@ -154,82 +154,86 @@ impl ExecutionContext<'_> {
         Ok(out)
     }
 
-    pub(super) async fn execute_pull_region(
-        &mut self,
-        region: &exec::ExecPullRegion,
-        by_id: &BTreeMap<exec::ExecStepId, &exec::ExecStep>,
-    ) -> Result<ExecutionValue> {
-        let terminal = *region.steps().last().expect("region is nonempty");
-        tracing::trace!(
-            terminal = terminal.get(),
-            operators = region.steps().len(),
-            "execute pull region"
-        );
-        let first = by_id[&region.steps()[0]];
-        let allowed = self.condition_allows(&first.condition)?;
-        for id in region.steps() {
-            self.release_condition_reference(&by_id[id].condition);
-        }
-        if !allowed {
+    /// A region's cursors poll recursively below this frame, so its state is
+    /// boxed here rather than held by the scheduler level that runs it.
+    pub(super) fn execute_pull_region<'a>(
+        &'a mut self,
+        region: &'a exec::ExecPullRegion,
+        by_id: &'a BTreeMap<exec::ExecStepId, &'a exec::ExecStep>,
+    ) -> BoxFuture<'a, Result<ExecutionValue>> {
+        Box::pin(async move {
+            let terminal = *region.steps().last().expect("region is nonempty");
+            tracing::trace!(
+                terminal = terminal.get(),
+                operators = region.steps().len(),
+                "execute pull region"
+            );
+            let first = by_id[&region.steps()[0]];
+            let allowed = self.condition_allows(&first.condition)?;
             for id in region.steps() {
-                self.release_dependency_references(&by_id[id].dependencies);
+                self.release_condition_reference(&by_id[id].condition);
             }
-            return Ok(ExecutionValue::Stream(Vec::new()));
-        }
-        // Resolve deferred writes before any source iterator is opened. No
-        // mutation is permitted inside a pull region.
-        for id in region.steps() {
-            self.flush_required_mutations(mutation::visibility::required_for(&by_id[id].op))
-                .await?;
-        }
-        let mut cursors = BTreeMap::new();
-        for id in region.steps() {
-            let step = by_id[id];
-            let mut inputs = Vec::new();
-            for dependency in &step.dependencies {
-                let input = match cursors.remove(dependency) {
-                    Some(cursor) => {
-                        self.release_dependency_references(&[*dependency]);
-                        cursor
-                    }
-                    None => Cursor::materialized(self.dependency_input(&[*dependency])?)?,
+            if !allowed {
+                for id in region.steps() {
+                    self.release_dependency_references(&by_id[id].dependencies);
+                }
+                return Ok(ExecutionValue::Stream(Vec::new()));
+            }
+            // Resolve deferred writes before any source iterator is opened. No
+            // mutation is permitted inside a pull region.
+            for id in region.steps() {
+                self.flush_required_mutations(mutation::visibility::required_for(&by_id[id].op))
+                    .await?;
+            }
+            let mut cursors = BTreeMap::new();
+            for id in region.steps() {
+                let step = by_id[id];
+                let mut inputs = Vec::new();
+                for dependency in &step.dependencies {
+                    let input = match cursors.remove(dependency) {
+                        Some(cursor) => {
+                            self.release_dependency_references(&[*dependency]);
+                            cursor
+                        }
+                        None => Cursor::materialized(self.dependency_input(&[*dependency])?)?,
+                    };
+                    inputs.push(input);
+                }
+                let cursor = match &step.op {
+                    exec::ExecOp::Merge { mode } => Cursor::merge(inputs, *mode)?,
+                    exec::ExecOp::Access { .. }
+                    | exec::ExecOp::Count { .. }
+                    | exec::ExecOp::KvRead(_)
+                    | exec::ExecOp::Expand { .. }
+                    | exec::ExecOp::VectorSearch { .. }
+                    | exec::ExecOp::TextSearch { .. }
+                    | exec::ExecOp::Filter { .. }
+                    | exec::ExecOp::IndexMembership { .. }
+                    | exec::ExecOp::Limit { .. }
+                    | exec::ExecOp::Skip { .. }
+                    | exec::ExecOp::Range { .. }
+                    | exec::ExecOp::Distinct
+                    | exec::ExecOp::Order { .. }
+                    | exec::ExecOp::Project { .. }
+                    | exec::ExecOp::Aggregate { .. }
+                    | exec::ExecOp::Variable { .. }
+                    | exec::ExecOp::Branch { .. }
+                    | exec::ExecOp::Repeat { .. }
+                    | exec::ExecOp::ShortestPath { .. }
+                    | exec::ExecOp::Mutation { .. }
+                    | exec::ExecOp::IndexDdl { .. }
+                    | exec::ExecOp::Reserved { .. }
+                    | exec::ExecOp::ForEach { .. }
+                    | exec::ExecOp::Barrier { .. }
+                    | exec::ExecOp::Noop => Cursor::concat(inputs)?.wrap(self, &step.op)?,
                 };
-                inputs.push(input);
+                cursors.insert(*id, cursor);
             }
-            let cursor = match &step.op {
-                exec::ExecOp::Merge { mode } => Cursor::merge(inputs, *mode)?,
-                exec::ExecOp::Access { .. }
-                | exec::ExecOp::Count { .. }
-                | exec::ExecOp::KvRead(_)
-                | exec::ExecOp::Expand { .. }
-                | exec::ExecOp::VectorSearch { .. }
-                | exec::ExecOp::TextSearch { .. }
-                | exec::ExecOp::Filter { .. }
-                | exec::ExecOp::IndexMembership { .. }
-                | exec::ExecOp::Limit { .. }
-                | exec::ExecOp::Skip { .. }
-                | exec::ExecOp::Range { .. }
-                | exec::ExecOp::Distinct
-                | exec::ExecOp::Order { .. }
-                | exec::ExecOp::Project { .. }
-                | exec::ExecOp::Aggregate { .. }
-                | exec::ExecOp::Variable { .. }
-                | exec::ExecOp::Branch { .. }
-                | exec::ExecOp::Repeat { .. }
-                | exec::ExecOp::ShortestPath { .. }
-                | exec::ExecOp::Mutation { .. }
-                | exec::ExecOp::IndexDdl { .. }
-                | exec::ExecOp::Reserved { .. }
-                | exec::ExecOp::ForEach { .. }
-                | exec::ExecOp::Barrier { .. }
-                | exec::ExecOp::Noop => Cursor::concat(inputs)?.wrap(self, &step.op)?,
-            };
-            cursors.insert(*id, cursor);
-        }
-        cursors
-            .remove(&terminal)
-            .expect("region has a terminal cursor")
-            .drain(self)
-            .await
+            cursors
+                .remove(&terminal)
+                .expect("region has a terminal cursor")
+                .drain(self)
+                .await
+        })
     }
 }

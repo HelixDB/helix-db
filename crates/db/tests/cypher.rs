@@ -48,6 +48,9 @@ mod ranges;
 #[path = "cypher/index_limits.rs"]
 mod index_limits;
 
+#[path = "cypher/stack_depth.rs"]
+mod stack_depth;
+
 #[path = "cypher/native_counts.rs"]
 mod native_counts;
 

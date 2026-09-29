@@ -167,52 +167,59 @@ impl<'db> ExecutionContext<'db> {
         .await
     }
 
-    /// Flushes only deferred families consumed by the next operation.
-    pub(in crate::execution::interpreter) async fn flush_required_mutations(
+    /// Flushes only deferred families consumed by the next operation. Every
+    /// executed step checks this, so a step needing no flush gets a ready
+    /// future and the flush's large state is boxed only when it runs.
+    pub(in crate::execution::interpreter) fn flush_required_mutations(
         &mut self,
         required: super::visibility::RequiredMutationVisibility,
-    ) -> Result<()> {
+    ) -> futures::future::Either<
+        std::future::Ready<Result<()>>,
+        futures::future::BoxFuture<'_, Result<()>>,
+    > {
         if required.is_empty() || !self.request_write_scope.is_active() {
-            return Ok(());
+            return futures::future::Either::Left(std::future::ready(Ok(())));
         }
-        let text_resources = required
-            .contains(super::visibility::DeferredMutationFamily::Text)
-            .then(|| {
-                (
-                    std::sync::Arc::clone(self.db.object_store()),
-                    self.db.path().to_string(),
-                    self.db
-                        .config()
-                        .db()
-                        .search_index_backfill()
-                        .active_text_mutation(),
-                )
-            });
-        let RequestWriteScopeState::Active(active) = &mut self.request_write_scope else {
-            return Ok(());
-        };
-        if required.contains(super::visibility::DeferredMutationFamily::Topology) {
-            active.index_context.flush_topology(&active.txn).await?;
-        }
-        if required.contains(super::visibility::DeferredMutationFamily::Secondary) {
-            active.index_context.flush_secondary(&active.txn).await?;
-        }
-        if required.contains(super::visibility::DeferredMutationFamily::Vector) {
-            active
-                .index_context
-                .flush_active_vectors(&active.txn)
-                .await?;
-        }
-        if required.contains(super::visibility::DeferredMutationFamily::Text) {
-            let Some((object_store, database, text_limits)) = text_resources else {
-                unreachable!("text visibility carries its flush resources")
+        futures::future::Either::Right(Box::pin(async move {
+            let text_resources = required
+                .contains(super::visibility::DeferredMutationFamily::Text)
+                .then(|| {
+                    (
+                        std::sync::Arc::clone(self.db.object_store()),
+                        self.db.path().to_string(),
+                        self.db
+                            .config()
+                            .db()
+                            .search_index_backfill()
+                            .active_text_mutation(),
+                    )
+                });
+            let RequestWriteScopeState::Active(active) = &mut self.request_write_scope else {
+                return Ok(());
             };
-            active
-                .index_context
-                .flush_active_text(&active.txn, text_limits, &object_store, &database)
-                .await?;
-        }
-        Ok(())
+            if required.contains(super::visibility::DeferredMutationFamily::Topology) {
+                active.index_context.flush_topology(&active.txn).await?;
+            }
+            if required.contains(super::visibility::DeferredMutationFamily::Secondary) {
+                active.index_context.flush_secondary(&active.txn).await?;
+            }
+            if required.contains(super::visibility::DeferredMutationFamily::Vector) {
+                active
+                    .index_context
+                    .flush_active_vectors(&active.txn)
+                    .await?;
+            }
+            if required.contains(super::visibility::DeferredMutationFamily::Text) {
+                let Some((object_store, database, text_limits)) = text_resources else {
+                    unreachable!("text visibility carries its flush resources")
+                };
+                active
+                    .index_context
+                    .flush_active_text(&active.txn, text_limits, &object_store, &database)
+                    .await?;
+            }
+            Ok(())
+        }))
     }
 
     /// Preserves the production-linked conservative barrier oracle.
