@@ -2185,7 +2185,7 @@ impl HelixDB {
         request_json: &[u8],
         tenant_scope: DataScope,
     ) -> Result<Vec<u8>> {
-        let request = sonic_rs::from_slice::<QueryRequest>(request_json)
+        let request = QueryRequest::from_json_slice(request_json)
             .map_err(|error| HelixDbError::InvalidQueryJson(error.to_string()))?;
         let query_metrics = self.embedded_query_metrics();
         query_service::execute_query_on_scoped_observed(

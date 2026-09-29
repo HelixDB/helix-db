@@ -121,7 +121,7 @@ impl HelixDbServer for GrpcService {
                 format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
             ));
         }
-        let query = sonic_rs::from_slice::<QueryRequest>(&request.body).map_err(|error| {
+        let query = QueryRequest::from_json_slice(&request.body).map_err(|error| {
             status_with_error_code(
                 tonic::Code::InvalidArgument,
                 error_code::QueryErrorCode::InvalidQueryJson,

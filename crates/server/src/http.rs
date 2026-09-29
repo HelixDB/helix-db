@@ -84,7 +84,7 @@ async fn execute_query(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
-    let request = match sonic_rs::from_slice::<QueryRequest>(&bytes) {
+    let request = match QueryRequest::from_json_slice(&bytes) {
         Ok(request) => request,
         Err(error) => {
             return error_response(

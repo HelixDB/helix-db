@@ -4735,7 +4735,9 @@ this specification.
 
 Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
-client must work against both environments.
+client must work against both environments. A `POST /v2/query` body may nest
+JSON arrays and objects at most 255 levels deep, including under keys the
+server ignores; a deeper body fails with `invalid_query_json`.
 
 ## Authentication
 

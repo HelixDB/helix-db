@@ -222,7 +222,55 @@ pub struct QueryRequest {
     parameters: QueryParameters,
 }
 
+/// Deepest JSON nesting a native request may use: sonic-rs's own limit for
+/// the values it deserializes.
+pub const MAX_REQUEST_JSON_DEPTH: usize = 255;
+
+/// Reject JSON nested deeper than [`MAX_REQUEST_JSON_DEPTH`] with one flat
+/// pass that tracks only the depth and whether it is inside a string.
+fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
+    // (depth, inside a string, after a backslash in a string)
+    bytes
+        .iter()
+        .try_fold((0_usize, false, false), |state, &byte| {
+            Ok(match (state, byte) {
+                ((depth, true, true), _) => (depth, true, false),
+                ((depth, true, false), b'\\') => (depth, true, true),
+                ((depth, true, false), b'"') => (depth, false, false),
+                ((depth, true, false), _) => (depth, true, false),
+                ((depth, false, _), b'"') => (depth, true, false),
+                ((depth, false, _), b'[' | b'{') if depth == MAX_REQUEST_JSON_DEPTH => {
+                    return Err(<sonic_rs::Error as serde::de::Error>::custom(format!(
+                        "JSON nesting exceeds {MAX_REQUEST_JSON_DEPTH} levels"
+                    )));
+                }
+                ((depth, false, _), b'[' | b'{') => (depth + 1, false, false),
+                ((depth, false, _), b']' | b'}') => (depth.saturating_sub(1), false, false),
+                ((depth, false, _), _) => (depth, false, false),
+            })
+        })
+        .map(|_| ())
+}
+
 impl QueryRequest {
+    /// Parse a request from JSON bytes. A flat scan bounds the nesting first:
+    /// sonic-rs skips the value of an unknown key recursively without its own
+    /// depth limit, so an unchecked body could exhaust the parsing thread's
+    /// stack.
+    ///
+    /// ```
+    /// use helix_ast::query::{QueryRequest, MAX_REQUEST_JSON_DEPTH};
+    /// let deep = format!("{{\"x\":{}", "[".repeat(MAX_REQUEST_JSON_DEPTH));
+    /// assert!(QueryRequest::from_json_slice(deep.as_bytes())
+    ///     .unwrap_err()
+    ///     .to_string()
+    ///     .contains("nesting"));
+    /// ```
+    pub fn from_json_slice(bytes: &[u8]) -> sonic_rs::Result<Self> {
+        check_json_depth(bytes)?;
+        sonic_rs::from_slice(bytes)
+    }
+
     fn new(query: BatchQuery) -> Self {
         Self {
             query_name: None,
@@ -644,6 +692,36 @@ fn query_value_kind(value: &QueryValue) -> &'static str {
 mod tests {
     use super::*;
     use crate::batch::{read_batch, write_batch};
+
+    #[test]
+    fn request_json_nesting_is_bounded_before_parsing() {
+        // An unclosed value far deeper than any stack could skip recursively
+        // fails the scan before the parser sees it.
+        assert!(QueryRequest::from_json_slice(
+            format!("{{\"x\":{}", "[".repeat(100_000)).as_bytes()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("nesting"));
+        let depth = |levels: usize| {
+            format!(
+                "{{\"x\":{}{}}}",
+                "[".repeat(levels - 1),
+                "]".repeat(levels - 1)
+            )
+        };
+        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok());
+        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes()).is_err());
+        // Brackets and escaped quotes inside strings are not structure.
+        assert!(
+            check_json_depth(format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()).is_ok()
+        );
+        let request = QueryRequest::read(read_batch());
+        assert_eq!(
+            QueryRequest::from_json_slice(&sonic_rs::to_vec(&request).unwrap()).unwrap(),
+            request
+        );
+    }
 
     fn typed(ty: QueryParamType, value: QueryValue) -> Result<QueryRequest, QueryError> {
         QueryRequest::read(read_batch()).with_typed_parameter("value", ty, value)
