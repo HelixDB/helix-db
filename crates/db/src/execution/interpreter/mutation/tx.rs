@@ -169,7 +169,9 @@ impl<'db> ExecutionContext<'db> {
 
     /// Flushes only deferred families consumed by the next operation. Every
     /// executed step checks this, so a step needing no flush gets a ready
-    /// future and the flush's large state is boxed only when it runs.
+    /// future and the flush's large state is boxed only when it runs. Never
+    /// inlined, so building that state stays out of the calling step's frame.
+    #[inline(never)]
     pub(in crate::execution::interpreter) fn flush_required_mutations(
         &mut self,
         required: super::visibility::RequiredMutationVisibility,

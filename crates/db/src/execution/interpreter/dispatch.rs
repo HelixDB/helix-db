@@ -55,6 +55,10 @@ impl<'db> ExecutionContext<'db> {
         })
     }
 
+    /// Never inlined: building an operation's future stages it on the stack
+    /// before boxing, and inlined into its caller's poll that stack space
+    /// would stay reserved at every level of a nested plan.
+    #[inline(never)]
     fn operation<'a>(
         &'a mut self,
         op: &'a exec::ExecOp,
