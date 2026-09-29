@@ -58,3 +58,25 @@ async fn long_expansion_chains_run_on_the_default_stack() {
     assert_eq!(response["c"], 32);
     db.close().await.unwrap();
 }
+
+/// A request built in memory has no parser bounding its nesting, so the
+/// query entry rejects one past the limit before telemetry, planning or
+/// execution walk it.
+#[tokio::test]
+async fn requests_nested_past_the_limit_fail_cleanly() {
+    let db = users().await;
+    let chain = (0..300).fold(traversal::g().n_with_label("U"), |t, _| t.dedup());
+    let error = db
+        .query(query::QueryRequest::read(
+            batch::read_batch()
+                .var_as("c", chain.count())
+                .returning(["c"]),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("nests deeper than 255 levels"),
+        "{error}"
+    );
+    db.close().await.unwrap();
+}

@@ -116,6 +116,13 @@ pub enum QueryError {
         /// Observed JSON value family.
         actual: &'static str,
     },
+    /// A request or parameter nests deeper than recursive consumers accept.
+    NestingTooDeep {
+        /// The request, or the parameter's path.
+        path: String,
+        /// Deepest accepted nesting.
+        maximum: usize,
+    },
     /// Typed parameter names must exactly match value names.
     ParameterNameMismatch {
         /// Declared names without values.
@@ -168,6 +175,9 @@ impl std::fmt::Display for QueryError {
                 f,
                 "parameter '{path}' expected {expected:?}, but received {actual}"
             ),
+            Self::NestingTooDeep { path, maximum } => {
+                write!(f, "{path} nests deeper than {maximum} levels")
+            }
             Self::ParameterNameMismatch {
                 missing_values,
                 extra_values,
@@ -269,6 +279,39 @@ impl QueryRequest {
     pub fn from_json_slice(bytes: &[u8]) -> sonic_rs::Result<Self> {
         check_json_depth(bytes)?;
         sonic_rs::from_slice(bytes)
+    }
+
+    /// Check with one iterative pass that no batch entry, step, predicate,
+    /// expression or value nests more than [`MAX_REQUEST_JSON_DEPTH`] levels.
+    /// Planning, execution and telemetry walk a request recursively; a JSON
+    /// request is bounded by its text, and this bounds one built in memory.
+    ///
+    /// ```
+    /// use helix_ast::{batch, query::QueryRequest, traversal};
+    /// let chain = (0..10_000).fold(traversal::g().n_with_label("User"), |t, _| t.dedup());
+    /// let request = QueryRequest::read(batch::read_batch().var_as("x", chain).returning(["x"]));
+    /// assert!(request.check_nesting().is_err());
+    /// # std::mem::forget(request);
+    /// ```
+    pub fn check_nesting(&self) -> Result<(), QueryError> {
+        let entries = match &self.query {
+            BatchQuery::Read(batch) => batch.entries(),
+            BatchQuery::Write(batch) => &batch.entries,
+        };
+        let values = match &self.parameters {
+            QueryParameters::Untyped(values) | QueryParameters::Typed { values, .. } => values,
+        };
+        let roots = entries
+            .iter()
+            .map(crate::nesting::Node::Entry)
+            .chain(values.values().map(crate::nesting::Node::Query));
+        match crate::nesting::within(roots, MAX_REQUEST_JSON_DEPTH) {
+            true => Ok(()),
+            false => Err(QueryError::NestingTooDeep {
+                path: "request".to_owned(),
+                maximum: MAX_REQUEST_JSON_DEPTH,
+            }),
+        }
     }
 
     fn new(query: BatchQuery) -> Self {
@@ -591,32 +634,55 @@ fn validate_parameter_name(name: &str) -> Result<(), QueryError> {
     }
 }
 
+/// Validate a parameter value with an explicit stack, so neither its size nor
+/// its nesting reaches the call stack; nesting is bounded like a request.
 fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError> {
-    match value {
-        QueryValue::F64(value) if !value.is_finite() => Err(QueryError::ParameterTypeMismatch {
-            path: path.to_owned(),
-            expected: QueryParamType::Value,
-            actual: "non-finite f64",
-        }),
-        QueryValue::F32(value) if !value.is_finite() => Err(QueryError::ParameterTypeMismatch {
-            path: path.to_owned(),
-            expected: QueryParamType::Value,
-            actual: "non-finite f32",
-        }),
-        QueryValue::Array(values) => values
-            .iter()
-            .enumerate()
-            .try_for_each(|(index, value)| validate_json_value(value, &format!("{path}[{index}]"))),
-        QueryValue::Object(values) => values
-            .iter()
-            .try_for_each(|(name, value)| validate_json_value(value, &format!("{path}.{name}"))),
-        QueryValue::Null
-        | QueryValue::Bool(_)
-        | QueryValue::I64(_)
-        | QueryValue::F64(_)
-        | QueryValue::F32(_)
-        | QueryValue::String(_) => Ok(()),
+    let mut pending = vec![(value, path.to_owned(), 1_usize)];
+    while let Some((value, path, depth)) = pending.pop() {
+        if depth > MAX_REQUEST_JSON_DEPTH {
+            return Err(QueryError::NestingTooDeep {
+                path,
+                maximum: MAX_REQUEST_JSON_DEPTH,
+            });
+        }
+        match value {
+            QueryValue::F64(value) if !value.is_finite() => {
+                return Err(QueryError::ParameterTypeMismatch {
+                    path,
+                    expected: QueryParamType::Value,
+                    actual: "non-finite f64",
+                });
+            }
+            QueryValue::F32(value) if !value.is_finite() => {
+                return Err(QueryError::ParameterTypeMismatch {
+                    path,
+                    expected: QueryParamType::Value,
+                    actual: "non-finite f32",
+                });
+            }
+            // Reverse pushes keep the first invalid element in document order.
+            QueryValue::Array(values) => pending.extend(
+                values
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(index, value)| (value, format!("{path}[{index}]"), depth + 1)),
+            ),
+            QueryValue::Object(values) => pending.extend(
+                values
+                    .iter()
+                    .rev()
+                    .map(|(name, value)| (value, format!("{path}.{name}"), depth + 1)),
+            ),
+            QueryValue::Null
+            | QueryValue::Bool(_)
+            | QueryValue::I64(_)
+            | QueryValue::F64(_)
+            | QueryValue::F32(_)
+            | QueryValue::String(_) => {}
+        }
     }
+    Ok(())
 }
 
 fn normalize_typed_value(
@@ -624,6 +690,26 @@ fn normalize_typed_value(
     value: QueryValue,
     path: &str,
 ) -> Result<QueryValue, QueryError> {
+    // Normalization recurses once per array level of the declared type.
+    let type_depth = std::iter::successors(Some(ty), |ty| match ty {
+        QueryParamType::Array(inner) => Some(inner.as_ref()),
+        QueryParamType::Bool
+        | QueryParamType::I64
+        | QueryParamType::F64
+        | QueryParamType::F32
+        | QueryParamType::String
+        | QueryParamType::DateTime
+        | QueryParamType::Bytes
+        | QueryParamType::Value
+        | QueryParamType::Object => None,
+    })
+    .count();
+    if type_depth > MAX_REQUEST_JSON_DEPTH {
+        return Err(QueryError::NestingTooDeep {
+            path: path.to_owned(),
+            maximum: MAX_REQUEST_JSON_DEPTH,
+        });
+    }
     let actual = query_value_kind(&value);
     match (ty, value) {
         (QueryParamType::Bool, value @ QueryValue::Bool(_))
@@ -692,6 +778,55 @@ fn query_value_kind(value: &QueryValue) -> &'static str {
 mod tests {
     use super::*;
     use crate::batch::{read_batch, write_batch};
+
+    #[test]
+    fn built_requests_and_parameters_are_bounded_without_recursion() {
+        use crate::expr::Predicate;
+        let request = |depth: usize| {
+            let predicate =
+                (0..depth).fold(Predicate::eq("a", 1_i64), |inner, _| Predicate::not(inner));
+            QueryRequest::read(
+                read_batch()
+                    .var_as("x", crate::traversal::g().n_where(predicate))
+                    .returning(["x"]),
+            )
+        };
+        assert!(request(200).check_nesting().is_ok());
+        assert!(matches!(
+            request(300).check_nesting(),
+            Err(QueryError::NestingTooDeep { maximum, .. }) if maximum == MAX_REQUEST_JSON_DEPTH
+        ));
+
+        let value = |depth: usize| {
+            (1..depth).fold(QueryValue::Null, |inner, _| QueryValue::Array(vec![inner]))
+        };
+        let mut request = QueryRequest::read(read_batch());
+        request
+            .try_insert_untyped_parameter("fits", value(MAX_REQUEST_JSON_DEPTH))
+            .unwrap();
+        assert!(request.check_nesting().is_ok());
+        assert!(matches!(
+            request.try_insert_untyped_parameter("deep", value(MAX_REQUEST_JSON_DEPTH + 1)),
+            Err(QueryError::NestingTooDeep { path, .. }) if path.starts_with("deep")
+        ));
+        // Validation is iterative, so a value far past the limit is rejected
+        // rather than walked.
+        assert!(matches!(
+            request.try_insert_untyped_parameter("deeper", value(5_000)),
+            Err(QueryError::NestingTooDeep { .. })
+        ));
+        let ty = (1..=MAX_REQUEST_JSON_DEPTH).fold(QueryParamType::Bool, |inner, _| {
+            QueryParamType::Array(Box::new(inner))
+        });
+        assert!(matches!(
+            QueryRequest::read(read_batch()).try_insert_typed_parameter(
+                "typed",
+                ty,
+                QueryValue::Array(Vec::new())
+            ),
+            Err(QueryError::NestingTooDeep { .. })
+        ));
+    }
 
     #[test]
     fn request_json_nesting_is_bounded_before_parsing() {

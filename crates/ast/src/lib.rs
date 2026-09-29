@@ -37,6 +37,7 @@ pub mod error_code;
 pub mod expr;
 pub mod graph;
 pub mod index;
+mod nesting;
 pub mod prelude;
 pub mod projection;
 pub mod query;

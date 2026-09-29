@@ -237,6 +237,11 @@ pub(crate) async fn execute_query_on_scoped_observed(
     query_metrics: Option<&OssQueryMetrics>,
     execution_control: ExecutionControl,
 ) -> std::result::Result<QueryResponse, QueryServiceError> {
+    // Telemetry, planning and execution walk the request recursively. A JSON
+    // request is bounded by its text; one built in memory is bounded here.
+    request
+        .check_nesting()
+        .map_err(|error| QueryServiceError::InvalidRequest(error.to_string()))?;
     let observation = query_metrics.and_then(|_| QueryObservation::capture(&request, tenant_id));
     let started_at = std::time::Instant::now();
     let result = match execution_control.check() {
