@@ -31,6 +31,7 @@ pub(in crate::rules) enum AccessSourceParts<'a, Plan> {
     Union(Vec<&'a Plan>),
     ScanThenFilter {
         source: &'a Plan,
+        residual: &'a ir::PredicatePlan,
     },
 }
 

@@ -258,6 +258,23 @@ mod tests {
     }
 
     #[test]
+    fn membership_never_decides_virtual_properties() {
+        // A residual over `$id`, `$score`, or `$distance` reads no property
+        // blob, so it costs less than a stored-record filter. No secondary
+        // index answers these properties, so membership never replaces them,
+        // and every membership predicate reads the indexed property's blob.
+        for property in ["$id", "$score", "$distance"] {
+            let predicate = Predicate::eq(property, 1);
+            assert_eq!(rewrite(predicate.clone()), None, "{predicate:?}");
+            let predicate = Predicate::and(vec![
+                Predicate::eq("$label", "Item"),
+                Predicate::eq(property, 1),
+            ]);
+            assert_eq!(rewrite(predicate.clone()), None, "{predicate:?}");
+        }
+    }
+
+    #[test]
     fn membership_keeps_runtime_parameters_for_runtime_classification() {
         let equality = rewrite(Predicate::eq_param("kind", "kind")).unwrap();
         assert!(matches!(

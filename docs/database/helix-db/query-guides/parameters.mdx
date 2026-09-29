@@ -169,7 +169,9 @@ request = query.to_query_request(
 - generic property `value`
 - typed objects and arrays
 
-JSON cannot represent a bytes parameter directly; use an SDK's byte request encoder.
+Query JSON cannot represent bytes, and no SDK provides a byte request encoder. Every SDK rejects a
+bytes parameter with an `UnsupportedBytesParameter` error when it serializes the request, so bytes
+parameters cannot currently be sent to `POST /v2/query`.
 
 In Go, `ParamDateTime` and typed `date_time` parameters accept `helix.DateTime`, `time.Time`, an
 RFC3339 string, or an `int`/`int64` epoch-millisecond value. The SDK normalizes each value to UTC

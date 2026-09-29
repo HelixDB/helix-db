@@ -34,25 +34,51 @@ use crate::search::vector::storage::{CanonicalVectorRowKey, SimHashDirectoryEntr
 use crate::search::vector::unaligned_vector::UnalignedVector;
 use crate::search::vector::{
     decode_item_borrowed, ResultCount, SearchParams, SearchResult, ValidatedMetricVector,
-    VectorDimension, VectorParameterError,
+    VectorDimension, VectorParameterError, SIMHASH_BITS,
 };
 
 const MAX_RESTRICTED_CANDIDATES: u64 = 1_000_000;
-const EXACT_CARDINALITY_THRESHOLD: u64 = 256;
-const EXACT_VECTOR_BYTES_THRESHOLD: u64 = 4 * 1024 * 1024;
-const FETCH_BATCH_SIZE: usize = 256;
+/// Largest candidate set scanned exactly, bounding per-candidate read overhead
+/// for low-dimensional indexes.
+const EXACT_CARDINALITY_THRESHOLD: u64 = 8_192;
+/// Largest candidate vector footprint scanned exactly (8,192 vectors at 768-d).
+///
+/// The bounded walk cannot rank near-tie bands wider than its payload budget:
+/// on 312k 768-d vectors a 5.5k-candidate scope reached 0.69 recall@50 by
+/// walking and 1.0 by exact scan, which was also faster with object-store
+/// latency. Sets that fit the walk's payload budget are always scanned exactly,
+/// and every exact-scan fetch stays within this footprint whatever the width.
+const EXACT_VECTOR_BYTES_THRESHOLD: u64 = 24 * 1024 * 1024;
+/// Most candidates resolved and fetched per exact-scan round trip. Vectors
+/// wider than 6,144 dimensions fetch fewer, so one fetch never holds more than
+/// [`EXACT_VECTOR_BYTES_THRESHOLD`] of payloads.
+const FETCH_BATCH_SIZE: usize = 1_024;
 const DIRECTORY_PREFIX_BITS: u32 = 16;
 const DIRECTORY_MAX_PROBES: usize = 64;
 const DIRECTORY_MAX_ROWS: usize = 65_536;
 const DIRECTORY_MAX_DECODED_BYTES: usize = 4 * 1024 * 1024;
 const DIRECTORY_MAX_CONCURRENT_SCANS: usize = 8;
 const FRONTIER_BATCH_SIZE: usize = 16;
-const BRIDGE_BATCH_SIZE: usize = 256;
+/// Floor of the rejected-bridge batch expanded per round. Dense filters rarely
+/// need bridges, so rounds that fill their scoring quota halve back to this
+/// floor and keep layer-zero row reads proportional to useful work; rounds that
+/// fall short double the batch they expanded (see [`BridgeBatchSize`]).
+const BRIDGE_BATCH_SIZE: usize = 32;
 const FILTERED_BEAM_PERCENT: usize = 150;
 const FILTERED_BEAM_PERCENT_DENOMINATOR: usize = 100;
 const FILTERED_SAMPLED_SEEDS: usize = 64;
 const FILTERED_DIRECTORY_SEEDS: usize = 256;
 const MAX_RESTRICTED_RESULT_COUNT: usize = 800;
+/// Estimated bridges ranked per selected bridge by a batch's first SimHash read.
+const BRIDGE_RANK_WINDOW: usize = 2;
+/// Dependent SimHash reads that may rank estimated bridges while selecting one
+/// batch: a [`BRIDGE_RANK_WINDOW`] per slot, then one per slot still open once
+/// the first read's ranked bridges are taken.
+const BRIDGE_RANK_READS: usize = 2;
+/// Rank penalty applied to each graph hop an inherited rank crosses.
+const BRIDGE_HOP_PENALTY_BITS: u32 = 1;
+/// Inherited rank when the discovering row has no known rank (uncorrelated).
+const BRIDGE_UNKNOWN_HAMMING: u32 = (SIMHASH_BITS / 2) as u32;
 const FILTERED_VECTOR_PAYLOAD_LIMIT: usize = MAX_RESTRICTED_RESULT_COUNT;
 
 #[cfg(feature = "production-scale")]
@@ -118,9 +144,9 @@ fn effective_filtered_beam_percent() -> usize {
     FILTERED_BEAM_PERCENT
 }
 
-/// Restricted-search execution selected after exact cardinality/byte admission.
+/// Restricted-search execution selected by exact candidate cardinality and bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RestrictedSearchStrategy {
+pub enum RestrictedSearchStrategy {
     /// Locality-sorted exact vector scan.
     Exact,
     /// Bounded directory/sample-seeded filtered graph traversal.
@@ -132,7 +158,8 @@ pub(crate) enum RestrictedSearchStrategy {
 pub(crate) enum RestrictedSearchTermination {
     /// No scored candidate or global routing anchor remained to expand.
     Exhausted,
-    /// The full allowed beam proved that the remaining frontier was worse.
+    /// The full allowed beam proved that the remaining frontier was worse and
+    /// no queued bridge could still be expanded.
     BeamComplete,
     /// The total layer-zero routing-row budget was exhausted.
     RoutingBudget,
@@ -292,10 +319,187 @@ struct RestrictedScoringState<'a> {
     stats: &'a mut RestrictedSearchStats,
 }
 
+/// Bridges expanded per walk round, never below [`BRIDGE_BATCH_SIZE`].
+///
+/// Each size follows from the batch the previous round actually expanded. A
+/// round whose discoveries fall short of its scoring quota doubles that batch,
+/// so sparse or disconnected scopes and large result counts reach new allowed
+/// regions, or spend the bridge budget, in logarithmically many dependent
+/// rounds. A round that fills its quota halves it back towards the floor. A
+/// round cut short by the queue or the budgets therefore grows from its own
+/// length: no batch exceeds twice the one before it or the floor, however many
+/// short rounds precede it. Callers still cap each batch by the remaining
+/// budgets and the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BridgeBatchSize(usize);
+
+impl BridgeBatchSize {
+    const FLOOR: Self = Self(BRIDGE_BATCH_SIZE);
+
+    const fn get(self) -> usize {
+        self.0
+    }
+
+    /// Batch for the round after one that expanded `expanded` bridges and found
+    /// `eligible` unscored allowed candidates towards a scoring quota of `quota`.
+    fn after_round(expanded: usize, eligible: usize, quota: usize) -> Self {
+        let next = if eligible < quota {
+            expanded.saturating_mul(2)
+        } else {
+            expanded / 2
+        };
+        Self(next.max(BRIDGE_BATCH_SIZE))
+    }
+}
+
+/// A queued bridge ranked by its own SimHash, ordered by query Hamming rank
+/// then node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RankedBridge {
+    hamming: u32,
+    node_id: NodeId,
+}
+
+/// A queued bridge whose rank is still inherited from a discovering row,
+/// ordered by that estimate then node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct EstimatedBridge {
+    estimate: u32,
+    node_id: NodeId,
+}
+
+/// Rejected nodes waiting to be expanded as bridges; each node is queued once.
+///
+/// A ranked bridge carries its own query Hamming rank. An estimated bridge
+/// carries the lowest rank inherited from any row that discovered it (that
+/// row's rank plus one hop), which costs no read. Heap entries superseded by a
+/// lower estimate or by ranking are skipped when popped. Only ranked bridges
+/// leave the queue for expansion.
+#[derive(Debug, Default)]
+struct BridgeQueue {
+    /// Every node ever queued; expanded bridges stay so they are never re-queued.
+    queued: HashSet<NodeId>,
+    ranked: BinaryHeap<Reverse<RankedBridge>>,
+    /// Current estimate of every queued bridge that is not yet ranked.
+    estimates: HashMap<NodeId, u32>,
+    estimated: BinaryHeap<Reverse<EstimatedBridge>>,
+}
+
+impl BridgeQueue {
+    /// Bridges still waiting to be expanded.
+    fn len(&self) -> usize {
+        self.ranked.len() + self.estimates.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ranked.is_empty() && self.estimates.is_empty()
+    }
+
+    /// Queues an unseen node, ranked when `rank` is known. A still-estimated
+    /// bridge rediscovered with a lower estimate takes it; ranked and expanded
+    /// bridges keep their place. Returns whether a heap entry was pushed.
+    fn offer(&mut self, node_id: NodeId, rank: Option<u32>, inherited: u32) -> bool {
+        if self.queued.insert(node_id) {
+            let Some(hamming) = rank else {
+                self.estimates.insert(node_id, inherited);
+                self.estimated.push(Reverse(EstimatedBridge {
+                    estimate: inherited,
+                    node_id,
+                }));
+                return true;
+            };
+            self.ranked.push(Reverse(RankedBridge { hamming, node_id }));
+            return true;
+        }
+        let Some(estimate) = self.estimates.get_mut(&node_id) else {
+            return false;
+        };
+        if inherited >= *estimate {
+            return false;
+        }
+        *estimate = inherited;
+        self.estimated.push(Reverse(EstimatedBridge {
+            estimate: inherited,
+            node_id,
+        }));
+        true
+    }
+
+    /// Lowest current estimate, discarding superseded heap entries.
+    fn best_estimate(&mut self) -> Option<u32> {
+        while let Some(Reverse(head)) = self.estimated.peek().copied() {
+            if self.estimates.get(&head.node_id) == Some(&head.estimate) {
+                return Some(head.estimate);
+            }
+            self.estimated.pop();
+        }
+        None
+    }
+
+    /// Pops the best ranked bridge unless an estimate is lower than its rank;
+    /// ranked bridges win ties.
+    fn pop_ranked_ahead_of_estimates(&mut self) -> Option<RankedBridge> {
+        let Reverse(head) = self.ranked.peek().copied()?;
+        if self
+            .best_estimate()
+            .is_some_and(|estimate| estimate < head.hamming)
+        {
+            return None;
+        }
+        self.pop_ranked()
+    }
+
+    fn pop_ranked(&mut self) -> Option<RankedBridge> {
+        self.ranked.pop().map(|Reverse(bridge)| bridge)
+    }
+
+    /// Pops up to `count` estimated bridges with the lowest current estimates.
+    fn pop_estimated(&mut self, count: usize) -> Vec<NodeId> {
+        let mut popped = Vec::new();
+        while popped.len() < count {
+            let Some(Reverse(head)) = self.estimated.pop() else {
+                break;
+            };
+            if self.estimates.get(&head.node_id) == Some(&head.estimate) {
+                self.estimates.remove(&head.node_id);
+                popped.push(head.node_id);
+            }
+        }
+        popped
+    }
+}
+
 struct RestrictedBridgeState {
     simhash_cache: HashMap<NodeId, Option<crate::search::vector::SimHash>>,
-    queued: HashSet<NodeId>,
-    frontier: BinaryHeap<Reverse<(u32, NodeId)>>,
+    /// Query Hamming ranks known without a SimHash row (directory seeds).
+    known_hamming: HashMap<NodeId, u32>,
+    queue: BridgeQueue,
+}
+
+impl RestrictedBridgeState {
+    /// Query Hamming rank of an already resolved node, if known.
+    fn hamming(&self, node_id: NodeId, query_hash: crate::search::vector::SimHash) -> Option<u32> {
+        match self.simhash_cache.get(&node_id) {
+            Some(Some(simhash)) => Some(simhash.hamming_distance(&query_hash)),
+            Some(None) | None => self.known_hamming.get(&node_id).copied(),
+        }
+    }
+
+    /// Queues rejected nodes with their inherited estimates without reading
+    /// their SimHash rows.
+    fn enqueue(
+        &mut self,
+        query_hash: crate::search::vector::SimHash,
+        candidates: impl IntoIterator<Item = (NodeId, u32)>,
+        stats: &mut RestrictedSearchStats,
+    ) {
+        for (node_id, inherited) in candidates {
+            let rank = self.hamming(node_id, query_hash);
+            if self.queue.offer(node_id, rank, inherited) {
+                stats.bridge_frontier_pushes = stats.bridge_frontier_pushes.saturating_add(1);
+            }
+        }
+    }
 }
 
 /// A non-empty, exact traversal-membership bitmap.
@@ -434,8 +638,9 @@ fn restricted_execution_plan_with_beam_percent<'a>(
         .len()
         .saturating_mul(dimension as u64)
         .saturating_mul(core::mem::size_of::<f32>() as u64);
-    if candidates.len() <= EXACT_CARDINALITY_THRESHOLD
-        && estimated_vector_bytes <= EXACT_VECTOR_BYTES_THRESHOLD
+    if candidates.len() <= FILTERED_VECTOR_PAYLOAD_LIMIT as u64
+        || (candidates.len() <= EXACT_CARDINALITY_THRESHOLD
+            && estimated_vector_bytes <= EXACT_VECTOR_BYTES_THRESHOLD)
     {
         RestrictedExecutionPlan::Exact { candidates, k }
     } else {
@@ -470,11 +675,29 @@ impl<D: Distance> VectorIndex<D> {
         params: &SearchParams,
         allowed: &RestrictedVectorCandidates,
     ) -> Result<Vec<SearchResult>, HelixDbError> {
-        let (results, _stats) = self
+        let started = std::time::Instant::now();
+        let (results, stats) = self
             .search_restricted_observed(read, query, params, allowed)
             .await?;
+        tracing::debug!(
+            target: "helix::vector::restricted",
+            index = self.id(),
+            elapsed_us = started.elapsed().as_micros() as u64,
+            strategy = ?stats.strategy,
+            termination = ?stats.termination,
+            ef_filtered = stats.ef_filtered,
+            directory_scan_calls = stats.directory_scan_calls,
+            directory_hits = stats.directory_hits,
+            simhash_row_requests = stats.simhash_row_requests,
+            routing_rows = stats.routing_rows,
+            bridge_rows = stats.bridge_rows,
+            bridge_frontier_pushes = stats.bridge_frontier_pushes,
+            vector_payload_requests = stats.vector_payload_requests,
+            vector_bytes = stats.vector_bytes,
+            "restricted vector search"
+        );
         #[cfg(any(test, feature = "production-coverage"))]
-        record_restricted_search(&_stats);
+        record_restricted_search(&stats);
         Ok(results)
     }
 
@@ -703,26 +926,19 @@ impl<D: Distance> VectorIndex<D> {
         Ok(())
     }
 
-    /// Adds unseen rejected graph nodes to the compact query-guided bridge frontier.
+    /// Reads SimHash rows for estimated bridges and queues them ranked.
     ///
-    /// Bridge routing never reads or scores vector payloads. A graph neighbor or
-    /// entry point without its mandatory SimHash companion is index corruption,
-    /// not an absent candidate that can be skipped.
-    async fn restricted_enqueue_bridges(
+    /// Bridge routing never reads or scores vector payloads. A bridge without its
+    /// mandatory SimHash companion is index corruption, not an absent candidate
+    /// that can be skipped.
+    async fn restricted_rank_bridges(
         &self,
         read: &(impl DbReadOps + Send + Sync),
         query_hash: crate::search::vector::SimHash,
-        node_ids: impl IntoIterator<Item = NodeId>,
+        node_ids: Vec<NodeId>,
         bridge_state: &mut RestrictedBridgeState,
         stats: &mut RestrictedSearchStats,
     ) -> Result<(), HelixDbError> {
-        let node_ids = node_ids
-            .into_iter()
-            .filter(|node_id| bridge_state.queued.insert(*node_id))
-            .collect::<Vec<_>>();
-        if node_ids.is_empty() {
-            return Ok(());
-        }
         let reads = self
             .fill_simhash_cache_for_nodes_counted::<false>(
                 read,
@@ -742,12 +958,55 @@ impl<D: Distance> VectorIndex<D> {
                     "ranking traversal-scoped rejected bridge nodes",
                 ));
             };
-            bridge_state
-                .frontier
-                .push(Reverse((simhash.hamming_distance(&query_hash), node_id)));
-            stats.bridge_frontier_pushes = stats.bridge_frontier_pushes.saturating_add(1);
+            bridge_state.queue.ranked.push(Reverse(RankedBridge {
+                hamming: simhash.hamming_distance(&query_hash),
+                node_id,
+            }));
         }
         Ok(())
+    }
+
+    /// Pops up to `count` bridges for expansion, each ranked by its own SimHash.
+    ///
+    /// Estimates only order the queue. Before each of at most
+    /// [`BRIDGE_RANK_READS`] SimHash reads, ranked bridges are taken while no
+    /// estimate is lower than their rank. The first read then ranks the
+    /// `BRIDGE_RANK_WINDOW * count` lowest estimates, and each later read ranks
+    /// one per slot still open once the bridges ranked so far are taken. Slots
+    /// open after the last read take the best ranked bridges, so an estimated
+    /// bridge is never expanded and SimHash reads stay within
+    /// `(BRIDGE_RANK_WINDOW + 1) * count` per batch.
+    async fn restricted_select_bridges(
+        &self,
+        read: &(impl DbReadOps + Send + Sync),
+        query_hash: crate::search::vector::SimHash,
+        count: usize,
+        bridge_state: &mut RestrictedBridgeState,
+        stats: &mut RestrictedSearchStats,
+    ) -> Result<Vec<RankedBridge>, HelixDbError> {
+        let mut selected = Vec::with_capacity(count);
+        for rank_read in 0..BRIDGE_RANK_READS {
+            let open = count - selected.len();
+            selected.extend(
+                std::iter::from_fn(|| bridge_state.queue.pop_ranked_ahead_of_estimates())
+                    .take(open),
+            );
+            let open = count - selected.len();
+            if open == 0 {
+                return Ok(selected);
+            }
+            let window = if rank_read == 0 {
+                count.saturating_mul(BRIDGE_RANK_WINDOW)
+            } else {
+                open
+            };
+            let estimated = bridge_state.queue.pop_estimated(window);
+            self.restricted_rank_bridges(read, query_hash, estimated, bridge_state, stats)
+                .await?;
+        }
+        let open = count - selected.len();
+        selected.extend(std::iter::from_fn(|| bridge_state.queue.pop_ranked()).take(open));
+        Ok(selected)
     }
 
     async fn restricted_exact_scan(
@@ -764,11 +1023,21 @@ impl<D: Distance> VectorIndex<D> {
         let mut unused_frontier = BinaryHeap::new();
         let mut scored = HashSet::with_capacity(allowed.len() as usize);
         let mut simhash_cache = HashMap::new();
-        let mut batch = Vec::with_capacity(FETCH_BATCH_SIZE);
+        // Payload-sized scopes are exact at any width, so the byte budget also
+        // bounds each fetch: wide vectors split one scope across round trips
+        // instead of holding every payload at once.
+        let batch_len = FETCH_BATCH_SIZE
+            .min(
+                usize::try_from(EXACT_VECTOR_BYTES_THRESHOLD)
+                    .expect("exact byte budget fits usize")
+                    / dimension.get().saturating_mul(core::mem::size_of::<f32>()),
+            )
+            .max(1);
+        let mut batch = Vec::with_capacity(batch_len);
 
         for node_id in allowed.iter() {
             batch.push(node_id);
-            if batch.len() < FETCH_BATCH_SIZE {
+            if batch.len() < batch_len {
                 continue;
             }
             let keyed = self
@@ -923,10 +1192,15 @@ impl<D: Distance> VectorIndex<D> {
         directory_seeds.sort_unstable_by_key(|(hamming, node_id, _)| (*hamming, *node_id));
         directory_seeds.truncate(budgets.directory_seeds);
 
+        // Order codes interleave SimHash bits, so their XOR popcount is the
+        // node's exact query Hamming rank.
         let mut bridge_state = RestrictedBridgeState {
             simhash_cache: HashMap::new(),
-            queued: HashSet::new(),
-            frontier: BinaryHeap::new(),
+            known_hamming: directory_seeds
+                .iter()
+                .map(|(hamming, node_id, _)| (*node_id, *hamming))
+                .collect(),
+            queue: BridgeQueue::default(),
         };
         let sampled_ids = allowed.deterministic_sample_ids(budgets.sampled_seeds);
         let mut attempted = sampled_ids.iter().copied().collect::<HashSet<_>>();
@@ -978,15 +1252,9 @@ impl<D: Distance> VectorIndex<D> {
         .await?;
 
         let mut expanded = HashSet::new();
+        let mut bridge_batch_size = BridgeBatchSize::FLOOR;
         if !allowed.contains(entry_point) {
-            self.restricted_enqueue_bridges(
-                read,
-                query_hash,
-                [entry_point],
-                &mut bridge_state,
-                stats,
-            )
-            .await?;
+            bridge_state.enqueue(query_hash, [(entry_point, 0)], stats);
         }
 
         loop {
@@ -994,27 +1262,20 @@ impl<D: Distance> VectorIndex<D> {
                 stats.termination = Some(RestrictedSearchTermination::VectorBudget);
                 break;
             }
-            if bridge_state.frontier.is_empty()
-                && top.len() >= budgets.ef_filtered
-                && frontier
+            // SimHash ranks only order bridges; none is a bound on distance, so
+            // the beam is complete only once no queued bridge can be expanded.
+            let bridges_pending =
+                !bridge_state.queue.is_empty() && stats.bridge_rows < budgets.bridge_rows;
+            let beam_complete = !bridges_pending
+                && top
                     .peek()
-                    .zip(top.peek())
-                    .is_some_and(|(Reverse(next), worst)| next > worst)
-            {
+                    .filter(|_| top.len() >= budgets.ef_filtered)
+                    .is_some_and(|worst| frontier.peek().is_some_and(|Reverse(next)| next > worst));
+            if beam_complete {
                 stats.termination = Some(RestrictedSearchTermination::BeamComplete);
                 break;
             }
-
-            let mut routing_batch = Vec::with_capacity(FRONTIER_BATCH_SIZE + 1);
-            while routing_batch.len() < FRONTIER_BATCH_SIZE {
-                let Some(Reverse(candidate)) = frontier.pop() else {
-                    break;
-                };
-                if expanded.insert(candidate.node_id) {
-                    routing_batch.push(candidate.node_id);
-                }
-            }
-            if routing_batch.is_empty() && bridge_state.frontier.is_empty() {
+            if frontier.is_empty() && bridge_state.queue.is_empty() {
                 stats.termination = Some(RestrictedSearchTermination::Exhausted);
                 break;
             }
@@ -1023,7 +1284,18 @@ impl<D: Distance> VectorIndex<D> {
                 stats.termination = Some(RestrictedSearchTermination::RoutingBudget);
                 break;
             }
-            routing_batch.truncate(routing_remaining);
+
+            // Pops only what the routing budget can read, so every popped
+            // candidate is expanded and none is silently dropped.
+            let mut routing_batch = Vec::with_capacity(FRONTIER_BATCH_SIZE);
+            while routing_batch.len() < FRONTIER_BATCH_SIZE.min(routing_remaining) {
+                let Some(Reverse(candidate)) = frontier.pop() else {
+                    break;
+                };
+                if expanded.insert(candidate.node_id) {
+                    routing_batch.push(candidate.node_id);
+                }
+            }
             let mut eligible = Vec::new();
             let mut eligible_seen = HashSet::new();
             let mut rejected = Vec::new();
@@ -1032,77 +1304,77 @@ impl<D: Distance> VectorIndex<D> {
                 stats.routing_rows = stats.routing_rows.saturating_add(routing_batch.len());
                 stats.neighbor_multi_get_calls = stats.neighbor_multi_get_calls.saturating_add(1);
                 routing_remaining = routing_remaining.saturating_sub(routing_batch.len());
-                for row in direct_rows.into_iter().flatten() {
-                    for node_id in row {
+                for (parent, row) in routing_batch.iter().zip(direct_rows) {
+                    let inherited = bridge_state
+                        .hamming(*parent, query_hash)
+                        .unwrap_or(BRIDGE_UNKNOWN_HAMMING)
+                        .saturating_add(BRIDGE_HOP_PENALTY_BITS);
+                    for node_id in row.into_iter().flatten() {
                         if allowed.contains(node_id) {
                             if !attempted.contains(&node_id) && eligible_seen.insert(node_id) {
                                 eligible.push(node_id);
                             }
                         } else {
-                            rejected.push(node_id);
+                            rejected.push((node_id, inherited));
                         }
                     }
                 }
             }
-            self.restricted_enqueue_bridges(
-                read,
-                query_hash,
-                rejected.drain(..),
-                &mut bridge_state,
-                stats,
-            )
-            .await?;
+            bridge_state.enqueue(query_hash, rejected.drain(..), stats);
 
             let bridge_remaining = budgets.bridge_rows.saturating_sub(stats.bridge_rows);
             let bridge_batch_len = bridge_remaining
                 .min(routing_remaining)
-                .min(BRIDGE_BATCH_SIZE)
-                .min(bridge_state.frontier.len());
-            let bridge_batch = (0..bridge_batch_len)
-                .filter_map(|_| {
-                    bridge_state
-                        .frontier
-                        .pop()
-                        .map(|Reverse((_, node_id))| node_id)
-                })
-                .collect::<Vec<_>>();
+                .min(bridge_batch_size.get())
+                .min(bridge_state.queue.len());
+            let bridge_batch = self
+                .restricted_select_bridges(
+                    read,
+                    query_hash,
+                    bridge_batch_len,
+                    &mut bridge_state,
+                    stats,
+                )
+                .await?;
             if !bridge_batch.is_empty() {
-                let bridge_rows = rows.layer0_neighbor_rows(&bridge_batch).await?;
+                let bridge_ids = bridge_batch
+                    .iter()
+                    .map(|bridge| bridge.node_id)
+                    .collect::<Vec<_>>();
+                let bridge_rows = rows.layer0_neighbor_rows(&bridge_ids).await?;
                 stats.routing_rows = stats.routing_rows.saturating_add(bridge_batch.len());
                 stats.bridge_rows = stats.bridge_rows.saturating_add(bridge_batch.len());
                 stats.neighbor_multi_get_calls = stats.neighbor_multi_get_calls.saturating_add(1);
-                for row in bridge_rows.into_iter().flatten() {
-                    for node_id in row {
+                for (bridge, row) in bridge_batch.iter().zip(bridge_rows) {
+                    let inherited = bridge.hamming.saturating_add(BRIDGE_HOP_PENALTY_BITS);
+                    for node_id in row.into_iter().flatten() {
                         if allowed.contains(node_id) {
                             if !attempted.contains(&node_id) && eligible_seen.insert(node_id) {
                                 eligible.push(node_id);
                             }
                         } else {
-                            rejected.push(node_id);
+                            rejected.push((node_id, inherited));
                         }
                     }
                 }
-                self.restricted_enqueue_bridges(
-                    read,
-                    query_hash,
-                    rejected.drain(..),
-                    &mut bridge_state,
-                    stats,
-                )
-                .await?;
-            } else if routing_batch.is_empty() && !bridge_state.frontier.is_empty() {
+                bridge_state.enqueue(query_hash, rejected.drain(..), stats);
+            } else if routing_batch.is_empty() && !bridge_state.queue.is_empty() {
                 stats.termination = Some(RestrictedSearchTermination::BridgeBudget);
                 break;
             }
 
-            let vector_remaining = budgets
+            // The loop-top guard left payload budget, and routing and bridge
+            // reads never score vectors.
+            debug_assert!(stats.vector_payload_requests < budgets.vector_payloads);
+            let scoring_quota = budgets
                 .vector_payloads
-                .saturating_sub(stats.vector_payload_requests);
-            if vector_remaining == 0 {
-                stats.termination = Some(RestrictedSearchTermination::VectorBudget);
-                break;
+                .saturating_sub(stats.vector_payload_requests)
+                .min(budgets.ef_filtered);
+            if !bridge_batch.is_empty() {
+                bridge_batch_size =
+                    BridgeBatchSize::after_round(bridge_batch.len(), eligible.len(), scoring_quota);
             }
-            eligible.truncate(vector_remaining.min(budgets.ef_filtered));
+            eligible.truncate(scoring_quota);
             if eligible.is_empty() {
                 continue;
             }

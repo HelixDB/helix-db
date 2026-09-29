@@ -7,15 +7,34 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-HelixDB v3 uses one operation-tree request model across the Rust, TypeScript, Go, and Python SDKs.
-Choose a setup guide:
+Every HelixDB SDK builds the same operation-tree request and sends it to
+`POST /v2/query`, so the query guides apply to all four languages. Pick the SDK for
+your application's language:
 
-- [Rust](/database/helix-db/start-here/sdk-setup/rust-project-setup) — typed DSL and async HTTP client.
-- [TypeScript](/database/helix-db/start-here/sdk-setup/typescript-project-setup) — typed DSL and JavaScript runtime support.
-- [Go](/database/helix-db/start-here/sdk-setup/go-project-setup) — server query builder and HTTP client.
-- [Python](/database/helix-db/start-here/sdk-setup/python-project-setup) — synchronous and asynchronous clients.
+| SDK | Package | HTTP client | Embedded runtime |
+| --- | --- | --- | --- |
+| Rust | `helix-db` (imported as `helix_db`) | Async | Yes, behind the `embedded` feature |
+| TypeScript | `@helix-db/helix-db` (ESM, Node.js 20+) | Async | Yes |
+| Go | `github.com/helixdb/helix-db/sdks/go` | Yes | Not yet |
+| Python | `helix-db` (imported as `helixdb`) | Sync and async | Yes, with `helix-db-embedded` |
 
-For HTTP execution, all current SDKs can send dynamic requests to `POST /v2/query`. Rust,
-TypeScript, and Python also support embedded runtimes; the published Go SDK is currently HTTP-only.
-Use the same query guides after setup for reads, writes, indexes, traversals, search, projections,
-and typed parameters.
+<CardGroup cols={2}>
+  <Card title="Rust" icon="rust" href="/database/helix-db/start-here/sdk-setup/rust-project-setup">
+    Typed DSL, `#[query]` macro, and async HTTP client.
+  </Card>
+  <Card title="TypeScript" icon="square-js" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
+    Typed DSL and async client for Node.js 20 or newer.
+  </Card>
+  <Card title="Go" icon="golang" href="/database/helix-db/start-here/sdk-setup/go-project-setup">
+    Query builder and HTTP client.
+  </Card>
+  <Card title="Python" icon="python" href="/database/helix-db/start-here/sdk-setup/python-project-setup">
+    Synchronous and asynchronous clients.
+  </Card>
+</CardGroup>
+
+## Next steps
+
+After setup, the [query walkthrough](/database/helix-db/core-concepts/overview) builds
+and runs a first query, and the query guides cover reads, writes, traversals,
+filtering, projections, parameters, and search in every language.

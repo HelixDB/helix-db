@@ -391,3 +391,114 @@ fn graph_scans_charge_rows_at_empty_small_and_saturating_estimates() {
         assert!(elements.latency >= profile.range_scan(rows).latency);
     }
 }
+
+#[test]
+fn membership_price_never_ties_the_per_row_filter() {
+    let profiles = [
+        StorageCostProfile::default(),
+        StorageCostProfile {
+            authoritative_verify_per_id: LatencyEstimate::ZERO,
+            cpu_predicate_eval: LatencyEstimate::ZERO,
+            ..StorageCostProfile::default()
+        },
+        StorageCostProfile {
+            object_get_latency: LatencyEstimate::ZERO,
+            ..StorageCostProfile::default()
+        },
+        StorageCostProfile {
+            object_get_latency: LatencyEstimate::micros(50_000),
+            ..StorageCostProfile::default()
+        },
+    ];
+    // Membership predicates with one leaf, two as a label-scoped predicate, and
+    // many. Each is priced against the per-row filter over the same predicate.
+    let kind = helix_ast::expr::Predicate::eq("kind", "B");
+    let predicates = [
+        kind.clone(),
+        helix_ast::expr::Predicate::and(vec![
+            helix_ast::expr::Predicate::eq("$label", "Attribute"),
+            kind,
+        ]),
+        helix_ast::expr::Predicate::or(
+            (0..32)
+                .map(|value| helix_ast::expr::Predicate::eq("kind", value))
+                .collect(),
+        ),
+    ];
+    // An unindexed conjunct stays a residual filter behind the membership.
+    let residual = helix_ast::expr::Predicate::contains("title", "x");
+    for profile in &profiles {
+        let set = profile.bitmap_equality_lookup(EstimatedRows::rows(10));
+        let label = profile.bitmap_equality_lookup(EstimatedRows::rows(1_000));
+        for predicate in &predicates {
+            let whole = helix_ast::expr::Predicate::and(vec![predicate.clone(), residual.clone()]);
+            for count in 0..=RECORD_BATCH_ROWS {
+                let rows = EstimatedRows::rows(count);
+                let filter = crate::optimizer::cost_key(profile.residual_filter(predicate, rows));
+                for label_domain in [None, Some(label)] {
+                    let unbounded = profile.index_membership_filter(
+                        predicate,
+                        set,
+                        label_domain,
+                        MembershipStream::MayExceedOneBatch(rows),
+                    );
+                    let bounded = crate::optimizer::cost_key(profile.index_membership_filter(
+                        predicate,
+                        set,
+                        label_domain,
+                        MembershipStream::WithinOneBatch(RecordBatchRows::at_most(count)),
+                    ));
+                    match count {
+                        0 => assert!(
+                            crate::optimizer::cost_key(unbounded) > filter,
+                            "{profile:?} {predicate:?} rows {count}"
+                        ),
+                        _ => assert!(
+                            crate::optimizer::cost_key(unbounded) < filter,
+                            "{profile:?} {predicate:?} rows {count}"
+                        ),
+                    }
+                    assert!(bounded > filter, "{profile:?} {predicate:?} rows {count}");
+
+                    // When the set keeps every row, the residual reads each kept
+                    // record a second time, which outweighs the membership's
+                    // credit even at a single row: the whole predicate stays
+                    // one per-row filter.
+                    assert!(
+                        crate::optimizer::cost_key(
+                            unbounded.serial(profile.residual_filter(&residual, rows))
+                        ) > crate::optimizer::cost_key(profile.residual_filter(&whole, rows)),
+                        "{profile:?} {predicate:?} rows {count}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn membership_stream_classifies_by_proven_bound() {
+    let rows = EstimatedRows::rows(10);
+    [(0, 0), (2, 2), (256, 10)]
+        .into_iter()
+        .for_each(|(upper, capped)| {
+            assert_eq!(
+                MembershipStream::new(rows, Some(upper)),
+                MembershipStream::WithinOneBatch(RecordBatchRows::at_most(capped))
+            );
+        });
+    [Some(257), Some(usize::MAX), None]
+        .into_iter()
+        .for_each(|upper| {
+            assert_eq!(
+                MembershipStream::new(rows, upper),
+                MembershipStream::MayExceedOneBatch(rows)
+            );
+        });
+    assert_eq!(
+        MembershipStream::new(EstimatedRows::rows(1_000), Some(256)),
+        MembershipStream::WithinOneBatch(RecordBatchRows::at_most(256))
+    );
+    assert!(RecordBatchRows::rows(RECORD_BATCH_ROWS).is_some());
+    assert!(RecordBatchRows::rows(257).is_none());
+}

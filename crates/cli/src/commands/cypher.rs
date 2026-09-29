@@ -1,4 +1,4 @@
-use crate::{config::InstanceInfo, project::ProjectContext};
+use crate::{config::InstanceInfo, output, project::ProjectContext};
 use eyre::{eyre, Result};
 
 #[derive(clap::Args)]
@@ -19,8 +19,6 @@ pub struct Args {
     host: Option<String>,
     #[arg(long)]
     port: Option<u16>,
-    #[arg(long)]
-    compact: bool,
     /// Show selected plans and blocking work without executing the statement
     #[arg(long)]
     explain: bool,
@@ -34,11 +32,10 @@ pub async fn run(args: Args) -> Result<()> {
         parameters,
         host,
         port,
-        compact,
         explain,
     } = args;
     let project = ProjectContext::find_and_load(None)?;
-    let instance = super::query::resolve_instance_target(&project, instance)?;
+    let instance = super::query::resolve_instance_name(&project, instance)?;
     let InstanceInfo::Local(config) = project.config.get_instance(&instance)? else {
         return Err(eyre!(
             "Cypher CLI requests currently require a local instance"
@@ -72,5 +69,16 @@ pub async fn run(args: Args) -> Result<()> {
             String::from_utf8_lossy(&bytes)
         ));
     }
-    super::query::print_response(&bytes, compact)
+    // Highlighted pretty JSON for humans, compact JSON under `--json`, as
+    // `helix query` prints its responses.
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+    });
+    output::emit(&body, |body| {
+        println!("{}", output::json::pretty(body, console::colors_enabled()));
+        Ok(())
+    })
 }

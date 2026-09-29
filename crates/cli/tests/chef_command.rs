@@ -45,7 +45,7 @@ async fn headless_chef_runs_setup_and_surfaces_external_tool_errors() {
     fs::create_dir_all(project.join("web")).unwrap();
     fs::write(project.join("web/package.json"), "{}").unwrap();
 
-    let chef = stdout(
+    let chef = stderr(
         fixture
             .command()
             .current_dir(fixture.root())

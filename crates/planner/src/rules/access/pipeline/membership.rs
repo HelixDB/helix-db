@@ -6,7 +6,10 @@
 //! [`logical::StreamPipelineOp::IndexMembership`] step plus a residual filter
 //! for unindexed conjuncts. Root wrappers inline their streams, so the rule
 //! also rewrites the pipeline inside them. Costing decides whether the
-//! membership alternative beats the per-row filter.
+//! membership alternative beats the per-row filter (see
+//! `StorageCostProfile::index_membership_filter`: unbounded streams, such as
+//! every expansion, prefer membership because the interpreter evaluates short
+//! streams row by row).
 
 use super::super::filter::{index_membership_filter, MembershipFilterRewrite};
 use crate::{catalog, context, logical, optimizer, properties, rules};

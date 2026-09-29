@@ -102,7 +102,7 @@ fn init_and_add_generate_expected_project_files() {
         config["local"]["dev"]["image"].as_str(),
         Some("ghcr.io/helixdb/helixdb")
     );
-    assert_eq!(config["local"]["dev"]["tag"].as_str(), Some("v0.0.6"));
+    assert_eq!(config["local"]["dev"]["tag"].as_str(), Some("v0.0.7"));
 
     let gitignore = fs::read_to_string(project.join(".gitignore")).unwrap();
     assert!(gitignore.lines().any(|line| line == ".helix/"));
@@ -366,7 +366,11 @@ fn local_runtime_commands_have_cross_platform_no_daemon_smoke_coverage() {
             .assert()
             .success(),
     );
-    assert!(status.contains("dev (local)"));
+    let dev = status
+        .lines()
+        .find(|line| line.starts_with("dev "))
+        .unwrap_or_default();
+    assert!(dev.contains("local"), "{status}");
     assert!(status.contains("not created"));
 
     let logs = stdout(
@@ -379,7 +383,7 @@ fn local_runtime_commands_have_cross_platform_no_daemon_smoke_coverage() {
     );
     assert!(logs.contains("fake logs"));
 
-    let stop = stdout(
+    let stop = stderr(
         fixture
             .command()
             .current_dir(&project)
@@ -389,7 +393,7 @@ fn local_runtime_commands_have_cross_platform_no_daemon_smoke_coverage() {
     );
     assert!(stop.contains("was not running"));
 
-    let prune = stdout(
+    let prune = stderr(
         fixture
             .command()
             .current_dir(&project)
@@ -417,7 +421,7 @@ database = "cluster:cluster-test"
             .assert()
             .failure(),
     );
-    assert!(start_cloud.contains("'production' is not a local v2 instance"));
+    assert!(start_cloud.contains("'production' is not a local instance"));
 
     let restart_cloud = stderr(
         fixture
@@ -427,7 +431,7 @@ database = "cluster:cluster-test"
             .assert()
             .failure(),
     );
-    assert!(restart_cloud.contains("'production' is not a local v2 instance"));
+    assert!(restart_cloud.contains("'production' is not a local instance"));
 
     fixture
         .command()
@@ -475,8 +479,8 @@ fn project_and_metrics_commands_use_isolated_state() {
             .assert()
             .success(),
     );
-    assert!(metrics_status.contains("Metrics Level"));
-    assert!(metrics_status.contains("Off"));
+    assert!(metrics_status.contains("Level"), "{metrics_status}");
+    assert!(metrics_status.contains("off"), "{metrics_status}");
 }
 
 #[test]
@@ -496,7 +500,7 @@ fn query_preflight_errors_do_not_need_running_runtime() {
         fixture
             .command()
             .current_dir(&project)
-            .args(["query", "dev", "--json", "{"])
+            .args(["query", "dev", "--body", "{"])
             .assert()
             .failure(),
     );
@@ -508,7 +512,7 @@ fn query_preflight_errors_do_not_need_running_runtime() {
         fixture
             .command()
             .current_dir(&project)
-            .args(["query", "dev", "--json", write_request, "--warm"])
+            .args(["query", "dev", "--body", write_request, "--warm"])
             .assert()
             .failure(),
     );
@@ -522,12 +526,13 @@ fn cloud_config_smoke_without_credentials() {
     let workspace_list = stderr(
         fixture
             .command()
-            .args(["workspace", "list", "--format", "json"])
+            .args(["workspace", "list", "--json"])
             .assert()
             .failure(),
     );
-    assert!(workspace_list.contains("Authentication required"));
-    assert!(workspace_list.contains("helix auth login"));
+    let error: serde_json::Value = serde_json::from_str(workspace_list.trim()).unwrap();
+    assert_eq!(error["error"]["message"], "not logged in to Helix Cloud");
+    assert_eq!(error["error"]["hint"], "run `helix auth login`");
 }
 
 #[test]
@@ -558,7 +563,7 @@ fn default_instance_and_noninteractive_error_branches_run_through_the_binary() {
         .args(["start", "--foreground"])
         .assert()
         .success();
-    let stop = stdout(
+    let stop = stderr(
         fixture
             .command()
             .current_dir(&project)
@@ -590,7 +595,10 @@ fn default_instance_and_noninteractive_error_branches_run_through_the_binary() {
             .assert()
             .failure(),
     );
-    assert!(missing_prune_target.contains("Specify a local instance"));
+    assert!(
+        missing_prune_target.contains("nothing to prune"),
+        "{missing_prune_target}"
+    );
     let unconfirmed_prune = stderr(
         fixture
             .command()
@@ -599,7 +607,7 @@ fn default_instance_and_noninteractive_error_branches_run_through_the_binary() {
             .assert()
             .failure(),
     );
-    assert!(unconfirmed_prune.contains("Re-run with --yes"));
+    assert!(unconfirmed_prune.contains("re-run with --yes"));
 
     let delete = stderr(
         fixture
@@ -704,4 +712,49 @@ async fn disk_start_tolerates_the_volume_create_race_but_surfaces_real_errors() 
             .failure(),
     );
     assert!(error.contains("permission denied"), "{error}");
+}
+
+#[test]
+fn json_mode_rejects_commands_without_a_json_result() {
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("json-gaps");
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--no-skills"])
+        .assert()
+        .success();
+    for (args, expected) in [
+        (vec!["start", "--foreground", "--json"], "--foreground"),
+        (vec!["skills", "list", "--json"], "interactive"),
+    ] {
+        let error = stderr(
+            fixture
+                .command()
+                .current_dir(&project)
+                .args(&args)
+                .assert()
+                .failure(),
+        );
+        let error: serde_json::Value = serde_json::from_str(error.trim()).unwrap();
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected),
+            "{args:?}: {error}"
+        );
+    }
+
+    let pruned = stdout(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["prune", "--all", "--yes", "--json"])
+            .assert()
+            .success(),
+    );
+    let pruned: serde_json::Value = serde_json::from_str(pruned.trim()).unwrap();
+    assert_eq!(pruned["pruned"][0]["instance"], "dev");
 }

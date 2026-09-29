@@ -268,7 +268,7 @@ pub(super) fn config() -> optimizer::OptimizerConfig {
             memo_expressions: properties::PositiveUsize::new(8).unwrap(),
             rule_fires: properties::PositiveUsize::new(16).unwrap(),
             alternatives_per_group: properties::PositiveUsize::new(8).unwrap(),
-            optimization_micros: properties::PositiveUsize::new(1_000_000).unwrap(),
+            exploration_rule_fires: properties::PositiveUsize::new(16).unwrap(),
         },
         planner_limits: context::PlannerLimits::default(),
         stats: context::StatsSnapshot::default(),

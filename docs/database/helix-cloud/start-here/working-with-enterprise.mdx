@@ -1,7 +1,7 @@
 ---
 title: "Connect to Helix Cloud"
-description: "Send dynamic requests through a managed gateway"
-sidebarTitle: "Overview"
+description: "Connect an SDK or HTTP client to a Helix Cloud database and control request routing"
+sidebarTitle: "Connect an application"
 pageType: "Guide"
 ---
 
@@ -60,9 +60,10 @@ client = Client(
 These SDK examples target a database-specific cluster-mode gateway URL. Such an
 endpoint authenticates the API key but rejects `X-Helix-Database-Id` and
 `X-Helix-Tenant-Id`. A GA shared gateway instead requires
-`X-Helix-Database-Id`; the current public SDK request builders do not expose
-that selection header, so use the direct HTTP contract for GA shared-gateway
-requests.
+`X-Helix-Database-Id`. The TypeScript SDK (`@helix-db/helix-db` 3.2.0 and
+later) sends it after `client.withDatabaseId("<database-id>")`. The published
+Python, Rust, and Go SDKs do not expose that selection header, so use the
+direct HTTP contract for GA shared-gateway requests from those languages.
 
 Each client sends the same operation-tree request body:
 

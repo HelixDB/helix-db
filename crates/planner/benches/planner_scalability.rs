@@ -46,14 +46,13 @@ fn wide_boolean_predicates(c: &mut Criterion) {
 fn wide_literal_membership(c: &mut Criterion) {
     use helix_ast::{batch, expr, traversal, value};
     use helix_planner::{catalog, context, ir, planning};
-    let mut ctx = context::PlannerContext {
+    let ctx = context::PlannerContext {
         indexes: catalog::IndexCatalogSnapshot::default()
             .with_node_eq(catalog::ScopedPropertyKey::try_new("User", "age").unwrap()),
         stats: context::StatsSnapshot::default()
             .with_node_label_cardinality(ir::NonEmptyString::new("User").unwrap(), 1_000_000),
         ..Default::default()
     };
-    ctx.optimizer_limits.optimization_micros = PositiveUsize::at_least_one(1_000_000);
     let mut group = c.benchmark_group("planner_wide_literal_membership");
     for size in [64, 1024, 16_384] {
         for (shape, distinct) in [("distinct", size), ("duplicates", 8)] {
@@ -92,14 +91,13 @@ fn many_available_indexes(c: &mut Criterion) {
 fn wide_literal_intersections(c: &mut Criterion) {
     use helix_ast::{batch, expr, traversal, value};
     use helix_planner::{catalog, context, ir, planning};
-    let mut ctx = context::PlannerContext {
+    let ctx = context::PlannerContext {
         indexes: catalog::IndexCatalogSnapshot::default()
             .with_node_eq(catalog::ScopedPropertyKey::try_new("User", "age").unwrap()),
         stats: context::StatsSnapshot::default()
             .with_node_label_cardinality(ir::NonEmptyString::new("User").unwrap(), 1_000_000),
         ..Default::default()
     };
-    ctx.optimizer_limits.optimization_micros = PositiveUsize::at_least_one(1_000_000);
     let mut group = c.benchmark_group("planner_wide_literal_intersections");
     for size in [64, 1024, 16_384] {
         for (shape, start) in [

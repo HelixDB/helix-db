@@ -327,77 +327,118 @@ fn membership_op(predicate: helix_ast::expr::Predicate) -> logical::StreamPipeli
 }
 
 #[test]
-fn membership_contract_prices_set_and_label_reads_against_record_reads() {
+fn membership_contract_prices_what_the_runtime_reads() {
     let storage = cost::StorageCostProfile::default();
     let stats = crate::context::StatsSnapshot::default();
-    let delivered = with_cardinality(access_delivered(properties::ElementKind::Node), Some(40));
-    let rows = cost::EstimatedRows::rows(1_000);
+    let unbounded = access_delivered(properties::ElementKind::Node);
     let unscoped = membership_op(helix_ast::expr::Predicate::eq("kind", "B"));
     let scoped = membership_op(helix_ast::expr::Predicate::and(vec![
         helix_ast::expr::Predicate::eq("$label", "Attribute"),
         helix_ast::expr::Predicate::eq("kind", "B"),
     ]));
+    let filter = logical::StreamPipelineOp::Filter {
+        predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B")).unwrap(),
+    };
+    let price = |op: &logical::StreamPipelineOp,
+                 delivered: &properties::DeliveredProperties,
+                 rows: u64,
+                 stats: &crate::context::StatsSnapshot| {
+        stream_pipeline_op_contract(
+            op,
+            delivered.clone(),
+            cost::EstimatedRows::rows(rows),
+            &storage,
+            stats,
+        )
+    };
 
-    let (op, membership_delivered, evaluate) =
-        stream_pipeline_op_contract(&unscoped, delivered.clone(), rows, &storage, &stats);
-    let (_, _, reject) =
-        stream_pipeline_op_contract(&scoped, delivered.clone(), rows, &storage, &stats);
-    let (_, _, per_row) = stream_pipeline_op_contract(
-        &logical::StreamPipelineOp::Filter {
-            predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B")).unwrap(),
-        },
-        delivered.clone(),
-        rows,
-        &storage,
-        &stats,
-    );
-
+    // Past one batch the set reads amortize: an unscoped predicate reads the
+    // label bitmap alongside the set and no records at all.
+    let (op, _, evaluate) = price(&unscoped, &unbounded, 1_000, &stats);
+    let (_, _, reject) = price(&scoped, &unbounded, 1_000, &stats);
+    let (_, _, per_row) = price(&filter, &unbounded, 1_000, &stats);
     assert_eq!(
         op,
         crate::physical::PhysicalPipelineOp::Stream(
             crate::physical::PhysicalStreamOp::IndexMembership
         )
     );
+    assert!(evaluate.latency < per_row.latency);
+    assert!(reject.latency < per_row.latency);
+    assert_eq!(evaluate.object_reads, 2);
+    assert_eq!(evaluate.authoritative_graph_reads, 0);
+    assert_eq!(reject.object_reads, 1);
+    assert_eq!(per_row.authoritative_graph_reads, 1_000);
+
+    // A stream proven to fit in one batch never reads the set, so the set read
+    // only adds to the filter's work.
+    let bounded = with_cardinality(unbounded.clone(), Some(40));
+    let (_, membership_delivered, evaluate) = price(&unscoped, &bounded, 40, &stats);
+    let (_, _, reject) = price(&scoped, &bounded, 40, &stats);
+    let (_, _, per_row) = price(&filter, &bounded, 40, &stats);
     assert_eq!(
         membership_delivered.cardinality,
         properties::CardinalityBounds::zero_to(Some(40))
     );
-    // The unscoped predicate cannot prove the stream's label, so half of the
-    // stream is charged the per-row filter on top of both bitmap reads.
-    assert_eq!(evaluate.object_reads, 2 + 500);
-    assert_eq!(evaluate.authoritative_graph_reads, 500);
-    assert_eq!(reject.object_reads, 1);
-    assert_eq!(reject.authoritative_graph_reads, 0);
-    assert!(reject.latency < per_row.latency);
     assert!(evaluate.latency > per_row.latency);
-    assert_eq!(per_row.authoritative_graph_reads, 1_000);
+    assert!(reject.latency > per_row.latency);
 
-    // A larger stream amortizes the bitmap reads for either policy.
-    let large = cost::EstimatedRows::rows(5_000);
-    let (_, _, large_evaluate) =
-        stream_pipeline_op_contract(&unscoped, delivered.clone(), large, &storage, &stats);
-    let (_, _, large_per_row) = stream_pipeline_op_contract(
-        &logical::StreamPipelineOp::Filter {
-            predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B")).unwrap(),
-        },
-        delivered,
-        large,
-        &storage,
-        &stats,
-    );
-    assert!(large_evaluate.latency < large_per_row.latency);
+    // An unbounded stream estimated within one batch does the work of the
+    // filter over the same predicate less one predicate-leaf evaluation.
+    for membership in [&unscoped, &scoped] {
+        let logical::StreamPipelineOp::IndexMembership { plan } = membership else {
+            panic!("expected an index membership op");
+        };
+        let same_filter = logical::StreamPipelineOp::Filter {
+            predicate: plan.predicate().clone(),
+        };
+        let (_, _, per_row) = price(&same_filter, &unbounded, 10, &stats);
+        let (_, _, cost) = price(membership, &unbounded, 10, &stats);
+        assert_eq!(cost.object_reads, per_row.object_reads);
+        assert_eq!(cost.authoritative_graph_reads, 10);
+        assert_eq!(cost.cpu_units + 1, per_row.cpu_units);
+        assert_eq!(
+            cost.latency.as_micros() + storage.cpu_predicate_eval.as_micros(),
+            per_row.latency.as_micros()
+        );
+    }
+
+    // Just past one batch, and for an empty stream, the set read outweighs
+    // the record reads it saves.
+    for rows in [257, 0] {
+        let (_, _, per_row) = price(&filter, &unbounded, rows, &stats);
+        for membership in [&unscoped, &scoped] {
+            let (_, _, cost) = price(membership, &unbounded, rows, &stats);
+            assert!(cost.latency > per_row.latency, "rows {rows}");
+        }
+    }
 
     // A huge label bitmap makes membership lose to the same stream.
     let huge_label = crate::context::StatsSnapshot::default()
         .with_node_label_cardinality(ir::NonEmptyString::new("Attribute").unwrap(), 10_000_000);
-    let (_, _, huge) = stream_pipeline_op_contract(
-        &unscoped,
-        access_delivered(properties::ElementKind::Node),
-        rows,
-        &storage,
-        &huge_label,
-    );
+    let (_, _, huge) = price(&unscoped, &unbounded, 1_000, &huge_label);
+    let (_, _, per_row) = price(&filter, &unbounded, 1_000, &stats);
     assert!(huge.latency > per_row.latency);
+}
+
+#[test]
+fn membership_pricing_leaves_the_filter_and_delivered_rows_alone() {
+    let storage = cost::StorageCostProfile::default();
+    let stats = crate::context::StatsSnapshot::default();
+    let rows = cost::EstimatedRows::rows(1_000);
+    let filter = logical::StreamPipelineOp::Filter {
+        predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B")).unwrap(),
+    };
+    let membership = membership_op(helix_ast::expr::Predicate::eq("kind", "B"));
+    for upper in [None, Some(40)] {
+        let delivered = with_cardinality(access_delivered(properties::ElementKind::Node), upper);
+        let (_, _, per_row) =
+            stream_pipeline_op_contract(&filter, delivered.clone(), rows, &storage, &stats);
+        assert_eq!(per_row, storage.stored_predicate_filter(rows));
+        let (_, membership_delivered, _) =
+            stream_pipeline_op_contract(&membership, delivered.clone(), rows, &storage, &stats);
+        assert_eq!(membership_delivered.cardinality, delivered.cardinality);
+    }
 }
 
 #[test]
@@ -423,8 +464,8 @@ fn row_estimates_carry_through_expansion_and_shrink_after_membership() {
             )
         };
 
-    // An unknown fan-out never inflates the estimate that prices index
-    // membership against the per-row filter.
+    // An unknown fan-out never inflates row estimates; index_membership_filter
+    // prices unbounded streams itself.
     assert_eq!(after(&expand, &unknown, 1), cost::EstimatedRows::rows(1));
     assert_eq!(
         after(&expand, &unknown, 50_000),

@@ -1,51 +1,21 @@
-use crate::config::InstanceInfo;
 use crate::local_runtime::LocalRuntime;
-use crate::output::Operation;
+use crate::output::{self, Operation};
 use crate::project::ProjectContext;
-use crate::prompts;
-use eyre::{eyre, Result};
+use eyre::Result;
+use serde_json::json;
 
 pub async fn run(instance: Option<String>) -> Result<()> {
     let project = ProjectContext::find_and_load(None)?;
-    let instance = resolve_local_instance(&project, instance)?;
-    if !matches!(
-        project.config.get_instance(&instance)?,
-        InstanceInfo::Local(_)
-    ) {
-        return Err(eyre!("'{instance}' is not a local v2 instance"));
-    }
+    let instance = project.resolve_local_instance(instance, "Stop which local instance?")?;
     let op = Operation::new("Stopping", &instance);
-    if LocalRuntime::new(&project).stop(&instance)? {
+    let was_running = LocalRuntime::new(&project).stop(&instance)?;
+    if was_running {
         op.success();
     } else {
-        crate::output::info(&format!("Instance '{instance}' was not running"));
+        output::outro(&format!("{instance} was not running"));
     }
-    Ok(())
-}
-
-fn resolve_local_instance(project: &ProjectContext, instance: Option<String>) -> Result<String> {
-    if let Some(instance) = instance {
-        return Ok(instance);
-    }
-    if prompts::is_interactive() && project.config.local.len() > 1 {
-        return prompts::select_instance(&local_instances(project), "Stop which local instance?");
-    }
-    if project.config.local.contains_key("dev") {
-        return Ok("dev".to_string());
-    }
-    if project.config.local.len() == 1 {
-        return Ok(project.config.local.keys().next().unwrap().clone());
-    }
-    Err(eyre!("No local instance specified"))
-}
-
-fn local_instances(project: &ProjectContext) -> Vec<(String, String)> {
-    let mut instances: Vec<(String, String)> = project
-        .config
-        .local
-        .iter()
-        .map(|(name, config)| (name.clone(), format!("http://localhost:{}", config.port)))
-        .collect();
-    instances.sort_by(|a, b| a.0.cmp(&b.0));
-    instances
+    output::emit(
+        &json!({"instance": instance, "wasRunning": was_running}),
+        |_| Ok(()),
+    )
 }

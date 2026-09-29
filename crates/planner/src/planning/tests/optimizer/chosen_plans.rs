@@ -723,7 +723,7 @@ fn cascades_chosen_access_matrix_proves_index_set_families() {
                 Predicate::eq("username", "bob"),
             ]),
         ),
-        ctx(indexes.clone()),
+        intersection_ctx(indexes.clone()),
     );
     assert_selected_root_family(&node_union, "alternative");
     assert_selected_rule(&node_union, KnownRuleId::SeedAccessPath);
@@ -740,7 +740,7 @@ fn cascades_chosen_access_matrix_proves_index_set_families() {
                 Predicate::lt("weight", 50),
             ]),
         ),
-        ctx(indexes),
+        intersection_ctx(indexes),
     );
     assert_selected_root_family(&edge_intersection, "alternative");
     assert_selected_rule(&edge_intersection, KnownRuleId::SeedAccessPath);
@@ -763,7 +763,7 @@ fn cascades_ordered_secondary_intersections_elide_explicit_sorts() {
         )
         .order_by("age", Order::Asc)
         .limit(5usize),
-        ctx(indexes.clone()),
+        intersection_ctx(indexes.clone()),
     );
     let edge = executable_traversal(
         g().e_with_label_where(
@@ -775,7 +775,7 @@ fn cascades_ordered_secondary_intersections_elide_explicit_sorts() {
         )
         .order_by("weight", Order::Asc)
         .limit(5usize),
-        ctx(indexes),
+        intersection_ctx(indexes),
     );
 
     assert_ordered_node_secondary_intersection(&node, "User", "age", "username");
@@ -874,7 +874,7 @@ fn cascades_index_set_limits_remain_semantic_after_set_merges() {
             ]),
         )
         .limit(1usize),
-        ctx(indexes.clone()),
+        intersection_ctx(indexes.clone()),
     );
     assert_access_window_selected(&limited_node_union);
     assert_batched_node_equality_set(&limited_node_union, "User", "username", 2);
@@ -892,7 +892,7 @@ fn cascades_index_set_limits_remain_semantic_after_set_merges() {
             ]),
         )
         .limit(1usize),
-        ctx(indexes),
+        intersection_ctx(indexes),
     );
     assert_access_window_selected(&limited_edge_intersection);
     assert_ordered_edge_secondary_intersection(
@@ -923,7 +923,7 @@ fn cascades_index_set_ranges_push_end_caps_and_keep_range_suffixes() {
             ]),
         )
         .range(1usize, 2usize),
-        ctx(indexes.clone()),
+        intersection_ctx(indexes.clone()),
     );
     assert_access_window_selected(&ranged_node_union);
     assert_batched_node_equality_set(&ranged_node_union, "User", "username", 2);
@@ -942,7 +942,7 @@ fn cascades_index_set_ranges_push_end_caps_and_keep_range_suffixes() {
             ]),
         )
         .range(1usize, 2usize),
-        ctx(indexes),
+        intersection_ctx(indexes),
     );
     assert_access_window_selected(&ranged_edge_intersection);
     assert_ordered_edge_secondary_intersection(
@@ -977,7 +977,7 @@ fn cascades_index_set_dynamic_ranges_remain_downstream_runtime_bounds() {
             StreamBound::expr(Expr::param("range_start")),
             StreamBound::expr(Expr::param("range_end")),
         ),
-        ctx(indexes.clone()),
+        intersection_ctx(indexes.clone()),
     );
     assert_selected_root_family(&dynamic_node_union, "alternative");
     assert_batched_node_equality_set(&dynamic_node_union, "User", "username", 2);
@@ -1003,7 +1003,7 @@ fn cascades_index_set_dynamic_ranges_remain_downstream_runtime_bounds() {
             StreamBound::expr(Expr::param("range_start")),
             StreamBound::expr(Expr::param("range_end")),
         ),
-        ctx(indexes),
+        intersection_ctx(indexes),
     );
     assert_selected_root_family(&dynamic_edge_intersection, "alternative");
     assert_ordered_edge_secondary_intersection(
@@ -1909,4 +1909,12 @@ fn assert_retained_static_prefix_window(plan: &ExecutablePlan, end: usize) {
     if has_exec_op_family(plan, ExecOpFamily::Range) {
         assert_exec_range(plan, 0, end);
     }
+}
+
+// These tests exercise intersection lowering, ordering, and semantic windows.
+// A broad equality makes intersection cheaper than fetching all seed rows.
+fn intersection_ctx(indexes: IndexCatalogSnapshot) -> PlannerContext {
+    let mut context = ctx(indexes);
+    context.storage.default_equality_index_rows = crate::cost::EstimatedRows::rows(2_000);
+    context
 }

@@ -6,6 +6,10 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
+Use the CLI to sign in to Helix Cloud, link a project to a Cloud database, and run
+queries against it. You need a Helix Cloud account and at least one database; see
+[Get started with Helix Cloud](/database/helix-cloud/start-here/using-the-cloud).
+
 <Steps>
   <Step title="Authenticate with WorkOS">
     ```bash
@@ -13,18 +17,14 @@ pageType: "Guide"
     helix auth status
     ```
   </Step>
-  <Step title="Discover a target">
+  <Step title="Link a project and database">
     ```bash
-    helix workspace list
-    helix project list --workspace-id <workspace-id>
-    helix database list --project <project-id>
+    helix init cloud
     ```
-  </Step>
-  <Step title="Link the current project and database">
-    ```bash
-    helix project link <project-id>
-    helix add cloud --name production --database tenant:<tenant-id>
-    ```
+
+    The CLI picks your workspace, project, and database: it uses the only one of each or
+    asks you to choose. It writes the project and a `production` database link to
+    `helix.toml`. To link another database later, run `helix add cloud --name <name>`.
   </Step>
   <Step title="Run a query through the broker">
     ```bash
@@ -32,18 +32,54 @@ pageType: "Guide"
     helix shell production
     ```
   </Step>
+  <Step title="Inspect the linked resources">
+    ```bash
+    helix status
+    helix database
+    helix logs production
+    ```
+
+    Inside a linked project, Cloud commands default to its project and databases, so
+    they need no IDs.
+  </Step>
 </Steps>
 
-The WorkOS session identifies the user. `database.query.read` or `database.query.write` independently
-authorizes the selected database; project-management access does not imply query access. The backend
-forwards the authorized request using the existing cluster-scoped operational gateway key and, for a
-tenant database, the exact tenant header. The CLI never receives that key and never contacts the
-gateway directly.
+Pass a resource by ID, slug, or name when you want a different one, for example
+`helix database list --project <project>` or `helix query tenant:<id> --file request.json`. In
+scripts, add `--json` for machine-readable output; commands then never prompt. See
+[Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
-Owners/admins have both query scopes by default. Members have neither unless explicitly granted.
-Local queries keep the current local auth-disabled path.
+## How Cloud queries are authorized
 
-Use `helix database key` only to create application keys for direct gateway clients. Use
-`helix service-credential` to manage headless HTTP API and unified MCP credentials. MCP tool
-access follows project grants; service credentials do not receive Cloud discovery or observability
-tools. Neither is a CLI login method.
+- `helix auth login` creates a WorkOS session that identifies you. The CLI never uses
+  database API keys.
+- Cloud queries go through the Helix Cloud backend (the broker), not directly to the
+  database gateway. The broker forwards each authorized request with its own gateway
+  credentials, which the CLI never receives.
+- Reads require the `database.query.read` scope and writes require
+  `database.query.write` on the selected database. Project-management access does not
+  imply query access.
+- Owners and admins have both query scopes by default. Members have neither unless
+  explicitly granted.
+- Local queries are unaffected and run without authentication.
+
+## Keys and credentials are not logins
+
+- `helix database key` creates application keys for your own services that call the
+  gateway directly.
+- `helix service-credential` manages headless HTTP API and unified MCP credentials.
+  MCP tool access follows the credential's project grants, and these sessions do not
+  get Cloud discovery or observability tools.
+
+Neither can be used to sign in to the CLI.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="CLI configuration" icon="gear" href="/cli/configuration">
+    How `helix.toml` stores project and database links.
+  </Card>
+  <Card title="helix query" icon="terminal" href="/cli/command-reference/query">
+    Request formats and Cloud query behavior.
+  </Card>
+</CardGroup>

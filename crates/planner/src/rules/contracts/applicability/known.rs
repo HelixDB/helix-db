@@ -138,7 +138,7 @@ mod tests {
     fn required_rewrites_match_implementation_rule_deferrals() {
         // Each required rewrite is paired with an implementation rule that
         // returns `NotApplicable` for the shapes the rewrite matches, so the
-        // rewrite must keep running after the time budget expires. Pinning
+        // rewrite must keep running after the exploration budget. Pinning
         // the set makes a new implementation-rule deferral update it
         // deliberately.
         let required = KnownRuleId::ALL

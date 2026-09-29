@@ -1,4 +1,6 @@
-use crate::{config::HelixConfig, errors::ProjectError, paths};
+use crate::config::{HelixConfig, InstanceInfo};
+use crate::errors::{Candidate, CliError, ProjectError};
+use crate::{paths, prompts};
 use eyre::Result;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -43,6 +45,56 @@ impl ProjectContext {
             config,
             helix_dir,
         })
+    }
+
+    /// Pick the local instance a lifecycle command acts on: the explicit name,
+    /// else `dev`, else the only local instance, else a prompt, else an error
+    /// listing them. A Cloud instance is rejected by name.
+    pub fn resolve_local_instance(&self, instance: Option<String>, prompt: &str) -> Result<String> {
+        let mut names: Vec<&String> = self.config.local.keys().collect();
+        names.sort();
+        let name = match (instance, names.as_slice()) {
+            (Some(name), _) => name,
+            (None, _) if self.config.local.contains_key("dev") => "dev".to_owned(),
+            (None, [only]) => (*only).clone(),
+            (None, []) => {
+                return Err(CliError::new("this project has no local instances")
+                    .with_hint("add one with `helix add local --name dev`")
+                    .into());
+            }
+            (None, _) if prompts::is_interactive() => prompts::select_instance(
+                &names
+                    .iter()
+                    .map(|name| {
+                        let port = self.config.local[*name].port;
+                        ((*name).clone(), format!("http://localhost:{port}"))
+                    })
+                    .collect::<Vec<_>>(),
+                prompt,
+            )?,
+            (None, _) => {
+                return Err(CliError::new("no default local instance")
+                    .with_hint("pass the instance name")
+                    .with_candidates(
+                        names
+                            .iter()
+                            .map(|name| Candidate {
+                                id: (*name).clone(),
+                                name: (*name).clone(),
+                            })
+                            .collect(),
+                    )
+                    .into());
+            }
+        };
+        match self.config.get_instance(&name)? {
+            InstanceInfo::Local(_) => Ok(name),
+            InstanceInfo::Enterprise(_) => Err(CliError::new(format!(
+                "'{name}' is not a local instance"
+            ))
+            .with_hint("start, stop, and restart manage local containers; Cloud databases need no lifecycle")
+            .into()),
+        }
     }
 
     pub fn instance_workspace(&self, instance_name: &str) -> PathBuf {

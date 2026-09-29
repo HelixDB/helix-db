@@ -8,6 +8,7 @@ use crate::{paths, service_endpoints};
 use eyre::{eyre, Result, WrapErr as _};
 use fs2::FileExt as _;
 use reqwest::{Method, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::{
@@ -18,6 +19,11 @@ use std::{
 };
 
 const REFRESH_WINDOW_SECONDS: i64 = 60;
+/// The largest page WFE serves; larger requests silently fall back to 50.
+const PAGE_SIZE: &str = "200";
+/// Upper bound on pages followed by [`CloudClient::list`] (10,000 items), so a
+/// server that never ends pagination cannot hang the CLI.
+const MAX_PAGES: usize = 50;
 const PRE_DISPATCH_AUTH_REASON: &str = "SESSION_REJECTED_PRE_DISPATCH";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,13 +105,28 @@ impl RawResponse {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| String::from_utf8_lossy(&self.body).trim().to_owned());
-            return Err(eyre!("Failed to {action}: HTTP {} {message}", self.status));
+            return Err(HttpError {
+                action: action.to_owned(),
+                status: self.status,
+                message,
+            }
+            .into());
         }
         if self.body.is_empty() {
             return Ok(Value::Null);
         }
         serde_json::from_slice(&self.body).wrap_err_with(|| format!("decode {action} response"))
     }
+}
+
+/// A non-success WFE response, typed so callers can react to the status
+/// (e.g. fall back to a search only on "not found").
+#[derive(Debug, thiserror::Error)]
+#[error("Failed to {action}: HTTP {status} {message}")]
+pub struct HttpError {
+    pub action: String,
+    pub status: StatusCode,
+    pub message: String,
 }
 
 struct CredentialLock {
@@ -187,28 +208,84 @@ impl CloudClient {
     }
 
     pub async fn public_post(&self, path: &str, body: Value, action: &str) -> Result<Value> {
-        self.send(None, Method::POST, path, Some(body))
+        self.send(None, Method::POST, path, &[], Some(body))
             .await?
             .into_value(action)
     }
 
     pub async fn get(&self, path: &str, action: &str) -> Result<Value> {
-        self.authenticated_request(Method::GET, path, None, action)
+        self.authenticated_request(Method::GET, path, &[], None, action)
             .await
     }
 
+    /// GET a single resource and deserialize it.
+    pub async fn fetch<T: DeserializeOwned>(&self, path: &str, action: &str) -> Result<T> {
+        let value = self.get(path, action).await?;
+        serde_json::from_value(value).wrap_err_with(|| format!("decode {action} response"))
+    }
+
+    /// GET every page of a collection, following `nextPageToken`, and
+    /// deserialize the items under `field`.
+    pub async fn list<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        field: &str,
+        action: &str,
+    ) -> Result<Vec<T>> {
+        let mut items = Vec::new();
+        let mut token = String::new();
+        for _ in 0..MAX_PAGES {
+            let mut page_query = query.to_vec();
+            page_query.push(("page.size", PAGE_SIZE));
+            if !token.is_empty() {
+                page_query.push(("page.token", &token));
+            }
+            let mut page = self
+                .authenticated_request(Method::GET, path, &page_query, None, action)
+                .await?;
+            // WFE emits empty collections as `[]`, so a missing field means
+            // a malformed response, not an empty one.
+            let Some(page_items) = page.get_mut(field).map(Value::take) else {
+                return Err(eyre!(
+                    "Failed to {action}: the response has no `{field}` list"
+                ));
+            };
+            items.extend(
+                serde_json::from_value::<Vec<T>>(page_items)
+                    .wrap_err_with(|| format!("decode {action} response"))?,
+            );
+            let next = page
+                .get("nextPageToken")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if next.is_empty() {
+                return Ok(items);
+            }
+            if next == token {
+                return Err(eyre!(
+                    "Failed to {action}: the server repeated a page token"
+                ));
+            }
+            token = next.to_owned();
+        }
+        Err(eyre!(
+            "Failed to {action}: more than {MAX_PAGES} pages; narrow the request"
+        ))
+    }
+
     pub async fn post(&self, path: &str, body: Value, action: &str) -> Result<Value> {
-        self.authenticated_request(Method::POST, path, Some(body), action)
+        self.authenticated_request(Method::POST, path, &[], Some(body), action)
             .await
     }
 
     pub async fn patch(&self, path: &str, body: Value, action: &str) -> Result<Value> {
-        self.authenticated_request(Method::PATCH, path, Some(body), action)
+        self.authenticated_request(Method::PATCH, path, &[], Some(body), action)
             .await
     }
 
     pub async fn delete(&self, path: &str, action: &str) -> Result<Value> {
-        self.authenticated_request(Method::DELETE, path, None, action)
+        self.authenticated_request(Method::DELETE, path, &[], None, action)
             .await
     }
 
@@ -216,6 +293,7 @@ impl CloudClient {
         &self,
         method: Method,
         path: &str,
+        query: &[(&str, &str)],
         body: Option<Value>,
         action: &str,
     ) -> Result<Value> {
@@ -225,6 +303,7 @@ impl CloudClient {
                 Some(&session.access_token),
                 method.clone(),
                 path,
+                query,
                 body.clone(),
             )
             .await?;
@@ -235,13 +314,21 @@ impl CloudClient {
         // This is the only retry path. The WFE interceptor guarantees this
         // typed error happened before handler dispatch.
         let refreshed = self.refresh_after_rejection(&session.access_token).await?;
-        self.send(Some(&refreshed.access_token), method, path, body)
+        self.send(Some(&refreshed.access_token), method, path, query, body)
             .await?
             .into_value(action)
     }
 
+    /// Take the credential lock without blocking a runtime worker: `flock`
+    /// blocks, and the holder may be awaiting a refresh on another task, so
+    /// blocking every worker on the lock would deadlock concurrent requests.
+    async fn lock(&self) -> Result<CredentialLock> {
+        let path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || CredentialLock::acquire(&path)).await?
+    }
+
     async fn current_session(&self) -> Result<SessionCredentials> {
-        let _lock = CredentialLock::acquire(&self.lock_path)?;
+        let _lock = self.lock().await?;
         let session = load_session(&self.credentials_path).map_err(|error| {
             eyre!("{error}. Run 'helix auth login' to create a WorkOS session.")
         })?;
@@ -255,7 +342,7 @@ impl CloudClient {
         &self,
         rejected_access_token: &str,
     ) -> Result<SessionCredentials> {
-        let _lock = CredentialLock::acquire(&self.lock_path)?;
+        let _lock = self.lock().await?;
         let session = load_session(&self.credentials_path)?;
         if session.access_token != rejected_access_token
             && session.expires_at > unix_now() + REFRESH_WINDOW_SECONDS
@@ -271,6 +358,7 @@ impl CloudClient {
                 None,
                 Method::POST,
                 "/v1/auth/refresh",
+                &[],
                 Some(serde_json::json!({"refreshToken": session.refresh_token})),
             )
             .await?;
@@ -291,11 +379,13 @@ impl CloudClient {
         access_token: Option<&str>,
         method: Method,
         path: &str,
+        query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<RawResponse> {
         let mut request = self
             .http
-            .request(method, format!("{}{}", self.base_url, path));
+            .request(method, format!("{}{}", self.base_url, path))
+            .query(query);
         if let Some(access_token) = access_token {
             request = request.bearer_auth(access_token);
         }

@@ -177,6 +177,291 @@ async fn public_hybrid_cache_opens_with_bounded_foyer_partitions() {
 }
 
 #[test]
+fn public_object_store_cache_settings_expose_their_validated_bounds() {
+    let root = std::path::Path::new("/var/cache/helix/object-store");
+    let settings = config::SlateObjectStoreCacheSettings::try_new(
+        root,
+        Some(1024 * 1024),
+        4096,
+        true,
+        config::ObjectStoreWarmLevel::L0,
+        None,
+        8,
+    )
+    .expect("valid object-store cache");
+
+    assert_eq!(settings.root(), root);
+    assert_eq!(settings.warm(), config::ObjectStoreWarmLevel::L0);
+    // A server sizes its open-file limit from this handle budget.
+    assert_eq!(settings.max_open_file_handles(), 8);
+    assert_eq!(settings.to_slate_options().max_open_file_handles, 8);
+    // A server whose SSTs are already on local disk stops caching its writes.
+    assert!(settings.to_slate_options().cache_puts);
+    let reads_only = settings.clone().with_cache_puts(false);
+    assert!(!reads_only.to_slate_options().cache_puts);
+    assert_eq!(reads_only.with_cache_puts(true), settings);
+}
+
+#[tokio::test]
+async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_owns() {
+    let root = tempfile::tempdir().expect("temporary server root");
+    let data_root = root.path().join("data");
+    std::fs::create_dir_all(&data_root).expect("data directory");
+    let source = || HelixDbSource::Disk {
+        root: data_root.clone(),
+        database: "server-foyer-cleanup".to_owned(),
+    };
+    let hybrid = |foyer_root: &std::path::Path, disk_bytes| {
+        config::DbConfig::new().with_cache(config::CacheConfig::new(
+            config::VectorMemorySettings::default(),
+            config::CacheMode::Hybrid {
+                slate_db: config::SlateHybridCacheConfig::try_new(
+                    1024 * 1024,
+                    foyer_root,
+                    disk_bytes,
+                )
+                .expect("valid Slate hybrid cache"),
+                object_store: config::SlateObjectStoreCacheSettings::try_new(
+                    root.path().join("object-store"),
+                    Some(1024 * 1024),
+                    4096,
+                    false,
+                    config::ObjectStoreWarmLevel::Off,
+                    None,
+                    1,
+                )
+                .expect("valid object-store cache"),
+                slate_warm: config::SlateWarmConfig::Off,
+                fts: None,
+            },
+        ))
+    };
+    let foyer_root = root.path().join("foyer");
+    let entries = || {
+        let mut names = std::fs::read_dir(&foyer_root)
+            .expect("Foyer cache directory exists")
+            .map(|entry| {
+                entry
+                    .expect("readable cache entry")
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 cache entry")
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    };
+    let partitions = |count: usize| {
+        (0..count)
+            .map(|index| format!("foyer-storage-direct-fs-{index:08}"))
+            .collect::<Vec<_>>()
+    };
+
+    // 16 MiB in 64 KiB blocks is 256 partitions.
+    HelixDB::open_for_server(source(), hybrid(&foyer_root, 16 * 1024 * 1024))
+        .await
+        .expect("server writer opens a fresh hybrid cache")
+        .close()
+        .await
+        .expect("server writer closes");
+    assert_eq!(entries(), partitions(256));
+
+    // Halving the budget keeps the block size, so partitions 0..128 are
+    // reused and 128..256 go. Names Foyer never numbers are left alone.
+    for name in ["foyer-storage-direct-fs-not-a-number", "unrelated"] {
+        std::fs::write(foyer_root.join(name), b"").expect("foreign cache entry");
+    }
+    HelixDB::open_for_server(source(), hybrid(&foyer_root, 8 * 1024 * 1024))
+        .await
+        .expect("server writer opens the smaller hybrid cache")
+        .close()
+        .await
+        .expect("server writer closes");
+    assert_eq!(
+        entries(),
+        [
+            partitions(128),
+            vec![
+                "foyer-storage-direct-fs-not-a-number".to_owned(),
+                "unrelated".to_owned(),
+            ],
+        ]
+        .concat()
+    );
+
+    // A stale partition that cannot be removed, and a cache root that is
+    // not a directory, fail the open instead of leaving stale blocks.
+    std::fs::create_dir(foyer_root.join("foyer-storage-direct-fs-00000999"))
+        .expect("irremovable stale partition");
+    let not_a_directory = root.path().join("not-a-directory");
+    std::fs::write(&not_a_directory, b"").expect("regular file");
+    for (foyer_root, reason) in [
+        (foyer_root.as_path(), "stale partition directory"),
+        (not_a_directory.as_path(), "regular file"),
+    ] {
+        let error = HelixDB::open_for_server(source(), hybrid(foyer_root, 8 * 1024 * 1024))
+            .await
+            .err()
+            .expect("the open fails");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to remove stale Slate hybrid cache partitions"),
+            "{reason}: {error}"
+        );
+    }
+}
+
+#[test]
+fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget() {
+    run_high_stack_contract(
+        "server-full-text-disk-trim",
+        server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget_contract,
+    );
+}
+
+async fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget_contract() {
+    let root = tempfile::tempdir().expect("temporary server root");
+    let data_root = root.path().join("data");
+    std::fs::create_dir_all(&data_root).expect("data directory");
+    let source = || HelixDbSource::Disk {
+        root: data_root.clone(),
+        database: "server-full-text-disk-trim".to_owned(),
+    };
+    let hybrid = |fts_disk_bytes| {
+        config::DbConfig::new().with_cache(config::CacheConfig::new(
+            config::VectorMemorySettings::default(),
+            config::CacheMode::Hybrid {
+                slate_db: config::SlateHybridCacheConfig::try_new(
+                    1024 * 1024,
+                    root.path().join("foyer"),
+                    16 * 1024 * 1024,
+                )
+                .expect("valid Slate hybrid cache"),
+                object_store: config::SlateObjectStoreCacheSettings::try_new(
+                    root.path().join("object-store"),
+                    Some(1024 * 1024),
+                    4096,
+                    false,
+                    config::ObjectStoreWarmLevel::Off,
+                    None,
+                    1,
+                )
+                .expect("valid object-store cache"),
+                slate_warm: config::SlateWarmConfig::Off,
+                fts: Some(
+                    config::FtsHybridCacheConfig::try_new(
+                        1024 * 1024,
+                        root.path().join("fts"),
+                        fts_disk_bytes,
+                        config::FtsWarmConfig::Off,
+                        1,
+                    )
+                    .expect("valid full-text hybrid cache"),
+                ),
+            },
+        ))
+    };
+    let search = QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "ids",
+                traversal::g()
+                    .text_search_nodes("Document", "body", "alpha", 8, None)
+                    .id(),
+            )
+            .returning(["ids"]),
+    );
+
+    let db = HelixDB::open_for_server(source(), hybrid(1024 * 1024))
+        .await
+        .expect("server writer opens with a full-text disk tier");
+    // The startup trim of the empty tier finishes before the searches.
+    db.wait_for_startup_cache_warm().await;
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "document",
+                traversal::g().add_n("Document", vec![("body", PropertyInput::from("alpha"))]),
+            )
+            .returning(Vec::<String>::new()),
+    ))
+    .await
+    .unwrap();
+    let receipt = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_text_index_nodes("Document", "body", None::<String>),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .unwrap();
+    await_index_operation_success(
+        &db,
+        receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted text-index operation has an ID"),
+        "text index",
+    )
+    .await;
+    for _ in 0..2 {
+        assert_eq!(
+            db.query(search.clone()).await.unwrap(),
+            serde_json::json!({ "ids": [0] })
+        );
+    }
+    // A completion is counted after the admission's trim, so the whole
+    // hydration task has run before close could abort it.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while db.fts_cache_state().await.unwrap().hydration_completions == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a split searched twice reaches the disk tier");
+    let admitted = db.fts_cache_state().await.unwrap().disk_artifact_count;
+    assert_eq!(admitted, 1);
+    db.close().await.expect("server writer closes");
+    // Past the one-second grace that protects recently used splits.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    // A one-byte budget holds no split, so the reopened writer evicts it at
+    // startup and never admits it again.
+    let db = HelixDB::open_for_server(source(), hybrid(1))
+        .await
+        .expect("server writer reopens with a smaller full-text disk tier");
+    db.wait_for_startup_cache_warm().await;
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (
+            state.disk_artifact_count,
+            state.disk_artifact_bytes,
+            state.disk_evictions
+        ),
+        (0, 0, admitted)
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            db.query(search.clone()).await.unwrap(),
+            serde_json::json!({ "ids": [0] })
+        );
+    }
+    // A hydration the second search spawned would count its attempt the
+    // first time this single-threaded runtime polls it.
+    tokio::task::yield_now().await;
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (state.hydration_attempts, state.disk_artifact_count),
+        (0, 0),
+        "a split larger than the whole tier is never admitted"
+    );
+    db.close().await.expect("server writer closes");
+}
+
+#[test]
 fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
     const SECRET_LITERAL: &str = "secret-query-value";
 
@@ -270,6 +555,137 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
         })
         .expect("default diagnostic response converts");
     assert!(default_response.diagnostics().insights.is_empty());
+}
+
+thread_local! {
+    /// `helix::query::step` records logged on this thread while it records;
+    /// `None` when the thread does not record.
+    static QUERY_STEP_LOGS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `log` facade sink that keeps `helix::query::step` records for the thread
+/// that emitted them when that thread records.
+///
+/// The logger comes from `tracing::log`, the exact `log` crate that tracing's
+/// `log` feature forwards to while no tracing subscriber is installed.
+struct QueryStepLog;
+
+impl tracing::log::Log for QueryStepLog {
+    fn enabled(&self, metadata: &tracing::log::Metadata<'_>) -> bool {
+        metadata.target() == "helix::query::step"
+    }
+
+    fn log(&self, record: &tracing::log::Record<'_>) {
+        if record.target() != "helix::query::step" {
+            return;
+        }
+        QUERY_STEP_LOGS.with_borrow_mut(|logs| {
+            let Some(logs) = logs else {
+                return;
+            };
+            logs.push(record.args().to_string());
+        });
+    }
+
+    fn flush(&self) {}
+}
+
+/// Every executed step emits one `helix::query::step` debug event with its
+/// operator name, the rows it produced (zero for non-stream values), and its
+/// elapsed microseconds. Without a tracing subscriber the event reaches the
+/// `log` facade.
+#[tokio::test]
+async fn public_execute_boundary_logs_every_executed_step() {
+    static LOGGER: QueryStepLog = QueryStepLog;
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing::log::set_logger(&LOGGER).expect("no other contract installs a logger");
+        tracing::log::set_max_level(tracing::log::LevelFilter::Debug);
+    });
+    assert!(
+        !tracing::dispatcher::has_been_set(),
+        "step events reach the log facade only without a tracing subscriber"
+    );
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-query-step-logging".to_owned(),
+    })
+    .await
+    .expect("query step logging fixture opens");
+    let step_id = |value| exec::ExecStepId::new(value).expect("step ID is positive");
+    let step = |id, dependencies, op| exec::ExecStep {
+        id: step_id(id),
+        dependencies,
+        output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
+        condition: exec::ExecCondition::Always,
+        op,
+        schedule: exec::ExecSchedule::Pipeline,
+        delivered: properties::DeliveredProperties::default(),
+        cost: cost::CostVector::ZERO,
+    };
+    // The mutation is an effect boundary, so the count runs as its own step
+    // rather than inside a pull region.
+    let plan = exec::ExecutablePlan::new(
+        ir::PlanKind::Write,
+        ir::ReturnPlan::None,
+        ir::AtLeast::<_, 1>::from_one_and_rest(
+            step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::AddNodeSource {
+                        label: ir::NonEmptyString::new("Logged").expect("label is non-empty"),
+                        properties: ir::PropertyAssignments::try_from_vec(Vec::new())
+                            .expect("empty assignments are valid"),
+                    },
+                },
+            ),
+            vec![step(
+                2,
+                vec![step_id(1)],
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
+                },
+            )],
+        ),
+        step_id(2),
+        trace::PlanningTrace::default(),
+        exec::PlannerMetrics::default(),
+    )
+    .expect("logged plan validates");
+
+    QUERY_STEP_LOGS.set(Some(Vec::new()));
+    let result = db
+        .execute(&plan, context::ParamBindings::default())
+        .await
+        .expect("logged plan executes");
+    let logs = QUERY_STEP_LOGS.take().expect("this thread records");
+
+    assert_eq!(result.last, Some(ExecutionValue::Count(1)));
+    let steps = logs
+        .iter()
+        .map(|record| {
+            let field = |name: &str| {
+                record
+                    .split(' ')
+                    .find_map(|token| token.strip_prefix(name))
+                    .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
+            };
+            field("elapsed_us=")
+                .parse::<u64>()
+                .expect("latency is whole microseconds");
+            (field("op="), field("rows="))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steps,
+        [("\"mutation()\"", "1"), ("\"count()\"", "0")],
+        "{logs:?}"
+    );
+    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -6686,10 +7102,12 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
             false,
         ),
     ] {
-        // Production planning has no statistics, and an unscoped predicate
-        // cannot prove which label its stream reaches, so it keeps the
-        // per-row filter. Scoped to `Attribute`, the same predicate plans
-        // membership whenever an index answers one of its conjuncts.
+        // Production planning has no statistics, so the label scan behind
+        // every checked shape keeps the unknown-scan estimate, past one
+        // record batch. Membership then amortizes its set reads whether the
+        // predicate is unscoped, evaluating rows of other labels, or scoped
+        // to `Attribute`, rejecting them, whenever an index answers one of
+        // its conjuncts.
         // A nested conjunction would hide its conjuncts from the index split.
         let conjuncts = if let Predicate::And { predicates } = &unscoped {
             predicates.clone()
@@ -6707,7 +7125,7 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
             .filter(|uid| uid.starts_with('a'))
             .collect::<Vec<_>>();
         for (predicate, expected, planned) in
-            [(unscoped, expected, false), (scoped, attributes, indexed)]
+            [(unscoped, expected, indexed), (scoped, attributes, indexed)]
         {
             let filtered = |group: &str| {
                 traversal::g()

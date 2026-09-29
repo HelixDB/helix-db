@@ -15,6 +15,8 @@ use std::sync::Once;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
+#[cfg(feature = "production-scale")]
+pub use crate::search::vector::RestrictedSearchStrategy;
 pub use crate::search::vector::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
@@ -287,6 +289,12 @@ pub async fn vector_missing_partition_mapping_delete_contract() {
     crate::index_lifecycle::vector::run_missing_partition_mapping_delete_contract().await;
 }
 
+/// Proves the retained vector build cache reuses only exact committed checkpoints.
+#[cfg(not(test))]
+pub async fn vector_build_cache_contracts() {
+    crate::index_lifecycle::vector::run_build_cache_contracts().await;
+}
+
 /// Characterizes the independent finite-score magnitude oracle and active kernels.
 pub fn vector_magnitude_oracle_and_kernel_contracts() {
     crate::search::vector::run_magnitude_oracle_and_kernel_contracts();
@@ -338,6 +346,7 @@ pub async fn vector_search_contracts() {
 /// metric, corruption rejection, SimHash-directory lifecycle and seeding,
 /// bounded bridge traversal, termination reasons, membership, and recall.
 pub async fn vector_restricted_search_contracts() {
+    enable_vector_tracing();
     crate::search::vector::run_restricted_contracts().await;
 }
 
@@ -573,6 +582,23 @@ pub async fn traversal_vector_prefilter_1m_scale_contract() {
 #[cfg(feature = "production-scale")]
 pub async fn index_lifecycle_blocked_limit_scale_contracts() {
     index_lifecycle_scale::run_blocked_limits().await;
+}
+
+/// Runs `query` and returns the strategy of the restricted vector search it ran.
+///
+/// `None` means `query` ran no traversal-scoped vector search; when it ran
+/// several, the last one is reported. Release gates use this to prove which
+/// restricted execution a scoped shape's recall measures, so an exact scan
+/// cannot stand in for the filtered graph walk.
+#[cfg(feature = "production-scale")]
+pub async fn observe_restricted_vector_strategy<F>(
+    query: F,
+) -> (F::Output, Option<RestrictedSearchStrategy>)
+where
+    F: std::future::Future,
+{
+    let (output, stats) = crate::search::vector::observe_restricted_search(query).await;
+    (output, stats.and_then(|stats| stats.strategy))
 }
 
 /// Runs vector property materialization and physical retirement for 100k rows.

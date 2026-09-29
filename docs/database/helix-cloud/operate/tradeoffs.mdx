@@ -1,16 +1,15 @@
 ---
 title: 'Tradeoffs'
+description: "What the Helix Cloud architecture is optimized for, and where another system may fit better"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
 Every system makes design choices. Helix Cloud optimizes for durable, cost-effective graph,
 vector, and text workloads with strong transactional guarantees. These choices have implications.
 
-## Excels At
+## Excels at
 
 | Area                                 | Details                                                                                                                                |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -21,7 +20,7 @@ vector, and text workloads with strong transactional guarantees. These choices h
 | **Cost efficiency at scale**         | Object storage is significantly cheaper per GB than local SSDs or in-memory stores. Large datasets remain affordable.                  |
 | **Operational simplicity**           | Single writer eliminates distributed consensus. No leader election, no split-brain, no quorum management.                              |
 
-## Not Optimal For
+## Not optimal for
 
 | Area                         | Details                                                                                                                                                                                     |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -29,7 +28,7 @@ vector, and text workloads with strong transactional guarantees. These choices h
 | **Ultra-low write latency**  | Writes incur object storage latency for durability. Write throughput is high, but individual write latency has a floor set by object storage round-trip time.                               |
 | **Exhaustive vector recall** | Vector search is approximate (ANN). Applications that require 100% exact nearest neighbor results should use brute-force search on smaller datasets.                                        |
 
-## Design Choices
+## Design choices
 
 **Object storage as the system of record.** Caches accelerate reads but are not required for
 correctness. This means cold starts are slower than systems that keep all data on local disk, but

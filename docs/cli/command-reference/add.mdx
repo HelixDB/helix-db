@@ -1,16 +1,88 @@
 ---
 title: "helix add"
-description: "Add a local instance or a Cloud database link"
+sidebarTitle: "add"
+description: "Add a local instance or a Helix Cloud database link to an existing project"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
+Add another instance to the project's existing `helix.toml` without changing the instances already
+in it. Works for local instances and Helix Cloud database links.
+
+## Usage
+
 ```bash
-helix add local --name dev [--port 6969] [--disk | --storage-uri s3://bucket/prefix]
-helix add cloud --name production [--database tenant:<id>|cluster:<id>] \
-  [--project <id>] [--workspace <id>]
+helix add local --name <name> [--port 6969] [--disk | --storage-uri s3://bucket/prefix]
+helix add cloud --name <name> [--database <database>] \
+  [--project <project>] [--workspace <workspace>]
 ```
 
-Cloud add uses the WorkOS session, verifies the selected database, and writes only stable IDs to
-`helix.toml`. If a project has multiple eligible databases, pass `--database` explicitly.
+## Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `local` | Add a local instance that runs in Docker or Podman. |
+| `cloud` | Link a Helix Cloud database. Alias: `enterprise`. |
+
+Run `helix add` with no subcommand in a terminal to choose interactively.
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-p`, `--path <DIR>` | Project directory. Accepted before or after the subcommand. | Current directory |
+| `-n`, `--name <NAME>` | Instance name. Required. | — |
+| `--json` | Print the result as JSON on stdout and never prompt. | Off |
+
+### `helix add local`
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--port <PORT>` | Host port for the instance. | `6969` |
+| `--disk` | Use on-disk storage backed by a CLI-managed SeaweedFS container. Cannot be combined with `--storage-uri`. | Off (in-memory) |
+| `--storage-uri <URI>` | Use an S3 or S3-compatible bucket and prefix, for example `s3://bucket/prefix/`. | — |
+| `--s3-region <REGION>` | Region for S3 storage. | — |
+| `--s3-endpoint-url <URL>` | Custom S3-compatible endpoint URL. | — |
+| `--s3-allow-http` | Allow plain HTTP for the S3 endpoint. | Off |
+
+### `helix add cloud`
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--database <DATABASE>` | Database ID, slug, or name, or `tenant:<id>` / `cluster:<id>`. | The project's only database not yet in `helix.toml`, then a picker |
+| `--project <PROJECT>` | Owning project ID, slug, or name. | Project linked in `helix.toml` |
+| `--workspace <WORKSPACE>` | Workspace ID, slug, or name to find the project in. | Workspace linked in `helix.toml` |
+
+## Behavior
+
+- Fails if an instance with the same name already exists in `helix.toml`.
+- Without a subcommand, the CLI prompts for the instance type in a terminal and fails in non-interactive shells.
+- `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`.
+- `add cloud` uses the WorkOS session and resolves the database as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
+- `add cloud` writes only stable IDs to `helix.toml`, and sets `[project] id` and `workspace_id` when they are missing.
+- Without `--database`, `add cloud` only offers databases that are not in `helix.toml` yet, and says so when every database is already added. Pass `--database` to add one again under another name.
+- `add cloud` refuses a database from a different project than the one `helix.toml` is linked to. Relink with [`helix project link`](/cli/command-reference/project) first.
+- A `cluster:<id>` target must be a dedicated cluster; shared clusters are not database targets.
+
+## Examples
+
+```bash
+# Add a second local instance on another port
+helix add local --name staging --port 7070
+
+# Add a local instance with persistent on-disk storage
+helix add local --name qa --disk
+
+# Link a Cloud database from the linked project, picking one if there are several
+helix add cloud --name production
+
+# Link a specific Cloud database
+helix add cloud --name analytics --database tenant:<id>
+```
+
+## Related
+
+- [`helix init`](/cli/command-reference/init) — create a new project.
+- [`helix delete`](/cli/command-reference/delete) — remove an instance from `helix.toml`.
+- [CLI configuration](/cli/configuration) — the `helix.toml` format.

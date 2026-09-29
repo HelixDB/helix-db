@@ -1,0 +1,213 @@
+---
+title: "What is the difference between cosine, Euclidean, and Manhattan distance?"
+description: "Cosine distance compares direction, Euclidean measures the straight-line gap, and Manhattan adds up the per-dimension gaps between two embeddings."
+sidebarTitle: "Distance metrics"
+pageType: "Concept"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+A distance metric is the formula a
+[vector search](/learn/vector-search/what-is-vector-search) uses to measure how close
+two [embeddings](/learn/vector-search/what-are-vector-embeddings), lists of numbers that
+capture what content means, are. It works like measuring the gap between two places on
+a map: as the crow flies (Euclidean), block by block along city streets (Manhattan), or
+by whether you are heading the same way (cosine). The choice decides which results come
+back first, so a mismatched metric can quietly push the best match down the list. The
+usual right answer is the metric your embedding model was trained for, which its
+provider normally documents.
+
+<div className="learn-objectives">
+  <Card title="Learning objectives" icon="graduation-cap">
+    After reading this article you will be able to:
+
+    - Explain what cosine, Euclidean, Manhattan, and dot product measure
+    - Show how the metrics can rank the same vectors differently
+    - Explain why cosine and Euclidean distance agree on normalized vectors
+    - Pick a metric that fits your embedding model
+  </Card>
+</div>
+
+## What are cosine, Euclidean, and Manhattan distance?
+
+They are three ways to turn a pair of vectors into one number that says how far apart
+they are. Cosine looks only at direction, Euclidean at the straight-line gap, and
+Manhattan at the gap measured one dimension at a time. When a music app finds similar
+songs with vector search, or an [AI agent](/learn/ai-memory/what-is-ai-agent-memory)
+looks up a related memory, a formula like these decides what counts as close.
+
+Dot product is a related similarity score that many models use, so it is included for
+comparison. Under the hood, for two vectors `a` and `b` with `n` dimensions, where `Σ`
+means "add up across every dimension" and `|a|` is the length of `a`:
+
+```text
+cosine similarity   = (a · b) / (|a| × |b|)
+cosine distance     = 1 − cosine similarity
+
+Euclidean (L2)      = sqrt( Σ (aᵢ − bᵢ)² )
+
+Manhattan (L1)      = Σ |aᵢ − bᵢ|
+
+dot product         = Σ aᵢ × bᵢ
+```
+
+| Metric | Measures | Sensitive to vector length? | Typical use |
+| --- | --- | --- | --- |
+| Cosine | The angle between vectors | No | Text and sentence embeddings |
+| Euclidean (L2) | Straight-line distance | Yes | Embeddings where magnitude carries meaning, image and spatial features |
+| Manhattan (L1) | Sum of absolute per-dimension differences | Yes | Sparse or high-dimensional features where large single-dimension gaps should not dominate |
+| Dot product | Alignment scaled by length | Yes | Models trained to score with an inner product |
+
+Similarity and distance point in opposite directions. Cosine similarity and dot product
+are similarities, so higher is closer. Cosine distance, Euclidean, and Manhattan are
+distances, so lower is closer. Search systems usually sort by distance, closest first.
+Keyword search works differently again:
+[full-text search](/learn/full-text-search/what-is-full-text-search) ranks documents by
+term statistics with functions such as [BM25](/learn/full-text-search/what-is-bm25),
+not by vector distance.
+
+## How can the metrics rank the same vectors differently?
+
+They weigh length and per-dimension gaps differently, so the nearest vector under one
+metric can be farther away under another. In a product catalog, that can decide which
+item a shopper sees first. Take a query vector `a = (1, 0)` and two stored vectors,
+`b = (0.6, 0.8)` and `c = (2, 0)`. Every column below is a distance, so lower is closer.
+
+| Pair | Cosine distance | Euclidean | Manhattan |
+| --- | --- | --- | --- |
+| `a`, `b` | 0.4 | 0.894 | 1.2 |
+| `a`, `c` | 0.0 | 1.0 | 1.0 |
+| Nearest to `a` | `c` | `b` | `c` |
+
+`c` points in exactly the same direction as `a` but is twice as long. Cosine ignores
+the length, so `c` is a perfect match. Euclidean counts the extra length as distance,
+so `b` wins. In other words, cosine and Euclidean disagree here because the vectors
+have different lengths.
+
+Manhattan distance is also sensitive to length, and it picks `c` only because of this
+particular geometry. `b` differs from `a` by 0.4 and 0.8 across two dimensions.
+Euclidean squares those gaps before adding them, so they total less than `c`'s single
+gap of 1.0. Manhattan adds them as they are, so they total 1.2.
+
+## When do the metrics agree?
+
+When every vector is normalized to unit length, meaning scaled so its length is exactly
+1, cosine and Euclidean distance produce the same ranking. Under the hood, for unit
+vectors the squared Euclidean distance equals `2 − 2 × cosine similarity`, so ordering
+by one orders by the other. The dot product of unit vectors also equals their cosine
+similarity.
+
+Manhattan distance does not have this property: it can rank normalized vectors
+differently from cosine and Euclidean distance.
+
+Normalizing a vector means dividing it by its length. Do it when your model's
+documentation recommends it, or when you want vector length to stop influencing
+results.
+
+<Tip>
+Many embedding models return normalized vectors. If yours does, cosine is a safe
+default. With exact search, switching to Euclidean distance gives the same ranking;
+with approximate search, results can differ slightly.
+</Tip>
+
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Create a vector index with cosine, Euclidean, or Manhattan distance on graph nodes
+    or edges in open-source HelixDB.
+  </Card>
+</div>
+
+## How do you choose a distance metric?
+
+Start from the embedding model, then confirm with your own data. For example, a
+support team searching tickets with a text embedding model should use the metric that
+model's documentation names.
+
+1. **Use the metric the embedding model was trained for.** Model documentation usually
+   says whether to compare its embeddings with cosine similarity, dot product, or
+   Euclidean distance. Matching it gives the rankings the model was optimized to
+   produce.
+2. **Check whether the vectors are normalized.** If they are, cosine, Euclidean, and dot
+   product rank results the same way, and the choice matters little.
+3. **Keep one metric per index.** Every vector in an index, and every query vector, must
+   come from the same model and be compared with the same metric. A
+   [vector database](/learn/vector-search/what-is-a-vector-database) typically fixes the
+   metric when the index is created. Changing the model means
+   [re-embedding](/learn/vector-search/what-are-vector-embeddings) every stored vector,
+   and changing the metric typically means rebuilding an approximate index such as
+   [HNSW](/learn/vector-search/what-is-hnsw).
+4. **Evaluate on your own queries.** When in doubt, measure recall and relevance with
+   each candidate metric on a sample of real questions, such as those a
+   [retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag) chatbot
+   receives.
+
+## How does HelixDB support distance metrics?
+
+Each HelixDB [vector index](/database/helix-db/query-guides/vector-indexes) declares one
+metric (cosine, Euclidean, or Manhattan) and a fixed dimension. Every stored embedding
+and every query vector must match that dimension exactly.
+
+- **Results come back closest first.** Hits are ordered by distance, then by ID when
+  distances tie.
+- **Search is approximate.** Vector indexes run approximate nearest neighbor search, and
+  the docs state over 90% recall.
+- **Cosine needs a non-zero vector.** A cosine vector with zero length has no direction,
+  so HelixDB rejects it with the `zero_norm_cosine_vector` error code.
+- **Dot-product models can use cosine.** For a model that recommends dot product on
+  normalized embeddings, use cosine, which ranks those vectors the same way.
+
+The application computes embeddings, and HelixDB stores and indexes them on the nodes
+or edges of a [property graph](/learn/graph-databases/what-is-a-property-graph).
+Distance ranking can also run inside a traversal-defined candidate set, as described in
+[filtered vector search](/learn/vector-search/filtered-vector-search).
+
+## Frequently asked questions
+
+### Is cosine similarity better than Euclidean distance?
+
+Neither is better in general. Cosine compares direction only, which suits most text
+embeddings. Euclidean distance also accounts for length. For normalized vectors they
+rank results identically.
+
+### Can I change the distance metric after building an index?
+
+Usually you build a new index. An approximate index such as
+[HNSW](/learn/vector-search/what-is-hnsw) is constructed by comparing vectors with its
+metric, so its structure reflects that metric. The stored embeddings can be reused if
+the model stays the same.
+
+### When is Manhattan distance useful?
+
+Manhattan distance adds up absolute differences without squaring them, so one very
+large difference makes up a smaller share of the total than it does in Euclidean
+distance. It is sometimes preferred for sparse or very high-dimensional features. Test
+it against your own data before choosing it.
+
+### What is the difference between dot product and cosine similarity?
+
+Cosine similarity is the dot product divided by both vectors' lengths. For unit-length
+vectors they are equal. For vectors of different lengths, the dot product also rewards
+longer vectors.
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="What are vector embeddings?" icon="cubes" href="/learn/vector-search/what-are-vector-embeddings">
+    How models turn inputs into vectors, and why a model change means re-embedding.
+  </Card>
+  <Card title="What is vector search?" icon="vector-square" href="/learn/vector-search/what-is-vector-search">
+    Embeddings, nearest neighbors, and approximate search.
+  </Card>
+  <Card title="What is HNSW?" icon="diagram-project" href="/learn/vector-search/what-is-hnsw">
+    A layered graph index widely used for approximate nearest neighbor search.
+  </Card>
+  <Card title="What is filtered vector search?" icon="filter" href="/learn/vector-search/filtered-vector-search">
+    Return the right top k when results must match a filter.
+  </Card>
+  <Card title="What is a vector database?" icon="database" href="/learn/vector-search/what-is-a-vector-database">
+    What a vector store does and where vector-only storage falls short.
+  </Card>
+  <Card title="HelixDB vector indexes" icon="code" href="/database/helix-db/query-guides/vector-indexes">
+    Create a vector index and run nearest-neighbor search.
+  </Card>
+</CardGroup>

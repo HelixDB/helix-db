@@ -1,13 +1,12 @@
 use clap::builder::styling::{AnsiColor, Color, RgbColor, Style, Styles};
 use clap::{ArgGroup, Parser, Subcommand};
-use color_eyre::owo_colors::OwoColorize;
+use console::style;
 use eyre::Result;
 use helix_cli::{
     commands, errors, metrics_sender, output, update, AddTarget, AuthAction, CloudApiAction,
-    ClusterConfigAction, ConfigAction, DatabaseAction, InitTarget, MetricsAction,
-    ProjectConfigAction, S3StorageArgs, ServiceCredentialAction, SkillsAction, WorkspaceAction,
+    ClusterAction, DatabaseAction, InitTarget, MetricsAction, ProjectAction, S3StorageArgs,
+    ServiceCredentialAction, SkillsAction, WorkspaceAction,
 };
-use std::io::IsTerminal;
 use tui_banner::{Align, Banner, ColorMode, Fill, Gradient, Palette};
 
 /// Helix brand orange, matching the welcome banner.
@@ -46,6 +45,10 @@ const HELP_STYLES: Styles = Styles::styled()
 #[command(version)]
 #[command(styles = HELP_STYLES)]
 struct Cli {
+    /// Print machine-readable JSON on stdout; never prompt
+    #[arg(long, global = true, conflicts_with_all = ["quiet", "verbose"])]
+    json: bool,
+
     /// Suppress output (errors and final result only)
     #[arg(long, global = true)]
     quiet: bool,
@@ -60,7 +63,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a v2 Helix project
+    /// Initialize a Helix project
     Init {
         /// Project directory (defaults to current directory)
         #[arg(short, long, global = true)]
@@ -79,7 +82,7 @@ enum Commands {
     #[command(alias = "cook")]
     Chef {},
 
-    /// Add a local v2 or Enterprise Cloud instance
+    /// Add a local or Helix Cloud instance
     Add {
         /// Project directory (defaults to current directory)
         #[arg(short, long, global = true)]
@@ -88,7 +91,7 @@ enum Commands {
         target: Option<AddTarget>,
     },
 
-    /// Start a local v2 instance in the background
+    /// Start a local instance in the background
     #[command(alias = "run")]
     Start {
         /// Instance name to start
@@ -114,39 +117,36 @@ enum Commands {
         persist: bool,
     },
 
-    /// Stop a background local v2 instance
+    /// Stop a background local instance
     Stop {
         /// Instance name to stop
         instance: Option<String>,
     },
 
-    /// Restart a background local v2 instance
+    /// Restart a background local instance
     Restart {
         /// Instance name to restart
         instance: Option<String>,
     },
 
-    /// Show local and Enterprise Cloud instance status
+    /// Show local and Helix Cloud instance status
     Status {
         /// Instance name to show, defaults to all instances
         instance: Option<String>,
     },
 
-    /// View logs for a local or Enterprise Cloud instance
+    /// View logs for a local or Helix Cloud instance
     Logs {
         /// Instance name
         instance: Option<String>,
-        /// Follow logs
+        /// Stream new log lines (local instances)
         #[arg(long, short = 'f')]
         follow: bool,
-        /// Query historical logs with time range for Enterprise Cloud
-        #[arg(long, short = 'r')]
-        range: bool,
-        /// Start time (ISO 8601)
-        #[arg(long, requires = "range")]
+        /// Start of the Cloud query-error window (RFC 3339); defaults to an hour before --end
+        #[arg(long)]
         start: Option<String>,
-        /// End time (ISO 8601)
-        #[arg(long, requires = "range")]
+        /// End of the Cloud query-error window (RFC 3339); defaults to now
+        #[arg(long)]
         end: Option<String>,
     },
 
@@ -154,7 +154,7 @@ enum Commands {
     #[command(group(
         ArgGroup::new("query_input")
             .required(true)
-            .args(["file", "json", "ts", "ts_file"])
+            .args(["file", "body", "ts", "ts_file"])
     ))]
     // Use the compact (short) help layout for both `-h` and `--help`. clap's
     // long-help layout hardcodes a blank line between every option, which is
@@ -180,9 +180,9 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
             help_heading = "Input (pick one)"
         )]
         file: Option<String>,
-        /// Query from an inline JSON string
+        /// Query from an inline JSON request body
         #[arg(long, value_name = "JSON", help_heading = "Input (pick one)")]
-        json: Option<String>,
+        body: Option<String>,
         /// Query from a TypeScript DSL expression, like `mysql -e`
         #[arg(
             short = 'e',
@@ -205,11 +205,8 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         #[arg(long, value_name = "PORT", help_heading = "Connection")]
         port: Option<u16>,
         /// Pre-warm caches with X-Helix-Warm (read requests only)
-        #[arg(long, help_heading = "Output")]
+        #[arg(long, help_heading = "Connection")]
         warm: bool,
-        /// Print compact single-line JSON
-        #[arg(long, help_heading = "Output")]
-        compact: bool,
     },
 
     /// Execute or explain Cypher against a local Helix instance
@@ -219,43 +216,33 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
     Shell {
         /// Instance or typed database; defaults to dev or the sole linked target
         instance: Option<String>,
-        /// Print compact single-line JSON
-        #[arg(long)]
-        compact: bool,
     },
 
-    /// Enterprise Cloud auth operations
+    /// Log in to Helix Cloud and inspect the session
     Auth {
         #[command(subcommand)]
         action: AuthAction,
     },
 
-    /// Discover workspaces and manage project/database links
-    #[command(hide = true)]
-    Config {
-        #[command(subcommand)]
-        action: Option<ConfigAction>,
-    },
-
-    /// Discover accessible Enterprise Cloud workspaces
+    /// List and inspect Helix Cloud workspaces
     Workspace {
         #[command(subcommand)]
         action: Option<WorkspaceAction>,
     },
 
-    /// Manage the current project's Enterprise Cloud link
+    /// Manage Helix Cloud projects and this directory's link
     Project {
         #[command(subcommand)]
-        action: Option<ProjectConfigAction>,
+        action: Option<ProjectAction>,
     },
 
-    /// List and inspect Enterprise Cloud clusters
+    /// List and inspect Helix Cloud clusters
     Cluster {
         #[command(subcommand)]
-        action: Option<ClusterConfigAction>,
+        action: Option<ClusterAction>,
     },
 
-    /// Manage Cloud databases and application database keys
+    /// Manage Helix Cloud databases and application keys
     Database {
         #[command(subcommand)]
         action: Option<DatabaseAction>,
@@ -267,13 +254,13 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         action: Option<ServiceCredentialAction>,
     },
 
-    /// Call a WFE Cloud API path with the active WorkOS session
+    /// Call a Helix Cloud API path with the active session
     Api {
         #[command(subcommand)]
         action: CloudApiAction,
     },
 
-    /// Prune local v2 containers/workspaces
+    /// Prune local containers and workspaces
     Prune {
         /// Instance to prune
         instance: Option<String>,
@@ -322,7 +309,7 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         message: Option<String>,
     },
 
-    // --- Removed v2 commands -------------------------------------------------
+    // --- Removed commands ----------------------------------------------------
     // Hidden so they don't clutter `--help`, but caught explicitly to return a
     // helpful "this moved" message instead of clap's bare "unrecognized
     // subcommand". The trailing args make `helix compile path --flag` route here
@@ -352,9 +339,9 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
 /// compile step — queries are validated server-side when sent to a running
 /// instance.
 fn removed_query_command_error(command: &str) -> eyre::Report {
-    errors::CliError::new(format!("`helix {command}` is not a command in HelixDB v2"))
+    errors::CliError::new(format!("`helix {command}` is not a command"))
         .with_hint(
-            "HelixDB v2 validates queries server-side — there is no compile/check step. \
+            "Helix validates queries server-side, so there is no compile/check step. \
              Send a query to a running instance with \
              `helix query <instance> --file <request.json>`.",
         )
@@ -363,14 +350,12 @@ fn removed_query_command_error(command: &str) -> eyre::Report {
 
 /// Build the friendly error shown for the removed deployment command.
 fn removed_deploy_command_error() -> eyre::Report {
-    errors::CliError::new("`helix deploy` is not a command in HelixDB v2")
+    errors::CliError::new("`helix deploy` is not a command")
         .with_hint("Cloud database lifecycle is managed through the Helix control plane.")
         .into()
 }
 
 fn display_welcome(update_available: Option<String>, skills_update_available: bool) {
-    let use_color = std::io::stdout().is_terminal();
-
     if let Ok(banner) = Banner::new("> HELIX DB") {
         let banner = banner
             .color_mode(ColorMode::TrueColor)
@@ -388,18 +373,14 @@ fn display_welcome(update_available: Option<String>, skills_update_available: bo
     }
 
     let version = update::current_version();
-    if use_color {
-        println!(
-            "  {} {}\n",
-            "Helix DB CLI".bold(),
-            format!("v{}", version).dimmed()
-        );
-    } else {
-        println!("  Helix DB CLI v{}\n", version);
-    }
+    println!(
+        "  {} {}\n",
+        style("Helix DB CLI").bold(),
+        style(format!("v{version}")).dim()
+    );
 
     if let Some(latest_version) = update_available {
-        println!("  Update available: v{} -> v{}", version, latest_version);
+        println!("  Update available: v{version} -> v{latest_version}");
         println!("  Run 'helix update' to upgrade\n");
     }
 
@@ -408,74 +389,48 @@ fn display_welcome(update_available: Option<String>, skills_update_available: bo
         println!("  Run 'helix skills update' to refresh\n");
     }
 
-    print_section("Getting Started", use_color);
-    print_command(
-        "helix chef",
-        "Bootstrap a Helix app with an AI agent",
-        use_color,
-    );
-    print_command("helix init", "Create a new project", use_color);
-    print_command(
-        "helix add",
-        "Add a local or Enterprise Cloud instance",
-        use_color,
-    );
+    print_section("Getting Started");
+    print_command("helix chef", "Bootstrap a Helix app with an AI agent", 38);
+    print_command("helix init", "Create a new project", 38);
+    print_command("helix add", "Add a local or Helix Cloud instance", 38);
 
-    print_section("Local Development", use_color);
+    print_section("Local Development");
     print_command(
         "helix start <instance>",
         "Start a local instance in the background",
-        use_color,
+        38,
     );
-    print_command(
-        "helix status",
-        "Show local and cloud instance status",
-        use_color,
-    );
+    print_command("helix status", "Show local and Cloud instance status", 38);
     print_command(
         "helix logs <instance> -f",
         "Follow logs for an instance",
-        use_color,
+        38,
     );
     print_command(
         "helix query <instance> --file request.json",
         "Send a query",
-        use_color,
+        38,
     );
 
-    print_section("HelixDB Cloud", use_color);
-    print_command("helix auth login", "Login to the cloud", use_color);
+    print_section("Helix Cloud");
+    print_command("helix auth login", "Log in to Helix Cloud", 38);
+    print_command("helix database list", "List your Cloud databases", 38);
 
     println!();
     println!("Docs: https://docs.helix-db.com");
     println!("Rust DSL: https://docs.rs/helix-enterprise-ql")
 }
 
-fn print_section(title: &str, use_color: bool) {
-    println!();
-    if use_color {
-        println!("{}", title.bold());
-    } else {
-        println!("{title}");
-    }
-    println!();
+fn print_section(title: &str) {
+    println!("\n{}\n", style(title).bold());
 }
 
-fn print_command(cmd: &str, desc: &str, use_color: bool) {
-    print_command_w(cmd, desc, 38, use_color);
-}
-
-fn print_command_w(cmd: &str, desc: &str, width: usize, use_color: bool) {
-    let padded = format!("{cmd:<width$}");
-    if use_color {
-        println!(
-            "  {} {}",
-            padded.truecolor(255, 165, 54).bold(),
-            desc.dimmed()
-        );
-    } else {
-        println!("  {padded} {desc}");
-    }
+fn print_command(cmd: &str, desc: &str, width: usize) {
+    println!(
+        "  {} {}",
+        style(format!("{cmd:<width$}")).color256(208).bold(),
+        style(desc).dim()
+    );
 }
 
 /// True when the invocation is a bare top-level help request (`helix help`,
@@ -507,129 +462,80 @@ where
 /// `helix --help`, and `helix -h`. Subcommand-level detail still comes from
 /// clap's per-command `--help` (e.g. `helix query --help`).
 fn print_help() {
-    let use_color = std::io::stdout().is_terminal();
-    let version = update::current_version();
-    const W: usize = 14;
-
-    if use_color {
-        println!(
-            "{} {}",
-            "Helix DB CLI".bold(),
-            format!("v{version}").dimmed()
-        );
-    } else {
-        println!("Helix DB CLI v{version}");
-    }
-    println!();
+    const W: usize = 20;
+    println!(
+        "{} {}\n",
+        style("Helix DB CLI").bold(),
+        style(format!("v{}", update::current_version())).dim()
+    );
     println!("Usage: helix [OPTIONS] <COMMAND>");
 
-    print_section("Getting started", use_color);
-    print_command_w(
+    print_section("Getting started");
+    print_command(
         "chef",
         "Bootstrap a Helix app with a coding agent (alias: cook)",
         W,
-        use_color,
     );
-    print_command_w(
+    print_command(
         "init",
         "Scaffold a new project (init local | init cloud)",
         W,
-        use_color,
     );
-    print_command_w(
+    print_command(
         "add",
         "Add a local or Cloud instance to an existing project",
         W,
-        use_color,
     );
 
-    print_section("Local development", use_color);
-    print_command_w(
+    print_section("Local development");
+    print_command(
         "start",
         "Start a local instance in the background (alias: run)",
         W,
-        use_color,
     );
-    print_command_w("stop", "Stop a background local instance", W, use_color);
-    print_command_w(
-        "restart",
-        "Restart a background local instance",
-        W,
-        use_color,
-    );
-    print_command_w(
-        "status",
-        "Show local and Cloud instance status",
-        W,
-        use_color,
-    );
-    print_command_w("logs", "View or follow instance logs", W, use_color);
-    print_command_w("query", "Send a query to POST /v2/query", W, use_color);
-    print_command_w(
-        "shell",
-        "Open an interactive JSON query shell",
-        W,
-        use_color,
-    );
-    print_command_w(
-        "prune",
-        "Remove Helix-owned local containers and state",
-        W,
-        use_color,
-    );
-    print_command_w("delete", "Delete an instance from helix.toml", W, use_color);
+    print_command("stop", "Stop a background local instance", W);
+    print_command("restart", "Restart a background local instance", W);
+    print_command("status", "Show local and Cloud instance status", W);
+    print_command("logs", "View or follow instance logs", W);
+    print_command("query", "Send a query to a local or Cloud instance", W);
+    print_command("shell", "Open an interactive JSON query shell", W);
+    print_command("prune", "Remove Helix-owned local containers and state", W);
+    print_command("delete", "Delete an instance from helix.toml", W);
 
-    print_section("Helix Cloud", use_color);
-    print_command_w(
-        "auth",
-        "Log in, inspect, or end a WorkOS session",
-        W,
-        use_color,
-    );
-    print_command_w(
-        "workspace",
-        "Discover accessible Cloud workspaces",
-        W,
-        use_color,
-    );
-    print_command_w("project", "Manage the linked Cloud project", W, use_color);
-    print_command_w("cluster", "List and inspect Cloud clusters", W, use_color);
-    print_command_w("database", "Manage Cloud databases and keys", W, use_color);
-    print_command_w(
+    print_section("Helix Cloud");
+    print_command("auth", "Log in, inspect, or end your session", W);
+    print_command("workspace", "List and inspect workspaces", W);
+    print_command("project", "Manage projects and this directory's link", W);
+    print_command("cluster", "List and inspect clusters", W);
+    print_command("database", "Manage databases and application keys", W);
+    print_command(
         "service-credential",
         "Manage headless automation credentials",
         W,
-        use_color,
     );
-    print_command_w("api", "Call a WorkOS-authenticated WFE API", W, use_color);
+    print_command("api", "Call the Helix Cloud API directly", W);
 
-    print_section("CLI", use_color);
-    print_command_w(
-        "skills",
-        "Install, update, and list Helix agent skills",
-        W,
-        use_color,
-    );
-    print_command_w("metrics", "Manage telemetry collection", W, use_color);
-    print_command_w(
-        "update",
-        "Update the CLI to the latest version",
-        W,
-        use_color,
-    );
-    print_command_w("feedback", "Send feedback to the Helix team", W, use_color);
-    print_command_w("help", "Show this help", W, use_color);
+    print_section("CLI");
+    print_command("skills", "Install, update, and list Helix agent skills", W);
+    print_command("metrics", "Manage telemetry collection", W);
+    print_command("update", "Update the CLI to the latest version", W);
+    print_command("feedback", "Send feedback to the Helix team", W);
+    print_command("help", "Show this help", W);
 
-    print_section("Options", use_color);
-    print_command_w("--quiet", "Errors and final result only", W, use_color);
-    print_command_w(
+    print_section("Options");
+    print_command(
+        "--json",
+        "Machine-readable JSON on stdout; never prompts",
+        W,
+    );
+    print_command("--quiet", "Errors and final result only", W);
+    print_command(
         "-v, --verbose",
         "Detailed output with timing information",
         W,
-        use_color,
     );
-    print_command_w("-h, --help", "Show this help", W, use_color);
-    print_command_w("-V, --version", "Show the CLI version", W, use_color);
+    print_command("-h, --help", "Show this help", W);
+    print_command("-V, --version", "Show the CLI version", W);
 
     println!();
     println!("Run 'helix <command> --help' for details on a specific command.");
@@ -639,6 +545,7 @@ fn print_help() {
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
+    cliclack::set_theme(output::HelixTheme);
 
     // Render our grouped overview for a bare top-level help request before doing
     // any setup — keeps `helix help` / `helix --help` instant and offline. clap
@@ -649,15 +556,30 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => exit_with_parse_error(error),
+    };
+    output::OutputMode::from_flags(cli.json, cli.quiet, cli.verbose).set();
+
     let metrics_sender = metrics_sender::MetricsSender::new();
     metrics_sender.send_cli_install_event_if_first_time();
-    let update_available = update::check_for_updates().await?;
-    let skills_update_available = update::check_skills_update().await;
-
-    let cli = Cli::parse();
-    output::Verbosity::set(output::Verbosity::from_flags(cli.quiet, cli.verbose));
+    // Update notices are chrome; JSON consumers never see them, so skip the
+    // network round-trips entirely.
+    let (update_available, skills_update_available) = if cli.json {
+        (None, false)
+    } else {
+        (
+            update::check_for_updates().await?,
+            update::check_skills_update().await,
+        )
+    };
 
     let result = match cli.command {
+        None if cli.json => output::emit(
+            &serde_json::json!({ "version": update::current_version() }),
+            |_| Ok(()),
+        ),
         None => {
             display_welcome(update_available, skills_update_available);
             Ok(())
@@ -695,40 +617,41 @@ async fn main() -> Result<()> {
         Some(Commands::Logs {
             instance,
             follow,
-            range,
             start,
             end,
-        }) => commands::logs::run(instance, follow, range, start, end).await,
+        }) => commands::logs::run(instance, follow, start, end).await,
         Some(Commands::Query {
             instance,
             file,
-            json,
+            body,
             ts,
             ts_file,
             warm,
             host,
             port,
-            compact,
             ..
         }) => {
-            commands::query::run(instance, file, json, ts, ts_file, warm, host, port, compact).await
+            commands::query::run(
+                instance,
+                file,
+                body,
+                ts,
+                ts_file,
+                commands::query::LocalOverrides { warm, host, port },
+            )
+            .await
         }
         Some(Commands::Cypher(args)) => commands::cypher::run(args).await,
-        Some(Commands::Shell { instance, compact }) => {
-            commands::shell::run(instance, compact).await
-        }
+        Some(Commands::Shell { instance }) => commands::shell::run(instance).await,
         Some(Commands::Auth { action }) => commands::auth::run(action).await,
-        Some(Commands::Config { action }) => commands::config::run(action).await,
-        Some(Commands::Workspace { action }) => commands::config::run_workspace(action).await,
-        Some(Commands::Project { action }) => commands::config::run_project(action).await,
-        Some(Commands::Cluster { action }) => commands::config::run_cluster(action).await,
-        Some(Commands::Database { action }) => {
-            commands::cloud_resources::run_database(action).await
-        }
+        Some(Commands::Workspace { action }) => commands::cloud::workspace::run(action).await,
+        Some(Commands::Project { action }) => commands::cloud::project::run(action).await,
+        Some(Commands::Cluster { action }) => commands::cloud::cluster::run(action).await,
+        Some(Commands::Database { action }) => commands::cloud::database::run(action).await,
         Some(Commands::ServiceCredential { action }) => {
-            commands::cloud_resources::run_service_credential(action).await
+            commands::cloud::service_credential::run(action).await
         }
-        Some(Commands::Api { action }) => commands::cloud_resources::run_api(action).await,
+        Some(Commands::Api { action }) => commands::cloud::api::run(action).await,
         Some(Commands::Prune { instance, all, yes }) => {
             commands::prune::run(instance, all, yes).await
         }
@@ -744,27 +667,91 @@ async fn main() -> Result<()> {
 
     let _ = metrics_sender.shutdown().await;
 
-    if let Err(e) = result {
-        if let Some(cli_error) = e.downcast_ref::<errors::CliError>() {
-            eprint!("{}", cli_error.render());
-        } else if let Some(config_error) = e.downcast_ref::<errors::ConfigError>() {
-            eprint!("{}", config_error.to_cli_error().render());
-        } else if let Some(project_error) = e.downcast_ref::<errors::ProjectError>() {
-            eprint!("{}", project_error.to_cli_error().render());
-        } else if let Some(port_error) = e.downcast_ref::<errors::PortError>() {
-            eprint!("{}", port_error.to_cli_error().render());
-        } else {
-            eprintln!("{e}");
-        }
-        std::process::exit(1);
-    }
+    let Err(error) = result else {
+        return Ok(());
+    };
+    output::report_error(&error);
+    std::process::exit(1);
+}
 
-    Ok(())
+/// Report a clap parse failure. Help and version requests print normally;
+/// real usage errors become `{"error": ...}` on stderr when `--json` was
+/// requested, so agents never have to parse clap's human text.
+fn exit_with_parse_error(error: clap::Error) -> ! {
+    use clap::error::ErrorKind;
+    let json_requested = std::env::args().any(|arg| arg == "--json");
+    if !json_requested
+        || matches!(
+            error.kind(),
+            ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        )
+    {
+        error.exit();
+    }
+    output::OutputMode::Json.set();
+    output::report_error(&eyre::Report::new(parse_error_to_cli_error(&error)));
+    std::process::exit(2);
+}
+
+/// clap's rendered text up to the usage line is the message (its first line
+/// minus the `error: ` prefix, plus any indented detail lines); the usage text
+/// is replaced by a pointer to `--help`.
+fn parse_error_to_cli_error(error: &clap::Error) -> errors::CliError {
+    let rendered = error.render().to_string();
+    let message = rendered
+        .lines()
+        .take_while(|line| !line.starts_with("Usage:"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let message = message.trim_start_matches("error: ");
+    let message = if message.is_empty() {
+        error.kind().to_string()
+    } else {
+        message.to_owned()
+    };
+    errors::CliError::new(message).with_hint("run the command with --help for usage")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn json_flag_is_global_and_conflicts_with_verbosity_flags() {
+        let cli = Cli::parse_from(["helix", "status", "--json"]);
+        assert!(cli.json);
+        assert!(Cli::try_parse_from(["helix", "--json", "--quiet", "status"]).is_err());
+        assert!(Cli::try_parse_from(["helix", "--json", "-v", "status"]).is_err());
+    }
+
+    #[test]
+    fn parse_errors_become_cli_errors_without_the_clap_prefix() {
+        let Err(error) = Cli::try_parse_from(["helix", "query", "dev"]) else {
+            panic!("query without input must fail to parse");
+        };
+        let converted = parse_error_to_cli_error(&error);
+        assert!(
+            !converted.message.starts_with("error:"),
+            "{}",
+            converted.message
+        );
+        assert!(
+            converted.message.contains("required"),
+            "{}",
+            converted.message
+        );
+        assert!(converted.hint.is_some());
+    }
 
     #[test]
     fn start_defaults_to_background() {
@@ -1270,7 +1257,7 @@ mod tests {
 
         match cli.command {
             Some(Commands::Workspace {
-                action: Some(WorkspaceAction::List { .. }),
+                action: Some(WorkspaceAction::List),
             }) => {}
             _ => panic!("expected workspace list command"),
         }
@@ -1282,7 +1269,7 @@ mod tests {
 
         match cli.command {
             Some(Commands::Project {
-                action: Some(ProjectConfigAction::Get { .. }),
+                action: Some(ProjectAction::Get { .. }),
             }) => {}
             _ => panic!("expected project get command"),
         }
@@ -1294,7 +1281,7 @@ mod tests {
 
         match cli.command {
             Some(Commands::Cluster {
-                action: Some(ClusterConfigAction::List { .. }),
+                action: Some(ClusterAction::List { .. }),
             }) => {}
             _ => panic!("expected cluster list command"),
         }
@@ -1302,17 +1289,62 @@ mod tests {
 
     #[test]
     fn root_cluster_indexes_command_parses() {
-        let cli = Cli::parse_from(["helix", "cluster", "indexes", "--cluster-id", "ent_123"]);
+        let cli = Cli::parse_from(["helix", "cluster", "indexes", "ent_123"]);
 
         match cli.command {
             Some(Commands::Cluster {
-                action:
-                    Some(ClusterConfigAction::Indexes {
-                        cluster_id,
-                        format: _,
-                    }),
-            }) => assert_eq!(cluster_id.as_deref(), Some("ent_123")),
+                action: Some(ClusterAction::Indexes { cluster, .. }),
+            }) => assert_eq!(cluster.as_deref(), Some("ent_123")),
             _ => panic!("expected cluster indexes command"),
+        }
+    }
+
+    #[test]
+    fn cloud_groups_default_to_listing_without_a_subcommand() {
+        for group in [
+            "workspace",
+            "project",
+            "cluster",
+            "database",
+            "service-credential",
+        ] {
+            assert!(Cli::try_parse_from(["helix", group]).is_ok(), "{group}");
+        }
+    }
+
+    #[test]
+    fn cloud_resources_are_optional_and_accept_scope_flags() {
+        let cli = Cli::parse_from([
+            "helix",
+            "database",
+            "get",
+            "--project",
+            "api",
+            "--workspace",
+            "acme",
+        ]);
+        match cli.command {
+            Some(Commands::Database {
+                action: Some(DatabaseAction::Get { database, scope }),
+            }) => {
+                assert!(database.is_none());
+                assert_eq!(scope.project.as_deref(), Some("api"));
+                assert_eq!(scope.workspace.as_deref(), Some("acme"));
+            }
+            _ => panic!("expected database get command"),
+        }
+    }
+
+    #[test]
+    fn removed_cloud_flags_are_rejected() {
+        for args in [
+            vec!["helix", "config", "workspace", "list"],
+            vec!["helix", "workspace", "list", "--format", "json"],
+            vec!["helix", "project", "list", "--workspace-id", "w"],
+            vec!["helix", "cluster", "indexes", "--cluster-id", "c"],
+            vec!["helix", "query", "dev", "--file", "r.json", "--compact"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
         }
     }
 
@@ -1331,9 +1363,9 @@ mod tests {
         let cli = Cli::parse_from(["helix", "query", "dev", "--file", "request.json"]);
 
         match cli.command {
-            Some(Commands::Query { file, json, .. }) => {
+            Some(Commands::Query { file, body, .. }) => {
                 assert_eq!(file.as_deref(), Some("request.json"));
-                assert!(json.is_none());
+                assert!(body.is_none());
             }
             _ => panic!("expected query command"),
         }
@@ -1342,12 +1374,12 @@ mod tests {
     #[test]
     fn query_accepts_inline_json_input() {
         let inline_json = r#"{"request_type":"read","query":{"queries":[]}}"#;
-        let cli = Cli::parse_from(["helix", "query", "dev", "--json", inline_json]);
+        let cli = Cli::parse_from(["helix", "query", "dev", "--body", inline_json]);
 
         match cli.command {
-            Some(Commands::Query { file, json, .. }) => {
+            Some(Commands::Query { file, body, .. }) => {
                 assert!(file.is_none());
-                assert_eq!(json.as_deref(), Some(inline_json));
+                assert_eq!(body.as_deref(), Some(inline_json));
             }
             _ => panic!("expected query command"),
         }
@@ -1366,7 +1398,7 @@ mod tests {
             "dev",
             "--file",
             "request.json",
-            "--json",
+            "--body",
             "{}",
         ])
         .is_err());
@@ -1397,10 +1429,10 @@ mod tests {
         let cli = Cli::parse_from(["helix", "query", "dev", "-e", "readBatch()"]);
 
         match cli.command {
-            Some(Commands::Query { ts, file, json, .. }) => {
+            Some(Commands::Query { ts, file, body, .. }) => {
                 assert_eq!(ts.as_deref(), Some("readBatch()"));
                 assert!(file.is_none());
-                assert!(json.is_none());
+                assert!(body.is_none());
             }
             _ => panic!("expected query command"),
         }
@@ -1424,7 +1456,7 @@ mod tests {
             "helix",
             "query",
             "dev",
-            "--json",
+            "--body",
             "{}",
             "-e",
             "readBatch()"
@@ -1545,6 +1577,9 @@ mod tests {
         // Options are grouped under scannable headings.
         assert!(help.contains("Input (pick one):"), "input heading missing");
         assert!(help.contains("Connection:"), "connection heading missing");
-        assert!(help.contains("Output:"), "output heading missing");
+        assert!(
+            !help.contains("--compact"),
+            "--compact was replaced by --json"
+        );
     }
 }

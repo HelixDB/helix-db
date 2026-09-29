@@ -38,9 +38,8 @@ fn wide_label_intersections_apply_branch_limits_to_the_final_domain() {
         });
         match overlap {
             0 => {
-                // Contradictions belong to simplification; index selection
-                // must preserve that existing rule boundary.
-                assert_eq!(result, optimizer::RuleResult::NotApplicable);
+                // Index selection explores the simplified filter, and a
+                // contradiction simplifies to an empty access.
                 let simplified =
                     AccessFilterSimplificationRule::default().apply(optimizer::RuleInput {
                         expr: &expr,
@@ -49,6 +48,7 @@ fn wide_label_intersections_apply_branch_limits_to_the_final_domain() {
                         planner_limits: &limits,
                         stats: default_stats(),
                     });
+                assert_eq!(result, simplified);
                 assert!(logical_access_path(simplified).is_direct_empty());
             }
             1 => assert!(

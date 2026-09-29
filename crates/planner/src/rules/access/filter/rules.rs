@@ -1,8 +1,8 @@
 use super::super::super::physical_contracts::access_filter_pipeline_contract;
 use super::super::super::{physical_result, KnownRuleId, RuleId, RuleKind, RuleMetadata};
 use super::super::sources::access_path_is_direct_empty;
-use super::{index_access_filter, simplify_access_filter};
-use crate::{logical, optimizer, physical};
+use super::{access_filter_alternatives, simplify_access_filter};
+use crate::{ir, logical, optimizer, physical};
 
 /// Simplify statically decidable residual filters over residual-free access.
 pub struct AccessFilterSimplificationRule {
@@ -33,7 +33,7 @@ impl optimizer::OptimizerRule for AccessFilterSimplificationRule {
     }
 }
 
-/// Explore catalog-backed indexes that fully cover access-filter predicates.
+/// Explore full index coverage and equality seeds with residual filters.
 pub struct AccessFilterIndexRule {
     metadata: RuleMetadata,
 }
@@ -58,7 +58,21 @@ impl optimizer::OptimizerRule for AccessFilterIndexRule {
         let logical::LogicalExpr::AccessFilter(filter) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        index_access_filter(filter, input.indexes, input.planner_limits).into_rule_result()
+        let alternatives = access_filter_alternatives(filter, &input, &[])
+            .into_iter()
+            .map(|stream| match stream {
+                logical::AccessStream::Path(path) => logical::LogicalExpr::AccessPath(path),
+                logical::AccessStream::Pipeline(pipeline) => {
+                    logical::LogicalExpr::AccessPipeline(pipeline)
+                }
+                _ => unreachable!("filter rewrites produce access paths or pipelines"),
+            })
+            .collect();
+        ir::AtLeast::<_, 1>::try_from_vec(alternatives)
+            .map(|alternatives| {
+                optimizer::RuleResult::Applied(optimizer::RuleEffect::Logical(alternatives))
+            })
+            .unwrap_or(optimizer::RuleResult::NotApplicable)
     }
 }
 

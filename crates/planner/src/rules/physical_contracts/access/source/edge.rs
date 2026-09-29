@@ -95,12 +95,12 @@ impl shared::AccessSourceFamily for EdgeAccessFamily {
             ir::EdgeAccessPlan::Union(plans) => {
                 shared::AccessSourceParts::Union(plans.iter().map(|plan| plan.as_ref()).collect())
             }
-            ir::EdgeAccessPlan::ScanThenFilter {
-                source,
-                residual: _,
-            } => shared::AccessSourceParts::ScanThenFilter {
-                source: source.as_ref(),
-            },
+            ir::EdgeAccessPlan::ScanThenFilter { source, residual } => {
+                shared::AccessSourceParts::ScanThenFilter {
+                    source: source.as_ref(),
+                    residual,
+                }
+            }
         }
     }
 

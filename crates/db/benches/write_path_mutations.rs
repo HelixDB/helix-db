@@ -18,7 +18,7 @@ use helix_planner::{context::ParamBindings, exec::ExecutablePlan, planning};
 static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
 
 // Bound setup planning so the benchmark does not measure or exhaust the
-// production optimizer's request-wide wall-clock budget.
+// production optimizer's request-wide exploration budget.
 const SEED_BATCH_SIZE: usize = 100;
 
 fn main() {

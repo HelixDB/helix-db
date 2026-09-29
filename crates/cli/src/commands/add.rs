@@ -1,10 +1,13 @@
+use crate::cloud::model::Named as _;
+use crate::cloud::resolve::{Kind, Link, ResolvedDatabase, Scope};
 use crate::config::{
     EnterpriseInstanceConfig, LocalInstanceConfig, LocalStorageMode, S3StorageConfig,
 };
-use crate::output::Operation;
+use crate::errors::CliError;
+use crate::output::{self, Operation};
 use crate::project::ProjectContext;
 use crate::prompts;
-use crate::AddTarget;
+use crate::{AddTarget, ScopeArgs};
 use eyre::{eyre, Result};
 use std::path::PathBuf;
 
@@ -38,6 +41,7 @@ pub async fn run(path: Option<String>, target: Option<AddTarget>) -> Result<()> 
                 .insert(name.clone(), local_instance_config(port, disk, &s3)?);
             project.config.save_to_file(&config_path)?;
             op.success();
+            output::emit(&serde_json::json!({"instance": name}), |_| Ok(()))?;
         }
         AddTarget::Enterprise {
             name,
@@ -47,23 +51,85 @@ pub async fn run(path: Option<String>, target: Option<AddTarget>) -> Result<()> 
         } => {
             validate_name(&name)?;
             ensure_available(&project, &name)?;
-            let target = crate::commands::config::resolve_cloud_target(
-                database,
-                target_project.or_else(|| project.config.project.id.clone()),
-                workspace.or_else(|| project.config.project.workspace_id.clone()),
-            )
-            .await?;
             let op = Operation::new("Adding", &name);
+            let scope = Scope::new(Link::from_config(&project.config)).await?;
+            let args = ScopeArgs {
+                workspace,
+                project: target_project,
+            };
+            let database = match database {
+                Some(database) => scope.database(Some(&database), &args).await?,
+                // Adding means choosing a database that is not in helix.toml
+                // yet, from the linked (or chosen) project.
+                None => {
+                    let added: Vec<_> = project
+                        .config
+                        .enterprise
+                        .values()
+                        .map(|instance| instance.database.clone())
+                        .collect();
+                    let owner = scope.project(&args).await?;
+                    let (already_added, candidates): (Vec<_>, Vec<_>) = scope
+                        .resolved_databases_in(&owner)
+                        .await?
+                        .into_iter()
+                        .partition(|resolved| added.contains(&resolved.database.reference()));
+                    if candidates.is_empty() && !already_added.is_empty() {
+                        return Err(CliError::new(format!(
+                            "every database in {} is already in helix.toml",
+                            owner.label()
+                        ))
+                        .with_hint(
+                            "create another with `helix database create <name>`, or pass --database to add one again",
+                        )
+                        .into());
+                    }
+                    scope.choose(Kind::Database, candidates)?
+                }
+            };
+            let ResolvedDatabase { database, owner } = database;
+            let linked = project.config.project.id.as_deref();
+            if linked.is_some_and(|linked| linked != owner.project_id) {
+                return Err(CliError::new(format!(
+                    "{} belongs to project {}, but helix.toml is linked to {}",
+                    database.reference(),
+                    owner.project_id,
+                    linked.unwrap_or_default()
+                ))
+                .with_hint(
+                    "add a database from the linked project, or relink with `helix project link`",
+                )
+                .into());
+            }
+            project
+                .config
+                .project
+                .id
+                .get_or_insert_with(|| owner.project_id.clone());
+            project
+                .config
+                .project
+                .workspace_id
+                .get_or_insert_with(|| owner.workspace_id.clone());
             project.config.enterprise.insert(
                 name.clone(),
                 EnterpriseInstanceConfig {
-                    database: target.database,
-                    workspace_id: Some(target.workspace_id),
-                    project_id: Some(target.project_id),
+                    database: database.reference(),
+                    workspace_id: Some(owner.workspace_id),
+                    project_id: Some(owner.project_id),
                 },
             );
             project.config.save_to_file(&config_path)?;
+            output::step(&format!(
+                "Linked {} ({})",
+                database.label(),
+                database.reference()
+            ));
             op.success();
+            output::emit(
+                &serde_json::json!({"instance": name, "database": database.reference()}),
+                |_| Ok(()),
+            )?;
         }
     }
 

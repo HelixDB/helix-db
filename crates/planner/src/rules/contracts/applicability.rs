@@ -232,8 +232,8 @@ impl RuleApplicability {
     /// A rewrite is required when its paired implementation rule returns
     /// `NotApplicable` for exactly the shapes the rewrite matches, deferring
     /// to the rewrite instead of implementing the unsimplified expression. The
-    /// optimizer must keep applying such rewrites after the time budget has
-    /// stopped optional exploration, or the memo group would reach selection
+    /// optimizer must keep applying such rewrites after the exploration budget
+    /// has stopped optional exploration, or the memo group would reach selection
     /// with no physical alternative. The required pairs are:
     ///
     /// - root branch/repeat over a direct empty input, implemented only via

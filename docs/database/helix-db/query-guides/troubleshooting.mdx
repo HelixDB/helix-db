@@ -10,8 +10,9 @@ pageType: "Troubleshooting"
 Start with the first error returned by the SDK or server. HelixDB rejects invalid
 requests and transactions instead of partially applying them.
 
-For the stable Cloud response envelope and gateway code reference, see
-[Error handling](/database/helix-cloud/operate/error-handling).
+Look up the stable `error` code in the [query error reference](/database/helix-db/query-guides/error-handling),
+or in [Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for
+codes returned by a Cloud gateway.
 
 ## Request uses the wrong AST shape
 
@@ -76,7 +77,7 @@ a multi-mutation request.
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.
 
-## Request returns HTTP 429
+## Request returns HTTP 429 (Helix Cloud)
 
 `rate_limited` means the shared request bucket for the Cloud database has no
 token available. The rejected query did not reach database execution.
@@ -89,7 +90,7 @@ bucket.
 See [Helix Cloud request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
 for the current plan limits and token-bucket behavior.
 
-## Request returns `rate_limit_unavailable`
+## Request returns `rate_limit_unavailable` (Helix Cloud)
 
 An HTTP `503` with `rate_limit_unavailable` means the gateway could not make a
 safe distributed admission decision. It fails closed, so the query did not

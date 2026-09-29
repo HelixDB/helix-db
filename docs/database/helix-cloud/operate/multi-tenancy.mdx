@@ -1,15 +1,14 @@
 ---
-title: 'Multi-Tenancy'
+title: 'Multi-tenancy'
+description: "Isolate application tenants with row-level scoping and tenant-partitioned search indexes"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
 Multi-tenant architectures generally fall into one of three isolation levels.
 
-## Isolation Levels
+## Isolation levels
 
 | Level                    | Description                                                                                                                 | Isolation                                                        | Resource efficiency                                                  |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------- |
@@ -17,7 +16,7 @@ Multi-tenant architectures generally fall into one of three isolation levels.
 | **Namespace-level**      | Shared infrastructure, separate logical partitions (databases, schemas, or namespaces) per tenant.                          | Strong. Logical separation with shared compute.                  | Moderate. Shared compute, but metadata and indexes scale per tenant. |
 | **Row-level**            | Shared infrastructure, shared data structures. Tenants distinguished by a property on every record, enforced at query time. | Application-enforced. Relies on consistent query-time filtering. | Highest. All tenants share indexes, caches, and storage.             |
 
-## Row-Level Isolation in Helix Cloud
+## Row-level isolation in Helix Cloud
 
 Helix Cloud focuses on row-level isolation, which lets you implement any tenancy model at the
 application layer without structural constraints on the database. Adding a tenant is a write, not a
@@ -32,7 +31,7 @@ The model stays shared infrastructure throughout — one writer fleet, one reade
 and secondary indexes. When search results also need isolating, vector and text search can use
 [tenant-partitioned indexes](#tenant-partitioned-search-indexes).
 
-### In Practice
+### In practice
 
 The pattern is the same regardless of node label: create an equality index on the
 tenant property, attach `tenant_id` to every node and edge written, and scope every
@@ -143,7 +142,7 @@ starting node — use `.where_(Predicate::eq("tenant_id", "acme"))`. The same sc
 at every hop: edges that fan out across the graph remain tenant-scoped as long as every step
 filters on the tenant property.
 
-## What This Provides
+## What this provides
 
 - **Data isolation.** Queries scoped to a tenant ID never observe another tenant's data. Isolation
   is enforced by the query layer, not by network or infrastructure boundaries.
@@ -156,12 +155,12 @@ filters on the tenant property.
 - **Full flexibility.** The application layer decides how tenancy is modeled, scoped, and
   enforced. Helix Cloud provides the primitives; the application owns the policy.
 
-## Tenant-Partitioned Search Indexes
+## Tenant-partitioned search indexes
 
 Tenant-partitioned search indexes are optional. They supplement row-level filtering with separate
 physical search structures per tenant value.
 
-### Vector Indexes
+### Vector indexes
 
 Vector indexes can optionally partition by a configured tenant property name. Helix reads that
 property from each record and maintains a separate vector index for each distinct property value.
@@ -175,7 +174,7 @@ Pass `tenant_id` as the tenant property when creating the vector index, store bo
 calling the SDK's vector-search builder. See [vector indexes](/database/helix-db/query-guides/vector-indexes)
 for the cross-language index definition.
 
-### Text Indexes
+### Text indexes
 
 Text indexes provide the same model for full-text search. The tenant property still means the
 property name used to read the partition value from each record. Current text index validation
@@ -198,7 +197,7 @@ the request's tenant value to the text-search builder. See
   searches require an explicit tenant value for the configured tenant property, and the system
   remains shared infrastructure even when search indexes are partitioned by tenant.
 
-## Stricter Isolation Requirements
+## Stricter isolation requirements
 
 For workloads that require namespace-level or infrastructure-level tenant isolation (regulatory
 compliance, data residency, or dedicated-resource SLAs), contact us at

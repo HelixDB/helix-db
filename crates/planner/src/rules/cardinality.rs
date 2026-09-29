@@ -1799,9 +1799,12 @@ fn cursor_cost(
             input, stats, storage,
         )
         .serial(storage.index_membership_filter(
+            plan.predicate.as_ref(),
             storage.bitmap_equality_lookup(storage.default_equality_index_rows),
             super::membership_label_domain_cost(plan.outside_label, &plan.label, stats, storage),
-            storage.default_unknown_scan_rows,
+            // A count cursor proves no bound on its input and prices every
+            // operator at the unknown-input default.
+            cost::MembershipStream::MayExceedOneBatch(storage.default_unknown_scan_rows),
         )),
         exec::ExecCountCursorPlan::Window { input, .. } => cursor_cost(input, stats, storage),
         exec::ExecCountCursorPlan::Order { input, .. } => cursor_cost(input, stats, storage)
@@ -4239,5 +4242,56 @@ mod tests {
             window: exec::ExecCountWindowPlan::identity(),
         })
         .is_err());
+    }
+
+    #[test]
+    fn membership_count_cursor_beats_the_filter_without_statistics() {
+        let storage = cost::StorageCostProfile::default();
+        let input = || Box::new(exec::ExecCountCursorPlan::NodeLabelBitmap(name("Group")));
+        let membership = |predicate: Predicate| exec::ExecCountCursorPlan::IndexMembership {
+            input: input(),
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                &ir::NodeIndexMembershipPlan::new(
+                    ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                        index: catalog::NodeEqualityIndexMeta::new(name("node_eq:Attribute:kind")),
+                        key: catalog::ScopedPropertyKey::try_new("Attribute", "kind").unwrap(),
+                        value: literal(PropertyValue::from("B")),
+                    })
+                    .unwrap(),
+                    ir::PredicatePlan::new(predicate).unwrap(),
+                )
+                .unwrap(),
+            )),
+        };
+        let evaluate = membership(Predicate::eq("kind", "B"));
+        let reject = membership(Predicate::and(vec![
+            Predicate::eq("$label", "Attribute"),
+            Predicate::eq("kind", "B"),
+        ]));
+        let filter = exec::ExecCountCursorPlan::Filter {
+            input: input(),
+            predicate: ir::PredicatePlan::new(Predicate::eq("kind", "B")).unwrap(),
+        };
+        let stats = context::StatsSnapshot::default();
+        let per_row = cursor_cost(&filter, &stats, &storage);
+
+        for (membership, outside_label) in [
+            (&evaluate, ir::NodeMembershipOutsideLabel::Evaluate),
+            (&reject, ir::NodeMembershipOutsideLabel::Reject),
+        ] {
+            let exec::ExecCountCursorPlan::IndexMembership { plan, .. } = membership else {
+                panic!("expected an index membership cursor");
+            };
+            assert_eq!(plan.outside_label, outside_label);
+            assert!(cursor_cost(membership, &stats, &storage).latency < per_row.latency);
+        }
+
+        // Statistics can still veto an unscoped membership over a huge label.
+        let huge_label = context::StatsSnapshot::default()
+            .with_node_label_cardinality(name("Attribute"), 10_000_000);
+        assert!(
+            cursor_cost(&evaluate, &huge_label, &storage).latency
+                > cursor_cost(&filter, &huge_label, &storage).latency
+        );
     }
 }

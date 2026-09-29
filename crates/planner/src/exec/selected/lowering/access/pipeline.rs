@@ -10,6 +10,7 @@ impl ExecutableDagBuilder<'_> {
         condition: ExecCondition,
     ) -> Result<ExecStepId, ExecPlanError> {
         let rows = selected_rows_for_delivered(&delivered, self.profile);
+        let upper = delivered.cardinality.upper();
         let draft = match op {
             logical::StreamPipelineOp::Filter { predicate } => StepDraft {
                 dependencies: vec![input_id],
@@ -35,6 +36,7 @@ impl ExecutableDagBuilder<'_> {
                 delivered: filtered_delivered_properties(delivered),
                 // Lowering has no statistics; selection already priced the set.
                 cost: self.profile.index_membership_filter(
+                    plan.predicate().as_ref(),
                     self.profile
                         .bitmap_equality_lookup(self.profile.default_equality_index_rows),
                     match plan.outside_label() {
@@ -44,7 +46,7 @@ impl ExecutableDagBuilder<'_> {
                                 .bitmap_equality_lookup(self.profile.default_unknown_scan_rows),
                         ),
                     },
-                    rows,
+                    cost::MembershipStream::new(rows, upper),
                 ),
             },
             logical::StreamPipelineOp::Window { window } => selected_access_window_step_draft(

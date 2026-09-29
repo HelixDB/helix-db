@@ -45,11 +45,11 @@ fn captures_replay_exact_inputs_and_sign_every_plan_field() {
         .input
         .context
         .optimizer_limits
-        .optimization_micros = helix_planner::properties::PositiveUsize::at_least_one(123);
+        .exploration_rule_fires = helix_planner::properties::PositiveUsize::at_least_one(123);
     assert_ne!(
         replay.manifest(),
         manifest,
-        "configured time budget is an input, not elapsed time"
+        "a configured optimizer budget is an input, not measured work"
     );
 }
 

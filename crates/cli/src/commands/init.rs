@@ -1,10 +1,12 @@
+use crate::cloud::model::Named as _;
+use crate::cloud::resolve::{Link, ResolvedDatabase, Scope};
 use crate::config::{
     EnterpriseInstanceConfig, HelixConfig, LocalInstanceConfig, LocalStorageMode, S3StorageConfig,
 };
-use crate::output::Operation;
+use crate::output;
 use crate::prompts;
-use crate::utils::{command_exists, print_instructions};
-use crate::InitTarget;
+use crate::utils::command_exists;
+use crate::{InitTarget, ScopeArgs};
 use eyre::Result;
 use std::env;
 use std::fs;
@@ -16,17 +18,13 @@ pub async fn run(
     target: Option<InitTarget>,
     skills: Option<bool>,
 ) -> Result<()> {
+    output::intro("Create a Helix project");
     let current_dir = env::current_dir()?;
     let project_dir = match path {
         Some(path) => path.into(),
         None if prompts::is_interactive() => prompts::select_init_project_dir(&current_dir)?,
         None => current_dir,
     };
-    let project_name = project_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("helix-project")
-        .to_string();
     let config_path = project_dir.join("helix.toml");
 
     if config_path.exists() {
@@ -38,8 +36,14 @@ pub async fn run(
 
     fs::create_dir_all(&project_dir)?;
     fs::create_dir_all(project_dir.join(".helix"))?;
+    // Canonicalize so `--path .` or `..` names the project after the real
+    // directory rather than falling back to the default.
+    let project_name = dunce::canonicalize(&project_dir)?
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("helix-project")
+        .to_string();
 
-    let op = Operation::new("Initializing", &project_name);
     let mut config = HelixConfig::default_config(&project_name);
 
     let target = match target {
@@ -89,31 +93,43 @@ pub async fn run(
         } => {
             validate_name(&name)?;
             let instance_name = name.clone();
-            let target =
-                crate::commands::config::resolve_cloud_target(database, project, workspace).await?;
+            // A new project never inherits the link of a project it sits in.
+            let scope = Scope::new(Link::default()).await?;
+            let ResolvedDatabase { database, owner } = scope
+                .database(database.as_deref(), &ScopeArgs { workspace, project })
+                .await?;
             config.local.clear();
+            config.project.id = Some(owner.project_id.clone());
+            config.project.workspace_id = Some(owner.workspace_id.clone());
             config.enterprise.insert(
                 name,
                 EnterpriseInstanceConfig {
-                    database: target.database,
-                    workspace_id: Some(target.workspace_id),
-                    project_id: Some(target.project_id),
+                    database: database.reference(),
+                    workspace_id: Some(owner.workspace_id),
+                    project_id: Some(owner.project_id),
                 },
             );
+            output::step(&format!(
+                "Linked {} ({})",
+                database.label(),
+                database.reference()
+            ));
             enterprise_next_steps(&instance_name)
         }
     };
 
     config.save_to_file(&config_path)?;
     append_gitignore(&project_dir)?;
-    op.success();
+    output::step(&format!("Wrote {}", config_path.display()));
 
     maybe_install_tooling(&project_dir, skills);
 
-    let next_step_refs: Vec<&str> = next_steps.iter().map(String::as_str).collect();
-    print_instructions("Next steps:", &next_step_refs);
-
-    Ok(())
+    output::next_steps(&next_steps);
+    output::outro(&format!("Initialized {project_name}"));
+    output::emit(
+        &serde_json::json!({"project": project_name, "config": config_path}),
+        |_| Ok(()),
+    )
 }
 
 /// Rejects a `--name`/`-n` the interactive prompt (`prompts::input_name`) would
@@ -173,7 +189,7 @@ fn maybe_install_tooling(project_dir: &Path, skills: Option<bool>) {
     }
 
     if !command_exists("npx") {
-        crate::output::warning(
+        output::warning(
             "npx not found; skipping Helix skills + docs MCP install. Install Node.js/npm, \
              then run 'npx skills add HelixDB/skills'.",
         );
@@ -181,29 +197,25 @@ fn maybe_install_tooling(project_dir: &Path, skills: Option<bool>) {
     }
 
     if let Err(err) = crate::setup::install_skills(project_dir, true, true) {
-        crate::output::warning(&format!("Skipping Helix skills install: {err}"));
+        output::warning(&format!("Skipping Helix skills install: {err}"));
     }
     if let Err(err) = crate::setup::install_mcp(project_dir, true, true) {
-        crate::output::warning(&format!("Skipping Helix docs MCP install: {err}"));
+        output::warning(&format!("Skipping Helix docs MCP install: {err}"));
     }
 }
 
 fn local_next_steps(instance_name: &str) -> Vec<String> {
     vec![
+        format!("helix start {instance_name}"),
+        format!("helix query {instance_name} --file examples/request.json"),
         format!(
-            "Run 'helix start {instance_name}' to start local Helix Enterprise dev in the background"
-        ),
-        format!("Run 'helix query {instance_name} --file examples/request.json'"),
-        format!(
-            "Or query in TypeScript: helix query {instance_name} -e 'readBatch().varAs(\"c\", g().nWithLabel(\"User\").count()).returning([\"c\"])'"
+            "helix query {instance_name} -e 'readBatch().varAs(\"c\", g().nWithLabel(\"User\").count()).returning([\"c\"])'"
         ),
     ]
 }
 
 fn enterprise_next_steps(instance_name: &str) -> Vec<String> {
-    vec![format!(
-        "Run 'helix query {instance_name} --file <request.json>' through the authenticated broker"
-    )]
+    vec![format!("helix query {instance_name} --file <request.json>")]
 }
 
 fn write_example_request(project_dir: &Path) -> Result<()> {

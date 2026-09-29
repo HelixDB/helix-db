@@ -1,13 +1,14 @@
+use crate::cloud::model::{Named as _, Workspace};
+use crate::errors::CliError;
+use crate::output::{self, table, Step};
 use crate::{
     cloud::{CloudClient, SessionCredentials},
     metrics_sender::{load_metrics_config, save_metrics_config},
-    output, prompts, AuthAction,
+    prompts, AuthAction,
 };
-use color_eyre::owo_colors::OwoColorize as _;
 use eyre::{eyre, Result, WrapErr as _};
 use serde::Deserialize;
 use serde_json::json;
-use std::io::{self, Write as _};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
@@ -47,9 +48,11 @@ pub async fn run(action: AuthAction) -> Result<()> {
 
 pub async fn login() -> Result<()> {
     if !prompts::is_interactive() {
-        return Err(eyre!("WorkOS login requires an interactive terminal"));
+        return Err(CliError::new("logging in needs an interactive terminal")
+            .with_hint("run `helix auth login` in a terminal; the CLI never logs in with API keys")
+            .into());
     }
-    output::info("Logging into Helix Cloud with WorkOS");
+    output::intro("Log in to Helix Cloud");
     let client = CloudClient::new()?;
     let listener = TcpListener::bind(LOGIN_CALLBACK_ADDRESS)
         .await
@@ -66,14 +69,35 @@ pub async fn login() -> Result<()> {
             .await?,
     )?;
 
-    open::that(&started.url).wrap_err("open WorkOS login in browser")?;
-    println!(
-        "Open this URL if the browser did not start:\n{}",
-        started.url.bold()
-    );
-    let (code, state) = timeout(LOGIN_TIMEOUT, receive_callback(listener))
-        .await
-        .map_err(|_| eyre!("WorkOS login timed out"))??;
+    match open::that(&started.url) {
+        Ok(()) => output::info(&format!(
+            "Opened your browser. If it did not open, visit:\n{}",
+            started.url
+        )),
+        Err(_) => output::warning(&format!(
+            "Could not open a browser. Visit this URL to log in:\n{}",
+            started.url
+        )),
+    }
+    let mut waiting = Step::with_messages("Waiting for the browser", "Signed in with the browser");
+    waiting.start();
+    let callback = timeout(LOGIN_TIMEOUT, receive_callback(listener)).await;
+    let (code, state) = match callback {
+        Ok(Ok(callback)) => {
+            waiting.done();
+            callback
+        }
+        Ok(Err(error)) => {
+            waiting.fail();
+            return Err(error);
+        }
+        Err(_) => {
+            waiting.fail();
+            return Err(CliError::new("the browser login timed out")
+                .with_hint("run `helix auth login` again and finish within 5 minutes")
+                .into());
+        }
+    };
     let exchanged: LoginResponse = serde_json::from_value(
         client
             .public_post(
@@ -84,10 +108,8 @@ pub async fn login() -> Result<()> {
             .await?,
     )?;
     let session = if exchanged.email_verification_required {
-        print!("Enter the verification code sent to {}: ", exchanged.email);
-        io::stdout().flush()?;
-        let mut code = String::new();
-        io::stdin().read_line(&mut code)?;
+        let code =
+            prompts::input_required(&format!("Verification code sent to {}", exchanged.email))?;
         serde_json::from_value::<LoginResponse>(
             client
                 .public_post(
@@ -111,12 +133,12 @@ pub async fn login() -> Result<()> {
     let mut metrics = load_metrics_config()?;
     metrics.user_id = None;
     save_metrics_config(&metrics)?;
-    output::success("Logged in successfully");
-    output::info(&format!(
-        "WorkOS session stored at {}",
+    output::remark(&format!(
+        "Session stored at {}",
         client.credentials_path().display()
     ));
-    Ok(())
+    output::outro(&format!("Logged in as {}", credentials.email));
+    output::emit(&json!({"email": credentials.email}), |_| Ok(()))
 }
 
 async fn receive_callback(listener: TcpListener) -> Result<(String, String)> {
@@ -165,41 +187,67 @@ async fn receive_callback(listener: TcpListener) -> Result<(String, String)> {
     result
 }
 
+/// The logged-in account and its workspaces. Listing the workspaces also
+/// proves the session is still accepted.
 async fn status() -> Result<()> {
-    let client = CloudClient::new()?;
-    let response = client.get("/v1/whoami", "load WorkOS session").await?;
-    let session = client.load_session()?;
-    output::success("Authenticated with WorkOS");
-    println!("Email: {}", session.email);
-    let memberships = response
-        .get("workspaces")
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    println!("Workspace memberships: {memberships}");
-    Ok(())
+    let client = require_auth().await?;
+    let email = client.load_session()?.email;
+    let workspaces: Vec<Workspace> = client
+        .list("/v1/workspaces", &[], "workspaces", "list workspaces")
+        .await?;
+    let summary = json!({
+        "email": email,
+        "workspaces": workspaces
+            .iter()
+            .map(|workspace| json!({"id": workspace.id, "name": workspace.label()}))
+            .collect::<Vec<_>>(),
+    });
+    output::emit(&summary, |_| {
+        let names = workspaces
+            .iter()
+            .map(|workspace| workspace.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        print!(
+            "{}",
+            table::key_values(&[
+                ("Email", email.clone()),
+                (
+                    "Workspaces",
+                    if names.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        names
+                    }
+                ),
+            ])
+        );
+        Ok(())
+    })
 }
 
 async fn logout() -> Result<()> {
-    output::info("Logging out of Helix Cloud");
     let client = CloudClient::new()?;
     if client.load_session().is_ok()
         && let Err(error) = client
             .post("/v1/auth/logout", json!({}), "revoke WorkOS session")
             .await
     {
-        output::warning(&format!(
-            "Could not revoke the remote WorkOS session: {error}"
-        ));
+        output::warning(&format!("Could not revoke the remote session: {error}"));
     }
     client.remove_session()?;
-    output::success("Logged out successfully");
-    Ok(())
+    output::success("Logged out of Helix Cloud");
+    output::emit(&json!({"loggedOut": true}), |_| Ok(()))
 }
 
+/// A client with a stored session, or an error pointing at `helix auth login`.
 pub async fn require_auth() -> Result<CloudClient> {
     let client = CloudClient::new()?;
-    client.load_session().map_err(|error| {
-        eyre!("{error}. Authentication required. Run 'helix auth login' first.")
+    client.load_session().map_err(|error| -> eyre::Report {
+        CliError::new("not logged in to Helix Cloud")
+            .with_caused_by(error.to_string())
+            .with_hint("run `helix auth login`")
+            .into()
     })?;
     Ok(client)
 }

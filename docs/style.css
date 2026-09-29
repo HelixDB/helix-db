@@ -391,3 +391,89 @@ h5 {
     font-feature-settings: "liga" 0, "calt" 0 !important;
     font-variant-ligatures: none !important;
 }
+
+/* Learn: tile grid and learning-objectives box use normal body text, not the
+   uppercase monospace card style used elsewhere. */
+.learn-tiles .card span,
+.learn-objectives .card span {
+    text-transform: none;
+    font-family: inherit;
+}
+
+/* Learn: tile grid on the /learn home page. */
+.learn-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
+    gap: 1rem;
+    align-items: stretch;
+}
+
+.learn-tiles .card {
+    height: 100%;
+    margin: 0;
+}
+
+.learn-tiles [data-component-part="card-content-container"] {
+    padding: 1.75rem;
+}
+
+.learn-tiles [data-component-part="card-title"] {
+    font-size: 1.25rem;
+    line-height: 1.75rem;
+    font-weight: 600;
+    margin-top: 1rem;
+}
+
+.learn-tiles [data-component-part="card-content"] {
+    margin-top: 0.5rem;
+    font-size: 0.9375rem;
+    line-height: 1.5rem;
+}
+
+.learn-tiles .learn-links {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid rgba(128, 128, 128, 0.2);
+}
+
+.learn-tiles .learn-links p {
+    margin: 0;
+}
+
+.learn-tiles [data-component-part="card-content"] a {
+    display: block;
+    margin-bottom: 0.5rem;
+    line-height: 1.35rem;
+    color: #F26419;
+    font-weight: 500;
+    font-size: 0.9375rem;
+    border-bottom: 0;
+    text-decoration: none;
+}
+
+.learn-tiles [data-component-part="card-content"] a:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+/* Learn: hide the global external-link anchors (dashboard, status, GitHub, and
+   legacy docs) in the sidebar on Learn pages. */
+body:has(.learn-tiles, .learn-objectives) #navigation-items ul:has(> li > a.nav-anchor) {
+    display: none;
+}
+
+/* Learn: let the /learn tile grid use the full width beside the sidebar. */
+body:has(.learn-tiles) #content-container {
+    max-width: none;
+}
+
+/* Learn: mid-article call to action. */
+.learn-cta .card {
+    border: 1px solid rgba(242, 100, 25, 0.45);
+    background-color: rgba(242, 100, 25, 0.06);
+}
+
+.learn-cta .card span {
+    text-transform: none;
+    font-family: inherit;
+}

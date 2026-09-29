@@ -7,8 +7,6 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
 The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
 same contract is available from a local server and a Helix Cloud gateway.
 Local servers also accept Cypher statements at `POST /v2/cypher` and provide
@@ -61,10 +59,11 @@ cluster-mode gateway URLs require the API key but reject both database and
 tenant selection headers. Use the endpoint mode shown in the dashboard; do not
 copy headers between the two modes.
 
-The current public SDK request builders set bearer authentication and execution
-headers but do not expose the GA database-selection header. Use them with a
-database-specific cluster gateway URL, or use direct HTTP for a GA shared
-gateway.
+The TypeScript SDK (`@helix-db/helix-db` 3.2.0 and later) sends
+`X-Helix-Database-Id` after `client.withDatabaseId("<database-id>")`. The
+published Python, Rust, and Go SDKs do not expose the GA database-selection
+header; use them with a database-specific cluster gateway URL, or use direct
+HTTP for a GA shared gateway.
 
 Create or rotate the cluster key in the Helix Cloud dashboard. Do not put keys
 in source control, agent instructions, `llms.txt`, or catalog manifests.
@@ -153,9 +152,11 @@ durability waits on reads are rejected with `400 Bad Request`.
 Local servers and Helix Cloud gateways return
 `{ "error": "<code>", "msg": "<message>" }`. Clients should branch on
 `error` and treat `msg` as diagnostic text. An oversized Cloud request uses
-`payload_too_large` as its stable error code. See
-[Error handling](/database/helix-db/query-guides/error-handling) for local error
-codes and retry guidance.
+`payload_too_large` as its stable error code. See the
+[query error reference](/database/helix-db/query-guides/error-handling) for engine
+error codes and retry guidance, and
+[Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for
+gateway codes.
 
 ## Cypher on a local server
 
@@ -239,7 +240,7 @@ budget warnings. This endpoint returns planning data separately from query
 results and does not execute the statement, including writes. It uses read
 request options, so `X-Helix-Await-Durable:true` is invalid.
 
-## Related resources
+## Next steps
 
 - [`helix query`](/cli/command-reference/query) builds and sends requests from JSON or the TypeScript DSL.
 - [Build and run a query](/database/helix-db/core-concepts/overview) explains the operation tree.

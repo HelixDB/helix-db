@@ -60,12 +60,12 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
     cost::CostVector,
 ) {
     match op {
-        logical::StreamPipelineOp::Filter { .. } => {
+        logical::StreamPipelineOp::Filter { predicate } => {
             let upper = delivered.cardinality.upper();
             (
                 physical::PhysicalPipelineOp::ResidualFilter,
                 with_cardinality(delivered, upper),
-                storage.stored_predicate_filter(rows),
+                storage.residual_filter(predicate.as_ref(), rows),
             )
         }
         logical::StreamPipelineOp::IndexMembership { plan } => {
@@ -75,6 +75,7 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
                 physical::PhysicalPipelineOp::Stream(physical::PhysicalStreamOp::IndexMembership),
                 with_cardinality(delivered, upper),
                 storage.index_membership_filter(
+                    plan.predicate().as_ref(),
                     set.secondary_id_cost().unwrap_or(set.cost),
                     membership_label_domain_cost(
                         plan.outside_label(),
@@ -82,7 +83,7 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
                         stats,
                         storage,
                     ),
-                    rows,
+                    cost::MembershipStream::new(rows, upper),
                 ),
             )
         }

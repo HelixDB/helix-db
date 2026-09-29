@@ -21,8 +21,6 @@ pub(super) fn profile(context: &mut context::PlannerContext, name: &str) {
         // scenario, not a claim about cache hits or measured object-store I/O.
         context.storage.authoritative_verify_per_id = latency;
     }
-    context.optimizer_limits.optimization_micros =
-        properties::PositiveUsize::at_least_one(60_000_000);
 }
 
 fn context(population: u64, indexed: bool) -> context::PlannerContext {

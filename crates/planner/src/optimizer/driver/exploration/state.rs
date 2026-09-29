@@ -109,11 +109,12 @@ impl ExplorationRun {
         self.queue.pop_front()
     }
 
-    pub(super) fn time_guardrail(
+    pub(super) fn exploration_budget_guardrail(
         &self,
         config: &optimizer::OptimizerConfig,
     ) -> Option<optimizer::OptimizerGuardrail> {
-        guardrails::time_guardrail(self.started, config)
+        (self.metrics.rule_fires >= config.limits.exploration_rule_fires.get())
+            .then_some(optimizer::OptimizerGuardrail::ExplorationBudget)
     }
 
     pub(super) fn rule_budget_guardrail(
@@ -481,14 +482,20 @@ mod tests {
     fn counters_and_finish_preserve_request_metrics() {
         let mut config = config();
         config.limits.rule_fires = properties::PositiveUsize::new(1).unwrap();
+        config.limits.exploration_rule_fires = properties::PositiveUsize::new(1).unwrap();
         let mut run = ready_run(ir::AtLeast::<_, 1>::from_one(source()), &config);
 
         assert_eq!(run.rule_budget_guardrail(&config), None);
+        assert_eq!(run.exploration_budget_guardrail(&config), None);
         run.record_rule_fire();
         run.record_rejection();
         assert_eq!(
             run.rule_budget_guardrail(&config),
             Some(optimizer::OptimizerGuardrail::RuleFires)
+        );
+        assert_eq!(
+            run.exploration_budget_guardrail(&config),
+            Some(optimizer::OptimizerGuardrail::ExplorationBudget)
         );
 
         let result = run.finish(Some(optimizer::OptimizerGuardrail::RuleFires));

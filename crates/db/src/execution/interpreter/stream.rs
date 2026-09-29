@@ -17,7 +17,11 @@ mod tests;
 /// Rows evaluated per stored-record batch. This bounds the decoded records an
 /// operator holds at once while amortizing one multi-get over many rows. Index
 /// membership also resolves its bitmaps only for streams with more node rows.
-const RECORD_BATCH_ROWS: usize = 256;
+///
+/// The planner prices index membership by this same threshold, so the value
+/// comes from `helix_planner::cost::RECORD_BATCH_ROWS`; changing it changes
+/// pricing and execution together.
+const RECORD_BATCH_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
 
 pub(super) use self::eval::property_value_is_in;
 pub(super) use self::filter::{MembershipCursor, PreparedMemberships, RowDecision};

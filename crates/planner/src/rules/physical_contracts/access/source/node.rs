@@ -98,12 +98,12 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
             ir::NodeAccessPlan::Union(plans) => {
                 shared::AccessSourceParts::Union(plans.iter().map(|plan| plan.as_ref()).collect())
             }
-            ir::NodeAccessPlan::ScanThenFilter {
-                source,
-                residual: _,
-            } => shared::AccessSourceParts::ScanThenFilter {
-                source: source.as_ref(),
-            },
+            ir::NodeAccessPlan::ScanThenFilter { source, residual } => {
+                shared::AccessSourceParts::ScanThenFilter {
+                    source: source.as_ref(),
+                    residual,
+                }
+            }
         }
     }
 

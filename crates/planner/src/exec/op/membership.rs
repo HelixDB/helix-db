@@ -6,8 +6,16 @@ use crate::{exec, ir};
 
 /// Interpreter contract for a node secondary-index membership filter.
 ///
-/// The interpreter resolves `set` once per operator execution through the
-/// request-authorized Active catalog and retains rows in place:
+/// The interpreter adapts to the stream it sees:
+///
+/// * an execution with at most
+///   [`cost::RECORD_BATCH_ROWS`](crate::cost::RECORD_BATCH_ROWS) node rows
+///   evaluates `predicate` for every row and reads no set;
+/// * a pull cursor does this for its first batch;
+/// * past that, `set` is resolved once through the request-authorized Active
+///   catalog and reused for the rest of the request.
+///
+/// With `set` resolved, rows are retained in place:
 ///
 /// * a node in `set` is kept without reading its record;
 /// * a node carrying `label` outside `set` is dropped without reading it;

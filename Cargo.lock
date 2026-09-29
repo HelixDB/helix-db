@@ -1285,6 +1285,7 @@ dependencies = [
  "rand 0.10.2",
  "range-cache",
  "rayon",
+ "reqwest 0.13.4",
  "rkyv",
  "roaring",
  "serde",
@@ -2086,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "helix-cli"
-version = "3.3.0"
+version = "3.4.0"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -2094,6 +2095,7 @@ dependencies = [
  "clap",
  "cliclack",
  "color-eyre",
+ "console 0.15.11",
  "dirs",
  "dotenvy",
  "dunce",
@@ -4641,14 +4643,17 @@ dependencies = [
  "helix-db-testkit",
  "helix-metrics",
  "helix-planner",
+ "libc",
  "object_store 0.14.1",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "rustix",
  "serde",
  "serde_json",
  "slatedb",
  "sonic-rs",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
@@ -4659,6 +4664,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

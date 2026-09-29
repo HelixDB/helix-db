@@ -22,7 +22,16 @@ fn ordered_range_queries_use_reverse_range_and_runtime_limit() {
             serde_json::from_value(json["query"]["read"]["entries"][0]["query"]["root"].clone())
                 .unwrap();
         for stats in [
-            StatsSnapshot::default(),
+            StatsSnapshot::default()
+                .with_node_label_cardinality(NonEmptyString::new("Resource").unwrap(), 100_000)
+                .with_node_eq_cardinality(
+                    ScopedPropertyKey::try_new("Resource", "tenant").unwrap(),
+                    20_000,
+                )
+                .with_node_eq_cardinality(
+                    ScopedPropertyKey::try_new("Resource", "type").unwrap(),
+                    10_000,
+                ),
             StatsSnapshot::default()
                 .with_node_label_cardinality(NonEmptyString::new("Resource").unwrap(), 100_000)
                 .with_node_eq_cardinality(
@@ -40,7 +49,7 @@ fn ordered_range_queries_use_reverse_range_and_runtime_limit() {
                         RangeIndexDirection::Asc,
                     )
                     .unwrap(),
-                    100_000,
+                    200,
                 ),
         ] {
             let context = PlannerContext {
@@ -118,7 +127,8 @@ fn ordered_edge_intersection_pushes_dynamic_limit_for_both_physical_directions()
             .with_edge_range(
                 ScopedPropertyDirectionKey::try_new("LINK", "last_seen", direction).unwrap(),
             );
-        let context = ctx(indexes);
+        let mut context = ctx(indexes);
+        context.storage.default_equality_index_rows = crate::cost::EstimatedRows::rows(2_000);
         let plan = executable_traversal(
             g().e_with_label_where(
                 "LINK",

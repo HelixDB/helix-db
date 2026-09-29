@@ -166,6 +166,63 @@ impl<'de, const MAX: u64> Deserialize<'de> for EstimatedRowsAtMost<MAX> {
 /// Estimated row count for unique equality lookups.
 pub type UniqueEqualityRows = EstimatedRowsAtMost<1>;
 
+/// Node rows the interpreter evaluates per stored-record batch.
+///
+/// An index membership evaluates a stream of at most this many node rows row
+/// by row, exactly like the per-row filter, and reads its set only for longer
+/// streams. The interpreter takes its batch size from here, so pricing and
+/// execution share one threshold.
+pub const RECORD_BATCH_ROWS: u64 = 256;
+
+/// Row estimate proven to fit in one record batch.
+pub type RecordBatchRows = EstimatedRowsAtMost<RECORD_BATCH_ROWS>;
+
+/// Node rows reaching an index membership, as far as planning can prove.
+///
+/// ```
+/// use helix_planner::cost::{EstimatedRows, MembershipStream, RecordBatchRows};
+/// let rows = EstimatedRows::rows(10);
+/// assert_eq!(
+///     MembershipStream::new(rows, Some(2)),
+///     MembershipStream::WithinOneBatch(RecordBatchRows::at_most(2))
+/// );
+/// assert_eq!(
+///     MembershipStream::new(rows, Some(256)),
+///     MembershipStream::WithinOneBatch(RecordBatchRows::at_most(10))
+/// );
+/// assert_eq!(
+///     MembershipStream::new(rows, Some(257)),
+///     MembershipStream::MayExceedOneBatch(rows)
+/// );
+/// assert_eq!(
+///     MembershipStream::new(rows, None),
+///     MembershipStream::MayExceedOneBatch(rows)
+/// );
+/// assert!(RecordBatchRows::rows(257).is_none());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipStream {
+    /// Proven to hold at most one record batch: the interpreter evaluates every
+    /// row and never reads the set.
+    WithinOneBatch(RecordBatchRows),
+    /// May exceed one batch; the rows are an estimate, not a bound. Every
+    /// expansion output is unbounded.
+    MayExceedOneBatch(EstimatedRows),
+}
+
+impl MembershipStream {
+    /// Classify a stream by its proven upper bound.
+    pub fn new(rows: EstimatedRows, upper: Option<usize>) -> Self {
+        let Some(bound) = upper
+            .and_then(|upper| u64::try_from(upper).ok())
+            .and_then(RecordBatchRows::rows)
+        else {
+            return Self::MayExceedOneBatch(rows);
+        };
+        Self::WithinOneBatch(RecordBatchRows::clamp(rows).min(bound))
+    }
+}
+
 /// Selectivity represented as parts per million.
 ///
 /// ```

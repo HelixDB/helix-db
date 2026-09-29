@@ -1,134 +1,192 @@
 use crate::cloud::CloudClient;
 use crate::config::{DatabaseReference, InstanceInfo};
-use crate::errors::CliError;
+use crate::errors::{Candidate, CliError};
+use crate::output::{self, Verbosity};
 use crate::project::ProjectContext;
+use crate::prompts;
 use base64::Engine as _;
+use console::style;
 use eyre::{eyre, Report, Result};
 use reqwest::header::CONTENT_TYPE;
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
-#[allow(clippy::too_many_arguments)]
+/// Where a query goes.
+pub(crate) enum Target {
+    /// A local instance from helix.toml, reached over plain HTTP.
+    Local { name: String, port: u16 },
+    /// A Cloud database, reached through the session-authenticated broker.
+    Cloud {
+        name: String,
+        database: DatabaseReference,
+    },
+}
+
+impl Target {
+    /// Resolve the CLI's target argument. A typed `cluster:<id>`/`tenant:<id>`
+    /// reference needs no helix.toml; anything else names an instance.
+    pub(crate) fn resolve(instance: Option<String>) -> Result<Self> {
+        let database = instance
+            .as_deref()
+            .and_then(|target| target.parse::<DatabaseReference>().ok());
+        let Some(database) = database else {
+            let project = ProjectContext::find_and_load(None)?;
+            let name = resolve_instance_name(&project, instance)?;
+            return Ok(match project.config.get_instance(&name)? {
+                InstanceInfo::Local(config) => Self::Local {
+                    port: config.port,
+                    name,
+                },
+                InstanceInfo::Enterprise(config) => Self::Cloud {
+                    database: config.database.clone(),
+                    name,
+                },
+            });
+        };
+        Ok(Self::Cloud {
+            name: database.to_string(),
+            database,
+        })
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Local { name, .. } | Self::Cloud { name, .. } => name,
+        }
+    }
+}
+
+/// Overrides that only apply to local targets.
+#[derive(Default)]
+pub struct LocalOverrides {
+    pub warm: bool,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+}
+
+/// A completed query.
+pub(crate) struct Outcome {
+    status: reqwest::StatusCode,
+    elapsed: Duration,
+    /// The decoded response; `None` for an empty body (e.g. 204).
+    body: Option<Value>,
+}
+
 pub async fn run(
     instance: Option<String>,
     file: Option<String>,
-    json: Option<String>,
+    body: Option<String>,
     ts: Option<String>,
     ts_file: Option<String>,
-    warm: bool,
-    host: Option<String>,
-    port: Option<u16>,
-    compact: bool,
+    overrides: LocalOverrides,
 ) -> Result<()> {
-    let project = ProjectContext::find_and_load(None)?;
-    let instance = resolve_instance_target(&project, instance)?;
-    let request_json = parse_query_request(file, json, ts, ts_file)?;
-    execute(&project, &instance, request_json, warm, host, port, compact).await
+    let target = Target::resolve(instance)?;
+    let request = parse_query_request(file, body, ts, ts_file)?;
+    let outcome = execute(&target, request, &overrides).await?;
+    print_outcome(&target, &outcome)
 }
 
-pub(crate) fn resolve_instance_target(
+/// Pick the instance to query: the explicit name, else `dev`, else the only
+/// instance, else a prompt, else an error listing the candidates.
+pub(crate) fn resolve_instance_name(
     project: &ProjectContext,
     instance: Option<String>,
 ) -> Result<String> {
-    if let Some(instance) = instance {
-        return Ok(instance);
+    let has_dev =
+        project.config.local.contains_key("dev") || project.config.enterprise.contains_key("dev");
+    let instances = project.config.list_instances_with_types();
+    match (instance, instances.as_slice()) {
+        (Some(instance), _) => Ok(instance),
+        (None, _) if has_dev => Ok("dev".to_owned()),
+        (None, [(only, _)]) => Ok((*only).clone()),
+        _ if prompts::is_interactive() => prompts::select_instance(
+            &instances
+                .iter()
+                .map(|(name, kind)| ((*name).clone(), (*kind).to_owned()))
+                .collect::<Vec<_>>(),
+            "Which instance should be queried?",
+        ),
+        _ => Err(CliError::new("no default query target")
+            .with_hint("pass an instance name, or cluster:<id> / tenant:<id>")
+            .with_candidates(
+                instances
+                    .iter()
+                    .map(|(name, _)| Candidate {
+                        id: (*name).clone(),
+                        name: (*name).clone(),
+                    })
+                    .collect(),
+            )
+            .into()),
     }
-    if project.config.local.contains_key("dev") || project.config.enterprise.contains_key("dev") {
-        return Ok("dev".to_owned());
-    }
-    let instances = project.config.list_instances();
-    if instances.len() == 1 {
-        return Ok(instances[0].clone());
-    }
-    let candidates = instances
-        .into_iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(eyre!(
-        "Cannot derive an unambiguous query target. Pass an instance name or cluster:<id> / tenant:<id>. Candidates: {candidates}"
-    ))
 }
 
 pub(crate) async fn execute(
-    project: &ProjectContext,
-    instance: &str,
-    request_json: Value,
-    warm: bool,
-    host: Option<String>,
-    port: Option<u16>,
-    compact: bool,
-) -> Result<()> {
-    let request_type = validate_dynamic_request(&request_json, warm)?;
-    let explicit_database = instance.parse::<DatabaseReference>().ok();
-    let body = if let Some(database) = explicit_database {
-        if host.is_some() || port.is_some() {
-            return Err(eyre!(
-                "--host and --port are only valid for local instances"
-            ));
-        }
-        if warm {
-            return Err(eyre!("--warm is only supported for local queries"));
-        }
-        execute_cloud_query(&database, request_type, &request_json).await?
-    } else {
-        match project.config.get_instance(instance)? {
-            InstanceInfo::Local(config) => {
-                let host = host.unwrap_or_else(|| "localhost".to_string());
-                let port = port.unwrap_or(config.port);
-                let endpoint = format!("http://{host}:{port}/v2/query");
-                let mut request = reqwest::Client::new()
-                    .post(&endpoint)
-                    .header(CONTENT_TYPE, "application/json");
-                if warm {
-                    request = request.header("X-Helix-Warm", "true");
-                }
-                let response =
-                    request
-                        .json(&request_json)
-                        .send()
-                        .await
-                        .map_err(|error| -> Report {
-                            if error.is_connect() || error.is_timeout() {
-                                connect_error(instance, &endpoint, &error.to_string()).into()
-                            } else {
-                                error.into()
-                            }
-                        })?;
-                let status = response.status();
-                if status == reqwest::StatusCode::NO_CONTENT {
-                    return Ok(());
-                }
-                let body = response.bytes().await?.to_vec();
-                if !status.is_success() {
-                    return Err(eyre!(
-                        "Query failed with HTTP {status}: {}",
-                        String::from_utf8_lossy(&body)
-                    ));
-                }
-                body
+    target: &Target,
+    request: Value,
+    overrides: &LocalOverrides,
+) -> Result<Outcome> {
+    let request_type = validate_dynamic_request(&request, overrides.warm)?;
+    let started = Instant::now();
+    let (status, body) = match target {
+        Target::Local { name, port } => {
+            let host = overrides.host.as_deref().unwrap_or("localhost");
+            let port = overrides.port.unwrap_or(*port);
+            let endpoint = format!("http://{host}:{port}/v2/query");
+            let mut http = reqwest::Client::new()
+                .post(&endpoint)
+                .header(CONTENT_TYPE, "application/json");
+            if overrides.warm {
+                http = http.header("X-Helix-Warm", "true");
             }
-            InstanceInfo::Enterprise(config) => {
-                if host.is_some() || port.is_some() {
-                    return Err(eyre!(
-                        "--host and --port are only valid for local instances"
-                    ));
-                }
-                if warm {
-                    return Err(eyre!("--warm is only supported for local queries"));
-                }
-                execute_cloud_query(&config.database, request_type, &request_json).await?
+            let response = http
+                .json(&request)
+                .send()
+                .await
+                .map_err(|error| -> Report {
+                    if error.is_connect() || error.is_timeout() {
+                        connect_error(name, &endpoint, &error.to_string()).into()
+                    } else {
+                        error.into()
+                    }
+                })?;
+            let status = response.status();
+            (status, response.bytes().await?.to_vec())
+        }
+        Target::Cloud { database, .. } => {
+            if overrides.host.is_some() || overrides.port.is_some() {
+                return Err(eyre!(
+                    "--host and --port are only valid for local instances"
+                ));
             }
+            if overrides.warm {
+                return Err(eyre!("--warm is only supported for local queries"));
+            }
+            execute_cloud_query(database, request_type, &request).await?
         }
     };
-
-    print_response(&body, compact)
+    let elapsed = started.elapsed();
+    if !status.is_success() {
+        return Err(CliError::new(format!("query failed with HTTP {status}"))
+            .with_caused_by(String::from_utf8_lossy(&body).trim())
+            .into());
+    }
+    let body = (!body.iter().all(u8::is_ascii_whitespace)).then(|| {
+        serde_json::from_slice(&body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()))
+    });
+    Ok(Outcome {
+        status,
+        elapsed,
+        body,
+    })
 }
 
 async fn execute_cloud_query(
     database: &DatabaseReference,
     request_type: &str,
     request_json: &Value,
-) -> Result<Vec<u8>> {
+) -> Result<(reqwest::StatusCode, Vec<u8>)> {
     let query_json = serde_json::to_vec(request_json)?;
     let payload = serde_json::json!({
         "database": database.query_request(),
@@ -144,8 +202,10 @@ async fn execute_cloud_query(
         .await?;
     let status = response
         .get("statusCode")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| eyre!("Cloud query response has no statusCode"))?;
+        .and_then(Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .and_then(|status| reqwest::StatusCode::from_u16(status).ok())
+        .ok_or_else(|| eyre!("Cloud query response has no valid statusCode"))?;
     let encoded = response
         .get("responseJson")
         .and_then(Value::as_str)
@@ -153,27 +213,35 @@ async fn execute_cloud_query(
     let body = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|error| eyre!("Cloud query response is invalid: {error}"))?;
-    if !(200..300).contains(&status) {
-        return Err(eyre!(
-            "Query failed with HTTP {status}: {}",
-            String::from_utf8_lossy(&body)
-        ));
-    }
-    Ok(body)
+    Ok((status, body))
 }
 
-pub(super) fn print_response(body: &[u8], compact: bool) -> Result<()> {
-    if body.iter().all(u8::is_ascii_whitespace) {
-        return Ok(());
-    }
-    let value: Value = serde_json::from_slice(body)
-        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()));
-    if crate::output::Verbosity::current().show_normal() {
-        if compact {
-            println!("{}", serde_json::to_string(&value)?);
-        } else {
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        }
+/// The result goes to stdout — highlighted pretty JSON for humans, compact
+/// JSON under `--json` — and is still printed under `--quiet`. A dim footer
+/// with status and latency goes to stderr.
+pub(crate) fn print_outcome(target: &Target, outcome: &Outcome) -> Result<()> {
+    outcome
+        .body
+        .as_ref()
+        .map(|body| {
+            output::emit(body, |body| {
+                println!("{}", output::json::pretty(body, console::colors_enabled()));
+                Ok(())
+            })
+        })
+        .transpose()?;
+    if Verbosity::current().show_normal() {
+        eprintln!(
+            "{}",
+            style(format!(
+                "{} · {} · {}",
+                outcome.status,
+                output::format_duration(outcome.elapsed),
+                target.name()
+            ))
+            .dim()
+            .for_stderr()
+        );
     }
     Ok(())
 }
@@ -190,13 +258,13 @@ fn connect_error(instance: &str, endpoint: &str, cause: &str) -> CliError {
 
 fn parse_query_request(
     file: Option<String>,
-    json: Option<String>,
+    body: Option<String>,
     ts: Option<String>,
     ts_file: Option<String>,
 ) -> Result<Value> {
     let provided = [
         file.is_some(),
-        json.is_some(),
+        body.is_some(),
         ts.is_some(),
         ts_file.is_some(),
     ]
@@ -205,12 +273,12 @@ fn parse_query_request(
     .count();
     if provided == 0 {
         return Err(eyre!(
-            "Provide a query with --file <path>, --json '<json>', -e '<ts>', or --ts-file <path>"
+            "Provide a query with --file <path>, --body '<json>', -e '<ts>', or --ts-file <path>"
         ));
     }
     if provided > 1 {
         return Err(eyre!(
-            "--file, --json, -e/--ts, and --ts-file are mutually exclusive"
+            "--file, --body, -e/--ts, and --ts-file are mutually exclusive"
         ));
     }
 
@@ -220,8 +288,8 @@ fn parse_query_request(
         return serde_json::from_str(&request_text)
             .map_err(|e| eyre!("Failed to parse query request file '{file}': {e}"));
     }
-    if let Some(json) = json {
-        return serde_json::from_str(&json)
+    if let Some(body) = body {
+        return serde_json::from_str(&body)
             .map_err(|e| eyre!("Failed to parse query request JSON: {e}"));
     }
     if let Some(ts) = ts {
@@ -271,7 +339,7 @@ mod tests {
         assert!(parse_query_request(None, None, None, None)
             .unwrap_err()
             .to_string()
-            .contains("--file <path>, --json"));
+            .contains("--file <path>, --body"));
         assert!(
             parse_query_request(Some("request.json".into()), Some("{}".into()), None, None)
                 .unwrap_err()
@@ -291,6 +359,55 @@ mod tests {
             false
         )
         .is_err());
+    }
+
+    #[test]
+    fn typed_database_targets_skip_helix_toml() {
+        let Target::Cloud { name, database } = Target::resolve(Some("tenant:abc".into())).unwrap()
+        else {
+            panic!("typed reference must resolve to a Cloud target");
+        };
+        assert_eq!(name, "tenant:abc");
+        assert_eq!(database, DatabaseReference::Tenant("abc".into()));
+    }
+
+    #[test]
+    fn instance_name_defaults_to_dev_then_the_only_instance_then_errors() {
+        use crate::config::{EnterpriseInstanceConfig, HelixConfig};
+        let mut config = HelixConfig::default_config("project");
+        let project = |config: HelixConfig| ProjectContext {
+            root: std::path::PathBuf::from("/tmp"),
+            helix_dir: std::path::PathBuf::from("/tmp/.helix"),
+            config,
+        };
+        assert_eq!(
+            resolve_instance_name(&project(config.clone()), Some("qa".into())).unwrap(),
+            "qa"
+        );
+        assert_eq!(
+            resolve_instance_name(&project(config.clone()), None).unwrap(),
+            "dev"
+        );
+
+        let dev = config.local.remove("dev").unwrap();
+        config.local.insert("preview".into(), dev);
+        assert_eq!(
+            resolve_instance_name(&project(config.clone()), None).unwrap(),
+            "preview"
+        );
+
+        config.enterprise.insert(
+            "production".into(),
+            EnterpriseInstanceConfig {
+                database: DatabaseReference::Tenant("t".into()),
+                workspace_id: None,
+                project_id: None,
+            },
+        );
+        let error = resolve_instance_name(&project(config), None).unwrap_err();
+        let error = error.downcast_ref::<CliError>().unwrap();
+        let names: Vec<_> = error.candidates.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(names, ["preview", "production"]);
     }
 
     #[test]

@@ -1,14 +1,27 @@
 ---
-title: 'Release Notes'
-description: 'HelixDB Cloud Release Notes'
-icon: ''
+title: 'Release notes'
+description: 'New features and changes in HelixDB, Helix Cloud, the SDKs, and the CLI'
 rss: true
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
+<Update
+  label="September 2026"
+  rss={{
+    title: "Docker v0.0.7 and CLI 3.4.0: fast traversal-scoped search and a local disk cache",
+    description: "Scoped vector search in tens of milliseconds, an opt-in disk cache, and SeaweedFS for local disk mode"
+  }}
+>
+- **Traversal-scoped search** is much faster. A `.where(...)` after a traversal is answered from equality-index bitmaps instead of reading every record. Scopes of up to 8,192 candidates (at 768 dimensions) are scored exactly, and larger scopes use a bounded graph walk. On 312k 768-d nodes in S3 with a warm disk cache, scoped vector queries that took 2–6 s, and a combined filter and scope that did not finish in 30 s, now return in about 60–110 ms. See [prefiltering](/database/helix-db/query-guides/prefiltering).
+- **[Local disk cache](/database/helix-db/start-here/local-development/local-server#add-a-local-disk-cache)** — set `HELIX_DISK_CACHE_DIR` to keep recently read data on local disk, ideally NVMe, across restarts.
+- **Planner** — a conjunction of four or more indexed equalities no longer falls back to a full label scan.
+- **Vector index builds** keep their planning cache across backfill steps, so large backfills run several times faster.
+- **Upgrading** — the stored data format is unchanged. Databases written by v0.0.6 open directly with v0.0.7.
+- **CLI 3.4.0** defaults to image v0.0.7. Cloud commands resolve workspaces, projects and databases without IDs, and a global `--json` flag gives machine-readable output. `helix --quiet query` now prints the result.
+- **Local `--disk` mode now uses SeaweedFS**, because MinIO withdrew its community images. Existing MinIO disk data is not moved automatically; see [Migrate MinIO disk data](/cli/workflows/local#migrate-minio-disk-data).
+</Update>
 
 <Update
   label="September 2026"
@@ -43,7 +56,7 @@ pageType: "Reference"
 - **Open-source database** — the engine moved out of `helix-hyperscale` into the public, modular `helix-db` workspace.
 - **New query planner** — a dedicated logical and physical planning layer optimizes the typed operation-tree AST before execution.
 - **[Embedded database](/database/helix-db/start-here/local-development/embedded-database)** — run the same engine and queries in process with memory, disk, or object storage.
-- **[Vector prefiltering](/database/helix-db/query-guides/filtering#vector-prefiltering)** — traverse and filter an exact candidate set before vector ranking, so results cannot escape graph or permission boundaries.
+- **[Vector prefiltering](/database/helix-db/query-guides/prefiltering#vector-prefiltering)** — traverse and filter an exact candidate set before vector ranking, so results cannot escape graph or permission boundaries.
 </Update>
 
 <Update
@@ -76,7 +89,7 @@ pageType: "Reference"
   label="April 2026"
   rss={{
     title: "Better, Faster, Stronger",
-    description: "Major performancy improvements and better reliability"
+    description: "Major performance improvements and better reliability"
   }}
 >
 - **Local docker deployment**

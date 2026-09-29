@@ -3,6 +3,7 @@
 pub(crate) mod cache;
 pub(crate) mod db;
 mod definition_differences;
+mod host_memory;
 mod index_lifecycle_throughput;
 pub(crate) mod indexes;
 mod migrations;

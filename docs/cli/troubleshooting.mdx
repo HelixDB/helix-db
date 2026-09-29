@@ -8,9 +8,10 @@ pageType: "Troubleshooting"
 
 ## Authentication required
 
-Run `helix auth login`. If an access token is near expiry, the CLI refreshes it through WFE while
-holding the credential-file lock. Only a typed WFE rejection before handler dispatch can trigger one
-refresh-and-retry. A normal authorization denial or any post-dispatch failure is not retried.
+Run `helix auth login`. The CLI refreshes a nearly expired session automatically
+through the Helix Cloud API. It retries once only when the API rejects the expired
+token before running the command; a normal authorization denial or any failure after
+the command runs is not retried.
 
 Old credential/config fields are intentionally rejected. Remove legacy user/admin keys, arbitrary
 authorization headers, gateway URLs, and query-key fields. Service credentials and application keys
@@ -18,8 +19,16 @@ cannot be used to log the CLI in.
 
 ## Ambiguous Cloud target
 
-Pass `--workspace`, `--project`, `cluster:<id>`, or `tenant:<id>`. Alternatively use
-`helix project link` and `helix add cloud` to persist stable project/database linkage in `helix.toml`.
+Without a terminal, or with `--json`, the CLI cannot prompt, so it fails and lists the candidates.
+Pass one by ID, slug, or name, for example `--workspace <workspace>`, `--project <project>`, or a
+database as `tenant:<id>`. If a name matches several resources, use the ID or slug instead.
+Alternatively run `helix project link` and `helix add cloud` to persist stable project/database
+linkage in `helix.toml`.
+
+## Confirmation required
+
+Destructive Cloud commands fail with `this action needs confirmation` when they cannot prompt. Re-run
+with `--yes` after checking the target.
 
 ## Query permission denied
 
