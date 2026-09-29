@@ -474,3 +474,92 @@ async fn product_cardinality_does_not_determine_retained_memory_or_source_reads(
     );
     db.close().await.unwrap();
 }
+
+/// A range source keeps an arrival-ordered prefix and, once a parent needs
+/// more, reads the rest of its range at once into a bitmap. Every parent
+/// replays the same order and sees each owner once, whatever the batch size,
+/// even though index order differs from node ID order.
+#[tokio::test]
+async fn range_sources_replay_their_prefix_then_the_rest_in_rank_order() {
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("product-range-prefix").with_range_index("R", "v"),
+    )
+    .await;
+    db.cypher(crate::cypher::Request::new(
+        "UNWIND range(1, 11) AS i CREATE (:R {v: 12 - i})",
+    ))
+    .await
+    .unwrap();
+    let limits = Limits {
+        memory_bytes: 512 * 1024,
+        ..Default::default()
+    };
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    context.row_memory = Some(memory::Budget::new(limits.memory_bytes));
+    context.enable_request_read_view().await.unwrap();
+    let plan = r::plan(
+        helix_cypher::compile("MATCH (n:R) WHERE n.v >= 0 RETURN count(*)").unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let [step] = plan.matches()[&0].sources[0].access.steps() else {
+        unreachable!("one range source")
+    };
+    for batch_rows in [1, 2, 7] {
+        let cursor = context.node_cursor(&step.op).await.unwrap().unwrap();
+        assert!(matches!(cursor, NodeCursor::Range(_)));
+        let mut source = ScanCache::new(cursor, context.row_budget()).unwrap();
+        let mut input = RowBuffer::new(context.row_budget()).unwrap();
+        for parent in 0..3 {
+            input
+                .push_with(size_of::<r::Row>() + 2 * size_of::<r::Value>(), || {
+                    vec![r::Value::Integer(parent), r::Value::Null]
+                })
+                .unwrap();
+        }
+        let mut cursor = ScanCursor::new(input.finish(), r::Slot(1));
+        let mut replays = std::collections::BTreeMap::<i64, Vec<u64>>::new();
+        while let Some(batch) = cursor
+            .next_batch(
+                &context,
+                &mut source,
+                Limits {
+                    batch_rows,
+                    ..limits
+                },
+            )
+            .await
+            .unwrap()
+        {
+            for row in batch.into_iter() {
+                let (r::Value::Integer(parent), r::Value::Entity(r::Entity::Node(id))) =
+                    (&row[0], &row[1])
+                else {
+                    unreachable!("a parent paired with a node");
+                };
+                replays.entry(*parent).or_default().push(*id);
+            }
+        }
+        let first = &replays[&0];
+        assert_eq!(first.len(), 11, "batch {batch_rows}");
+        assert_eq!(
+            first
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            11
+        );
+        // The prefix is in index order, so it starts with the highest IDs.
+        assert!(first[0] > first[1], "{first:?}");
+        assert!(replays.values().all(|replay| replay == first));
+        assert!(matches!(
+            source.source,
+            Source::Complete(Delivered::Arrival { rest: Some(_), .. })
+        ));
+        drop(source);
+    }
+    context.close_request_read_view().unwrap();
+    assert_eq!(context.row_budget().available(), limits.memory_bytes);
+    drop(context);
+    db.close().await.unwrap();
+}

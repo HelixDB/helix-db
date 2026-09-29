@@ -50,14 +50,10 @@ impl Builder {
         Ok(())
     }
 
-    /// Borrow the admitted prefix without cloning or permitting uncharged growth.
-    pub(crate) fn iter(&self) -> roaring::treemap::Iter<'_> {
-        self.bitmap.iter()
-    }
-
-    /// The member of rank `n`, if there are more than `n` members.
-    pub(crate) fn select(&self, n: u64) -> Option<u64> {
-        self.bitmap.select(n)
+    /// Borrow the admitted members, for iteration and rank lookups, without
+    /// cloning or permitting uncharged growth.
+    pub(crate) fn treemap(&self) -> &roaring::RoaringTreemap {
+        &self.bitmap
     }
 
     pub(crate) fn finish(self) -> Bitmap {

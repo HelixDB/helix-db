@@ -4,6 +4,12 @@ use super::{memory, scan::NodeCursor, ExecutionContext, Limits, Result, RowBuffe
 use crate::query_resources::bitmap;
 use helix_planner::relational as r;
 
+/// Arrival-ordered IDs a range source keeps before reading the rest of its
+/// range at once: a short or limited read stays lazy, while a long one
+/// replays the remainder from a compressed bitmap instead of eight bytes per
+/// ID. Unit tests use a small prefix so both parts are exercised.
+const ARRIVAL_PREFIX_IDS: usize = if cfg!(test) { 4 } else { 64 * 1024 };
+
 /// IDs a source has delivered, replayed to each parent by position.
 enum Delivered {
     /// A source yielding increasing IDs, kept compressed. Position `n` is the
@@ -12,11 +18,13 @@ enum Delivered {
         ids: bitmap::Builder,
         last: Option<u64>,
     },
-    /// A range source yields its owners in index order, so they stay in the
-    /// order they arrived.
+    /// A range source yields its owners in index order. Up to
+    /// [`ARRIVAL_PREFIX_IDS`] keep that order; once a parent needs more, the
+    /// rest of the range is read at once and follows the prefix in rank order.
     Arrival {
-        ids: Vec<u64>,
+        prefix: Vec<u64>,
         memory: memory::Reservation,
+        rest: Option<bitmap::Bitmap>,
     },
 }
 
@@ -31,21 +39,22 @@ impl Delivered {
         let mut replayed = 0;
         match self {
             Self::Increasing { ids, .. } => {
-                let Some(first) = ids.select(position as u64) else {
-                    return Ok(0);
-                };
-                let mut ids = ids.iter();
-                ids.advance_to(first);
-                for id in ids.take(limit) {
-                    visit(id)?;
-                    replayed += 1;
-                }
+                replayed += replay_ranked(ids.treemap(), position, limit, &mut visit)?;
             }
-            Self::Arrival { ids, .. } => {
-                for &id in ids.iter().skip(position).take(limit) {
+            Self::Arrival { prefix, rest, .. } => {
+                for &id in prefix.iter().skip(position).take(limit) {
                     visit(id)?;
                     replayed += 1;
                 }
+                let Some(rest) = rest.as_ref().filter(|_| replayed < limit) else {
+                    return Ok(replayed);
+                };
+                replayed += replay_ranked(
+                    rest,
+                    position.saturating_sub(prefix.len()),
+                    limit - replayed,
+                    &mut visit,
+                )?;
             }
         }
         Ok(replayed)
@@ -61,19 +70,44 @@ impl Delivered {
                 ids.insert(id)?;
                 *last = Some(id);
             }
-            Self::Arrival { ids, memory } => {
-                if ids.len() == ids.capacity() {
+            Self::Arrival { prefix, memory, .. } => {
+                assert!(
+                    prefix.len() < ARRIVAL_PREFIX_IDS,
+                    "a range source reads no further than its arrival prefix"
+                );
+                if prefix.len() == prefix.capacity() {
                     // Admit the old and new buffers together before growing.
-                    let capacity = ids.capacity().saturating_mul(2).max(64);
-                    memory.resize((ids.capacity() + capacity) * size_of::<u64>())?;
-                    ids.reserve_exact(capacity - ids.len());
-                    memory.resize(ids.capacity() * size_of::<u64>())?;
+                    let capacity = prefix
+                        .capacity()
+                        .saturating_mul(2)
+                        .clamp(ARRIVAL_PREFIX_IDS.min(64), ARRIVAL_PREFIX_IDS);
+                    memory.resize((prefix.capacity() + capacity) * size_of::<u64>())?;
+                    prefix.reserve_exact(capacity - prefix.len());
+                    memory.resize(prefix.capacity() * size_of::<u64>())?;
                 }
-                ids.push(id);
+                prefix.push(id);
             }
         }
         Ok(())
     }
+}
+
+/// Visit up to `limit` members of `ids` from rank `start` on, in rank order.
+fn replay_ranked(
+    ids: &roaring::RoaringTreemap,
+    start: usize,
+    limit: usize,
+    visit: &mut impl FnMut(u64) -> Result<()>,
+) -> Result<usize> {
+    let Some(first) = ids.select(start as u64) else {
+        return Ok(0);
+    };
+    let mut ids = ids.iter();
+    ids.advance_to(first);
+    ids.take(limit).try_fold(0, |replayed, id| {
+        visit(id)?;
+        Ok(replayed + 1)
+    })
 }
 
 enum Source {
@@ -98,8 +132,9 @@ impl ScanCache {
         let memory = budget.reserve(size_of::<Self>() + 2 * size_of::<NodeCursor>())?;
         let delivered = match cursor {
             NodeCursor::Range(_) => Delivered::Arrival {
-                ids: Vec::new(),
+                prefix: Vec::new(),
                 memory: budget.reserve(0)?,
+                rest: None,
             },
             NodeCursor::Scan(_) | NodeCursor::Indexed { .. } => Delivered::Increasing {
                 ids: bitmap::Builder::new(Some(budget))?,
@@ -146,6 +181,48 @@ impl ScanCache {
                 )
                 .into())
             }
+        };
+        let batch_rows = match &delivered {
+            Delivered::Increasing { .. } => limits.batch_rows,
+            Delivered::Arrival { prefix, .. } => ARRIVAL_PREFIX_IDS - prefix.len(),
+        };
+        if batch_rows == 0 {
+            // Past its prefix, a range source is read to its end at once into
+            // a compressed bitmap, so every later position has a fixed rank.
+            let mut cursor = *cursor;
+            let mut rest = bitmap::Builder::new(Some(context.row_budget()))?;
+            let drain = Limits {
+                batch_rows: 512,
+                ..limits
+            };
+            while let Some((batch, next)) = context
+                .row_budget()
+                .admitted_future(cursor.next_batch(context, 1, r::Slot(0), drain))?
+                .await?
+            {
+                for row in batch {
+                    let r::Value::Entity(r::Entity::Node(id)) = row[0] else {
+                        unreachable!("a node source yields node references");
+                    };
+                    rest.insert(id)?;
+                }
+                cursor = next;
+            }
+            let rest = rest.finish();
+            let extended = !rest.is_empty();
+            let Delivered::Arrival { prefix, memory, .. } = delivered else {
+                unreachable!("only a range source stops at a prefix");
+            };
+            self.source = Source::Complete(Delivered::Arrival {
+                prefix,
+                memory,
+                rest: Some(rest),
+            });
+            return Ok(extended);
+        }
+        let limits = Limits {
+            batch_rows: limits.batch_rows.min(batch_rows),
+            ..limits
         };
         let Some((batch, cursor)) = context
             .row_budget()

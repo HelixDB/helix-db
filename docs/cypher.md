@@ -90,9 +90,11 @@ helix cypher -e 'RETURN $name AS name' --parameters '{"name":"Ada"}'
 helix cypher --file query.cypher --parameters '{"minimumAge":30}'
 ```
 
-An optional instance name selects a linked local instance. `--host`, `--port`,
-and `--compact` control connection and output. The CLI currently requires a local
-instance configuration.
+An optional instance name selects a linked local instance. `--host` and `--port`
+control the connection, and `--explain` shows the selected plans without
+executing the statement. Responses print as highlighted JSON, or as compact
+JSON with the global `--json` flag. The CLI currently requires a local instance
+configuration.
 
 ## Supported language profile
 
@@ -150,7 +152,9 @@ the label scan. A comparison such as `n.age >= 21 AND n.age < $max` against a
 number or string literal or parameter can read a native range index on that
 property, with bounds on one property combined. It reads and verifies index
 entries in index order only as far as the query consumes them, so a `LIMIT`
-reads a few entries rather than the whole range. `ORDER BY` that property alone
+reads a few entries rather than the whole range. A later clause or cartesian
+step that replays a range for each input row keeps up to 65,536 of its entries
+in index order and reads the rest of the range at once when it needs more. `ORDER BY` that property alone
 in the index's own direction with a `LIMIT`, directly after a single-node
 `MATCH`, as in `MATCH (u:User) WHERE u.rank >= 0 WITH u ORDER BY u.rank DESC
 LIMIT 10 RETURN u.name` with a descending index on `rank`, reads the index in
