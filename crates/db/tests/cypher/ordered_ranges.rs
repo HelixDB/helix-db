@@ -4,8 +4,9 @@ use db::cypher;
 use helix_ast::index;
 use serde_json::json;
 
-/// ORDER BY a range-bounded, range-indexed property with a LIMIT reads the
-/// index in order and stops after the window. Each result equals the same
+/// ORDER BY a range-bounded, range-indexed property in the index's direction
+/// with a LIMIT, projecting only the node, reads the index in order and stops
+/// after the window. Each result equals the same
 /// query on a database without indexes; only sort keys are returned, since
 /// ties may come in any order.
 #[tokio::test]
@@ -37,6 +38,9 @@ async fn ordered_range_limits_read_only_the_window() {
         "MATCH (u:User) WHERE u.name > 'n2' RETURN u.name ORDER BY u.name LIMIT 5",
         "MATCH (u:User) WHERE u.rank >= 0 RETURN u.rank ORDER BY u.rank DESC LIMIT 0",
         "MATCH (u:User) WHERE u.rank > 1000 RETURN u.rank ORDER BY u.rank LIMIT 5",
+        "MATCH (u:User) WHERE u.rank >= 0 WITH u ORDER BY u.rank LIMIT 5 RETURN u.rank",
+        "MATCH (u:User) WHERE u.rank >= 50 RETURN u ORDER BY u.rank SKIP 2 LIMIT 3",
+        "MATCH (u:User) WHERE u.rank >= 0 WITH u ORDER BY u.rank DESC LIMIT 5 RETURN u.rank",
     ] {
         let direct = indexed.cypher(request(query)).await.unwrap();
         let reference = scanned.cypher(request(query)).await.unwrap();
@@ -44,7 +48,7 @@ async fn ordered_range_limits_read_only_the_window() {
     }
     let direct = indexed
         .cypher(request(
-            "MATCH (u:User) WHERE u.rank >= 0 RETURN u.uid ORDER BY u.rank DESC LIMIT 5",
+            "MATCH (u:User) WHERE u.rank >= 0 WITH u ORDER BY u.rank LIMIT 5 RETURN u.rank",
         ))
         .await
         .unwrap();

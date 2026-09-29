@@ -273,8 +273,12 @@ fn plan_accesses(
                         .find(|n| n.slot == node.slot && n.label.is_some())
                         .and_then(|n| n.label.as_ref())
                 })
+                // Skipping nodes of other labels would also skip their pattern
+                // constraints, so only constraints that cannot fail allow it.
                 .or_else(|| {
-                    total_predicate.and_then(|predicate| conjunct_label(predicate, node.slot))
+                    total_predicate
+                        .filter(|_| constraints_total)
+                        .and_then(|predicate| conjunct_label(predicate, node.slot))
                 });
             let mut candidates = vec![match label {
                 Some(label) => ir::NodeAccessPlan::LabelScan {
@@ -478,24 +482,22 @@ fn plan_accesses(
                     let Some((key, index)) = range_index(&property) else {
                         continue;
                     };
-                    // Read the sort property in the ORDER BY direction.
-                    let sorted = sort.as_ref().is_some_and(|(slot, sorted, _)| {
-                        operator_index == 0 && *slot == node.slot && *sorted == property
+                    // An index whose own direction is the ORDER BY direction
+                    // reads the sort property in order. Reverse iteration is
+                    // not used: the storage engine's descending scans do not
+                    // yet order keys across the files of one sorted run.
+                    let sorted = sort.as_ref().is_some_and(|(slot, sorted, descending)| {
+                        operator_index == 0
+                            && *slot == node.slot
+                            && *sorted == property
+                            && (key.direction == helix_ast::index::RangeIndexDirection::Desc)
+                                == *descending
                     });
-                    let ascending = sort.as_ref().is_none_or(|(_, _, descending)| !descending);
-                    let iteration = if !sorted
-                        || (key.direction == helix_ast::index::RangeIndexDirection::Asc)
-                            == ascending
-                    {
-                        ir::RangeScanIteration::Forward
-                    } else {
-                        ir::RangeScanIteration::Reverse
-                    };
                     let candidate = ir::NodeAccessPlan::RangeIndex {
                         index,
                         key,
                         range,
-                        iteration,
+                        iteration: ir::RangeScanIteration::Forward,
                     };
                     if sorted {
                         ordered = Some(candidate.clone());
@@ -693,7 +695,7 @@ fn plan_accesses(
                 }
                 // The most selective indexed equality or membership, a unique
                 // one first, keys the lookup regardless of written order.
-                let lookup = equalities
+                let (correlated, bound): (Vec<_>, Vec<_>) = equalities
                     .into_iter()
                     .map(|(property, expression)| (property, expression, LookupMatch::Value))
                     .chain(
@@ -758,8 +760,24 @@ fn plan_accesses(
                             estimated_rows,
                         })
                     })
+                    .partition(|lookup| incoming.contains(&lookup.probe));
+                // The cheapest lookup keyed on an earlier clause always applies.
+                // The cheapest keyed on another binding of this pattern is kept
+                // as well when it is cheaper; the schedule uses it once that
+                // binding is known.
+                let correlated = correlated
+                    .into_iter()
                     .min_by_key(|lookup| lookup.estimated_rows);
-                lookups.extend(lookup);
+                let bound = bound
+                    .into_iter()
+                    .min_by_key(|lookup| lookup.estimated_rows)
+                    .filter(|bound| {
+                        correlated.as_ref().is_none_or(|correlated| {
+                            bound.estimated_rows < correlated.estimated_rows
+                        })
+                    });
+                lookups.extend(correlated);
+                lookups.extend(bound);
             }
         }
         order = order.with_lookups(lookups)?;
@@ -908,36 +926,46 @@ fn plan_accesses(
 
 /// The node, property and direction that order the rows of a projection
 /// with a LIMIT and a single ORDER BY key that directly follows the first
-/// MATCH, through the item that projects the property when the key is its
-/// alias.
+/// MATCH and only passes variables, literals and parameters along: a window
+/// stops before later rows, where reading another stored property could fail.
 pub(super) fn sort_key(query: &Query) -> Option<(Slot, String, bool)> {
     let [Operator::Match { .. }, Operator::Project {
         items,
         distinct: false,
         ordering,
+        predicate: None,
         limit: Some(_),
         ..
     }, ..] = query.operators()
     else {
         return None;
     };
+    if !items.iter().all(|item| {
+        matches!(
+            item.expression,
+            Expression::Slot(_) | Expression::Literal(_) | Expression::Parameter(_)
+        )
+    }) {
+        return None;
+    }
     let [order] = ordering.as_slice() else {
         return None;
     };
-    let expression = match &order.expression {
-        Expression::Slot(output) => items
-            .iter()
-            .find(|item| item.slot == *output)
-            .map_or(&order.expression, |item| &item.expression),
-        expression => expression,
-    };
-    let Expression::Property(value, key) = expression else {
+    let Expression::Property(value, key) = &order.expression else {
         return None;
     };
     let Expression::Slot(slot) = value.as_ref() else {
         return None;
     };
-    Some((*slot, key.clone(), order.descending))
+    // A projected variable orders by the input it passes along.
+    let slot = match items.iter().find(|item| item.slot == *slot) {
+        Some(item) => match item.expression {
+            Expression::Slot(input) => input,
+            _ => return None,
+        },
+        None => *slot,
+    };
+    Some((slot, key.clone(), order.descending))
 }
 
 /// The predicate an index source of the MATCH at `index` may use: its own

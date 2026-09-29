@@ -9,8 +9,19 @@ use helix_planner::{ir, relational as r};
 struct ActiveParent {
     cursor: EdgeCursor,
     pending: Option<(EdgeIdBatch, usize)>,
-    /// The relationship type the cursor reads, among the step's types.
-    label: usize,
+    accepts: Accepts,
+}
+
+/// The relationship types a cursor's edges may have. A typed cursor lists
+/// the neighbors of one type but resolves each node pair to every edge
+/// between them, so it keeps only edges of its own type, and a relationship
+/// that several listed types reach appears once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Accepts {
+    /// Every listed type, or any type for an untyped step.
+    Listed,
+    /// The listed type at this position.
+    Only(usize),
 }
 
 impl ExecutionContext<'_> {
@@ -40,33 +51,19 @@ impl ExecutionContext<'_> {
             }
             (r::Direction::Undirected, _) => ir::ExpandDirection::Both,
         };
-        // Each distinct type reads only its own adjacency; an untyped step
-        // reads every relationship.
-        let labels = if relationship.types.is_empty() {
-            vec![ir::ExpandLabelPlan::Any]
-        } else {
-            relationship
-                .types
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .map(|label| {
-                    ir::ExpandLabelPlan::Label(
-                        ir::NonEmptyString::new(label.clone()).expect("validated type"),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
+        // Each distinct type reads only its own adjacency toward an unbound
+        // node; an untyped step, or one into a bound node, reads the node's
+        // relationships once.
+        let types = relationship
+            .types
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         futures::stream::try_unfold(
-            (
-                rows,
-                0_usize,
-                0_usize,
-                None::<ActiveParent>,
-                0_usize,
-                labels,
-            ),
-            move |(mut rows, mut parent, mut released, mut active, mut next_label, labels)| {
+            (rows, 0_usize, 0_usize, None::<ActiveParent>, 0_usize, types),
+            move |(mut rows, mut parent, mut released, mut active, mut next_type, types)| {
                 // Only an active poll owns the async storage-operation state.
                 // Suspended expansion levels retain their compact continuation.
                 let poll = async move {
@@ -89,7 +86,7 @@ impl ExecutionContext<'_> {
                                         row[from.0 as usize]
                                     else {
                                         parent += 1;
-                                        next_label = 0;
+                                        next_type = 0;
                                         continue;
                                     };
                                     let target = match row[to.0 as usize] {
@@ -104,6 +101,18 @@ impl ExecutionContext<'_> {
                                         | r::Value::Entity(r::Entity::Relationship(_))
                                         | r::Value::Path(_) => None,
                                     };
+                                    let (label, accepts) = match types.get(next_type) {
+                                        Some(label) if target.is_none() => (
+                                            ir::ExpandLabelPlan::Label(
+                                                ir::NonEmptyString::new(label.clone())
+                                                    .expect("validated type"),
+                                            ),
+                                            Accepts::Only(next_type),
+                                        ),
+                                        Some(_) | None => {
+                                            (ir::ExpandLabelPlan::Any, Accepts::Listed)
+                                        }
+                                    };
                                     ActiveParent {
                                         cursor: self
                                             .row_budget()
@@ -111,13 +120,13 @@ impl ExecutionContext<'_> {
                                                 self,
                                                 source,
                                                 direction,
-                                                &labels[next_label],
+                                                &label,
                                                 target,
                                                 limits.batch_rows,
                                             ))?
                                             .await?,
                                         pending: None,
-                                        label: next_label,
+                                        accepts,
                                     }
                                 }
                             };
@@ -128,7 +137,7 @@ impl ExecutionContext<'_> {
                                     candidates.extend(
                                         batch.ids()[offset..offset + count]
                                             .iter()
-                                            .map(|id| (parent, *id)),
+                                            .map(|id| (parent, *id, current.accepts)),
                                     );
                                     offset += count;
                                     if offset < batch.ids().len() {
@@ -143,17 +152,23 @@ impl ExecutionContext<'_> {
                                         .await?
                                     else {
                                         // The parent's next type, then the next parent.
-                                        next_label = current.label + 1;
-                                        if next_label == labels.len() {
-                                            parent += 1;
-                                            next_label = 0;
+                                        match current.accepts {
+                                            Accepts::Only(position)
+                                                if position + 1 < types.len() =>
+                                            {
+                                                next_type = position + 1;
+                                            }
+                                            Accepts::Only(_) | Accepts::Listed => {
+                                                parent += 1;
+                                                next_type = 0;
+                                            }
                                         }
                                         continue;
                                     };
                                     active = Some(ActiveParent {
                                         cursor,
                                         pending: Some((batch, 0)),
-                                        label: current.label,
+                                        accepts: current.accepts,
                                     });
                                 }
                             }
@@ -161,28 +176,46 @@ impl ExecutionContext<'_> {
                         if candidates.is_empty() {
                             return Ok(None);
                         }
-                        ids.extend(candidates.iter().map(|(_, id)| *id));
-                        let accepted_types = self
-                            .row_budget()
-                            .admitted_future(
-                                self.relationship_types_batch(&ids, &relationship.types),
-                            )?
-                            .await?;
-                        assert_eq!(
-                            accepted_types.len(),
-                            candidates.len(),
-                            "one type result per candidate"
-                        );
-                        let mut accepted_types = accepted_types.into_iter();
-                        candidates
-                            .retain(|_| accepted_types.next().expect("validated candidate count"));
+                        // Candidates of each cursor kind read their types together.
+                        let mut accepted = vec![false; candidates.len()];
+                        for accepts in std::iter::once(Accepts::Listed)
+                            .chain((0..types.len()).map(Accepts::Only))
+                        {
+                            ids.clear();
+                            ids.extend(
+                                candidates
+                                    .iter()
+                                    .filter(|candidate| candidate.2 == accepts)
+                                    .map(|candidate| candidate.1),
+                            );
+                            if ids.is_empty() {
+                                continue;
+                            }
+                            let wanted = match accepts {
+                                Accepts::Listed => &types[..],
+                                Accepts::Only(position) => std::slice::from_ref(&types[position]),
+                            };
+                            let results = self
+                                .row_budget()
+                                .admitted_future(self.relationship_types_batch(&ids, wanted))?
+                                .await?;
+                            assert_eq!(results.len(), ids.len(), "one type result per candidate");
+                            candidates
+                                .iter()
+                                .zip(accepted.iter_mut())
+                                .filter(|(candidate, _)| candidate.2 == accepts)
+                                .zip(results)
+                                .for_each(|((_, accepted), result)| *accepted = result);
+                        }
+                        let mut accepted = accepted.into_iter();
+                        candidates.retain(|_| accepted.next().expect("one result per candidate"));
                         if candidates.is_empty() {
                             rows.release_rows(released..parent);
                             released = parent;
                             continue;
                         }
                         ids.clear();
-                        ids.extend(candidates.iter().map(|(_, id)| *id));
+                        ids.extend(candidates.iter().map(|(_, id, _)| *id));
                         let endpoints = self
                             .row_budget()
                             .admitted_future(self.edge_endpoints_batch(&ids))?
@@ -193,7 +226,7 @@ impl ExecutionContext<'_> {
                             "one endpoint result per candidate"
                         );
                         let mut output = RowBuffer::new(self.row_budget())?;
-                        for ((parent, id), endpoints) in candidates.into_iter().zip(endpoints) {
+                        for ((parent, id, _), endpoints) in candidates.into_iter().zip(endpoints) {
                             let row = &rows[parent];
                             if pattern.relationships.iter().any(|other| {
                                 other.slot != relationship.slot
@@ -256,7 +289,7 @@ impl ExecutionContext<'_> {
                         if output.len() > 0 {
                             return Ok(Some((
                                 output.finish(),
-                                (rows, parent, released, active, next_label, labels),
+                                (rows, parent, released, active, next_type, types),
                             )));
                         }
                     }

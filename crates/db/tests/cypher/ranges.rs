@@ -130,3 +130,35 @@ async fn range_comparisons_read_range_indexes_with_cypher_semantics() {
     );
     db.close().await.unwrap();
 }
+
+/// A range source yields nodes in index order. Every consumer that replays a
+/// source for several input rows, a later cartesian step or a lookup's
+/// fallback still returns the unindexed result when that order differs from
+/// node ID order.
+#[tokio::test]
+async fn range_sources_in_index_order_feed_every_consumer() {
+    let indexed = database().await;
+    let scanned = database().await;
+    for db in [&indexed, &scanned] {
+        run(
+            db,
+            "UNWIND range(0, 59) AS i CREATE (:R {v: 59 - i, k: i % 7}), (:C {c: i % 3})",
+        )
+        .await;
+    }
+    create_index(&indexed, index::IndexSpec::node_range("R", "v")).await;
+    create_index(&indexed, index::IndexSpec::node_unique_equality("R", "k2")).await;
+    for query in [
+        "UNWIND [1, 2] AS x MATCH (n:R) WHERE n.v >= 40 RETURN x, n.v ORDER BY x, n.v",
+        "MATCH (c:C {c: 1}) MATCH (n:R) WHERE n.v >= 50 RETURN count(*)",
+        "MATCH (c:C {c: 2}) OPTIONAL MATCH (n:R) WHERE n.v >= 55 RETURN count(n)",
+        "MATCH (c:C), (n:R) WHERE c.c = 0 AND n.v >= 57 RETURN count(*)",
+        "MATCH (c:C) WITH c MATCH (n:R) WHERE n.v >= 58 RETURN count(*)",
+        "UNWIND [[1], 2] AS k MATCH (n:R) WHERE n.k2 = k AND n.v >= 30 RETURN count(*)",
+    ] {
+        let direct = run(&indexed, query).await;
+        assert_eq!(direct.rows, run(&scanned, query).await.rows, "{query}");
+    }
+    indexed.close().await.unwrap();
+    scanned.close().await.unwrap();
+}

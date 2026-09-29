@@ -70,3 +70,55 @@ async fn type_alternatives_read_only_their_adjacency() {
     );
     db.close().await.unwrap();
 }
+
+/// Several listed types between one pair of nodes, into an already bound
+/// node or around a self-loop still return each relationship once, as the
+/// same step written with a type test does.
+#[tokio::test]
+async fn type_alternatives_return_each_relationship_once() {
+    let db = database().await;
+    run(
+        &db,
+        "CREATE (a:U {id: 1})-[:LIKES]->(p:P {id: 10}), (a)-[:VIEWED]->(p), (a)-[:LIKES]->(p), \
+         (p)-[:VIEWED]->(a), (a)-[:LIKES]->(a), (a)-[:VIEWED]->(a), (a)-[:OTHER]->(p)",
+    )
+    .await;
+    for (typed, tested) in [
+        (
+            "MATCH (a:U {id: 1})-[r:LIKES|VIEWED]->(x) RETURN type(r) AS t, count(*) ORDER BY t",
+            "MATCH (a:U {id: 1})-[r]->(x) WHERE type(r) IN ['LIKES', 'VIEWED'] \
+             RETURN type(r) AS t, count(*) ORDER BY t",
+        ),
+        (
+            "MATCH (p:P {id: 10})<-[r:LIKES|VIEWED]-(x) RETURN count(*)",
+            "MATCH (p:P {id: 10})<-[r]-(x) WHERE type(r) IN ['LIKES', 'VIEWED'] RETURN count(*)",
+        ),
+        (
+            "MATCH (a:U {id: 1})-[r:LIKES|VIEWED]-(x) RETURN type(r) AS t, count(*) ORDER BY t",
+            "MATCH (a:U {id: 1})-[r]-(x) WHERE type(r) IN ['LIKES', 'VIEWED'] \
+             RETURN type(r) AS t, count(*) ORDER BY t",
+        ),
+        (
+            "MATCH (a:U {id: 1}), (p:P {id: 10}) WITH a, p \
+             MATCH (a)-[r:LIKES|VIEWED|MISSING]->(p) RETURN count(*)",
+            "MATCH (a:U {id: 1}), (p:P {id: 10}) WITH a, p \
+             MATCH (a)-[r]->(p) WHERE type(r) IN ['LIKES', 'VIEWED', 'MISSING'] RETURN count(*)",
+        ),
+        (
+            "MATCH (a:U {id: 1})-[r:LIKES|VIEWED]->(a) RETURN count(*)",
+            "MATCH (a:U {id: 1})-[r]->(a) WHERE type(r) IN ['LIKES', 'VIEWED'] RETURN count(*)",
+        ),
+        (
+            "MATCH (a:U {id: 1})-[:LIKES|VIEWED]->(p:P)-[:VIEWED|LIKES]->(a) RETURN count(*)",
+            "MATCH (a:U {id: 1})-[r1]->(p:P)-[r2]->(a) WHERE type(r1) IN ['LIKES', 'VIEWED'] \
+             AND type(r2) IN ['LIKES', 'VIEWED'] RETURN count(*)",
+        ),
+    ] {
+        assert_eq!(
+            run(&db, typed).await.rows,
+            run(&db, tested).await.rows,
+            "{typed}"
+        );
+    }
+    db.close().await.unwrap();
+}

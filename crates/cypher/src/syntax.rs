@@ -87,6 +87,10 @@ impl Expr {
     pub fn kind(&self) -> &ExprKind {
         &self.kind
     }
+    /// Checked nesting depth, counting this node.
+    pub(crate) fn depth(&self) -> usize {
+        self.depth
+    }
     pub(crate) fn new(kind: ExprKind, span: Span) -> r::Result<Self> {
         let depth = 1 + match &kind {
             ExprKind::Literal(_)

@@ -319,6 +319,18 @@ async fn membership_lookups_read_each_member_once() {
         reads.point_gets + reads.multi_get_keys + reads.scan_rows < 40,
         "{reads:?}"
     );
+    // A repeated member is read once.
+    let repeated = format!(
+        "WITH [{}] AS ids MATCH (u:User) WHERE u.uid IN ids RETURN count(*)",
+        ["7"; 64].join(", ")
+    );
+    let direct = run(&indexed, &repeated).await;
+    assert_eq!(direct.rows, vec![vec![json!(1)]]);
+    let reads = &direct.resources.reads;
+    assert!(
+        reads.point_gets + reads.multi_get_keys + reads.scan_rows < 10,
+        "{reads:?}"
+    );
     indexed.close().await.unwrap();
     scanned.close().await.unwrap();
 }

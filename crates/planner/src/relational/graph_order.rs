@@ -173,7 +173,7 @@ impl GraphPatternOrder {
     pub fn with_lookups(mut self, lookups: Vec<PatternLookup>) -> Result<Self> {
         let mut targets = BTreeSet::new();
         if lookups.iter().any(|lookup| {
-            !targets.insert(lookup.slot)
+            !targets.insert((lookup.slot, lookup.probe))
                 || self.incoming.contains(&lookup.slot)
                 || lookup.probe == lookup.slot
                 || !(self.incoming.contains(&lookup.probe)
@@ -276,7 +276,8 @@ impl GraphPatternOrder {
             if let Some(lookup) = self
                 .lookups
                 .iter()
-                .find(|lookup| lookup.slot == source.slot && known.contains(&lookup.probe))
+                .filter(|lookup| lookup.slot == source.slot && known.contains(&lookup.probe))
+                .min_by_key(|lookup| lookup.estimated_rows)
             {
                 let cardinality = cost::EstimatedRows::rows(lookup.estimated_rows);
                 let lookup_cost = match lookup.index.uniqueness {

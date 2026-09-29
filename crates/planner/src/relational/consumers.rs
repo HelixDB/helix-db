@@ -125,9 +125,9 @@ pub(super) fn prepare(
 /// projection that directly consumes it: its one node is read through a
 /// range index on the sort property in the sort direction. The MATCH's WHERE
 /// holds that range, so every row has a non-null value of the range's type,
-/// and values of one type order as the index does. Items and ordering that
-/// cannot fail let the projection stop after its window without skipping an
-/// error a later row would raise.
+/// and values of one type order as the index does. `sort_key` admits only
+/// projections that pass variables, literals and parameters along, and the
+/// index read and verified the sort key on every row it returns.
 fn ordered_input(pipeline: &r::RowPipeline, matches: &BTreeMap<usize, r::MatchPlan>) -> bool {
     let query = pipeline.query();
     let Some((slot, property, descending)) = r::planning::sort_key(query) else {
@@ -137,11 +137,6 @@ fn ordered_input(pipeline: &r::RowPipeline, matches: &BTreeMap<usize, r::MatchPl
         pattern,
         optional: false,
         predicate,
-    }, r::Operator::Project {
-        items,
-        ordering,
-        predicate: None,
-        ..
     }, ..] = query.operators()
     else {
         return false;
@@ -157,13 +152,15 @@ fn ordered_input(pipeline: &r::RowPipeline, matches: &BTreeMap<usize, r::MatchPl
     let [step] = source.access.steps() else {
         return false;
     };
-    let Some(crate::exec::ExecNodeCursor::Range { key, iteration, .. }) =
-        step.op.node_cursor_access()
+    let Some(crate::exec::ExecNodeCursor::Range {
+        key,
+        iteration: crate::ir::RangeScanIteration::Forward,
+        ..
+    }) = step.op.node_cursor_access()
     else {
         return false;
     };
-    let ascending = (key.direction == helix_ast::index::RangeIndexDirection::Asc)
-        == (iteration == crate::ir::RangeScanIteration::Forward);
+    let ascending = key.direction == helix_ast::index::RangeIndexDirection::Asc;
     let totality = r::planning::Totality {
         pattern,
         bindings: query.bindings(),
@@ -175,11 +172,4 @@ fn ordered_input(pipeline: &r::RowPipeline, matches: &BTreeMap<usize, r::MatchPl
         && predicate
             .as_ref()
             .is_none_or(|predicate| totality.predicate(predicate.expression()))
-        && items.iter().all(|item| {
-            !item.expression.has_aggregate()
-                && (totality.operand(&item.expression) || totality.predicate(&item.expression))
-        })
-        && ordering
-            .iter()
-            .all(|order| totality.operand(&order.expression))
 }

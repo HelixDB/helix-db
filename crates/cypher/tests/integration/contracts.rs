@@ -1200,51 +1200,64 @@ fn ordered_range_sources_end_top_k_projections_early() {
         (plan.batch_consumer(0), iteration)
     };
     use helix_ast::index::RangeIndexDirection::{Asc, Desc};
-    use ir::RangeScanIteration::{Forward, Reverse};
+    use ir::RangeScanIteration::Forward;
     let ordered = Some(r::BatchConsumer::OrderedWindow);
+    let top_k = Some(r::BatchConsumer::TopK);
     for (text, direction, expected) in [
         (
-            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age DESC LIMIT 3",
-            Asc,
-            (ordered, Some(Reverse)),
-        ),
-        (
-            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age LIMIT 3",
+            "MATCH (u:N) WHERE u.age > 0 RETURN u ORDER BY u.age LIMIT 3",
             Asc,
             (ordered, Some(Forward)),
         ),
         (
-            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age DESC SKIP 2 LIMIT $k",
+            "MATCH (u:N) WHERE u.age > 0 RETURN u, 1 AS one, $k AS k \
+             ORDER BY u.age DESC SKIP 2 LIMIT $k",
             Desc,
             (ordered, Some(Forward)),
         ),
         (
-            "MATCH (u:N) WHERE u.age < 'z' RETURN u.age AS a ORDER BY a LIMIT 3",
+            "MATCH (u:N) WHERE u.age < 'z' WITH u ORDER BY u.age LIMIT 3 RETURN u.key",
+            Asc,
+            (ordered, Some(Forward)),
+        ),
+        // Only the index's own direction is read in order.
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u ORDER BY u.age DESC LIMIT 3",
+            Asc,
+            (top_k, Some(Forward)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u ORDER BY u.age LIMIT 3",
             Desc,
-            (ordered, Some(Reverse)),
+            (top_k, Some(Forward)),
         ),
         // Without a range bound, nulls and other types would order differently.
         (
-            "MATCH (u:N) RETURN u.key ORDER BY u.age DESC LIMIT 3",
+            "MATCH (u:N) RETURN u ORDER BY u.age LIMIT 3",
             Asc,
-            (Some(r::BatchConsumer::TopK), None),
+            (top_k, None),
         ),
-        // A second key, an item that can fail, or a range on another property
-        // needs every row.
+        // Another stored property could fail on a row past the window; a second
+        // key or a range on another property needs every row.
         (
-            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age, u.key LIMIT 3",
+            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.age LIMIT 3",
             Asc,
-            (Some(r::BatchConsumer::TopK), Some(Forward)),
-        ),
-        (
-            "MATCH (u:N) WHERE u.age > 0 RETURN 1 / u.key ORDER BY u.age LIMIT 3",
-            Asc,
-            (Some(r::BatchConsumer::TopK), Some(Forward)),
+            (top_k, Some(Forward)),
         ),
         (
-            "MATCH (u:N) WHERE u.age > 0 RETURN u.key ORDER BY u.key LIMIT 3",
+            "MATCH (u:N) WHERE u.age > 0 RETURN u.age AS a ORDER BY a LIMIT 3",
             Asc,
-            (Some(r::BatchConsumer::TopK), Some(Forward)),
+            (top_k, Some(Forward)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u ORDER BY u.age, u.key LIMIT 3",
+            Asc,
+            (top_k, Some(Forward)),
+        ),
+        (
+            "MATCH (u:N) WHERE u.age > 0 RETURN u ORDER BY u.key LIMIT 3",
+            Asc,
+            (top_k, Some(Forward)),
         ),
     ] {
         assert_eq!(consumer(text, direction), expected, "{text}");
@@ -1303,5 +1316,46 @@ fn membership_lookups_probe_list_variables() {
         ),
     ] {
         assert_eq!(lookups(text), expected, "{text}");
+    }
+}
+
+#[test]
+fn incoming_lookups_survive_cheaper_lookups_on_the_same_pattern() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(catalog::ScopedPropertyKey::try_new("N", "key").unwrap());
+    for property in ["uid", "email"] {
+        indexes.node_eq.insert(
+            catalog::ScopedPropertyKey::try_new("N", property).unwrap(),
+            catalog::NodeEqualityIndexMeta::try_new(format!("node_eq:N:{property}"))
+                .unwrap()
+                .with_uniqueness(catalog::IndexUniqueness::Unique),
+        );
+    }
+    let context = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let lookups = |text: &str| {
+        r::plan(helix_cypher::compile(text).unwrap(), &context)
+            .unwrap()
+            .matches()
+            .values()
+            .flat_map(|plan| &plan.steps)
+            .filter_map(|step| match step {
+                r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
+                r::MatchStep::Scan(_)
+                | r::MatchStep::Expand { .. }
+                | r::MatchStep::HashJoin { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // `p` is reached only through `n`, so `p.author` never probes first.
+    for text in [
+        "UNWIND [1, 2] AS c MATCH (n:N {key: c, uid: p.author})-[:R]->(p:P) RETURN n",
+        "WITH 'e' AS e MATCH (p:P)<-[:R]-(n:N) WHERE n.uid = p.author AND n.email = e RETURN n",
+        "WITH 'e' AS e MATCH (p:P)<-[:R]-(n:N) WHERE n.email = e AND n.uid = p.author RETURN n",
+    ] {
+        let found = lookups(text);
+        assert!(found == ["key"] || found == ["email"], "{text}: {found:?}");
     }
 }

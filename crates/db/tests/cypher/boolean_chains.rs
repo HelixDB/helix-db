@@ -3,8 +3,8 @@ use db::cypher;
 use serde_json::json;
 
 /// A long flat Boolean chain stays within the expression depth limit, and a
-/// chain evaluates its operands as the same chain written left-nested does,
-/// including which operand's error it reports.
+/// short chain evaluates its operands as the same chain written left-nested
+/// does, including which operand's error it reports.
 #[tokio::test]
 async fn boolean_chains_are_balanced_without_changing_evaluation() {
     let db = database().await;

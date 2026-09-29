@@ -62,6 +62,28 @@ impl ScanCache {
                 .into())
             }
         };
+        // Parents resume through the prefix in increasing ID order, but a range
+        // source yields its owners in index order, so read all of it first.
+        if matches!(*cursor, NodeCursor::Range(_)) {
+            let mut cursor = *cursor;
+            let mut extended = false;
+            while let Some((batch, next)) = context
+                .row_budget()
+                .admitted_future(cursor.next_batch(context, 1, r::Slot(0), limits))?
+                .await?
+            {
+                for row in batch {
+                    let r::Value::Entity(r::Entity::Node(id)) = row[0] else {
+                        unreachable!("a node source yields node references");
+                    };
+                    ids.insert(id)?;
+                }
+                extended = true;
+                cursor = next;
+            }
+            self.source = Source::Complete(ids.finish());
+            return Ok(extended);
+        }
         let Some((batch, cursor)) = context
             .row_budget()
             .admitted_future((*cursor).next_batch(context, 1, r::Slot(0), limits))?

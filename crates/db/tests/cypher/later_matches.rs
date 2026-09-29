@@ -58,3 +58,24 @@ async fn later_match_constraints_read_the_earlier_index_with_scan_semantics() {
     indexed.close().await.unwrap();
     scanned.close().await.unwrap();
 }
+
+/// A label from a later MATCH narrows an earlier source only when that
+/// source's own pattern constraints cannot fail on the nodes it would skip.
+#[tokio::test]
+async fn later_match_labels_keep_failing_constraints_evaluated() {
+    let db = database().await;
+    run(&db, "CREATE (:Post {likes: 3})-[:TAGGED]->(:Tag {kind: 1})").await;
+    for query in [
+        "MATCH (a)-[:TAGGED]->(t:Tag {kind: 1 / (a.likes - a.likes)}) MATCH (a:User) RETURN count(*)",
+        "MATCH (a)-[:TAGGED]->(t:Tag {kind: 1 / (a.likes - a.likes)}) WHERE a:User RETURN count(*)",
+        "MATCH (a)-[:TAGGED]->(t:Tag {kind: 1 / (a.likes - a.likes)}) RETURN count(*)",
+    ] {
+        let error = db
+            .cypher(cypher::Request::new(query))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("DivisionByZero"), "{query}: {error}");
+    }
+    db.close().await.unwrap();
+}

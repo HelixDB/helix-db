@@ -175,8 +175,8 @@ impl Probe {
             | r::Value::Entity(_)
             | r::Value::Path(_) => return Ok(Self::Scan),
         };
-        // The literals, the executable values and the plan's metadata live
-        // together until the cursor has read the owners.
+        // The literals, the executable values, the repeat set and the plan's
+        // metadata live together until the cursor has read the owners.
         let _scratch = context.row_budget().reserve(
             size_of::<exec::ExecAccessPlan>()
                 .saturating_add(lookup.index.index_id.len())
@@ -185,6 +185,7 @@ impl Probe {
                 .saturating_add(members.iter().fold(0_usize, |bytes, member| {
                     bytes
                         .saturating_add(2 * size_of::<exec::ExecIndexedEqualityValue>())
+                        .saturating_add(2 * size_of::<Member<'_>>())
                         .saturating_add(match member {
                             r::Value::String(value) => 2 * value.len(),
                             r::Value::Null
@@ -198,18 +199,31 @@ impl Probe {
                         })
                 })),
         )?;
+        // An exact repeat reads nothing new. `1` and `1.0` stay apart: the
+        // index may encode them differently.
+        #[derive(PartialEq, Eq, Hash)]
+        enum Member<'a> {
+            Boolean(bool),
+            Integer(i64),
+            Float(u64),
+            String(&'a str),
+        }
+        let mut seen = std::collections::HashSet::with_capacity(members.len());
         let mut literals = Vec::with_capacity(members.len());
         for member in members {
-            let value = match member {
+            let (value, key) = match member {
                 r::Value::Null => continue,
-                r::Value::Boolean(value) => P::Bool(*value),
-                r::Value::Integer(value) => P::I64(*value),
-                r::Value::Float(value) => P::F64(*value),
-                r::Value::String(value) => P::String(value.clone()),
+                r::Value::Boolean(value) => (P::Bool(*value), Member::Boolean(*value)),
+                r::Value::Integer(value) => (P::I64(*value), Member::Integer(*value)),
+                r::Value::Float(value) => (P::F64(*value), Member::Float(value.to_bits())),
+                r::Value::String(value) => (P::String(value.clone()), Member::String(value)),
                 r::Value::List(_) | r::Value::Map(_) | r::Value::Entity(_) | r::Value::Path(_) => {
                     return Ok(Self::Scan);
                 }
             };
+            if !seen.insert(key) {
+                continue;
+            }
             let literal = ir::SecondaryIndexLiteral::new(value)
                 .expect("nonnull scalar literals have native equality semantics");
             if literal.may_exceed_index_key() {

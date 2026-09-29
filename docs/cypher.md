@@ -151,12 +151,16 @@ number or string literal or parameter can read a native range index on that
 property, with bounds on one property combined. It reads and verifies index
 entries in index order only as far as the query consumes them, so a `LIMIT`
 reads a few entries rather than the whole range. `ORDER BY` that property alone
-with a `LIMIT`, directly after a single-node `MATCH`, as in
-`MATCH (u:User) WHERE u.rank >= 0 RETURN u.name ORDER BY u.rank DESC LIMIT 10`,
-reads the index in that direction and stops after the window when the
-returned items and the sort key cannot fail. The range bound is required:
-without it, nodes that lack the property sort first in descending order and
-values of other types sort by type, which the index does not deliver. A
+in the index's own direction with a `LIMIT`, directly after a single-node
+`MATCH`, as in `MATCH (u:User) WHERE u.rank >= 0 WITH u ORDER BY u.rank DESC
+LIMIT 10 RETURN u.name` with a descending index on `rank`, reads the index in
+order and stops after the window. As for any window, the ordered clause may
+only pass variables, literals and parameters along, because reading another
+stored property could fail on a row it no longer reads; return properties
+from a later clause. The range bound is required: without it, nodes that lack
+the property sort first in descending order and values of other types sort by
+type, which the index does not deliver. The opposite direction still reads
+and sorts the whole range. A
 boolean, list, null or NaN bound, or a string too large to index, keeps the
 label scan, because such a comparison is null or unindexable rather than a
 range. Index access also requires every other
@@ -357,8 +361,9 @@ Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
 An expression may nest at most 48 levels, which a `ResourceLimit` error with
 `ExpressionDepth` reports. A flat chain of one Boolean operator, such as
-`a OR b OR c OR ...`, is nested as a balanced tree and counts only the
-logarithm of its length, while its operands still evaluate left to right.
+`a OR b OR c OR ...`, associates to the left as written; only a chain that
+would exceed the limit is nested as a balanced tree over the same operands,
+so it counts only the logarithm of its length.
 Peak admission includes temporary expression buffers alongside retained rows
 and operator state. Consuming a large intermediate value can raise the peak even
 when a query returns one number. Scalar aggregation accounts for an incoming
