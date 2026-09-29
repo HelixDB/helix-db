@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::de::{MapAccess, Visitor};
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::batch::{BatchQuery, ReadBatch, WriteBatch};
@@ -42,7 +42,33 @@ pub enum QueryRequestType {
 }
 
 /// JSON-compatible query parameter value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Each variant serializes as its bare JSON form. Deserialization maps JSON
+/// back onto the variants: integers become [`QueryValue::I64`] when they fit
+/// and [`QueryValue::F64`] otherwise, other numbers become
+/// [`QueryValue::F64`], and a repeated object key keeps its last value. JSON
+/// never produces [`QueryValue::F32`]; typed `f32` parameters normalize into
+/// it.
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use helix_ast::query::QueryValue;
+/// let value: QueryValue =
+///     sonic_rs::from_str(r#"[null, -1, 18446744073709551615, 0.5, "a\n", {"k": 1, "k": true}]"#)
+///         .unwrap();
+/// assert_eq!(
+///     value,
+///     QueryValue::Array(vec![
+///         QueryValue::Null,
+///         QueryValue::I64(-1),
+///         QueryValue::F64(u64::MAX as f64),
+///         QueryValue::F64(0.5),
+///         QueryValue::String("a\n".to_owned()),
+///         QueryValue::Object(BTreeMap::from([("k".to_owned(), QueryValue::Bool(true))])),
+///     ])
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum QueryValue {
     /// Null.
@@ -61,6 +87,94 @@ pub enum QueryValue {
     Array(Vec<QueryValue>),
     /// Object.
     Object(BTreeMap<String, QueryValue>),
+}
+
+/// Builds each value directly from the deserializer's events. A derived
+/// untagged impl buffers the value and then copies every nested subtree once
+/// per level while it tries variants, so its peak memory grows with depth
+/// times size.
+impl<'de> Deserialize<'de> for QueryValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct QueryValueVisitor;
+
+        impl<'de> Visitor<'de> for QueryValueVisitor {
+            type Value = QueryValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(QueryValue::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(QueryValue::Null)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                QueryValue::deserialize(deserializer)
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(QueryValue::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(QueryValue::I64(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(i64::try_from(value).map_or(QueryValue::F64(value as f64), QueryValue::I64))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(QueryValue::F64(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(QueryValue::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(QueryValue::String(value))
+            }
+
+            // `visit_seq` and `visit_map` recurse once per level of request
+            // nesting, so they use plain loops: iterator adapters here made
+            // each level's release-build stack frame about half again larger.
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element()? {
+                    values.push(value);
+                }
+                Ok(QueryValue::Array(values))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                // Inserting in document order lets a repeated key keep its last value.
+                let mut values = BTreeMap::new();
+                while let Some((name, value)) = map.next_entry()? {
+                    values.insert(name, value);
+                }
+                Ok(QueryValue::Object(values))
+            }
+        }
+
+        deserializer.deserialize_any(QueryValueVisitor)
+    }
 }
 
 impl From<&QueryValue> for PropertyValue {
@@ -855,6 +969,200 @@ mod tests {
         assert_eq!(
             QueryRequest::from_json_slice(&sonic_rs::to_vec(&request).unwrap()).unwrap(),
             request
+        );
+    }
+
+    // Test-only allocator observation delegates unchanged operations to
+    // System. Production code continues to deny unsafe code.
+    #[allow(unsafe_code)]
+    mod heap {
+        struct PeakHeap;
+
+        #[global_allocator]
+        static PEAK_HEAP: PeakHeap = PeakHeap;
+
+        thread_local! {
+            /// Heap bytes this thread holds since the last reset, and their peak.
+            pub(super) static HEAP: std::cell::Cell<(isize, isize)> =
+                const { std::cell::Cell::new((0, 0)) };
+        }
+
+        // SAFETY: Both methods forward their arguments unchanged to `System`.
+        // The bookkeeping touches only a const-initialized thread local, which
+        // never allocates; the default `realloc` and `alloc_zeroed` route
+        // through these methods.
+        unsafe impl std::alloc::GlobalAlloc for PeakHeap {
+            unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+                let _ = HEAP.try_with(|heap| {
+                    let (live, peak) = heap.get();
+                    let live = live + layout.size() as isize;
+                    heap.set((live, peak.max(live)));
+                });
+                // SAFETY: The caller upholds `GlobalAlloc::alloc`'s contract.
+                unsafe { std::alloc::System.alloc(layout) }
+            }
+
+            unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+                let _ = HEAP.try_with(|heap| {
+                    let (live, peak) = heap.get();
+                    heap.set((live - layout.size() as isize, peak));
+                });
+                // SAFETY: `pointer` and `layout` still identify a `System` allocation.
+                unsafe { std::alloc::System.dealloc(pointer, layout) }
+            }
+        }
+    }
+
+    #[test]
+    fn query_values_parse_every_json_shape_as_the_untagged_derive_did() {
+        let object = |entries: Vec<(&str, QueryValue)>| {
+            QueryValue::Object(
+                entries
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value))
+                    .collect(),
+            )
+        };
+        let cases = [
+            ("null", QueryValue::Null),
+            ("true", QueryValue::Bool(true)),
+            ("false", QueryValue::Bool(false)),
+            ("0", QueryValue::I64(0)),
+            ("-1", QueryValue::I64(-1)),
+            ("9223372036854775807", QueryValue::I64(i64::MAX)),
+            ("-9223372036854775808", QueryValue::I64(i64::MIN)),
+            // Integers past i64 were F64, the next variant the derive tried.
+            ("9223372036854775808", QueryValue::F64(2_f64.powi(63))),
+            ("18446744073709551615", QueryValue::F64(u64::MAX as f64)),
+            ("-9223372036854775809", QueryValue::F64(i64::MIN as f64)),
+            ("1.0", QueryValue::F64(1.0)),
+            ("-0.25", QueryValue::F64(-0.25)),
+            ("1e3", QueryValue::F64(1_000.0)),
+            (r#""""#, QueryValue::String(String::new())),
+            (r#""plain""#, QueryValue::String("plain".to_owned())),
+            (
+                r#""q\"b\\s\/n\nt\tu\u00e9\ud83d\ude00""#,
+                QueryValue::String("q\"b\\s/n\nt\tu\u{e9}\u{1f600}".to_owned()),
+            ),
+            ("[]", QueryValue::Array(Vec::new())),
+            ("{}", QueryValue::Object(BTreeMap::new())),
+            (
+                r#"[1, [true, null, []], {"k": "v\n"}, 2.5]"#,
+                QueryValue::Array(vec![
+                    QueryValue::I64(1),
+                    QueryValue::Array(vec![
+                        QueryValue::Bool(true),
+                        QueryValue::Null,
+                        QueryValue::Array(Vec::new()),
+                    ]),
+                    object(vec![("k", QueryValue::String("v\n".to_owned()))]),
+                    QueryValue::F64(2.5),
+                ]),
+            ),
+            (
+                r#"{"b": {"": [{}], "c": -3}, "a": null}"#,
+                object(vec![
+                    ("a", QueryValue::Null),
+                    (
+                        "b",
+                        object(vec![
+                            ("", QueryValue::Array(vec![object(Vec::new())])),
+                            ("c", QueryValue::I64(-3)),
+                        ]),
+                    ),
+                ]),
+            ),
+            // A repeated key keeps its last value, at every level.
+            (
+                r#"{"k": 1, "o": {"x": "first", "x": ["second"]}, "k": 2}"#,
+                object(vec![
+                    ("k", QueryValue::I64(2)),
+                    (
+                        "o",
+                        object(vec![(
+                            "x",
+                            QueryValue::Array(vec![QueryValue::String("second".to_owned())]),
+                        )]),
+                    ),
+                ]),
+            ),
+        ];
+
+        for (json, expected) in cases {
+            assert_eq!(
+                sonic_rs::from_str::<QueryValue>(json).unwrap(),
+                expected,
+                "sonic-rs: {json}"
+            );
+            assert_eq!(
+                serde_json::from_str::<QueryValue>(json).unwrap(),
+                expected,
+                "serde_json: {json}"
+            );
+            assert_eq!(
+                serde_json::from_value::<QueryValue>(serde_json::from_str(json).unwrap()).unwrap(),
+                expected,
+                "serde_json::Value: {json}"
+            );
+            let serialized = sonic_rs::to_string(&expected).unwrap();
+            assert_eq!(
+                sonic_rs::from_str::<QueryValue>(&serialized).unwrap(),
+                expected,
+                "round trip: {serialized}"
+            );
+        }
+
+        for invalid in ["", "[1,", r#"{"k"}"#, "nul", r#""\x""#] {
+            assert!(
+                sonic_rs::from_str::<QueryValue>(invalid).is_err(),
+                "{invalid}"
+            );
+            assert!(
+                serde_json::from_str::<QueryValue>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    /// Debug builds spend about 24 KiB of parser stack per nesting level, more
+    /// than a test thread's stack allows at this depth, so this parses on its
+    /// own thread with a larger stack.
+    #[test]
+    fn deeply_nested_escaped_strings_parse_without_a_copy_per_level() {
+        const DEPTH: usize = 40;
+        const LEN: usize = 1 << 20;
+        // The escape makes the parser hand over an owned copy of the string.
+        let body = read_wire(
+            &format!(
+                r#"{{"p":{}"{}\n"{}}}"#,
+                "[".repeat(DEPTH),
+                "a".repeat(LEN),
+                "]".repeat(DEPTH)
+            ),
+            None,
+        );
+
+        heap::HEAP.with(|heap| heap.set((0, 0)));
+        let request = QueryRequest::from_json_slice(body.as_bytes()).unwrap();
+        let peak = heap::HEAP.with(std::cell::Cell::get).1;
+
+        let innermost =
+            (0..DEPTH).try_fold(
+                &request.parameters().unwrap()["p"],
+                |value, _| match value {
+                    QueryValue::Array(values) => values.first(),
+                    _ => None,
+                },
+            );
+        assert!(matches!(
+            innermost,
+            Some(QueryValue::String(text)) if text.len() == LEN + 1 && text.ends_with('\n')
+        ));
+        // Parser scratch and the owned string take about 3x the string. The
+        // derived untagged impl held a copy per level: about 40x here.
+        assert!(
+            peak < (8 * LEN) as isize,
+            "parsing peaked at {peak} heap bytes"
         );
     }
 
