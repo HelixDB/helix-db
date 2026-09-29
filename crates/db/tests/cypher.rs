@@ -69,6 +69,9 @@ mod ordered_ranges;
 #[path = "cypher/relationship_types.rs"]
 mod relationship_types;
 
+#[path = "cypher/boolean_chains.rs"]
+mod boolean_chains;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

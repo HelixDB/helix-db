@@ -740,6 +740,20 @@ impl<'source> Parser<'source> {
                 }
                 self.position += width;
                 let right = self.expr(precedence + 1)?;
+                if matches!(operator, r::Binary::And | r::Binary::Or | r::Binary::Xor) {
+                    // A run of one associative Boolean operator is built balanced
+                    // with its operands in written order, so a long flat chain
+                    // stays within the depth limit. Evaluation still visits the
+                    // operands left to right.
+                    let mut operands = vec![expression, right];
+                    while self.binary().is_some_and(|(next, _, _)| next == operator) {
+                        self.position += width;
+                        operands.push(self.expr(precedence + 1)?);
+                    }
+                    comparison_tail = None;
+                    expression = balanced(operator, operands)?;
+                    continue;
+                }
                 if matches!(
                     operator,
                     r::Binary::Equal
@@ -819,6 +833,25 @@ impl<'source> Parser<'source> {
         }
         None
     }
+}
+
+/// A Boolean chain as a balanced tree over its operands in order. The left
+/// half takes the extra operand, so two and three operands keep their
+/// left-associated shape.
+fn balanced(operator: r::Binary, mut operands: Vec<Expr>) -> Result<Expr> {
+    if operands.len() == 1 {
+        return Ok(operands.pop().expect("one operand"));
+    }
+    let right = operands.split_off(operands.len().div_ceil(2));
+    let (left, right) = (balanced(operator, operands)?, balanced(operator, right)?);
+    let span = Span {
+        start: left.span.start,
+        end: right.span.end,
+    };
+    Expr::new(
+        ExprKind::Binary(operator, Box::new(left), Box::new(right)),
+        span,
+    )
 }
 
 fn number_value(text: &str, negative: bool, span: Span) -> Result<r::Value> {

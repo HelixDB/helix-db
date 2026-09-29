@@ -355,6 +355,10 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
+An expression may nest at most 48 levels, which a `ResourceLimit` error with
+`ExpressionDepth` reports. A flat chain of one Boolean operator, such as
+`a OR b OR c OR ...`, is nested as a balanced tree and counts only the
+logarithm of its length, while its operands still evaluate left to right.
 Peak admission includes temporary expression buffers alongside retained rows
 and operator state. Consuming a large intermediate value can raise the peak even
 when a query returns one number. Scalar aggregation accounts for an incoming
