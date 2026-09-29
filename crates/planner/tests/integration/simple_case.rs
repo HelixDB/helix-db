@@ -185,9 +185,14 @@ fn owned_case_rewrites_drop_each_payload_once_and_stop_in_preorder() {
         drop(result);
         assert_eq!(drops.get(), 4);
     }
-    // A boxed CASE adds no payload width to the existing generic enum layout.
+    // A boxed CASE adds no payload width to the existing generic enum layout,
+    // and neither does a connective's operand list.
     assert_eq!(
         size_of::<r::ScalarExpression<u8, (), (), ()>>(),
+        5 * size_of::<usize>()
+    );
+    assert_eq!(
+        size_of::<r::ScalarExpression<u8, (), (), (), r::Connective>>(),
         5 * size_of::<usize>()
     );
 }

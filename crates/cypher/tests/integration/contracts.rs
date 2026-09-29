@@ -698,6 +698,33 @@ fn source_and_expression_limits_fail_cleanly() {
     );
 }
 
+/// Planning keeps query-sized structure off the stack: the conditions a
+/// later MATCH puts on a bound node form one flat conjunction, and values
+/// substituted through pass-through WITH clauses stop at the expression
+/// limit, so each of these plans on a default test thread.
+#[test]
+fn long_conjunctions_and_substitution_chains_plan_without_deep_recursion() {
+    let properties = (0..10_000)
+        .map(|i| format!("p{i}: {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let clause = format!(" WITH {}n{} AS n", "[".repeat(47), "]".repeat(47));
+    for query in [
+        format!(
+            "MATCH (n) MATCH (n) WHERE {} RETURN 1 AS x",
+            vec!["true"; 20_000].join(" AND ")
+        ),
+        format!("MATCH (n) MATCH (n {{{properties}}}) RETURN 1 AS x"),
+        format!("MATCH (n){} RETURN 1 AS x", clause.repeat(100)),
+    ] {
+        r::plan(
+            helix_cypher::compile(&query).unwrap(),
+            &context::PlannerContext::default(),
+        )
+        .unwrap();
+    }
+}
+
 #[test]
 fn operator_contracts_preserve_optional_correlation_scope_and_effects() {
     let query = helix_cypher::compile(

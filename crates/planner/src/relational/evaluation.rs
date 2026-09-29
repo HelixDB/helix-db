@@ -1,6 +1,7 @@
 //! Scalar semantics over an already materialized batch. No storage I/O occurs here.
 use super::{
-    Aggregate, Binary, Entity, Expression, Function, GraphValues, QueryError, Result, Unary, Value,
+    Aggregate, Binary, Connective, Entity, Expression, Function, GraphValues, QueryError, Result,
+    Unary, Value,
 };
 use std::{cmp::Ordering, collections::BTreeMap};
 
@@ -215,12 +216,6 @@ impl Evaluation<'_> {
             }
             E::Binary(op, left, right) => {
                 let left = self.eval(left)?;
-                if *op == Binary::And && left.truth()? == Some(false) {
-                    return Ok(Value::Boolean(false));
-                }
-                if *op == Binary::Or && left.truth()? == Some(true) {
-                    return Ok(Value::Boolean(true));
-                }
                 let right = self.remaining(left.allocated_bytes())?.eval(right)?;
                 let input_bytes = left
                     .allocated_bytes()
@@ -232,6 +227,7 @@ impl Evaluation<'_> {
                     binary(*op, left, right)?
                 }
             }
+            E::Connective(op, operands) => self.connective(*op, operands)?,
             E::List(xs) => {
                 self.collection(xs.len())?;
                 Value::List(self.arguments(xs)?)
@@ -311,6 +307,51 @@ impl Evaluation<'_> {
         value.validate_collections(0, self.max_collection_items)?;
         self.remaining(value.allocated_bytes())?;
         Ok(value)
+    }
+
+    /// Evaluate a connective's operands in written order, keeping only the
+    /// running result live between them, so a chain's length adds neither
+    /// recursion nor retained values. Results, short-circuits, errors and
+    /// memory admission match the left-associated binary chain over the same
+    /// operands: AND and OR test the running result before each later operand,
+    /// so a non-Boolean first operand fails before the second is evaluated,
+    /// while XOR tests the first two operands only once both are evaluated.
+    fn connective(&self, op: Connective, operands: &[Expression]) -> Result<Value> {
+        let [first, rest @ ..] = operands else {
+            unreachable!("a connective has at least two operands");
+        };
+        let mut result = self.eval(first)?;
+        for operand in rest {
+            let decided = match op {
+                Connective::And => result.truth()? == Some(false),
+                Connective::Or => result.truth()? == Some(true),
+                Connective::Xor => false,
+            };
+            if decided {
+                return Ok(result);
+            }
+            let right = self.remaining(result.allocated_bytes())?.eval(operand)?;
+            self.remaining(
+                result
+                    .allocated_bytes()
+                    .saturating_add(right.allocated_bytes()),
+            )?;
+            let (left, right) = (result.truth()?, right.truth()?);
+            result = truth(match op {
+                Connective::And => match (left, right) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                },
+                Connective::Or => match (left, right) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                },
+                Connective::Xor => left.zip(right).map(|(left, right)| left ^ right),
+            });
+        }
+        Ok(result)
     }
 
     /// Both operands are already owned and admitted. Only a growing buffer or
@@ -841,23 +882,6 @@ pub(super) fn overflow() -> QueryError {
 }
 pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
     use Binary as B;
-    if matches!(op, B::And | B::Or | B::Xor) {
-        let (a, b) = (a.truth()?, b.truth()?);
-        return Ok(truth(match op {
-            B::And => match (a, b) {
-                (Some(false), _) | (_, Some(false)) => Some(false),
-                (Some(true), Some(true)) => Some(true),
-                _ => None,
-            },
-            B::Or => match (a, b) {
-                (Some(true), _) | (_, Some(true)) => Some(true),
-                (Some(false), Some(false)) => Some(false),
-                _ => None,
-            },
-            B::Xor => a.zip(b).map(|(a, b)| a ^ b),
-            _ => unreachable!(),
-        }));
-    }
     if op == B::In {
         if b == Value::Null {
             return Ok(Value::Null);

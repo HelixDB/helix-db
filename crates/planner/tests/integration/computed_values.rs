@@ -104,18 +104,22 @@ fn borrowed_values_are_checked_before_use_and_short_circuits_stay_lazy() {
                         V::Integer(17),
                     ),
                     (
-                        E::Binary(
-                            r::Binary::And,
-                            Box::new(E::Literal(V::Boolean(false))),
-                            Box::new(expression.clone()),
+                        E::Connective(
+                            r::Connective::And,
+                            helix_planner::ir::AtLeast::from_pair(
+                                E::Literal(V::Boolean(false)),
+                                expression.clone(),
+                            ),
                         ),
                         V::Boolean(false),
                     ),
                     (
-                        E::Binary(
-                            r::Binary::Or,
-                            Box::new(E::Literal(V::Boolean(true))),
-                            Box::new(expression.clone()),
+                        E::Connective(
+                            r::Connective::Or,
+                            helix_planner::ir::AtLeast::from_pair(
+                                E::Literal(V::Boolean(true)),
+                                expression.clone(),
+                            ),
                         ),
                         V::Boolean(true),
                     ),

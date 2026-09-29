@@ -1,5 +1,8 @@
 //! Source-shaped syntax. Names stay strings until semantic resolution.
-use helix_planner::relational::{self as r, Span};
+use helix_planner::{
+    ir::AtLeast,
+    relational::{self as r, Span},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
@@ -87,10 +90,6 @@ impl Expr {
     pub fn kind(&self) -> &ExprKind {
         &self.kind
     }
-    /// Checked nesting depth, counting this node.
-    pub(crate) fn depth(&self) -> usize {
-        self.depth
-    }
     pub(crate) fn new(kind: ExprKind, span: Span) -> r::Result<Self> {
         let depth = 1 + match &kind {
             ExprKind::Literal(_)
@@ -99,6 +98,9 @@ impl Expr {
             | ExprKind::PatternPredicate(_) => 0,
             ExprKind::Property(x, _) | ExprKind::Unary(_, x) | ExprKind::HasLabel(x, _) => x.depth,
             ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => a.depth.max(b.depth),
+            ExprKind::Connective(_, operands) => {
+                operands.iter().map(|x| x.depth).max().unwrap_or(0)
+            }
             ExprKind::Slice { value, start, end } => start
                 .iter()
                 .chain(end.iter())
@@ -150,6 +152,10 @@ pub enum ExprKind {
     },
     Unary(r::Unary, Box<Expr>),
     Binary(r::Binary, Box<Expr>, Box<Expr>),
+    /// A run of one Boolean connective, such as `a AND b AND c`, as one flat
+    /// node over its operands in written order. Only genuine nesting, such as
+    /// parentheses around a different operator, adds depth.
+    Connective(r::Connective, AtLeast<Expr, 2>),
     Call {
         name: String,
         arguments: Vec<Expr>,

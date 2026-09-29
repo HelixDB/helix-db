@@ -8,11 +8,11 @@ impl Drop for NonClone {
         self.1.set(self.1.get() + 1);
     }
 }
-type Expr = r::ScalarExpression<NonClone, NonClone, NonClone, NonClone>;
+type Expr = r::ScalarExpression<NonClone, NonClone, NonClone, NonClone, NonClone>;
 
 #[test]
 fn owned_rewrites_move_nonclone_payloads_and_stop_at_the_first_error() {
-    for fail in [None, Some(1), Some(2), Some(3)] {
+    for fail in [None, Some(1), Some(2), Some(3), Some(4), Some(5)] {
         let drops = std::rc::Rc::new(std::cell::Cell::new(0));
         let literal = |id| Expr::Literal(NonClone(id, drops.clone()));
         let expression = Expr::Function(
@@ -27,6 +27,10 @@ fn owned_rewrites_move_nonclone_payloads_and_stop_at_the_first_error() {
                     )),
                 ),
                 literal(3),
+                Expr::Connective(
+                    NonClone(13, drops.clone()),
+                    helix_planner::ir::AtLeast::from_pair(literal(4), literal(5)),
+                ),
             ],
         );
         let mut seen = Vec::new();
@@ -41,10 +45,10 @@ fn owned_rewrites_move_nonclone_payloads_and_stop_at_the_first_error() {
                 Ok(ControlFlow::Continue(node))
             }
         });
-        assert_eq!(seen, (1..=fail.unwrap_or(3)).collect::<Vec<_>>());
+        assert_eq!(seen, (1..=fail.unwrap_or(5)).collect::<Vec<_>>());
         assert_eq!(result.as_ref().err().copied(), fail);
         drop(result);
-        assert_eq!(drops.get(), 6);
+        assert_eq!(drops.get(), 9);
     }
 }
 
@@ -115,7 +119,7 @@ fn large_payloads_are_transferred_without_copying() {
 
 #[test]
 fn every_child_shape_matches_existing_rewrite_order_and_pruning() {
-    type E = r::ScalarExpression<u8, (), (), ()>;
+    type E = r::ScalarExpression<u8, (), (), (), ()>;
     let leaf = E::Literal;
     let tree = E::List(vec![
         E::Property(Box::new(leaf(0)), "key".into()),
@@ -156,6 +160,10 @@ fn every_child_shape_matches_existing_rewrite_order_and_pruning() {
             argument: None,
             distinct: false,
         },
+        E::Connective(
+            (),
+            helix_planner::ir::AtLeast::from_pair_and_rest(leaf(19), leaf(20), vec![leaf(21)]),
+        ),
     ]);
     for prune in [false, true] {
         for failure in [
@@ -167,6 +175,8 @@ fn every_child_shape_matches_existing_rewrite_order_and_pruning() {
             Some(16),
             Some(17),
             Some(18),
+            Some(19),
+            Some(21),
         ] {
             let mut old_seen = Vec::new();
             let mut new_seen = Vec::new();

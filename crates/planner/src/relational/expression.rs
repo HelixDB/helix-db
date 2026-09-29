@@ -32,13 +32,41 @@ pub enum Binary {
     LessEqual,
     Greater,
     GreaterEqual,
-    And,
-    Or,
-    Xor,
     In,
     StartsWith,
     EndsWith,
     Contains,
+}
+
+/// A Boolean connective over two or more operands, evaluated in written order
+/// with Cypher's three-valued logic. A chain of one connective is a single flat
+/// node, so its length never adds nesting depth:
+///
+/// - `And` returns false at the first false operand without evaluating later
+///   ones; otherwise null if any operand was null, else true.
+/// - `Or` returns true at the first true operand without evaluating later
+///   ones; otherwise null if any operand was null, else false.
+/// - `Xor` evaluates every operand and returns null if any was null, else
+///   whether an odd number of operands were true.
+///
+/// ```
+/// use helix_planner::{ir, relational as r};
+/// let expression = r::Expression::Connective(
+///     r::Connective::And,
+///     ir::AtLeast::from_pair_and_rest(
+///         r::Expression::Slot(r::Slot(0)),
+///         r::Expression::Literal(r::Value::Boolean(true)),
+///         vec![r::Expression::Slot(r::Slot(1))],
+///     ),
+/// );
+/// assert_eq!(expression.slots(), [r::Slot(0), r::Slot(1)].into());
+/// expression.validate_shape().unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Connective {
+    And,
+    Or,
+    Xor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -110,7 +138,7 @@ pub struct SimpleCase<E> {
 /// encode semantic differences (for example native two-valued comparisons and
 /// Cypher null propagation), without retaining either frontend's syntax tree.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ScalarExpression<L, U, B, F> {
+pub enum ScalarExpression<L, U, B, F, C = std::convert::Infallible> {
     Literal(L),
     Slot(Slot),
     Parameter(String),
@@ -123,6 +151,10 @@ pub enum ScalarExpression<L, U, B, F> {
     },
     Unary(U, Box<Self>),
     Binary(B, Box<Self>, Box<Self>),
+    /// A flat chain of one connective. Operands are visited, rewritten and
+    /// evaluated in written order; a frontend without connectives uses the
+    /// uninhabited default and cannot construct this variant.
+    Connective(C, crate::ir::AtLeast<Self, 2>),
     Function(F, Vec<Self>),
     Aggregate {
         function: Aggregate,
@@ -148,7 +180,7 @@ pub enum TraversalControl {
 }
 
 /// Resolved expressions with Cypher's graph-value and scalar semantics.
-pub type Expression = ScalarExpression<Value, Unary, Binary, Function>;
+pub type Expression = ScalarExpression<Value, Unary, Binary, Function, Connective>;
 
 impl Expression {
     /// Slots requiring graph hydration. Identity, paths, and ordinary scalar
@@ -246,6 +278,7 @@ impl Expression {
                     }
                 }
                 Self::List(xs) => xs.iter().for_each(child),
+                Self::Connective(_, xs) => xs.iter().for_each(child),
                 Self::Map(xs) => xs.iter().for_each(|(_, e)| child(e)),
                 Self::Case {
                     branches,
@@ -302,7 +335,7 @@ impl Expression {
     }
 }
 
-impl<L, U, B, F> ScalarExpression<L, U, B, F> {
+impl<L, U, B, F, C> ScalarExpression<L, U, B, F, C> {
     /// Consume and rewrite nodes in preorder without cloning their payloads.
     /// `Break(replacement)` replaces the subtree without visiting its children;
     /// `Continue(node)` descends into that node in the ordinary visitor order.
@@ -348,6 +381,7 @@ impl<L, U, B, F> ScalarExpression<L, U, B, F> {
             Self::Binary(op, a, b) => {
                 Self::Binary(op, Box::new(rewrite(*a)?), Box::new(rewrite(*b)?))
             }
+            Self::Connective(op, operands) => Self::Connective(op, operands.try_map(&mut rewrite)?),
             Self::Function(function, args) => Self::Function(
                 function,
                 args.into_iter()
@@ -472,6 +506,11 @@ impl<L, U, B, F> ScalarExpression<L, U, B, F> {
                     x.try_visit_pruned(f)?;
                 }
             }
+            Self::Connective(_, xs) => {
+                for x in xs {
+                    x.try_visit_pruned(f)?;
+                }
+            }
             Self::Aggregate { argument, .. } => {
                 argument.iter().try_for_each(|x| x.try_visit_pruned(f))?;
             }
@@ -522,7 +561,7 @@ impl<L, U, B, F> ScalarExpression<L, U, B, F> {
     }
 }
 
-impl<L: Clone, U: Copy, B: Copy, F: Clone> ScalarExpression<L, U, B, F> {
+impl<L: Clone, U: Copy, B: Copy, F: Clone, C: Copy> ScalarExpression<L, U, B, F, C> {
     /// Rewrite resolved expressions without reconstructing frontend syntax.
     /// Returning a replacement stops traversal into that subtree.
     pub fn rewrite(
@@ -551,6 +590,7 @@ impl<L: Clone, U: Copy, B: Copy, F: Clone> ScalarExpression<L, U, B, F> {
             Self::Binary(op, a, b) => {
                 Self::Binary(*op, Box::new(rewrite(a)?), Box::new(rewrite(b)?))
             }
+            Self::Connective(op, operands) => Self::Connective(*op, operands.try_map_ref(rewrite)?),
             Self::Function(f, args) => Self::Function(
                 f.clone(),
                 args.iter().map(rewrite).collect::<super::Result<_>>()?,

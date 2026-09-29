@@ -100,11 +100,6 @@ impl Expression {
                 let a = infer(a)?;
                 let b = infer(b)?;
                 match op {
-                    Binary::And | Binary::Or | Binary::Xor => {
-                        require(a, &[T::Boolean], "SyntaxError")?;
-                        require(b, &[T::Boolean], "SyntaxError")?;
-                        T::Boolean
-                    }
                     Binary::In => {
                         require(b, &[T::List], "SyntaxError")?;
                         T::Boolean
@@ -135,6 +130,20 @@ impl Expression {
                         }
                     }
                 }
+            }
+            Self::Connective(_, operands) => {
+                let [first, second, rest @ ..] = operands.as_ref() else {
+                    unreachable!("a connective has at least two operands");
+                };
+                // As the left-associated chain did, infer the first two
+                // operands before checking either, then each later one in turn.
+                let (first, second) = (infer(first)?, infer(second)?);
+                require(first, &[T::Boolean], "SyntaxError")?;
+                require(second, &[T::Boolean], "SyntaxError")?;
+                for operand in rest {
+                    require(infer(operand)?, &[T::Boolean], "SyntaxError")?;
+                }
+                T::Boolean
             }
             Self::List(xs) => {
                 for x in xs {

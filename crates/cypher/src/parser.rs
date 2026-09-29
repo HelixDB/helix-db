@@ -2,7 +2,10 @@ use crate::{
     lexer::{self, Kind, PatternPunctuation, Token},
     syntax::*,
 };
-use helix_planner::relational::{self as r, QueryError, Result, Span};
+use helix_planner::{
+    ir::AtLeast,
+    relational::{self as r, QueryError, Result, Span},
+};
 
 pub fn parse(source: &str) -> Result<Statement> {
     Parser {
@@ -182,6 +185,7 @@ impl<'source> Parser<'source> {
                         | ExprKind::Slice { .. }
                         | ExprKind::Unary(..)
                         | ExprKind::Binary(..)
+                        | ExprKind::Connective(..)
                         | ExprKind::Call { .. }
                         | ExprKind::List(_)
                         | ExprKind::Map(_)
@@ -679,7 +683,6 @@ impl<'source> Parser<'source> {
                 end: self.tokens[self.position - 1].span.end,
             },
         )?;
-        let mut comparison_tail: Option<Expr> = None;
         loop {
             if self.is(".") && min <= 10 {
                 self.position += 1;
@@ -728,6 +731,23 @@ impl<'source> Parser<'source> {
                     },
                     Box::new(expression),
                 );
+            } else if let Some((connective, precedence)) = self.connective() {
+                if precedence < min {
+                    break;
+                }
+                // A run of one connective is one flat node over its operands in
+                // written order, so the run's length adds no nesting depth.
+                self.position += 1;
+                let second = self.expr(precedence + 1)?;
+                let mut rest = Vec::new();
+                while self.connective() == Some((connective, precedence)) {
+                    self.position += 1;
+                    rest.push(self.expr(precedence + 1)?);
+                }
+                left = ExprKind::Connective(
+                    connective,
+                    AtLeast::from_pair_and_rest(expression, second, rest),
+                );
             } else {
                 if self.is("{") {
                     return Err(self.unsupported("MapProjectionOrSubquery"));
@@ -739,71 +759,50 @@ impl<'source> Parser<'source> {
                     break;
                 }
                 self.position += width;
-                let right = self.expr(precedence + 1)?;
-                if matches!(operator, r::Binary::And | r::Binary::Or | r::Binary::Xor) {
-                    // A run of one associative Boolean operator is associated to
-                    // the left as written. Only a run too deep for the limit is
-                    // nested as a balanced tree over the same operands instead.
-                    let mut operands = vec![expression, right];
-                    while self.binary().is_some_and(|(next, _, _)| next == operator) {
-                        self.position += width;
-                        operands.push(self.expr(precedence + 1)?);
-                    }
-                    comparison_tail = None;
-                    let left_depth = operands[1..]
-                        .iter()
-                        .fold(operands[0].depth(), |depth, operand| {
-                            1 + depth.max(operand.depth())
-                        });
-                    expression = if left_depth > r::MAX_EXPRESSION_DEPTH {
-                        balanced(operator, operands)?
-                    } else {
-                        let mut operands = operands.into_iter();
-                        let first = operands.next().expect("a run has two operands");
-                        operands.try_fold(first, |left, right| {
-                            let span = Span {
-                                start: left.span.start,
-                                end: right.span.end,
-                            };
-                            Expr::new(
-                                ExprKind::Binary(operator, Box::new(left), Box::new(right)),
-                                span,
-                            )
-                        })?
+                let comparison = |operator| {
+                    matches!(
+                        operator,
+                        r::Binary::Equal
+                            | r::Binary::NotEqual
+                            | r::Binary::Less
+                            | r::Binary::LessEqual
+                            | r::Binary::Greater
+                            | r::Binary::GreaterEqual
+                    )
+                };
+                // `a < b < c` means `a < b AND b < c`: one flat conjunction of
+                // comparisons, each sharing its right operand with the next.
+                let mut comparisons = Vec::new();
+                let (mut operator, mut lhs, mut rhs) =
+                    (operator, expression, self.expr(precedence + 1)?);
+                while comparison(operator)
+                    && let Some((next, _, width)) =
+                        self.binary().filter(|(next, _, _)| comparison(*next))
+                {
+                    self.position += width;
+                    let span = Span {
+                        start: lhs.span.start,
+                        end: rhs.span.end,
                     };
-                    continue;
+                    let shared = rhs.clone();
+                    comparisons.push(Expr::new(
+                        ExprKind::Binary(operator, Box::new(lhs), Box::new(rhs)),
+                        span,
+                    )?);
+                    (operator, lhs, rhs) = (next, shared, self.expr(precedence + 1)?);
                 }
-                if matches!(
-                    operator,
-                    r::Binary::Equal
-                        | r::Binary::NotEqual
-                        | r::Binary::Less
-                        | r::Binary::LessEqual
-                        | r::Binary::Greater
-                        | r::Binary::GreaterEqual
-                ) {
-                    let previous = comparison_tail.replace(right.clone());
-                    left = match previous {
-                        Some(previous) => {
-                            let span = Span {
-                                start: previous.span.start,
-                                end: right.span.end,
-                            };
-                            let comparison = Expr::new(
-                                ExprKind::Binary(operator, Box::new(previous), Box::new(right)),
-                                span,
-                            )?;
-                            ExprKind::Binary(
-                                r::Binary::And,
-                                Box::new(expression),
-                                Box::new(comparison),
-                            )
-                        }
-                        None => ExprKind::Binary(operator, Box::new(expression), Box::new(right)),
-                    };
-                } else {
-                    comparison_tail = None;
-                    left = ExprKind::Binary(operator, Box::new(expression), Box::new(right));
+                let span = Span {
+                    start: lhs.span.start,
+                    end: rhs.span.end,
+                };
+                left = ExprKind::Binary(operator, Box::new(lhs), Box::new(rhs));
+                if !comparisons.is_empty() {
+                    comparisons.push(Expr::new(left, span)?);
+                    left = ExprKind::Connective(
+                        r::Connective::And,
+                        AtLeast::try_from_vec(comparisons)
+                            .expect("a comparison chain has two comparisons"),
+                    );
                 }
             }
             expression = Expr::new(
@@ -817,12 +816,23 @@ impl<'source> Parser<'source> {
         Ok(expression)
     }
 
+    /// The Boolean connective at the cursor and its precedence: OR binds
+    /// loosest, then XOR, then AND, all looser than every binary operator.
+    fn connective(&self) -> Option<(r::Connective, u8)> {
+        [
+            ("OR", r::Connective::Or, 1),
+            ("XOR", r::Connective::Xor, 2),
+            ("AND", r::Connective::And, 3),
+        ]
+        .into_iter()
+        .find_map(|(word, connective, precedence)| {
+            self.is(word).then_some((connective, precedence))
+        })
+    }
+
     fn binary(&self) -> Option<(r::Binary, u8, usize)> {
         use r::Binary as B;
         for (s, op, p) in [
-            ("OR", B::Or, 1),
-            ("XOR", B::Xor, 2),
-            ("AND", B::And, 3),
             ("=", B::Equal, 4),
             ("<>", B::NotEqual, 4),
             ("!=", B::NotEqual, 4),
@@ -852,23 +862,6 @@ impl<'source> Parser<'source> {
         }
         None
     }
-}
-
-/// A Boolean chain as a balanced tree over its operands in order.
-fn balanced(operator: r::Binary, mut operands: Vec<Expr>) -> Result<Expr> {
-    if operands.len() == 1 {
-        return Ok(operands.pop().expect("one operand"));
-    }
-    let right = operands.split_off(operands.len().div_ceil(2));
-    let (left, right) = (balanced(operator, operands)?, balanced(operator, right)?);
-    let span = Span {
-        start: left.span.start,
-        end: right.span.end,
-    };
-    Expr::new(
-        ExprKind::Binary(operator, Box::new(left), Box::new(right)),
-        span,
-    )
 }
 
 fn number_value(text: &str, negative: bool, span: Span) -> Result<r::Value> {

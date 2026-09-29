@@ -1028,6 +1028,11 @@ fn index_predicate(
                 _ => Ok(None),
             })
             .ok()
+            // A substituted value nests the values its slots are bound to, so
+            // clause after clause it could deepen without bound. Checking the
+            // shape iteratively keeps every binding, and so every copy and walk
+            // of one, within the expression limit; a deeper value ends the walk.
+            .filter(|value| value.validate_shape().is_ok())
     };
     for operator in query.operators()[index + 1..]
         .iter()
@@ -1123,8 +1128,8 @@ fn index_predicate(
                     let mut pending = vec![predicate.expression()];
                     while let Some(expression) = pending.pop() {
                         match expression {
-                            Expression::Binary(Binary::And, left, right) => {
-                                pending.extend([left.as_ref(), right.as_ref()]);
+                            Expression::Connective(Connective::And, operands) => {
+                                pending.extend(operands);
                             }
                             conjunct => filters.push(conjunct.clone()),
                         }
@@ -1149,9 +1154,12 @@ fn index_predicate(
         };
         conjuncts.push(next);
     }
-    conjuncts
-        .into_iter()
-        .reduce(|left, right| Expression::Binary(Binary::And, Box::new(left), Box::new(right)))
+    // One conjunct is the predicate itself; more form one flat conjunction.
+    if conjuncts.len() > 1 {
+        return ir::AtLeast::try_from_vec(conjuncts)
+            .map(|operands| Expression::Connective(Connective::And, operands));
+    }
+    conjuncts.pop()
 }
 
 /// What a totality proof knows about query parameters.
@@ -1257,8 +1265,8 @@ impl Totality<'_> {
                     )
                 ))
             }
-            Expression::Binary(Binary::And | Binary::Or | Binary::Xor, left, right) => {
-                self.predicate(left) && self.predicate(right)
+            Expression::Connective(_, operands) => {
+                operands.iter().all(|operand| self.predicate(operand))
             }
             Expression::Unary(Unary::Not, negated) => self.predicate(negated),
             Expression::Unary(Unary::IsNull | Unary::IsNotNull, value) => self.operand(value),
@@ -1343,9 +1351,9 @@ fn conjunct_ids(
             .map(|ids| ids.into_iter().flatten().collect::<BTreeSet<_>>())
     };
     match expression {
-        Expression::Binary(Binary::And, a, b) => {
-            conjunct_ids(a, slot, params).or_else(|| conjunct_ids(b, slot, params))
-        }
+        Expression::Connective(Connective::And, operands) => operands
+            .iter()
+            .find_map(|operand| conjunct_ids(operand, slot, params)),
         Expression::Binary(Binary::Equal, a, b) => [(a, b), (b, a)]
             .into_iter()
             .filter(|(target, _)| is_id(target))
@@ -1378,9 +1386,9 @@ fn conjunct_ids(
 /// A label that a conjunct of `expression` requires `slot` to carry.
 fn conjunct_label(expression: &Expression, slot: Slot) -> Option<&String> {
     match expression {
-        Expression::Binary(Binary::And, a, b) => {
-            conjunct_label(a, slot).or_else(|| conjunct_label(b, slot))
-        }
+        Expression::Connective(Connective::And, operands) => operands
+            .iter()
+            .find_map(|operand| conjunct_label(operand, slot)),
         Expression::HasLabel(target, label) if *target == slot => Some(label),
         _ => None,
     }
@@ -1388,9 +1396,10 @@ fn conjunct_label(expression: &Expression, slot: Slot) -> Option<&String> {
 
 fn collect_equalities(expression: &Expression, slot: Slot, out: &mut Vec<(String, Expression)>) {
     match expression {
-        Expression::Binary(Binary::And, a, b) => {
-            collect_equalities(a, slot, out);
-            collect_equalities(b, slot, out);
+        Expression::Connective(Connective::And, operands) => {
+            for operand in operands {
+                collect_equalities(operand, slot, out);
+            }
         }
         Expression::Binary(Binary::Equal, a, b) => {
             for (a, b) in [(a, b), (b, a)] {
@@ -1417,9 +1426,10 @@ fn collect_ranges(
     out: &mut Vec<(String, ir::IndexRange)>,
 ) {
     let (op, a, b) = match expression {
-        Expression::Binary(Binary::And, a, b) => {
-            collect_ranges(a, slot, params, out);
-            collect_ranges(b, slot, params, out);
+        Expression::Connective(Connective::And, operands) => {
+            for operand in operands {
+                collect_ranges(operand, slot, params, out);
+            }
             return;
         }
         Expression::Binary(
@@ -1475,9 +1485,10 @@ fn collect_ranges(
 
 fn collect_memberships(expression: &Expression, slot: Slot, out: &mut Vec<(String, Expression)>) {
     match expression {
-        Expression::Binary(Binary::And, a, b) => {
-            collect_memberships(a, slot, out);
-            collect_memberships(b, slot, out);
+        Expression::Connective(Connective::And, operands) => {
+            for operand in operands {
+                collect_memberships(operand, slot, out);
+            }
         }
         Expression::Binary(Binary::In, value, list) => {
             let Expression::Property(value, key) = value.as_ref() else {
@@ -1488,7 +1499,7 @@ fn collect_memberships(expression: &Expression, slot: Slot, out: &mut Vec<(Strin
             }
         }
         // `n.p = a OR n.p = b` has the three-valued result of `n.p IN [a, b]`.
-        Expression::Binary(Binary::Or, ..) => {
+        Expression::Connective(Connective::Or, _) => {
             let mut key = None;
             let mut members = Vec::new();
             if equality_disjuncts(expression, slot, &mut key, &mut members)
@@ -1510,9 +1521,9 @@ fn equality_disjuncts(
     members: &mut Vec<Expression>,
 ) -> bool {
     match expression {
-        Expression::Binary(Binary::Or, a, b) => {
-            equality_disjuncts(a, slot, key, members) && equality_disjuncts(b, slot, key, members)
-        }
+        Expression::Connective(Connective::Or, operands) => operands
+            .iter()
+            .all(|operand| equality_disjuncts(operand, slot, key, members)),
         Expression::Binary(Binary::Equal, a, b) => {
             [(a, b), (b, a)].into_iter().any(|(property, member)| {
                 let Expression::Property(value, name) = property.as_ref() else {

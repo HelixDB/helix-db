@@ -213,6 +213,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                                 | r::Expression::Slice { .. }
                                 | r::Expression::Unary(..)
                                 | r::Expression::Binary(..)
+                                | r::Expression::Connective(..)
                                 | r::Expression::Function(..)
                                 | r::Expression::Aggregate { .. }
                                 | r::Expression::List(_)
@@ -939,14 +940,39 @@ impl Binder {
                 }),
             ),
             E::Binary(op, a, b) => {
-                let operand = |e: &s::Expr| {
-                    if matches!(op, r::Binary::And | r::Binary::Or | r::Binary::Xor) {
-                        self.boolean_expression(e, scope, allow_aggregate)
-                    } else {
-                        resolve(e)
+                r::Expression::Binary(*op, Box::new(resolve(a)?), Box::new(resolve(b)?))
+            }
+            E::Connective(op, operands) => {
+                let operand = |e: &s::Expr| self.boolean_expression(e, scope, allow_aggregate);
+                let boolean = |operand: r::Expression| {
+                    let actual = operand.value_type(&self.bindings)?;
+                    if !matches!(
+                        actual,
+                        r::ValueType::Any | r::ValueType::Null | r::ValueType::Boolean
+                    ) {
+                        return Err(semantic(
+                            "InvalidArgumentType",
+                            format!("expected [Boolean], received {actual:?}"),
+                        ));
                     }
+                    Ok(operand)
                 };
-                r::Expression::Binary(*op, Box::new(operand(a)?), Box::new(operand(b)?))
+                let [first, second, rest @ ..] = operands.as_ref() else {
+                    unreachable!("a connective has at least two operands");
+                };
+                // Report the error the left-associated chain this replaces
+                // would: it resolved its first two operands before checking
+                // either's type, then resolved and checked each later one.
+                let (first, second) = (operand(first)?, operand(second)?);
+                let (first, second) = (boolean(first)?, boolean(second)?);
+                let rest = rest
+                    .iter()
+                    .map(|e| boolean(operand(e)?))
+                    .collect::<Result<_>>()?;
+                r::Expression::Connective(
+                    *op,
+                    helix_planner::ir::AtLeast::from_pair_and_rest(first, second, rest),
+                )
             }
             E::List(xs) => r::Expression::List(xs.iter().map(resolve).collect::<Result<_>>()?),
             E::Map(xs) => r::Expression::Map(

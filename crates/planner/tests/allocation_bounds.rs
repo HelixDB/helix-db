@@ -974,11 +974,13 @@ fn addition_preserves_nulls_errors_and_operand_order() {
         let expression = r::Expression::Binary(r::Binary::Add, Box::new(left), Box::new(right));
         assert_eq!(evaluation.eval(&expression).unwrap_err().detail, detail);
     }
-    for (op, left) in [(r::Binary::And, false), (r::Binary::Or, true)] {
-        let expression = r::Expression::Binary(
+    for (op, left) in [(r::Connective::And, false), (r::Connective::Or, true)] {
+        let expression = r::Expression::Connective(
             op,
-            Box::new(r::Expression::Literal(r::Value::Boolean(left))),
-            Box::new(r::Expression::Parameter("missing".into())),
+            helix_planner::ir::AtLeast::from_pair(
+                r::Expression::Literal(r::Value::Boolean(left)),
+                r::Expression::Parameter("missing".into()),
+            ),
         );
         assert_eq!(
             evaluation.eval(&expression).unwrap(),

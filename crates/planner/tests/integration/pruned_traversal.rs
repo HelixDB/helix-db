@@ -3,7 +3,7 @@ use helix_planner::relational as r;
 use r::TraversalControl;
 
 struct NonClone(u8);
-type Expr = r::ScalarExpression<NonClone, (), (), ()>;
+type Expr = r::ScalarExpression<NonClone, (), (), (), ()>;
 fn tree() -> Expr {
     let literal = |id| Expr::Literal(NonClone(id));
     Expr::List(vec![
@@ -34,6 +34,14 @@ fn tree() -> Expr {
         })),
         Expr::HasLabel(r::Slot(1), "N".into()),
         Expr::Parameter("p".into()),
+        Expr::Connective(
+            (),
+            helix_planner::ir::AtLeast::from_pair_and_rest(
+                literal(18),
+                literal(19),
+                vec![literal(20)],
+            ),
+        ),
     ])
 }
 
@@ -56,6 +64,7 @@ fn traversal_borrows_nonclone_leaves_in_stable_child_order() {
                 | Expr::Slice { .. }
                 | Expr::Unary(..)
                 | Expr::Binary(..)
+                | Expr::Connective(..)
                 | Expr::Function(..)
                 | Expr::Aggregate { .. }
                 | Expr::List(_)
@@ -66,7 +75,7 @@ fn traversal_borrows_nonclone_leaves_in_stable_child_order() {
             Ok::<_, ()>(TraversalControl::Descend)
         })
         .unwrap();
-    assert_eq!(ids, (0..18).collect::<Vec<_>>());
+    assert_eq!(ids, (0..21).collect::<Vec<_>>());
     assert_eq!(slots, [r::Slot(0)]);
     assert_eq!(labels, [(r::Slot(1), "N")]);
     assert_eq!(parameters, ["p"]);
@@ -95,7 +104,7 @@ fn pruning_visits_the_root_and_skips_only_that_subtree() {
             Ok(TraversalControl::Descend)
         })
         .unwrap();
-    assert_eq!(ids, [0, 1, 5, 6, 7, 10, 11, 12, 13]);
+    assert_eq!(ids, [0, 1, 5, 6, 7, 10, 11, 12, 13, 18, 19, 20]);
     let mut roots = 0;
     expression
         .try_visit_pruned(&mut |_| {
@@ -142,10 +151,17 @@ fn empty_optional_children_are_valid_and_wide_deep_walks_allocate_nothing() {
         Expr::Function((), vec![]),
     ]);
     let wide = Expr::List((0..10000).map(|_| Expr::Literal(NonClone(0))).collect());
+    let chain = Expr::Connective(
+        (),
+        helix_planner::ir::AtLeast::try_from_vec(
+            (0..10000).map(|_| Expr::Literal(NonClone(0))).collect(),
+        )
+        .unwrap(),
+    );
     let deep = (0..47).fold(Expr::Literal(NonClone(0)), |expression, _| {
         Expr::Unary((), Box::new(expression))
     });
-    for (expression, expected) in [(empty, 6), (wide, 10001), (deep, 48)] {
+    for (expression, expected) in [(empty, 6), (wide, 10001), (chain, 10001), (deep, 48)] {
         let ((result, visited), count) = allocation::observe(|| {
             let mut visited = 0;
             let result = expression.try_visit_pruned(&mut |_| {

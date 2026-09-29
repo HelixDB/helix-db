@@ -2,11 +2,11 @@ use super::{database, run};
 use db::cypher;
 use serde_json::json;
 
-/// A long flat Boolean chain stays within the expression depth limit, and a
-/// short chain evaluates its operands as the same chain written left-nested
-/// does, including which operand's error it reports.
+/// A Boolean chain is one flat node, and it evaluates its operands as the
+/// same chain written left-nested does, including which operand's error it
+/// reports.
 #[tokio::test]
-async fn boolean_chains_are_balanced_without_changing_evaluation() {
+async fn flat_boolean_chains_evaluate_as_left_nested_chains() {
     let db = database().await;
     run(&db, "UNWIND range(0, 199) AS i CREATE (:User {uid: i})").await;
     let chain = (0..100)
@@ -47,5 +47,61 @@ async fn boolean_chains_are_balanced_without_changing_evaluation() {
             assert_eq!(result(flat.clone()).await, result(nested).await, "{flat}");
         }
     }
+    db.close().await.unwrap();
+}
+
+/// A chain's length adds no nesting depth, so a chain of any length compiles
+/// inside NOT or another connective and matches the equivalent IN list, and
+/// a chain of ten thousand terms plans and evaluates on the default stack.
+#[tokio::test]
+async fn boolean_chains_of_any_length_nest_and_evaluate() {
+    let db = database().await;
+    run(
+        &db,
+        "UNWIND range(0, 199) AS i CREATE (:User {uid: i, active: i % 2 = 0})",
+    )
+    .await;
+    let chain = |terms: usize| {
+        (0..terms)
+            .map(|value| format!("n.uid = {value}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let list = |terms: usize| {
+        (0..terms)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let count = |condition: String| {
+        let db = &db;
+        async move {
+            run(
+                db,
+                &format!("MATCH (n:User) WHERE {condition} RETURN count(*)"),
+            )
+            .await
+            .rows
+        }
+    };
+    for terms in 44..=50 {
+        for (chained, listed) in [
+            (
+                format!("n.active = true AND ({})", chain(terms)),
+                format!("n.active = true AND n.uid IN [{}]", list(terms)),
+            ),
+            (
+                format!("NOT ({})", chain(terms)),
+                format!("NOT n.uid IN [{}]", list(terms)),
+            ),
+        ] {
+            assert_eq!(
+                count(chained.clone()).await,
+                count(listed).await,
+                "{chained}"
+            );
+        }
+    }
+    assert_eq!(count(chain(10_000)).await, vec![vec![json!(200)]]);
     db.close().await.unwrap();
 }

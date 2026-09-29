@@ -361,10 +361,13 @@ An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
 An expression may nest at most 48 levels, which a `ResourceLimit` error with
-`ExpressionDepth` reports. A flat chain of one Boolean operator, such as
-`a OR b OR c OR ...`, associates to the left as written; only a chain that
-would exceed the limit is nested as a balanced tree over the same operands,
-so it counts only the logarithm of its length.
+`ExpressionDepth` reports. A chain of one Boolean operator, such as
+`a OR b OR c OR ...`, and a comparison chain such as `a < b < c` are flat: the
+chain is one level over all of its operands, however many there are, so its
+length does not count toward the nesting depth. The operands are still
+evaluated in written order with the short-circuits and errors of the chain
+associated to the left. Parentheses, `NOT` and a change of operator nest as
+usual.
 Peak admission includes temporary expression buffers alongside retained rows
 and operator state. Consuming a large intermediate value can raise the peak even
 when a query returns one number. Scalar aggregation accounts for an incoming

@@ -270,6 +270,8 @@ impl<'db> ExecutionContext<'db> {
             | E::HasLabel(..) => {
                 unreachable!("native adapter only constructs supported expression contracts")
             }
+            // Native conjunctions use `All` and `Any`; its connective is uninhabited.
+            E::Connective(never, _) => match *never {},
         }
     }
 }

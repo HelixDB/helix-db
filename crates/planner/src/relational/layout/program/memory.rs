@@ -132,6 +132,10 @@ fn expression_heap(expression: &r::Expression) -> usize {
             values.capacity().saturating_mul(size_of::<E>()),
             |bytes, value| bytes.saturating_add(expression_heap(value)),
         ),
+        E::Connective(_, values) => values.iter().fold(
+            values.capacity().saturating_mul(size_of::<E>()),
+            |bytes, value| bytes.saturating_add(expression_heap(value)),
+        ),
         E::Map(values) => values.iter().fold(
             values.capacity().saturating_mul(size_of::<(String, E)>()),
             |bytes, (name, value)| {
