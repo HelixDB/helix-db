@@ -310,12 +310,16 @@ impl SecondaryMutationRuntime {
             let target = mutations.targets.get(ordinal).ok_or_else(|| {
                 corruption("secondary mutation route named a target outside its catalog")
             })?;
-            // A value the index cannot hold never had an entry, so there is nothing
-            // to remove; failing on it would keep an entity that blocks a build from
-            // being fixed or deleted.
-            let old_value = canonical_value(&target.definition, before, entity.id)
-                .ok()
-                .flatten();
+            let old_value = match canonical_value(&target.definition, before, entity.id) {
+                Ok(value) => value,
+                // While a build records deltas, an entity whose value the index
+                // cannot hold blocks that build and never had an entry, so changing
+                // or deleting it removes nothing. An active index holds no such value.
+                Err(_) if matches!(target.mode, SecondaryMutationMode::RecordBuildDelta) => None,
+                Err(error) => {
+                    return Err(mutation_value_error(&target.definition, entity.id, error))
+                }
+            };
             let new_value = storable_value(
                 scope,
                 target.index_id,
@@ -631,12 +635,14 @@ pub(crate) async fn maintain_entity(
         .iter()
         .filter(|target| target.definition.element_kind() == entity_kind)
     {
-        // A value the index cannot hold never had an entry, so there is nothing
-        // to remove; failing on it would keep an entity that blocks a build from
-        // being fixed or deleted.
-        let old_value = canonical_value(&target.definition, before, entity_id)
-            .ok()
-            .flatten();
+        let old_value = match canonical_value(&target.definition, before, entity_id) {
+            Ok(value) => value,
+            // While a build records deltas, an entity whose value the index
+            // cannot hold blocks that build and never had an entry, so changing
+            // or deleting it removes nothing. An active index holds no such value.
+            Err(_) if matches!(target.mode, SecondaryMutationMode::RecordBuildDelta) => None,
+            Err(error) => return Err(mutation_value_error(&target.definition, entity_id, error)),
+        };
         let new_value = storable_value(
             scope,
             target.index_id,
