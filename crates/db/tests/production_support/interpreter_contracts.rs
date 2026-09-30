@@ -214,6 +214,128 @@ pub async fn run_request_mode_and_isolated_mutation_contracts() {
     db.close().await.expect("isolated mutation fixture closes");
 }
 
+/// Proves membership retention decisions the public planner cannot reach.
+///
+/// One operation's writes are homogeneous, so only a transaction's sequence
+/// of transitions shows a label's property footprint growing and being
+/// absorbed by a node write. Validated plans never carry a range set, but a
+/// hand-built one resolves per row and is still forgotten by any write to
+/// its label, since it reads more than point indexes.
+pub async fn run_membership_retention_contracts() {
+    use crate::index_lifecycle::graph_mutation::{
+        CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit,
+        PropertyEditOutcome,
+    };
+
+    let row = CanonicalPropertyRow::new(vec![Property::string("$label", "Item")]);
+    let replace = |property: &str| {
+        let PropertyEditOutcome::Changed(transition) = GraphMutationTransition::edit(
+            DataScope::LegacyUnscoped,
+            GraphEntity::node(1),
+            row.clone(),
+            PropertyEdit::set(Property::string(property, "v")),
+        ) else {
+            panic!("the edit changes the row");
+        };
+        transition
+    };
+    let mut writes = mutation::NodeIndexWrites::default();
+    writes.record(&replace("title"));
+    writes.record(&replace("kind"));
+    assert_eq!(
+        writes.label("Item"),
+        Some(&mutation::LabelWrites::Properties(
+            ["kind".into(), "title".into()].into()
+        ))
+    );
+    writes.record(&GraphMutationTransition::create(
+        DataScope::LegacyUnscoped,
+        GraphEntity::node(2),
+        row.clone(),
+    ));
+    writes.record(&replace("status"));
+    assert_eq!(writes.label("Item"), Some(&mutation::LabelWrites::Nodes));
+
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("production-membership-retention-range")
+            .with_range_index("Item", "rank"),
+    )
+    .await;
+    let item = test_support::add_node_with_properties(
+        &db,
+        "Item",
+        vec![("rank", helix_ast::value::PropertyValue::I64(5))],
+    )
+    .await;
+    let key =
+        catalog::ScopedPropertyDirectionKey::try_new("Item", "rank", RangeIndexDirection::Asc)
+            .expect("range key is valid");
+    let predicate =
+        ir::PredicatePlan::new(Predicate::gte("rank", 3_i64)).expect("range predicate is valid");
+    let range = exec::ExecOp::IndexMembership {
+        plan: Box::new(exec::ExecNodeIndexMembershipPlan {
+            set: exec::ExecNodeMembershipSet::Index {
+                set: exec::ExecNodeSecondarySetPlan::Range(exec::ExecNodeSecondaryRangePlan {
+                    index: catalog::IndexCatalogSnapshot::default()
+                        .with_node_range(key.clone())
+                        .node_range[&key]
+                        .clone(),
+                    key,
+                    range: ir::IndexRange::All,
+                    iteration: ir::RangeScanIteration::Forward,
+                }),
+                label: test_support::name("Item"),
+                outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+            },
+            predicate: predicate.clone(),
+            residual: None,
+        }),
+    };
+    let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+    execution
+        .enable_request_write_scope()
+        .await
+        .expect("request transaction opens");
+    let kept = ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(item))]);
+    for rank in [4, 2] {
+        execution
+            .flush_active_index_mutations()
+            .await
+            .expect("pending writes flush");
+        let membership = execution
+            .execute_op(&range, kept.clone())
+            .await
+            .expect("range membership evaluates rows");
+        let filter = execution
+            .execute_op(
+                &exec::ExecOp::Filter {
+                    predicate: predicate.clone(),
+                },
+                kept.clone(),
+            )
+            .await
+            .expect("per-row filter evaluates rows");
+        assert_eq!(membership, filter);
+        execution
+            .execute_op(
+                &exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::SetProperty {
+                        name: test_support::name("rank"),
+                        value: ir::PropertyInputPlan::Value(helix_ast::value::PropertyValue::I64(
+                            rank,
+                        )),
+                    },
+                },
+                kept.clone(),
+            )
+            .await
+            .expect("rank update succeeds");
+    }
+    execution.abort_request_write_scope();
+    drop(execution);
+    db.close().await.expect("range retention fixture closes");
+}
+
 /// Proves index status stays on the open graph write and does not publish it.
 pub async fn run_get_operation_keeps_open_graph_write() {
     let status = exec::ExecOp::IndexDdl {
