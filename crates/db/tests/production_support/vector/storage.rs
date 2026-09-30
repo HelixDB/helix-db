@@ -2098,7 +2098,7 @@ async fn run_read_fault_contracts() {
 
 /// Exercises scoped keys, typed row codecs, opaque tokens, and lane cleanup.
 /// Proves the concurrent batch policy returns the same rows, in caller order,
-/// as one `multi_get` when a batch spans several chunks and waves.
+/// as one `multi_get` when a batch spans more runs than run at once.
 async fn run_batch_read_contracts() {
     let db = Db::open("production-vector-batch-reads", Arc::new(InMemory::new()))
         .await
@@ -2107,7 +2107,8 @@ async fn run_batch_read_contracts() {
         "production-vector-batch-reads".into(),
         DataScope::LegacyUnscoped,
     );
-    let batch_len = CONCURRENT_MULTI_GET_CHUNK_KEYS * CONCURRENT_MULTI_GET_MAX_CHUNKS + 5;
+    // Long enough for 33 runs of 32 keys, more than the 16 in flight.
+    let batch_len = 1_029;
     let present = |node_id: NodeId| !node_id.is_multiple_of(3);
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     (1..=batch_len as NodeId)
@@ -2134,7 +2135,10 @@ async fn run_batch_read_contracts() {
             false => SimHashRow::Missing,
         })
         .collect::<Vec<_>>();
-    for batch_reads in [VectorBatchReads::Single, VectorBatchReads::Concurrent] {
+    for batch_reads in [
+        crate::batch_reads::BatchReads::Single,
+        crate::batch_reads::BatchReads::Concurrent,
+    ] {
         let keyspace = keyspace.clone().with_batch_reads(batch_reads);
         let rows = VectorRows::new(&db, &keyspace)
             .simhash_rows(&node_ids)

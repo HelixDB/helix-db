@@ -74,17 +74,22 @@ impl<'db> ExecutionContext<'db> {
         self.pull_work
             .multi_get_keys
             .fetch_add(keys.len(), std::sync::atomic::Ordering::Relaxed);
+        let batch_reads = self.db.batch_reads();
         match (
             self.active_write_tx(),
             self.request_read_view(),
             self.db.storage(),
         ) {
-            (Some(active), _, _) => Ok(active.txn.multi_get(keys).await?),
-            (None, Some(view), _) => Ok(view.multi_get(keys).await?),
+            (Some(active), _, _) => batch_reads.multi_get(&active.txn, keys).await,
+            (None, Some(view), _) => batch_reads.multi_get(view, keys).await,
             #[cfg(test)]
-            (None, None, HelixStorage::Reader(reader)) => Ok(reader.multi_get(keys).await?),
+            (None, None, HelixStorage::Reader(reader)) => {
+                batch_reads.multi_get(reader.as_ref(), keys).await
+            }
             #[cfg(test)]
-            (None, None, HelixStorage::Writer(writer)) => Ok(writer.multi_get(keys).await?),
+            (None, None, HelixStorage::Writer(writer)) => {
+                batch_reads.multi_get(writer.db(), keys).await
+            }
             #[cfg(not(test))]
             (None, None, _) => Err(HelixDbError::InvariantViolation(
                 "storage multi-get escaped its request read view".to_string(),

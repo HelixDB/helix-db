@@ -118,7 +118,7 @@ impl<'db> ExecutionContext<'db> {
                 scope_permit,
                 mutation_catalog,
                 std::sync::Arc::clone(self.db.simhasher_registry()),
-                self.db.vector_batch_reads(),
+                self.db.batch_reads(),
                 self.db
                     .config()
                     .db()
