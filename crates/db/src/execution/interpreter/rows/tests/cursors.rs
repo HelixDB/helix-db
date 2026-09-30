@@ -90,11 +90,11 @@ async fn expansion_batches_combine_parents_and_retain_partial_cursor_ownership()
         }
         assert_eq!(count, if stop_early { 8 } else { 32 });
         let reads = ctx.row_budget().reads();
-        // Each parent needs a neighbor and pair lookup. Property/endpoint
-        // hydration is one pair of calls per eight parents, not per parent.
-        assert_eq!(reads.point_gets, count);
-        assert_eq!(reads.multi_get_batches, count + 2 * count / 8);
-        assert_eq!(reads.multi_get_keys, 3 * count);
+        // Each parent needs a neighbor and a pair point get. Property and
+        // endpoint hydration is one pair of calls per eight parents.
+        assert_eq!(reads.point_gets, 2 * count);
+        assert_eq!(reads.multi_get_batches, 2 * count / 8);
+        assert_eq!(reads.multi_get_keys, 2 * count);
         drop(batches);
         assert_eq!(ctx.row_budget().reads(), reads);
         assert_eq!(ctx.row_budget().available(), limits.memory_bytes);
@@ -305,8 +305,9 @@ async fn typed_expansion_reads_local_indexes_and_checks_parallel_relationship_ty
         .await
         .unwrap();
     assert_eq!(candidates.iter().collect::<Vec<_>>(), vec![follows, other]);
-    assert_eq!(ctx.row_budget().reads().point_gets, 1); // neighborhood
-    assert_eq!(ctx.row_budget().reads().multi_get_batches, 1); // edge pair
+    // The neighborhood and the edge pair.
+    assert_eq!(ctx.row_budget().reads().point_gets, 2);
+    assert_eq!(ctx.row_budget().reads().multi_get_batches, 0);
     let _batch = ctx.row_budget().reserve(2 * 128).unwrap();
     assert_eq!(
         ctx.relationship_types_batch(&[follows, other], &["FOLLOWS".into()])
@@ -314,8 +315,8 @@ async fn typed_expansion_reads_local_indexes_and_checks_parallel_relationship_ty
             .unwrap(),
         vec![true, false]
     );
-    assert_eq!(ctx.row_budget().reads().multi_get_batches, 2);
-    assert_eq!(ctx.row_budget().reads().multi_get_keys, 3);
+    assert_eq!(ctx.row_budget().reads().multi_get_batches, 1);
+    assert_eq!(ctx.row_budget().reads().multi_get_keys, 2);
     assert_eq!(
         ctx.relationship_types_batch(&[follows, other], &[])
             .await

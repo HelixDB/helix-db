@@ -6,6 +6,7 @@ use super::super::{ExecutionContext, Result};
 use crate::encoding::keys;
 use crate::encoding::keys::indexes::EdgeDirection;
 use crate::query_resources::{adjacency, bitmap, Reservation};
+use futures::{StreamExt, TryStreamExt};
 use helix_planner::ir;
 
 pub(in crate::execution::interpreter) struct Cursor {
@@ -297,7 +298,19 @@ impl Cursor {
                 .pull_work
                 .pair_reads
                 .fetch_add(keys.len(), std::sync::atomic::Ordering::Relaxed);
-            self.values = context.multi_get_raw(&keys).await?.into_iter();
+            // Pair keys are merge-backed until a last-run compaction resolves
+            // them, and a multi-get restarts every merge it meets as a point
+            // get. Concurrent point gets resolve each merge chain in one pass,
+            // as main's sequential reads did, and overlap storage misses.
+            let mut reads = Vec::with_capacity(keys.len());
+            for key in &keys {
+                reads.push(context.get_raw(key));
+            }
+            self.values = futures::stream::iter(reads)
+                .buffered(super::PARALLEL_INDEX_READS.get())
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter();
         }
         Ok((!output.ids.is_empty()).then_some((output, self)))
     }
@@ -328,13 +341,13 @@ mod tests {
         assert!(Box::pin(cursor.next_batch(&context)).await.is_err());
         let budget = context.row_memory.as_ref().unwrap();
         assert_eq!(budget.available(), 1024 * 1024);
-        assert_eq!(budget.reads().multi_get_keys, 1);
-        assert_eq!(budget.reads().multi_get_batches, 1);
+        assert_eq!(budget.reads().point_gets, 1);
+        assert_eq!(budget.reads().multi_get_batches, 0);
         context.fail_deadline_after(0);
         let cursor = Cursor::from_pairs(vec![(1, 3)], 1);
         assert!(Box::pin(cursor.next_batch(&context)).await.is_err());
         assert_eq!(budget.available(), 1024 * 1024);
-        assert_eq!(budget.reads().multi_get_keys, 1);
+        assert_eq!(budget.reads().point_gets, 1);
         context.close_request_read_view().unwrap();
         db.close().await.unwrap();
     }

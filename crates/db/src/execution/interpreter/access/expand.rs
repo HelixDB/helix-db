@@ -306,21 +306,21 @@ mod tests {
             );
         }
         let budget = ctx.row_memory.as_ref().unwrap();
-        assert_eq!(budget.reads().point_gets, 0);
-        assert_eq!(budget.reads().multi_get_batches, 64);
-        assert_eq!(budget.reads().multi_get_keys, 2 * 1026);
+        // Merge-backed pair keys are read with point gets, never multi-gets.
+        assert_eq!(budget.reads().point_gets, 2 * 1026);
+        assert_eq!(budget.reads().multi_get_batches, 0);
         let empty = super::super::EdgeCursor::empty(512)
             .collect(&ctx, None)
             .await
             .unwrap();
         assert!(empty.is_empty());
         drop(empty);
-        assert_eq!(budget.reads().multi_get_batches, 64);
+        assert_eq!(budget.reads().point_gets, 2 * 1026);
         let cursor =
             super::super::EdgeCursor::from_pairs((0..1026).map(|target| (7, target)).collect(), 16);
         let (batch, rest) = Box::pin(cursor.next_batch(&ctx)).await.unwrap().unwrap();
         assert_eq!(batch.ids().len(), 16);
-        assert_eq!(budget.reads().multi_get_keys, 2 * 1026 + 16);
+        assert_eq!(budget.reads().point_gets, 2 * 1026 + 16);
         assert!(budget.available() < 2 * 1024 * 1024);
         drop(batch);
         drop(rest);
@@ -332,10 +332,7 @@ mod tests {
             Box::pin(cursor.next_batch(&ctx)).await,
             Err(HelixDbError::QueryMemoryLimitExceeded)
         ));
-        assert_eq!(
-            ctx.row_memory.as_ref().unwrap().reads().multi_get_batches,
-            0
-        );
+        assert_eq!(ctx.row_memory.as_ref().unwrap().reads().point_gets, 0);
         assert_eq!(ctx.row_memory.as_ref().unwrap().available(), 32 * 1024);
         ctx.close_request_read_view().unwrap();
         db.close().await.unwrap();
