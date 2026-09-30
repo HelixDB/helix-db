@@ -11,20 +11,24 @@ pub(crate) struct Adjacency {
 }
 
 impl Adjacency {
+    /// A budgeted read reserves a structural bound before decoding; an
+    /// unbudgeted native read decodes exactly as it always has.
     pub(crate) fn decode(bytes: &[u8], budget: Option<&Budget>) -> Result<Self> {
+        let Some(budget) = budget else {
+            return Ok(Self {
+                edges: adjacency::decode_edges(bytes)?,
+                _memory: None,
+            });
+        };
         let prepared = adjacency::prepare_edges(bytes)?;
-        let memory = budget
-            .map(|budget| {
-                budget.reserve(
-                    prepared
-                        .allocation_bound()
-                        .saturating_add(size_of::<Self>()),
-                )
-            })
-            .transpose()?;
+        let memory = budget.reserve(
+            prepared
+                .allocation_bound()
+                .saturating_add(size_of::<Self>()),
+        )?;
         Ok(Self {
             edges: prepared.decode()?,
-            _memory: memory,
+            _memory: Some(memory),
         })
     }
 

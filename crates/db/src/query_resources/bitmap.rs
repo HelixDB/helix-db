@@ -56,7 +56,15 @@ impl Bitmap {
         })
     }
 
+    /// A budgeted read reserves a structural bound before decoding; an
+    /// unbudgeted native read decodes exactly as it always has.
     pub(crate) fn decode(bytes: &[u8], budget: Option<&Budget>) -> Result<Self> {
+        let Some(budget) = budget else {
+            return Ok(Self {
+                ids: equality::SecondaryEqualityBitmapValue::decode(bytes)?.into_ids(),
+                memory: None,
+            });
+        };
         let prepared = equality::SecondaryEqualityBitmapValue::prepare(bytes)?;
         Self::from_prepared(prepared, budget)
     }
@@ -64,24 +72,26 @@ impl Bitmap {
     /// Built-in index rows preserve the existing portable-prefix compatibility
     /// contract. Managed index rows use the stricter `decode` entry point.
     pub(crate) fn decode_builtin(bytes: &[u8], budget: Option<&Budget>) -> Result<Self> {
+        let Some(budget) = budget else {
+            return Ok(Self {
+                ids: equality::SecondaryEqualityValue::decode(bytes)?.into_ids(),
+                memory: None,
+            });
+        };
         Self::from_prepared(equality::SecondaryEqualityValue::prepare(bytes)?, budget)
     }
 
-    fn from_prepared(
-        prepared: equality::PreparedBitmap<'_>,
-        budget: Option<&Budget>,
-    ) -> Result<Self> {
-        let memory = budget
-            .map(|budget| {
-                budget.reserve(
-                    prepared
-                        .allocation_bound()
-                        .saturating_add(size_of::<Self>()),
-                )
-            })
-            .transpose()?;
+    fn from_prepared(prepared: equality::PreparedBitmap<'_>, budget: &Budget) -> Result<Self> {
+        let memory = budget.reserve(
+            prepared
+                .allocation_bound()
+                .saturating_add(size_of::<Self>()),
+        )?;
         let ids = prepared.decode()?.into_ids();
-        Ok(Self { ids, memory })
+        Ok(Self {
+            ids,
+            memory: Some(memory),
+        })
     }
 
     /// Bridge for native paths that still construct their own bitmap. This

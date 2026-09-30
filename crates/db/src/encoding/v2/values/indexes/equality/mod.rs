@@ -178,8 +178,26 @@ impl SecondaryEqualityBitmapValue {
         Bytes::from(bytes)
     }
 
+    /// Decode without the allocation preflight a budgeted read needs, exactly
+    /// as the merge operator, migrations and unbudgeted reads always have.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, EncodingError> {
-        Self::prepare(bytes)?.decode()
+        if let Some(delta) = BitmapMembershipDelta::decode_if_delta(bytes)? {
+            return Ok(Self(delta.additions));
+        }
+        let mut cursor = Cursor::new(bytes);
+        let ids = RoaringTreemap::deserialize_from(&mut cursor).map_err(|error| {
+            EncodingError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to decode secondary equality bitmap: {error}"),
+            ))
+        })?;
+        if cursor.position() != bytes.len() as u64 {
+            return Err(EncodingError::Custom(format!(
+                "secondary equality bitmap has {} trailing bytes",
+                bytes.len() as u64 - cursor.position()
+            )));
+        }
+        Ok(Self(ids))
     }
 
     pub(crate) fn prepare(bytes: &[u8]) -> Result<PreparedBitmap<'_>, EncodingError> {
@@ -228,13 +246,23 @@ impl<'a> PreparedBitmap<'a> {
                 ))
             })?;
             // Structural preflight has already consumed exactly this payload.
-            assert_eq!(cursor.position(), self.bytes.len() as u64);
+            if cursor.position() != self.bytes.len() as u64 {
+                return Err(EncodingError::Custom(format!(
+                    "secondary equality bitmap decoded {} of its {} preflighted bytes",
+                    cursor.position(),
+                    self.bytes.len()
+                )));
+            }
             ids
         };
         let allocated = retained_allocation_estimate(&ids);
-        assert!(allocated <= self.allocation_bound(),
-            "bitmap decoder footprint {allocated} exceeded its preflight allocation bound {} for {} encoded bytes",
-            self.allocation_bound(), self.bytes.len());
+        if allocated > self.allocation_bound() {
+            return Err(EncodingError::Custom(format!(
+                "bitmap decoder footprint {allocated} exceeded its preflight allocation bound {} for {} encoded bytes",
+                self.allocation_bound(),
+                self.bytes.len()
+            )));
+        }
         Ok(SecondaryEqualityBitmapValue(ids))
     }
 }
