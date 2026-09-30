@@ -293,6 +293,8 @@ run_invalid_configuration_tests() {
   local bad_cache_size="helixdb-image-bad-cache-size-$resource_suffix"
   local s3_bad_cache_size="helixdb-image-s3-bad-cache-size-$resource_suffix"
   local s3_unwritable_cache="helixdb-image-s3-unwritable-cache-$resource_suffix"
+  local s3_read_only_root="helixdb-image-s3-read-only-root-$resource_suffix"
+  local s3_default_budget="helixdb-image-s3-default-budget-$resource_suffix"
 
   log "Testing invalid startup configuration"
   start_container "$bad_address" "$((base_port + 4))" -e HELIX_HTTP_ADDR=not-an-address
@@ -335,7 +337,28 @@ run_invalid_configuration_tests() {
   wait_for_exit "$s3_unwritable_cache"
   assert_nonzero_exit "$s3_unwritable_cache"
   assert_error_names "$s3_unwritable_cache" \
-    'HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; set HELIX_DISK_CACHE_DIR'
+    'HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; mount a writable volume there or set HELIX_DISK_CACHE_DIR'
+
+  # A read-only root filesystem cannot hold the cache anywhere, so the error
+  # also names the volume remedy.
+  start_container "$s3_read_only_root" "$((base_port + 13))" \
+    --read-only \
+    -e S3_BUCKET=unreachable \
+    -e HELIX_DISK_CACHE_BYTES=67108864
+  wait_for_exit "$s3_read_only_root"
+  assert_nonzero_exit "$s3_read_only_root"
+  assert_error_names "$s3_read_only_root" \
+    'HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; mount a writable volume there'
+
+  # The 32 GiB default must fit the cache's filesystem, here a 64 MiB tmpfs,
+  # rather than fill it; a budget that is set is only warned about.
+  start_container "$s3_default_budget" "$((base_port + 14))" \
+    --tmpfs /var/cache/helix:size=64m,mode=1777 \
+    -e S3_BUCKET=unreachable
+  wait_for_exit "$s3_default_budget"
+  assert_nonzero_exit "$s3_default_budget"
+  assert_error_names "$s3_default_budget" \
+    'HELIX_DISK_CACHE_BYTES is unset and its 34359738368-byte default exceeds the space free for the disk cache at `/var/cache/helix`'
 }
 
 run_signal_test() {

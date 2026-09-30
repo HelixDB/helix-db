@@ -85,7 +85,11 @@ def run(args):
             assert trace.poll() is None, "S3 request trace must stay connected"
             # The fixture keeps Helix's disk cache on tmpfs, so the restart
             # empties it and hydration reads reach the trace. A range read
-            # again later is served from that cache and never traced.
+            # again later is served from that cache and never traced, so the
+            # idle check below catches only fetches of uncached ranges.
+            # Redundant re-hydration of cached ranges is guarded by the DB
+            # contract (run_idle_refresh_contracts), which runs without the
+            # object-store cache.
             subprocess.run(["docker", "restart", container], check=True, stdout=subprocess.DEVNULL)
             deadline = time.monotonic() + 120
             while True:
@@ -136,7 +140,7 @@ def run(args):
         assert warm - metadata, "warm phase must read SST ranges outside the catalog"
         unexpected = set(idle) - metadata
         assert not unexpected, f"idle refresh fetched non-catalog SST ranges: {unexpected}"
-        print(f"Idle trace: {len(idle)} catalog SST GETs, zero vector-data SST GETs")
+        print(f"Idle trace: {len(idle)} catalog SST GETs, zero uncached vector-data SST GETs")
 
     assert query(args.port, search) == expected
     query(args.port, dsl.write_batch().var_as("node", dsl.g().add_n("IdleVectorFixture", {
@@ -148,7 +152,7 @@ def run(args):
     assert query(args.port, updated_search) == {"hits": [{"ordinal": 512}]}
     time.sleep(6)
     assert query(args.port, updated_search) == {"hits": [{"ordinal": 512}]}
-    print("Vector idle regression passed: zero vector-data SST GETs across three refresh intervals; searches pass before and after a write")
+    print("Vector idle regression passed: zero uncached vector-data SST GETs across three refresh intervals; searches pass before and after a write")
 
 
 if __name__ == "__main__":
