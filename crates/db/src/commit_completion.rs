@@ -1,7 +1,12 @@
-//! Finite commit completion tasks survive request cancellation and drain at close.
-//! Tracking owns no task handles or database references, so task/runtime ownership
-//! remains acyclic. Sealing rejects new commits before any task is spawned.
+//! Finite commit completions survive request cancellation and drain at close.
+//! A completion runs in its request's task; a request dropped before it finishes
+//! hands the rest to a spawned task. Tracking owns no task handles or database
+//! references, so task/runtime ownership remains acyclic. Sealing rejects new
+//! commits before any work starts.
 use crate::error::{HelixDbError, Result};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, Copy)]
@@ -36,11 +41,12 @@ impl Drop for Completion {
 }
 
 impl Tracker {
-    /// Spawn one admitted, finite completion. Dropping the returned handle does
-    /// not abort the task. Its token is released on success, error or panic.
-    pub(crate) fn spawn<F>(&self, future: F) -> Result<tokio::task::JoinHandle<F::Output>>
+    /// Admit one finite completion that runs in the caller's task. Dropping it
+    /// before it finishes does not abandon it: the rest runs as a spawned task.
+    /// Its token is released on success, error or panic.
+    pub(crate) fn run<F>(&self, future: F) -> Result<InPlace<F>>
     where
-        F: std::future::Future + Send + 'static,
+        F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
         let accepted = self.state.send_if_modified(|state| {
@@ -55,14 +61,12 @@ impl Tracker {
         if !accepted {
             return Err(HelixDbError::DatabaseClosed);
         }
-        let completion = Completion {
-            state: self.state.clone(),
-        };
-        Ok(tokio::spawn(async move {
-            let result = future.await;
-            drop(completion);
-            result
-        }))
+        Ok(InPlace {
+            future: Some(Box::pin(future)),
+            completion: Some(Completion {
+                state: self.state.clone(),
+            }),
+        })
     }
 
     /// Permanently reject new admissions before the shutdown owner is spawned.
@@ -86,6 +90,59 @@ impl Tracker {
     }
 }
 
+/// An admitted completion polled by its request, or detached when dropped.
+pub(crate) struct InPlace<F: Future + Send + 'static>
+where
+    F::Output: Send + 'static,
+{
+    future: Option<Pin<Box<F>>>,
+    completion: Option<Completion>,
+}
+
+impl<F> Future for InPlace<F>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
+        // Held outside `self` while polled, so a future that panics is dropped
+        // by the unwind and never resumed.
+        let mut future = self
+            .future
+            .take()
+            .expect("an in-place completion is not polled after it finishes");
+        let Poll::Ready(output) = future.as_mut().poll(context) else {
+            self.future = Some(future);
+            return Poll::Pending;
+        };
+        self.completion = None;
+        Poll::Ready(output)
+    }
+}
+
+impl<F> Drop for InPlace<F>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn drop(&mut self) {
+        // A finished or panicked completion has nothing left to run, and
+        // without a runtime the rest cannot run; each releases its token.
+        let (Some(future), Some(completion)) = (self.future.take(), self.completion.take()) else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            future.await;
+            drop(completion);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,7 +159,7 @@ mod tests {
         let done = Arc::new(AtomicBool::new(false));
         let completed = Arc::clone(&done);
         let task = tracker
-            .spawn(async move {
+            .run(async move {
                 wait.await.unwrap();
                 completed.store(true, Ordering::Release);
             })
@@ -113,7 +170,7 @@ mod tests {
         let ran = Arc::new(AtomicBool::new(false));
         let rejected = Arc::clone(&ran);
         assert!(matches!(
-            tracker.spawn(async move {
+            tracker.run(async move {
                 rejected.store(true, Ordering::Release);
             }),
             Err(HelixDbError::DatabaseClosed)
@@ -129,25 +186,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_panic_and_task_abort_release_their_ownership() {
+    async fn failure_and_panic_release_their_ownership() {
         let tracker = Tracker::default();
         let error = tracker
-            .spawn(async { Err::<(), _>("storage failure") })
+            .run(async { Err::<(), _>("storage failure") })
             .unwrap()
-            .await
-            .unwrap();
+            .await;
         assert_eq!(error, Err("storage failure"));
-        let panic = tracker
-            .spawn(async {
-                panic!("completion panic");
-            })
-            .unwrap()
-            .await
-            .unwrap_err();
-        assert!(panic.is_panic());
-        let task = tracker.spawn(std::future::pending::<()>()).unwrap();
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        let panic = std::panic::AssertUnwindSafe(
+            tracker
+                .run(async {
+                    panic!("completion panic");
+                })
+                .unwrap(),
+        )
+        .catch_unwind()
+        .await;
+        assert!(panic.is_err());
+        assert!(tracker.seal_and_wait().now_or_never().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_completion_dropped_mid_way_finishes_detached() {
+        let tracker = Tracker::default();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&done);
+        let mut completion = Box::pin(
+            tracker
+                .run(async move {
+                    tokio::task::yield_now().await;
+                    wait.await.unwrap();
+                    completed.store(true, Ordering::Release);
+                    17
+                })
+                .unwrap(),
+        );
+        assert!(futures::poll!(&mut completion).is_pending());
+        drop(completion);
+        let mut drain = Box::pin(tracker.seal_and_wait());
+        assert!(futures::poll!(&mut drain).is_pending());
+        release.send(()).unwrap();
+        drain.await;
+        assert!(done.load(Ordering::Acquire));
+        // An undisturbed completion returns its output in place.
+        let tracker = Tracker::default();
+        assert_eq!(tracker.run(async { 17 }).unwrap().await, 17);
         assert!(tracker.seal_and_wait().now_or_never().is_some());
     }
 
@@ -163,7 +247,7 @@ mod tests {
             let completed = Arc::clone(&completed);
             attempts.push(tokio::spawn(async move {
                 start.wait().await;
-                match tracker.spawn(async move {
+                match tracker.run(async move {
                     tokio::task::yield_now().await;
                     completed.fetch_add(1, Ordering::AcqRel);
                 }) {
@@ -200,7 +284,7 @@ mod tests {
         let task = db
             .inner
             .commit_completions
-            .spawn(async move {
+            .run(async move {
                 wait.await.unwrap();
                 // The completion still has its original live storage authority.
                 let key = crate::index_lifecycle::graph_mutation::GraphEntity::node(99)
@@ -212,7 +296,7 @@ mod tests {
         let mut close = Box::pin(db.close());
         assert!(futures::poll!(&mut close).is_pending());
         assert!(matches!(
-            db.inner.commit_completions.spawn(async {}),
+            db.inner.commit_completions.run(async {}),
             Err(HelixDbError::DatabaseClosed)
         ));
         release.send(()).unwrap();
@@ -235,7 +319,7 @@ mod tests {
         drop(
             db.inner
                 .commit_completions
-                .spawn(async move { wait.await.unwrap() })
+                .run(async move { wait.await.unwrap() })
                 .unwrap(),
         );
         let mut close = Box::pin(db.close());

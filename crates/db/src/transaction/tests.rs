@@ -345,7 +345,7 @@ async fn detached_completion_retains_read_admission_and_abort_releases_it() {
             let task = db
                 .inner
                 .commit_completions
-                .spawn(async move {
+                .run(async move {
                     wait.await.unwrap();
                     transaction.commit().await.unwrap();
                 })

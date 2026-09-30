@@ -425,7 +425,7 @@ async fn abandoned_batches_and_cancelled_transactions_release_all_merge_owners()
             let task = db
                 .inner
                 .commit_completions
-                .spawn(async move {
+                .run(async move {
                     wait.await.unwrap();
                     transaction.commit().await.unwrap();
                 })

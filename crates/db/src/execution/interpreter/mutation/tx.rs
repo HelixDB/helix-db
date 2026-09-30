@@ -259,9 +259,11 @@ impl<'db> ExecutionContext<'db> {
             .await?;
         let ActiveWriteTx { txn, index_context } = active;
         let prepared_index_context = index_context.into_prepared()?;
-        // Commit may outlive its awaiting request. This finite task retains the
-        // exact runtime, mutation permit and cache fences until finalization.
-        // The tracker owns no task handles, so this Arc creates no ownership cycle.
+        // Commit runs in this request's task but may outlive it: a request
+        // dropped mid-commit hands the rest to a spawned task. The completion
+        // retains the exact runtime, mutation permit and cache fences until
+        // finalization. The tracker owns no task handles, so this Arc creates
+        // no ownership cycle.
         let db = HelixDB {
             inner: std::sync::Arc::clone(&self.db.inner),
         };
@@ -307,19 +309,11 @@ impl<'db> ExecutionContext<'db> {
             }
             Ok(())
         };
-        let task = match self.row_memory.as_ref() {
-            Some(budget) => self
-                .db
-                .inner
-                .commit_completions
-                .spawn(budget.admitted_future(complete)?)?,
-            None => self.db.inner.commit_completions.spawn(complete)?,
+        let complete = match self.row_memory.as_ref() {
+            Some(budget) => futures::future::Either::Left(budget.admitted_future(complete)?),
+            None => futures::future::Either::Right(complete),
         };
-        task.await.map_err(|error| {
-            HelixDbError::InvariantViolation(format!(
-                "commit completion task terminated; outcome may be unknown: {error}"
-            ))
-        })?
+        self.db.inner.commit_completions.run(complete)?.await
     }
 }
 
