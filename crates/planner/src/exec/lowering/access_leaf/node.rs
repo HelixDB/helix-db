@@ -88,7 +88,8 @@ impl<'a> TryFrom<&'a ir::NodeAccessPlan> for SimpleNodeAccessLeaf<'a> {
             ir::NodeAccessPlan::PointIds { .. }
             | ir::NodeAccessPlan::Intersect(_)
             | ir::NodeAccessPlan::Union(_)
-            | ir::NodeAccessPlan::ScanThenFilter { .. } => {
+            | ir::NodeAccessPlan::ScanThenFilter { .. }
+            | ir::NodeAccessPlan::BranchResidualUnion(_) => {
                 Err(ExecPlanError::UnsupportedSimpleAccessLeaf {
                     element: properties::ElementKind::Node,
                 })

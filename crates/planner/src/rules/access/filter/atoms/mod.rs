@@ -7,6 +7,7 @@ mod types;
 
 use crate::{context, ir};
 
+pub(super) use self::collect::access_filter_index_atom;
 pub(super) use self::types::{
     AccessEqualityDomain, AccessFilterIndexAtom, AccessFilterIndexAtoms, AccessFilterIndexBranches,
     AccessFilterIndexPlan, AccessFilterIndexPlanMatch, AccessFilterIndexPlanRejection,

@@ -70,7 +70,8 @@ pub(crate) fn node_secondary_set(
         | ir::NodeAccessPlan::LabelScan { .. }
         | ir::NodeAccessPlan::VectorSearch { .. }
         | ir::NodeAccessPlan::TextSearch { .. }
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 
@@ -132,7 +133,8 @@ pub(crate) fn edge_secondary_set(
         | ir::EdgeAccessPlan::LabelScan { .. }
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 

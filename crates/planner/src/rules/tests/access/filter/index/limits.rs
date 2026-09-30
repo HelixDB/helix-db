@@ -33,18 +33,33 @@ fn access_filter_index_rule_applies_union_branch_limits_without_blocking_singlet
         .unwrap(),
     );
 
-    for limits in [&limited, &disabled] {
-        assert_eq!(
-            rule.apply(optimizer::RuleInput {
-                expr: &union,
-                storage: &storage,
-                indexes: &indexes,
-                planner_limits: limits,
-                stats: default_stats(),
-            }),
-            optimizer::RuleResult::NotApplicable
-        );
-    }
+    // A limit below the branch count caps distribution only: the same-key
+    // disjunction is still one index union. Disabled unions keep the filter.
+    let limited_union = logical_access_path(rule.apply(optimizer::RuleInput {
+        expr: &union,
+        storage: &storage,
+        indexes: &indexes,
+        planner_limits: &limited,
+        stats: default_stats(),
+    }));
+    assert!(matches!(
+        limited_union,
+        logical::AccessPath::Node(path)
+            if matches!(
+                path.source().as_ref(),
+                ir::NodeAccessPlan::Union(children) if children.len() == 2
+            )
+    ));
+    assert_eq!(
+        rule.apply(optimizer::RuleInput {
+            expr: &union,
+            storage: &storage,
+            indexes: &indexes,
+            planner_limits: &disabled,
+            stats: default_stats(),
+        }),
+        optimizer::RuleResult::NotApplicable
+    );
     let singleton = logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &singleton_in,
         storage: &storage,

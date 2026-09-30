@@ -26,7 +26,8 @@ pub(in crate::rules) fn edge_access_contract(
         | ir::EdgeAccessPlan::RangeIndex { .. }
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => None,
     };
     match exact {
         Some(exact) => {
@@ -100,6 +101,15 @@ impl shared::AccessSourceFamily for EdgeAccessFamily {
                     source: source.as_ref(),
                     residual,
                 }
+            }
+            ir::EdgeAccessPlan::BranchResidualUnion(branches) => {
+                shared::AccessSourceParts::BranchResidualUnion(
+                    branches
+                        .as_ref()
+                        .iter()
+                        .map(|branch| (branch.source().as_ref(), branch.residual()))
+                        .collect(),
+                )
             }
         }
     }

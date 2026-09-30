@@ -43,7 +43,7 @@ fn collect_access_filter_index_atoms(
     }
 }
 
-fn access_filter_index_atom(
+pub(in crate::rules::access::filter) fn access_filter_index_atom(
     predicate: &helix_ast::expr::Predicate,
     planner_limits: &crate::context::PlannerLimits,
 ) -> Result<AccessFilterIndexAtom, AccessFilterIndexPlanRejection> {

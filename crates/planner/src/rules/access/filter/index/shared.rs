@@ -7,7 +7,7 @@ use super::super::atoms::{
 use super::super::labels::access_filter_label;
 use super::contracts::{
     AccessFilterIndexApplication, AccessFilterIndexRejection, IndexedSourceCombination,
-    MissingAccessIndex, PartialIndexFilterApplication, PartialIndexFilterRejection,
+    MissingAccessIndex, PartialIndexFilterRejection,
 };
 use crate::{analysis, catalog, context, ir};
 
@@ -41,6 +41,11 @@ pub(super) trait AccessFilterIndexFamily {
     fn union_source(sources: Vec<Self::Source>) -> Self::Source;
     fn intersection_source(sources: Vec<Self::Source>) -> Self::Source;
     fn is_broad_source(source: &Self::Source) -> bool;
+    /// Union of index-only branch sets, each filtered by its own residual,
+    /// or `None` when the branches do not satisfy that contract.
+    fn branch_residual_union(
+        branches: Vec<(Self::Source, Option<ir::PredicatePlan>)>,
+    ) -> Option<Self::Source>;
     fn intersect_pair(left: Self::Source, right: Self::Source) -> Self::Source;
 }
 
@@ -71,43 +76,6 @@ where
         IndexedSourceCombination::Unchanged => {
             AccessFilterIndexApplication::NotApplicable(AccessFilterIndexRejection::SourceUnchanged)
         }
-    }
-}
-
-pub(super) fn partial_index_filter<F>(
-    path: &F::Path,
-    predicate: &helix_ast::expr::Predicate,
-    predicate_label: &analysis::FeasibleLabelScope,
-    indexes: &catalog::IndexCatalogSnapshot,
-    planner_limits: &context::PlannerLimits,
-) -> PartialIndexFilterApplication<F::Source>
-where
-    F: AccessFilterIndexFamily,
-{
-    let Some(label) = access_filter_label(
-        F::source_common_label(F::path_source(path)),
-        predicate_label,
-    ) else {
-        return PartialIndexFilterApplication::NotApplicable(PartialIndexFilterRejection::NoLabel);
-    };
-    let split =
-        match conjunct_index_split::<F>(predicate, &label, indexes, planner_limits, |_, _| true) {
-            Ok(split) => split,
-            Err(reason) => return PartialIndexFilterApplication::NotApplicable(reason),
-        };
-    let source = match combine_indexed_filter_source::<F>(F::path_source(path), split.source) {
-        IndexedSourceCombination::Rewritten(source) => source,
-        IndexedSourceCombination::Unchanged if split.residual.is_empty() => {
-            return PartialIndexFilterApplication::NotApplicable(
-                PartialIndexFilterRejection::SourceUnchanged,
-            );
-        }
-        IndexedSourceCombination::Unchanged => F::path_source(path).clone(),
-    };
-
-    PartialIndexFilterApplication::Rewritten {
-        source,
-        residual: conjunction_plan(split.residual),
     }
 }
 

@@ -53,6 +53,25 @@ pub(in crate::exec) fn node_access_cost(
                 profile,
                 contracts::node_access_hard_upper_bound(source).map(|rows| rows as u64),
             )),
+        // Each branch reads its index set; residual branches then filter
+        // their own rows. Branches run concurrently.
+        ir::NodeAccessPlan::BranchResidualUnion(branches) => profile.parallel_reads(
+            &branches
+                .as_ref()
+                .iter()
+                .map(|branch| {
+                    let read = node_access_cost(branch.source(), profile);
+                    match branch.residual() {
+                        Some(_) => read.serial(predicate_cost_for_rows(
+                            profile,
+                            contracts::node_access_hard_upper_bound(branch.source())
+                                .map(|rows| rows as u64),
+                        )),
+                        None => read,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ),
         ir::NodeAccessPlan::AllScan => profile.element_scan(profile.default_unknown_scan_rows),
         ir::NodeAccessPlan::LabelScan { .. } => {
             profile.label_scan(profile.default_unknown_scan_rows)
@@ -91,6 +110,25 @@ pub(in crate::exec) fn edge_access_cost(
                 profile,
                 contracts::edge_access_hard_upper_bound(source).map(|rows| rows as u64),
             )),
+        // Each branch reads its index set; residual branches then filter
+        // their own rows. Branches run concurrently.
+        ir::EdgeAccessPlan::BranchResidualUnion(branches) => profile.parallel_reads(
+            &branches
+                .as_ref()
+                .iter()
+                .map(|branch| {
+                    let read = edge_access_cost(branch.source(), profile);
+                    match branch.residual() {
+                        Some(_) => read.serial(predicate_cost_for_rows(
+                            profile,
+                            contracts::edge_access_hard_upper_bound(branch.source())
+                                .map(|rows| rows as u64),
+                        )),
+                        None => read,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ),
         ir::EdgeAccessPlan::AllScan => profile.element_scan(profile.default_unknown_scan_rows),
         ir::EdgeAccessPlan::LabelScan { .. } => {
             profile.label_scan(profile.default_unknown_scan_rows)

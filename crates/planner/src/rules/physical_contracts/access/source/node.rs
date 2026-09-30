@@ -26,7 +26,8 @@ pub(in crate::rules) fn node_access_contract(
         | ir::NodeAccessPlan::RangeIndex { .. }
         | ir::NodeAccessPlan::VectorSearch { .. }
         | ir::NodeAccessPlan::TextSearch { .. }
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => None,
     };
     match exact {
         Some(exact) => {
@@ -103,6 +104,15 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
                     source: source.as_ref(),
                     residual,
                 }
+            }
+            ir::NodeAccessPlan::BranchResidualUnion(branches) => {
+                shared::AccessSourceParts::BranchResidualUnion(
+                    branches
+                        .as_ref()
+                        .iter()
+                        .map(|branch| (branch.source().as_ref(), branch.residual()))
+                        .collect(),
+                )
             }
         }
     }

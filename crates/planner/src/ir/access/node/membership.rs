@@ -341,7 +341,8 @@ fn unservable_leaf(plan: &NodeAccessPlan) -> Option<NodeIndexMembershipError> {
         | NodeAccessPlan::EqualityIndex { .. }
         | NodeAccessPlan::VectorSearch { .. }
         | NodeAccessPlan::TextSearch { .. }
-        | NodeAccessPlan::ScanThenFilter { .. } => None,
+        | NodeAccessPlan::ScanThenFilter { .. }
+        | NodeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 

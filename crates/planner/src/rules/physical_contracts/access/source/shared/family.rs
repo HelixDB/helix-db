@@ -33,6 +33,9 @@ pub(in crate::rules) enum AccessSourceParts<'a, Plan> {
         source: &'a Plan,
         residual: &'a ir::PredicatePlan,
     },
+    /// Index-only branch sets, each with the residual its own rows must
+    /// satisfy.
+    BranchResidualUnion(Vec<(&'a Plan, Option<&'a ir::PredicatePlan>)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,6 +9,7 @@ mod label_domain;
 mod membership;
 mod node;
 mod shared;
+mod translate;
 
 use self::contracts::{
     AccessFilterIndexApplication, AccessFilterIndexRejection, PartialIndexFilterApplication,
@@ -40,8 +41,10 @@ pub(in crate::rules) fn index_access_filter(
 
 /// The index rewrite a source filter must take because a property index
 /// serves at least one of its conjuncts: the full rewrite when indexes answer
-/// the whole predicate, otherwise the intersection of every index-served
-/// conjunct with the rest as a residual filter.
+/// the whole predicate, otherwise its recursive translation (`AND` into
+/// intersection, `OR` into union), in which each branch intersects its
+/// index-served conjuncts and keeps only the rest as its own residual. Only a
+/// disjunction with a branch no index narrows stays a per-row filter.
 ///
 /// A filter the source already answers exactly, such as `a == 1` over the
 /// `a == 1` equality lookup, is dropped: the result is the unchanged source,
@@ -77,12 +80,24 @@ pub(in crate::rules) fn required_index_access_filter(
     };
     full.or_else(|| match filter.access() {
         logical::AccessPath::Node(path) => partial_index_application_rewrite(
-            node::partial_index_filter(path, &predicate, &label, indexes, planner_limits),
+            translate::translated_index_filter::<node::NodeIndexFamily>(
+                path,
+                &predicate,
+                &label,
+                indexes,
+                planner_limits,
+            ),
             |source| logical::AccessPath::Node(logical::NodeAccessPath::new(source)),
             filter.access(),
         ),
         logical::AccessPath::Edge(path) => partial_index_application_rewrite(
-            edge::partial_index_filter(path, &predicate, &label, indexes, planner_limits),
+            translate::translated_index_filter::<edge::EdgeIndexFamily>(
+                path,
+                &predicate,
+                &label,
+                indexes,
+                planner_limits,
+            ),
             |source| logical::AccessPath::Edge(logical::EdgeAccessPath::new(source)),
             filter.access(),
         ),
@@ -140,7 +155,8 @@ fn partial_index_application_rewrite<T>(
         PartialIndexFilterApplication::NotApplicable(
             PartialIndexFilterRejection::NoLabel
             | PartialIndexFilterRejection::NotConjunction
-            | PartialIndexFilterRejection::NoIndexedConjunct,
+            | PartialIndexFilterRejection::NoIndexedConjunct
+            | PartialIndexFilterRejection::ResidualBranchesUnrepresentable,
         ) => AccessFilterRewrite::NotApplicable,
     }
 }

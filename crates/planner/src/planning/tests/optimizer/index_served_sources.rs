@@ -127,6 +127,22 @@ fn indexed_predicates() -> Vec<Predicate> {
             Predicate::or(vec![Predicate::eq("p0", 1), Predicate::eq("p1", 2)]),
         ]),
         Predicate::eq("p0", PropertyValue::Null),
+        // Partly indexed disjunctions: each branch reads its own index and
+        // evaluates only its unindexed conjuncts.
+        Predicate::or(vec![
+            Predicate::and(vec![Predicate::eq("p0", 0), Predicate::gte("rank", 3)]),
+            Predicate::eq("p1", 0),
+        ]),
+        Predicate::and(vec![
+            Predicate::eq("p2", 4),
+            Predicate::or(vec![
+                Predicate::and(vec![
+                    Predicate::eq("p0", 1),
+                    Predicate::contains("title", "x"),
+                ]),
+                Predicate::eq_param("p1", "v1"),
+            ]),
+        ]),
     ]);
     predicates
 }
@@ -331,4 +347,31 @@ fn source_filters_without_an_index_served_conjunct_scan() {
             }
         }
     }
+}
+
+#[test]
+fn wide_disjunctions_over_many_indexes_plan_one_union() {
+    // A thousand branches over a thousand indexed properties stay one index
+    // union, and planning them stays bounded.
+    let properties = (0..1_000).map(|n| format!("q{n}")).collect::<Vec<_>>();
+    let planner_ctx =
+        ctx(properties
+            .iter()
+            .fold(IndexCatalogSnapshot::default(), |indexes, property| {
+                indexes.with_node_eq(ScopedPropertyKey::try_new("Item", property).unwrap())
+            }));
+    let predicate = Predicate::or(
+        properties
+            .iter()
+            .map(|property| Predicate::eq(property.as_str(), 1))
+            .collect(),
+    );
+    let plan = executable_traversal(
+        g().n_with_label_where("Item", predicate).values(vec!["q0"]),
+        planner_ctx.clone(),
+    );
+    let statistics = crate::diagnostics::analyze(&plan, &planner_ctx).statistics;
+    assert!(!plan.metrics().guardrail_hit);
+    assert_eq!(statistics.node_accesses.label_scans, 0);
+    assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
 }

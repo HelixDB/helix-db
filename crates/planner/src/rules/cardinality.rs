@@ -509,6 +509,33 @@ fn node_count_plans(
                 window,
             })
         }
+        // Each branch counts its own index set, filtered by its residual;
+        // the union counts a row several branches accept once.
+        ir::NodeAccessPlan::BranchResidualUnion(branches) => {
+            let mut cursors = branches
+                .as_ref()
+                .iter()
+                .map(|branch| {
+                    let cursor = node_cursor(branch.source().as_ref(), rule)?;
+                    Ok(match branch.residual() {
+                        Some(residual) => exec::ExecCountCursorPlan::Filter {
+                            input: Box::new(cursor),
+                            predicate: residual.clone(),
+                        },
+                        None => cursor,
+                    })
+                })
+                .collect::<Result<Vec<_>, RuleRejection>>()?;
+            let driver = cursors.remove(0);
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::Union {
+                    driver: Box::new(driver),
+                    rest: ir::AtLeast::<_, 1>::try_from_vec(cursors)
+                        .expect("a branch residual union has at least two branches"),
+                },
+                window,
+            })
+        }
     };
     Ok(vec![plan])
 }
@@ -594,6 +621,33 @@ fn edge_count_plans(
                 cursor: exec::ExecCountCursorPlan::Filter {
                     input: Box::new(edge_cursor(source.as_ref(), rule)?),
                     predicate: residual.clone(),
+                },
+                window,
+            })
+        }
+        // Each branch counts its own index set, filtered by its residual;
+        // the union counts a row several branches accept once.
+        ir::EdgeAccessPlan::BranchResidualUnion(branches) => {
+            let mut cursors = branches
+                .as_ref()
+                .iter()
+                .map(|branch| {
+                    let cursor = edge_cursor(branch.source().as_ref(), rule)?;
+                    Ok(match branch.residual() {
+                        Some(residual) => exec::ExecCountCursorPlan::Filter {
+                            input: Box::new(cursor),
+                            predicate: residual.clone(),
+                        },
+                        None => cursor,
+                    })
+                })
+                .collect::<Result<Vec<_>, RuleRejection>>()?;
+            let driver = cursors.remove(0);
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::Union {
+                    driver: Box::new(driver),
+                    rest: ir::AtLeast::<_, 1>::try_from_vec(cursors)
+                        .expect("a branch residual union has at least two branches"),
                 },
                 window,
             })
@@ -1061,7 +1115,8 @@ fn node_bitmap_expr(
         | ir::NodeAccessPlan::RangeIndex { .. }
         | ir::NodeAccessPlan::VectorSearch { .. }
         | ir::NodeAccessPlan::TextSearch { .. }
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => Ok(None),
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => Ok(None),
     }
 }
 
@@ -1094,7 +1149,8 @@ fn edge_bitmap_expr(
         | ir::EdgeAccessPlan::RangeIndex { .. }
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => Ok(None),
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => Ok(None),
     }
 }
 

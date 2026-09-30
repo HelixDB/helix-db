@@ -109,6 +109,56 @@ pub(super) fn access_set_contract(
     )
 }
 
+/// Physical contract of a union of index-only branch sets, each filtered by
+/// its own residual.
+///
+/// Branch sets are read concurrently. A residual branch reads the records of
+/// its own set's rows only, and every accepted row is materialized once. No
+/// row outside the branch sets is ever read, so the contract never prices a
+/// scan.
+pub(super) fn branch_residual_union_contract(
+    element: properties::ElementKind,
+    branches: Vec<(AccessPhysicalContract, Option<&crate::ir::PredicatePlan>)>,
+    storage: &cost::StorageCostProfile,
+) -> AccessPhysicalContract {
+    let rows = set_union_estimated_rows(
+        &branches
+            .iter()
+            .map(|(branch, _)| branch.estimated_rows)
+            .collect::<Vec<_>>(),
+    );
+    let delivered = access_delivered_with(
+        element,
+        set_union_cardinality(
+            &branches
+                .iter()
+                .map(|(branch, _)| branch.delivered.clone())
+                .collect::<Vec<_>>(),
+        ),
+    );
+    let reads = storage.parallel_reads(
+        &branches
+            .iter()
+            .map(|(branch, _)| branch.secondary_id_cost().unwrap_or(branch.cost))
+            .collect::<Vec<_>>(),
+    );
+    let residuals = branches
+        .iter()
+        .filter_map(|(branch, residual)| {
+            residual
+                .map(|residual| storage.residual_filter(residual.as_ref(), branch.estimated_rows))
+        })
+        .fold(cost::CostVector::ZERO, cost::CostVector::serial);
+    AccessPhysicalContract::new(
+        physical::PhysicalAccess::BranchResidualUnion,
+        delivered,
+        reads
+            .serial(residuals)
+            .serial(storage.secondary_row_materialization(rows)),
+        rows,
+    )
+}
+
 pub(super) fn set_intersection_cardinality(
     children: &[properties::DeliveredProperties],
 ) -> properties::CardinalityBounds {

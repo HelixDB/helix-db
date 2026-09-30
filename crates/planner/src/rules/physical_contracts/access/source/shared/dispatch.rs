@@ -75,6 +75,18 @@ where
             let child = access_contract::<F>(source, storage, stats);
             filter::scan_then_filter_contract(child, residual, storage)
         }
+        family::AccessSourceParts::BranchResidualUnion(branches) => {
+            sets::branch_residual_union_contract(
+                element,
+                branches
+                    .into_iter()
+                    .map(|(source, residual)| {
+                        (access_contract::<F>(source, storage, stats), residual)
+                    })
+                    .collect(),
+                storage,
+            )
+        }
     }
 }
 

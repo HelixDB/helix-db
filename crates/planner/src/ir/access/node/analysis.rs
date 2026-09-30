@@ -24,6 +24,14 @@ pub(super) fn hard_cardinality_upper_bound(source: &NodeAccessPlan) -> Option<us
             plan.hard_cardinality_upper_bound()
                 .map(|upper| sum.saturating_add(upper))
         }),
+        NodeAccessPlan::BranchResidualUnion(branches) => {
+            branches.as_ref().iter().try_fold(0usize, |sum, branch| {
+                branch
+                    .source()
+                    .hard_cardinality_upper_bound()
+                    .map(|upper| sum.saturating_add(upper))
+            })
+        }
         NodeAccessPlan::FromParam { .. }
         | NodeAccessPlan::FromVar { .. }
         | NodeAccessPlan::AllScan
@@ -39,6 +47,12 @@ pub(super) fn common_label(source: &NodeAccessPlan) -> Option<&ir::NonEmptyStrin
         NodeAccessPlan::Intersect(plans) | NodeAccessPlan::Union(plans) => {
             super::super::common_source_label(plans.iter().map(NodeAccessSourcePlan::common_label))
         }
+        NodeAccessPlan::BranchResidualUnion(branches) => super::super::common_source_label(
+            branches
+                .as_ref()
+                .iter()
+                .map(|branch| branch.source().common_label()),
+        ),
         plan => plan.direct_label(),
     }
 }
@@ -58,7 +72,8 @@ pub(super) fn secondary_set_eligible(source: &NodeAccessPlan) -> bool {
         | NodeAccessPlan::LabelScan { .. }
         | NodeAccessPlan::VectorSearch { .. }
         | NodeAccessPlan::TextSearch { .. }
-        | NodeAccessPlan::ScanThenFilter { .. } => false,
+        | NodeAccessPlan::ScanThenFilter { .. }
+        | NodeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
@@ -90,7 +105,8 @@ pub(super) fn set_canonicalization_candidate(source: &NodeAccessPlan) -> bool {
         | NodeAccessPlan::RangeIndex { .. }
         | NodeAccessPlan::VectorSearch { .. }
         | NodeAccessPlan::TextSearch { .. }
-        | NodeAccessPlan::ScanThenFilter { .. } => false,
+        | NodeAccessPlan::ScanThenFilter { .. }
+        | NodeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
@@ -113,7 +129,8 @@ pub(super) fn set_subsumption_candidate(source: &NodeAccessPlan) -> bool {
         | NodeAccessPlan::RangeIndex { .. }
         | NodeAccessPlan::VectorSearch { .. }
         | NodeAccessPlan::TextSearch { .. }
-        | NodeAccessPlan::ScanThenFilter { .. } => false,
+        | NodeAccessPlan::ScanThenFilter { .. }
+        | NodeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
