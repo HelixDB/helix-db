@@ -976,6 +976,7 @@ async fn exact_null_and_nan_row_access_never_enter_bitmap_dispatch() {
 
     let mut expected = vec![explicit_null, absent];
     expected.sort_unstable();
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
     assert_eq!(
         run_node_access(
             &db,
@@ -990,6 +991,11 @@ async fn exact_null_and_nan_row_access_never_enter_bitmap_dispatch() {
         .await,
         ExecutionValue::Scalars(expected.into_iter().map(ExecutionScalar::NodeId).collect())
     );
+    // No Active generation: the three `User` rows are the candidates, and
+    // the `Other` row is never read.
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.scans, 0);
+    assert_eq!(metrics.graph_reads, 3);
 
     crate::index_lifecycle::secondary::reset_equality_read_metrics();
     for nan in [PropertyValue::F32(f32::NAN), PropertyValue::F64(f64::NAN)] {
@@ -1048,6 +1054,7 @@ async fn dynamic_equality_is_the_only_runtime_classifier_for_null_nan_and_indexe
         .await,
         ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(active)])
     );
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
     assert_eq!(
         run_node_access_with_params(
             &db,
@@ -1057,6 +1064,11 @@ async fn dynamic_equality_is_the_only_runtime_classifier_for_null_nan_and_indexe
         .await,
         ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(null)])
     );
+    // A null binding reads the lane once and verifies only the label row
+    // outside it.
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.scans, 1);
+    assert_eq!(metrics.graph_reads, 1);
     assert_eq!(
         run_node_access_with_params(
             &db,
@@ -1182,6 +1194,273 @@ async fn dynamic_membership_batches_safe_values_and_falls_back_authoritatively()
             ExecutionScalar::NodeId(paused),
         ])
     );
+}
+
+#[tokio::test]
+async fn null_equality_reads_only_label_rows_outside_the_lane() {
+    let db = test_support::open_db("access-null-equality-label-complement").await;
+    let mut active = Vec::new();
+    for _ in 0..6 {
+        active.push(
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::from("active"))],
+            )
+            .await,
+        );
+    }
+    let explicit_null =
+        test_support::add_node_with_properties(&db, "User", vec![("status", PropertyValue::Null)])
+            .await;
+    let missing = test_support::add_node_with_properties(&db, "User", Vec::new()).await;
+    for _ in 0..5 {
+        test_support::add_node_with_properties(&db, "Other", vec![("status", PropertyValue::Null)])
+            .await;
+    }
+    let from = active[0];
+    let to = active[1];
+    let mut active_edges = Vec::new();
+    for _ in 0..3 {
+        active_edges.push(
+            test_support::add_edge_with_properties(
+                &db,
+                from,
+                to,
+                "FOLLOWS",
+                vec![("status", PropertyValue::from("active"))],
+            )
+            .await,
+        );
+    }
+    let null_edge = test_support::add_edge_with_properties(
+        &db,
+        from,
+        to,
+        "FOLLOWS",
+        vec![("status", PropertyValue::Null)],
+    )
+    .await;
+    for _ in 0..4 {
+        test_support::add_edge_with_properties(
+            &db,
+            from,
+            to,
+            "LIKES",
+            vec![("status", PropertyValue::Null)],
+        )
+        .await;
+    }
+    let node_rows = active.iter().map(|id| ("active", *id)).collect::<Vec<_>>();
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        70,
+        &node_rows,
+    )
+    .await;
+    let edge_rows = active_edges
+        .iter()
+        .map(|id| ("active", *id))
+        .collect::<Vec<_>>();
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::edge_equality("FOLLOWS", "status").unwrap(),
+        71,
+        &edge_rows,
+    )
+    .await;
+
+    let null =
+        || ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(PropertyValue::Null).unwrap());
+    let param = test_support::name("late_status");
+    let node_index = catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status"));
+    let node_key = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+    let mut with_nulls = vec![explicit_null, missing];
+    with_nulls.sort_unstable();
+    let mut active_or_null = active
+        .iter()
+        .copied()
+        .chain(with_nulls.clone())
+        .collect::<Vec<_>>();
+    active_or_null.sort_unstable();
+    // A literal, a bound parameter (a `ForEach` field binds the same runtime
+    // equality), an `IN` list with null, and a parameter list with null.
+    let node_cases = [
+        (
+            exec::ExecNodeAccessPlan::exact_equality(node_index.clone(), node_key.clone(), null()),
+            context::ParamBindings::default(),
+            with_nulls.clone(),
+        ),
+        (
+            exec::ExecNodeAccessPlan::DynamicEquality {
+                index: node_index.clone(),
+                key: node_key.clone(),
+                param: param.clone(),
+            },
+            context::ParamBindings::default().with_value(param.clone(), PropertyValue::Null),
+            with_nulls.clone(),
+        ),
+        (
+            exec::ExecNodeAccessPlan::SecondarySet {
+                set: exec::ExecNodeSecondarySetPlan::exact_equalities(
+                    node_index.clone(),
+                    node_key.clone(),
+                    ir::AtLeast::try_from_vec(vec![
+                        null(),
+                        ir::IndexValue::Literal(
+                            ir::SecondaryIndexLiteral::new(PropertyValue::from("active")).unwrap(),
+                        ),
+                    ])
+                    .unwrap(),
+                ),
+            },
+            context::ParamBindings::default(),
+            active_or_null.clone(),
+        ),
+        (
+            exec::ExecNodeAccessPlan::DynamicMembership {
+                index: node_index.clone(),
+                key: node_key.clone(),
+                values: ir::RuntimeEqualitySet::new(
+                    param.clone(),
+                    std::num::NonZeroUsize::new(2).unwrap(),
+                ),
+            },
+            context::ParamBindings::default().with_value(
+                param.clone(),
+                PropertyValue::Array(vec![PropertyValue::Null, PropertyValue::from("active")]),
+            ),
+            active_or_null,
+        ),
+    ];
+    for (plan, params, expected) in node_cases {
+        crate::index_lifecycle::secondary::reset_equality_read_metrics();
+        assert_eq!(
+            run_node_access_with_params(&db, plan, params).await,
+            ExecutionValue::Scalars(expected.into_iter().map(ExecutionScalar::NodeId).collect())
+        );
+        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+        // One lane scan, and only the two label rows outside it are read:
+        // never a row of another label.
+        assert_eq!(metrics.scans, 1);
+        assert_eq!(metrics.graph_reads, 2);
+    }
+
+    let edge_index =
+        catalog::EdgeEqualityIndexMeta::new(test_support::name("edge_eq:FOLLOWS:status"));
+    let edge_key = catalog::ScopedPropertyKey::try_new("FOLLOWS", "status").unwrap();
+    for (plan, params) in [
+        (
+            exec::ExecEdgeAccessPlan::exact_equality(edge_index.clone(), edge_key.clone(), null()),
+            context::ParamBindings::default(),
+        ),
+        (
+            exec::ExecEdgeAccessPlan::DynamicEquality {
+                index: edge_index,
+                key: edge_key,
+                param: param.clone(),
+            },
+            context::ParamBindings::default().with_value(param.clone(), PropertyValue::Null),
+        ),
+    ] {
+        crate::index_lifecycle::secondary::reset_equality_read_metrics();
+        assert_eq!(
+            run_edge_access_with_params(&db, plan, params).await,
+            ExecutionValue::Scalars(vec![ExecutionScalar::EdgeId(null_edge)])
+        );
+        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+        assert_eq!(metrics.scans, 1);
+        assert_eq!(metrics.graph_reads, 1);
+    }
+
+    // Without an Active generation every label row is a candidate, still
+    // never a row of another label.
+    let unindexed = test_support::open_db("access-null-equality-without-lane").await;
+    test_support::add_node_with_properties(
+        &unindexed,
+        "User",
+        vec![("status", PropertyValue::from("active"))],
+    )
+    .await;
+    let mut expected = vec![
+        test_support::add_node_with_properties(
+            &unindexed,
+            "User",
+            vec![("status", PropertyValue::Null)],
+        )
+        .await,
+        test_support::add_node_with_properties(&unindexed, "User", Vec::new()).await,
+    ];
+    expected.sort_unstable();
+    test_support::add_node_with_properties(
+        &unindexed,
+        "Other",
+        vec![("status", PropertyValue::Null)],
+    )
+    .await;
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    assert_eq!(
+        run_node_access(
+            &unindexed,
+            exec::ExecNodeAccessPlan::exact_equality(node_index, node_key, null()),
+        )
+        .await,
+        ExecutionValue::Scalars(expected.into_iter().map(ExecutionScalar::NodeId).collect())
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.scans, 0);
+    assert_eq!(metrics.graph_reads, 3);
+}
+
+#[tokio::test]
+async fn unsupported_and_oversized_equality_values_return_verified_label_rows() {
+    let db = test_support::open_db("access-unencodable-equality-values").await;
+    let active = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("status", PropertyValue::from("active"))],
+    )
+    .await;
+    test_support::add_node_with_properties(&db, "User", vec![("status", PropertyValue::Null)])
+        .await;
+    test_support::add_node_with_properties(&db, "Other", Vec::new()).await;
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        72,
+        &[("active", active)],
+    )
+    .await;
+    let param = test_support::name("late_status");
+    let plan = exec::ExecNodeAccessPlan::DynamicEquality {
+        index: catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status")),
+        key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+        param: param.clone(),
+    };
+    for value in [
+        PropertyValue::Object(Default::default()),
+        PropertyValue::Array(vec![PropertyValue::I64(1)]),
+        PropertyValue::String("x".repeat(
+            crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN,
+        )),
+    ] {
+        crate::index_lifecycle::secondary::reset_equality_read_metrics();
+        // No stored row can hold a value no lane can encode, so the verified
+        // label rows outside the lane answer it: empty, and never an error.
+        assert_eq!(
+            run_node_access_with_params(
+                &db,
+                plan.clone(),
+                context::ParamBindings::default().with_value(param.clone(), value),
+            )
+            .await,
+            ExecutionValue::Scalars(Vec::new())
+        );
+        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+        assert_eq!(metrics.scans, 1);
+        assert_eq!(metrics.graph_reads, 1);
+    }
 }
 
 #[tokio::test]

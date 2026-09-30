@@ -278,9 +278,10 @@ impl<'db> ExecutionContext<'db> {
 
     /// Whether `set` resolves from index reads alone in this request.
     ///
-    /// Literal null equality, runtime parameters that bind null or values
-    /// without an exact index encoding, and runtime domains over their bound
-    /// all require an authoritative keyspace scan, so they return `false`.
+    /// Literal null equality, and runtime parameters or domains that bind null
+    /// or values without an exact index encoding, verify the label rows
+    /// outside the equality lane record by record, so they return `false`. A
+    /// runtime domain of indexed values is index-served at any size.
     /// Range scans verify every in-range record of the label with its own
     /// authoritative read, and runtime bounds may have no range encoding at
     /// all, so any set with a range scan returns `false` as well.
@@ -383,22 +384,22 @@ impl<'db> ExecutionContext<'db> {
                     let read = self.verified_node_unique_owner(lookup, verification);
                     Ok(SecondaryIds::Unordered(read.await?.into_iter().collect()))
                 }
-                exec::ExecNodeSecondarySetPlan::AuthoritativeScan(predicate) => {
+                exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                ) => self
+                    .null_equality_rows(crate::index_lifecycle::IndexElementKind::Node, key, None)
+                    .await
+                    .map(SecondaryIds::Unordered),
+                exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
                     let ids = read.await?;
                     let mut matches = RoaringTreemap::new();
                     for id in ids {
                         let row =
                             super::super::ExecutionRow::current(super::super::ElementRef::Node(id));
-                        let accepted = match predicate {
-                            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                                self.scoped_null_matches(&row, key).await?
-                            }
-                            exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                self.eval_predicate(&row, predicate.predicate()).await?
-                            }
-                        };
-                        if accepted {
+                        if self.eval_predicate(&row, predicate.predicate()).await? {
                             matches.insert(id);
                         }
                     }
@@ -422,6 +423,7 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
                         values,
+                        reads,
                     )
                     .await
                     .map(SecondaryIds::Unordered)
@@ -437,18 +439,53 @@ impl<'db> ExecutionContext<'db> {
                     )
                     .await
                     .map(SecondaryIds::Ordered),
-                exec::ExecNodeSecondarySetPlan::Intersect { driver, rest } => intersection(
-                    self.read_children(
-                        core::iter::once(driver.as_ref())
-                            .chain(rest.iter())
-                            .collect(),
-                        reads,
-                        |child, reads| self.node_secondary_ids(child, None, reads),
-                    )
-                    .map_ok(SecondaryIds::into_bitmap),
-                )
-                .await
-                .map(SecondaryIds::Unordered),
+                exec::ExecNodeSecondarySetPlan::Intersect { driver, rest } => {
+                    // Null equalities verify only the rows the other children
+                    // keep, so those children are read first.
+                    let (nulls, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                        .chain(rest.iter())
+                        .partition(|child| {
+                            matches!(
+                                child,
+                                exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. }
+                                )
+                            )
+                        });
+                    let mut ids = if others.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            intersection(
+                                self.read_children(others, reads, |child, reads| {
+                                    self.node_secondary_ids(child, None, reads)
+                                })
+                                .map_ok(SecondaryIds::into_bitmap),
+                            )
+                            .await?,
+                        )
+                    };
+                    for null in nulls {
+                        let exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                        ) = null
+                        else {
+                            unreachable!("partitioned null equalities");
+                        };
+                        if ids.as_ref().is_some_and(RoaringTreemap::is_empty) {
+                            break;
+                        }
+                        ids = Some(
+                            self.null_equality_rows(
+                                crate::index_lifecycle::IndexElementKind::Node,
+                                key,
+                                ids.as_ref(),
+                            )
+                            .await?,
+                        );
+                    }
+                    Ok(SecondaryIds::Unordered(ids.unwrap_or_default()))
+                }
                 exec::ExecNodeSecondarySetPlan::Union { driver, rest } => union(
                     self.read_children(
                         core::iter::once(driver.as_ref())
@@ -497,22 +534,22 @@ impl<'db> ExecutionContext<'db> {
                     .edge_bitmap(bitmap, reads)
                     .await
                     .map(SecondaryIds::Unordered),
-                exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(predicate) => {
+                exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                ) => self
+                    .null_equality_rows(crate::index_lifecycle::IndexElementKind::Edge, key, None)
+                    .await
+                    .map(SecondaryIds::Unordered),
+                exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
                     let ids = read.await?;
                     let mut matches = RoaringTreemap::new();
                     for id in ids {
                         let row =
                             super::super::ExecutionRow::current(super::super::ElementRef::Edge(id));
-                        let accepted = match predicate {
-                            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                                self.scoped_null_matches(&row, key).await?
-                            }
-                            exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                self.eval_predicate(&row, predicate.predicate()).await?
-                            }
-                        };
-                        if accepted {
+                        if self.eval_predicate(&row, predicate.predicate()).await? {
                             matches.insert(id);
                         }
                     }
@@ -536,6 +573,7 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
                         values,
+                        reads,
                     )
                     .await
                     .map(SecondaryIds::Unordered)
@@ -551,18 +589,53 @@ impl<'db> ExecutionContext<'db> {
                     )
                     .await
                     .map(SecondaryIds::Ordered),
-                exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest } => intersection(
-                    self.read_children(
-                        core::iter::once(driver.as_ref())
-                            .chain(rest.iter())
-                            .collect(),
-                        reads,
-                        |child, reads| self.edge_secondary_ids(child, None, reads),
-                    )
-                    .map_ok(SecondaryIds::into_bitmap),
-                )
-                .await
-                .map(SecondaryIds::Unordered),
+                exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest } => {
+                    // Null equalities verify only the rows the other children
+                    // keep, so those children are read first.
+                    let (nulls, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                        .chain(rest.iter())
+                        .partition(|child| {
+                            matches!(
+                                child,
+                                exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { .. }
+                                )
+                            )
+                        });
+                    let mut ids = if others.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            intersection(
+                                self.read_children(others, reads, |child, reads| {
+                                    self.edge_secondary_ids(child, None, reads)
+                                })
+                                .map_ok(SecondaryIds::into_bitmap),
+                            )
+                            .await?,
+                        )
+                    };
+                    for null in nulls {
+                        let exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                        ) = null
+                        else {
+                            unreachable!("partitioned null equalities");
+                        };
+                        if ids.as_ref().is_some_and(RoaringTreemap::is_empty) {
+                            break;
+                        }
+                        ids = Some(
+                            self.null_equality_rows(
+                                crate::index_lifecycle::IndexElementKind::Edge,
+                                key,
+                                ids.as_ref(),
+                            )
+                            .await?,
+                        );
+                    }
+                    Ok(SecondaryIds::Unordered(ids.unwrap_or_default()))
+                }
                 exec::ExecEdgeSecondarySetPlan::Union { driver, rest } => union(
                     self.read_children(
                         core::iter::once(driver.as_ref())

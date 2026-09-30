@@ -388,6 +388,7 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         &plan.key,
                         &plan.values,
+                        access::PARALLEL_INDEX_READS,
                     )
                     .await?;
                 window.apply(ids.len() as usize)
@@ -400,6 +401,7 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         &plan.key,
                         &plan.values,
+                        access::PARALLEL_INDEX_READS,
                     )
                     .await?;
                 window.apply(ids.len() as usize)
@@ -577,6 +579,18 @@ impl<'db> ExecutionContext<'db> {
         if threshold == Some(0) {
             return Ok(0);
         }
+        let predicate = match predicate {
+            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
+                let read = self.null_equality_rows(
+                    crate::index_lifecycle::IndexElementKind::Node,
+                    key,
+                    None,
+                );
+                let rows = usize::try_from(read.await?.len()).unwrap_or(usize::MAX);
+                return Ok(threshold.map_or(rows, |threshold| rows.min(threshold)));
+            }
+            exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => predicate,
+        };
         let keyspace = exec::ElementKeyspace::NodeProperty;
         let mut iter = self
             .open_raw_range(
@@ -599,17 +613,8 @@ impl<'db> ExecutionContext<'db> {
                 continue;
             };
             let row = ExecutionRow::current(ElementRef::Node(id));
-            let matches = match predicate {
-                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                    let read = self.scoped_null_matches(&row, key);
-                    read.await?
-                }
-                exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                    let read = self.eval_predicate(&row, predicate.predicate());
-                    read.await?
-                }
-            };
-            if matches {
+            let read = self.eval_predicate(&row, predicate.predicate());
+            if read.await? {
                 accepted = accepted.saturating_add(1);
             }
         }
@@ -624,6 +629,18 @@ impl<'db> ExecutionContext<'db> {
         if threshold == Some(0) {
             return Ok(0);
         }
+        let predicate = match predicate {
+            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
+                let read = self.null_equality_rows(
+                    crate::index_lifecycle::IndexElementKind::Edge,
+                    key,
+                    None,
+                );
+                let rows = usize::try_from(read.await?.len()).unwrap_or(usize::MAX);
+                return Ok(threshold.map_or(rows, |threshold| rows.min(threshold)));
+            }
+            exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => predicate,
+        };
         let keyspace = exec::ElementKeyspace::EdgeEndpoints;
         let mut iter = self
             .open_raw_range(
@@ -646,42 +663,12 @@ impl<'db> ExecutionContext<'db> {
                 continue;
             };
             let row = ExecutionRow::current(ElementRef::Edge(id));
-            let matches = match predicate {
-                exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                    let read = self.scoped_null_matches(&row, key);
-                    read.await?
-                }
-                exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                    let read = self.eval_predicate(&row, predicate.predicate());
-                    read.await?
-                }
-            };
-            if matches {
+            let read = self.eval_predicate(&row, predicate.predicate());
+            if read.await? {
                 accepted = accepted.saturating_add(1);
             }
         }
         Ok(accepted)
-    }
-
-    pub(in crate::execution::interpreter) async fn scoped_null_matches(
-        &self,
-        row: &ExecutionRow,
-        key: &helix_planner::catalog::ScopedPropertyKey,
-    ) -> Result<bool> {
-        let read = self.row_properties(row);
-        let properties = read.await?;
-        if properties
-            .iter()
-            .find(|property| property.name == "$label")
-            .and_then(|property| property.value.as_str())
-            != Some(key.label.as_ref())
-        {
-            return Ok(false);
-        }
-        Ok(properties
-            .iter()
-            .find(|property| property.name == key.property.as_ref())
-            .is_none_or(|property| matches!(property.value, DbPropertyValue::Null)))
     }
 
     /// Execute the exact unique-owner primitive and verify the authoritative row.
@@ -1089,6 +1076,7 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
                     )
                     .await?
                     .len() as usize
@@ -1099,6 +1087,7 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
                     )
                     .await?
                     .len() as usize
@@ -1344,45 +1333,59 @@ impl<'db> ExecutionContext<'db> {
                         .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
                         .collect())
                 }
-                CountCursorLeaf::NodeAuthoritativeScan(predicate) => {
+                CountCursorLeaf::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                ) => {
+                    let read = self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        None,
+                    );
+                    let ids = read.await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                        .collect())
+                }
+                CountCursorLeaf::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
                     let ids = read.await?;
                     let mut rows = Vec::new();
                     for id in ids {
                         let row = ExecutionRow::current(ElementRef::Node(id));
-                        let matches = match predicate {
-                            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                                let read = self.scoped_null_matches(&row, key);
-                                read.await?
-                            }
-                            exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                let read = self.eval_predicate(&row, predicate.predicate());
-                                read.await?
-                            }
-                        };
-                        if matches {
+                        let read = self.eval_predicate(&row, predicate.predicate());
+                        if read.await? {
                             rows.push(row);
                         }
                     }
                     Ok(rows)
                 }
-                CountCursorLeaf::EdgeAuthoritativeScan(predicate) => {
+                CountCursorLeaf::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                ) => {
+                    let read = self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        None,
+                    );
+                    let ids = read.await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
+                        .collect())
+                }
+                CountCursorLeaf::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
                     let ids = read.await?;
                     let mut rows = Vec::new();
                     for id in ids {
                         let row = ExecutionRow::current(ElementRef::Edge(id));
-                        let matches = match predicate {
-                            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                                let read = self.scoped_null_matches(&row, key);
-                                read.await?
-                            }
-                            exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                let read = self.eval_predicate(&row, predicate.predicate());
-                                read.await?
-                            }
-                        };
-                        if matches {
+                        let read = self.eval_predicate(&row, predicate.predicate());
+                        if read.await? {
                             rows.push(row);
                         }
                     }
@@ -1560,6 +1563,7 @@ impl<'db> ExecutionContext<'db> {
                             crate::index_lifecycle::IndexElementKind::Node,
                             key,
                             values,
+                            access::PARALLEL_INDEX_READS,
                         )
                         .await?;
                     Ok(ids
@@ -1574,6 +1578,7 @@ impl<'db> ExecutionContext<'db> {
                             crate::index_lifecycle::IndexElementKind::Edge,
                             key,
                             values,
+                            access::PARALLEL_INDEX_READS,
                         )
                         .await?;
                     Ok(ids
@@ -2324,6 +2329,8 @@ mod tests {
                 ExecutionValue::Count(expected)
             );
         }
+        // No stored value can equal a value no lane entry can hold: the
+        // verified label rows outside the lane answer it, never an error.
         for value in [
             PropertyValue::Array(Vec::new()),
             PropertyValue::String("x".repeat(
@@ -2331,13 +2338,16 @@ mod tests {
                     + 1,
             )),
         ] {
-            assert!(execute_direct_count_with_params(
-                &db,
-                node.clone(),
-                context::ParamBindings::default().with_value(param.clone(), value),
-            )
-            .await
-            .is_err());
+            assert_eq!(
+                execute_direct_count_with_params(
+                    &db,
+                    node.clone(),
+                    context::ParamBindings::default().with_value(param.clone(), value),
+                )
+                .await
+                .unwrap(),
+                ExecutionValue::Count(0)
+            );
         }
 
         let unique =

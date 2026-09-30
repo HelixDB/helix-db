@@ -118,6 +118,94 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 
+    /// Rows of `key.label` whose `key.property` no Active equality entry holds
+    /// and whose value (`None` when missing) passes `accept`, narrowed to
+    /// `within` when it is given.
+    ///
+    /// This serves null equality and query values no lane can encode. It reads
+    /// the label bitmap and the Active lane concurrently, then verifies only
+    /// the label rows outside the lane, in record batches, so it never reads a
+    /// row of another label. A property with no Active equality generation
+    /// verifies every label row.
+    pub(in crate::execution::interpreter) async fn unindexed_label_rows(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyKey,
+        accept: impl Fn(Option<&DbPropertyValue>) -> bool,
+        within: Option<&roaring::RoaringTreemap>,
+    ) -> Result<roaring::RoaringTreemap> {
+        let identity = secondary_identity(
+            crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
+            element_kind,
+            key.label.as_ref(),
+            key.property.as_ref(),
+        )?;
+        let label = crate::index_lifecycle::secondary::UnindexedLabel {
+            scope: self.tenant_scope,
+            kind: element_kind,
+            label: key.label.as_ref(),
+            property: key.property.as_ref(),
+        };
+        if let Some(active) = self.active_write_tx() {
+            return unindexed_label_rows_in_view(self, &active.txn, &identity, label, accept, within)
+                .await;
+        }
+        if let Some(view) = self.request_read_view() {
+            return unindexed_label_rows_in_view(self, view, &identity, label, accept, within)
+                .await;
+        }
+        #[cfg(test)]
+        {
+            match self.db.storage() {
+                HelixStorage::Reader(reader) => {
+                    unindexed_label_rows_in_view(
+                        self,
+                        reader.as_ref(),
+                        &identity,
+                        label,
+                        accept,
+                        within,
+                    )
+                    .await
+                }
+                HelixStorage::Writer(writer) => {
+                    unindexed_label_rows_in_view(
+                        self,
+                        writer.db(),
+                        &identity,
+                        label,
+                        accept,
+                        within,
+                    )
+                    .await
+                }
+            }
+        }
+        #[cfg(not(test))]
+        {
+            Err(HelixDbError::InvariantViolation(
+                "unindexed label rows escaped their request read view".to_string(),
+            ))
+        }
+    }
+
+    /// Rows of `key.label` whose `key.property` is missing or null, narrowed
+    /// to `within` when it is given; see [`Self::unindexed_label_rows`].
+    pub(in crate::execution::interpreter) async fn null_equality_rows(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyKey,
+        within: Option<&roaring::RoaringTreemap>,
+    ) -> Result<roaring::RoaringTreemap> {
+        self.unindexed_label_rows(
+            element_kind,
+            key,
+            |value| value.is_none_or(|value| matches!(value, DbPropertyValue::Null)),
+            within,
+        )
+        .await
+    }
+
     /// Execute a planner-selected literal bitmap batch without key folding.
     pub(in crate::execution::interpreter) async fn lookup_managed_equality_literal_batch(
         &self,
@@ -691,6 +779,53 @@ async fn lookup_managed_equalities_in_view(
         ),
     )
     .await
+}
+
+/// Resolves the request's Active equality generation for `identity`, when
+/// there is one, and returns the verified label rows outside its lane.
+async fn unindexed_label_rows_in_view(
+    context: &ExecutionContext<'_>,
+    reader: &(impl DbReadOps + Send + Sync),
+    identity: &crate::index_lifecycle::IndexIdentity,
+    label: crate::index_lifecycle::secondary::UnindexedLabel<'_>,
+    accept: impl Fn(Option<&DbPropertyValue>) -> bool,
+    within: Option<&roaring::RoaringTreemap>,
+) -> Result<roaring::RoaringTreemap> {
+    let compatibility = context.request_read_view().map_or(
+        crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+        super::super::read_view::StableRequestReadView::storage_compatibility,
+    );
+    let loaded;
+    let handle = if let Some(active_write) = context.active_write_tx() {
+        active_write.index_context.active_handle(identity)
+    } else if let Some(catalog) = context.request_read_index_catalog() {
+        catalog.handle(identity)
+    } else {
+        crate::index_lifecycle::secondary::record_equality_point_read();
+        loaded = crate::index_lifecycle::repository::load_index_record(
+            reader,
+            context.tenant_scope,
+            identity,
+        )
+        .await?
+        .and_then(|record| {
+            crate::index_lifecycle::ActiveIndexHandle::try_from_record(
+                context.tenant_scope,
+                &record,
+            )
+        });
+        loaded.as_ref()
+    };
+    let candidates = crate::index_lifecycle::secondary::unindexed_label_rows(
+        reader,
+        label,
+        handle.map(|handle| (handle, compatibility)),
+        within,
+    )
+    .await?;
+    context.check_execution_deadline()?;
+    crate::index_lifecycle::secondary::verified_unindexed_rows(reader, label, candidates, accept)
+        .await
 }
 
 async fn lookup_managed_active_equalities_in_view(

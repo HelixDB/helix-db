@@ -547,7 +547,9 @@ async fn runtime_parameters_needing_authoritative_scans_fall_back_to_rows() {
         ))),
         Predicate::is_in_param("kind", "kinds"),
     );
-    for (values, reads) in [(vec!["A", "B"], 5), (vec!["A", "B", "C"], 8)] {
+    // A domain wider than one index union is read as several unions; it
+    // stays index-served at any size.
+    for (values, reads) in [(vec!["A", "B"], 5), (vec!["A", "B", "C"], 5)] {
         let (_, actual) = assert_matches_filter(
             &fixture,
             &domain,

@@ -1079,6 +1079,86 @@ mod tests {
     struct FailingRows;
 
     #[tokio::test]
+    async fn legacy_equality_union_null_candidates_include_v3_entries() {
+        let db = super::super::tests::test_db("secondary-legacy-null-candidates").await;
+        let handle = super::super::tests::active_read_handle(
+            &db,
+            crate::config::SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
+        )
+        .await;
+        // Entities 1 and 2 are held only by deployed V3 entries, 3 by a V4
+        // bitmap; 4 and 5 carry the label and no lane entry.
+        put_v3_equality_entry(&db, &handle, "shared", 1).await;
+        put_v3_equality_entry(&db, &handle, "other", 2).await;
+        put_v4_equality_bitmap(&db, &handle, "shared", [3]).await;
+        db.put(
+            DataKey::Data {
+                scope: handle.scope(),
+                kind: DataKeyKind::PropertyIndex(
+                    crate::encoding::indexes::PropertyIndexKey::Equality(
+                        crate::encoding::indexes::equality::EqualityIndexKey::new(
+                            crate::encoding::indexes::hash_property_name("$label"),
+                            crate::encoding::indexes::hash_property_value("User"),
+                        ),
+                    ),
+                ),
+            }
+            .to_bytes(),
+            crate::search::encode_roaring_treemap(&roaring::RoaringTreemap::from_iter(1..=5)),
+        )
+        .await
+        .unwrap();
+        let label = UnindexedLabel {
+            scope: handle.scope(),
+            kind: IndexElementKind::Node,
+            label: "User",
+            property: "email",
+        };
+
+        reset_equality_read_metrics();
+        assert_eq!(
+            unindexed_label_rows(
+                &db,
+                label,
+                Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                None,
+            )
+            .await
+            .unwrap(),
+            roaring::RoaringTreemap::from_iter([4, 5])
+        );
+        // The V4 bitmaps and the V3 entries are one scan each.
+        assert_eq!(equality_read_metrics().scans, 2);
+        assert_eq!(
+            unindexed_label_rows(
+                &db,
+                label,
+                Some((&handle, ReaderStorageCompatibility::Current)),
+                None,
+            )
+            .await
+            .unwrap(),
+            roaring::RoaringTreemap::from_iter([1, 2, 4, 5])
+        );
+        assert_eq!(
+            unindexed_label_rows(
+                &db,
+                label,
+                Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                Some(&roaring::RoaringTreemap::from_iter([2, 4])),
+            )
+            .await
+            .unwrap(),
+            roaring::RoaringTreemap::from_iter([4])
+        );
+        assert_eq!(
+            unindexed_label_rows(&db, label, None, None).await.unwrap(),
+            roaring::RoaringTreemap::from_iter(1..=5)
+        );
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn legacy_equality_reads_union_v3_entries_and_v4_bitmaps_without_duplicates() {
         let db = super::super::tests::test_db("secondary-exact-legacy-equality-union").await;
         let handle = super::super::tests::active_read_handle(

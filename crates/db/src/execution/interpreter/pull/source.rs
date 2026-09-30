@@ -148,6 +148,38 @@ impl<'a> Source<'a> {
                 false,
             )),
             Plan::Access(A::Node(
+                N::AuthoritativeScan {
+                    predicate: exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                }
+                | N::SecondarySet {
+                    set:
+                        exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                        ),
+                },
+            )) => Ok(bitmap_ids(
+                ctx.null_equality_rows(crate::index_lifecycle::IndexElementKind::Node, key, None)
+                    .await?,
+                K::NodeProperty,
+                true,
+            )),
+            Plan::Access(A::Edge(
+                E::AuthoritativeScan {
+                    predicate: exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                }
+                | E::SecondarySet {
+                    set:
+                        exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                        ),
+                },
+            )) => Ok(bitmap_ids(
+                ctx.null_equality_rows(crate::index_lifecycle::IndexElementKind::Edge, key, None)
+                    .await?,
+                K::EdgeEndpoints,
+                true,
+            )),
+            Plan::Access(A::Node(
                 N::AllScan
                 | N::AuthoritativeScan { .. }
                 | N::SecondarySet {
@@ -233,6 +265,7 @@ impl<'a> Source<'a> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
                     )
                     .await?,
                     K::NodeProperty,
@@ -246,6 +279,7 @@ impl<'a> Source<'a> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
                     )
                     .await?,
                     K::EdgeEndpoints,
@@ -514,33 +548,31 @@ impl<'a> Source<'a> {
                     ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
             };
+            // Null equality opens as verified label rows; only a predicate
+            // scan evaluates each row here.
             let accepted = match self.plan {
                 Plan::Access(exec::ExecAccessPlan::Node(
-                    exec::ExecNodeAccessPlan::AuthoritativeScan { predicate }
+                    exec::ExecNodeAccessPlan::AuthoritativeScan {
+                        predicate: exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                    }
                     | exec::ExecNodeAccessPlan::SecondarySet {
-                        set: exec::ExecNodeSecondarySetPlan::AuthoritativeScan(predicate),
+                        set:
+                            exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                                exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                            ),
                     },
-                )) => match predicate {
-                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                        ctx.scoped_null_matches(&row, key).await?
+                ))
+                | Plan::Access(exec::ExecAccessPlan::Edge(
+                    exec::ExecEdgeAccessPlan::AuthoritativeScan {
+                        predicate: exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
                     }
-                    exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                        ctx.eval_predicate(&row, predicate.predicate()).await?
-                    }
-                },
-                Plan::Access(exec::ExecAccessPlan::Edge(
-                    exec::ExecEdgeAccessPlan::AuthoritativeScan { predicate }
                     | exec::ExecEdgeAccessPlan::SecondarySet {
-                        set: exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(predicate),
+                        set:
+                            exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                                exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
+                            ),
                     },
-                )) => match predicate {
-                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                        ctx.scoped_null_matches(&row, key).await?
-                    }
-                    exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                        ctx.eval_predicate(&row, predicate.predicate()).await?
-                    }
-                },
+                )) => ctx.eval_predicate(&row, predicate.predicate()).await?,
                 Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => true,
             };
             if !accepted {

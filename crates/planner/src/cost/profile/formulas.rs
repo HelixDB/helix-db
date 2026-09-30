@@ -226,14 +226,35 @@ impl StorageCostProfile {
             .serial(self.secondary_set_operation(rows))
     }
 
-    /// Cost an authoritative graph scan used for null equality.
-    pub fn null_equality_scan(&self, scanned_rows: EstimatedRows) -> CostVector {
-        self.range_scan(scanned_rows)
-            .serial(self.predicate_eval(scanned_rows))
-            .serial(CostVector {
-                authoritative_graph_reads: scanned_rows.as_rows(),
-                ..CostVector::ZERO
-            })
+    /// Cost null equality over a label of `label_rows` rows.
+    ///
+    /// The executor reads the label bitmap, scans the equality lane (at most
+    /// one entry per label row), subtracts it, and verifies only the label
+    /// rows left outside the lane, which the default equality estimate bounds.
+    /// No row outside the label is ever read.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.null_equality_scan(EstimatedRows::rows(1_000_000));
+    /// assert_eq!(cost.range_seeks, 1);
+    /// assert_eq!(
+    ///     cost.authoritative_graph_reads,
+    ///     profile.default_equality_index_rows.as_rows()
+    /// );
+    /// let tiny = profile.null_equality_scan(EstimatedRows::rows(2));
+    /// assert_eq!(tiny.authoritative_graph_reads, 2);
+    /// ```
+    pub fn null_equality_scan(&self, label_rows: EstimatedRows) -> CostVector {
+        let candidates = EstimatedRows::rows(
+            label_rows
+                .as_rows()
+                .min(self.default_equality_index_rows.as_rows()),
+        );
+        self.bitmap_equality_lookup(label_rows)
+            .serial(self.range_scan(label_rows))
+            .serial(self.secondary_set_operation(label_rows))
+            .serial(self.authoritative_verification(candidates))
     }
 
     /// Cost a V2 range scan plus authoritative verification of every candidate.
