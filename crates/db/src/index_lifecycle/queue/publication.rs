@@ -1246,6 +1246,14 @@ async fn load_generation_record(
     Ok(None)
 }
 
+#[cfg(all(
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing",
+    not(test)
+))]
+#[path = "../../../tests/production_support/queue_publication.rs"]
+pub(crate) mod production_contracts;
+
 /// Errors after which this writer can no longer make durable progress.
 fn is_fatal(error: &HelixDbError) -> bool {
     matches!(

@@ -29,6 +29,18 @@ use super::{
 mod driver;
 #[cfg(all(feature = "production-coverage", not(test)))]
 pub(crate) use driver::build_cache_production_contracts::run as run_build_cache_contracts;
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) use driver::driver_contracts::run as run_driver_contracts;
+#[cfg(all(feature = "production-coverage", not(test)))]
+pub(crate) use driver::publication_production_contracts::run as run_publication_contracts;
+#[cfg(all(
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing",
+    not(test)
+))]
+pub(crate) use driver::publication_production_contracts::{
+    hold_planning_sessions, planning_session_lock_holders,
+};
 pub(crate) mod publication;
 pub(crate) use driver::{
     OfferedVectorBuild, PublicationBacklog, VectorBuildCache, VectorIndexDriver,
