@@ -147,10 +147,13 @@ fn bitmap_expr_cost(
                 .fold(0_u64, u64::saturating_add),
         )
     };
-    let cost = children
+    // The executor reads bitmap children concurrently.
+    let costs = children
         .into_iter()
         .map(|(cost, _)| cost)
-        .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+        .collect::<Vec<_>>();
+    let cost = profile
+        .parallel_reads(&costs)
         .serial(profile.secondary_set_operation(input_rows));
     (cost, rows)
 }
@@ -292,10 +295,12 @@ fn node_secondary_set_cost(
                     .map(|(_, rows)| rows.as_rows())
                     .fold(0_u64, u64::saturating_add),
             );
-            let cost = children
+            let costs = children
                 .into_iter()
                 .map(|(cost, _)| cost)
-                .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+                .collect::<Vec<_>>();
+            let cost = profile
+                .parallel_reads(&costs)
                 .serial(profile.secondary_set_operation(input_rows));
             (cost, rows)
         }
@@ -310,24 +315,31 @@ fn node_secondary_set_cost(
                     .map(|(_, rows)| rows.as_rows())
                     .fold(0_u64, u64::saturating_add),
             );
-            let cost = children
+            let costs = children
                 .into_iter()
                 .map(|(cost, _)| cost)
-                .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+                .collect::<Vec<_>>();
+            let cost = profile
+                .parallel_reads(&costs)
                 .serial(profile.secondary_set_operation(rows));
             (cost, rows)
         }
         exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters } => {
+            // Filters are read concurrently before the ordered driver scans
+            // against their combined set.
             let driver_rows = profile.default_range_index_rows;
-            let mut rows = driver_rows;
-            let mut cost = profile.ordered_range_scan(driver_rows, driver.iteration);
-            for filter in filters {
-                let (filter_cost, filter_rows) = node_secondary_set_cost(filter, profile);
-                cost = cost.serial(filter_cost);
-                rows = rows.min(filter_rows);
-            }
+            let (filter_costs, filter_rows): (Vec<_>, Vec<_>) = filters
+                .iter()
+                .map(|filter| node_secondary_set_cost(filter, profile))
+                .unzip();
+            let rows = filter_rows
+                .into_iter()
+                .fold(driver_rows, cost::EstimatedRows::min);
             (
-                cost.serial(profile.authoritative_verification(rows))
+                profile
+                    .parallel_reads(&filter_costs)
+                    .serial(profile.ordered_range_scan(driver_rows, driver.iteration))
+                    .serial(profile.authoritative_verification(rows))
                     .serial(profile.secondary_set_operation(driver_rows)),
                 rows,
             )
@@ -389,10 +401,12 @@ fn edge_secondary_set_cost(
                     .map(|(_, rows)| rows.as_rows())
                     .fold(0_u64, u64::saturating_add),
             );
-            let cost = children
+            let costs = children
                 .into_iter()
                 .map(|(cost, _)| cost)
-                .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+                .collect::<Vec<_>>();
+            let cost = profile
+                .parallel_reads(&costs)
                 .serial(profile.secondary_set_operation(input_rows));
             (cost, rows)
         }
@@ -407,24 +421,31 @@ fn edge_secondary_set_cost(
                     .map(|(_, rows)| rows.as_rows())
                     .fold(0_u64, u64::saturating_add),
             );
-            let cost = children
+            let costs = children
                 .into_iter()
                 .map(|(cost, _)| cost)
-                .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+                .collect::<Vec<_>>();
+            let cost = profile
+                .parallel_reads(&costs)
                 .serial(profile.secondary_set_operation(rows));
             (cost, rows)
         }
         exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, filters } => {
+            // Filters are read concurrently before the ordered driver scans
+            // against their combined set.
             let driver_rows = profile.default_range_index_rows;
-            let mut rows = driver_rows;
-            let mut cost = profile.ordered_range_scan(driver_rows, driver.iteration);
-            for filter in filters {
-                let (filter_cost, filter_rows) = edge_secondary_set_cost(filter, profile);
-                cost = cost.serial(filter_cost);
-                rows = rows.min(filter_rows);
-            }
+            let (filter_costs, filter_rows): (Vec<_>, Vec<_>) = filters
+                .iter()
+                .map(|filter| edge_secondary_set_cost(filter, profile))
+                .unzip();
+            let rows = filter_rows
+                .into_iter()
+                .fold(driver_rows, cost::EstimatedRows::min);
             (
-                cost.serial(profile.authoritative_verification(rows))
+                profile
+                    .parallel_reads(&filter_costs)
+                    .serial(profile.ordered_range_scan(driver_rows, driver.iteration))
+                    .serial(profile.authoritative_verification(rows))
                     .serial(profile.secondary_set_operation(driver_rows)),
                 rows,
             )
@@ -475,9 +496,12 @@ mod tests {
             panic!("non-unique equality uses a bitmap")
         };
         let lookup = profile.bitmap_equality_lookup(profile.default_equality_index_rows);
-        let expected_ids = lookup
-            .serial(lookup)
+        // Both bitmaps are read concurrently, then combined once.
+        let expected_ids = profile
+            .parallel_reads(&[lookup, lookup])
             .serial(profile.secondary_set_operation(cost::EstimatedRows::rows(20)));
+        assert_eq!(expected_ids.latency.as_micros(), 5_130);
+        assert_eq!(expected_ids.parallel_width, 2);
         for (node, edge, expected_rows) in [
             (
                 exec::ExecNodeBitmapExpr::Intersect {
@@ -519,6 +543,7 @@ mod tests {
             driver: Box::new(exec::ExecEdgeSecondarySetPlan::Bitmap(edge)),
             rest: ir::AtLeast::from_one(exec::ExecEdgeSecondarySetPlan::Empty),
         };
+        // The empty child reads nothing, so only the bitmap read is charged.
         let expected_ids =
             lookup.serial(profile.secondary_set_operation(profile.default_equality_index_rows));
         assert_eq!(

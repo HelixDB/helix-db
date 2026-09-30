@@ -46,7 +46,12 @@ fn selective_equality_type_union_is_one_index_intersection() {
             )
         })
         .unwrap();
-    assert_eq!(indexed.alternative.cost.latency.as_micros(), 6_020);
+    // The tenant bitmap (5,000 get + 50 probe + 10 decode) and the batched
+    // type union (750 setup + 2 x 75 keys + 20 decode) are read
+    // concurrently: 5,060 critical path + 2 x 25 task overhead, then a
+    // 30-row set operation and 10 materialized rows.
+    assert_eq!(indexed.alternative.cost.latency.as_micros(), 5_150);
+    assert_eq!(indexed.alternative.cost.parallel_width, 2);
     assert_eq!(indexed.alternative.cost.object_reads, 3);
     assert_eq!(indexed.alternative.cost.multi_get_calls, 1);
     // No single-index seed evaluates the other indexed conjuncts per row.
@@ -104,10 +109,12 @@ fn selective_equality_offers_only_the_full_intersection() {
             )
         })
         .unwrap();
-    assert_eq!(indexed.alternative.cost.latency.as_micros(), 15_220);
+    // Three 5,060 us bitmap reads run concurrently: 5,060 + 3 x 25 task
+    // overhead, then a 30-row set operation and 10 materialized rows.
+    assert_eq!(indexed.alternative.cost.latency.as_micros(), 5_175);
     assert_eq!(indexed.alternative.cost.object_reads, 3);
     assert_eq!(indexed.alternative.cost.cpu_units, 70);
-    assert_eq!(indexed.alternative.cost.parallel_width, 1);
+    assert_eq!(indexed.alternative.cost.parallel_width, 3);
     let best = result.best_alternative(result.root()).unwrap();
     assert_eq!(best.cost, indexed.alternative.cost);
     assert_eq!(best.cost.authoritative_graph_reads, 0);
@@ -348,10 +355,12 @@ fn indexed_conjunction_offers_only_the_full_intersection() {
             )
         })
         .unwrap();
-    assert_eq!(indexed.alternative.cost.latency.as_micros(), 25_360);
+    // Five 5,060 us bitmap reads run concurrently: 5,060 + 5 x 25 task
+    // overhead, then a 50-row set operation and 10 materialized rows.
+    assert_eq!(indexed.alternative.cost.latency.as_micros(), 5_245);
     assert_eq!(indexed.alternative.cost.object_reads, 5);
     assert_eq!(indexed.alternative.cost.cpu_units, 110);
-    assert_eq!(indexed.alternative.cost.parallel_width, 1);
+    assert_eq!(indexed.alternative.cost.parallel_width, 5);
     let best = result.best_alternative(result.root()).unwrap();
     assert_eq!(best.cost, indexed.alternative.cost);
     assert_eq!(best.cost.authoritative_graph_reads, 0);

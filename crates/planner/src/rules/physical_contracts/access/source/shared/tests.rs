@@ -284,10 +284,12 @@ fn selective_equality_intersection_charges_all_memberships_and_materializes_once
             &stats,
         );
         let rows = cost::EstimatedRows::rows(rare_rows);
-        let expected_ids = [1000, 2000, rare_rows]
-            .into_iter()
-            .map(|count| storage.bitmap_equality_lookup(cost::EstimatedRows::rows(count)))
-            .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+        // The three bitmaps are read concurrently, then combined once.
+        let expected_ids = storage
+            .parallel_reads(
+                &[1000, 2000, rare_rows]
+                    .map(|count| storage.bitmap_equality_lookup(cost::EstimatedRows::rows(count))),
+            )
             .serial(storage.secondary_set_operation(cost::EstimatedRows::rows(3000 + rare_rows)));
         assert_eq!(flat.estimated_rows, rows);
         assert_eq!(flat.secondary_id_cost(), Some(expected_ids));
@@ -295,7 +297,7 @@ fn selective_equality_intersection_charges_all_memberships_and_materializes_once
             flat.cost,
             expected_ids.serial(storage.secondary_row_materialization(rows))
         );
-        assert_eq!(flat.cost.parallel_width, 1);
+        assert_eq!(flat.cost.parallel_width, 3);
         assert_eq!(flat.cost.object_reads, 3);
         assert_eq!(nested.estimated_rows, cost::EstimatedRows::ZERO);
         assert_eq!(nested.cost, expected_ids);

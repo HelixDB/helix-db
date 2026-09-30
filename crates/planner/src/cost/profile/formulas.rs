@@ -470,6 +470,47 @@ impl StorageCostProfile {
         }
     }
 
+    /// Cost reading the children of one secondary-set operation concurrently,
+    /// within `max_parallel_kv_reads`, the way the executor reads
+    /// intersection, union, and ordered-intersection filter children.
+    ///
+    /// Children that cost nothing, such as statically empty sets, read
+    /// nothing and schedule no task. No remaining child costs nothing and one
+    /// costs exactly itself, with no task overhead. Two or more pay their
+    /// critical path plus the task overhead of the parallel width, and every
+    /// read still counts.
+    ///
+    /// ```
+    /// use helix_planner::cost::{CostVector, LatencyEstimate, StorageCostProfile};
+    ///
+    /// let profile = StorageCostProfile::default();
+    /// let read = |micros| CostVector {
+    ///     latency: LatencyEstimate::micros(micros),
+    ///     object_reads: 1,
+    ///     ..CostVector::ZERO
+    /// };
+    ///
+    /// assert_eq!(profile.parallel_reads(&[]), CostVector::ZERO);
+    /// assert_eq!(profile.parallel_reads(&[read(40)]), read(40));
+    /// assert_eq!(profile.parallel_reads(&[read(40), CostVector::ZERO]), read(40));
+    /// let both = profile.parallel_reads(&[read(5_000), read(7_000)]);
+    /// assert_eq!(both.object_reads, 2);
+    /// assert_eq!(both.parallel_width, 2);
+    /// assert_eq!(both.latency.as_micros(), 7_000 + 2 * 25);
+    /// ```
+    pub fn parallel_reads(&self, children: &[CostVector]) -> CostVector {
+        let reads = children
+            .iter()
+            .copied()
+            .filter(|child| *child != CostVector::ZERO)
+            .collect::<Vec<_>>();
+        match reads.as_slice() {
+            [] => CostVector::ZERO,
+            [one] => *one,
+            _ => self.parallel(&reads, self.max_parallel_kv_reads),
+        }
+    }
+
     /// Batch size used by multi-get coalescing for a locality class.
     pub const fn multi_get_batch_size(&self, locality: KeyLocality) -> PositiveUsize {
         match locality {

@@ -289,6 +289,9 @@ fn selective_equality_intersects_every_index_with_absent_or_stale_statistics() {
                     assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
                     assert_eq!(plan.metrics().selected_cost.range_nexts, 0);
                     assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 0);
+        assert_eq!(plan.metrics().selected_cost.parallel_width, 3);
+                    // The three sets are read concurrently.
+                    assert_eq!(plan.metrics().selected_cost.parallel_width, 3);
                     let diagnostics = crate::diagnostics::analyze(&plan, &context);
                     assert!(diagnostics.insights.iter().all(|insight| !matches!(
                         insight,
@@ -339,6 +342,7 @@ fn small_labels_still_use_every_index() {
             plan.steps()
         );
         assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 0);
+        assert_eq!(plan.metrics().selected_cost.parallel_width, 3);
         assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
     }
 }

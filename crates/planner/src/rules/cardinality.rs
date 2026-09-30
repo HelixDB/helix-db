@@ -1459,28 +1459,23 @@ fn node_bitmap_cost(
                 cost::EstimatedRows::rows(rows.as_rows().saturating_mul(values.len() as u64)),
             )
         }
-        exec::ExecNodeBitmapExpr::Union { driver, rest } => {
-            let mut rows = node_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(node_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = node_bitmap_rows(child, stats, storage);
-                    rows = cost::EstimatedRows::rows(
-                        rows.as_rows().saturating_add(child_rows.as_rows()),
-                    );
-                    cost.serial(node_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(rows))
-                })
-        }
-        exec::ExecNodeBitmapExpr::Intersect { driver, rest } => {
-            let mut rows = node_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(node_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = node_bitmap_rows(child, stats, storage);
-                    let operation_rows = rows;
-                    rows = cost::EstimatedRows::rows(rows.as_rows().min(child_rows.as_rows()));
-                    cost.serial(node_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(operation_rows))
-                })
+        // The count program reads set children concurrently, then combines
+        // every child's rows once.
+        exec::ExecNodeBitmapExpr::Union { driver, rest }
+        | exec::ExecNodeBitmapExpr::Intersect { driver, rest } => {
+            let children = core::iter::once(driver.as_ref())
+                .chain(rest.iter())
+                .collect::<Vec<_>>();
+            let costs = children
+                .iter()
+                .map(|child| node_bitmap_cost(child, stats, storage))
+                .collect::<Vec<_>>();
+            let input_rows = children.iter().fold(0_u64, |rows, child| {
+                rows.saturating_add(node_bitmap_rows(child, stats, storage).as_rows())
+            });
+            storage
+                .parallel_reads(&costs)
+                .serial(storage.secondary_set_operation(cost::EstimatedRows::rows(input_rows)))
         }
     }
 }
@@ -1507,28 +1502,23 @@ fn edge_bitmap_cost(
                 cost::EstimatedRows::rows(rows.as_rows().saturating_mul(values.len() as u64)),
             )
         }
-        exec::ExecEdgeBitmapExpr::Union { driver, rest } => {
-            let mut rows = edge_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(edge_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = edge_bitmap_rows(child, stats, storage);
-                    rows = cost::EstimatedRows::rows(
-                        rows.as_rows().saturating_add(child_rows.as_rows()),
-                    );
-                    cost.serial(edge_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(rows))
-                })
-        }
-        exec::ExecEdgeBitmapExpr::Intersect { driver, rest } => {
-            let mut rows = edge_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(edge_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = edge_bitmap_rows(child, stats, storage);
-                    let operation_rows = rows;
-                    rows = cost::EstimatedRows::rows(rows.as_rows().min(child_rows.as_rows()));
-                    cost.serial(edge_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(operation_rows))
-                })
+        // The count program reads set children concurrently, then combines
+        // every child's rows once.
+        exec::ExecEdgeBitmapExpr::Union { driver, rest }
+        | exec::ExecEdgeBitmapExpr::Intersect { driver, rest } => {
+            let children = core::iter::once(driver.as_ref())
+                .chain(rest.iter())
+                .collect::<Vec<_>>();
+            let costs = children
+                .iter()
+                .map(|child| edge_bitmap_cost(child, stats, storage))
+                .collect::<Vec<_>>();
+            let input_rows = children.iter().fold(0_u64, |rows, child| {
+                rows.saturating_add(edge_bitmap_rows(child, stats, storage).as_rows())
+            });
+            storage
+                .parallel_reads(&costs)
+                .serial(storage.secondary_set_operation(cost::EstimatedRows::rows(input_rows)))
         }
     }
 }
@@ -1677,11 +1667,13 @@ fn verified_range_count_cost(
             .unwrap_or(u64::MAX)
             .min(driver_rows.as_rows())
     });
-    let mut total = filters
-        .iter()
-        .fold(cost::CostVector::ZERO, |total, (filter, _)| {
-            total.serial(*filter)
-        });
+    // Bitmap filters are read concurrently before the driver scan.
+    let mut total = storage.parallel_reads(
+        &filters
+            .iter()
+            .map(|(filter, _)| *filter)
+            .collect::<Vec<_>>(),
+    );
     if scanned_rows > 0 {
         total =
             total.serial(storage.secondary_range_lookup(cost::EstimatedRows::rows(scanned_rows)));
@@ -2641,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_intersection_alternatives_are_costed_in_planner_selected_order() {
+    fn bitmap_intersection_alternatives_read_every_child_concurrently() {
         let child = |index: &str, property: &str| {
             ir::NodeAccessSourcePlan::new(node_equality(
                 index,
@@ -2663,11 +2655,9 @@ mod tests {
         assert_eq!(alternatives.len(), 3);
 
         let storage = cost::StorageCostProfile::default();
-        for (wide, medium, narrow, expected) in [
-            (1, 10, 100, "wide"),
-            (100, 1, 10, "medium"),
-            (10, 100, 1, "narrow"),
-        ] {
+        // Every child bitmap is read concurrently, so no driver order is
+        // cheaper than another, whichever child is the most selective.
+        for (wide, medium, narrow) in [(1, 10, 100), (100, 1, 10), (10, 100, 1)] {
             let stats = context::StatsSnapshot::default()
                 .with_node_eq_cardinality(
                     catalog::ScopedPropertyKey::try_new("User", "wide").unwrap(),
@@ -2681,22 +2671,13 @@ mod tests {
                     catalog::ScopedPropertyKey::try_new("User", "narrow").unwrap(),
                     narrow,
                 );
-            let winner = alternatives
+            let costs = alternatives
                 .iter()
-                .min_by_key(|plan| count_cost(plan, &stats, &storage).latency)
-                .unwrap();
-            let exec::ExecCountPlan::NodeBitmap(exec::ExecNodeBitmapCountPlan {
-                bitmap: exec::ExecNodeBitmapExpr::Intersect { driver, .. },
-                ..
-            }) = winner
-            else {
-                panic!("expected a bitmap intersection alternative")
-            };
-            assert!(matches!(
-                driver.as_ref(),
-                exec::ExecNodeBitmapExpr::PointRead { key, .. }
-                    if key.property.as_ref() == expected
-            ));
+                .map(|plan| count_cost(plan, &stats, &storage))
+                .collect::<Vec<_>>();
+            assert!(costs.iter().all(|cost| *cost == costs[0]), "{costs:?}");
+            assert_eq!(costs[0].parallel_width, 3);
+            assert_eq!(costs[0].object_reads, 3);
         }
     }
 

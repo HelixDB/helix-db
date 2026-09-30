@@ -76,25 +76,28 @@ pub(super) fn access_set_contract(
             || set_union_estimated_rows(&child_estimates),
             |index| children[index].estimated_rows,
         );
-        children
-            .iter()
-            .zip(secondary_costs)
+        // The executor reads every non-driver child concurrently, then scans
+        // the ordered driver against their combined set. Only the driver is
+        // filtered before verification; other ranges are complete
+        // membership inputs.
+        let filters = secondary_costs
+            .into_iter()
             .enumerate()
-            .map(|(index, (child, cost))| {
-                if Some(index) == driver {
-                    // Only the ordered driver is filtered before verification;
-                    // other ranges are complete membership inputs.
-                    storage
-                        .ordered_range_scan(
-                            child.estimated_rows,
-                            child.range_iteration().expect("selected range driver"),
-                        )
-                        .serial(storage.authoritative_verification(rows))
-                } else {
-                    cost
-                }
-            })
-            .fold(cost::CostVector::ZERO, cost::CostVector::serial)
+            .filter(|(index, _)| Some(*index) != driver)
+            .map(|(_, cost)| cost)
+            .collect::<Vec<_>>();
+        let driver = driver.map_or(cost::CostVector::ZERO, |index| {
+            let child = &children[index];
+            storage
+                .ordered_range_scan(
+                    child.estimated_rows,
+                    child.range_iteration().expect("selected range driver"),
+                )
+                .serial(storage.authoritative_verification(rows))
+        });
+        storage
+            .parallel_reads(&filters)
+            .serial(driver)
             .serial(storage.secondary_set_operation(scanned))
     };
     AccessPhysicalContract::new_secondary(
