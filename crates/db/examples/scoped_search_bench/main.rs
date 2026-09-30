@@ -9,7 +9,8 @@
 //! - `BENCH_S3_BUCKET=bucket` (+ `BENCH_S3_REGION`): embedded, S3 object store.
 //!
 //! Modes: `load` (graph + indexes; `BENCH_VECTOR=before|after|skip`), `index`
-//! (build the vector index by backfill), `query` (default).
+//! (build the vector index by backfill), `query` (default), and the batch-write
+//! benchmark's `batch-load` and `batch-run` (see [`batch`]).
 //!
 //! `BENCH_INDEX_TIMEOUT_SECS` (default 14,400) bounds each wait for index
 //! builds; a reference-scale backfill needs a long deadline.
@@ -19,6 +20,7 @@
 //! BENCH_DIR=/tmp/bench cargo run --release -p db --example scoped_search_bench -- query
 //! ```
 
+mod batch;
 mod fixture;
 
 use std::sync::Arc;
@@ -250,6 +252,8 @@ async fn main() {
                 fixture::build_vector_index(&backend, env_or("BENCH_DIM", 768), index_deadline())
                     .await
             }
+            "batch-load" => batch::load(&backend, &batch::Options::from_env()).await,
+            "batch-run" => batch::run(&backend, &batch::Options::from_env()).await,
             _ => run_queries("server", &backend).await,
         }
         return;
@@ -268,9 +272,11 @@ async fn main() {
         db: writer,
         store: Arc::clone(&store),
     };
-    if mode == "load" || mode == "index" {
+    if matches!(mode.as_str(), "load" | "index" | "batch-load" | "batch-run") {
         match mode.as_str() {
             "load" => fixture::load(&backend, load_options()).await,
+            "batch-load" => batch::load(&backend, &batch::Options::from_env()).await,
+            "batch-run" => batch::run(&backend, &batch::Options::from_env()).await,
             _ => {
                 fixture::build_vector_index(&backend, env_or("BENCH_DIM", 768), index_deadline())
                     .await

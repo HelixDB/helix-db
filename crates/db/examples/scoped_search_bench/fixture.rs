@@ -118,7 +118,7 @@ impl ObjectStore for CountingStore {
 }
 
 /// SplitMix64: deterministic, dependency-free fixture randomness.
-pub struct Rng(u64);
+pub struct Rng(pub u64);
 
 impl Rng {
     fn next_u64(&mut self) -> u64 {
@@ -129,11 +129,11 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    fn unit(&mut self) -> f64 {
+    pub fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn below(&mut self, bound: usize) -> usize {
+    pub fn below(&mut self, bound: usize) -> usize {
         (self.next_u64() % bound as u64) as usize
     }
 
