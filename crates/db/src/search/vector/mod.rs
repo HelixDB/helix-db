@@ -215,6 +215,8 @@ pub(crate) use hnsw::mutation::production_contracts::run as run_mutation_contrac
 pub(crate) use hnsw::mutation::{VectorBuildSession, VectorBuildSessionStats};
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
+#[cfg(any(test, feature = "production-scale"))]
+pub(crate) use hnsw::restricted::observe_restricted_search;
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::restricted::run_production_contracts as run_restricted_contracts;
 #[cfg(feature = "production-coverage")]
@@ -222,8 +224,7 @@ pub use hnsw::restricted::RestrictedSearchStrategy;
 pub(crate) use hnsw::restricted::RestrictedVectorCandidates;
 #[cfg(feature = "production-scale")]
 pub(crate) use hnsw::restricted::{
-    observe_restricted_search, RestrictedBeamOverrideGuard, RestrictedBeamScale,
-    RestrictedSearchTermination,
+    RestrictedBeamOverrideGuard, RestrictedBeamScale, RestrictedSearchTermination,
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::search::production_contracts::run as run_search_contracts;

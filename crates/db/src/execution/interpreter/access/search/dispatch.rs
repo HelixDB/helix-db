@@ -207,10 +207,11 @@ impl<'db> ExecutionContext<'db> {
     ///
     /// Physical rows of selected pending entities are superseded. A
     /// traversal-restricted search removes them from its allowed set, so it
-    /// runs once at `k` within the restricted result cap. An unrestricted
-    /// search suppresses them, so they still route the ANN traversal, and
-    /// widens past them with [`settle_physical`]; a search past its
-    /// suppression limit fails or reruns with a smaller selection, as
+    /// runs once at `k` within the restricted result cap, or not at all when
+    /// no candidate remains. An unrestricted search suppresses them, so they
+    /// still route the ANN traversal, and widens past them with
+    /// [`settle_physical`]; a search past its suppression limit fails or
+    /// reruns with a smaller selection, as
     /// [`PendingSelection::yield_to_suppression_limit`] decides.
     /// Pending vectors pass the same traversal restriction, tenant partition,
     /// and metric as physical rows, and both sources merge by
@@ -253,11 +254,19 @@ impl<'db> ExecutionContext<'db> {
         loop {
             let mut pending_scored =
                 score_pending_vectors::<D>(definition, tenant_value, query, candidates, &pending)?;
-            let mut results = match generation.as_ref() {
-                super::generation::VectorSearchAuthority::AbsentManagedPartition => Vec::new(),
-                super::generation::VectorSearchAuthority::Managed(handle) => {
-                    let unsuperseded =
-                        candidates.map(|candidates| candidates.without(&pending.superseded));
+            let physical = match generation.as_ref() {
+                super::generation::VectorSearchAuthority::AbsentManagedPartition => None,
+                super::generation::VectorSearchAuthority::Managed(handle) => Some((
+                    handle,
+                    candidates.map(|candidates| candidates.without(&pending.superseded)),
+                )),
+            };
+            let mut results = match physical {
+                // An absent partition has no physical rows, and no physical row
+                // can rank once every candidate is superseded, so neither runs
+                // a physical search.
+                None | Some((_, Some(RestrictedVectorCandidates::Empty))) => Vec::new(),
+                Some((handle, unsuperseded)) => {
                     let physical_candidates = unsuperseded.as_ref();
                     let settlement = settle_physical(
                         k,
@@ -390,6 +399,9 @@ impl<'db> ExecutionContext<'db> {
                 .search_text_manifest_with_scope(&manifest, &query, k, scope)
                 .await;
         };
+        // One logical search records one use of its splits, however often it
+        // widens or reruns with a smaller selection.
+        let mut demand = crate::search::text::SplitDemand::Record;
         loop {
             match self
                 .overlaid_text_hits(
@@ -399,6 +411,7 @@ impl<'db> ExecutionContext<'db> {
                     &query,
                     k,
                     &scope,
+                    &mut demand,
                 )
                 .await?
             {
@@ -416,10 +429,16 @@ impl<'db> ExecutionContext<'db> {
     /// documents in the searched partition are indexed in memory with the
     /// production analyzer and scored against the same statistics. A
     /// traversal-restricted search removes superseded entities from its
-    /// candidate set. An unrestricted search suppresses their split hits and
-    /// widens past them with [`settle_physical`], reporting a search past its
-    /// suppression limit to the caller, which fails or reruns it with a
-    /// smaller selection.
+    /// candidate set and skips its physical search when none remain. An
+    /// unrestricted search suppresses their split hits and widens past them
+    /// with [`settle_physical`], reporting a search past its suppression
+    /// limit to the caller, which fails or reruns it with a smaller
+    /// selection. Only the first physical search that `demand` allows
+    /// records a use of its splits.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one overlaid attempt binds its definition, generation, selection, query, and demand"
+    )]
     async fn overlaid_text_hits(
         &self,
         definition: &crate::config::TextIndexDefinition,
@@ -430,6 +449,7 @@ impl<'db> ExecutionContext<'db> {
         query: &str,
         k: usize,
         scope: &TextSearchScope,
+        demand: &mut crate::search::text::SplitDemand,
     ) -> Result<Settlement<crate::search::text::TextSearchHit>> {
         let super::generation::TextSearchAuthority::Managed(handle) = generation else {
             return Ok(Settlement::Settled(Vec::new()));
@@ -524,10 +544,15 @@ impl<'db> ExecutionContext<'db> {
             }
             None => TextSearchScope::Unrestricted,
         };
-        let settlement = match self
-            .load_text_manifest_root(super::generation::TextSearchAuthority::Managed(handle))
-            .await?
-        {
+        // No physical document can rank once every candidate is superseded,
+        // so the search reads neither the manifest nor its splits.
+        let manifest = if physical_scope.is_empty_restricted() {
+            None
+        } else {
+            self.load_text_manifest_root(super::generation::TextSearchAuthority::Managed(handle))
+                .await?
+        };
+        let settlement = match manifest {
             None => Settlement::Settled(Vec::new()),
             Some(manifest) => {
                 let (manifest, statistics, physical_scope) =
@@ -545,6 +570,8 @@ impl<'db> ExecutionContext<'db> {
                     },
                     move |request| {
                         let scope = physical_scope.clone();
+                        let demand =
+                            std::mem::replace(demand, crate::search::text::SplitDemand::Skip);
                         async move {
                             self.search_text_manifest_with_statistics(
                                 manifest,
@@ -552,6 +579,7 @@ impl<'db> ExecutionContext<'db> {
                                 request,
                                 scope,
                                 Some(statistics),
+                                demand,
                             )
                             .await
                         }
