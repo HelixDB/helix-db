@@ -31,6 +31,8 @@ use crate::error::{HelixDbError, Result};
 use crate::execution_control;
 
 mod failure;
+#[cfg(test)]
+pub(crate) mod step_pause;
 
 #[cfg(feature = "production-coverage")]
 pub(crate) use failure::contracts::run as driver_failure_classification_contract;
@@ -1086,6 +1088,8 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             .stage(driver, db, &transaction, claimed.scope, &operation, limits)
             .await;
         failpoints::trip(IndexOutboxFailpoint::PhysicalStagingAfter)?;
+        #[cfg(test)]
+        step_pause::hold(db, &operation).await;
         // An error can follow staged physical writes. Drop this transaction before
         // recording a blocker or releasing the claim; never commit a partial step.
         let execution = step.inspect_err(|_| {
@@ -1948,6 +1952,73 @@ fn operation_model_error(error: super::IndexOperationModelError) -> HelixDbError
 
 fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
+}
+
+/// Test driver that commits `writes` after `inner` stages a step and before
+/// the outbox commits it, as a foreground write inside the step's window.
+#[cfg(test)]
+pub(crate) struct WriteDuringStepDriver<'a> {
+    pub(crate) inner: &'a dyn IndexOperationDriver,
+    pub(crate) writes: Vec<(Bytes, Bytes)>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl IndexOperationDriver for WriteDuringStepDriver<'_> {
+    fn family(&self) -> IndexOperationFamily {
+        self.inner.family()
+    }
+
+    async fn acquire_generation_ownership(
+        &self,
+        scope: DataScope,
+        operation: &IndexOperationRecord,
+    ) -> Box<dyn IndexOperationStepPermit> {
+        self.inner
+            .acquire_generation_ownership(scope, operation)
+            .await
+    }
+
+    async fn prepare_step(
+        &self,
+        db: &Db,
+        scope: DataScope,
+        operation: &IndexOperationRecord,
+        limits: SearchIndexBatchLimits,
+    ) -> Result<PreparedIndexOperationStep> {
+        self.inner.prepare_step(db, scope, operation, limits).await
+    }
+
+    async fn step(
+        &self,
+        db: &Db,
+        transaction: &DbTransaction,
+        scope: DataScope,
+        operation: &IndexOperationRecord,
+        limits: SearchIndexBatchLimits,
+    ) -> Result<IndexOperationStepExecution> {
+        let execution = self
+            .inner
+            .step(db, transaction, scope, operation, limits)
+            .await?;
+        for (key, value) in &self.writes {
+            db.put(key, value).await?;
+        }
+        Ok(execution)
+    }
+
+    async fn after_commit(
+        &self,
+        scope: DataScope,
+        index: &IndexRecordV2,
+        operation: &IndexOperationRecord,
+        committed: CommittedOperationStep,
+        state: Option<CommittedStepState>,
+    ) {
+        self.inner
+            .after_commit(scope, index, operation, committed, state)
+            .await;
+    }
 }
 
 #[cfg(test)]

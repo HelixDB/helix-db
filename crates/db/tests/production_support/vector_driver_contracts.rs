@@ -55,7 +55,7 @@ pub(crate) async fn run() {
     adoption_and_activation_guards_fail_closed().await;
 }
 
-const NOW_MILLIS: u64 = 1;
+pub(super) const NOW_MILLIS: u64 = 1;
 
 pub(super) async fn test_db(name: &str) -> Db {
     let db = Db::builder(name, Arc::new(InMemory::new()))
@@ -153,7 +153,7 @@ pub(super) async fn create_build(
 
 pub(super) async fn drive_one(
     db: &Db,
-    driver: &VectorIndexDriver,
+    driver: &dyn IndexOperationDriver,
     operation_id: IndexOperationId,
     claim_sequence: &mut u64,
     limits: SearchIndexBatchLimits,

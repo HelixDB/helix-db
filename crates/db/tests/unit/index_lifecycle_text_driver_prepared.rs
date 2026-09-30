@@ -1120,6 +1120,7 @@ async fn scan_source_case(
     }
     let result = scan_source(
         &transaction,
+        &transaction,
         scope,
         &operation,
         &record(),
@@ -1252,6 +1253,7 @@ async fn source_scan_attributes_every_input_output_and_corruption_boundary() {
     assert!(matches!(
         scan_source(
             &transaction,
+            &transaction,
             scope,
             &operation,
             &record(),
@@ -1276,6 +1278,7 @@ async fn source_scan_attributes_every_input_output_and_corruption_boundary() {
         },
     );
     assert!(scan_source(
+        &transaction,
         &transaction,
         scope,
         &operation,
@@ -1324,6 +1327,402 @@ async fn source_scan_blocks_documents_over_the_publication_analysis_budget() {
         ),
         "{result:?}"
     );
+}
+
+/// Writes to a graph row the step already read (1) and to one ahead of its
+/// batch (6) commit between the step's reads and its commit. Graph rows are
+/// read from a snapshot, so the step still commits; a serializable scan of
+/// the range fails that commit with a conflict. Each entity's statistics
+/// marker records the text its own step read.
+#[tokio::test]
+async fn source_scan_step_commits_through_writes_to_its_source_range() {
+    use crate::index_lifecycle::lifecycle::{create_index_operation, InitialBuildProgress};
+    use crate::index_lifecycle::outbox::{
+        claim_operation, execute_claimed_step, observe_operation_pointer, read_operation,
+        ClaimPermission, CommittedOperationStep, OperationPointerObservation,
+        WriteDuringStepDriver,
+    };
+
+    let db = Db::open(
+        "text-driver-source-concurrent-writes",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    crate::migrations::startup::bootstrap_writer(&db)
+        .await
+        .unwrap();
+    let scope = DataScope::LegacyUnscoped;
+    let key = |id| authoritative_property_key(scope, reconciliation_entity(id));
+    let row = |body: &str| {
+        property::encode_properties(&[
+            property::Property::string("$label", "Document"),
+            property::Property::string("body", body),
+        ])
+    };
+    for id in 0..8 {
+        db.put(key(id), row(&format!("alpha {id}"))).await.unwrap();
+    }
+    let crate::index_lifecycle::IndexDdlReceipt::Accepted {
+        operation_id,
+        index_id,
+        generation,
+    } = create_index_operation(
+        &db,
+        scope,
+        ValidatedDynamicIndexDefinition::Text(definition()),
+        helix_planner::ir::IndexCreateMode::ErrorIfExists,
+        InitialBuildProgress::text(IndexCursor::try_new(key(7)).unwrap()),
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("a new text definition enqueues a build");
+    };
+    let inner = TextIndexDriver::new();
+    let racing = WriteDuringStepDriver {
+        inner: &inner,
+        writes: vec![(key(1), row("omega")), (key(6), row("omega"))],
+    };
+    let writer_epoch = WriterEpoch::from_bytes([0x7C; 16]).unwrap();
+    let steps: [(&dyn IndexOperationDriver, u64); 2] = [(&racing, 3), (&inner, 7)];
+    for (sequence, (driver, cursor)) in (1..).zip(steps) {
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(&db, operation_id, writer_epoch, 1)
+                .await
+                .unwrap()
+        else {
+            panic!("the queued text build is eligible");
+        };
+        let claimed = claim_operation(
+            &db,
+            &eligible,
+            writer_epoch,
+            ClaimSequence::new(sequence).unwrap(),
+            1,
+            ClaimPermission::Normal,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            execute_claimed_step(
+                &db,
+                &claimed,
+                driver,
+                batch_limits(4, u64::MAX, u64::MAX, u64::MAX),
+                1
+            )
+            .await
+            .unwrap(),
+            CommittedOperationStep::Progressed
+        );
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+            TextBuildStage::ScanSource(progress),
+        )) = operation.progress()
+        else {
+            panic!("the build is still scanning its source");
+        };
+        assert_eq!(
+            progress.cursor,
+            Some(IndexCursor::try_new(key(cursor)).unwrap())
+        );
+        assert_eq!(progress.counters.entities, cursor + 1);
+    }
+
+    let snapshot = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    for (id, text) in [(1, "alpha 1"), (6, "omega")] {
+        let (_, marker) = crate::index_lifecycle::text::statistics::read_marker(
+            &snapshot,
+            None,
+            scope,
+            index_id,
+            generation,
+            reconciliation_entity(id),
+        )
+        .await
+        .unwrap()
+        .expect("scanned entity has a statistics marker");
+        assert_eq!(
+            marker.contribution,
+            crate::index_lifecycle::text::statistics::present_contribution(
+                definition().analyzer(),
+                TextPartition::Unpartitioned,
+                text,
+            )
+            .unwrap(),
+            "entity {id}"
+        );
+    }
+    drop(snapshot);
+    db.close().await.unwrap();
+}
+
+/// A write repairs the invalid graph row 0 after the ScanSource step reads it
+/// and before the step commits. The step reads its blocker's row through the
+/// serializable transaction, so the commit fails instead of blocking the
+/// build durably, and the retried step stages the repaired row.
+#[tokio::test]
+async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
+    use crate::index_lifecycle::lifecycle::{create_index_operation, InitialBuildProgress};
+    use crate::index_lifecycle::outbox::{
+        claim_operation, execute_claimed_step, observe_operation_pointer, read_operation,
+        ClaimPermission, CommittedOperationStep, OperationPointerObservation,
+        SameEpochRecoveryProof, WriteDuringStepDriver,
+    };
+
+    let db = Db::open(
+        "text-driver-source-repaired-blocker",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    crate::migrations::startup::bootstrap_writer(&db)
+        .await
+        .unwrap();
+    let scope = DataScope::LegacyUnscoped;
+    let key = |id| authoritative_property_key(scope, reconciliation_entity(id));
+    let row = |body: &str| {
+        property::encode_properties(&[
+            property::Property::string("$label", "Document"),
+            property::Property::string("body", body),
+        ])
+    };
+    db.put(key(0), b"malformed").await.unwrap();
+    for id in 1..4 {
+        db.put(key(id), row(&format!("alpha {id}"))).await.unwrap();
+    }
+    let crate::index_lifecycle::IndexDdlReceipt::Accepted {
+        operation_id,
+        index_id,
+        generation,
+    } = create_index_operation(
+        &db,
+        scope,
+        ValidatedDynamicIndexDefinition::Text(definition()),
+        helix_planner::ir::IndexCreateMode::ErrorIfExists,
+        InitialBuildProgress::text(IndexCursor::try_new(key(3)).unwrap()),
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("a new text definition enqueues a build");
+    };
+    let inner = TextIndexDriver::new();
+    let racing = WriteDuringStepDriver {
+        inner: &inner,
+        writes: vec![(key(0), row("repaired"))],
+    };
+    let writer_epoch = WriterEpoch::from_bytes([0x7D; 16]).unwrap();
+    let limits = batch_limits(4, u64::MAX, u64::MAX, u64::MAX);
+    let OperationPointerObservation::Eligible(eligible) =
+        observe_operation_pointer(&db, operation_id, writer_epoch, 1)
+            .await
+            .unwrap()
+    else {
+        panic!("the queued text build is eligible");
+    };
+    let claimed = claim_operation(
+        &db,
+        &eligible,
+        writer_epoch,
+        ClaimSequence::new(1).unwrap(),
+        1,
+        ClaimPermission::Normal,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let error = execute_claimed_step(&db, &claimed, &racing, limits, 1)
+        .await
+        .expect_err("a blocker whose row was repaired does not commit");
+    assert!(error.is_transaction_conflict(), "{error}");
+
+    // The supervisor rejoins its task and retries the same step.
+    let OperationPointerObservation::ClaimedByCurrentWriter(eligible) =
+        observe_operation_pointer(&db, operation_id, writer_epoch, 1)
+            .await
+            .unwrap()
+    else {
+        panic!("the failed step leaves its claim with this writer");
+    };
+    let claimed = claim_operation(
+        &db,
+        &eligible,
+        writer_epoch,
+        ClaimSequence::new(2).unwrap(),
+        1,
+        ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(writer_epoch)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        execute_claimed_step(&db, &claimed, &inner, limits, 1)
+            .await
+            .unwrap(),
+        CommittedOperationStep::Progressed
+    );
+    let operation = read_operation(&db, scope, operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+        TextBuildStage::ScanSource(progress),
+    )) = operation.progress()
+    else {
+        panic!("the build is still scanning its source");
+    };
+    assert_eq!(progress.cursor, Some(IndexCursor::try_new(key(3)).unwrap()));
+    assert_eq!(progress.counters.entities, 4);
+    let snapshot = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let (_, marker) = crate::index_lifecycle::text::statistics::read_marker(
+        &snapshot,
+        None,
+        scope,
+        index_id,
+        generation,
+        reconciliation_entity(0),
+    )
+    .await
+    .unwrap()
+    .expect("the repaired entity has a statistics marker");
+    assert_eq!(
+        marker.contribution,
+        crate::index_lifecycle::text::statistics::present_contribution(
+            definition().analyzer(),
+            TextPartition::Unpartitioned,
+            "repaired",
+        )
+        .unwrap()
+    );
+    drop(snapshot);
+    db.close().await.unwrap();
+}
+
+/// A graph row turns invalid after ScanSource, so ScanPartitions prepares an
+/// InvalidSourceData blocker. The blocker carries that row as observed: staged
+/// against the unchanged row, a repair before commit fails the commit, and
+/// once the repair is visible the prepared blocker stages as a retry.
+#[tokio::test]
+async fn partition_blocker_retries_once_its_graph_row_is_repaired() {
+    let scope = DataScope::LegacyUnscoped;
+    let operation = claimed_operation();
+    let db = Db::open(
+        "text-driver-partition-repaired-blocker",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let graph_key = authoritative_property_key(scope, reconciliation_entity(7));
+    let row = |body: &str| {
+        property::encode_properties(&[
+            property::Property::string("$label", "Document"),
+            property::Property::string("body", body),
+        ])
+    };
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    transaction
+        .put(
+            scoped_index_key(scope, ScopedKey::index_record(record().identity().clone())),
+            crate::encoding::v2::values::encode_index_record(&record()),
+        )
+        .unwrap();
+    transaction.put(&graph_key, row("alpha")).unwrap();
+    assert!(matches!(
+        scan_source(
+            &transaction,
+            &transaction,
+            scope,
+            &operation,
+            &record(),
+            &SourceScanProgress {
+                inclusive_upper_bound: IndexCursor::try_new(graph_key.clone()).unwrap(),
+                cursor: None,
+                counters: OperationCounters::default(),
+            },
+            batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
+            document_limits(),
+            IndexLifecycleScanTuning::default(),
+        )
+        .await
+        .unwrap(),
+        IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+            TextBuildProgress::Constructing(TextBuildStage::ScanPartitions(_))
+        ))
+    ));
+    let (_, root) = prepare_empty_manifest_root(
+        &transaction,
+        scope,
+        &operation,
+        TextPartition::Unpartitioned,
+    )
+    .await
+    .unwrap()
+    .into_parts();
+    root.into_iter()
+        .try_for_each(|root| root.stage(&transaction))
+        .unwrap();
+    transaction.commit().await.unwrap();
+    db.put(&graph_key, b"malformed").await.unwrap();
+
+    let runtime = TextStorageRuntime {
+        object_store: Arc::new(InMemory::new()),
+        db_path: "text-driver-partition-repaired-blocker".to_string(),
+        compaction_limits: crate::config::SearchIndexBackfillLimits::default().text_compaction(),
+    };
+    let prepared = prepare_partition_step_with_scan_tuning(
+        &db,
+        scope,
+        &operation,
+        &initial_partition_scan(&operation, scope, OperationCounters::default()).unwrap(),
+        batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
+        document_limits(),
+        IndexLifecycleScanTuning::default(),
+        &runtime,
+    )
+    .await
+    .unwrap();
+    let PreparedTextOperationStep::Repository(repository) = &prepared else {
+        panic!("a partition blocker is a repository step")
+    };
+    assert!(matches!(
+        repository.result,
+        IndexOperationStepResult::Blocked(IndexOperationBlocker::InvalidSourceData { .. })
+    ));
+
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        prepared
+            .stage(&transaction, scope, &operation)
+            .await
+            .unwrap(),
+        IndexOperationStepResult::Blocked(IndexOperationBlocker::InvalidSourceData { .. })
+    ));
+    db.put(&graph_key, row("repaired")).await.unwrap();
+    let error = HelixDbError::from(transaction.commit().await.unwrap_err());
+    assert!(error.is_transaction_conflict(), "{error}");
+
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        prepared
+            .stage(&transaction, scope, &operation)
+            .await
+            .unwrap(),
+        IndexOperationStepResult::TransientFailure
+    ));
+    drop(transaction);
+    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -1406,19 +1805,21 @@ async fn partition_scan_separates_root_creation_document_upload_and_empty_exhaus
         (batch_limits(8, 1, u64::MAX, u64::MAX), 1),
         (batch_limits(8, u64::MAX, u64::MAX, 1), 1),
     ] {
-        let PartitionScanSelection::Blocked(IndexOperationBlocker::ManifestLimit { limit, .. }) =
-            scan_partition_documents(
-                &transaction,
-                scope,
-                &operation,
-                &definition,
-                &progress,
-                limits,
-                document_limits(),
-                IndexLifecycleScanTuning::default(),
-            )
-            .await
-            .unwrap()
+        let PartitionScanSelection::Blocked(
+            IndexOperationBlocker::ManifestLimit { limit, .. },
+            None,
+        ) = scan_partition_documents(
+            &transaction,
+            scope,
+            &operation,
+            &definition,
+            &progress,
+            limits,
+            document_limits(),
+            IndexLifecycleScanTuning::default(),
+        )
+        .await
+        .unwrap()
         else {
             panic!("empty-root resource boundaries are durable manifest blockers")
         };
@@ -1427,7 +1828,7 @@ async fn partition_scan_separates_root_creation_document_upload_and_empty_exhaus
     assert!(root_input_bytes > 1);
     assert!(root_output_bytes > 1);
     let seed_limit = root_input_bytes.saturating_add(1);
-    let PartitionScanSelection::Blocked(IndexOperationBlocker::ManifestLimit { .. }) =
+    let PartitionScanSelection::Blocked(IndexOperationBlocker::ManifestLimit { .. }, None) =
         scan_partition_documents(
             &transaction,
             scope,
@@ -1582,7 +1983,11 @@ async fn partition_scan_separates_root_creation_document_upload_and_empty_exhaus
         )
         .await
         .unwrap(),
-        PartitionScanSelection::Blocked(IndexOperationBlocker::InvalidSourceData { .. })
+        PartitionScanSelection::Blocked(
+            IndexOperationBlocker::InvalidSourceData { .. },
+            Some(PreparedTextExpectedRead { key, value }),
+        ) if key == authoritative_property_key(scope, entity)
+            && value.as_deref() == Some(b"malformed".as_slice())
     ));
 
     let mut wrong_progress = progress.clone();
@@ -1784,6 +2189,7 @@ async fn scanned_generation(
     assert!(matches!(
         scan_source(
             &transaction,
+            &transaction,
             scope,
             operation,
             &tenant_record(operation),
@@ -1899,12 +2305,15 @@ async fn partition_scan_reconciles_entities_changed_after_the_source_scan() {
         cursor: Some(first.completed_cursor.clone()),
         ..progress.clone()
     };
-    let PartitionScanSelection::Blocked(IndexOperationBlocker::OversizedEntity {
-        entity_id,
-        observed,
-        limit: 2,
-        ..
-    }) = scan(
+    let PartitionScanSelection::Blocked(
+        IndexOperationBlocker::OversizedEntity {
+            entity_id,
+            observed,
+            limit: 2,
+            ..
+        },
+        Some(graph_read),
+    ) = scan(
         after_stable.clone(),
         batch_limits(8, u64::MAX, 2, u64::MAX),
         document_limits(),
@@ -1915,6 +2324,12 @@ async fn partition_scan_reconciles_entities_changed_after_the_source_scan() {
     };
     assert_eq!(entity_id, IndexEntityId::new(8));
     assert!(observed > 2);
+    // The blocker carries the deleted entity's absent graph row.
+    assert_eq!(
+        graph_read.key,
+        authoritative_property_key(scope, reconciliation_entity(8))
+    );
+    assert_eq!(graph_read.value, None);
     let (retired_state, graph) = (
         snapshot.get(&state_key(8)).await.unwrap().unwrap(),
         authoritative_property_key(scope, reconciliation_entity(8)),
@@ -1973,7 +2388,7 @@ async fn partition_scan_reconciles_entities_changed_after_the_source_scan() {
             mutation_limits(crate::config::SearchIndexBackfillLimits::default().batch(), retirement_input, page),
         )
         .await,
-        PartitionScanSelection::Blocked(IndexOperationBlocker::ManifestLimit { observed, .. })
+        PartitionScanSelection::Blocked(IndexOperationBlocker::ManifestLimit { observed, .. }, Some(_))
             if observed == source
     ));
     assert!(matches!(
@@ -1983,7 +2398,7 @@ async fn partition_scan_reconciles_entities_changed_after_the_source_scan() {
             mutation_limits(crate::config::SearchIndexBackfillLimits::default().batch(), retirement_input - 1, page),
         )
         .await,
-        PartitionScanSelection::Blocked(IndexOperationBlocker::OversizedEntity { observed, .. })
+        PartitionScanSelection::Blocked(IndexOperationBlocker::OversizedEntity { observed, .. }, Some(_))
             if observed == retirement_input
     ));
 
@@ -2376,10 +2791,10 @@ async fn partition_scan_reserves_the_upload_artifact_row() {
     ] {
         assert!(matches!(
             scan(max_output_operations, max_output_bytes).await,
-            PartitionScanSelection::Blocked(IndexOperationBlocker::ManifestLimit {
-                observed,
-                ..
-            }) if observed == admitted
+            PartitionScanSelection::Blocked(
+                IndexOperationBlocker::ManifestLimit { observed, .. },
+                Some(_),
+            ) if observed == admitted
         ));
     }
     drop(snapshot);

@@ -5,6 +5,35 @@
 //! enqueue operand per `(scope, index, generation)` queue key in the same
 //! transaction as the graph change. The publication worker later applies and
 //! acknowledges exact operation IDs.
+//!
+//! # Build source reads
+//!
+//! Vector and text builds read graph rows from a snapshot outside their step's
+//! serializable transaction, so a write inside a step's read-to-commit window
+//! does not abort the step. Every graph write that commits after a build is
+//! created also queues a complete operation for its hidden `Building`
+//! generation (a write whose serializable catalog read predates the creation
+//! conflicts with it). Publication defers those operations until activation,
+//! then applies them in commit order as idempotent replacements or deletes:
+//!
+//! - a row changed after the build read it is corrected by its operation;
+//! - a row changed before the build read it is re-applied with the same value;
+//! - a deleted row is removed by its operation;
+//! - an entity above the build's source watermark arrives only from the queue.
+//!
+//! Once the queue drains, the generation therefore holds the same documents
+//! whichever snapshot, taken after the build's creation, each step read. Text
+//! `ScanPartitions` rereads graph rows the same way and realigns each entity's
+//! statistics marker with the document it builds, which queued publication
+//! diffs against. Rows the build owns (operation, canonical record, applied
+//! and entity state, statistics, tenant mappings, physical rows) stay in the
+//! step's serializable read set. Secondary builds have no queue and read
+//! source rows serializably.
+//!
+//! The queue corrects documents, not blockers, and a blocker is durable. A
+//! step that blocks on a graph row therefore also reads that row through its
+//! transaction (`ScanPartitions` retains it as an expected read), so a write
+//! that repairs the row before the step commits makes the step retry.
 
 pub(crate) mod backlog;
 pub(crate) mod lag;
