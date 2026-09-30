@@ -50,6 +50,7 @@ use super::{
 };
 
 mod all_index_validation;
+mod text_build_reconciliation;
 
 const MAXIMUM_CONTROLLER_TURNS: usize = 4_096;
 
@@ -208,9 +209,12 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
     );
 
     let mut case_count = 0usize;
-    for (shape_ordinal, shape) in shapes.into_iter().enumerate() {
-        for (boundary_ordinal, boundary) in PublicMutationBoundary::ALL.into_iter().enumerate() {
-            let ordinal = shape_ordinal * PublicMutationBoundary::ALL.len() + boundary_ordinal;
+    for shape in shapes {
+        for boundary in PublicMutationBoundary::ALL
+            .into_iter()
+            .filter(|boundary| boundary.applies_to(shape.family()))
+        {
+            let ordinal = case_count;
             let db = HelixDB::open_for_index_lifecycle_testing(
                 HelixDbSource::InMemory {
                     database: format!("index-lifecycle-public-boundary-{ordinal}"),
@@ -299,7 +303,7 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 .await
                 .expect("partitioned vector moves through the public mutation boundary");
             }
-            assert_build_delta_count_at_least(&db, scope, &definition, 2).await;
+            assert_late_work_at_least(&db, scope, &definition, 2).await;
 
             let evidence = controller
                 .advance(
@@ -312,21 +316,33 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 .await
                 .expect("public-boundary operation resumes after writes");
             assert_monotonic_step(&evidence);
-            if matches!(
-                stage,
-                IndexOperationStage::Validate
-                    | IndexOperationStage::ValidateDescriptor
-                    | IndexOperationStage::Activate
-            ) {
-                assert_eq!(
-                    db.get_index_operation(scope, operation_id)
-                        .await
-                        .expect("public-boundary operation remains readable")
-                        .common()
-                        .stage,
-                    IndexOperationStage::CatchUp,
-                    "{shape:?} must re-enter CatchUp after a public write at {stage:?}"
-                );
+            let resumed = db
+                .get_index_operation(scope, operation_id)
+                .await
+                .expect("public-boundary operation remains readable")
+                .common()
+                .stage;
+            match shape.family() {
+                PublicMutationFamily::Secondary
+                    if matches!(
+                        stage,
+                        IndexOperationStage::Validate | IndexOperationStage::Activate
+                    ) =>
+                {
+                    assert_eq!(
+                        resumed,
+                        IndexOperationStage::CatchUp,
+                        "{shape:?} must re-enter CatchUp after a public write at {stage:?}"
+                    );
+                }
+                PublicMutationFamily::Secondary => {}
+                PublicMutationFamily::Vector | PublicMutationFamily::Text => {
+                    assert_ne!(
+                        resumed,
+                        IndexOperationStage::CatchUp,
+                        "queued {shape:?} writes at {stage:?} never send the build to catch-up"
+                    );
+                }
             }
             assert!(matches!(
                 drive_to_terminal(&db, &controller, scope, operation_id).await,
@@ -334,6 +350,7 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
             ));
             assert_identity_active(&db, scope, &definition).await;
             assert_build_deltas_empty(&db, scope, &definition).await;
+            // Strong searches overlay queued vector work before publication.
             assert_public_boundary_results(
                 &db,
                 &shape,
@@ -342,13 +359,27 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 (second_ordinal, second_id),
             )
             .await;
+            if shape.family() != PublicMutationFamily::Secondary {
+                db.publish_index_queues_for_lifecycle_testing()
+                    .await
+                    .expect("queued public-boundary writes publish");
+                assert_eq!(queued_operations(&db, scope, &definition).await, 0);
+                assert_public_boundary_results(
+                    &db,
+                    &shape,
+                    &seeded,
+                    (first_ordinal, first_id),
+                    (second_ordinal, second_id),
+                )
+                .await;
+            }
             db.close().await.expect("public-boundary writer closes");
             case_count += 1;
         }
     }
     assert_eq!(
-        case_count, 76,
-        "nineteen public shapes run at four exact lifecycle boundaries"
+        case_count, 64,
+        "seven secondary shapes run at four exact boundaries and twelve vector shapes at three"
     );
 }
 
@@ -1506,6 +1537,11 @@ pub(super) async fn run_all_index_validation_mutations() {
     all_index_validation::run().await;
 }
 
+/// Runs text builds whose scanned entities change before partition construction.
+pub(super) async fn run_text_build_reconciliation() {
+    text_build_reconciliation::run().await;
+}
+
 /// Interleaves source changes with two builds and proves unique repair/retry.
 async fn run_secondary_mutation_interleaving() {
     let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
@@ -2251,6 +2287,16 @@ enum PublicMutationBoundary {
 impl PublicMutationBoundary {
     const ALL: [Self; 4] = [Self::Scan, Self::CatchUp, Self::Validate, Self::Activate];
 
+    /// Queued vector builds never enter catch-up, so only secondary builds
+    /// race public writes there.
+    fn applies_to(self, family: PublicMutationFamily) -> bool {
+        match (self, family) {
+            (Self::CatchUp, PublicMutationFamily::Secondary) => true,
+            (Self::CatchUp, PublicMutationFamily::Vector | PublicMutationFamily::Text) => false,
+            (Self::Scan | Self::Validate | Self::Activate, _) => true,
+        }
+    }
+
     fn stage(self, family: PublicMutationFamily) -> IndexOperationStage {
         match (self, family) {
             (Self::Scan, _) => IndexOperationStage::Scan,
@@ -2426,7 +2472,7 @@ async fn run_every_family_public_mutation_interleaving() {
         );
         first_write.expect("first concurrent Building write commits after bounded retries");
         second_write.expect("second concurrent Building write commits after bounded retries");
-        assert_build_delta_count_at_least(&db, scope, &definition, 2).await;
+        assert_late_work_at_least(&db, scope, &definition, 2).await;
 
         assert!(matches!(
             drive_to_terminal(&db, &controller, scope, operation_id).await,
@@ -2570,7 +2616,7 @@ async fn run_partitioned_search_edge_tenant_moves() {
         )
         .await
         .expect("tenant move commits while partitioned edge index is Building");
-        assert_build_delta_count_at_least(&db, scope, &definition, 1).await;
+        assert_late_work_at_least(&db, scope, &definition, 1).await;
         assert!(matches!(
             drive_to_terminal(&db, &controller, scope, operation_id).await,
             IndexOperationStatus::Succeeded { .. }
@@ -2646,6 +2692,196 @@ async fn execute_write_with_bindings_retry(
     Err(HelixDbError::InvariantViolation(
         "public lifecycle mutation exhausted eight serializable retries".to_string(),
     ))
+}
+
+/// Atomically enqueues one vector/text entity transition with its source row.
+///
+/// Mirrors a graph write: complete operations are routed through the
+/// transaction's canonical catalog, capacity is reserved in the ledger, and
+/// one blind operand per touched generation queue commits with the source
+/// row. Secondary maintenance is not exercised here.
+async fn enqueue_search_mutation(
+    db: &HelixDB,
+    scope: DataScope,
+    element_kind: IndexElementKind,
+    entity_id: u64,
+    before: &[Property],
+    after: &[Property],
+) -> crate::error::Result<()> {
+    let _scope_permit = db.index_mutation_scope_permit(scope).await;
+    let writer = db.lifecycle_test_writer_db()?;
+    let transaction = writer.begin(IsolationLevel::SerializableSnapshot).await?;
+    let (_, _, vector, text, routes) =
+        crate::index_lifecycle::mutation_catalog::MutationIndexCatalog::load(&transaction, scope)
+            .await?
+            .into_components();
+    let mut collector =
+        crate::index_lifecycle::queue::producer::QueuedMutationCollector::new(scope);
+    for transition in graph_transitions(scope, element_kind, entity_id, before, after) {
+        collector.collect(
+            &vector,
+            &text,
+            &routes.targets_for(&transition),
+            &transition,
+        )?;
+    }
+    let staged = collector.finalize(db.index_operand_limit(), db.active_text_mutation_limits())?;
+    let mut reservation = if staged.is_empty() {
+        None
+    } else {
+        let reservation = db.index_operation_backlog().reserve(staged.charges)?;
+        for staged in staged.operands {
+            db.index_queue_store().stage_enqueue(
+                &transaction,
+                staged.target,
+                staged.operand,
+                &staged.operations,
+            )?;
+        }
+        Some(reservation)
+    };
+    let key = match element_kind {
+        IndexElementKind::Node => source_key(scope, entity_id),
+        IndexElementKind::Edge => edge_source_key(scope, entity_id),
+    };
+    if after.is_empty() {
+        transaction.delete(key)?;
+    } else {
+        transaction.put(key, encode_properties(after))?;
+    }
+    if let Some(reservation) = reservation.as_mut() {
+        reservation.begin_commit();
+    }
+    match (transaction.commit().await, reservation) {
+        (Ok(_), Some(reservation)) => reservation.committed(),
+        (Ok(_), None) => {}
+        (Err(error), Some(reservation)) => {
+            reservation.aborted();
+            return Err(error.into());
+        }
+        (Err(error), None) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Expresses a complete before/after property change as ordinary graph
+/// transitions: a create, a delete, or one edit per changed property.
+fn graph_transitions(
+    scope: DataScope,
+    element_kind: IndexElementKind,
+    entity_id: u64,
+    before: &[Property],
+    after: &[Property],
+) -> Vec<crate::index_lifecycle::graph_mutation::GraphMutationTransition> {
+    use crate::index_lifecycle::graph_mutation::{
+        CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit,
+        PropertyEditOutcome,
+    };
+    let entity = match element_kind {
+        IndexElementKind::Node => GraphEntity::node(entity_id),
+        IndexElementKind::Edge => GraphEntity::edge(entity_id),
+    };
+    match (before.is_empty(), after.is_empty()) {
+        (true, true) => Vec::new(),
+        (true, false) => vec![GraphMutationTransition::create(
+            scope,
+            entity,
+            CanonicalPropertyRow::new(after.to_vec()),
+        )],
+        (false, true) => vec![GraphMutationTransition::delete(
+            scope,
+            entity,
+            CanonicalPropertyRow::new(before.to_vec()),
+        )],
+        (false, false) => {
+            let edits = before
+                .iter()
+                .filter(|property| after.iter().all(|next| next.name != property.name))
+                .map(|property| PropertyEdit::remove(property.name.clone()))
+                .chain(after.iter().cloned().map(PropertyEdit::set));
+            let mut row = CanonicalPropertyRow::new(before.to_vec());
+            let mut transitions = Vec::new();
+            for edit in edits {
+                match GraphMutationTransition::edit(scope, entity, row.clone(), edit) {
+                    PropertyEditOutcome::Unchanged(unchanged) => row = unchanged,
+                    PropertyEditOutcome::Changed(transition) => {
+                        row = transition
+                            .after()
+                            .expect("a property edit retains its row")
+                            .clone();
+                        transitions.push(transition);
+                    }
+                }
+            }
+            transitions
+        }
+    }
+}
+
+/// Requires a generation to retain at least `minimum` queued operations.
+async fn assert_queued_operations_at_least(
+    db: &HelixDB,
+    scope: DataScope,
+    definition: &ValidatedDynamicIndexDefinition,
+    minimum: usize,
+) {
+    let operations = queued_operations(db, scope, definition).await;
+    assert!(
+        operations >= minimum,
+        "{definition:?} retained {operations} queued operations, expected at least {minimum}"
+    );
+}
+
+/// Counts the operations queued for a definition's current generation.
+async fn queued_operations(
+    db: &HelixDB,
+    scope: DataScope,
+    definition: &ValidatedDynamicIndexDefinition,
+) -> usize {
+    let writer = db
+        .lifecycle_test_writer_db()
+        .expect("queue count has writer storage");
+    let record = crate::index_lifecycle::repository::load_index_record(
+        writer,
+        scope,
+        &definition.identity(),
+    )
+    .await
+    .expect("queue count canonical row decodes")
+    .expect("queue count canonical row exists");
+    let target = crate::index_lifecycle::queue::QueueTarget::new(
+        scope,
+        record.index_id(),
+        record.state().generation(),
+    );
+    writer
+        .get(target.key())
+        .await
+        .expect("queue key remains readable")
+        .map_or(0, |value| {
+            crate::encoding::v2::values::indexes::operation_queue::OperationQueue::decode(&value)
+                .expect("queue value decodes")
+                .operations()
+                .len()
+        })
+}
+
+/// Requires late writes to remain pending: secondary work as build deltas,
+/// vector/text work as queued operations.
+async fn assert_late_work_at_least(
+    db: &HelixDB,
+    scope: DataScope,
+    definition: &ValidatedDynamicIndexDefinition,
+    minimum: usize,
+) {
+    match definition {
+        ValidatedDynamicIndexDefinition::Secondary(_) => {
+            assert_build_delta_count_at_least(db, scope, definition, minimum).await;
+        }
+        ValidatedDynamicIndexDefinition::Vector(_) | ValidatedDynamicIndexDefinition::Text(_) => {
+            assert_queued_operations_at_least(db, scope, definition, minimum).await;
+        }
+    }
 }
 
 /// Counts coalesced BUILD deltas without retaining entity-sized test state.
@@ -3387,14 +3623,14 @@ fn building_drop_checkpoints(family: IndexDefinitionFamily) -> Vec<BuildingDropC
                 BuildingDropCheckpoint::Stage(IndexOperationStage::Activate),
             ]);
         }
+        // Queued vector/text builds never enter catch-up: writes during the
+        // build are queued operations published after activation.
         IndexDefinitionFamily::Vector => checkpoints.extend([
-            BuildingDropCheckpoint::Stage(IndexOperationStage::CatchUp),
             BuildingDropCheckpoint::Stage(IndexOperationStage::ValidateDescriptor),
             BuildingDropCheckpoint::Stage(IndexOperationStage::Activate),
         ]),
         IndexDefinitionFamily::Text => checkpoints.extend([
             BuildingDropCheckpoint::Stage(IndexOperationStage::ScanPartitions),
-            BuildingDropCheckpoint::Stage(IndexOperationStage::CatchUp),
             BuildingDropCheckpoint::Stage(IndexOperationStage::Compact),
             BuildingDropCheckpoint::Stage(IndexOperationStage::PrepareManifests),
             BuildingDropCheckpoint::Stage(IndexOperationStage::ValidateManifests),
@@ -3956,6 +4192,23 @@ async fn drive_until_stage(
     operation_id: crate::index_lifecycle::IndexOperationId,
     expected_stage: IndexOperationStage,
 ) {
+    drive_until(db, controller, scope, operation_id, |status| {
+        status.common().stage == expected_stage
+    })
+    .await;
+}
+
+/// Advances all work one operation step at a time until `ready` holds.
+///
+/// `ready` is checked before every step, so a status that already satisfies
+/// it takes no step. The operation must stay nonterminal until then.
+async fn drive_until(
+    db: &HelixDB,
+    controller: &LifecycleTestController,
+    scope: DataScope,
+    operation_id: crate::index_lifecycle::IndexOperationId,
+    ready: impl Fn(&IndexOperationStatus) -> bool,
+) -> IndexOperationStatus {
     let logical_start = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3972,15 +4225,15 @@ async fn drive_until_stage(
             .get_index_operation(scope, operation_id)
             .await
             .expect("staged operation remains readable");
-        if status.common().stage == expected_stage {
-            return;
+        if ready(&status) {
+            return status;
         }
         assert!(
             matches!(
                 status,
                 IndexOperationStatus::Queued { .. } | IndexOperationStatus::Running { .. }
             ),
-            "operation terminated before reaching {expected_stage:?}: {status:?}"
+            "operation terminated before its pause point: {status:?}"
         );
         let logical_now = logical_start.saturating_add(
             u64::try_from(turn)
@@ -3996,8 +4249,8 @@ async fn drive_until_stage(
             .get_index_operation(scope, operation_id)
             .await
             .expect("staged operation remains readable after its step");
-        if status_after.common().stage == expected_stage {
-            return;
+        if ready(&status_after) {
+            return status_after;
         }
         let page = controller
             .discover(
@@ -4018,7 +4271,7 @@ async fn drive_until_stage(
             assert_monotonic_step(&evidence);
         }
     }
-    panic!("operation did not reach {expected_stage:?} within its turn bound");
+    panic!("operation did not reach its pause point within its turn bound");
 }
 
 /// Checks revision monotonicity and successful non-waiting checkpoint movement.

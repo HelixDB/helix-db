@@ -1694,6 +1694,57 @@ fn search_index(
     search_reader(&reader, fields, analyzer, query, k)
 }
 
+/// Searches pending documents in memory exactly as persisted splits are searched.
+///
+/// The same schema, analyzer, OR-term query, deterministic collector, traversal
+/// scope, and caller-supplied BM25 statistics produce scores that merge
+/// directly with physical split results.
+pub(crate) fn search_pending_documents(
+    definition: &TextIndexDefinition,
+    documents: &[(u64, Arc<str>)],
+    query: &str,
+    k: usize,
+    statistics: &crate::index_lifecycle::text::statistics::TextBm25Statistics,
+    scope: &TextSearchScope,
+) -> Result<Vec<TextSearchHit>, HelixDbError> {
+    if documents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (index, fields) = create_ram_index(definition)?;
+    let mut budget = TextAnalysisMemoryBudget::new(std::num::NonZeroU64::MAX);
+    let analyzed = documents
+        .iter()
+        .map(|(entity_id, text)| {
+            Ok(AnalyzedTextDocumentInput {
+                entity_id: *entity_id,
+                logical_version: 0,
+                analyzed: analyze_text_for_indexing(
+                    definition.analyzer(),
+                    text.to_string(),
+                    &mut budget,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, HelixDbError>>()?;
+    populate_analyzed_index(&index, fields, analyzed)?;
+    let reader = build_reader(&index)?;
+    Ok(search_reader_candidates_with_statistics(
+        &reader,
+        fields,
+        definition.analyzer(),
+        query,
+        k,
+        Some(statistics),
+        scope,
+    )?
+    .into_iter()
+    .map(|candidate| TextSearchHit {
+        entity_id: candidate.entity_id,
+        score: candidate.score,
+    })
+    .collect())
+}
+
 fn build_reader(index: &Index) -> Result<IndexReader, HelixDbError> {
     let reader = index
         .reader_builder()
@@ -1970,6 +2021,133 @@ impl TextAnalysisMemoryBudget {
     }
 }
 
+/// Bytes a [`TextAnalysisMemoryBudget`] charges for one retained indexed token.
+///
+/// Conservatively covers vector over-allocation, owned token text,
+/// unique-term tree/vector storage, and downstream Tantivy copies.
+pub(crate) const fn indexed_token_charge(token_bytes: u64) -> u64 {
+    const OVERHEAD: u64 = (core::mem::size_of::<Token>() * 3
+        + core::mem::size_of::<Bytes>() * 2
+        + core::mem::size_of::<usize>() * 6) as u64;
+    OVERHEAD.saturating_add(token_bytes.saturating_mul(3))
+}
+
+/// Split bytes that do not grow with the document, rounded up to over twice
+/// the largest measured: Tantivy's meta, managed, fast-field, field-norm,
+/// store, and file footers, plus the bundle footer and hotcache.
+const SINGLE_DOCUMENT_SPLIT_OVERHEAD: u64 = 16 * 1024;
+
+/// Upper bound on the immutable split holding only one document that a
+/// [`TextAnalysisMemoryBudget`] charged `analysis_bytes`.
+///
+/// The body is indexed but not stored. Beyond its fixed layout, a split
+/// stores each distinct term in up to three places (its term-dictionary
+/// block, the block index, and the hotcache's copy of that index) plus a few
+/// bytes of frequency and position per token. Analysis charges every retained
+/// token [`indexed_token_charge`] (over 280 bytes plus three per token byte)
+/// on top of the text, and lowercasing grows a token to at most one and a
+/// half times its text, so every token byte is charged more than three and a
+/// half bytes. Adversarial documents measure below 0.71 of their charge
+/// beyond the fixed layout
+/// (`single_document_splits_stay_within_the_analysis_bound`).
+pub(crate) const fn single_document_split_bytes(analysis_bytes: u64) -> u64 {
+    SINGLE_DOCUMENT_SPLIT_OVERHEAD.saturating_add(analysis_bytes)
+}
+
+/// What indexing one document charges and retains, as admission sizes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextAnalysisTotals {
+    /// Bytes [`analyze_text_for_indexing`] charges for an owned copy of the
+    /// text whose capacity equals its length.
+    pub(crate) analysis_bytes: u64,
+    /// Bytes of the source text.
+    pub(crate) text_bytes: u64,
+    /// Distinct indexed terms.
+    pub(crate) unique_terms: u64,
+    /// Bytes of all distinct indexed terms together.
+    pub(crate) unique_term_bytes: u64,
+}
+
+impl TextAnalysisTotals {
+    /// Returns totals no analyzer exceeds for ASCII `text`, without running
+    /// one; `None` for other text, whose lowercase forms can grow.
+    ///
+    /// Both tokenizers emit disjoint, non-empty substrings of the text.
+    /// Lowercasing keeps an ASCII token's length, and English stemming only
+    /// deletes a suffix or replaces it with an ASCII one no longer than it.
+    /// An ASCII text of `L` bytes therefore yields at most `L` tokens holding
+    /// at most `L` bytes, so every total is at most its value for `L` distinct
+    /// one-byte terms.
+    pub(crate) fn ascii_bound(text: &str) -> Option<Self> {
+        text.is_ascii().then(|| {
+            let bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+            Self {
+                analysis_bytes: bytes.saturating_add(bytes.saturating_mul(indexed_token_charge(1))),
+                text_bytes: bytes,
+                unique_terms: bytes,
+                unique_term_bytes: bytes,
+            }
+        })
+    }
+}
+
+/// Analyzes `text` like [`analyze_text`] while charging `budget` exactly what
+/// [`analyze_text_for_indexing`] charges for an owned copy of it whose
+/// capacity equals its length.
+///
+/// Only distinct terms are retained, and analysis stops at the first token
+/// the budget rejects, so sizing a document neither copies its text nor
+/// keeps its token stream.
+pub(crate) fn analyze_text_within_budget(
+    analyzer: TextAnalyzerKind,
+    text: &str,
+    budget: &mut TextAnalysisMemoryBudget,
+) -> Result<(AnalyzedText, TextAnalysisTotals), HelixDbError> {
+    let charged_before = budget.used;
+    let text_bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    budget.try_reserve(text_bytes)?;
+    let mut terms = BTreeSet::<Bytes>::new();
+    let mut token_count = 0_u64;
+    let mut text_analyzer = build_text_analyzer(analyzer);
+    let mut stream = text_analyzer.token_stream(text);
+    // Tantivy streams tokens through one reused buffer rather than an
+    // iterator, and the loop returns at the first rejected charge.
+    while stream.advance() {
+        let term = stream.token().text.as_bytes();
+        if term.is_empty() || term.len() > MAX_TOKEN_LEN {
+            continue;
+        }
+        budget.try_reserve(indexed_token_charge(
+            u64::try_from(term.len()).unwrap_or(u64::MAX),
+        ))?;
+        token_count = token_count
+            .checked_add(1)
+            .expect("an in-memory text cannot contain more than u64 tokens");
+        if !terms.contains(term) {
+            terms.insert(Bytes::copy_from_slice(term));
+        }
+    }
+    let totals = TextAnalysisTotals {
+        analysis_bytes: budget
+            .used
+            .checked_sub(charged_before)
+            .expect("text analysis budget consumption is monotonic"),
+        text_bytes,
+        unique_terms: u64::try_from(terms.len()).unwrap_or(u64::MAX),
+        unique_term_bytes: terms
+            .iter()
+            .map(|term| u64::try_from(term.len()).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add),
+    };
+    Ok((
+        AnalyzedText {
+            token_count,
+            unique_terms: terms.into_iter().collect(),
+        },
+        totals,
+    ))
+}
+
 /// Applies the production analyzer and Tantivy's postings token-length boundary.
 pub(crate) fn analyze_text(analyzer: TextAnalyzerKind, text: &str) -> AnalyzedText {
     let mut terms = BTreeSet::new();
@@ -2011,21 +2189,9 @@ pub(crate) fn analyze_text_for_indexing(
             return;
         }
         if !token.text.is_empty() && token.text.len() <= MAX_TOKEN_LEN {
-            // Conservatively cover vector over-allocation, owned token text,
-            // unique-term tree/vector storage, and downstream Tantivy copies.
-            let retained_token_bytes = u64::try_from(
-                core::mem::size_of::<Token>()
-                    .saturating_mul(3)
-                    .saturating_add(core::mem::size_of::<Bytes>().saturating_mul(2))
-                    .saturating_add(core::mem::size_of::<usize>().saturating_mul(6)),
-            )
-            .unwrap_or(u64::MAX)
-            .saturating_add(
-                u64::try_from(token.text.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(3),
-            );
-            if let Err(error) = budget.try_reserve(retained_token_bytes) {
+            if let Err(error) = budget.try_reserve(indexed_token_charge(
+                u64::try_from(token.text.len()).unwrap_or(u64::MAX),
+            )) {
                 analysis_error = Some(error);
                 return;
             }
@@ -2494,6 +2660,101 @@ mod tests {
             .is_none());
     }
 
+    /// Worst-case one-document splits stay within the bound admission charges.
+    ///
+    /// Long distinct terms that share a stem in pairs keep the block index
+    /// from shortening its keys, random two-byte and case-expanding characters
+    /// resist compression and grow when lowercased, and many short or
+    /// repeated terms stress postings, positions, and the fixed layout.
+    #[test]
+    fn single_document_splits_stay_within_the_analysis_bound() {
+        let mut state = 7_u64;
+        let mut random = |alphabet: &[char], len: usize| {
+            (0..len)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    alphabet[usize::try_from(state >> 33).unwrap() % alphabet.len()]
+                })
+                .collect::<String>()
+        };
+        let printable = ('!'..='~').collect::<Vec<_>>();
+        let two_byte = ('\u{100}'..='\u{7FF}')
+            .filter(|character| !character.is_whitespace())
+            .collect::<Vec<_>>();
+        let expanding = ['\u{130}', '\u{23A}', '\u{23E}'];
+        let mut paired = |alphabet: &[char], stems: usize, len: usize| {
+            (0..stems)
+                .map(|_| random(alphabet, len))
+                .flat_map(|stem| [format!("{stem}0 "), format!("{stem}1 ")])
+                .collect::<String>()
+        };
+        let documents = [
+            "a".to_string(),
+            " ".to_string(),
+            "x".repeat(MAX_TOKEN_LEN + 1),
+            paired(&two_byte, 10, 30_000),
+            paired(&two_byte, 50, 4_000),
+            paired(&expanding, 50, 4_000),
+            paired(&printable, 200, 1_000),
+            paired(&printable, 5_000, 3),
+            "a ".repeat(100_000),
+            (0..100_000)
+                .map(|index| format!("t{} ", (index * 7_919) % 4_000))
+                .collect(),
+        ];
+        let mut worst = 0.0_f64;
+        for analyzer in [
+            TextAnalyzerKind::Standard,
+            TextAnalyzerKind::StandardStemEn,
+            TextAnalyzerKind::WhitespaceLowercase,
+        ] {
+            for positions in [false, true] {
+                let definition = TextIndexDefinition::new_node("Doc", "body")
+                    .expect("test text definition is valid")
+                    .with_analyzer(analyzer)
+                    .with_positions_enabled(positions);
+                for text in &documents {
+                    let (_, totals) = analyze_text_within_budget(
+                        analyzer,
+                        text,
+                        &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                    )
+                    .expect("an unbounded budget admits every document");
+                    let analyzed = analyze_text_for_indexing(
+                        analyzer,
+                        text.clone(),
+                        &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                    )
+                    .expect("an unbounded budget admits every document");
+                    let (payload, _, _) = build_analyzed_documents_as_split(
+                        &definition,
+                        vec![AnalyzedTextDocumentInput {
+                            entity_id: u64::MAX,
+                            logical_version: u64::MAX,
+                            analyzed,
+                        }],
+                    )
+                    .expect("build one-document split")
+                    .expect("one document produces a split")
+                    .into_parts();
+                    let split = u64::try_from(payload.len()).unwrap();
+                    assert!(
+                        split <= single_document_split_bytes(totals.analysis_bytes),
+                        "{analyzer:?} positions={positions}: {split} bytes for {totals:?}"
+                    );
+                    worst = worst.max(
+                        split.saturating_sub(SINGLE_DOCUMENT_SPLIT_OVERHEAD) as f64
+                            / totals.analysis_bytes.max(1) as f64,
+                    );
+                }
+            }
+        }
+        // The stem pairs reach the adversarial regime the bound must cover.
+        assert!(worst > 0.5, "{worst}");
+    }
+
     #[test]
     fn foreground_analyzed_split_preserves_format_and_search_semantics() {
         let definition = TextIndexDefinition::new_node("Doc", "body")
@@ -2646,6 +2907,150 @@ mod tests {
             } if observed > limit.get()
         ));
         assert!(budget.used() <= limit.get());
+    }
+
+    const ANALYZERS: [TextAnalyzerKind; 3] = [
+        TextAnalyzerKind::Standard,
+        TextAnalyzerKind::StandardStemEn,
+        TextAnalyzerKind::WhitespaceLowercase,
+    ];
+
+    /// Words that exercise every English stemmer rewrite and exception.
+    const STEMMER_WORDS: &str = "caresses ponies ties cries gas this eed agreed feed \
+        plastered bled motoring sing conflated troubled sized hopping tanned falling \
+        hissing fizzed failing filing happy sky relational conditional rational valenci \
+        hesitanci digitizer conformabli radicalli differentli vileli analogousli \
+        vietnamization predication operator feudalism decisiveness hopefulness \
+        callousness formaliti sensitiviti sensibiliti fruitfulli lessli archaeologi \
+        triplicate formative formalize electriciti electrical hopeful goodness revival \
+        allowance inference airliner gyroscopic adjustable defensible irritant \
+        replacement adjustment dependent adoption homologou communism activate \
+        angulariti homologous effective bowdlerize probate rate cease skis skies dying \
+        lying tying idly gently ugly early only singly news howe atlas cosmos bias andes \
+        inning outing canning herring earring proceed exceed succeed generously arsenal \
+        communal generate yying sayings";
+
+    fn sizing_corpus() -> Vec<String> {
+        vec![
+            String::new(),
+            "!!! ???".to_string(),
+            "Hello, happy tax payer!".to_string(),
+            "a a a b b c".to_string(),
+            "Ünïcödé İstanbul ΣΊΣΥΦΟΣ Ⱥ ǅ ß".to_string(),
+            "x".repeat(70_000),
+            STEMMER_WORDS.to_string(),
+        ]
+    }
+
+    /// Budgeted sizing counts exactly what indexing analysis retains and
+    /// charges, and both reject one byte below that charge identically.
+    #[test]
+    fn budgeted_sizing_matches_indexing_analysis_exactly() {
+        for analyzer in ANALYZERS {
+            for text in sizing_corpus() {
+                let indexed = analyze_text_for_indexing(
+                    analyzer,
+                    text.clone(),
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                let (statistics, totals) = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                assert_eq!(&statistics, indexed.statistics());
+                assert_eq!(statistics, analyze_text(analyzer, &text));
+                assert_eq!(totals.analysis_bytes, indexed.retained_bytes());
+                assert_eq!(totals.text_bytes, text.len() as u64);
+                assert_eq!(totals.unique_terms, statistics.unique_terms.len() as u64);
+                assert_eq!(
+                    totals.unique_term_bytes,
+                    statistics
+                        .unique_terms
+                        .iter()
+                        .map(|term| term.len() as u64)
+                        .sum::<u64>()
+                );
+                let Some(short) = NonZeroU64::new(totals.analysis_bytes.saturating_sub(1)) else {
+                    continue;
+                };
+                analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(
+                        NonZeroU64::new(totals.analysis_bytes).unwrap(),
+                    ),
+                )
+                .expect("the exact charge is admitted");
+                let sized = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(short),
+                )
+                .map(drop)
+                .unwrap_err();
+                let full = analyze_text_for_indexing(
+                    analyzer,
+                    text.clone(),
+                    &mut TextAnalysisMemoryBudget::new(short),
+                )
+                .map(drop)
+                .unwrap_err();
+                assert_eq!(sized.to_string(), full.to_string(), "{analyzer:?}");
+            }
+        }
+    }
+
+    /// The ASCII bound covers every analyzer, stemming included, and is
+    /// refused for text whose lowercase forms can grow.
+    #[test]
+    fn ascii_bound_covers_every_analyzer_or_is_refused() {
+        for text in sizing_corpus() {
+            let Some(bound) = TextAnalysisTotals::ascii_bound(&text) else {
+                assert!(!text.is_ascii());
+                continue;
+            };
+            for analyzer in ANALYZERS {
+                let (_, exact) = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                assert!(exact.analysis_bytes <= bound.analysis_bytes, "{analyzer:?}");
+                assert_eq!(exact.text_bytes, bound.text_bytes);
+                assert!(exact.unique_terms <= bound.unique_terms, "{analyzer:?}");
+                assert!(
+                    exact.unique_term_bytes <= bound.unique_term_bytes,
+                    "{analyzer:?}"
+                );
+            }
+        }
+        // Stemming never lengthens a word, so no stem outgrows its source.
+        for word in STEMMER_WORDS.split_whitespace() {
+            let stems = analyze_text(TextAnalyzerKind::StandardStemEn, word).unique_terms;
+            assert!(stems.iter().all(|stem| stem.len() <= word.len()), "{word}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn ascii_bound_never_undercounts(text in "[ -~]{0,160}") {
+            let bound = TextAnalysisTotals::ascii_bound(&text).unwrap();
+            for analyzer in ANALYZERS {
+                let (_, exact) = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                prop_assert!(exact.analysis_bytes <= bound.analysis_bytes);
+                prop_assert!(exact.unique_terms <= bound.unique_terms);
+                prop_assert!(exact.unique_term_bytes <= bound.unique_term_bytes);
+            }
+        }
     }
 
     #[tokio::test]

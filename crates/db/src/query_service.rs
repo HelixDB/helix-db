@@ -274,10 +274,16 @@ async fn execute_validated(
     execution_control: ExecutionControl,
 ) -> std::result::Result<QueryResponse, QueryServiceError> {
     execution_control.check()?;
-    let (batch, params) = match query {
-        ValidatedQuery::Read { batch, parameters } => {
-            (BatchQuery::Read(batch), query_param_bindings(parameters)?)
-        }
+    let (batch, params, search_consistency) = match query {
+        ValidatedQuery::Read {
+            batch,
+            parameters,
+            search_consistency,
+        } => (
+            BatchQuery::Read(batch),
+            query_param_bindings(parameters)?,
+            search_consistency,
+        ),
         ValidatedQuery::Write { batch, parameters } => {
             if db.is_reader_mode() {
                 return Err(HelixDbError::WriterModeRequired {
@@ -285,7 +291,11 @@ async fn execute_validated(
                 }
                 .into());
             }
-            (BatchQuery::Write(batch), query_param_bindings(parameters)?)
+            (
+                BatchQuery::Write(batch),
+                query_param_bindings(parameters)?,
+                helix_ast::query::SearchConsistency::Strong,
+            )
         }
     };
     let prepared = execution_control
@@ -301,6 +311,7 @@ async fn execute_validated(
             tenant_scope,
             execution_control,
             prepared.into_catalog_proof(),
+            search_consistency,
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
@@ -311,7 +322,9 @@ enum ValidatedQuery {
     Read {
         batch: ReadBatch,
         parameters: BTreeMap<String, QueryValue>,
+        search_consistency: helix_ast::query::SearchConsistency,
     },
+    /// Write batches always search strongly; the type carries no choice.
     Write {
         batch: WriteBatch,
         parameters: BTreeMap<String, QueryValue>,
@@ -320,9 +333,14 @@ enum ValidatedQuery {
 
 impl ValidatedQuery {
     fn from_request(request: QueryRequest) -> std::result::Result<Self, QueryServiceError> {
+        let search_consistency = request.search_consistency();
         let (query, parameters) = request.into_query();
         match query {
-            BatchQuery::Read(batch) => Ok(Self::Read { batch, parameters }),
+            BatchQuery::Read(batch) => Ok(Self::Read {
+                batch,
+                parameters,
+                search_consistency,
+            }),
             BatchQuery::Write(batch) => Ok(Self::Write { batch, parameters }),
         }
     }
@@ -925,6 +943,7 @@ mod tests {
             DataScope::LegacyUnscoped,
             ExecutionControl::unlimited(),
             prepared.into_catalog_proof(),
+            helix_ast::query::SearchConsistency::Strong,
         )
         .await
         .expect("the exact prepared read view survives a newer catalog publication");
@@ -1053,6 +1072,7 @@ mod tests {
             DataScope::LegacyUnscoped,
             ExecutionControl::unlimited(),
             prepared.into_catalog_proof(),
+            helix_ast::query::SearchConsistency::Strong,
         )
         .await
         .expect("graph write opens under its prepared authority");
@@ -1097,6 +1117,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect("foreign proof safely falls back");
@@ -1149,6 +1170,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect_err("foreign catalog authority must be discarded");
@@ -1202,6 +1224,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 proof,
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect("expired proof safely falls back");
@@ -1241,6 +1264,7 @@ mod tests {
             tenant_scope,
             ExecutionControl::unlimited(),
             prepared.into_catalog_proof(),
+            helix_ast::query::SearchConsistency::Strong,
         )
         .await
         .expect("cross-scope proof safely falls back");
@@ -2137,6 +2161,7 @@ mod tests {
         let query = ValidatedQuery::Read {
             batch: ReadBatch::new(),
             parameters: BTreeMap::new(),
+            search_consistency: helix_ast::query::SearchConsistency::Strong,
         };
 
         query

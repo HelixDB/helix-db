@@ -49,50 +49,6 @@ fn routed_target_iterator_covers_every_representable_storage_shape() {
 }
 
 #[test]
-fn route_registration_and_state_selection_cover_absent_single_and_two_label_shapes() {
-    let mut routes = MutationRouteCatalog::default();
-    let secondary = MutationRouteTarget::Secondary(0);
-    let vector = MutationRouteTarget::Vector(1);
-    routes.register(
-        IndexElementKind::Node,
-        "Before",
-        ["value", "value"],
-        secondary,
-    );
-    routes.register(IndexElementKind::Node, "After", ["value"], vector);
-
-    assert!(matches!(
-        routes.targets_for_states(IndexElementKind::Edge, &[], &[]),
-        RoutedMutationTargets::None
-    ));
-    assert!(matches!(
-        routes.targets_for_states(
-            IndexElementKind::Node,
-            row(None, &[]).properties(),
-            row(Some("Before"), &[]).properties(),
-        ),
-        RoutedMutationTargets::One(targets) if targets == [secondary]
-    ));
-    assert!(matches!(
-        routes.targets_for_states(
-            IndexElementKind::Node,
-            row(Some("Before"), &[]).properties(),
-            row(Some("After"), &[]).properties(),
-        ),
-        RoutedMutationTargets::Two(first, second)
-            if first == [secondary] && second == [vector]
-    ));
-    assert!(matches!(
-        routes.targets_for_states(
-            IndexElementKind::Node,
-            row(Some("Before"), &[]).properties(),
-            row(Some("Before"), &[("value", "same")]).properties(),
-        ),
-        RoutedMutationTargets::One(targets) if targets == [secondary]
-    ));
-}
-
-#[test]
 fn transition_routing_deduplicates_multi_property_targets_and_handles_label_moves() {
     let mut routes = MutationRouteCatalog::default();
     routes.register(

@@ -1,4 +1,5 @@
-//! Canonical in-memory graph transitions shared by foreground index writers.
+//! Canonical in-memory graph transitions shared by graph-transaction index
+//! maintenance: staged secondary rows and queued vector/text operations.
 //!
 //! These types are deliberately runtime-only. Property rows continue to use
 //! the canonical value codec; retaining the encoded bytes beside the decoded values
@@ -105,11 +106,6 @@ impl CanonicalPropertyRow {
     /// Borrows the exact canonical bytes for storage and validation.
     pub(crate) const fn encoded(&self) -> &Bytes {
         &self.encoded
-    }
-
-    /// Returns the encoded row length without rebuilding it.
-    pub(crate) fn encoded_len(&self) -> usize {
-        self.encoded.len()
     }
 }
 
@@ -331,36 +327,6 @@ impl GraphMutationTransition {
     pub(crate) fn graph_key(&self) -> Bytes {
         self.entity().property_key(self.scope())
     }
-
-    /// Consumes the transition into its coalescing components.
-    pub(crate) fn into_states(
-        self,
-    ) -> (
-        DataScope,
-        GraphEntity,
-        Option<CanonicalPropertyRow>,
-        Option<CanonicalPropertyRow>,
-    ) {
-        match self {
-            Self::Create {
-                scope,
-                entity,
-                after,
-            } => (scope, entity, None, Some(after)),
-            Self::Replace {
-                scope,
-                entity,
-                before,
-                after,
-                ..
-            } => (scope, entity, Some(before), Some(after)),
-            Self::Delete {
-                scope,
-                entity,
-                before,
-            } => (scope, entity, Some(before), None),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -383,7 +349,7 @@ mod tests {
         let decoded = CanonicalPropertyRow::decode(original.encoded().clone()).unwrap();
 
         assert_eq!(decoded, original);
-        assert_eq!(decoded.encoded_len(), original.encoded_len());
+        assert_eq!(decoded.encoded().len(), original.encoded().len());
     }
 
     #[test]
@@ -425,7 +391,12 @@ mod tests {
                 .and_then(|property| property.value.as_str()),
             Some("Grace")
         );
-        let (changed_scope, changed_entity, before, after) = changed.into_states();
+        let (changed_scope, changed_entity, before, after) = (
+            changed.scope(),
+            changed.entity(),
+            changed.before().cloned(),
+            changed.after().cloned(),
+        );
         assert_eq!(changed_scope, scope);
         assert_eq!(changed_entity, entity);
         assert_eq!(
@@ -611,13 +582,23 @@ mod tests {
             }
         ));
 
-        let (create_scope, create_entity, before, after) = create.into_states();
+        let (create_scope, create_entity, before, after) = (
+            create.scope(),
+            create.entity(),
+            create.before().cloned(),
+            create.after().cloned(),
+        );
         assert_eq!(create_scope, scope);
         assert_eq!(create_entity, node);
         assert!(before.is_none());
         assert!(after.is_some());
 
-        let (delete_scope, delete_entity, before, after) = delete.into_states();
+        let (delete_scope, delete_entity, before, after) = (
+            delete.scope(),
+            delete.entity(),
+            delete.before().cloned(),
+            delete.after().cloned(),
+        );
         assert_eq!(delete_scope, scope);
         assert_eq!(delete_entity, edge);
         assert!(before.is_some());

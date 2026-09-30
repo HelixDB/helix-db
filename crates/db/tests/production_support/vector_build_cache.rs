@@ -93,9 +93,9 @@ async fn checked_out_simhashes<D: Distance>(
 /// revision, and progress it was committed at, and only for its own metric.
 /// Another operation's step or commit leaves it in place, a stale checkpoint
 /// or a committed step without state forgets it, and each operation keeps its
-/// own session. Only a step progressing to Scan or CatchUp offers a session.
+/// own session. Only a step progressing to another Scan offers a session.
 /// The committed state crosses the outbox boundary with a diagnostic that
-/// names it without exposing its rows, and source-scan and catch-up planning
+/// names it without exposing its rows, and source-scan planning and storage
 /// errors return from the step without offering a session.
 pub(crate) async fn run() {
     let db = Db::builder(
@@ -114,13 +114,25 @@ pub(crate) async fn run() {
     let checkpoint = VectorBuildCheckpoint::new(&first, &first_record, first.progress().clone());
     let other_operation =
         VectorBuildCheckpoint::new(&second, &second_record, second.progress().clone());
-    let catch_up = VectorBuildStage::CatchUp(PrefixScanProgress {
-        cursor: None,
-        counters: OperationCounters::default(),
-    });
+    let source_cursor = |entity_id| {
+        IndexCursor::try_new(
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
+            }
+            .to_bytes(),
+        )
+        .expect("source key is a valid cursor")
+    };
     let mut advanced = checkpoint.clone();
-    advanced.progress =
-        IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(catch_up.clone()));
+    advanced.progress = IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+        VectorBuildStage::Scan(SourceScanProgress {
+            inclusive_upper_bound: source_cursor(1),
+            cursor: Some(source_cursor(1)),
+            counters: OperationCounters::default(),
+        }),
+    ));
+    assert_ne!(advanced.progress, checkpoint.progress);
 
     const BUDGET: u64 = 1 << 20;
     const MARKED: usize = 3;
@@ -294,16 +306,6 @@ pub(crate) async fn run() {
     let ValidatedDynamicIndexDefinition::Vector(definition) = first_record.definition() else {
         panic!("contract index is a vector index");
     };
-    let source_cursor = |entity_id| {
-        IndexCursor::try_new(
-            DataKey::Data {
-                scope,
-                kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
-            }
-            .to_bytes(),
-        )
-        .expect("source key is a valid cursor")
-    };
     let transaction = db
         .begin(IsolationLevel::Snapshot)
         .await
@@ -331,6 +333,7 @@ pub(crate) async fn run() {
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
     db.close().await.expect("contract database closes");
+    // A scan that still has source rows to read reaches closed storage.
     assert!(step_build::<Euclidean>(
         &db,
         &transaction,
@@ -338,7 +341,11 @@ pub(crate) async fn run() {
         &first,
         &first_record,
         definition,
-        &catch_up,
+        &VectorBuildStage::Scan(SourceScanProgress {
+            inclusive_upper_bound: source_cursor(1),
+            cursor: None,
+            counters: OperationCounters::default(),
+        }),
         SearchIndexBackfillLimits::default().batch(),
         IndexLifecycleScanTuning::default(),
         Arc::new(vector::SimHasherRegistry::default()),

@@ -1,57 +1,36 @@
 //! Generation-qualified vector mutation and lifecycle ownership.
 //!
 //! Ordinary graph mutations load one [`VectorMutationSet`] from canonical V2
-//! records in their serializable transaction. A hidden `Building` generation
-//! receives one coalesced entity delta; an `Active` generation mutates only the
-//! physical namespace authorized by its canonical record and checked tenant
-//! mapping. Missing tenant mappings are created only with the first mutation
-//! work for that partition, never by a read.
+//! records in their serializable transaction and enqueue one complete
+//! operation per changed entity for every Building or Active generation.
+//! Publication ([`publication`]) later plans that work with the build planner
+//! into only the physical namespaces an `Active` generation's canonical record
+//! and checked tenant mappings authorize, and defers a hidden `Building`
+//! generation until activation. Missing tenant mappings are created only with
+//! the first admitted work for that partition, never by a read.
 //!
-//! The same semantic document projection is used by active mutation and the
-//! outbox builder. It validates labels, dimensions, finite f32 conversion,
+//! The same semantic document projection is used by the queue producer and
+//! the outbox builder. It validates labels, dimensions, finite f32 conversion,
 //! cosine zero vectors, metric-specific component magnitude, and type-preserving
 //! tenant identity before any HNSW or lifecycle row is staged.
 
-use bytes::Bytes;
-use slatedb::DbTransaction;
-
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
-use crate::encoding::v2::keys::indexes::vector::{
-    VectorIndexMetadataKey, VectorKey, VectorStorageLane,
-};
-use crate::encoding::v2::keys::scope::DataScope;
-use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
-use crate::encoding::v2::keys::{DataKey, DataKeyKind};
-use crate::encoding::v2::keys::{IndexEntity, IndexEntityStateKey, ScopedKey};
-use crate::encoding::v2::legacy::vector::transaction_guard::{
-    decode_active_txn_guard, LegacyVectorTxnGuardKey,
-};
-#[cfg(any(test, feature = "index-lifecycle-testing"))]
-use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::property::encode_index_partition_value;
-use crate::encoding::v2::values::{decode_build_delta, encode_build_delta};
 use crate::error::{HelixDbError, Result};
 use crate::search;
-use crate::search::vector::{
-    self, Distance, ValidatedMetricVector, VectorCacheWriteSet, VectorDimension,
-    VectorDistanceMetric, VectorIndexConfig,
-};
+use crate::search::vector::{ValidatedMetricVector, VectorDimension};
 
-use super::repository;
-use super::work::{CoalescedBuildDeltaState, CoalescedBuildDeltaValue, VectorTenantPartition};
-#[cfg(any(test, feature = "index-lifecycle-testing"))]
-use super::IndexStateV2;
 use super::{
-    ActiveIndexHandle, IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, TextPartition,
-    ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition, VectorPhysicalIndexId,
-    VectorPhysicalLayout,
+    ActiveIndexHandle, IndexEntityId, IndexGenerationId, IndexId, TextPartition,
+    ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition,
 };
 
 mod driver;
 #[cfg(all(feature = "production-coverage", not(test)))]
 pub(crate) use driver::build_cache_production_contracts::run as run_build_cache_contracts;
-pub(crate) use driver::{RetainedVectorBuild, VectorIndexDriver};
+pub(crate) mod publication;
+pub(crate) use driver::{RetainedVectorBuild, VectorBuildCache, VectorIndexDriver};
 
 /// Validated vector and its canonical physical-partition identity.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,11 +60,23 @@ struct VectorMutationTarget {
     mode: VectorMutationMode,
 }
 
-/// Closed maintenance choice derived from canonical lifecycle state.
+/// Lifecycle role of one routed vector generation.
 #[derive(Debug, Clone)]
 enum VectorMutationMode {
-    MaintainActive(ActiveIndexHandle),
-    RecordBuildDelta,
+    /// Planner-visible generation the queue worker publishes into.
+    Active(ActiveIndexHandle),
+    /// Hidden build that scans source rows; queued work waits for activation.
+    Building,
+}
+
+/// One vector generation selected for queued maintenance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueuedVectorTarget<'a> {
+    pub(crate) index_id: IndexId,
+    pub(crate) generation: IndexGenerationId,
+    pub(crate) definition: &'a ValidatedVectorIndexDefinition,
+    /// Active generation handle; `None` for a hidden build.
+    pub(crate) active: Option<&'a ActiveIndexHandle>,
 }
 
 /// Transaction-local vector generations loaded from canonical records.
@@ -94,38 +85,23 @@ pub(crate) struct VectorMutationSet {
     targets: Vec<VectorMutationTarget>,
 }
 
-/// Complete authoritative property transition for one graph entity.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct VectorEntityMutation<'a> {
-    entity_kind: IndexElementKind,
-    entity_id: IndexEntityId,
-    before: &'a [Property],
-    after: &'a [Property],
-}
-
-impl<'a> VectorEntityMutation<'a> {
-    /// Binds one entity to its complete before/after property snapshots.
-    #[cfg(any(
-        test,
-        feature = "production-coverage",
-        feature = "index-lifecycle-testing"
-    ))]
-    pub(crate) const fn new(
-        entity_kind: IndexElementKind,
-        entity_id: u64,
-        before: &'a [Property],
-        after: &'a [Property],
-    ) -> Self {
-        Self {
-            entity_kind,
-            entity_id: IndexEntityId::new(entity_id),
-            before,
-            after,
-        }
-    }
-}
-
 impl VectorMutationSet {
+    /// Resolves one routed target for queued maintenance.
+    pub(crate) fn queued_target(&self, ordinal: usize) -> Result<QueuedVectorTarget<'_>> {
+        let target = self.targets.get(ordinal).ok_or_else(|| {
+            corruption("vector mutation route named a target outside its catalog")
+        })?;
+        Ok(QueuedVectorTarget {
+            index_id: target.index_id,
+            generation: target.generation,
+            definition: &target.definition,
+            active: match &target.mode {
+                VectorMutationMode::Active(handle) => Some(handle),
+                VectorMutationMode::Building => None,
+            },
+        })
+    }
+
     /// Returns an empty set for focused configured-index tests.
     #[cfg(test)]
     pub(crate) const fn empty() -> Self {
@@ -147,7 +123,7 @@ impl VectorMutationSet {
     ) -> Result<usize> {
         let (record, mode) = match entry {
             super::mutation_catalog::MutationCatalogEntry::Building(record) => {
-                (record, VectorMutationMode::RecordBuildDelta)
+                (record, VectorMutationMode::Building)
             }
             super::mutation_catalog::MutationCatalogEntry::Active { record, handle } => {
                 if !matches!(handle, ActiveIndexHandle::Vector { .. }) {
@@ -155,7 +131,7 @@ impl VectorMutationSet {
                         "active vector record carried another family handle",
                     ));
                 }
-                (record, VectorMutationMode::MaintainActive(handle.clone()))
+                (record, VectorMutationMode::Active(handle.clone()))
             }
         };
         let ValidatedDynamicIndexDefinition::Vector(definition) = record.definition() else {
@@ -171,654 +147,6 @@ impl VectorMutationSet {
             mode,
         });
         Ok(ordinal)
-    }
-}
-
-/// Loads every vector generation whose state requires mutation work.
-///
-/// The canonical record scan is part of the caller's serializable graph
-/// transaction. Activation/drop revisions therefore conflict with the graph
-/// commit rather than allowing writes to cross a lifecycle boundary.
-#[cfg(any(test, feature = "index-lifecycle-testing"))]
-pub(crate) async fn load_mutation_set(
-    transaction: &DbTransaction,
-    scope: DataScope,
-) -> Result<VectorMutationSet> {
-    let logical_prefix =
-        ScopedKey::logical_prefix(crate::encoding::v2::keys::RecordKind::IndexRecord);
-    let physical_prefix = IndexKey::data_prefix(scope, logical_prefix);
-    let mut rows = transaction.scan_prefix(&physical_prefix, ..).await?;
-    let mut mutations = VectorMutationSet::default();
-    while let Some(row) = rows.next().await? {
-        let IndexKey::Data {
-            kind: ScopedKey::IndexRecord(key),
-            ..
-        } = IndexKey::parse_from_slice(scope, &row.key)?
-        else {
-            return Err(corruption(
-                "vector mutation catalog prefix yielded another key kind",
-            ));
-        };
-        let record = decode_index_record(&row.value)?;
-        if key.identity != *record.identity() {
-            return Err(corruption(
-                "vector mutation catalog key/value identity mismatch",
-            ));
-        }
-        match record.definition() {
-            ValidatedDynamicIndexDefinition::Vector(_) => {}
-            ValidatedDynamicIndexDefinition::Secondary(_)
-            | ValidatedDynamicIndexDefinition::Text(_) => continue,
-        }
-        let active_handle = match record.state() {
-            IndexStateV2::Building { .. } => None,
-            IndexStateV2::Active { .. } => Some(
-                ActiveIndexHandle::try_from_record(scope, &record)
-                    .ok_or_else(|| corruption("active vector record did not project a handle"))?,
-            ),
-            IndexStateV2::Aborting { .. }
-            | IndexStateV2::Dropping { .. }
-            | IndexStateV2::Dropped { .. } => continue,
-        };
-        let entry = match active_handle.as_ref() {
-            Some(handle) => super::mutation_catalog::MutationCatalogEntry::Active {
-                record: &record,
-                handle,
-            },
-            None => super::mutation_catalog::MutationCatalogEntry::Building(&record),
-        };
-        let _ = mutations.include_catalog_entry(entry)?;
-    }
-    Ok(mutations)
-}
-
-/// Maintains every V2 vector generation affected by one graph entity.
-///
-/// `before` and `after` are complete authoritative property sets. Partition
-/// moves therefore become a typed remove-plus-upsert, and hidden builds receive
-/// one coalesced reconciliation marker for any semantic document change.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
-pub(crate) async fn maintain_entity_with_runtime(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    mutations: &VectorMutationSet,
-    runtime: &mut vector::ActiveVectorMutationRuntime,
-    cache_writes: &VectorCacheWriteSet,
-    entity: VectorEntityMutation<'_>,
-) -> Result<()> {
-    for target in mutations
-        .targets
-        .iter()
-        .filter(|target| target.definition.element_kind() == entity.entity_kind)
-    {
-        maintain_target(transaction, scope, target, runtime, cache_writes, entity).await?;
-    }
-    Ok(())
-}
-
-async fn maintain_target(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    runtime: &mut vector::ActiveVectorMutationRuntime,
-    cache_writes: &VectorCacheWriteSet,
-    entity: VectorEntityMutation<'_>,
-) -> Result<()> {
-    let new_document = vector_document(&target.definition, entity.after)?;
-    let (old_document, force_build_delta) = match vector_document(&target.definition, entity.before)
-    {
-        Ok(document) => (document, false),
-        Err(HelixDbError::VectorComponentMagnitudeExceeded { .. }) => match &target.mode {
-            VectorMutationMode::RecordBuildDelta => (None, true),
-            VectorMutationMode::MaintainActive(_) => {
-                // An already-invalid active physical row must remain
-                // untouched until the index is dropped and rebuilt.
-                return Ok(());
-            }
-        },
-        Err(error) => return Err(error),
-    };
-    if !force_build_delta && old_document == new_document {
-        return Ok(());
-    }
-    match &target.mode {
-        VectorMutationMode::RecordBuildDelta => {
-            let index_entity = IndexEntity {
-                kind: entity.entity_kind,
-                id: entity.entity_id,
-            };
-            stage_vector_build_delta(
-                transaction,
-                scope,
-                target,
-                index_entity,
-                old_document.map(|document| document.partition),
-            )
-            .await?;
-        }
-        VectorMutationMode::MaintainActive(handle) => {
-            maintain_active(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity.entity_id,
-                old_document,
-                new_document,
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-/// Preserves the original partition across repeated coalesced mutations.
-async fn stage_vector_build_delta(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    entity: IndexEntity,
-    initial_before: Option<TextPartition>,
-) -> Result<()> {
-    let key = scoped_index_key(
-        scope,
-        ScopedKey::BuildDelta(IndexEntityStateKey {
-            index_id: target.index_id,
-            generation: target.generation,
-            entity,
-        }),
-    );
-    let state = match transaction.get(&key).await? {
-        Some(existing) => {
-            let value = crate::index_lifecycle::expect_typed_value(
-                decode_build_delta(&existing),
-                "vector build-delta key contains another value kind",
-            )?;
-            if value.index_id != target.index_id
-                || value.generation != target.generation
-                || value.entity_kind != entity.kind
-                || value.entity_id != entity.id
-            {
-                return Err(corruption("vector build-delta key/value mismatch"));
-            }
-            match value.state {
-                CoalescedBuildDeltaState::Marker | CoalescedBuildDeltaState::VectorBefore(_) => {
-                    value.state
-                }
-                CoalescedBuildDeltaState::SecondaryBefore(_) => {
-                    return Err(corruption(
-                        "vector build delta contains secondary recovery state",
-                    ));
-                }
-            }
-        }
-        None => CoalescedBuildDeltaState::VectorBefore(initial_before),
-    };
-    transaction.put(
-        key,
-        encode_build_delta(&CoalescedBuildDeltaValue {
-            index_id: target.index_id,
-            generation: target.generation,
-            entity_kind: entity.kind,
-            entity_id: entity.id,
-            state,
-        }),
-    )?;
-    Ok(())
-}
-
-/// Maintains only vector targets selected by the transaction-owned router.
-pub(crate) async fn maintain_routed_entity_with_runtime(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    mutations: &VectorMutationSet,
-    routes: &super::mutation_catalog::RoutedMutationTargets<'_>,
-    runtime: &mut vector::ActiveVectorMutationRuntime,
-    cache_writes: &VectorCacheWriteSet,
-    transition: &super::graph_mutation::GraphMutationTransition,
-) -> Result<()> {
-    let entity = transition.entity().index_entity();
-    let before = transition.before().map_or(
-        &[][..],
-        super::graph_mutation::CanonicalPropertyRow::properties,
-    );
-    let after = transition.after().map_or(
-        &[][..],
-        super::graph_mutation::CanonicalPropertyRow::properties,
-    );
-    let entity = VectorEntityMutation {
-        entity_kind: entity.kind,
-        entity_id: entity.id,
-        before,
-        after,
-    };
-    for ordinal in routes.iter().filter_map(|target| match target {
-        super::mutation_catalog::MutationRouteTarget::Vector(ordinal) => Some(ordinal),
-        super::mutation_catalog::MutationRouteTarget::Secondary(_)
-        | super::mutation_catalog::MutationRouteTarget::TextBuilding(_)
-        | super::mutation_catalog::MutationRouteTarget::TextActive(_) => None,
-    }) {
-        let target = mutations.targets.get(ordinal).ok_or_else(|| {
-            corruption("vector mutation route named a target outside its catalog")
-        })?;
-        maintain_target(transaction, scope, target, runtime, cache_writes, entity).await?;
-    }
-    Ok(())
-}
-
-/// Preserves the isolated per-entity contract as a differential-test oracle.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
-pub(crate) async fn maintain_entity(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    mutations: &VectorMutationSet,
-    cache_writes: &VectorCacheWriteSet,
-    entity: VectorEntityMutation<'_>,
-) -> Result<()> {
-    let mut runtime = vector::ActiveVectorMutationRuntime::new(
-        std::num::NonZeroU64::new(8 * 1024 * 1024)
-            .expect("the differential vector-session limit is non-zero"),
-    );
-    maintain_entity_with_runtime(
-        transaction,
-        scope,
-        mutations,
-        &mut runtime,
-        cache_writes,
-        entity,
-    )
-    .await?;
-    runtime.prepare(transaction).await
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "active mutation requires the exact transaction, generation, cache, entity, and state transition"
-)]
-async fn maintain_active(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    handle: &ActiveIndexHandle,
-    runtime: &mut vector::ActiveVectorMutationRuntime,
-    cache_writes: &VectorCacheWriteSet,
-    entity_id: IndexEntityId,
-    old_document: Option<VectorIndexedDocument>,
-    new_document: Option<VectorIndexedDocument>,
-) -> Result<()> {
-    match target.definition.metric() {
-        VectorDistanceMetric::Cosine => {
-            maintain_active_with_distance::<vector::distance::Cosine>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                old_document,
-                new_document,
-            )
-            .await
-        }
-        VectorDistanceMetric::Euclidean => {
-            maintain_active_with_distance::<vector::distance::Euclidean>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                old_document,
-                new_document,
-            )
-            .await
-        }
-        VectorDistanceMetric::Manhattan => {
-            maintain_active_with_distance::<vector::distance::Manhattan>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                old_document,
-                new_document,
-            )
-            .await
-        }
-    }
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the distance-specialized mutation owns one complete graph state transition"
-)]
-async fn maintain_active_with_distance<D: Distance>(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    handle: &ActiveIndexHandle,
-    runtime: &mut vector::ActiveVectorMutationRuntime,
-    cache_writes: &VectorCacheWriteSet,
-    entity_id: IndexEntityId,
-    old_document: Option<VectorIndexedDocument>,
-    new_document: Option<VectorIndexedDocument>,
-) -> Result<()> {
-    match (old_document, new_document) {
-        (None, None) => Ok(()),
-        (Some(old), None) => {
-            remove_active_document::<D>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                &old,
-            )
-            .await
-        }
-        (None, Some(new)) => {
-            upsert_active_document::<D>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                &new,
-            )
-            .await
-        }
-        (Some(old), Some(new)) if old.partition() == new.partition() => {
-            upsert_active_document::<D>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                &new,
-            )
-            .await
-        }
-        (Some(old), Some(new)) => {
-            remove_active_document::<D>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                &old,
-            )
-            .await?;
-            upsert_active_document::<D>(
-                transaction,
-                scope,
-                target,
-                handle,
-                runtime,
-                cache_writes,
-                entity_id,
-                &new,
-            )
-            .await
-        }
-    }
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the removal binds exact lifecycle and transaction identity before physical access"
-)]
-async fn remove_active_document<D: Distance>(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    active: &ActiveIndexHandle,
-    runtime: &mut vector::ActiveVectorMutationRuntime,
-    cache_writes: &VectorCacheWriteSet,
-    entity_id: IndexEntityId,
-    document: &VectorIndexedDocument,
-) -> Result<()> {
-    let (physical_index_id, created) = resolve_active_physical(
-        transaction,
-        scope,
-        target,
-        active,
-        document.partition(),
-        false,
-    )
-    .await?;
-    if created {
-        return Err(corruption(
-            "vector remove path unexpectedly allocated a tenant partition",
-        ));
-    }
-    let generation =
-        vector::ValidatedVectorGenerationHandle::try_from_active::<D>(active, physical_index_id)
-            .map_err(|error| corruption(error.to_string()))?;
-    let empty = runtime
-        .delete(transaction, &generation, cache_writes, entity_id.get())
-        .await?;
-    if matches!(document.partition(), TextPartition::TenantValue(_)) && empty {
-        runtime.drain_generation(transaction, &generation).await?;
-    }
-    let index = crate::search::vector::VectorIndex::<D>::from_generation(&generation);
-    reclaim_empty_tenant_partition(
-        transaction,
-        scope,
-        target,
-        &generation,
-        cache_writes,
-        document.partition(),
-        &index,
-    )
-    .await
-}
-
-/// Reclaims one physically empty tenant namespace in the graph transaction.
-///
-/// The V2 count is an exact fast-path signal for newly allocated generations;
-/// every physical lane is still probed before ownership is removed. Mapping,
-/// metadata, and the optional legacy transaction guard disappear atomically.
-/// Shared cache retirement is recorded only as a post-commit effect.
-async fn reclaim_empty_tenant_partition<D: Distance>(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    generation: &vector::ValidatedVectorGenerationHandle,
-    cache_writes: &VectorCacheWriteSet,
-    partition: &TextPartition,
-    index: &crate::search::vector::VectorIndex<D>,
-) -> Result<()> {
-    let TextPartition::TenantValue(_) = partition else {
-        return Ok(());
-    };
-    let metadata = index
-        .get_metadata(transaction)
-        .await?
-        .ok_or_else(|| corruption("tenant vector partition lost metadata during deletion"))?;
-    if metadata.count != 0 {
-        return Ok(());
-    }
-    if metadata.validated_state()? != vector::VectorIndexState::Empty {
-        return Err(HelixDbError::InvariantViolation(
-            "zero-count tenant vector partition retains populated metadata state".to_string(),
-        ));
-    }
-    let expected =
-        VectorIndexConfig::from_v2_definition(&target.definition, generation.physical_name());
-    if !metadata.config.has_same_physical_contract(&expected) {
-        return Err(corruption(
-            "empty tenant vector metadata conflicts with its active generation",
-        ));
-    }
-
-    let physical_index_id = generation.physical_index_id();
-    let metadata_key = DataKey::Data {
-        scope,
-        kind: DataKeyKind::Vector(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
-            physical_index_id,
-        ))),
-    }
-    .to_bytes();
-    let guard_key = DataKey::Data {
-        scope,
-        kind: DataKeyKind::Vector(VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(
-            physical_index_id,
-        ))),
-    }
-    .to_bytes();
-    for lane in VectorStorageLane::ALL {
-        let prefix = DataKey::data_prefix(scope, lane.prefix_key(physical_index_id).to_bytes());
-        let mut rows = transaction.scan_prefix(prefix, ..).await?;
-        while let Some(row) = rows.next().await? {
-            if lane == VectorStorageLane::Core && row.key == metadata_key {
-                continue;
-            }
-            if lane == VectorStorageLane::Core && row.key == guard_key {
-                decode_active_txn_guard(&row.value).map_err(|error| {
-                    HelixDbError::InvariantViolation(format!(
-                        "empty tenant vector partition has a malformed transaction guard: {error}"
-                    ))
-                })?;
-                continue;
-            }
-            return Err(HelixDbError::InvariantViolation(format!(
-                "zero-count tenant vector partition {} retains a {:?} row",
-                physical_index_id, lane
-            )));
-        }
-    }
-
-    let tenant = VectorTenantPartition::try_from_partition(partition.clone())
-        .map_err(|error| corruption(error.to_string()))?;
-    repository::stage_delete_vector_partition_mapping(
-        transaction,
-        scope,
-        target.index_id,
-        target.generation,
-        VectorPhysicalLayout::Partitioned,
-        &tenant,
-        VectorPhysicalIndexId::new(physical_index_id)?,
-    )
-    .await?;
-    transaction.delete(metadata_key)?;
-    transaction.delete(guard_key)?;
-    cache_writes.retire_after_commit(generation);
-    Ok(())
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the upsert binds exact lifecycle and transaction identity before physical access"
-)]
-async fn upsert_active_document<D: Distance>(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    active: &ActiveIndexHandle,
-    runtime: &mut vector::ActiveVectorMutationRuntime,
-    cache_writes: &VectorCacheWriteSet,
-    entity_id: IndexEntityId,
-    document: &VectorIndexedDocument,
-) -> Result<()> {
-    let (physical_index_id, created) = resolve_active_physical(
-        transaction,
-        scope,
-        target,
-        active,
-        document.partition(),
-        true,
-    )
-    .await?;
-    let generation =
-        vector::ValidatedVectorGenerationHandle::try_from_active::<D>(active, physical_index_id)
-            .map_err(|error| corruption(error.to_string()))?;
-    runtime
-        .upsert(
-            transaction,
-            &generation,
-            cache_writes,
-            entity_id.get(),
-            document.vector(),
-            created,
-        )
-        .await
-}
-
-async fn resolve_active_physical(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    target: &VectorMutationTarget,
-    active: &ActiveIndexHandle,
-    partition: &TextPartition,
-    create_missing: bool,
-) -> Result<(VectorPhysicalIndexId, bool)> {
-    let ActiveIndexHandle::Vector { layout, .. } = active else {
-        return Err(corruption(
-            "vector mutation target retained another active family",
-        ));
-    };
-    match (layout, partition) {
-        (
-            VectorPhysicalLayout::Unpartitioned { physical_index_id },
-            TextPartition::Unpartitioned,
-        ) => Ok((*physical_index_id, false)),
-        (VectorPhysicalLayout::Partitioned, TextPartition::TenantValue(_)) => {
-            let tenant = VectorTenantPartition::try_from_partition(partition.clone())
-                .map_err(|error| corruption(error.to_string()))?;
-            let existing = repository::load_vector_partition_mapping(
-                transaction,
-                scope,
-                target.index_id,
-                target.generation,
-                *layout,
-                &tenant,
-            )
-            .await?;
-            if let Some(physical_index_id) = existing {
-                return Ok((physical_index_id, false));
-            }
-            if !create_missing {
-                return Err(corruption(
-                    "active vector document has no tenant partition mapping",
-                ));
-            }
-            let physical_index_id = repository::stage_vector_partition_mapping(
-                transaction,
-                scope,
-                target.index_id,
-                target.generation,
-                *layout,
-                &tenant,
-            )
-            .await?;
-            Ok((physical_index_id, true))
-        }
-        (VectorPhysicalLayout::Unpartitioned { .. }, TextPartition::TenantValue(_))
-        | (VectorPhysicalLayout::Partitioned, TextPartition::Unpartitioned) => Err(corruption(
-            "canonical vector document partition disagrees with physical layout",
-        )),
     }
 }
 
@@ -914,115 +242,51 @@ fn numeric_value_to_f32(value: &PropertyValue) -> Result<f32> {
     }
 }
 
-fn scoped_index_key(scope: DataScope, logical: ScopedKey) -> Bytes {
-    IndexKey::Data {
-        scope,
-        kind: logical,
-    }
-    .to_bytes()
-}
-
 fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
 }
 
-/// Proves a real tenant-indexed vector still requires its physical mapping.
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) async fn run_missing_partition_mapping_delete_contract() {
-    use std::sync::Arc;
-
-    use slatedb::object_store::memory::InMemory;
-    use slatedb::{Db, IsolationLevel};
-
-    let db = Db::builder(
-        "vector-production-missing-tenant-mapping",
-        Arc::new(InMemory::new()),
-    )
-    .build()
-    .await
-    .expect("production contract database opens");
-    crate::migrations::startup::bootstrap_writer(&db)
-        .await
-        .expect("production contract database bootstraps");
-
-    let runtime = crate::config::VectorIndexDefinition::new_node(
-        "Document",
-        "embedding",
-        3,
-        VectorDistanceMetric::Euclidean,
-    )
-    .expect("production contract vector definition")
-    .with_tenant_property("account_id")
-    .expect("production contract tenant definition");
-    let definition = ValidatedVectorIndexDefinition::try_from_runtime(&runtime)
-        .expect("production contract definition validates");
-    let record = super::IndexRecordV2::building(
-        IndexId::new(31).expect("production contract index ID is nonzero"),
-        ValidatedDynamicIndexDefinition::Vector(definition.clone()),
-        super::IndexRevision::initial(),
-        super::PhysicalGeneration::Vector {
-            generation: IndexGenerationId::new(7)
-                .expect("production contract generation ID is nonzero"),
-            layout: VectorPhysicalLayout::Partitioned,
-            descriptor: super::VectorGenerationDescriptor::for_definition(&definition),
-        },
-        super::IndexOperationId::new_v4(),
-    )
-    .expect("production contract building record validates")
-    .transition(super::IndexStateTransition::Activate)
-    .expect("production contract record activates");
-    let handle = ActiveIndexHandle::try_from_record(DataScope::LegacyUnscoped, &record)
-        .expect("production contract active handle validates");
-    let mutations = VectorMutationSet {
-        targets: vec![VectorMutationTarget {
-            index_id: record.index_id(),
-            generation: record.state().generation(),
-            definition,
-            mode: VectorMutationMode::MaintainActive(handle),
-        }],
-    };
-    let properties = vec![
-        Property::new("$label", PropertyValue::String("Document".to_string())),
-        Property::new("account_id", PropertyValue::I64(7)),
-        Property::new("embedding", PropertyValue::F32Array(vec![1.0, 2.0, 3.0])),
-    ];
-    let transaction = db
-        .begin(IsolationLevel::SerializableSnapshot)
-        .await
-        .expect("production contract transaction opens");
-
-    assert!(matches!(
-        maintain_entity(
-            &transaction,
-            DataScope::LegacyUnscoped,
-            &mutations,
-            &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 9, &properties, &[]),
-        )
-        .await,
-        Err(HelixDbError::IndexCatalogCorruption(_))
-    ));
-    drop(transaction);
-    db.close()
-        .await
-        .expect("production contract database closes");
-}
-
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     use slatedb::object_store::memory::InMemory;
-    use slatedb::{Db, IsolationLevel};
+    use slatedb::{Db, DbTransaction, IsolationLevel};
+
+    use bytes::Bytes;
 
     use super::*;
-    use crate::encoding::v2::keys::{GlobalKey, IndexRecordKey, VectorPartitionMappingKey};
-    use crate::encoding::v2::values::{encode_index_record, encode_metadata_value};
+    use crate::config::SearchIndexBackfillLimits;
+    use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorStorageLane};
+    use crate::encoding::v2::keys::scope::DataScope;
+    use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
+    use crate::encoding::v2::keys::{
+        DataKey, DataKeyKind, GlobalKey, ScopedKey, VectorPartitionMappingKey,
+    };
+    use crate::encoding::v2::values::encode_build_delta;
+    use crate::index_lifecycle::queue::publication::VectorPublicationResources;
+    use crate::index_lifecycle::queue::storage::AcknowledgementOutput;
+    use crate::index_lifecycle::repository;
+    use crate::index_lifecycle::work::{
+        CoalescedBuildDeltaState, CoalescedBuildDeltaValue, VectorTenantPartition,
+    };
+    use crate::index_lifecycle::{IndexElementKind, VectorPhysicalIndexId, VectorPhysicalLayout};
+    use crate::search::vector::{self, Distance, VectorCacheWriteSet, VectorDistanceMetric};
+
+    fn scoped_index_key(scope: DataScope, logical: ScopedKey) -> Bytes {
+        IndexKey::Data {
+            scope,
+            kind: logical,
+        }
+        .to_bytes()
+    }
+    use crate::encoding::v2::values::encode_metadata_value;
     use crate::index_lifecycle::{
         IndexOperationId, IndexRecordV2, IndexRevision, IndexStateTransition, IndexV2MetadataValue,
         PhysicalGeneration, VectorGenerationDescriptor, VectorPhysicalIdWatermark,
     };
-    use crate::search::vector::VectorIndex;
+    use crate::search::vector::{VectorIndex, VectorIndexConfig};
 
     async fn test_db(name: &str) -> Db {
         let db = Db::builder(name, Arc::new(InMemory::new()))
@@ -1056,6 +320,98 @@ mod tests {
             .expect("validated V2 vector definition")
     }
 
+    /// One complete entity transition, as the queue producer derives it.
+    #[derive(Clone, Copy)]
+    struct VectorEntityMutation<'a> {
+        entity_id: u64,
+        before: &'a [Property],
+        after: &'a [Property],
+    }
+
+    impl<'a> VectorEntityMutation<'a> {
+        const fn new(
+            _kind: IndexElementKind,
+            entity_id: u64,
+            before: &'a [Property],
+            after: &'a [Property],
+        ) -> Self {
+            Self {
+                entity_id,
+                before,
+                after,
+            }
+        }
+    }
+
+    /// Publishes one transaction's entity transitions into every Active
+    /// target through queued publication staging, the only production writer
+    /// of Active vector rows, with no acknowledgement beside them.
+    async fn maintain_entities(
+        db: &Db,
+        transaction: &DbTransaction,
+        mutations: &VectorMutationSet,
+        cache_writes: &VectorCacheWriteSet,
+        entities: &[VectorEntityMutation<'_>],
+    ) -> Result<()> {
+        let resources = VectorPublicationResources {
+            cache_registry: Arc::new(vector::VectorCacheRegistry::default()),
+            simhasher_registry: Arc::new(vector::SimHasherRegistry::default()),
+            batch_reads: crate::batch_reads::BatchReads::Single,
+            planning_cache: Arc::new(VectorBuildCache::new(
+                SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
+            )),
+        };
+        for target in &mutations.targets {
+            let VectorMutationMode::Active(handle) = &target.mode else {
+                continue;
+            };
+            let mut effects = Vec::new();
+            for entity in entities {
+                let before = vector_document(&target.definition, entity.before)?;
+                let after = vector_document(&target.definition, entity.after)?;
+                if before == after {
+                    // The producer queues nothing for an unchanged document.
+                    continue;
+                }
+                effects.push(publication::QueuedVectorEffect {
+                    entity_id: IndexEntityId::new(entity.entity_id),
+                    stale: before
+                        .map(|document| document.partition)
+                        .into_iter()
+                        .collect(),
+                    replacement: after
+                        .map(|document| {
+                            crate::encoding::v2::values::indexes::operation_queue::QueuedVectorReplacement::try_new(
+                                document.partition,
+                                document.vector.into(),
+                            )
+                        })
+                        .transpose()
+                        .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?,
+                });
+            }
+            let Some(expected) = NonZeroUsize::new(effects.len()) else {
+                continue;
+            };
+            let staged = publication::stage_active_effects(
+                db,
+                transaction,
+                handle,
+                &effects,
+                SearchIndexBackfillLimits::default().batch(),
+                AcknowledgementOutput {
+                    operations: 0,
+                    bytes: 0,
+                },
+                &resources,
+                cache_writes,
+            )
+            .await?;
+            assert_eq!(staged, publication::StagedEffects::Prefix(expected));
+        }
+        Ok(())
+    }
+
     fn active_target(
         definition: ValidatedVectorIndexDefinition,
         layout: VectorPhysicalLayout,
@@ -1083,64 +439,10 @@ mod tests {
                 index_id: record.index_id(),
                 generation: record.state().generation(),
                 definition,
-                mode: VectorMutationMode::MaintainActive(handle.clone()),
+                mode: VectorMutationMode::Active(handle.clone()),
             },
             handle,
         )
-    }
-
-    #[tokio::test]
-    async fn repeated_build_deltas_preserve_the_first_vector_partition() {
-        let db = test_db("vector-build-delta-first-partition").await;
-        let scope = DataScope::LegacyUnscoped;
-        let target = VectorMutationTarget {
-            index_id: IndexId::new(31).unwrap(),
-            generation: IndexGenerationId::new(7).unwrap(),
-            definition: validated_definition(Some("account_id"), VectorDistanceMetric::Euclidean),
-            mode: VectorMutationMode::RecordBuildDelta,
-        };
-        let first_partition =
-            TextPartition::try_tenant_value(Bytes::from_static(b"first")).unwrap();
-        let second_partition =
-            TextPartition::try_tenant_value(Bytes::from_static(b"second")).unwrap();
-        let transaction = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-
-        for (entity_id, first, second) in [
-            (
-                IndexEntityId::new(7),
-                Some(first_partition.clone()),
-                Some(second_partition.clone()),
-            ),
-            (IndexEntityId::new(8), None, Some(second_partition.clone())),
-        ] {
-            let entity = IndexEntity {
-                kind: IndexElementKind::Node,
-                id: entity_id,
-            };
-            stage_vector_build_delta(&transaction, scope, &target, entity, first.clone())
-                .await
-                .unwrap();
-            stage_vector_build_delta(&transaction, scope, &target, entity, second)
-                .await
-                .unwrap();
-
-            let key = scoped_index_key(
-                scope,
-                ScopedKey::BuildDelta(IndexEntityStateKey {
-                    index_id: target.index_id,
-                    generation: target.generation,
-                    entity,
-                }),
-            );
-            let delta = decode_build_delta(&transaction.get(&key).await.unwrap().unwrap()).unwrap();
-            assert_eq!(delta.state, CoalescedBuildDeltaState::VectorBefore(first));
-        }
-
-        transaction.rollback();
-        db.close().await.unwrap();
     }
 
     /// Exercises one unpartitioned active generation through insert and removal.
@@ -1185,12 +487,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &insert,
-            DataScope::LegacyUnscoped,
             &mutations,
             &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, 9, &[], &properties),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                9,
+                &[],
+                &properties,
+            )],
         )
         .await
         .unwrap();
@@ -1201,12 +508,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &delete,
-            DataScope::LegacyUnscoped,
             &mutations,
             &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, 9, &properties, &[]),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                9,
+                &properties,
+                &[],
+            )],
         )
         .await
         .unwrap();
@@ -1407,9 +719,11 @@ mod tests {
         .await;
     }
 
+    /// Plans every effect of one batch in one publication transaction: later
+    /// effects see earlier ones, and the transaction reads its own writes.
     #[tokio::test]
-    async fn active_runtime_batches_repeated_entities_in_one_transaction() {
-        let db = test_db("vector-active-runtime-batched-repeated-entities").await;
+    async fn one_publication_stages_a_batch_of_inserts_updates_and_deletes() {
+        let db = test_db("vector-active-publication-batch").await;
         let physical_index_id = VectorPhysicalIndexId::new(44).unwrap();
         let (target, active) = active_target(
             validated_definition(None, VectorDistanceMetric::Euclidean),
@@ -1437,71 +751,68 @@ mod tests {
             targets: vec![target],
         };
         let cache_writes = VectorCacheWriteSet::default();
-        let mut runtime = vector::ActiveVectorMutationRuntime::new(
-            std::num::NonZeroU64::new(8 * 1024 * 1024).unwrap(),
-        );
-        let first = vec![
-            property("$label", PropertyValue::String("Document".to_string())),
-            property("embedding", PropertyValue::F32Array(vec![1.0, 0.0, 0.0])),
-        ];
-        let second = vec![
-            property("$label", PropertyValue::String("Document".to_string())),
-            property("embedding", PropertyValue::F32Array(vec![0.0, 1.0, 0.0])),
-        ];
-        let replacement = vec![
-            property("$label", PropertyValue::String("Document".to_string())),
-            property("embedding", PropertyValue::F32Array(vec![0.0, 0.0, 1.0])),
-        ];
-        let transaction = db
+        let document = |vector: [f32; 3]| {
+            vec![
+                property("$label", PropertyValue::String("Document".to_string())),
+                property("embedding", PropertyValue::F32Array(vector.to_vec())),
+            ]
+        };
+        let first = document([1.0, 0.0, 0.0]);
+        let second = document([0.0, 1.0, 0.0]);
+        let third = document([0.0, 0.0, 1.0]);
+        let replacement = document([1.0, 1.0, 1.0]);
+        let insert = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity_with_runtime(
-            &transaction,
-            DataScope::LegacyUnscoped,
+        maintain_entities(
+            &db,
+            &insert,
             &mutations,
-            &mut runtime,
             &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, 1, &[], &first),
+            &[
+                VectorEntityMutation::new(IndexElementKind::Node, 1, &[], &first),
+                VectorEntityMutation::new(IndexElementKind::Node, 2, &[], &second),
+                VectorEntityMutation::new(IndexElementKind::Node, 3, &[], &third),
+            ],
         )
         .await
         .unwrap();
-        maintain_entity_with_runtime(
-            &transaction,
-            DataScope::LegacyUnscoped,
+        insert.commit().await.unwrap();
+        assert_eq!(index.get_metadata(&db).await.unwrap().unwrap().count, 3);
+
+        let change = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        maintain_entities(
+            &db,
+            &change,
             &mutations,
-            &mut runtime,
             &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, 2, &[], &second),
+            &[
+                VectorEntityMutation::new(IndexElementKind::Node, 1, &first, &replacement),
+                VectorEntityMutation::new(IndexElementKind::Node, 2, &second, &[]),
+            ],
         )
         .await
         .unwrap();
-        maintain_entity_with_runtime(
-            &transaction,
-            DataScope::LegacyUnscoped,
-            &mutations,
-            &mut runtime,
-            &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, 1, &first, &replacement),
-        )
-        .await
-        .unwrap();
-        runtime.flush(&transaction).await.unwrap();
         assert_eq!(
             index
-                .get_item(&transaction, 1)
+                .get_item(&change, 1)
                 .await
                 .unwrap()
                 .unwrap()
                 .vector
                 .to_vec(),
-            vec![0.0, 0.0, 1.0]
+            vec![1.0, 1.0, 1.0],
+            "the publication transaction reads its applied plan"
         );
-        runtime.prepare(&transaction).await.unwrap();
-        transaction.commit().await.unwrap();
+        change.commit().await.unwrap();
 
         assert_eq!(index.get_metadata(&db).await.unwrap().unwrap().count, 2);
-        assert!(index.get_item(&db, 2).await.unwrap().is_some());
+        assert!(index.get_item(&db, 2).await.unwrap().is_none());
+        assert!(index.get_item(&db, 3).await.unwrap().is_some());
         db.close().await.unwrap();
     }
 
@@ -1529,12 +840,17 @@ mod tests {
             .await
             .unwrap();
 
-        maintain_entity(
+        maintain_entities(
+            &db,
             &transaction,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 9, &properties, &[]),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                9,
+                &properties,
+                &[],
+            )],
         )
         .await
         .unwrap();
@@ -1553,61 +869,15 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// Avoids a build delta when both graph snapshots lack the indexed vector.
+    /// Tolerates removal from a tenant partition that never materialized:
+    /// queued routing can name a state a hidden build never applied.
     #[tokio::test]
-    async fn building_missing_property_delete_stages_no_delta() {
-        let db = test_db("vector-building-missing-property-delete").await;
-        let index_id = IndexId::new(32).unwrap();
-        let generation = IndexGenerationId::new(8).unwrap();
-        let target = VectorMutationTarget {
-            index_id,
-            generation,
-            definition: validated_definition(Some("account_id"), VectorDistanceMetric::Euclidean),
-            mode: VectorMutationMode::RecordBuildDelta,
-        };
-        let properties = vec![
-            property("$label", PropertyValue::String("Document".to_string())),
-            property("account_id", PropertyValue::I64(7)),
-        ];
-        let mutations = VectorMutationSet {
-            targets: vec![target],
-        };
-        let delta_key = scoped_index_key(
-            DataScope::LegacyUnscoped,
-            ScopedKey::BuildDelta(IndexEntityStateKey {
-                index_id,
-                generation,
-                entity: IndexEntity {
-                    kind: IndexElementKind::Node,
-                    id: IndexEntityId::new(9),
-                },
-            }),
-        );
-        let transaction = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-
-        maintain_entity(
-            &transaction,
-            DataScope::LegacyUnscoped,
-            &mutations,
-            &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 9, &properties, &[]),
-        )
-        .await
-        .unwrap();
-        transaction.commit().await.unwrap();
-        assert!(db.get(&delta_key).await.unwrap().is_none());
-        db.close().await.unwrap();
-    }
-
-    /// Rejects removal from a tenant partition whose physical mapping is absent.
-    #[tokio::test]
-    async fn active_tenant_removal_requires_an_existing_partition_mapping() {
+    async fn active_tenant_removal_tolerates_a_missing_partition_mapping() {
         let db = test_db("vector-active-missing-tenant-mapping").await;
         let definition = validated_definition(Some("account_id"), VectorDistanceMetric::Euclidean);
         let (target, _) = active_target(definition, VectorPhysicalLayout::Partitioned);
+        let index_id = target.index_id;
+        let generation = target.generation;
         let mutations = VectorMutationSet {
             targets: vec![target],
         };
@@ -1617,23 +887,44 @@ mod tests {
             property("account_id", PropertyValue::I64(7)),
             property("embedding", PropertyValue::F32Array(vec![1.0, 2.0, 3.0])),
         ];
+        let partition = VectorTenantPartition::try_from_partition(
+            vector_partition(&mutations.targets[0].definition, &properties)
+                .unwrap()
+                .expect("label and tenant project a partition"),
+        )
+        .unwrap();
         let transaction = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
 
-        assert!(matches!(
-            maintain_entity(
-                &transaction,
-                DataScope::LegacyUnscoped,
-                &mutations,
-                &cache_writes,
-                VectorEntityMutation::new(IndexElementKind::Node, 9, &properties, &[]),
-            )
-            .await,
-            Err(HelixDbError::IndexCatalogCorruption(_))
-        ));
-        drop(transaction);
+        maintain_entities(
+            &db,
+            &transaction,
+            &mutations,
+            &cache_writes,
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                9,
+                &properties,
+                &[],
+            )],
+        )
+        .await
+        .expect("removal from an unmaterialized partition stages nothing");
+        assert!(cache_writes.entries().is_empty());
+        transaction.commit().await.unwrap();
+        assert!(repository::load_vector_partition_mapping(
+            &db,
+            DataScope::LegacyUnscoped,
+            index_id,
+            generation,
+            VectorPhysicalLayout::Partitioned,
+            &partition,
+        )
+        .await
+        .unwrap()
+        .is_none());
         db.close().await.unwrap();
     }
 
@@ -1659,65 +950,21 @@ mod tests {
             .await
             .unwrap();
 
-        maintain_entity(
+        maintain_entities(
+            &db,
             &transaction,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 9, &properties, &properties),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                9,
+                &properties,
+                &properties,
+            )],
         )
         .await
         .unwrap();
         transaction.commit().await.unwrap();
-        db.close().await.unwrap();
-    }
-
-    /// Rejects a canonical vector row whose key repeats a different identity.
-    #[tokio::test]
-    async fn mutation_set_rejects_catalog_key_value_identity_disagreement() {
-        let db = test_db("vector-mutation-catalog-identity-mismatch").await;
-        let definition = validated_definition(None, VectorDistanceMetric::Euclidean);
-        let record = IndexRecordV2::building(
-            IndexId::new(61).unwrap(),
-            ValidatedDynamicIndexDefinition::Vector(definition.clone()),
-            IndexRevision::initial(),
-            PhysicalGeneration::Vector {
-                generation: IndexGenerationId::new(7).unwrap(),
-                layout: VectorPhysicalLayout::Unpartitioned {
-                    physical_index_id: VectorPhysicalIndexId::new(62).unwrap(),
-                },
-                descriptor: VectorGenerationDescriptor::for_definition(&definition),
-            },
-            IndexOperationId::new_v4(),
-        )
-        .unwrap();
-        let other = validated_definition(None, VectorDistanceMetric::Manhattan);
-        let other = crate::config::VectorIndexDefinition::new_node(
-            other.label().as_str(),
-            "other_embedding",
-            other.dimension() as usize,
-            other.metric(),
-        )
-        .unwrap();
-        let other = ValidatedVectorIndexDefinition::try_from_runtime(&other).unwrap();
-        let key = IndexKey::Data {
-            scope: DataScope::LegacyUnscoped,
-            kind: ScopedKey::IndexRecord(IndexRecordKey {
-                identity: other.identity(),
-            }),
-        }
-        .to_bytes();
-        db.put(key, encode_index_record(&record)).await.unwrap();
-        let transaction = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            load_mutation_set(&transaction, DataScope::LegacyUnscoped).await,
-            Err(HelixDbError::IndexCatalogCorruption(_))
-        ));
-        drop(transaction);
         db.close().await.unwrap();
     }
 
@@ -1754,12 +1001,17 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            maintain_entity(
+            maintain_entities(
+                &db,
                 &transaction,
-                DataScope::LegacyUnscoped,
                 &mutations,
                 &VectorCacheWriteSet::default(),
-                VectorEntityMutation::new(IndexElementKind::Node, 9, &[], &properties),
+                &[VectorEntityMutation::new(
+                    IndexElementKind::Node,
+                    9,
+                    &[],
+                    &properties
+                )],
             )
             .await,
             Err(HelixDbError::IdentifierExhausted(
@@ -1814,12 +1066,17 @@ mod tests {
         };
 
         assert!(matches!(
-            maintain_entity(
+            maintain_entities(
+                &db,
                 &transaction,
-                DataScope::LegacyUnscoped,
                 &mutations,
                 &VectorCacheWriteSet::default(),
-                VectorEntityMutation::new(IndexElementKind::Node, 9, &[], &properties),
+                &[VectorEntityMutation::new(
+                    IndexElementKind::Node,
+                    9,
+                    &[],
+                    &properties
+                )],
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(_))
@@ -1828,7 +1085,8 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// Propagates a physical-index collision after a new mapping is staged.
+    /// A namespace at the ID the watermark offers, visible to the publication
+    /// transaction itself, is a stale watermark and fails closed.
     #[tokio::test]
     async fn active_tenant_upsert_rejects_preexisting_allocated_physical_index() {
         let db = test_db("vector-active-tenant-physical-collision").await;
@@ -1866,15 +1124,20 @@ mod tests {
         };
 
         assert!(matches!(
-            maintain_entity(
+            maintain_entities(
+                &db,
                 &transaction,
-                DataScope::LegacyUnscoped,
                 &mutations,
                 &VectorCacheWriteSet::default(),
-                VectorEntityMutation::new(IndexElementKind::Node, 9, &[], &properties),
+                &[VectorEntityMutation::new(
+                    IndexElementKind::Node,
+                    9,
+                    &[],
+                    &properties
+                )],
             )
             .await,
-            Err(HelixDbError::IndexAlreadyExists(_))
+            Err(HelixDbError::IndexCatalogCorruption(reason)) if reason.contains("watermark")
         ));
         drop(transaction);
         db.close().await.unwrap();
@@ -1923,12 +1186,17 @@ mod tests {
             targets: vec![target],
         };
 
-        assert!(maintain_entity(
+        assert!(maintain_entities(
+            &db,
             &transaction,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 9, &before, &after),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                9,
+                &before,
+                &after
+            )],
         )
         .await
         .is_err());
@@ -1959,12 +1227,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &insert,
-            DataScope::LegacyUnscoped,
             &mutations,
             &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, 19, &[], &first),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                19,
+                &[],
+                &first,
+            )],
         )
         .await
         .unwrap();
@@ -1999,12 +1272,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &update,
-            DataScope::LegacyUnscoped,
             &mutations,
             &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, 19, &first, &second),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                19,
+                &first,
+                &second,
+            )],
         )
         .await
         .unwrap();
@@ -2084,17 +1362,17 @@ mod tests {
             .await
             .unwrap();
         let insert_cache_writes = VectorCacheWriteSet::default();
-        for entity_id in [41, 42] {
-            maintain_entity(
-                &insert,
-                DataScope::LegacyUnscoped,
-                &mutations,
-                &insert_cache_writes,
-                VectorEntityMutation::new(IndexElementKind::Node, entity_id, &[], &properties),
-            )
-            .await
-            .unwrap();
-        }
+        maintain_entities(
+            &db,
+            &insert,
+            &mutations,
+            &insert_cache_writes,
+            &[41, 42].map(|entity_id| {
+                VectorEntityMutation::new(IndexElementKind::Node, entity_id, &[], &properties)
+            }),
+        )
+        .await
+        .unwrap();
         insert.commit().await.unwrap();
         let first_physical = repository::load_vector_partition_mapping(
             &db,
@@ -2118,12 +1396,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &delete_non_last,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 41, &properties, &[]),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                41,
+                &properties,
+                &[],
+            )],
         )
         .await
         .unwrap();
@@ -2151,12 +1434,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &delete_last,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 42, &properties, &[]),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                42,
+                &properties,
+                &[],
+            )],
         )
         .await
         .unwrap();
@@ -2191,12 +1479,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &reinsert,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 43, &[], &properties),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                43,
+                &[],
+                &properties,
+            )],
         )
         .await
         .unwrap();
@@ -2245,12 +1538,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &insert,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 51, &[], &properties),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                51,
+                &[],
+                &properties,
+            )],
         )
         .await
         .unwrap();
@@ -2292,12 +1590,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        let error = maintain_entity(
+        let error = maintain_entities(
+            &db,
             &delete,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 51, &properties, &[]),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                51,
+                &properties,
+                &[],
+            )],
         )
         .await
         .unwrap_err();
@@ -2342,12 +1645,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &seed,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 61, &[], &properties),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                61,
+                &[],
+                &properties,
+            )],
         )
         .await
         .unwrap();
@@ -2368,12 +1676,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &delete,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 61, &properties, &[]),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                61,
+                &properties,
+                &[],
+            )],
         )
         .await
         .unwrap();
@@ -2381,12 +1694,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &racing_insert,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 62, &[], &properties),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                62,
+                &[],
+                &properties,
+            )],
         )
         .await
         .unwrap();
@@ -2399,12 +1717,17 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        maintain_entity(
+        maintain_entities(
+            &db,
             &retry,
-            DataScope::LegacyUnscoped,
             &mutations,
             &VectorCacheWriteSet::default(),
-            VectorEntityMutation::new(IndexElementKind::Node, 62, &[], &properties),
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                62,
+                &[],
+                &properties,
+            )],
         )
         .await
         .unwrap();

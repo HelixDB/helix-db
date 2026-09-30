@@ -21,7 +21,6 @@ pub(crate) use active_preflight::production_contracts::run as run_active_preflig
 pub(crate) mod active_publication;
 #[cfg(any(test, feature = "production-coverage"))]
 mod active_retirement;
-pub(crate) mod active_runtime;
 #[cfg(feature = "production-coverage")]
 pub(crate) use active_retirement::production_contracts::run as run_active_retirement_contracts;
 pub(crate) mod attachment;

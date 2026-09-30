@@ -61,6 +61,9 @@ use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
+pub use index_lifecycle::queue::lag::PublicationLagHistogram;
+pub use index_lifecycle::queue::IndexOperationQueueStats;
+pub use merge_operator::{operation_queue_merge_stats, OperationQueueMergeStats, QueueMergeCost};
 
 #[cfg(any(test, feature = "production-coverage"))]
 use config::ValidatedDynamicIndexDefinition;
@@ -806,6 +809,7 @@ struct HelixDBInner {
     index_claim_sequences: Arc<index_lifecycle::worker::ClaimSequenceAllocator>,
     index_operation_backlog: Arc<index_lifecycle::queue::backlog::IndexOperationBacklog>,
     index_queue_store: Arc<index_lifecycle::queue::storage::QueueStore>,
+    index_queue_publisher: Option<Arc<index_lifecycle::queue::publication::QueuePublisher>>,
     secondary_lifecycle_step: Mutex<()>,
     #[cfg(feature = "index-lifecycle-testing")]
     lifecycle_test_scheduling: IndexLifecycleScheduling,
@@ -1525,23 +1529,25 @@ impl HelixDB {
             )
             .with_scan_tuning(lifecycle_throughput.scan()),
         );
-        let vector_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> = Arc::new(
-            index_lifecycle::vector::VectorIndexDriver::new(
-                Arc::clone(&index_scope_gates),
-                Arc::clone(&vector_memory.registry),
-                Arc::clone(&vector_memory.simhasher_registry),
-            )
-            .with_scan_tuning(lifecycle_throughput.scan())
-            .with_batch_reads(batch_reads::BatchReads::for_block_cache(
-                slate_db_cache.as_ref(),
-            ))
-            .with_build_cache_bytes(
-                config
-                    .db()
-                    .search_index_backfill()
-                    .vector_build_cache_bytes(),
-            ),
+        let vector_driver = index_lifecycle::vector::VectorIndexDriver::new(
+            Arc::clone(&index_scope_gates),
+            Arc::clone(&vector_memory.registry),
+            Arc::clone(&vector_memory.simhasher_registry),
+        )
+        .with_scan_tuning(lifecycle_throughput.scan())
+        .with_batch_reads(batch_reads::BatchReads::for_block_cache(
+            slate_db_cache.as_ref(),
+        ))
+        .with_build_cache_bytes(
+            config
+                .db()
+                .search_index_backfill()
+                .vector_build_cache_bytes(),
         );
+        // Queue publication plans within the budget builds retain sessions in.
+        let vector_planning_cache = vector_driver.build_cache();
+        let vector_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> =
+            Arc::new(vector_driver);
         let secondary_scheduling = index_scheduling.resolve(match secondary_tuning.worker_mode() {
             config::SecondaryIndexLifecycleWorkerMode::Enabled => {
                 index_lifecycle::worker::IndexDriverScheduling::Automatic
@@ -1557,7 +1563,7 @@ impl HelixDB {
                 Arc::clone(&index_scope_gates),
                 Arc::clone(storage.object_store()),
                 storage.path().to_string(),
-                config.db().search_index_backfill().text_compaction(),
+                config.db().search_index_backfill(),
             )
             .with_scan_tuning(lifecycle_throughput.scan()),
         );
@@ -1608,11 +1614,55 @@ impl HelixDB {
                     .max_inflight_bytes,
             ),
         ));
+        // Every writer owns a publisher; only automatic scheduling hands it to
+        // the supervisor, so explicitly stepped harnesses drive it directly.
+        let index_queue_publisher = match storage.handle() {
+            HelixStorage::Writer(writer) => {
+                Some(index_lifecycle::queue::publication::QueuePublisher::new(
+                    Arc::clone(&writer.db),
+                    Arc::clone(&index_operation_backlog),
+                    Arc::clone(&index_queue_store),
+                    Arc::clone(&index_scope_gates),
+                    index_lifecycle::queue::publication::VectorPublicationResources {
+                        cache_registry: Arc::clone(&vector_memory.registry),
+                        simhasher_registry: Arc::clone(&vector_memory.simhasher_registry),
+                        batch_reads: batch_reads::BatchReads::for_block_cache(
+                            slate_db_cache.as_ref(),
+                        ),
+                        planning_cache: vector_planning_cache,
+                    },
+                    config.db().search_index_backfill().batch(),
+                    index_lifecycle::queue::publication::TextPublicationResources {
+                        object_store: Arc::clone(storage.object_store()),
+                        database: storage.path().to_string(),
+                        limits: config.db().search_index_backfill().active_text_mutation(),
+                    },
+                ))
+            }
+            HelixStorage::Reader(_) => None,
+        };
+        let scheduled_publisher = match automatic_scheduling {
+            index_lifecycle::worker::IndexDriverScheduling::Automatic => {
+                index_queue_publisher.clone()
+            }
+            index_lifecycle::worker::IndexDriverScheduling::ExplicitOnly => None,
+        };
+        #[cfg(test)]
+        if queue_tuning.starts_paused()
+            && let Some(publisher) = &index_queue_publisher
+        {
+            publisher
+                .hooks()
+                .paused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let index_worker = match storage.handle() {
             HelixStorage::Writer(writer) => {
                 Some(index_lifecycle::worker::IndexWorkerSupervisor::start(
                     Arc::clone(&writer.db),
                     index_capabilities.clone(),
+                    scheduled_publisher,
+                    queue_tuning.recovery_sweep_interval(),
                     config.db().index_lifecycle_throughput().concurrency(),
                     Arc::clone(&index_claim_sequences),
                     #[cfg(feature = "index-lifecycle-testing")]
@@ -1647,6 +1697,7 @@ impl HelixDB {
                 index_claim_sequences,
                 index_operation_backlog,
                 index_queue_store,
+                index_queue_publisher,
                 secondary_lifecycle_step: Mutex::new(()),
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_test_scheduling: index_scheduling,
@@ -2166,6 +2217,7 @@ impl HelixDB {
         tenant_scope: DataScope,
         execution_control: execution_control::ExecutionControl,
         proof: CatalogRefreshProof,
+        search_consistency: helix_ast::query::SearchConsistency,
     ) -> Result<ExecutionResult> {
         Interpreter::new_scoped_controlled_prepared(
             self,
@@ -2174,6 +2226,7 @@ impl HelixDB {
             execution_control,
             proof,
         )
+        .with_search_consistency(search_consistency)
         .execute(plan)
         .await
     }
@@ -3123,6 +3176,135 @@ impl HelixDB {
         scope: DataScope,
     ) -> index_lifecycle::IndexScopeCatalogPermit {
         self.inner.index_scope_gates.catalog_permit(scope).await
+    }
+
+    /// Returns the queue storage layout shared by producers, the publisher,
+    /// and search overlays.
+    pub(crate) fn index_queue_store(&self) -> &index_lifecycle::queue::storage::QueueStore {
+        &self.inner.index_queue_store
+    }
+
+    /// Returns the retained index-operation admission ledger.
+    pub(crate) fn index_operation_backlog(
+        &self,
+    ) -> &Arc<index_lifecycle::queue::backlog::IndexOperationBacklog> {
+        &self.inner.index_operation_backlog
+    }
+
+    /// Returns asynchronous vector/text index backlog and publication counters.
+    ///
+    /// Reads in-memory state only: atomics plus one scan of retained charges
+    /// under the ledger lock, so sample it periodically rather than per
+    /// request. Reader handles own no ledger or publisher and report zeros.
+    pub fn index_operation_queue_stats(&self) -> IndexOperationQueueStats {
+        let backlog = self.inner.index_operation_backlog.totals();
+        let stats = IndexOperationQueueStats {
+            retained_bytes: backlog.usage.retained_bytes,
+            pending_members: backlog.usage.members,
+            pending_operations: backlog.usage.operations,
+            uncertain_operations: backlog.usage.uncertain_operations,
+            committed_operations: backlog.outcomes.committed,
+            discovered_operations: backlog.outcomes.discovered,
+            acknowledged_operations: backlog.outcomes.acknowledged,
+            censored_acknowledgements: backlog.outcomes.acknowledged_censored,
+            oldest_pending_micros: backlog.oldest_committed_pending_micros,
+            ..IndexOperationQueueStats::default()
+        };
+        let Some(publisher) = &self.inner.index_queue_publisher else {
+            return stats;
+        };
+        let metrics = publisher.metrics();
+        let load = |counter: &std::sync::atomic::AtomicU64| {
+            counter.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        IndexOperationQueueStats {
+            published_operations: load(&metrics.published_operations),
+            published_entities: load(&metrics.published_entities),
+            committed_batches: load(&metrics.committed_batches),
+            commit_conflicts: load(&metrics.commit_conflicts),
+            uncertain_commits: load(&metrics.uncertain_commits),
+            output_retries: load(&metrics.output_retries),
+            blocked_attempts: load(&metrics.blocked_attempts),
+            discarded_operations: load(&metrics.discarded_operations),
+            queue_reads: load(&metrics.queue_reads),
+            queue_read_bytes: load(&metrics.queue_read_bytes),
+            queue_read_micros: load(&metrics.queue_read_micros),
+            publication_attempts: load(&metrics.attempts),
+            publication_attempt_micros: load(&metrics.attempt_micros),
+            publication_retries: load(&metrics.retry_attempts),
+            publication_error_retries: load(&metrics.error_retries),
+            deferred_attempts: load(&metrics.deferred_attempts),
+            ..stats
+        }
+    }
+
+    /// Returns the cumulative publication lag of operations committed and
+    /// acknowledged through this handle, joined by exact operation ID.
+    ///
+    /// Operations without an observed commit instant are counted in
+    /// [`IndexOperationQueueStats::censored_acknowledgements`] instead.
+    pub fn index_operation_publication_lag(&self) -> PublicationLagHistogram {
+        self.inner.index_operation_backlog.lag()
+    }
+
+    /// Publishes every outstanding vector/text queue for an explicitly
+    /// stepped harness, returning the operations published or discarded.
+    ///
+    /// Only for explicit scheduling: no automatic worker may publish at the
+    /// same time, since two attempts for one generation must never overlap.
+    #[cfg(any(feature = "index-lifecycle-testing", feature = "production-coverage"))]
+    #[doc(hidden)]
+    pub async fn publish_index_queues_for_lifecycle_testing(&self) -> Result<u64> {
+        use index_lifecycle::queue::publication::PublicationOutcome;
+        let Some(publisher) = self.inner.index_queue_publisher.as_ref() else {
+            return Err(HelixDbError::WriterModeRequired {
+                actual: self.mode().as_str(),
+            });
+        };
+        let mut released = 0;
+        for target in self.inner.index_operation_backlog.outstanding_targets() {
+            let mut retries = 0_u32;
+            loop {
+                match publisher.publish_once(target).await? {
+                    PublicationOutcome::Published { operations, .. }
+                    | PublicationOutcome::Discarded { operations } => released += operations,
+                    PublicationOutcome::Trimmed => {}
+                    PublicationOutcome::Empty => break,
+                    PublicationOutcome::Retry if retries < 100 => retries += 1,
+                    outcome @ (PublicationOutcome::Retry
+                    | PublicationOutcome::Deferred
+                    | PublicationOutcome::Blocked) => {
+                        return Err(HelixDbError::InvariantViolation(format!(
+                            "queued publication stalled for index {}: {outcome:?}",
+                            target.index_id.get()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(released)
+    }
+
+    /// Returns this writer's queued-publication runtime.
+    #[cfg(test)]
+    pub(crate) fn index_queue_publisher(
+        &self,
+    ) -> Option<&Arc<index_lifecycle::queue::publication::QueuePublisher>> {
+        self.inner.index_queue_publisher.as_ref()
+    }
+
+    /// Returns the per-transaction queue operand ceiling in bytes.
+    pub(crate) fn index_operand_limit(&self) -> u64 {
+        self.inner.index_queue_store.max_operand_bytes()
+    }
+
+    /// Returns the limits queued text publication applies to one entity.
+    pub(crate) fn active_text_mutation_limits(&self) -> config::ActiveTextMutationLimits {
+        self.inner
+            .config
+            .db()
+            .search_index_backfill()
+            .active_text_mutation()
     }
 
     /// Rebuilds retained-operation accounting from durable queues.

@@ -255,7 +255,7 @@ mod tests {
             };
             assert_eq!(error, "active_text_mutation_limit_exceeded");
             assert_eq!(msg, expected_message);
-            assert!(msg.contains("hard mutation-batch limit"));
+            assert!(msg.contains("hard per-document limit"));
         }
     }
 

@@ -121,6 +121,135 @@ pub(crate) async fn load_query_statistics(
     }))
 }
 
+/// Loads query statistics adjusted for selected pending entities.
+///
+/// Every selected entity's physical contribution in `partition` (read from
+/// its indexed-entity statistics marker through `reader`) is removed, and its
+/// latest pending document in `partition`, if any, is added. Documents that do
+/// not match the query still change corpus totals, so BM25 scores for physical
+/// and pending documents share one consistent corpus.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the overlay binds one exact view, generation, partition, analyzer, query, and selection"
+)]
+pub(crate) async fn load_overlaid_query_statistics(
+    reader: &(impl DbReadOps + Send + Sync),
+    scope: DataScope,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
+    partition: &work::TextPartition,
+    analyzer: TextAnalyzerKind,
+    query: &str,
+    pending: &[(index_keys::IndexEntity, Option<&str>)],
+) -> Result<LoadedTextQueryStatistics> {
+    let analyzed = crate::search::text::analyze_text(analyzer, query);
+    if analyzed.unique_terms.is_empty() {
+        return Ok(LoadedTextQueryStatistics::EmptyQuery);
+    }
+    let (mut documents, mut tokens, mut frequencies) = match load_query_statistics(
+        reader, scope, index_id, generation, partition, analyzer, query,
+    )
+    .await?
+    {
+        LoadedTextQueryStatistics::Ready(statistics) => (
+            statistics.total_document_count,
+            statistics.total_token_count,
+            statistics.document_frequencies,
+        ),
+        LoadedTextQueryStatistics::EmptyCorpus | LoadedTextQueryStatistics::EmptyQuery => (
+            0,
+            0,
+            analyzed
+                .unique_terms
+                .iter()
+                .map(|term| (term.clone(), 0))
+                .collect(),
+        ),
+    };
+    // A zero-document corpus row may still hold residual term rows; restart
+    // from exact zero so pending documents alone define an empty corpus.
+    if documents == 0 {
+        tokens = 0;
+        frequencies
+            .values_mut()
+            .for_each(|frequency| *frequency = 0);
+    }
+    const MARKER_BATCH: usize = 256;
+    for chunk in pending.chunks(MARKER_BATCH) {
+        let keys = chunk
+            .iter()
+            .map(|(entity, _)| {
+                scoped_key(
+                    scope,
+                    index_keys::ScopedKey::TextStatisticsEntity(
+                        index_keys::TextStatisticsEntityKey {
+                            index_id,
+                            generation,
+                            entity: *entity,
+                        },
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let markers = reader.multi_get(&keys).await?;
+        for ((entity, text), marker) in chunk.iter().zip(markers) {
+            if let Some(marker) = marker {
+                let marker = index_values::decode_statistics_entity(&marker)?;
+                if marker.index_id != index_id
+                    || marker.generation != generation
+                    || marker.entity_kind != entity.kind
+                    || marker.entity_id != entity.id
+                {
+                    return Err(corruption(
+                        "text statistics entity key/value ownership mismatch",
+                    ));
+                }
+                if let work::TextStatisticsContribution::Present {
+                    partition: accounted,
+                    token_count,
+                    terms,
+                    ..
+                } = &marker.contribution
+                    && accounted == partition
+                {
+                    documents = documents.checked_sub(1).ok_or_else(|| {
+                        corruption("pending text overlay removed an unaccounted document")
+                    })?;
+                    tokens = tokens.checked_sub(*token_count).ok_or_else(|| {
+                        corruption("pending text overlay removed unaccounted tokens")
+                    })?;
+                    for (term, frequency) in &mut frequencies {
+                        if terms.binary_search(term).is_ok() {
+                            *frequency = frequency.checked_sub(1).ok_or_else(|| {
+                                corruption("pending text overlay removed an unaccounted term")
+                            })?;
+                        }
+                    }
+                }
+            }
+            let Some(text) = text else {
+                continue;
+            };
+            let added = crate::search::text::analyze_text(analyzer, text);
+            documents = documents.saturating_add(1);
+            tokens = tokens.saturating_add(added.token_count);
+            for (term, frequency) in &mut frequencies {
+                if added.unique_terms.binary_search(term).is_ok() {
+                    *frequency = frequency.saturating_add(1);
+                }
+            }
+        }
+    }
+    if documents == 0 {
+        return Ok(LoadedTextQueryStatistics::EmptyCorpus);
+    }
+    Ok(LoadedTextQueryStatistics::Ready(TextBm25Statistics {
+        total_document_count: documents,
+        total_token_count: tokens,
+        document_frequencies: frequencies,
+    }))
+}
+
 /// Canonical contribution produced by one validated source document.
 pub(crate) fn present_contribution(
     analyzer: TextAnalyzerKind,
@@ -168,6 +297,152 @@ pub(crate) fn present_contribution_from_analysis(
         analyzed.unique_terms.clone(),
     )
     .map_err(model_error)
+}
+
+/// Returns the encoded key/value bytes of a present contribution's term rows
+/// and the entity marker holding it, from its distinct-term totals.
+///
+/// Term keys are fixed-width fingerprints and every counter, the marker's
+/// fingerprint included, is fixed-width. Each term therefore adds one term
+/// row and one marker entry that differ from a one-byte term's only by its
+/// own bytes, and an observed or written row has these bytes whatever its
+/// document frequency.
+pub(super) fn contribution_row_bytes(
+    scope: DataScope,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
+    entity: index_keys::IndexEntity,
+    partition: &work::TextPartition,
+    unique_terms: u64,
+    unique_term_bytes: u64,
+) -> Result<u64> {
+    let len = |bytes: &[u8]| u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let one_byte_term = Bytes::from_static(b"a");
+    let term_row = len(&term_key(
+        scope,
+        index_id,
+        generation,
+        partition,
+        &one_byte_term,
+    ))
+    .saturating_add(len(&index_values::encode_term_statistics(
+        &work::TextTermStatisticsValue::try_new(
+            index_id,
+            generation,
+            partition.clone(),
+            one_byte_term.clone(),
+            1,
+        )
+        .map_err(model_error)?,
+    )));
+    let marker_value = |terms: Vec<Bytes>| {
+        work::TextStatisticsContribution::try_present(partition.clone(), [0; 32], 0, terms)
+            .map_err(model_error)
+            .map(|contribution| {
+                len(&index_values::encode_statistics_entity(
+                    &work::TextStatisticsEntityValue {
+                        index_id,
+                        generation,
+                        entity_kind: entity.kind,
+                        entity_id: entity.id,
+                        contribution,
+                    },
+                ))
+            })
+    };
+    let empty_marker = marker_value(Vec::new())?;
+    let marker_entry = marker_value(vec![one_byte_term])?.saturating_sub(empty_marker);
+    let marker_key = len(&scoped_key(
+        scope,
+        index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
+            index_id,
+            generation,
+            entity,
+        }),
+    ));
+    Ok(unique_terms
+        .saturating_mul(term_row.saturating_add(marker_entry).saturating_sub(2))
+        .saturating_add(unique_term_bytes.saturating_mul(2))
+        .saturating_add(marker_key)
+        .saturating_add(empty_marker))
+}
+
+/// Returns the rows and encoded key/value bytes of one present contribution's
+/// term rows and the entity marker holding it, encoding every row.
+///
+/// Tests pin [`contribution_row_bytes`] to this reference.
+#[cfg(test)]
+pub(super) fn contribution_rows(
+    scope: DataScope,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
+    entity: index_keys::IndexEntity,
+    contribution: &work::TextStatisticsContribution,
+) -> Result<(u64, u64)> {
+    let work::TextStatisticsContribution::Present {
+        partition, terms, ..
+    } = contribution
+    else {
+        return Err(corruption(
+            "an absent text contribution has no statistics rows",
+        ));
+    };
+    let len = |bytes: &[u8]| u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let term_bytes = terms.iter().try_fold(0_u64, |total, term| {
+        let value = index_values::encode_term_statistics(
+            &work::TextTermStatisticsValue::try_new(
+                index_id,
+                generation,
+                partition.clone(),
+                term.clone(),
+                1,
+            )
+            .map_err(model_error)?,
+        );
+        Ok::<_, HelixDbError>(
+            total
+                .saturating_add(len(&term_key(scope, index_id, generation, partition, term)))
+                .saturating_add(len(&value)),
+        )
+    })?;
+    let marker_key = scoped_key(
+        scope,
+        index_keys::ScopedKey::TextStatisticsEntity(index_keys::TextStatisticsEntityKey {
+            index_id,
+            generation,
+            entity,
+        }),
+    );
+    let marker_value = index_values::encode_statistics_entity(&work::TextStatisticsEntityValue {
+        index_id,
+        generation,
+        entity_kind: entity.kind,
+        entity_id: entity.id,
+        contribution: contribution.clone(),
+    });
+    Ok((
+        u64::try_from(terms.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+        term_bytes
+            .saturating_add(len(&marker_key))
+            .saturating_add(len(&marker_value)),
+    ))
+}
+
+/// Returns the encoded key/value bytes of one partition's corpus row.
+pub(super) fn corpus_row_bytes(
+    scope: DataScope,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
+    partition: &work::TextPartition,
+) -> Result<u64> {
+    let key = corpus_key(scope, index_id, generation, partition);
+    let value = index_values::encode_corpus_statistics(
+        &work::TextCorpusStatisticsValue::try_new(index_id, generation, partition.clone(), 1, 1)
+            .map_err(model_error)?,
+    );
+    Ok(u64::try_from(key.len().saturating_add(value.len())).unwrap_or(u64::MAX))
 }
 
 /// One exact row observation and its desired replacement.
@@ -231,6 +506,11 @@ impl PreparedTextStatisticsBatch {
             }
         }
         Ok(())
+    }
+
+    /// Consumes the batch as each row's first observation and final replacement.
+    pub(crate) fn into_rows(self) -> impl Iterator<Item = PreparedStatisticsRow> {
+        self.rows.into_values()
     }
 
     fn effective_value(&self, key: &[u8]) -> Option<Option<Bytes>> {
@@ -307,42 +587,17 @@ impl PreparedTextStatisticsBatch {
 }
 
 impl PreparedTextStatisticsTransition {
-    /// Exact serialized reads and writes admitted with the surrounding mutation.
-    pub(crate) fn measurements(&self) -> (u64, u64, u64) {
-        self.rows
-            .iter()
-            .fold((0_u64, 0_u64, 0_u64), |(input, operations, output), row| {
-                let key_len = u64::try_from(row.key.len()).unwrap_or(u64::MAX);
-                (
-                    input.saturating_add(
-                        key_len.saturating_add(
-                            row.observed
-                                .as_ref()
-                                .map_or(0, |value| u64::try_from(value.len()).unwrap_or(u64::MAX)),
-                        ),
-                    ),
-                    operations.saturating_add(u64::from(row.replacement != row.observed)),
-                    output.saturating_add(if row.replacement != row.observed {
-                        key_len.saturating_add(
-                            row.replacement
-                                .as_ref()
-                                .map_or(0, |value| u64::try_from(value.len()).unwrap_or(u64::MAX)),
-                        )
-                    } else {
-                        0
-                    }),
-                )
-            })
-    }
-
     /// Borrows the sorted unique physical row transitions.
     pub(crate) fn rows(&self) -> &[PreparedStatisticsRow] {
         &self.rows
     }
 }
 
-/// One Active statistics transition against the latest composed epoch state.
-pub(crate) struct ActiveTextStatisticsMutation {
+/// One entity's statistics transition from its accounted contribution.
+///
+/// Active publication replaces the accounted contribution with a queued
+/// document's; a hidden build replaces it with the document it builds.
+pub(crate) struct TextStatisticsMutation {
     scope: DataScope,
     index_id: index_lifecycle::IndexId,
     generation: index_lifecycle::IndexGenerationId,
@@ -351,7 +606,7 @@ pub(crate) struct ActiveTextStatisticsMutation {
     after: work::TextStatisticsContribution,
 }
 
-impl ActiveTextStatisticsMutation {
+impl TextStatisticsMutation {
     pub(crate) fn new(
         scope: DataScope,
         index_id: index_lifecycle::IndexId,
@@ -371,21 +626,41 @@ impl ActiveTextStatisticsMutation {
     }
 }
 
-/// Prepares one Active transition against the latest composed epoch state.
-pub(crate) async fn prepare_active_in_batch(
+/// Returns the contribution currently accounted for one entity.
+///
+/// Queued publication uses this physical marker, composed with earlier
+/// transitions in the same epoch, as the previous indexed representation.
+pub(crate) async fn accounted_contribution(
     transaction: &DbTransaction,
     batch: &PreparedTextStatisticsBatch,
-    mutation: ActiveTextStatisticsMutation,
-) -> Result<PreparedTextStatisticsTransition> {
-    prepare_active_from(transaction, Some(batch), mutation).await
+    scope: DataScope,
+    index_id: index_lifecycle::IndexId,
+    generation: index_lifecycle::IndexGenerationId,
+    entity: index_keys::IndexEntity,
+) -> Result<work::TextStatisticsContribution> {
+    Ok(read_marker(
+        transaction,
+        Some(batch),
+        scope,
+        index_id,
+        generation,
+        entity,
+    )
+    .await?
+    .map_or(work::TextStatisticsContribution::Absent, |(_, marker)| {
+        marker.contribution
+    }))
 }
 
-async fn prepare_active_from(
+/// Prepares one transition against the latest state of a composed batch.
+///
+/// `before` must equal the entity's accounted marker.
+pub(crate) async fn prepare_mutation_in_batch(
     transaction: &DbTransaction,
-    batch: Option<&PreparedTextStatisticsBatch>,
-    mutation: ActiveTextStatisticsMutation,
+    batch: &PreparedTextStatisticsBatch,
+    mutation: TextStatisticsMutation,
 ) -> Result<PreparedTextStatisticsTransition> {
-    let ActiveTextStatisticsMutation {
+    let TextStatisticsMutation {
         scope,
         index_id,
         generation,
@@ -393,7 +668,15 @@ async fn prepare_active_from(
         before,
         after,
     } = mutation;
-    let marker = read_marker(transaction, batch, scope, index_id, generation, entity).await?;
+    let marker = read_marker(
+        transaction,
+        Some(batch),
+        scope,
+        index_id,
+        generation,
+        entity,
+    )
+    .await?;
     match (
         &before,
         marker.as_ref().map(|(_, marker)| &marker.contribution),
@@ -401,7 +684,7 @@ async fn prepare_active_from(
         (work::TextStatisticsContribution::Present { .. }, Some(actual)) if actual == &before => {}
         (work::TextStatisticsContribution::Present { .. }, _) => {
             return Err(corruption(
-                "Active text statistics marker is absent or disagrees with indexed graph state",
+                "text statistics marker is absent or disagrees with its accounted contribution",
             ));
         }
         (
@@ -409,7 +692,7 @@ async fn prepare_active_from(
             Some(work::TextStatisticsContribution::Present { .. }),
         ) => {
             return Err(corruption(
-                "Active text statistics marker retains a document absent from graph state",
+                "text statistics marker retains a contribution accounted as absent",
             ));
         }
         (work::TextStatisticsContribution::Absent, None | Some(_)) => {}
@@ -426,78 +709,7 @@ async fn prepare_active_from(
             accounted,
             desired: after,
             missing_absent_marker: MissingAbsentMarkerPolicy::KeepMissing,
-            batch,
-        },
-    )
-    .await
-}
-
-/// Prepares a BUILD mutation; an absent marker means the source scan never accounted it.
-pub(crate) async fn prepare_build_mutation(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    index_id: index_lifecycle::IndexId,
-    generation: index_lifecycle::IndexGenerationId,
-    entity: index_keys::IndexEntity,
-    current: work::TextStatisticsContribution,
-) -> Result<PreparedTextStatisticsTransition> {
-    prepare_build_mutation_from(
-        transaction,
-        None,
-        scope,
-        index_id,
-        generation,
-        entity,
-        current,
-    )
-    .await
-}
-
-/// Prepares one BUILD mutation against the latest composed epoch state.
-pub(crate) async fn prepare_build_mutation_in_batch(
-    transaction: &DbTransaction,
-    batch: &PreparedTextStatisticsBatch,
-    scope: DataScope,
-    index_id: index_lifecycle::IndexId,
-    generation: index_lifecycle::IndexGenerationId,
-    entity: index_keys::IndexEntity,
-    current: work::TextStatisticsContribution,
-) -> Result<PreparedTextStatisticsTransition> {
-    prepare_build_mutation_from(
-        transaction,
-        Some(batch),
-        scope,
-        index_id,
-        generation,
-        entity,
-        current,
-    )
-    .await
-}
-
-async fn prepare_build_mutation_from(
-    transaction: &DbTransaction,
-    batch: Option<&PreparedTextStatisticsBatch>,
-    scope: DataScope,
-    index_id: index_lifecycle::IndexId,
-    generation: index_lifecycle::IndexGenerationId,
-    entity: index_keys::IndexEntity,
-    current: work::TextStatisticsContribution,
-) -> Result<PreparedTextStatisticsTransition> {
-    let marker = read_marker(transaction, batch, scope, index_id, generation, entity).await?;
-    let accounted = marker.as_ref().map(|(_, marker)| &marker.contribution);
-    prepare_transition(
-        transaction,
-        TextStatisticsTransitionRequest {
-            scope,
-            index_id,
-            generation,
-            entity,
-            marker_observed: marker.as_ref().map(|(bytes, _)| bytes.clone()),
-            accounted,
-            desired: current,
-            missing_absent_marker: MissingAbsentMarkerPolicy::Persist,
-            batch,
+            batch: Some(batch),
         },
     )
     .await
@@ -574,40 +786,6 @@ pub(crate) async fn load_entity_contribution(
         ));
     }
     Ok(Some(marker.contribution))
-}
-
-/// Revalidates every observed row without buffering writes.
-#[cfg(any(test, feature = "index-lifecycle-testing"))]
-pub(crate) async fn validate(
-    transaction: &DbTransaction,
-    prepared: &PreparedTextStatisticsTransition,
-) -> Result<()> {
-    for row in &prepared.rows {
-        if transaction.get(&row.key).await? != row.observed {
-            return Err(corruption(
-                "text statistics input changed after transactional preparation",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Buffers a transition after its complete request-level validation pass.
-#[cfg(any(test, feature = "index-lifecycle-testing"))]
-pub(crate) fn stage_validated(
-    transaction: &DbTransaction,
-    prepared: &PreparedTextStatisticsTransition,
-) -> Result<()> {
-    for row in &prepared.rows {
-        if row.replacement == row.observed {
-            continue;
-        }
-        match &row.replacement {
-            Some(value) => transaction.put(&row.key, value)?,
-            None => transaction.delete(&row.key)?,
-        }
-    }
-    Ok(())
 }
 
 async fn prepare_transition(
@@ -841,7 +1019,8 @@ async fn read_document_count(
     Ok(statistics.document_count)
 }
 
-async fn read_marker(
+/// Reads one entity's marker bytes and value through a composed batch.
+pub(super) async fn read_marker(
     transaction: &DbTransaction,
     batch: Option<&PreparedTextStatisticsBatch>,
     scope: DataScope,
