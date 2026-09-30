@@ -716,3 +716,86 @@ async fn graph_hydration_rejects_invalid_metadata_and_corrupt_encoded_values() {
     ctx.close_request_read_view().unwrap();
     db.close().await.unwrap();
 }
+
+/// Stored records confirm what scans and adjacency lists propose. An
+/// unlabeled scan skips a key under the node prefix that is not a node key, an
+/// expansion drops an adjacent edge whose endpoints record is missing, and an
+/// edge-pair entry whose stored endpoints reach another node does not bind the
+/// requested target.
+#[tokio::test]
+async fn scans_and_expansions_skip_candidates_their_stored_records_do_not_confirm() {
+    let db =
+        crate::execution::interpreter::test_support::open_db("unconfirmed-graph-candidates").await;
+    let created = db
+        .cypher(crate::cypher::Request::new(
+            "CREATE (a:A)-[r:R]->(:B),(p:P)-[s:R]->(q:Q),(c:C) RETURN id(a),id(r),id(p),id(s),id(c)",
+        ))
+        .await
+        .unwrap();
+    let ids = created.rows[0]
+        .iter()
+        .map(|id| id.as_u64().unwrap())
+        .collect::<Vec<_>>();
+    let [a, r, p, s, c] = ids[..] else {
+        unreachable!("five created IDs")
+    };
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let mut malformed = ctx
+        .storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+            a,
+        )))
+        .to_vec();
+    malformed.push(0);
+    db.inner_db()
+        .put(malformed, property::encode_properties(&[]))
+        .await
+        .unwrap();
+    db.inner_db()
+        .delete(ctx.storage_key(keys::DataKeyKind::EdgeEndpoints(
+            keys::EdgeEndpointsKey::new(r),
+        )))
+        .await
+        .unwrap();
+    db.inner_db()
+        .put(
+            ctx.storage_key(keys::DataKeyKind::EdgeEndpoints(
+                keys::EdgeEndpointsKey::new(s),
+            )),
+            EdgeEndpointsValue::new(p, c).encode(),
+        )
+        .await
+        .unwrap();
+    for (text, expected) in [
+        ("MATCH (n) RETURN count(*)", 5),
+        ("MATCH (x:A)-[e]->(y) RETURN count(*)", 0),
+        (
+            "MATCH (x:P),(y:Q) WITH x,y MATCH (x)-[e]->(y) RETURN count(*)",
+            0,
+        ),
+    ] {
+        let plan = r::plan(
+            helix_cypher::compile(text).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        for batch_rows in [1, 7] {
+            let response = Interpreter::new(&db, context::ParamBindings::default())
+                .execute_rows(
+                    &plan,
+                    &BTreeMap::new(),
+                    Limits {
+                        batch_rows,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.rows,
+                vec![vec![serde_json::json!(expected)]],
+                "{text}"
+            );
+        }
+    }
+    db.close().await.unwrap();
+}

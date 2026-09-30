@@ -319,6 +319,15 @@ async fn predicates_cover_alias_comparisons_membership_arrays_and_errors() {
             "{predicate:?}"
         );
     }
+    // Empty connectives keep their identities: vacuous truth and falsity.
+    assert!(ctx
+        .eval_predicate(&row, &Predicate::and(Vec::new()))
+        .await
+        .unwrap());
+    assert!(!ctx
+        .eval_predicate(&row, &Predicate::or(Vec::new()))
+        .await
+        .unwrap());
 
     let false_and = Predicate::And {
         predicates: vec![

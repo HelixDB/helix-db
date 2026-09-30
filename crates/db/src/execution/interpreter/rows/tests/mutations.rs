@@ -481,3 +481,233 @@ async fn deleted_relationship_types_survive_but_properties_fail_and_roll_back() 
     assert_eq!(result.rows, vec![vec![json!(1)]]);
     db.close().await.unwrap();
 }
+
+/// A deletion retains each deleted relationship's type exactly once, so every
+/// surviving reference still reports it, whether the relationships share a
+/// batch or one relationship recurs across batches.
+#[tokio::test]
+async fn deleted_relationship_types_are_retained_once_across_rows_and_batches() {
+    let db =
+        crate::execution::interpreter::test_support::open_db("deleted-relationship-batches").await;
+    let plan = r::plan(
+        helix_cypher::compile(
+            "MATCH ()-[r]->() WITH r UNWIND [1,2] AS i DELETE r RETURN type(r) AS t ORDER BY t",
+        )
+        .unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    for batch_rows in [1, 2, 512] {
+        db.cypher(crate::cypher::Request::new(
+            "CREATE (a:N)-[:R]->(b:N),(a)-[:S]->(b)",
+        ))
+        .await
+        .unwrap();
+        let response = Interpreter::new(&db, context::ParamBindings::default())
+            .execute_rows(
+                &plan,
+                &BTreeMap::new(),
+                Limits {
+                    batch_rows,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.rows,
+            vec![
+                vec![json!("R")],
+                vec![json!("R")],
+                vec![json!("S")],
+                vec![json!("S")]
+            ],
+            "batch={batch_rows}"
+        );
+        assert_eq!(
+            db.cypher(crate::cypher::Request::new(
+                "MATCH ()-[r]->() RETURN count(r)"
+            ))
+            .await
+            .unwrap()
+            .rows,
+            vec![vec![json!(0)]]
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// A relationship property that fails to evaluate aborts its CREATE after
+/// the endpoints were staged; nothing the request created persists.
+#[tokio::test]
+async fn relationship_property_failures_roll_back_created_endpoints() {
+    let db =
+        crate::execution::interpreter::test_support::open_db("relationship-property-failure").await;
+    let error = db
+        .cypher(crate::cypher::Request::new(
+            "UNWIND [0] AS z CREATE (a:X)-[:R {x: 1/z}]->(b:Y) RETURN a",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Query(error) if error.detail == "DivisionByZero"));
+    assert_eq!(
+        db.cypher(crate::cypher::Request::new("MATCH (n) RETURN count(n)"))
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![json!(0)]]
+    );
+    db.close().await.unwrap();
+}
+
+/// Each new relationship needs exactly one type. The frontend rejects an
+/// untyped CREATE, and row creation rejects such a pattern itself before it
+/// stages any write or keeps any reservation.
+#[tokio::test]
+async fn untyped_relationship_patterns_are_rejected_before_staging_writes() {
+    let error = helix_cypher::compile("CREATE (a)-[r]->(b)").unwrap_err();
+    assert_eq!(error.detail, "NoSingleRelationshipType");
+    let db = crate::execution::interpreter::test_support::open_db("untyped-relationship").await;
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(64 * 1024));
+    let pattern = r::Pattern {
+        nodes: vec![],
+        relationships: vec![r::RelationshipPattern {
+            slot: r::Slot(2),
+            from: r::Slot(0),
+            to: r::Slot(1),
+            direction: r::Direction::Outgoing,
+            types: vec![],
+            properties: vec![],
+        }],
+        paths: vec![],
+    };
+    let rows = memory::Rows::new(
+        vec![vec![
+            r::Value::Entity(r::Entity::Node(1)),
+            r::Value::Entity(r::Entity::Node(2)),
+            r::Value::Null,
+        ]],
+        ctx.row_budget(),
+    )
+    .unwrap();
+    let error = match ctx
+        .create_rows(rows, &pattern, &BTreeMap::new(), Limits::default())
+        .await
+    {
+        Err(Error::Query(error)) => error,
+        Err(error) => panic!("unexpected failure: {error:?}"),
+        Ok(_) => panic!("an untyped relationship was created"),
+    };
+    assert_eq!(
+        (error.category.as_str(), error.detail.as_str()),
+        ("SyntaxError", "NoRelationshipType")
+    );
+    assert!(!ctx.has_active_write_tx());
+    assert_eq!(ctx.row_budget().available(), 64 * 1024);
+    drop(ctx);
+    db.close().await.unwrap();
+}
+
+/// Extending with an empty map or null changes nothing, while replacing with
+/// an empty map clears every user property.
+#[tokio::test]
+async fn empty_map_updates_extend_nothing_and_replace_everything() {
+    let db = crate::execution::interpreter::test_support::open_db("empty-map-updates").await;
+    db.cypher(crate::cypher::Request::new("CREATE (:N {a:1,b:'x'})"))
+        .await
+        .unwrap();
+    for (update, expected) in [
+        ("SET n += {}", json!({"a": 1, "b": "x"})),
+        ("SET n += null", json!({"a": 1, "b": "x"})),
+        ("SET n = {}", json!({})),
+    ] {
+        let response = db
+            .cypher(crate::cypher::Request::new(format!(
+                "MATCH (n:N) {update} RETURN properties(n)"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.rows, vec![vec![expected]], "{update}");
+    }
+    db.close().await.unwrap();
+}
+
+/// Property updates observe cancellation at every checkpoint and admit each
+/// change set before editing. A cancelled or rejected update leaves every node
+/// unchanged; the first run that completes updates them all.
+#[tokio::test]
+async fn cancelled_or_rejected_property_updates_leave_every_node_unchanged() {
+    let db = crate::execution::interpreter::test_support::open_db("update-checkpoints").await;
+    db.cypher(crate::cypher::Request::new(
+        "UNWIND range(1,3) AS k CREATE (:N {k:k})",
+    ))
+    .await
+    .unwrap();
+    let pad = "p".repeat(16 * 1024);
+    for (update, cancel) in [
+        ("SET n.v = n.k * 10".to_owned(), true),
+        (format!("SET n.v = '{pad}'"), false),
+    ] {
+        let plan = r::plan(
+            helix_cypher::compile(&format!("MATCH (n:N) {update} RETURN count(*)")).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        let before = db
+            .cypher(crate::cypher::Request::new(
+                "MATCH (n:N) RETURN collect(n.v)",
+            ))
+            .await
+            .unwrap()
+            .rows;
+        let mut attempt = 0;
+        loop {
+            let interpreter = Interpreter::new(&db, context::ParamBindings::default());
+            let limits = if cancel {
+                interpreter.ctx.fail_deadline_after(attempt);
+                Limits::default()
+            } else {
+                Limits {
+                    memory_bytes: attempt * 128,
+                    ..Default::default()
+                }
+            };
+            match interpreter
+                .execute_rows(&plan, &BTreeMap::new(), limits)
+                .await
+            {
+                Ok(response) => {
+                    assert_eq!(response.rows, vec![vec![json!(3)]]);
+                    break;
+                }
+                Err(Error::Storage(crate::HelixDbError::QueryDeadlineExceeded)) if cancel => {}
+                Err(Error::Query(error)) if !cancel && error.detail == "MemoryLimit" => {}
+                Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) if !cancel => {}
+                Err(error) => panic!("{update} attempt {attempt}: {error:?}"),
+            }
+            assert_eq!(
+                db.cypher(crate::cypher::Request::new(
+                    "MATCH (n:N) RETURN collect(n.v)"
+                ))
+                .await
+                .unwrap()
+                .rows,
+                before,
+                "{update} attempt {attempt}"
+            );
+            attempt += 1;
+        }
+        assert!(attempt > 0, "{update} failed at least once");
+    }
+    assert_eq!(
+        db.cypher(crate::cypher::Request::new(
+            "MATCH (n:N) RETURN count(*), min(size(n.v)), max(size(n.v))"
+        ))
+        .await
+        .unwrap()
+        .rows,
+        vec![vec![json!(3), json!(16 * 1024), json!(16 * 1024)]]
+    );
+    db.close().await.unwrap();
+}

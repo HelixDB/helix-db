@@ -260,5 +260,22 @@ mod tests {
             context.search_limit(&limit_zero).await,
             Err(HelixDbError::Query(message)) if message.contains("non-positive value 0")
         ));
+
+        // An expression that cannot be evaluated fails the query input with
+        // its own error, before any shape check runs.
+        let vector_unbound = ir::VectorQueryInputPlan::Expr(
+            ir::SearchQueryExprPlan::new(Expr::param("unbound")).unwrap(),
+        );
+        assert!(matches!(
+            context.search_query_vector(&vector_unbound).await,
+            Err(HelixDbError::Query(message)) if message == "parameter `unbound` is not bound"
+        ));
+        let text_unbound = ir::TextQueryInputPlan::Expr(
+            ir::SearchQueryExprPlan::new(Expr::param("unbound")).unwrap(),
+        );
+        assert!(matches!(
+            context.search_query_text(&text_unbound).await,
+            Err(HelixDbError::Query(message)) if message == "parameter `unbound` is not bound"
+        ));
     }
 }

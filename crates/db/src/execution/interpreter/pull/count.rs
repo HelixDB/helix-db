@@ -706,4 +706,53 @@ mod tests {
         }
         db.close().await.unwrap();
     }
+
+    /// A structural count over a node label reads the label bitmap when its
+    /// leaf is first polled, and a corrupt bitmap fails the count.
+    #[tokio::test]
+    async fn label_leaf_propagates_a_corrupt_label_bitmap() {
+        use crate::encoding::{indexes, keys};
+        let db = test_support::open_db("pull-count-corrupt-label").await;
+        test_support::add_user(&db, "alice").await;
+        test_support::add_user(&db, "bob").await;
+        let plan = exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+            cursor: exec::ExecCountCursorPlan::Filter {
+                input: Box::new(exec::ExecCountCursorPlan::NodeLabelBitmap(
+                    test_support::name("User"),
+                )),
+                predicate: ir::PredicatePlan::new(Predicate::eq("name", "alice")).unwrap(),
+            },
+            window: exec::ExecCountWindowPlan::identity(),
+        });
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        assert_eq!(
+            ctx.execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                .await
+                .unwrap(),
+            ExecutionValue::Count(1)
+        );
+
+        db.inner_db()
+            .put(
+                keys::DataKey::Data {
+                    scope: keys::scope::DataScope::LegacyUnscoped,
+                    kind: keys::DataKeyKind::PropertyIndex(indexes::PropertyIndexKey::Equality(
+                        indexes::equality::EqualityIndexKey::new(
+                            indexes::hash_property_name("$label"),
+                            indexes::hash_property_value("User"),
+                        ),
+                    )),
+                }
+                .to_bytes(),
+                bytes::Bytes::from_static(b"corrupt label bitmap"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            ctx.execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                .await,
+            Err(HelixDbError::Encoding(_))
+        ));
+        db.close().await.unwrap();
+    }
 }

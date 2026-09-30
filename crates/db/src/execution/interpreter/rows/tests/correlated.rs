@@ -322,6 +322,126 @@ async fn correlated_cancellation_and_early_drop_release_cache_and_active_lookup(
     db.close().await.unwrap();
 }
 
+/// An indexed or fallback lookup admits each continuation and candidate copy
+/// before it grows. Whatever allowance remains when a parent starts or
+/// resumes, the stage either produces the parent's next match or fails with
+/// MemoryLimit, and dropping the failed stage releases everything it held. A
+/// wide outer row makes each candidate copy the largest owner.
+#[tokio::test]
+async fn correlated_lookup_admission_failures_release_every_owner() {
+    use super::super::correlated::{MatchCursor, NodeMatch};
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("correlated-admission-sweep")
+            .with_equality_index("N", "key"),
+    )
+    .await;
+    db.cypher(crate::cypher::Request::new(
+        "CREATE (:N {key:1}),(:N {key:1}),(:N {key:[1]}),(:N {key:[1]})",
+    ))
+    .await
+    .unwrap();
+    let text = "WITH '' AS pad UNWIND [1] AS key OPTIONAL MATCH (n:N {key:key}) RETURN pad, n.key";
+    let plan = r::plan(
+        helix_cypher::compile(text).unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let [r::Operator::Project { items, .. }, r::Operator::Unwind { slot: probe, .. }, r::Operator::Match {
+        pattern,
+        optional,
+        predicate,
+    }, ..] = plan.query().operators()
+    else {
+        unreachable!("padding, probe and lookup operators")
+    };
+    let pad = items.iter().next().unwrap().slot;
+    let node = pattern.single_node().unwrap();
+    let limits = Limits {
+        batch_rows: 1,
+        memory_bytes: 1024 * 1024,
+        ..Default::default()
+    };
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
+    ctx.enable_request_read_view().await.unwrap();
+    let parameters = BTreeMap::new();
+    for fallback in [false, true] {
+        for resumed in [false, true] {
+            let (mut failures, mut successes) = (0, 0);
+            for available in (0..16 * 1024)
+                .step_by(8)
+                .chain((16 * 1024..=192 * 1024).step_by(512))
+            {
+                let mut row = vec![r::Value::Null; plan.query().bindings().len()];
+                row[pad.0 as usize] = r::Value::String("p".repeat(32 * 1024));
+                row[probe.0 as usize] = if fallback {
+                    r::Value::List(vec![r::Value::Integer(1)])
+                } else {
+                    r::Value::Integer(1)
+                };
+                let mut input = RowBuffer::new(ctx.row_budget()).unwrap();
+                push_row(&mut input, row, limits).unwrap();
+                let mut cursor = MatchCursor::new(input.finish(), ctx.row_budget()).unwrap();
+                let mut stage = NodeMatch::new(
+                    matches::Match {
+                        pattern,
+                        optional: *optional,
+                        predicate: predicate.as_deref(),
+                        demand: usize::MAX,
+                    },
+                    &plan.matches()[&2],
+                );
+                if resumed {
+                    let first = stage
+                        .next_batch(&mut cursor, &ctx, &parameters, limits)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(first.len(), 1);
+                }
+                let held = ctx
+                    .row_budget()
+                    .reserve(ctx.row_budget().available().saturating_sub(available))
+                    .unwrap();
+                match stage
+                    .next_batch(&mut cursor, &ctx, &parameters, limits)
+                    .await
+                {
+                    Ok(Some(rows)) => {
+                        assert_eq!(rows.len(), 1);
+                        assert!(matches!(
+                            rows[0][node.0 as usize],
+                            r::Value::Entity(r::Entity::Node(_))
+                        ));
+                        successes += 1;
+                    }
+                    Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                    Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => {
+                        failures += 1
+                    }
+                    Ok(None) => panic!("the parent has another match"),
+                    Err(error) => panic!("{available}: {error:?}"),
+                }
+                drop(held);
+                drop(cursor);
+                drop(stage);
+                assert_eq!(
+                    ctx.row_budget().available(),
+                    limits.memory_bytes,
+                    "fallback={fallback}, resumed={resumed}, available={available}"
+                );
+            }
+            assert!(
+                failures > 0 && successes > 0,
+                "fallback={fallback}, resumed={resumed}"
+            );
+        }
+    }
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn correlated_batch_errors_preserve_candidate_order_and_drain_after_limits() {
     let db = test_support::open_db("correlated-error-order").await;

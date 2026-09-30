@@ -301,3 +301,57 @@ async fn hash_probe_continuations_preserve_error_order_and_release_owned_state()
     }
     db.close().await.unwrap();
 }
+
+/// A table build admits its fixed state, source stream, property demand and
+/// each source row before allocating them. Under any budget the build either
+/// completes with every keyed node or fails with MemoryLimit, and a failure
+/// releases every reservation.
+#[tokio::test]
+async fn hash_table_builds_admit_every_source_row_or_release_everything() {
+    use super::super::joins::HashJoinTable;
+    use crate::query_resources::bitmap;
+    use helix_ast::value::PropertyValue as P;
+    let db = test_support::open_db("hash-build-admission").await;
+    let mut ids = Vec::new();
+    for key in [1, 2, 1] {
+        ids.push(test_support::add_node_with_properties(&db, "N", vec![("k", P::I64(key))]).await);
+    }
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(16 * 1024));
+    ctx.enable_request_read_view().await.unwrap();
+    let mut source = bitmap::Builder::new(None).unwrap();
+    for &id in &ids {
+        source.insert(id).unwrap();
+    }
+    let source = source.finish();
+    let (mut failures, mut successes) = (0, 0);
+    for memory_bytes in (0..=16 * 1024).step_by(8) {
+        let limits = Limits {
+            memory_bytes,
+            batch_rows: 2,
+            ..Default::default()
+        };
+        ctx.row_memory = Some(memory::Budget::new(memory_bytes));
+        match HashJoinTable::build(&ctx, &source, 2, r::Slot(1), "k", limits).await {
+            Ok(table) => {
+                assert_eq!(
+                    table.bucket(&r::GroupingKey::new(r::Value::Integer(1)).unwrap()),
+                    Some(&[ids[0], ids[2]][..])
+                );
+                assert_eq!(
+                    table.bucket(&r::GroupingKey::new(r::Value::Integer(2)).unwrap()),
+                    Some(&[ids[1]][..])
+                );
+                successes += 1;
+            }
+            Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+            Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
+            Err(error) => panic!("{memory_bytes}: {error:?}"),
+        }
+        assert_eq!(ctx.row_budget().available(), memory_bytes);
+    }
+    assert!(failures > 0 && successes > 0);
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}

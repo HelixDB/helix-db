@@ -291,3 +291,89 @@ async fn late_pattern_constraints_preserve_multiplicity_paths_and_demand() {
     drop(ctx);
     db.close().await.unwrap();
 }
+
+/// Materialized matching counts demand in complete matches and stops reading
+/// outer rows once it is met: a later outer row is never validated, so its
+/// binding error cannot surface. Unbounded demand reaches and reports it.
+#[tokio::test]
+async fn materialized_matching_stops_reading_outer_rows_at_demand() {
+    let db = test_support::open_db("materialized-outer-demand").await;
+    let created = db
+        .cypher(crate::cypher::Request::new(
+            "CREATE (a:A)-[:R]->(:B), (a)-[:R]->(:B) RETURN a",
+        ))
+        .await
+        .unwrap();
+    let a = created.rows[0][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let plan = r::plan(
+        helix_cypher::compile("MATCH (a:A) WITH a MATCH (a)-[:R]->(b) RETURN b").unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let program = plan.program();
+    let r::Operator::Match { pattern, .. } = &program.query().operators()[2] else {
+        panic!("correlated match");
+    };
+    let match_plan = &program.matches()[&2];
+    let Some(bound) = pattern
+        .nodes
+        .iter()
+        .find(|node| match_plan.incoming.contains(&node.slot))
+    else {
+        panic!("the correlated match binds its outer node");
+    };
+    let width = program.query().width();
+    let outer = |value| {
+        let mut row = vec![r::Value::Null; width];
+        row[bound.slot.0 as usize] = value;
+        row
+    };
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(1024 * 1024));
+    ctx.enable_request_read_view().await.unwrap();
+    for demand in [1, 2, usize::MAX] {
+        let input = Rows::new(
+            vec![
+                outer(r::Value::Entity(r::Entity::Node(a))),
+                outer(r::Value::Integer(7)),
+            ],
+            ctx.row_budget(),
+        )
+        .unwrap();
+        let result = ctx
+            .match_rows(
+                input,
+                Match {
+                    pattern,
+                    optional: false,
+                    predicate: None,
+                    demand,
+                },
+                match_plan,
+                &BTreeMap::new(),
+                Limits::default(),
+            )
+            .await;
+        let Ok(rows) = result else {
+            assert_eq!(demand, usize::MAX);
+            assert!(matches!(
+                result,
+                Err(crate::cypher::Error::Query(error)) if error.detail == "ExpectedNode"
+            ));
+            continue;
+        };
+        assert_eq!(rows.len(), demand);
+        assert!(rows
+            .iter()
+            .all(|row| row[bound.slot.0 as usize] == r::Value::Entity(r::Entity::Node(a))));
+        drop(rows);
+        assert_eq!(ctx.row_budget().available(), 1024 * 1024);
+    }
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}

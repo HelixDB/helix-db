@@ -1506,6 +1506,20 @@ pub(super) mod tests {
                 .expect("transaction endpoint lookup succeeds"),
             Some((alice, bob))
         );
+        assert_eq!(
+            context
+                .lookup_edge_pair_index(alice, bob)
+                .await
+                .expect("transaction edge pair lookup succeeds")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![edge]
+        );
+        assert!(context
+            .lookup_edge_pair_index(bob, alice)
+            .await
+            .expect("transaction reverse pair lookup succeeds")
+            .is_empty());
         context.abort_request_write_scope();
         assert!(context
             .lookup_managed_equality_literal_batch(

@@ -50,6 +50,168 @@ async fn index_probe_admission_rejects_before_copying_values_or_opening_storage(
     db.close().await.unwrap();
 }
 
+/// A probe the index cannot answer exactly asks its caller to scan the source,
+/// which then checks the pattern itself: a property of a value that is neither
+/// an entity nor a map, and membership in a value that is not a list.
+#[tokio::test]
+async fn unindexable_probe_values_ask_for_a_source_scan() {
+    use super::super::lookup;
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("lookup-unindexable-probes").with_equality_index("A", "key"),
+    )
+    .await;
+    let property = r::plan(
+        helix_cypher::compile("MATCH (b:B) WITH b MATCH (a:A {key:b.key}) RETURN a.key").unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let member = r::plan(
+        helix_cypher::compile("WITH [1,2] AS keys MATCH (a:A) WHERE a.key IN keys RETURN a.key")
+            .unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let [r::MatchStep::IndexLookup(property_lookup)] = property.matches()[&2].steps.as_slice()
+    else {
+        unreachable!("one property probe")
+    };
+    let [r::MatchStep::IndexLookup(member_lookup)] = member.matches()[&1].steps.as_slice() else {
+        unreachable!("one membership probe")
+    };
+    assert!(property_lookup.probe_property.is_some());
+    assert_eq!(member_lookup.matches, r::LookupMatch::Member);
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(64 * 1024));
+    ctx.enable_request_read_view().await.unwrap();
+    let path = r::Value::Path(r::Path::new(vec![7], Vec::new()).unwrap());
+    for value in [
+        r::Value::Boolean(true),
+        r::Value::Integer(1),
+        r::Value::Float(1.0),
+        r::Value::String("key".into()),
+        r::Value::List(vec![r::Value::Integer(1)]),
+        path.clone(),
+    ] {
+        let mut row = vec![r::Value::Null; property.query().bindings().len()];
+        row[property_lookup.probe.0 as usize] = value.clone();
+        let rows = [row];
+        let mut probes = lookup::ProbeValues::default();
+        let probe = probes
+            .value(&ctx, property_lookup, &rows, 0, Limits::default())
+            .await
+            .unwrap();
+        assert!(probe.is_none(), "{value:?}");
+    }
+    for value in [
+        r::Value::Boolean(true),
+        r::Value::Integer(1),
+        r::Value::Float(1.0),
+        r::Value::String("key".into()),
+        r::Value::Map(BTreeMap::new()),
+        r::Value::Entity(r::Entity::Node(7)),
+        path,
+    ] {
+        let probe = lookup::Probe::new(&ctx, member_lookup, &value)
+            .await
+            .unwrap();
+        assert!(matches!(probe, lookup::Probe::Scan), "{value:?}");
+    }
+    assert_eq!(ctx.row_budget().available(), 64 * 1024);
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}
+
+/// Membership and property probes admit every buffer before allocating it.
+/// Whatever allowance remains, a probe either reads its candidates or fails
+/// with MemoryLimit, and a failure releases every reservation it made.
+#[tokio::test]
+async fn probe_admission_failures_release_every_reservation() {
+    use super::super::lookup;
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("lookup-probe-admission-sweep")
+            .with_equality_index("A", "key"),
+    )
+    .await;
+    let created = db
+        .cypher(crate::cypher::Request::new(
+            "CREATE (:A {key:1}),(:A {key:2}),(b:B {key:2}) RETURN id(b)",
+        ))
+        .await
+        .unwrap();
+    let b = created.rows[0][0].as_u64().unwrap();
+    let property = r::plan(
+        helix_cypher::compile("MATCH (b:B) WITH b MATCH (a:A {key:b.key}) RETURN a.key").unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let member = r::plan(
+        helix_cypher::compile("WITH [1,2] AS keys MATCH (a:A) WHERE a.key IN keys RETURN a.key")
+            .unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let [r::MatchStep::IndexLookup(property_lookup)] = property.matches()[&2].steps.as_slice()
+    else {
+        unreachable!("one property probe")
+    };
+    let [r::MatchStep::IndexLookup(member_lookup)] = member.matches()[&1].steps.as_slice() else {
+        unreachable!("one membership probe")
+    };
+    let limits = Limits {
+        memory_bytes: 256 * 1024,
+        ..Default::default()
+    };
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
+    ctx.enable_request_read_view().await.unwrap();
+    let mut row = vec![r::Value::Null; property.query().bindings().len()];
+    row[property_lookup.probe.0 as usize] = r::Value::Entity(r::Entity::Node(b));
+    let rows = [row];
+    let members = r::Value::List(vec![
+        r::Value::Integer(1),
+        r::Value::Integer(2),
+        r::Value::Integer(1),
+    ]);
+    let (mut failures, mut successes) = (0, 0);
+    for available in (0..=16 * 1024).step_by(8) {
+        let held = ctx
+            .row_budget()
+            .reserve(limits.memory_bytes - available)
+            .unwrap();
+        let member_probe = lookup::Probe::new(&ctx, member_lookup, &members)
+            .await
+            .map(|probe| matches!(probe, lookup::Probe::Index(_)));
+        let mut probes = lookup::ProbeValues::default();
+        let property_probe = probes
+            .value(&ctx, property_lookup, &rows, 0, limits)
+            .await
+            .map(|value| value == Some(&r::Value::Integer(2)));
+        drop(probes);
+        for result in [member_probe, property_probe] {
+            match result {
+                Ok(expected) => {
+                    assert!(expected, "{available}");
+                    successes += 1;
+                }
+                Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
+                Err(error) => panic!("{available}: {error:?}"),
+            }
+        }
+        drop(held);
+        assert_eq!(
+            ctx.row_budget().available(),
+            limits.memory_bytes,
+            "{available}"
+        );
+    }
+    assert!(failures > 0 && successes > 0);
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn indexed_pattern_frames_match_independent_products_and_paths() {
     let db = test_support::open_db_with_config(
@@ -285,6 +447,83 @@ async fn lookup_cursor_transfers_release_admission_on_failure_and_drop() {
     db.close().await.unwrap();
 }
 
+/// A lookup level admits each parent's probe and candidates before reading
+/// them. Whatever allowance remains, its first batch either holds every
+/// candidate of the parent or fails with MemoryLimit, and dropping the cursor
+/// and its source cache releases everything.
+#[tokio::test]
+async fn lookup_cursor_admission_failures_release_every_reservation() {
+    use super::super::{expansion_stack::SourceCache, lookup_cursor::LookupCursor};
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("lookup-cursor-admission").with_equality_index("A", "key"),
+    )
+    .await;
+    db.cypher(crate::cypher::Request::new(
+        "CREATE (:A {key:1}),(:A {key:1})",
+    ))
+    .await
+    .unwrap();
+    let plan = r::plan(
+        helix_cypher::compile("UNWIND [1] AS key MATCH (a:A {key:key}) RETURN a.key").unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let physical = &plan.matches()[&1];
+    let [r::MatchStep::IndexLookup(lookup)] = physical.steps.as_slice() else {
+        unreachable!("one lookup")
+    };
+    let limits = Limits {
+        batch_rows: 4,
+        memory_bytes: 128 * 1024,
+        ..Default::default()
+    };
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
+    ctx.enable_request_read_view().await.unwrap();
+    for fallback in [false, true] {
+        let (mut failures, mut successes) = (0, 0);
+        for available in (0..=16 * 1024).step_by(8) {
+            let mut row = vec![r::Value::Null; plan.query().bindings().len()];
+            row[lookup.probe.0 as usize] = if fallback {
+                r::Value::List(vec![r::Value::Integer(1)])
+            } else {
+                r::Value::Integer(1)
+            };
+            let mut input = RowBuffer::new(ctx.row_budget()).unwrap();
+            push_row(&mut input, row, limits).unwrap();
+            let mut cursor = LookupCursor::new(input.finish(), ctx.row_budget()).unwrap();
+            let mut cache =
+                SourceCache::new(physical, 0, limits.batch_rows, ctx.row_budget()).unwrap();
+            let held = ctx
+                .row_budget()
+                .reserve(ctx.row_budget().available().saturating_sub(available))
+                .unwrap();
+            match cursor.next_batch(&ctx, lookup, &mut cache, limits).await {
+                Ok(Some(rows)) => {
+                    assert_eq!(rows.len(), 2);
+                    successes += 1;
+                }
+                Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
+                Ok(None) => panic!("the parent has candidates"),
+                Err(error) => panic!("{available}: {error:?}"),
+            }
+            drop(held);
+            drop(cursor);
+            drop(cache);
+            assert_eq!(
+                ctx.row_budget().available(),
+                limits.memory_bytes,
+                "fallback={fallback}, available={available}"
+            );
+        }
+        assert!(failures > 0 && successes > 0, "fallback={fallback}");
+    }
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn indexed_pattern_fallbacks_share_sources_across_outer_batches() {
     let db = test_support::open_db_with_config(
@@ -455,6 +694,10 @@ async fn oversized_string_probes_scan_instead_of_failing_the_lookup() {
             "WITH $big AS k OPTIONAL MATCH (u:U {key: k}) RETURN count(*), count(u)",
             json!([[1, 0]]),
         ),
+        (
+            "WITH [$big, 'x'] AS keys MATCH (a:A) WHERE a.key IN keys RETURN count(*)",
+            json!([[1]]),
+        ),
     ] {
         let plan = r::plan(
             helix_cypher::compile(text).unwrap(),
@@ -482,6 +725,81 @@ async fn oversized_string_probes_scan_instead_of_failing_the_lookup() {
                 expected,
                 "{text} {strategy:?}"
             );
+        }
+    }
+    db.close().await.unwrap();
+}
+
+/// A probe property that cannot be read is not an index key. The lookup scans
+/// its source instead, so the unreadable value fails the query only once a
+/// candidate exists, exactly as a plan without the index would.
+#[tokio::test]
+async fn unreadable_probe_properties_scan_and_fail_only_with_candidates() {
+    use crate::encoding::v2::{
+        keys,
+        values::property::{self, property_value::PropertyValue as P, Property},
+    };
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("lookup-unreadable-probe").with_equality_index("A", "key"),
+    )
+    .await;
+    let created = db
+        .cypher(crate::cypher::Request::new("CREATE (b:B {key:1}) RETURN b"))
+        .await
+        .unwrap();
+    let id = created.rows[0][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    db.inner_db()
+        .put(
+            ctx.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                id,
+            ))),
+            property::encode_properties(&[
+                Property::string("$label", "B"),
+                Property::new("key", P::DateTime(1)),
+            ]),
+        )
+        .await
+        .unwrap();
+    drop(ctx);
+    let plan = r::plan(
+        helix_cypher::compile("MATCH (b:B) MATCH (a:A {key: b.key}) RETURN a.key").unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    assert!(plan.matches()[&1]
+        .steps
+        .iter()
+        .any(|step| matches!(step, r::MatchStep::IndexLookup(_))));
+    for candidate in [false, true] {
+        if candidate {
+            db.cypher(crate::cypher::Request::new("CREATE (:A {key:1})"))
+                .await
+                .unwrap();
+        }
+        for strategy in [r::RowExecution::Batched, r::RowExecution::Materialized] {
+            let result = Interpreter::new(&db, context::ParamBindings::default())
+                .execute_rows(
+                    &plan.clone().with_execution(strategy),
+                    &BTreeMap::new(),
+                    Limits::default(),
+                )
+                .await;
+            match result {
+                Ok(response) => {
+                    assert!(!candidate, "{strategy:?}");
+                    assert!(response.rows.is_empty(), "{strategy:?}");
+                }
+                Err(error) => assert!(
+                    candidate
+                        && matches!(error, Error::Query(ref error) if error.detail == "StoredValueType"),
+                    "{strategy:?}: {error}"
+                ),
+            }
         }
     }
     db.close().await.unwrap();

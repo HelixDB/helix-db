@@ -739,8 +739,10 @@ mod tests {
         assert!(!is_parallel_isolated_step(&barrier));
     }
 
-    #[test]
-    fn missing_stage_step_is_reported_as_invariant_violation() {
+    /// A stage naming a step the plan lacks is an invariant violation, and
+    /// stage dispatch reports it before running any of the stage's steps.
+    #[tokio::test]
+    async fn missing_stage_step_is_reported_as_invariant_violation() {
         let stage = exec::ExecExecutionStage::Parallel(exec::ExecParallelStage::new(
             ir::AtLeast::<_, 2>::from_pair(id(1), id(2)),
             exec::ExecParallelStagePolicy::for_ready_width(2),
@@ -752,5 +754,15 @@ mod tests {
             Err(HelixDbError::InvariantViolation(message))
                 if message.contains("missing step 2")
         ));
+
+        let db = test_support::open_db("scheduler-missing-stage-step").await;
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        assert!(matches!(
+            ctx.execute_stage(&stage, &by_id(&steps), &exec::ExecProgram::default())
+                .await,
+            Err(HelixDbError::InvariantViolation(message))
+                if message.contains("missing step 2")
+        ));
+        assert!(ctx.step_outputs.is_empty());
     }
 }

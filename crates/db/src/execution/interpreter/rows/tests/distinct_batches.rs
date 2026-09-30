@@ -296,3 +296,53 @@ async fn distinct_memory_exhaustion_and_cancellation_rollback_prior_writes() {
     }
     db.close().await.unwrap();
 }
+
+/// Incremental DISTINCT admits each retained representative before inserting
+/// it. Under any budget the query either returns the smallest distinct rows or
+/// fails with MemoryLimit; wide rows make each representative the largest owner.
+#[tokio::test]
+async fn distinct_admission_failures_leave_no_partial_result() {
+    let db = test_support::open_db("distinct-batch-admission").await;
+    let pad = "p".repeat(8 * 1024);
+    let text = format!(
+        "UNWIND [3,1,3,2] AS x WITH DISTINCT x, '{pad}' AS pad LIMIT 2 RETURN x, size(pad)"
+    );
+    let plan = r::plan(
+        helix_cypher::compile(&text).unwrap(),
+        &db.planner_context(context::ParamBindings::default()),
+    )
+    .unwrap();
+    let peak = Interpreter::new(&db, context::ParamBindings::default())
+        .execute_rows(&plan, &BTreeMap::new(), Limits::default())
+        .await
+        .unwrap()
+        .resources
+        .peak_memory_bytes;
+    let (mut failures, mut successes) = (0, 0);
+    for memory_bytes in (0..peak).step_by(64).chain([peak]) {
+        match Interpreter::new(&db, context::ParamBindings::default())
+            .execute_rows(
+                &plan,
+                &BTreeMap::new(),
+                Limits {
+                    memory_bytes,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(response) => {
+                assert_eq!(
+                    response.rows,
+                    vec![vec![json!(1), json!(8192)], vec![json!(2), json!(8192)]]
+                );
+                successes += 1;
+            }
+            Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+            Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
+            Err(error) => panic!("{memory_bytes}: {error:?}"),
+        }
+    }
+    assert!(failures > 0 && successes > 0);
+    db.close().await.unwrap();
+}

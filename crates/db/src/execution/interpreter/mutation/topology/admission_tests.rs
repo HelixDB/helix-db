@@ -254,3 +254,57 @@ async fn rejected_both_direction_update_preserves_the_first_direction() {
     assert_eq!(budget.available(), 16 * 1024 * 1024);
     db.close().await.unwrap();
 }
+
+/// Debug output shows the collection state, pending rows and staged keys but
+/// omits admission handles and the request budget.
+#[tokio::test]
+async fn topology_debug_shows_pending_rows_and_staged_keys_without_admission() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "topology-debug".into(),
+    })
+    .await
+    .unwrap();
+    let budget = query_resources::Budget::new(1024 * 1024);
+    let mut runtime = TopologyMutationRuntime::new(Some(&budget));
+    assert_eq!(
+        format!("{runtime:?}"),
+        "TopologyMutationRuntime { state: Collecting, staged_keys: {}, .. }"
+    );
+    runtime
+        .add_node_label(DataScope::LegacyUnscoped, "Person", 1)
+        .unwrap();
+    runtime
+        .add_adjacency(
+            DataScope::LegacyUnscoped,
+            9,
+            1,
+            helix_planner::ir::ExpandDirection::Out,
+        )
+        .unwrap();
+    let pending = format!("{runtime:?}");
+    assert!(
+        pending.starts_with(
+            "TopologyMutationRuntime { state: Pending(TopologyMutationBatch { bitmaps: {NodeLabel {"
+        ),
+        "{pending}"
+    );
+    assert!(pending.contains("adjacency: {("), "{pending}");
+    assert!(
+        pending.ends_with(", .. }), staged_keys: {}, .. }"),
+        "{pending}"
+    );
+    let transaction = db
+        .inner_db()
+        .begin(slatedb::IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    runtime.flush(&transaction).await.unwrap();
+    let flushed = format!("{runtime:?}");
+    assert!(
+        flushed.starts_with("TopologyMutationRuntime { state: Collecting, staged_keys: {b\""),
+        "{flushed}"
+    );
+    drop((runtime, transaction));
+    assert_eq!(budget.available(), 1024 * 1024);
+    db.close().await.unwrap();
+}

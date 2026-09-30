@@ -181,6 +181,23 @@ async fn expressions_cover_arithmetic_case_parameters_and_errors() {
         .unwrap_err()
         .to_string()
         .contains("neg expression must be numeric"));
+    // A CASE condition without operands is rejected with the planner's message.
+    for (predicate, message) in [
+        (
+            Predicate::and(Vec::new()),
+            "and predicate must contain at least one child",
+        ),
+        (
+            Predicate::or(Vec::new()),
+            "or predicate must contain at least one child",
+        ),
+    ] {
+        assert!(matches!(
+            ctx.eval_expr(&row, &Expr::case(vec![(predicate, Expr::val(1))], None))
+                .await,
+            Err(HelixDbError::Query(error)) if error == message
+        ));
+    }
 }
 
 #[tokio::test]

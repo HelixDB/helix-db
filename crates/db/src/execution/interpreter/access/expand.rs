@@ -338,6 +338,74 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    /// Labeled edge expansion decodes the source's label-neighbor row for the
+    /// selected direction. A corrupt row fails the expansion in that direction
+    /// instead of reading as an empty neighborhood.
+    #[tokio::test]
+    async fn corrupt_label_neighbor_rows_fail_labeled_edge_expansion() {
+        use crate::encoding::indexes;
+        let db = test_support::open_db("expand-corrupt-label-neighbors").await;
+        let alice = test_support::add_user(&db, "alice").await;
+        let bob = test_support::add_user(&db, "bob").await;
+        test_support::add_edge(&db, alice, bob, "KNOWS").await;
+        let label = test_support::name("KNOWS");
+        for (index_direction, node) in [
+            (indexes::EdgeDirection::Out, alice),
+            (indexes::EdgeDirection::In, bob),
+        ] {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::PropertyIndex(
+                            indexes::PropertyIndexKey::EdgeLabelNeighbor(
+                                indexes::label::EdgeLabelNeighborKey::new(
+                                    index_direction,
+                                    node,
+                                    indexes::hash_property_value(label.as_ref()),
+                                ),
+                            ),
+                        ),
+                    }
+                    .to_bytes(),
+                    bytes::Bytes::from_static(b"corrupt label-neighbor bitmap"),
+                )
+                .await
+                .unwrap();
+        }
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+        for (direction, node) in [
+            (ir::ExpandDirection::Out, alice),
+            (ir::ExpandDirection::In, bob),
+        ] {
+            assert!(matches!(
+                ctx.expand(
+                    ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(node))]),
+                    &ir::ExpandPlan {
+                        direction,
+                        label: ir::ExpandLabelPlan::Label(label.clone()),
+                        output: ir::ExpandOutput::Edges,
+                    },
+                )
+                .await,
+                Err(HelixDbError::Encoding(_))
+            ));
+            assert!(matches!(
+                ctx.expand_edge_candidate_ids(
+                    node,
+                    direction,
+                    &ir::ExpandLabelPlan::Label(label.clone()),
+                    None,
+                    512,
+                )
+                .await,
+                Err(HelixDbError::Encoding(_))
+            ));
+        }
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn bound_endpoint_expansion_probes_exact_pairs_in_every_direction() {
         let db = test_support::open_db("expand-bound-endpoints").await;

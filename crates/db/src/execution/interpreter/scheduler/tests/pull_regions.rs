@@ -183,3 +183,144 @@ async fn invalid_consumer_ownership_fails_before_transferring_any_value() {
     assert_eq!(uses.get(&id(1)).unwrap().get(), usize::MAX);
     db.close().await.unwrap();
 }
+
+/// A region whose condition gates it off returns an empty stream and releases
+/// every reference without opening its source.
+#[tokio::test]
+async fn gated_region_releases_references_without_opening_its_source() {
+    let db = test_support::open_db("scheduler-gated-region").await;
+    let gate = exec::ExecCondition::PreviousStepNotEmpty { dependency: id(1) };
+    let plan = test_support::executable(
+        ir::PlanKind::Read,
+        vec![
+            test_support::step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Empty)),
+                },
+            ),
+            exec::ExecStep {
+                condition: gate.clone(),
+                ..test_support::step(
+                    2,
+                    vec![id(1)],
+                    exec::ExecOp::Access {
+                        plan: Box::new(exec::ExecAccessPlan::Node(
+                            exec::ExecNodeAccessPlan::FromParam {
+                                param: named("unbound"),
+                            },
+                        )),
+                    },
+                )
+            },
+            exec::ExecStep {
+                condition: gate,
+                ..test_support::step(
+                    3,
+                    vec![id(2)],
+                    exec::ExecOp::Limit {
+                        count: ir::StreamBoundPlan::Literal(1),
+                    },
+                )
+            },
+        ],
+        3,
+    );
+    assert_eq!(
+        plan.execution_program()
+            .regions()
+            .map(|(terminal, region)| (terminal.get(), region.steps().len()))
+            .collect::<Vec<_>>(),
+        vec![(3, 2)]
+    );
+    // The parameter is unbound, so opening the source would fail the plan.
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.execute_steps(
+        plan.steps(),
+        plan.execution_order(),
+        plan.root(),
+        plan.execution_program(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(ctx.pull_work.snapshot().source_visits, 0);
+    assert_eq!(
+        ctx.finish(plan.root(), &exec::ExecutableReturns::None)
+            .unwrap()
+            .last,
+        Some(ExecutionValue::Stream(Vec::new()))
+    );
+    assert!(ctx.step_output_uses.is_empty());
+    db.close().await.unwrap();
+}
+
+/// A region flushes the deferred index maintenance its operators observe
+/// before opening any source, so a pending unique conflict fails the region.
+#[tokio::test]
+async fn region_flush_surfaces_a_pending_unique_conflict_before_reading() {
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("scheduler-region-unique-flush")
+            .with_unique_equality_index("User", "email"),
+    )
+    .await;
+    let plan = test_support::executable(
+        ir::PlanKind::Read,
+        vec![
+            test_support::step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(exec::ExecAccessPlan::Node(
+                        exec::ExecNodeAccessPlan::FromParam {
+                            param: named("unbound"),
+                        },
+                    )),
+                },
+            ),
+            test_support::step(
+                2,
+                vec![id(1)],
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
+                },
+            ),
+        ],
+        2,
+    );
+    assert!(plan.execution_program().region(id(2)).is_some());
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.enable_request_write_scope().await.unwrap();
+    let add = exec::ExecOp::Mutation {
+        plan: exec::ExecMutationPlan::AddNodeSource {
+            label: named("User"),
+            properties: test_support::assignments(vec![(
+                "email",
+                helix_ast::value::PropertyValue::from("taken@example.com"),
+            )]),
+        },
+    };
+    for _ in 0..2 {
+        ctx.execute_op(&add, ExecutionValue::Stream(Vec::new()))
+            .await
+            .expect("conflicting writes stage without flushing");
+    }
+
+    // The unbound source parameter would fail first if the region opened it.
+    assert!(matches!(
+        ctx.execute_steps(
+            plan.steps(),
+            plan.execution_order(),
+            plan.root(),
+            plan.execution_program(),
+        )
+        .await,
+        Err(HelixDbError::UniqueConstraintViolation { .. })
+    ));
+    assert_eq!(ctx.pull_work.snapshot().source_visits, 0);
+    ctx.abort_request_write_scope();
+    db.close().await.unwrap();
+}

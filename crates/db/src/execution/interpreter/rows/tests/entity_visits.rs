@@ -226,3 +226,134 @@ async fn shared_graph_references_union_keys_and_upgrade_to_all_properties() {
     ctx.close_request_read_view().unwrap();
     db.close().await.unwrap();
 }
+
+/// A stored `$label` that is not a nonempty string hydrates as an unlabeled
+/// node with its properties intact. A relationship whose record vanished
+/// without a type recorded by this request stays unavailable instead of
+/// failing the batch.
+#[tokio::test]
+async fn hydration_leaves_unreadable_labels_unset_and_skips_vanished_relationships() {
+    let db = test_support::open_db("unreadable-entity-labels").await;
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    for (id, label) in [
+        (7, P::I64(3)),
+        (8, P::String(String::new())),
+        (9, P::String("N".into())),
+    ] {
+        db.inner_db()
+            .put(
+                ctx.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                    id,
+                ))),
+                property::encode_properties(&[
+                    Property::new("$label", label),
+                    Property::i64("k", id as i64),
+                ]),
+            )
+            .await
+            .unwrap();
+    }
+    ctx.row_memory = Some(memory::Budget::new(64 * 1024));
+    ctx.enable_request_read_view().await.unwrap();
+    let rows = [vec![
+        r::Value::Entity(r::Entity::Node(7)),
+        r::Value::Entity(r::Entity::Node(8)),
+        r::Value::Entity(r::Entity::Node(9)),
+        r::Value::Entity(r::Entity::Relationship(11)),
+    ]];
+    for demand in [
+        r::PropertyDemand::All,
+        r::PropertyDemand::Keys(["k".into()].into()),
+    ] {
+        let demand = (0..4).map(|slot| (r::Slot(slot), demand.clone())).collect();
+        let graph = ctx.graph_batch_required(&rows, &demand).await.unwrap();
+        for (id, label) in [(7, None), (8, None), (9, Some("N"))] {
+            assert_eq!(graph.label(r::Entity::Node(id)).unwrap(), label);
+            assert_eq!(
+                graph.property(r::Entity::Node(id), "k").unwrap(),
+                &r::Value::Integer(id as i64)
+            );
+        }
+        assert!(!graph.entities.contains_key(&r::Entity::Relationship(11)));
+        assert!(matches!(
+            graph.label(r::Entity::Relationship(11)),
+            Err(error) if error.detail == "DeletedEntityAccess"
+        ));
+        drop(graph);
+        assert_eq!(ctx.row_budget().available(), 64 * 1024);
+    }
+    ctx.close_request_read_view().unwrap();
+    db.close().await.unwrap();
+}
+
+/// Output admission reads every property it will encode. A stored value with
+/// no Cypher representation fails the query with its own error, whether the
+/// entity is returned directly or inside a list; selected readable properties
+/// of the same entity remain available.
+#[tokio::test]
+async fn returned_entities_with_unreadable_properties_fail_with_the_stored_value_error() {
+    let db = test_support::open_db("unreadable-returned-entities").await;
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    db.inner_db()
+        .put(
+            ctx.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                7,
+            ))),
+            property::encode_properties(&[
+                Property::string("$label", "N"),
+                Property::i64("k", 1),
+                Property::new("when", P::DateTime(1)),
+            ]),
+        )
+        .await
+        .unwrap();
+    drop(ctx);
+    let response = db
+        .cypher(crate::cypher::Request::new("MATCH (n) RETURN n.k"))
+        .await
+        .unwrap();
+    assert_eq!(response.rows, vec![vec![serde_json::json!(1)]]);
+    for text in ["MATCH (n) RETURN n", "MATCH (n) RETURN [n]"] {
+        let error = db
+            .cypher(crate::cypher::Request::new(text))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Query(ref error) if error.detail == "StoredValueType"),
+            "{text}: {error}"
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// Wire encoding never relabels an entity: hydrated data of the other kind
+/// for its identity is an internal error, not a node or relationship value.
+#[test]
+fn wire_encoding_rejects_hydrated_data_of_the_other_entity_kind() {
+    let mut graph = GraphBatch::default();
+    graph.entities.insert(
+        r::Entity::Relationship(3),
+        EntityData {
+            kind: EntityKind::Node {
+                label: Some("N".into()),
+            },
+            properties: BTreeMap::new(),
+        },
+    );
+    graph.entities.insert(
+        r::Entity::Node(4),
+        EntityData {
+            kind: EntityKind::Relationship {
+                label: "R".into(),
+                endpoints: (1, 2),
+            },
+            properties: BTreeMap::new(),
+        },
+    );
+    for entity in [r::Entity::Relationship(3), r::Entity::Node(4)] {
+        assert!(matches!(
+            graph.wire(&r::Value::Entity(entity)),
+            Err(Error::Query(error)) if error.detail == "EntityKindMismatch"
+        ));
+    }
+}

@@ -6,13 +6,105 @@ use crate::{
             property::{self, property_value::PropertyValue as P, Property},
         },
     },
-    execution::interpreter::{test_support, ExecutionContext},
-    index_lifecycle::graph_mutation::CanonicalPropertyRow,
+    execution::interpreter::{mutation::DeletionTargets, test_support, ExecutionContext},
+    index_lifecycle::graph_mutation::{map, CanonicalPropertyRow},
     query_resources,
 };
 use helix_planner::{context, relational as r};
 use serde_json::json;
 use std::collections::BTreeMap;
+
+/// Row mutations admit every observation, rewritten row and pending write
+/// inside the request transaction. Sweeping the spare budget upward from zero
+/// fails each shortfall with `MemoryLimit`; aborting the request releases all
+/// admission and leaves storage untouched, and a sufficient allowance
+/// succeeds.
+#[tokio::test]
+async fn row_mutations_fail_cleanly_across_admission_shortfalls() {
+    #[derive(Debug, Clone, Copy)]
+    enum Operation {
+        Map(r::Entity),
+        Remove(r::Entity),
+        Delete(r::Entity, bool),
+    }
+    let db = test_support::open_db("row-mutation-admission").await;
+    let mut seed = ExecutionContext::new(&db, context::ParamBindings::default());
+    // Edits keep the payload, so each rewritten row needs more than the
+    // observation buffers released before it.
+    let properties = vec![
+        Property::new("payload", P::Bytes(vec![7; 1024])),
+        Property::new("extra", P::I64(1)),
+    ];
+    let node = seed.row_create_node("N", properties.clone()).await.unwrap();
+    let edge = seed
+        .row_create_edge(node, node, "R", properties)
+        .await
+        .unwrap();
+    let limit = 1024 * 1024;
+    let budget = query_resources::Budget::new(limit);
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(budget.clone());
+    for operation in [
+        Operation::Map(r::Entity::Node(node)),
+        Operation::Map(r::Entity::Relationship(edge)),
+        Operation::Remove(r::Entity::Node(node)),
+        Operation::Remove(r::Entity::Relationship(edge)),
+        Operation::Delete(r::Entity::Relationship(edge), false),
+        Operation::Delete(r::Entity::Node(node), true),
+    ] {
+        // A 16-byte stride keeps the sweep short; every owner on these paths
+        // admits more than that, so each one is still reached.
+        let mut allowances = (0..limit).step_by(16);
+        let mut shortfalls = 0;
+        loop {
+            let allowance = allowances
+                .next()
+                .expect("the operation fits within the request budget");
+            ctx.enable_request_write_scope().await.unwrap();
+            let mut targets = DeletionTargets::new(&budget).unwrap();
+            match operation {
+                Operation::Delete(entity, _) => targets.insert(entity).unwrap(),
+                Operation::Map(_) | Operation::Remove(_) => {}
+            }
+            let occupied = budget.reserve(budget.available() - allowance).unwrap();
+            let result = match operation {
+                Operation::Map(entity) => {
+                    let mut edit = map::Edit::new(map::Mode::Extend);
+                    edit.insert("added".into(), Some(P::I64(1))).unwrap();
+                    ctx.row_edit_map(entity, edit).await
+                }
+                Operation::Remove(entity) => ctx.row_edit_property(entity, "extra", None).await,
+                Operation::Delete(_, detach) => ctx.row_delete_entities(targets, detach).await,
+            };
+            drop(occupied);
+            ctx.abort_request_write_scope();
+            assert_eq!(
+                budget.available(),
+                limit,
+                "{operation:?} retained admission at {allowance} spare bytes"
+            );
+            let Err(error) = result else {
+                break;
+            };
+            assert!(
+                matches!(error, crate::cypher::Error::Query(ref error) if error.detail == "MemoryLimit"),
+                "{operation:?} at {allowance} spare bytes: {error:?}"
+            );
+            shortfalls += 1;
+        }
+        assert!(shortfalls > 0, "{operation:?} must admit before writing");
+    }
+    assert_eq!(
+        db.cypher(crate::cypher::Request::new(
+            "MATCH (n:N)-[r:R]->(n) RETURN n.extra, r.extra, n.added, r.added"
+        ))
+        .await
+        .unwrap()
+        .rows,
+        vec![vec![json!(1), json!(1), json!(null), json!(null)]]
+    );
+    db.close().await.unwrap();
+}
 
 #[test]
 fn canonical_snapshots_retain_raw_and_decoded_owners_and_native_bits() {

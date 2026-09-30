@@ -1202,6 +1202,83 @@ mod additional_tests {
         );
     }
 
+    /// A read-your-writes text search flushes the request's pending text epoch
+    /// first. A flush that exceeds the Active text split ceiling fails the
+    /// request before commit, so the written node never persists.
+    #[tokio::test]
+    async fn text_visibility_flush_failures_abort_the_request() {
+        let defaults = crate::config::SearchIndexBackfillLimits::default();
+        let compaction = defaults.text_compaction();
+        let limits = crate::config::SearchIndexBackfillLimits::try_new(
+            defaults.batch(),
+            defaults.edge_property_read_batch(),
+            defaults.text_artifacts(),
+            crate::config::TextBackfillCompactionLimits::new(
+                compaction.max_fan_in(),
+                compaction.max_input_bytes(),
+                compaction.max_temporary_disk_bytes(),
+                NonZeroU64::MIN,
+                compaction.max_manifest_bytes(),
+            ),
+        )
+        .unwrap();
+        let db = HelixDB::open_with_object_store_and_config(
+            "text-visibility-flush-failure",
+            Arc::new(slatedb::object_store::memory::InMemory::new()),
+            crate::config::DbConfig::new().with_search_index_backfill_limits(limits),
+        )
+        .await
+        .unwrap();
+        db.install_index_for_tests(
+            crate::config::TextIndexDefinition::new_node("Doc", "body")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let error = db
+            .query(helix_ast::query::QueryRequest::write(
+                helix_ast::batch::write_batch()
+                    .var_as(
+                        "doc",
+                        helix_ast::traversal::g().add_n(
+                            "Doc",
+                            vec![(
+                                "body",
+                                helix_ast::value::PropertyInput::from("rust planner"),
+                            )],
+                        ),
+                    )
+                    .var_as(
+                        "hits",
+                        helix_ast::traversal::g()
+                            .text_search_nodes("Doc", "body", "rust", 10, None),
+                    )
+                    .returning(["hits"]),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                HelixDbError::ActiveTextMutationLimitExceeded {
+                    resource: crate::error::ActiveTextMutationResource::SplitBytes,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            db.cypher(crate::cypher::Request::new("MATCH (n:Doc) RETURN count(n)"))
+                .await
+                .unwrap()
+                .rows,
+            vec![vec![serde_json::json!(0)]]
+        );
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn rejected_commit_submission_rolls_back_before_spawning() {
         for shutting_down in [false, true] {

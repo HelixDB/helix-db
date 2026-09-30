@@ -792,6 +792,56 @@ mod tests {
         assert_eq!(limited.len(), 2);
         assert_eq!(limited[0].0, Bytes::from_static(b"storage/range/1"));
         assert_eq!(limited[1].0, Bytes::from_static(b"storage/range/2"));
+
+        // An admitted request records one scan and each returned row, and
+        // retains the rows only while the caller holds them.
+        let mut admitted = ExecutionContext::new(&db, context::ParamBindings::default());
+        let budget = crate::query_resources::Budget::new(1024 * 1024);
+        admitted.row_memory = Some(budget.clone());
+        let rows = admitted
+            .scan_raw_range_limited(
+                Bytes::from_static(b"storage/range/1"),
+                Bytes::from_static(b"storage/range/4"),
+                Some(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows, limited);
+        assert_eq!((budget.reads().scans, budget.reads().scan_rows), (1, 2));
+        assert!(budget.available() < 1024 * 1024);
+        drop(rows);
+        assert_eq!(budget.available(), 1024 * 1024);
+    }
+
+    /// With read reuse enabled, a multi-get first admits its lookup scratch.
+    /// A batch whose scratch exceeds the budget fails before storage is read
+    /// and releases the attempted admission.
+    #[tokio::test]
+    async fn reused_multi_get_admits_its_scratch_before_reading() {
+        let db = test_support::open_db("storage-reused-multi-get-scratch").await;
+        let budget = crate::query_resources::Budget::new(4 * 1024);
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.row_memory = Some(budget.clone());
+        ctx.enable_request_read_view().await.unwrap();
+        ctx.enable_request_read_cache(128 * 1024);
+        assert!(ctx.request_read_cache().is_some());
+        let admitted = budget.available();
+        let keys = (0..1024)
+            .map(|id| {
+                ctx.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                    id,
+                )))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            ctx.multi_get_raw(&keys).await,
+            Err(HelixDbError::QueryMemoryLimitExceeded)
+        ));
+        assert_eq!(budget.available(), admitted);
+        assert_eq!(budget.reads().multi_get_batches, 0);
+        ctx.close_request_read_view().unwrap();
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

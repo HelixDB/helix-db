@@ -192,6 +192,116 @@ async fn maps_keep_separate_item_order_and_rollback_every_error_without_changing
     db.close().await.unwrap();
 }
 
+/// Single-property edits reject internal and empty names before opening a
+/// write. Setting a property on a missing entity fails as a storage error,
+/// while removing one from a missing entity is an idempotent no-op.
+#[tokio::test]
+async fn property_edits_reject_invalid_names_and_missing_set_targets() {
+    let db = test_support::open_db("property-edit-validation").await;
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    for (key, detail) in [
+        ("$label", "ReservedPropertyName"),
+        ("", "EmptyPropertyName"),
+    ] {
+        let error = ctx
+            .row_edit_property(
+                relational::Entity::Node(1),
+                key,
+                Some(PropertyValue::I64(1)),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, cypher::Error::Query(ref error) if error.detail == detail),
+            "{error:?}"
+        );
+    }
+    let error = ctx
+        .row_edit_property(
+            relational::Entity::Node(u64::MAX),
+            "a",
+            Some(PropertyValue::I64(1)),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            cypher::Error::Storage(crate::HelixDbError::InvariantViolation(_))
+        ),
+        "{error:?}"
+    );
+    let error = ctx
+        .row_edit_property(
+            relational::Entity::Relationship(u64::MAX),
+            "a",
+            Some(PropertyValue::I64(1)),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            cypher::Error::Storage(crate::HelixDbError::Query(ref message))
+                if message == &format!("edge {} does not exist", u64::MAX)
+        ),
+        "{error:?}"
+    );
+    for entity in [
+        relational::Entity::Node(u64::MAX),
+        relational::Entity::Relationship(u64::MAX),
+    ] {
+        ctx.row_edit_property(entity, "a", None).await.unwrap();
+    }
+    assert_eq!(
+        db.cypher(cypher::Request::new("MATCH (n) RETURN count(n)"))
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![json!(0)]]
+    );
+    db.close().await.unwrap();
+}
+
+/// A map value that a configured vector index cannot hold fails during index
+/// maintenance, and the statement leaves the stored row unchanged.
+#[tokio::test]
+async fn map_updates_reject_values_their_vector_index_cannot_hold() {
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("map-vector-rejection").with_node_vector_index(
+            "Doc",
+            "embedding",
+            3,
+            crate::search::vector::VectorDistanceMetric::Euclidean,
+        ),
+    )
+    .await;
+    db.cypher(cypher::Request::new(
+        "CREATE (:Doc {embedding: [1.0, 2.0, 3.0]})",
+    ))
+    .await
+    .unwrap();
+    for update in ["{embedding: 'text'}", "{embedding: [1.0, 2.0]}"] {
+        let error = db
+            .cypher(cypher::Request::new(format!(
+                "MATCH (n:Doc) SET n += {update}"
+            )))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, cypher::Error::Storage(_)), "{error:?}");
+    }
+    assert_eq!(
+        db.cypher(cypher::Request::new(
+            "MATCH (n:Doc) RETURN n.embedding = [1.0, 2.0, 3.0]"
+        ))
+        .await
+        .unwrap()
+        .rows,
+        vec![vec![json!(true)]]
+    );
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn map_admission_failure_and_cancelled_requests_release_all_versions_and_rollback() {
     let db = test_support::open_db("map-resource-rollback").await;

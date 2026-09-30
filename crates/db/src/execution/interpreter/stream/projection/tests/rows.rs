@@ -1043,3 +1043,90 @@ async fn project_rejects_folded_stream_inputs() {
         .to_string()
         .contains("project expected stream input, got folded stream"));
 }
+
+/// A coalesce prefetches only its first bound reference and reads a later
+/// reference on demand when earlier values are null. A row binding none of
+/// its references projects no column, and a corrupt fallback record fails
+/// the projection only once it is reached.
+#[tokio::test]
+async fn coalesce_bindings_read_fallback_records_on_demand() {
+    use crate::encoding::keys;
+    let db = test_support::open_db("projection-coalesce-fallback").await;
+    let named = test_support::add_user(&db, "ada").await;
+    let unnamed = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("nickname", PropertyValue::from("anon"))],
+    )
+    .await;
+    let corrupt = test_support::add_user(&db, "corrupt").await;
+    db.inner_db()
+        .put(
+            keys::DataKey::Data {
+                scope: keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(corrupt)),
+            }
+            .to_bytes(),
+            bytes::Bytes::from_static(b"corrupt fallback record"),
+        )
+        .await
+        .unwrap();
+    let (first, second) = (name("first"), name("second"));
+    let projection = ir::ProjectionPlan::ProjectBindings {
+        projections: binding_projection_items(vec![ir::BindingProjectionPlan::Coalesce {
+            refs: binding_refs(vec![
+                ir::BindingValueRefPlan {
+                    target: ir::BindingTargetPlan::Binding(first.clone()),
+                    source: name("name"),
+                },
+                ir::BindingValueRefPlan {
+                    target: ir::BindingTargetPlan::Binding(second.clone()),
+                    source: name("name"),
+                },
+            ]),
+            alias: name("display"),
+        }]),
+        dedup: ir::ProjectionDedupMode::All,
+    };
+    let mut named_first = ExecutionRow::empty();
+    named_first
+        .bindings
+        .insert(first.clone(), ElementRef::Node(named));
+    named_first
+        .bindings
+        .insert(second.clone(), ElementRef::Node(corrupt));
+    let mut unnamed_first = ExecutionRow::empty();
+    unnamed_first
+        .bindings
+        .insert(first, ElementRef::Node(unnamed));
+    unnamed_first
+        .bindings
+        .insert(second, ElementRef::Node(corrupt));
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let ExecutionValue::Scalars(scalars) = ctx
+        .project(
+            ExecutionValue::Stream(vec![named_first, ExecutionRow::empty()]),
+            &projection,
+        )
+        .await
+        .expect("the corrupt fallback is never reached")
+    else {
+        panic!("binding projection emits scalars");
+    };
+    assert_eq!(
+        scalars.into_iter().map(object).collect::<Vec<_>>(),
+        vec![
+            BTreeMap::from([(
+                "display".to_string(),
+                DbPropertyValue::String("ada".to_string()),
+            )]),
+            BTreeMap::new(),
+        ]
+    );
+    assert!(ctx
+        .project(ExecutionValue::Stream(vec![unnamed_first]), &projection)
+        .await
+        .is_err());
+    db.close().await.unwrap();
+}

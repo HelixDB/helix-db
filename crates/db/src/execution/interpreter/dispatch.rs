@@ -707,4 +707,85 @@ mod tests {
         assert!(db.inner_db().get(&node_key).await.unwrap().is_some());
         db.close().await.expect("writer closes");
     }
+
+    /// Unique maintenance is deferred until a step observes it, so two
+    /// conflicting writes in one request fail the observing step with the
+    /// violation before that step runs.
+    #[tokio::test]
+    async fn step_flush_surfaces_a_pending_unique_conflict() {
+        let db = test_support::open_db_with_config(
+            test_support::in_memory_config("dispatch-flush-unique-conflict")
+                .with_unique_equality_index("User", "email"),
+        )
+        .await;
+        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        context.enable_request_write_scope().await.unwrap();
+        let add = exec::ExecOp::Mutation {
+            plan: exec::ExecMutationPlan::AddNodeSource {
+                label: test_support::name("User"),
+                properties: test_support::assignments(vec![(
+                    "email",
+                    helix_ast::value::PropertyValue::from("taken@example.com"),
+                )]),
+            },
+        };
+        for _ in 0..2 {
+            context
+                .execute_op(&add, ExecutionValue::Stream(Vec::new()))
+                .await
+                .expect("conflicting writes stage without flushing");
+        }
+
+        assert!(matches!(
+            context
+                .execute_step(&test_support::step(
+                    1,
+                    Vec::new(),
+                    exec::ExecOp::Barrier {
+                        name: test_support::name("unique visibility"),
+                    },
+                ))
+                .await,
+            Err(HelixDbError::UniqueConstraintViolation { .. })
+        ));
+        context.abort_request_write_scope();
+        db.close().await.expect("writer closes");
+    }
+
+    /// Isolated DDL commits the open write before changing the catalog, then
+    /// reopens it. A deadline that expires before the reopen fails the
+    /// request without a write scope, while the DDL stays durably accepted.
+    #[tokio::test]
+    async fn expired_deadline_after_isolated_ddl_does_not_reopen_the_write() {
+        let db = test_support::open_db("dispatch-ddl-reopen-deadline").await;
+        let create = exec::ExecOp::IndexDdl {
+            plan: ir::IndexDdlPlan::Create {
+                spec: ir::IndexDdlCreateSpec::NodeEquality {
+                    key: helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
+                        .unwrap(),
+                    uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                },
+                mode: ir::IndexCreateMode::ErrorIfExists,
+            },
+        };
+        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        context.enable_request_write_scope().await.unwrap();
+        // Only the check before the DDL commits passes.
+        context.fail_deadline_after(1);
+
+        assert!(matches!(
+            context
+                .execute_op(&create, ExecutionValue::Stream(Vec::new()))
+                .await,
+            Err(HelixDbError::QueryDeadlineExceeded)
+        ));
+        assert!(!context.has_request_write_scope());
+        assert!(matches!(
+            ExecutionContext::new(&db, context::ParamBindings::default())
+                .execute_op(&create, ExecutionValue::Stream(Vec::new()))
+                .await,
+            Err(HelixDbError::IndexAlreadyExists(_))
+        ));
+        db.close().await.expect("writer closes");
+    }
 }

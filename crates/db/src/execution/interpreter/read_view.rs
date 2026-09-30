@@ -455,6 +455,17 @@ mod tests {
         assert!(context.request_read_view().is_none());
     }
 
+    /// Read reuse is owned by one exact request snapshot, so enabling it
+    /// before that snapshot exists is a caller contract violation.
+    #[tokio::test]
+    #[should_panic(expected = "read reuse requires its exact storage view")]
+    async fn read_reuse_requires_an_active_request_view() {
+        let db = test_support::open_db("read-view-reuse-without-view").await;
+        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        context.row_memory = Some(crate::query_resources::Budget::new(1024 * 1024));
+        context.enable_request_read_cache(128 * 1024);
+    }
+
     #[tokio::test]
     async fn writer_transaction_keeps_its_initial_snapshot_and_requires_serial_stages() {
         let object_store: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());

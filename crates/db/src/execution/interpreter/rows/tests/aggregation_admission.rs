@@ -210,6 +210,138 @@ async fn mixed_aggregate_memory_and_cancellation_boundaries_release_every_owner(
     db.close().await.unwrap();
 }
 
+/// Direct aggregation admits its metadata, each batch's graph read, every
+/// grouping key and each new group before allocating them. Under any budget
+/// the projection either returns every group in arrival order or fails with
+/// MemoryLimit, and a failure releases the input and every group.
+#[tokio::test]
+async fn direct_aggregation_admission_failures_release_every_group() {
+    use super::super::*;
+    use crate::execution::interpreter::test_support;
+    use helix_planner::context;
+
+    let db = test_support::open_db("direct-aggregate-admission").await;
+    let items = r::ProjectionProgram::new(vec![
+        r::Projection {
+            slot: r::Slot(1),
+            expression: r::Expression::Slot(r::Slot(0)),
+        },
+        r::Projection {
+            slot: r::Slot(2),
+            expression: r::Expression::Aggregate {
+                function: r::Aggregate::Count,
+                argument: None,
+                distinct: false,
+            },
+        },
+    ])
+    .unwrap();
+    let keys = ["a".repeat(4096), "b".repeat(4096)];
+    let (mut failures, mut successes) = (0, 0);
+    for memory_bytes in (0..=64 * 1024).step_by(8) {
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.row_memory = Some(memory::Budget::new(memory_bytes));
+        let data = [0, 1, 0]
+            .map(|key| {
+                vec![
+                    r::Value::String(keys[key].clone()),
+                    r::Value::Null,
+                    r::Value::Null,
+                ]
+            })
+            .to_vec();
+        let result = match Rows::new(data, ctx.row_budget()) {
+            Ok(rows) => {
+                ctx.project_rows(
+                    rows,
+                    3,
+                    projection::Projection {
+                        items: &items,
+                        distinct: false,
+                        ordering: &[],
+                        predicate: None,
+                        skip: None,
+                        limit: None,
+                    },
+                    &BTreeMap::new(),
+                    Limits {
+                        memory_bytes,
+                        batch_rows: 2,
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(rows) => {
+                assert_eq!(
+                    rows.data,
+                    vec![
+                        vec![
+                            r::Value::Null,
+                            r::Value::String(keys[0].clone()),
+                            r::Value::Integer(2)
+                        ],
+                        vec![
+                            r::Value::Null,
+                            r::Value::String(keys[1].clone()),
+                            r::Value::Integer(1)
+                        ],
+                    ]
+                );
+                successes += 1;
+            }
+            Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+            Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
+            Err(error) => panic!("{memory_bytes}: {error:?}"),
+        }
+        assert_eq!(ctx.row_budget().available(), memory_bytes);
+    }
+    assert!(failures > 0 && successes > 0);
+    db.close().await.unwrap();
+}
+
+/// Grouping columns share one structural budget per key, which their tuple
+/// framing also uses. A list at the single-value item limit is a valid value,
+/// but as a grouping column it exceeds the key's budget and fails the query.
+#[tokio::test]
+async fn grouping_keys_share_the_structural_item_limit() {
+    use super::super::*;
+    use crate::execution::interpreter::test_support;
+    use helix_planner::context;
+
+    let db = test_support::open_db("grouping-key-structure").await;
+    for (last, fits) in [(199_998, true), (199_999, false)] {
+        let text = format!("WITH range(1,{last}) AS xs WITH xs, count(*) AS c RETURN size(xs), c");
+        let plan = r::plan(
+            helix_cypher::compile(&text).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        let result = Interpreter::new(&db, context::ParamBindings::default())
+            .execute_rows(&plan, &BTreeMap::new(), Limits::default())
+            .await;
+        match (result, fits) {
+            (Ok(response), true) => {
+                assert_eq!(
+                    response.rows,
+                    vec![vec![serde_json::json!(last), serde_json::json!(1)]]
+                )
+            }
+            (Err(Error::Query(error)), false) => {
+                assert_eq!(
+                    (error.category.as_str(), error.detail.as_str()),
+                    ("ResourceLimit", "ValueDepth")
+                )
+            }
+            (result, fits) => panic!("{last} fits={fits}: {:?}", result.map(|r| r.rows)),
+        }
+    }
+    db.close().await.unwrap();
+}
+
 #[test]
 fn distinct_rejected_inputs_do_not_copy_payloads_or_poison_accumulator_state() {
     for function in [

@@ -977,6 +977,24 @@ async fn unique_union_batches_owners_and_rejects_stale_graph_rows() {
                 .is_err(),
                 "malformed owners must not become misses"
             );
+
+            // Literal admission precedes every owner read: a budget that
+            // cannot hold the requested values fails before any lookup.
+            let exec::ExecNodeAccessPlan::SecondarySet { set } = plan(&["first", "second"]) else {
+                panic!("unique union fixture is a secondary set");
+            };
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.row_memory = Some(crate::query_resources::Budget::new(1));
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            assert!(matches!(
+                ctx.node_secondary_set_ids(&set, None).await,
+                Err(HelixDbError::QueryMemoryLimitExceeded)
+            ));
+            assert_eq!(
+                crate::index_lifecycle::secondary::equality_read_metrics().multi_get_calls,
+                0
+            );
+            assert_eq!(ctx.row_memory.as_ref().unwrap().available(), 1);
         })
         .await
 }

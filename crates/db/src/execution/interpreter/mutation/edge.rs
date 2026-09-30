@@ -695,6 +695,40 @@ mod tests {
             .expect("deleting a missing edge is idempotent");
     }
 
+    /// An edge whose endpoints survive without its property row is corrupt:
+    /// setting a property reports an invariant violation rather than writing
+    /// a label-less row rebuilt from nothing.
+    #[tokio::test]
+    async fn edges_missing_their_property_row_reject_property_sets() {
+        let db = test_support::open_db("mutation-edge-without-properties").await;
+        let from = test_support::add_user(&db, "alice").await;
+        let to = test_support::add_user(&db, "bob").await;
+        let edge_id = test_support::add_edge(&db, from, to, "FOLLOWS").await;
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let mut index_context = index_context(&db);
+        let txn = db
+            .inner_db()
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("snapshot transaction begins");
+        txn.delete(GraphEntity::edge(edge_id).property_key(context.tenant_scope))
+            .expect("the property row delete is staged");
+
+        let error = context
+            .set_edge_property(
+                &txn,
+                edge_id,
+                Property::new("weight", DbPropertyValue::I64(1)),
+                &mut index_context,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, HelixDbError::InvariantViolation(_)),
+            "{error:?}"
+        );
+    }
+
     #[tokio::test]
     async fn removing_an_absent_edge_property_preserves_existing_properties() {
         let db = test_support::open_db("mutation-absent-edge-property").await;

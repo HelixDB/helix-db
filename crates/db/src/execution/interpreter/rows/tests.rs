@@ -1,6 +1,7 @@
 use super::*;
 use helix_planner::context;
 
+mod admission_points;
 mod aggregation_admission;
 mod bound_match;
 mod computed_depth;
@@ -121,3 +122,39 @@ mod node_existence;
 
 mod lookup_frames;
 mod match_producers;
+
+/// A relation fits its budget up to exactly its owned row bytes. Every caller
+/// admits rows first, so this check is the backstop for an unadmitted build.
+#[test]
+fn relation_memory_check_accepts_owned_bytes_up_to_the_budget() {
+    let rows = vec![
+        vec![r::Value::String("x".repeat(64)), r::Value::Null],
+        vec![r::Value::List(vec![r::Value::Integer(1); 8])],
+    ];
+    let bytes = rows_bytes(&rows);
+    for (memory_bytes, fits) in [(bytes, true), (bytes - 1, false)] {
+        let result = check_memory(
+            &rows,
+            Limits {
+                memory_bytes,
+                ..Limits::default()
+            },
+        );
+        assert_eq!(result.is_ok(), fits, "{memory_bytes} bytes");
+        let Err(error) = result else {
+            continue;
+        };
+        assert!(matches!(error, Error::Query(error) if error.detail == "MemoryLimit"));
+    }
+}
+
+/// Response sizing counts the exact JSON encoding without buffering it, so
+/// flushing the counter is a no-op that leaves the count unchanged.
+#[test]
+fn wire_size_counts_serialized_bytes_and_flushes_nothing() {
+    let value = serde_json::json!({"columns":["a"],"rows":[[1,"two",null]]});
+    let mut wire = WireSize { bytes: 0 };
+    serde_json::to_writer(&mut wire, &value).unwrap();
+    std::io::Write::flush(&mut wire).unwrap();
+    assert_eq!(wire.bytes, serde_json::to_vec(&value).unwrap().len());
+}

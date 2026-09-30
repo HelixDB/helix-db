@@ -102,6 +102,64 @@ async fn pending_property_versions_coalesce_without_releasing_shared_index_owner
     db.close().await.unwrap();
 }
 
+/// Debug output reports only how many entities the admitted ledger tracks, so
+/// payload bytes never reach logs. Replacements and tombstones of one entity
+/// share its entry, and unbudgeted writes keep no ledger at all.
+#[tokio::test]
+async fn pending_property_debug_counts_admitted_entities_without_payloads() {
+    let db = test_support::open_db("pending-property-debug").await;
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    let budget = query_resources::Budget::new(1024 * 1024);
+    context.row_memory = Some(budget.clone());
+    let scope = context.take_or_begin_write_scope().await.unwrap();
+    let mut admitted = Pending::default();
+    let mut unbudgeted = Pending::default();
+    assert_eq!(
+        format!("{admitted:?}"),
+        "PendingPropertyWrites { entries: 0 }"
+    );
+    let row = CanonicalPropertyRow::new_with_budget(
+        vec![Property::string("secret", "payload")],
+        Some(&budget),
+    )
+    .unwrap();
+    for (entity, value) in [
+        (GraphEntity::node(1), Some(row.write_payload())),
+        (GraphEntity::node(1), None),
+        (GraphEntity::edge(1), Some(row.write_payload())),
+    ] {
+        admitted
+            .stage(
+                &scope.txn,
+                context.tenant_scope,
+                entity,
+                value,
+                Some(&budget),
+            )
+            .unwrap();
+    }
+    unbudgeted
+        .stage(
+            &scope.txn,
+            context.tenant_scope,
+            GraphEntity::node(2),
+            Some(row.write_payload()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        format!("{admitted:?}"),
+        "PendingPropertyWrites { entries: 2 }"
+    );
+    assert_eq!(
+        format!("{unbudgeted:?}"),
+        "PendingPropertyWrites { entries: 0 }"
+    );
+    drop((row, admitted, unbudgeted, scope));
+    assert_eq!(budget.available(), 1024 * 1024);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn pending_property_admission_precedes_backend_writes_and_survives_preparation() {
     let db = test_support::open_db("pending-property-commit").await;

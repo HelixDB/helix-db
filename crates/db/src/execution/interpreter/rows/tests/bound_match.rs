@@ -387,6 +387,265 @@ async fn bound_expansion_continuations_release_every_level_on_failure_or_drop() 
     db.close().await.unwrap();
 }
 
+/// A bound pattern admits its source cache, seed row, stack, continuation and
+/// every candidate copy before allocating them. Whatever allowance remains
+/// when a parent starts or resumes, the stage either produces the parent's
+/// next match or fails with MemoryLimit, and dropping the failed stage
+/// releases everything. A wide outer row makes each row copy the largest owner.
+#[tokio::test]
+async fn bound_pattern_admission_failures_release_every_owner() {
+    use super::super::bound_match::{BoundCursor, BoundMatch};
+    let db = test_support::open_db("bound-pattern-admission-sweep").await;
+    let created = db
+        .cypher(crate::cypher::Request::new(
+            "CREATE (a:N)-[:R]->(:M),(a)-[:R]->(:M),(a)-[:R]->(:M) RETURN id(a)",
+        ))
+        .await
+        .unwrap();
+    let id = created.rows[0][0].as_u64().unwrap();
+    let limits = Limits {
+        memory_bytes: 1024 * 1024,
+        batch_rows: 1,
+        ..Default::default()
+    };
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
+    ctx.enable_request_read_view().await.unwrap();
+    let parameters = BTreeMap::new();
+    for text in [
+        "WITH '' AS pad UNWIND [1] AS i MATCH (a:N)-[:R]->(b) RETURN pad, b",
+        "MATCH (a:N) WITH a, '' AS pad OPTIONAL MATCH (a)-[:R]->(b) RETURN pad, b",
+    ] {
+        let plan = r::plan(
+            helix_cypher::compile(text).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        let (index, pattern, optional, predicate) = plan
+            .query()
+            .operators()
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, operator)| {
+                let r::Operator::Match {
+                    pattern,
+                    optional,
+                    predicate,
+                } = operator
+                else {
+                    return None;
+                };
+                Some((index, pattern, *optional, predicate.as_deref()))
+            })
+            .unwrap();
+        let physical = &plan.matches()[&index];
+        let pad = plan
+            .query()
+            .bindings()
+            .iter()
+            .position(|binding| binding.name == "pad")
+            .unwrap();
+        for resumed in [false, true] {
+            let (mut failures, mut successes) = (0, 0);
+            for available in (0..16 * 1024)
+                .step_by(8)
+                .chain((16 * 1024..=256 * 1024).step_by(512))
+            {
+                let mut row = vec![r::Value::Null; plan.query().bindings().len()];
+                row[pad] = r::Value::String("p".repeat(32 * 1024));
+                for slot in &physical.incoming {
+                    row[slot.0 as usize] = r::Value::Entity(r::Entity::Node(id));
+                }
+                let mut input = RowBuffer::new(ctx.row_budget()).unwrap();
+                push_row(&mut input, row, limits).unwrap();
+                let mut cursor = BoundCursor::new(input.finish(), ctx.row_budget()).unwrap();
+                let mut stage = BoundMatch::new(
+                    matches::Match {
+                        pattern,
+                        optional,
+                        predicate,
+                        demand: usize::MAX,
+                    },
+                    physical,
+                );
+                if resumed {
+                    let first = stage
+                        .next_batch(&mut cursor, &ctx, &parameters, limits)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(first.len(), 1);
+                }
+                let held = ctx
+                    .row_budget()
+                    .reserve(ctx.row_budget().available().saturating_sub(available))
+                    .unwrap();
+                match stage
+                    .next_batch(&mut cursor, &ctx, &parameters, limits)
+                    .await
+                {
+                    Ok(Some(rows)) => {
+                        assert_eq!(rows.len(), 1);
+                        successes += 1;
+                    }
+                    Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                    Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => {
+                        failures += 1
+                    }
+                    Ok(None) => panic!("the parent has another match"),
+                    Err(error) => panic!("{available}: {error:?}"),
+                }
+                drop(held);
+                drop(cursor);
+                drop(stage);
+                assert_eq!(
+                    ctx.row_budget().available(),
+                    limits.memory_bytes,
+                    "{text}, resumed={resumed}, available={available}"
+                );
+            }
+            assert!(failures > 0 && successes > 0, "{text}, resumed={resumed}");
+        }
+    }
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}
+
+/// A stack level admits its frame and that frame's first poll before
+/// allocating either. When another owner takes the budget just as the level
+/// below yields, the stack fails with MemoryLimit, whatever allowance was left,
+/// and releases everything it holds, whether a hash level builds its table
+/// or reuses the one the stage already built.
+#[tokio::test]
+async fn stack_levels_admit_frames_and_polls_after_their_input_yields() {
+    use super::super::expansion_stack::{ExpansionStack, SourceCache};
+    let db = test_support::open_db("stack-level-admission").await;
+    let created = db
+        .cypher(crate::cypher::Request::new(
+            "CREATE (a:A {key:1})-[:R]->(:B {key:1}) RETURN id(a)",
+        ))
+        .await
+        .unwrap();
+    let id = created.rows[0][0].as_u64().unwrap();
+    let limits = Limits {
+        memory_bytes: 256 * 1024,
+        batch_rows: 4,
+        ..Default::default()
+    };
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
+    ctx.enable_request_read_view().await.unwrap();
+    for (text, completed, reuse) in [
+        ("MATCH (a:A) WITH a MATCH (a)-[:R]->(b) RETURN b", 0, false),
+        ("MATCH (a:A),(b:B) WHERE a.key=b.key RETURN b", 1, false),
+        ("MATCH (a:A),(b:B) WHERE a.key=b.key RETURN b", 1, true),
+    ] {
+        let plan = r::plan(
+            helix_cypher::compile(text).unwrap(),
+            &db.planner_context(context::ParamBindings::default()),
+        )
+        .unwrap();
+        let (index, pattern) = plan
+            .query()
+            .operators()
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, operator)| {
+                let r::Operator::Match { pattern, .. } = operator else {
+                    return None;
+                };
+                Some((index, pattern))
+            })
+            .unwrap();
+        let physical = &plan.matches()[&index];
+        // The input binds the stage's incoming nodes and every completed scan.
+        let mut row = vec![r::Value::Null; plan.query().bindings().len()];
+        for slot in physical
+            .incoming
+            .iter()
+            .chain(physical.steps[..completed].iter().map(|step| {
+                let r::MatchStep::Scan(slot) = step else {
+                    unreachable!("completed steps are scans")
+                };
+                slot
+            }))
+        {
+            row[slot.0 as usize] = r::Value::Entity(r::Entity::Node(id));
+        }
+        let mut reused =
+            SourceCache::new(physical, completed, limits.batch_rows, ctx.row_budget()).unwrap();
+        if reuse {
+            let seed = Rows::new(vec![row.clone()], ctx.row_budget()).unwrap();
+            let mut warm = ExpansionStack::new(
+                pattern,
+                physical,
+                completed,
+                futures::stream::once(async move { Ok::<_, Error>(seed) }),
+                ctx.row_budget(),
+            )
+            .unwrap();
+            while warm
+                .next_batch(&ctx, limits, &mut reused)
+                .await
+                .unwrap()
+                .is_some()
+            {}
+        }
+        let retained = ctx.row_budget().available();
+        let (mut failures, mut successes) = (0, 0);
+        for available in (0..=32 * 1024).step_by(8) {
+            let mut fresh =
+                SourceCache::new(physical, completed, limits.batch_rows, ctx.row_budget()).unwrap();
+            let cache = if reuse { &mut reused } else { &mut fresh };
+            // The source outlives this iteration's borrows: the stack shares
+            // the cache's lifetime. It hands the taken budget back through
+            // this shared slot.
+            let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let seed = Rows::new(vec![row.clone()], ctx.row_budget()).unwrap();
+            let budget = ctx.row_budget().clone();
+            let held_by_source = std::sync::Arc::clone(&held);
+            let source = futures::stream::once(async move {
+                *held_by_source.lock().unwrap() = Some(
+                    budget
+                        .reserve(budget.available().saturating_sub(available))
+                        .unwrap(),
+                );
+                Ok::<_, Error>(seed)
+            });
+            let mut stack =
+                ExpansionStack::new(pattern, physical, completed, source, ctx.row_budget())
+                    .unwrap();
+            match stack.next_batch(&ctx, limits, cache).await {
+                Ok(Some(rows)) => {
+                    assert_eq!(rows.len(), 1);
+                    successes += 1;
+                }
+                Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
+                Ok(None) => panic!("the input has a match"),
+                Err(error) => panic!("{available}: {error:?}"),
+            }
+            drop(stack);
+            drop(held);
+            drop(fresh);
+            assert_eq!(
+                ctx.row_budget().available(),
+                retained,
+                "{text}, reuse={reuse}, available={available}"
+            );
+        }
+        assert!(failures > 0 && successes > 0, "{text}, reuse={reuse}");
+        drop(reused);
+        assert_eq!(ctx.row_budget().available(), limits.memory_bytes);
+    }
+    ctx.close_request_read_view().unwrap();
+    drop(ctx);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn repeated_bound_expansion_clauses_use_the_normal_stack() {
     let db = test_support::open_db("bound-pattern-depth").await;

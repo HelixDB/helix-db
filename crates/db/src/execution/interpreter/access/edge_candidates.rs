@@ -348,7 +348,34 @@ mod tests {
         assert!(Box::pin(cursor.next_batch(&context)).await.is_err());
         assert_eq!(budget.available(), 1024 * 1024);
         assert_eq!(budget.reads().point_gets, 1);
+        // The batch and pair checks pass; the deadline then expires inside the
+        // concurrent pair reads, before any of them reaches storage.
+        context.fail_deadline_after(2);
+        let cursor = Cursor::from_pairs(vec![(1, 3)], 1);
+        assert!(matches!(
+            Box::pin(cursor.next_batch(&context)).await,
+            Err(crate::HelixDbError::QueryDeadlineExceeded)
+        ));
+        assert_eq!(budget.available(), 1024 * 1024);
+        assert_eq!(budget.reads().point_gets, 1);
         context.close_request_read_view().unwrap();
         db.close().await.unwrap();
+    }
+
+    /// An empty cursor source reports an exact zero upper bound, as does a
+    /// labeled source with neither neighbor direction selected.
+    #[test]
+    fn exhausted_pair_sources_report_a_zero_upper_bound() {
+        assert_eq!(Pairs::Empty.size_hint(), (0, Some(0)));
+        assert_eq!(
+            Pairs::Labeled {
+                source: 1,
+                outgoing: None,
+                incoming: None,
+                both: false,
+            }
+            .size_hint(),
+            (0, Some(0))
+        );
     }
 }

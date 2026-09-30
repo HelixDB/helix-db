@@ -558,6 +558,53 @@ async fn range_sources_replay_their_prefix_then_the_rest_in_rank_order() {
         ));
         drop(source);
     }
+    // A parent resuming past the prefix replays the rest from the bitmap. A
+    // row that cannot be admitted there fails the batch; the source survives.
+    let cursor = context.node_cursor(&step.op).await.unwrap().unwrap();
+    let mut source = ScanCache::new(cursor, context.row_budget()).unwrap();
+    let mut input = RowBuffer::new(context.row_budget()).unwrap();
+    input
+        .push_with(size_of::<r::Row>() + 2 * size_of::<r::Value>(), || {
+            vec![r::Value::Integer(0), r::Value::Null]
+        })
+        .unwrap();
+    let mut cursor = ScanCursor::new(input.finish(), r::Slot(1));
+    let prefix = Limits {
+        batch_rows: ARRIVAL_PREFIX_IDS,
+        ..limits
+    };
+    for _ in 0..2 {
+        let batch = cursor
+            .next_batch(&context, &mut source, prefix)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.len(), ARRIVAL_PREFIX_IDS);
+    }
+    assert!(matches!(
+        source.source,
+        Source::Complete(Delivered::Arrival { rest: Some(_), .. })
+    ));
+    let held = context
+        .row_budget()
+        .reserve(context.row_budget().available())
+        .unwrap();
+    let error = cursor
+        .next_batch(&context, &mut source, prefix)
+        .await
+        .err()
+        .expect("a replayed row needs admission");
+    assert!(
+        matches!(error, crate::cypher::Error::Query(ref e) if e.detail == "MemoryLimit")
+            || matches!(
+                error,
+                crate::cypher::Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)
+            )
+    );
+    drop(held);
+    assert_eq!(cached(&source).unwrap().len(), 11);
+    drop(cursor);
+    drop(source);
     context.close_request_read_view().unwrap();
     assert_eq!(context.row_budget().available(), limits.memory_bytes);
     drop(context);

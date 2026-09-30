@@ -198,3 +198,7 @@ impl Ord for RankedRow<'_> {
             .unwrap_or_else(|| self.ordinal.cmp(&other.ordinal))
     }
 }
+
+#[cfg(test)]
+#[path = "tests/top_k.rs"]
+mod tests;
