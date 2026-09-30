@@ -1,3 +1,6 @@
+// Deep Cypher futures need more than the default 128 levels to prove `Send`.
+#![recursion_limit = "256"]
+
 use db::{cypher, HelixDB, HelixDbSource};
 use serde_json::json;
 
