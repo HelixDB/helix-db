@@ -3036,6 +3036,17 @@ export enum QueryRequestType {
   Read = "read",
   Write = "write",
 }
+/**
+ * Request-level visibility of committed but not yet indexed vector/text data.
+ *
+ * `Strong` (the default) searches every committed graph change. `Eventual`
+ * overlays a bounded budget of unpublished changes and is valid only for read
+ * requests; write batches always search strongly.
+ */
+export enum SearchConsistency {
+  Strong = "strong",
+  Eventual = "eventual",
+}
 export type QueryValue = JsonValue;
 export const QueryValue = {
   null: (): JsonValue => null,
@@ -3048,7 +3059,7 @@ export const QueryValue = {
   object: (values: Record<string, JsonValue>): JsonValue => values,
 };
 export type BatchQuery = ReadBatch | WriteBatch;
-export type QueryOptions = { queryName?: string | null };
+export type QueryOptions = { queryName?: string | null; searchConsistency?: SearchConsistency };
 
 type QueryRequestState =
   | { readonly requestType: QueryRequestType.Read; readonly query: ReadBatch }
@@ -3064,6 +3075,7 @@ type QueryParameterState =
 export class QueryRequest implements Encodable {
   private queryName: string | null = null;
   private parameterState?: QueryParameterState;
+  private consistency: SearchConsistency = SearchConsistency.Strong;
   private constructor(
     private readonly state: QueryRequestState,
     queryName: string | null = null,
@@ -3119,6 +3131,23 @@ export class QueryRequest implements Encodable {
     this.setQueryName(name);
     return this;
   }
+  get searchConsistency(): SearchConsistency {
+    return this.consistency;
+  }
+  /** Selects search visibility; eventual search is rejected for write requests. */
+  setSearchConsistency(consistency: SearchConsistency): void {
+    if (consistency !== SearchConsistency.Strong && consistency !== SearchConsistency.Eventual) {
+      throw new TypeError(`unknown search consistency: ${String(consistency)}`);
+    }
+    if (consistency === SearchConsistency.Eventual && this.state.requestType === QueryRequestType.Write) {
+      throw new TypeError('search consistency "eventual" is only valid for read requests; write batches always search strongly');
+    }
+    this.consistency = consistency;
+  }
+  withSearchConsistency(consistency: SearchConsistency): QueryRequest {
+    this.setSearchConsistency(consistency);
+    return this;
+  }
   toJSON(): JsonValue {
     const parameters = this.parameterState?.values;
     const parameterTypes = this.parameterState?.mode === "typed" ? this.parameterState.types : undefined;
@@ -3128,6 +3157,8 @@ export class QueryRequest implements Encodable {
       query: this.state.requestType === QueryRequestType.Read ? { read: this.state.query } : { write: this.state.query },
       parameters,
       parameter_types: parameterTypes,
+      // Omitted for the strong default so existing request bytes are unchanged.
+      search_consistency: this.consistency === SearchConsistency.Eventual ? this.consistency : undefined,
     };
   }
   toJsonBytes(): Uint8Array {
@@ -3167,7 +3198,9 @@ function isDefinedParams(value: unknown): value is DefinedParams<ParamShape> {
 }
 
 function applyQueryOptions(request: QueryRequest, options?: QueryOptions): QueryRequest {
-  if (!options || !("queryName" in options)) return request;
+  if (!options) return request;
+  if (options.searchConsistency !== undefined) request.setSearchConsistency(options.searchConsistency);
+  if (!("queryName" in options)) return request;
   if (options.queryName === null || options.queryName === undefined) {
     request.clearQueryName();
   } else {
@@ -3200,6 +3233,7 @@ export const prelude = {
   QueryError,
   QueryRequest,
   QueryRequestType,
+  SearchConsistency,
   QueryValue,
   PropertyValue,
   PropertyInput,

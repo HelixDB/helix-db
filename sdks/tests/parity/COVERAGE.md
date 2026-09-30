@@ -5,10 +5,10 @@ The parity suite combines coverage tools with explicit contract assertions:
 - Rust's fixture visitor classifies every authoritative AST enum variant. A new
   unclassified variant fails compilation, and the JSON-only corpus must contain
   every classified variant.
-- All four language SDKs independently construct 233 executable requests and 15
+- All four language SDKs independently construct 234 executable requests and 15
   serialization-only requests. Both Python clients serialize the same request
   types.
-- All 233 executable requests run through Rust, TypeScript, Go, synchronous
+- All 234 executable requests run through Rust, TypeScript, Go, synchronous
   Python, and asynchronous Python embedded clients in memory and disk modes.
   Disk Python runs include seeded read-only reopen checkpoints.
 - The current-source server executes the same corpus in disk mode for both

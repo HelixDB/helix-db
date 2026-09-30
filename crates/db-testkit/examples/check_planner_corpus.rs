@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use helix_ast::query::QueryRequest;
 use helix_db_testkit::planner_domain;
 
-const EXPECTED_SDK_CORPUS_REQUESTS: usize = 248;
+const EXPECTED_SDK_CORPUS_REQUESTS: usize = 249;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(root) = std::env::args_os().nth(1).map(PathBuf::from) else {

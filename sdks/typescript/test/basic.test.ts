@@ -16,6 +16,7 @@ import {
   PropertyValue,
   QueryParamType,
   QueryRequest,
+  SearchConsistency,
   RepeatConfig,
   ShortestPathDirection,
   SourcePredicate,
@@ -424,6 +425,31 @@ const atomicTyped = QueryRequest.read(readBatch())
 assert.deepEqual(parsed(atomicTyped).parameters, { flag: true, score: Math.fround(1.1) });
 assert.deepEqual(parsed(atomicTyped).parameter_types, { flag: "bool", score: "f32" });
 assert.throws(() => atomicTyped.withTypedParameter("flag", QueryParamType.bool(), false), /duplicate parameter/);
+assert.equal(QueryRequest.read(readBatch()).searchConsistency, SearchConsistency.Strong);
+assert.equal(QueryRequest.read(readBatch()).toJsonString().includes("search_consistency"), false);
+assert.equal(parsed(QueryRequest.read(readBatch()).withSearchConsistency(SearchConsistency.Eventual)).search_consistency, "eventual");
+assert.equal(
+  QueryRequest.read(readBatch()).withSearchConsistency(SearchConsistency.Strong).toJsonString().includes("search_consistency"),
+  false,
+);
+assert.equal(
+  JSON.parse(
+    readQuery(params).toQueryJson(
+      params,
+      { tenant_id: "acme", limit: 1n, created_after: DateTime.fromMillis(0), labels: {} },
+      {
+        searchConsistency: SearchConsistency.Eventual,
+      },
+    ),
+  ).search_consistency,
+  "eventual",
+);
+assert.throws(() => QueryRequest.write(writeBatch()).withSearchConsistency(SearchConsistency.Eventual), /only valid for read requests/);
+assert.throws(
+  () => writeQuery(writeParams).toQueryJson(writeParams, { data: [] }, { searchConsistency: SearchConsistency.Eventual }),
+  /only valid for read requests/,
+);
+assert.throws(() => QueryRequest.read(readBatch()).withSearchConsistency("sometimes" as SearchConsistency), /unknown search consistency/);
 assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("flag", QueryParamType.bool(), 1), /must be boolean/);
 assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("bytes", QueryParamType.bytes(), "AQID"), QueryError);
 assert.throws(

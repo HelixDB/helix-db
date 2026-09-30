@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { canonicalizeJson, parseJsonStructural, structuralJsonEqual } from "../../src/index.js";
 import { workspaceRoot } from "./paths.js";
 
-const EXPECTED_RUNTIME = 233;
+const EXPECTED_RUNTIME = 234;
 const typescriptRoot = join(workspaceRoot, "sdks", "typescript");
 const pythonRoot = join(workspaceRoot, "sdks", "python");
 const goRoot = join(workspaceRoot, "sdks", "go");

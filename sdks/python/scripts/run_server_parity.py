@@ -33,7 +33,7 @@ from helixdb import (  # noqa: E402
     write_batch,
 )
 
-EXPECTED_RUNTIME = 233
+EXPECTED_RUNTIME = 234
 TRANSACTION_CONFLICT_ATTEMPTS = 8
 
 

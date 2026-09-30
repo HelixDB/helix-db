@@ -930,6 +930,51 @@ func TestLostResponseGatewayProbe(t *testing.T) {
 	}
 }
 
+func TestSearchConsistencySerializesOnlyWhenEventual(t *testing.T) {
+	read := func() *QueryRequest { return NewReadQueryRequest(Read().Returning()) }
+	if read().SearchConsistency() != SearchConsistencyStrong {
+		t.Fatal("requests default to strong search")
+	}
+	strong, err := MarshalRequest(read().WithSearchConsistency(SearchConsistencyStrong))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(strong), "search_consistency") {
+		t.Fatalf("strong search must be omitted: %s", strong)
+	}
+	eventual, err := MarshalRequest(read().WithSearchConsistency(SearchConsistencyEventual))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(eventual), `"search_consistency":"eventual"`) {
+		t.Fatalf("eventual search must serialize: %s", eventual)
+	}
+	write := NewWriteQueryRequest(Write().Returning())
+	if err := write.SetSearchConsistency(SearchConsistencyEventual); !errors.Is(err, ErrEventualWriteSearchConsistency) {
+		t.Fatalf("write eventual error = %v", err)
+	}
+	if _, err := MarshalRequest(NewWriteQueryRequest(Write().Returning()).WithSearchConsistency(SearchConsistencyEventual)); !errors.Is(err, ErrEventualWriteSearchConsistency) {
+		t.Fatalf("write eventual marshal error = %v", err)
+	}
+	if err := read().SetSearchConsistency("sometimes"); !errors.Is(err, ErrUnknownSearchConsistency) {
+		t.Fatalf("unknown consistency error = %v", err)
+	}
+}
+
+func TestIndexBackpressureIsRetryable(t *testing.T) {
+	err := decodeRemoteError([]byte(`{"error":"index_backpressure","msg":"index backpressure","retryable":true}`), "fallback", http.StatusTooManyRequests)
+	if !IsRetryable(err) || !IsIndexBackpressure(err) || IsConflict(err) {
+		t.Fatalf("remote backpressure classification: %v", err)
+	}
+	embedded := &HelixError{Kind: ErrorEmbedded, Code: QueryErrorCodeIndexBackpressure}
+	if !IsRetryable(embedded) || !IsIndexBackpressure(embedded) {
+		t.Fatal("embedded backpressure is retryable")
+	}
+	if IsRetryable(&HelixError{Kind: ErrorEmbedded, Code: "invalid_query"}) {
+		t.Fatal("other embedded errors are not retryable")
+	}
+}
+
 func TestRemoteRetryabilityRequiresExplicitBooleanTrue(t *testing.T) {
 	for _, testCase := range []struct {
 		body     string
