@@ -17,7 +17,7 @@ import {
 } from "../../src/index.js";
 import { goGeneratedRoot, resultsRoot, rustGeneratedRoot, typescriptGeneratedRoot, workspaceRoot } from "./paths.js";
 
-const EXPECTED_RUNTIME = 233;
+const EXPECTED_RUNTIME = 234;
 const TRANSACTION_CONFLICT_ATTEMPTS = 8;
 
 type Instance = {

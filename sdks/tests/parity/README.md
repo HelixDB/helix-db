@@ -14,10 +14,10 @@ The suite does three things:
 
 - `parity:generate` independently writes Rust, TypeScript, Go, and Python
   requests under `tests/parity/generated`.
-- `parity:compare-json` structurally compares all 248 requests from all four
+- `parity:compare-json` structurally compares all 249 requests from all four
   SDKs. This includes integers outside JavaScript's safe range.
 - `parity:embedded` generates Python, Node, and Go UniFFI bindings in a fresh
-  temporary directory, runs all 233 runtime fixtures through each SDK in memory
+  temporary directory, runs all 234 runtime fixtures through each SDK in memory
   and disk modes, reopens disk readers and writers, compares all results, and
   removes the generated bindings.
 - `parity:server-disk` runs the runtime corpus through the real server HTTP API,

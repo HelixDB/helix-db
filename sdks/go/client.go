@@ -54,9 +54,34 @@ func IsConflict(err error) bool {
 	return errors.Is(err, ErrConflict) || errors.As(err, &helixErr) && helixErr.Kind == ErrorRemote && helixErr.StatusCode == http.StatusConflict
 }
 
+// IsRetryable reports whether a failure is explicitly retryable. Remote
+// failures are retryable only when the server says so; embedded
+// index_backpressure failures are retryable because the whole request was
+// rejected without effect: a write before commit, or a strong search.
 func IsRetryable(err error) bool {
 	var helixErr *HelixError
-	return errors.As(err, &helixErr) && helixErr.Kind == ErrorRemote && helixErr.Retryable != nil && *helixErr.Retryable
+	if !errors.As(err, &helixErr) {
+		return false
+	}
+	if helixErr.Kind == ErrorEmbedded {
+		return helixErr.Code == QueryErrorCodeIndexBackpressure
+	}
+	return helixErr.Kind == ErrorRemote && helixErr.Retryable != nil && *helixErr.Retryable
+}
+
+// QueryErrorCodeIndexBackpressure marks requests rejected because asynchronous
+// vector/text index work reached a limit (HTTP 429, gRPC resource-exhausted):
+// a write before commit because the index backlog is full, or a strong search
+// whose answer lies behind more than 800 unpublished changes. Eventual
+// searches are never rejected this way. Retry the unchanged request after a
+// backoff.
+const QueryErrorCodeIndexBackpressure QueryErrorCode = "index_backpressure"
+
+// IsIndexBackpressure reports whether asynchronous index work rejected the
+// request: a write before commit, or a strong search.
+func IsIndexBackpressure(err error) bool {
+	var helixErr *HelixError
+	return errors.As(err, &helixErr) && (helixErr.Kind == ErrorRemote || helixErr.Kind == ErrorEmbedded) && helixErr.Code == QueryErrorCodeIndexBackpressure
 }
 
 type Client struct {

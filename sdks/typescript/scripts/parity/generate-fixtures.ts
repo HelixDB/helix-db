@@ -19,6 +19,7 @@ import {
   PropertyValue,
   QueryParamType,
   RepeatConfig,
+  SearchConsistency,
   ShortestPathDirection,
   SourcePredicate,
   Step,
@@ -513,6 +514,20 @@ export function runtimeFixtures(): Fixture[] {
           .varAs("edge_vector_hits", g().vectorSearchEdges("FOLLOWS", "embedding", [1.0, 0.0], 5, null).edgeProperties())
           .returning(["edge_vector_hits"]),
       ),
+    ),
+    runtime(
+      "028a-read-eventual-search",
+      QueryRequest.read(
+        readBatch()
+          .varAs("text_hits", g().textSearchNodes("ParityUser", "bio", "graph", 5, null).valueMap(["externalId", "bio", "$distance"]))
+          .varAs(
+            "vector_hits",
+            g()
+              .vectorSearchNodes("ParityUser", "embedding", [1.0, 0.0, 0.0], 3, null)
+              .project([Projection.property("externalId", "externalId"), Projection.property("$distance", "distance")]),
+          )
+          .returning(["text_hits", "vector_hits"]),
+      ).withSearchConsistency(SearchConsistency.Eventual),
     ),
     runtime(
       "029-write-drop-temp-node",

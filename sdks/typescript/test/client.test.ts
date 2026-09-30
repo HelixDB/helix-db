@@ -361,6 +361,19 @@ for (const [retryable, expected] of [
   assert.equal(error.isRetryable(), expected);
 }
 
+{
+  const body = '{"error":"index_backpressure","msg":"index backpressure","retryable":true}';
+  const error = await remoteError(429, body);
+
+  assert.equal(error.code, "index_backpressure");
+  assert.equal(error.isRateLimited(), true);
+  assert.equal(error.isRetryable(), true);
+  assert.equal(error.isIndexBackpressure(), true);
+  assert.equal(error.isConflict(), false);
+  assert.equal(HelixError.embedded("index backpressure", "index_backpressure").isRetryable(), true);
+  assert.equal(HelixError.embedded("bad input", "invalid_query").isRetryable(), false);
+}
+
 for (const status of [400, 401, 403, 409, 429, 503]) {
   const body = JSON.stringify({ message: `status ${status}`, code: "test_error" });
   const error = await remoteError(status, body);
