@@ -28,6 +28,7 @@ const CORE_MULTI_SDK_PAGES = [
   "database/helix-db/query-guides/vector-indexes",
   "database/helix-db/query-guides/text-indexes",
   "database/helix-db/query-guides/prefiltering",
+  "database/helix-db/query-guides/search-consistency",
   "database/helix-db/query-guides/traversals",
   "database/helix-db/query-guides/filtering",
   "database/helix-db/query-guides/projections",

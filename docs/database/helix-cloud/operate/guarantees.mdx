@@ -27,7 +27,12 @@ Transactions use serializable snapshot isolation:
 - A write request reads its own mutations before commit.
 - Conflicting writes are detected at commit; the request fails instead of committing
   against stale transactional state.
-- Secondary, vector, and text lookups participate in the same request transaction.
+- Secondary, vector, and text lookups participate in the same request transaction. A
+  write request that searches a vector or text index conflicts with any concurrent
+  write to that index, including work not yet published into it, and with the index
+  worker publishing that work. Both fail with a retryable `transaction_conflict`;
+  under a sustained publication backlog, searching writes may need several retries.
+  See [Search consistency](/database/helix-db/query-guides/search-consistency).
 
 ## Durability
 
@@ -43,7 +48,9 @@ acknowledgement. Embedded mode rejects this server-only option.
 
 Index creation and deletion use durable lifecycle operations:
 
-- A build scans existing entities and catches up concurrent mutations.
+- A build scans existing entities. A secondary-index build then catches up
+  concurrent mutations; vector and text writes made during a build are queued and
+  published after activation.
 - A constructing generation is hidden from queries.
 - Validation completes before one atomic activation step.
 - A blocked or aborted generation never becomes partially queryable.
@@ -52,7 +59,10 @@ Index creation and deletion use durable lifecycle operations:
 
 The writer can serve a newly committed state immediately. A reader observes it after
 refreshing to a snapshot that contains the commit, so a request routed to a reader may
-temporarily lag.
+temporarily lag. Vector and text searches include committed writes that the index
+worker has not published yet, unless a read opts into `eventual`
+[search consistency](/database/helix-db/query-guides/search-consistency), so they
+follow the same rules.
 
 Use a writer-only server request when a separate request requires read-after-write:
 

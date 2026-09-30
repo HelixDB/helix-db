@@ -4069,6 +4069,13 @@ To rank only the nodes or edges a traversal reaches, such as documents a user ma
 access, search within the traversal instead of the whole index. See
 [Prefiltered search](/database/helix-db/query-guides/prefiltering#vector-prefiltering).
 
+## Search consistency
+
+By default, searches include committed writes that the index worker has not published
+into the index yet. A read request can opt into `eventual` search, which bounds that
+work per search. See [Search consistency](/database/helix-db/query-guides/search-consistency)
+for both modes, searches in write batches, and `index_backpressure`.
+
 ## Result limits
 
 The server caps the effective result count of a whole-index search at 800. A narrower
@@ -4078,6 +4085,9 @@ bound from the surrounding plan can lower it. Prefiltered searches have their ow
 ## Operational notes
 
 - Creation returns before the backfill necessarily finishes.
+- Writes made while an index builds are queued and published after it activates;
+  strong searches include them as soon as the index is active. Until then they count
+  toward [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - Malformed source vectors can block the operation.
 - A new generation remains hidden until validation and activation succeed.
 - Dropping an index is also a durable lifecycle operation.
@@ -4262,6 +4272,13 @@ To rank only the nodes or edges a traversal reaches, such as documents a user ca
 read, search within the traversal instead of the whole index. See
 [Prefiltered search](/database/helix-db/query-guides/prefiltering#full-text-search-prefiltering).
 
+## Search consistency
+
+By default, searches include committed writes that the index worker has not published
+into the index yet. A read request can opt into `eventual` search, which bounds that
+work per search. See [Search consistency](/database/helix-db/query-guides/search-consistency)
+for both modes, searches in write batches, and `index_backpressure`.
+
 ## Result limits
 
 The server caps the effective result count of a whole-index search at 800.
@@ -4270,9 +4287,12 @@ Prefiltered searches have their own [limits](/database/helix-db/query-guides/pre
 ## Indexed values
 
 - Store searchable text in a top-level `String` or `StringArray` property.
-- `null` and non-string values are rejected; fix them before retrying a blocked backfill.
+- `null` and non-string values are rejected. Fix, shorten or delete them before retrying a blocked
+  backfill; those writes are accepted while the backfill is blocked.
 - Keep tenant property names and values consistent with the definition.
 - Treat analyzer and term-position behavior as part of the index definition.
+- Keep each document within the [per-document admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission).
+  Writes with longer text fail, and existing longer rows block a backfill with `oversized_entity`.
 
 ## Next steps
 
@@ -4723,6 +4743,21 @@ stream. Go has separate node and edge methods.
 | Text | At most `min(unique candidates, k, 800)` rows. |
 | Both | More than 1,000,000 unique candidates is a query error. |
 
+## Unpublished changes
+
+Prefiltered searches follow the request's
+[search consistency](/database/helix-db/query-guides/search-consistency). A candidate
+whose indexed vector or text changed in a committed write that the index worker has
+not published yet is superseded: the search drops that candidate's published index rows
+up front and ranks its newest committed value instead, or leaves it out when that write
+removed the value.
+
+- `strong` (the default) treats every superseded candidate this way. Unlike a
+  whole-index search, a prefiltered search never fails with `index_backpressure`
+  because of unpublished changes; only the limits above apply.
+- `eventual` does this for the oldest unpublished work within its per-search budget and
+  ranks the remaining candidates by their last published values until publication.
+
 ## Checklist
 
 - Create a compatible index for the candidate label and property. Vector queries must
@@ -4740,6 +4775,190 @@ stream. Go has separate node and edge methods.
     Build the candidate set by following relationships.
 
     Preserve ranked hit metadata before continuing a traversal.
+
+# Search consistency
+
+Page type: Guide
+
+A write to an indexed vector or text property commits its index work as a durable
+queued operation, and the index worker publishes it into the index shortly afterwards.
+Search consistency sets how a read request's vector and text searches treat work that
+is committed but not yet published. It applies to whole-index and
+[prefiltered](/database/helix-db/query-guides/prefiltering) searches.
+
+| `search_consistency` | Behavior |
+| --- | --- |
+| `strong` (default) | Every write committed in the request's snapshot is searchable, including unpublished work. |
+| `eventual` | Each search includes up to 128 MiB of unpublished work, oldest first. The rest is served as last published until the index worker publishes it. |
+
+## Request eventual search
+
+The SDK options on this page ship in the SDK releases after Rust `helix-db` 3.0.0,
+TypeScript `@helix-db/helix-db` 3.2.0, Go v0.3.1, and Python `helix-db` 0.3.4. Those
+versions cannot set search consistency; send `search_consistency` in a direct HTTP
+request instead.
+
+This read returns the ten `Doc` nodes closest to the query vector and bounds the
+unpublished work each search includes:
+
+```rust Rust
+let request = QueryRequest::read(
+    read_batch()
+        .var_as(
+            "hits",
+            g().vector_search_nodes("Doc", "embedding", vec![0.1, 0.8, 0.2], 10, None)
+                .value_map(Some(vec!["$id", "title", "$distance"])),
+        )
+        .returning(["hits"]),
+)
+.with_query_name("similar_docs")
+.with_search_consistency(SearchConsistency::Eventual)?;
+```
+
+```ts TypeScript
+import { SearchConsistency, g, readBatch } from "@helix-db/helix-db";
+
+const request = readBatch()
+  .varAs(
+    "hits",
+    g()
+      .vectorSearchNodes("Doc", "embedding", [0.1, 0.8, 0.2], 10, null)
+      .valueMap(["$id", "title", "$distance"]),
+  )
+  .returning(["hits"])
+  .toQueryRequest({
+    queryName: "similar_docs",
+    searchConsistency: SearchConsistency.Eventual,
+  });
+```
+
+```go Go
+request := helix.ReadQuery("similar_docs").
+	WithSearchConsistency(helix.SearchConsistencyEventual).
+	VarAs(
+		"hits",
+		helix.G().
+			VectorSearchNodes("Doc", "embedding", []float32{0.1, 0.8, 0.2}, 10).
+			ValueMap("$id", "title", "$distance"),
+	).
+	Returning("hits")
+```
+
+```python Python
+from helixdb import SearchConsistency, g, read_batch
+
+request = (
+    read_batch()
+    .var_as(
+        "hits",
+        g()
+        .vector_search_nodes("Doc", "embedding", [0.1, 0.8, 0.2], 10)
+        .value_map(["$id", "title", "$distance"]),
+    )
+    .returning(["hits"])
+    .to_query_request(
+        query_name="similar_docs",
+        search_consistency=SearchConsistency.EVENTUAL,
+    )
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "similar_docs",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "hits",
+          "root": {
+            "value_map": {
+              "input": {
+                "vector_search_nodes": {
+                  "label": "Doc",
+                  "property": "embedding",
+                  "query_vector": { "value": { "f32_array": [0.1, 0.8, 0.2] } },
+                  "k": { "literal": 10 }
+                }
+              },
+              "properties": ["$id", "title", "$distance"]
+            }
+          }
+        }
+      }],
+      "returns": ["hits"]
+    }
+  },
+  "search_consistency": "eventual"
+}
+```
+
+Omitting the option, or setting `strong`, sends no `search_consistency` field. The
+option covers every vector and text search in the request.
+
+## Searches in write batches
+
+Write batches always search strongly and see their own uncommitted changes, so
+`eventual` is rejected for write requests.
+
+A write batch that searches a vector or text index fails with a retryable
+`transaction_conflict` if another write to that index commits first, or if the index
+worker publishes queued work into it first. Search-then-write logic therefore stays
+serializable. Under a sustained publication backlog, such batches may need several
+retries.
+
+## Searches behind unpublished changes
+
+A whole-index `strong` search whose answer lies behind more than 800 results with
+committed but unpublished changes, for example right after a bulk delete near the
+query, fails with a retryable `index_backpressure` error. It does not scan further or
+answer without those changes, and it succeeds once that work is published.
+
+- A write batch's own changes never count toward this limit. A later search in the
+  same batch scans past every result the batch changed.
+- An `eventual` search in the same position never fails. It includes only the oldest
+  800 changed entities and serves the rest as last published.
+- Prefiltered searches are not limited this way. They drop the published rows of
+  changed candidates up front and keep only their own
+  [result limits](/database/helix-db/query-guides/prefiltering#result-limits).
+
+## Index backpressure
+
+By default, each index retains at most 1,000,000,000 bytes or 250,000 pending
+entities of unpublished work. A write that would push an index past either limit fails
+before commit with `index_backpressure`: HTTP 429 with `retryable: true` and no
+`Retry-After` header, or gRPC `ResourceExhausted`. Nothing from the rejected request
+commits. Retry the unchanged request with bounded backoff and jitter; it succeeds once
+the index worker has published enough of the backlog, or, while the index is building,
+once the index activates.
+
+A single write that exceeds either limit on its own, or stages more than 8 MiB of
+queued work for one index, can never be admitted. It fails with the non-retryable
+`index_operation_batch_too_large` error (HTTP 400) instead; split it into smaller
+writes. See the
+[query error reference](/database/helix-db/query-guides/error-handling) for both codes.
+
+## Index builds
+
+Writes made while an index builds are queued and published after it activates. Strong
+searches include them as soon as the index is active.
+
+Writes queued during a build count toward the index's
+[backpressure limits](#index-backpressure) and nothing publishes them before
+activation, so a heavy write load during a long build can fail with
+`index_backpressure` until the build activates. Bounded retries may run out first;
+throttle writes to an index while it builds.
+
+## Next steps
+
+    Create the index and run nearest-neighbor search.
+
+    Rank string properties with BM25 keyword search.
+
+    Rank only the nodes or edges a traversal reaches.
+
+    Review isolation and read-after-write behavior.
 
 # HelixDB HTTP API and OpenAPI specification
 
@@ -4813,7 +5032,9 @@ flow for agents. See the [HelixDB MCP guide](/database/helix-cloud/connect/mcp) 
 `request_type` and the single `query` variant must agree: `read` with `read`, or
 `write` with `write`. `query_name` is optional diagnostic metadata. Parameters
 can be untyped, or every parameter can have a matching entry in
-`parameter_types`.
+`parameter_types`. Read requests can set `search_consistency` to `strong` (the
+default) or `eventual`; write requests accept only `strong`. See
+[Search consistency](/database/helix-db/query-guides/search-consistency).
 
 Raw HTTP JSON supports `f32` and `f64` parameter declarations. The decoder
 converts integer JSON values such as `5` and floating-point values such as `5.25`
@@ -4881,7 +5102,12 @@ durability waits on reads are rejected with `400 Bad Request`.
   it is idempotent or protected by an application idempotency key.
 - `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
   rejects it before query parsing.
-- `429` reports a Helix Cloud rate limit and can include `Retry-After`.
+- `429` reports a Helix Cloud rate limit (`rate_limited`), which can include
+  `Retry-After`, or database engine backpressure (`index_backpressure`): a vector
+  or text index holds its maximum unpublished work, or a whole-index `strong`
+  search lies behind too many unpublished changes. Backpressure responses carry
+  `retryable: true` and no `Retry-After`; nothing from the request took effect.
+  See [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - `500` reports an internal query or storage failure.
 - `503` reports that a required writer or ready database is unavailable.
 
@@ -5009,7 +5235,8 @@ being collapsed or rejected.
 
 For gRPC, the status message remains human-readable and the same static code is
 attached as ASCII metadata under `helix-error-code`. Active-text mutation admission
-failures use `InvalidArgument`, matching their HTTP 400 classification.
+failures use `InvalidArgument`, matching their HTTP 400 classification, and
+`index_backpressure` uses `ResourceExhausted`, matching HTTP 429.
 
 Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
 fields named `error` and `msg`; generated Python, Node, and Go bindings pass
@@ -5025,6 +5252,9 @@ code from exception text.
   idempotency key.
 - `transaction_conflict` is the only HTTP conflict classification and is
   normally retryable with bounded backoff.
+- `index_backpressure` (HTTP 429) rejects the whole request before it takes
+  effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
+  see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - Availability and lifecycle failures should be retried only after the named
   condition changes. Validation and planning failures require a corrected
   request or schema/index configuration.
@@ -5104,24 +5334,25 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 ### Active-text mutation limits
 
 `active_text_mutation_limit_exceeded` reports a deterministic rejection before the
-write transaction commits. The request's graph changes are not committed. The error
-is caller-correctable and uses HTTP 400, gRPC `InvalidArgument`, or the embedded
-`InvalidRequest` binding category. It is not a transient rate limit or an unknown
-write outcome; retrying the identical mutation does not resolve the limit.
+write transaction commits: one indexed text document is too large. The request's graph
+changes are not committed. The error is caller-correctable and uses HTTP 400, gRPC
+`InvalidArgument`, or the embedded `InvalidRequest` binding category. It is not a
+transient rate limit or an unknown write outcome; retrying the identical mutation does
+not resolve the limit.
 
 For example, the HTTP query service returns:
 
 ```json
 {
   "error": "active_text_mutation_limit_exceeded",
-  "msg": "db error: Active text mutation exceeds entities: observed 513, limit 512. This is a hard mutation-batch limit; reduce the number or size of mutations."
+  "msg": "db error: Active text mutation exceeds output_operations: observed 20006, limit 16384. This is a hard per-document limit; shorten the indexed text."
 }
 ```
 
 Branch on `error`, not the wording in `msg`. The diagnostic identifies the resource,
-observed usage and configured limit. See [active-text admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission)
-for the default bounds and how entities are counted. The same engine policy applies
-to standalone databases; embedded configurations may override it.
+the document's usage and its allowance. See [active-text admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission)
+for the default allowances. The same engine policy applies to standalone databases;
+embedded configurations may override it.
 
 ### Index lifecycle
 
@@ -5129,7 +5360,8 @@ to standalone databases; embedded configurations may override it.
 | --- | --- | --- | --- | --- |
 | `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
 | `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
-| `active_text_mutation_limit_exceeded` | An active text mutation exceeded a hard admission limit. | 400 | Reduce the mutation before retrying | Yes |
+| `active_text_mutation_limit_exceeded` | One indexed text document exceeded a hard per-document admission limit. | 400 | Shorten the text before retrying | Yes |
+| `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry. | 400 | Split the write before retrying | Yes |
 | `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
 | `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |
@@ -5151,6 +5383,7 @@ to standalone databases; embedded configurations may override it.
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
+| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes. | 429 | Yes, bounded backoff | No request change required |
 | `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
 | `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
 | `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |
@@ -5282,6 +5515,18 @@ a multi-mutation request.
 
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.
+
+## Request returns `index_backpressure`
+
+An HTTP 429 with `index_backpressure` comes from the database engine, not a rate limit.
+Either a vector or text index already holds its maximum unpublished work, so the write
+was rejected before commit, or a whole-index `strong` search's answer lies behind more
+than 800 unpublished changes. Nothing from the request took effect.
+
+Retry the unchanged request with bounded backoff and jitter; it succeeds once the index
+worker publishes the backlog, or, while the index is building, once it activates. Reads
+that can tolerate lag can use `eventual` search.
+See [Search consistency](/database/helix-db/query-guides/search-consistency).
 
 ## Request returns HTTP 429 (Helix Cloud)
 
@@ -6071,7 +6316,12 @@ Transactions use serializable snapshot isolation:
 - A write request reads its own mutations before commit.
 - Conflicting writes are detected at commit; the request fails instead of committing
   against stale transactional state.
-- Secondary, vector, and text lookups participate in the same request transaction.
+- Secondary, vector, and text lookups participate in the same request transaction. A
+  write request that searches a vector or text index conflicts with any concurrent
+  write to that index, including work not yet published into it, and with the index
+  worker publishing that work. Both fail with a retryable `transaction_conflict`;
+  under a sustained publication backlog, searching writes may need several retries.
+  See [Search consistency](/database/helix-db/query-guides/search-consistency).
 
 ## Durability
 
@@ -6087,7 +6337,9 @@ acknowledgement. Embedded mode rejects this server-only option.
 
 Index creation and deletion use durable lifecycle operations:
 
-- A build scans existing entities and catches up concurrent mutations.
+- A build scans existing entities. A secondary-index build then catches up
+  concurrent mutations; vector and text writes made during a build are queued and
+  published after activation.
 - A constructing generation is hidden from queries.
 - Validation completes before one atomic activation step.
 - A blocked or aborted generation never becomes partially queryable.
@@ -6096,7 +6348,10 @@ Index creation and deletion use durable lifecycle operations:
 
 The writer can serve a newly committed state immediately. A reader observes it after
 refreshing to a snapshot that contains the commit, so a request routed to a reader may
-temporarily lag.
+temporarily lag. Vector and text searches include committed writes that the index
+worker has not published yet, unless a read opts into `eventual`
+[search consistency](/database/helix-db/query-guides/search-consistency), so they
+follow the same rules.
 
 Use a writer-only server request when a separate request requires read-after-write:
 
@@ -6122,39 +6377,39 @@ fundamental architectural boundaries.
 
 ## Active-text mutation admission
 
-The engine bounds foreground mutations that affect full-text indexes. These limits
-apply to Cloud and standalone HelixDB. Exceeding a bound rejects the write transaction
-before commit with HTTP 400 and code `active_text_mutation_limit_exceeded`; it does
-not partially commit graph changes. The diagnostic reports the measured resource,
-observed usage and configured limit.
+The engine checks each text document a write indexes before the write commits. When one
+document's final text exceeds a bound, the write fails with HTTP 400 and code
+`active_text_mutation_limit_exceeded`, and none of its graph changes commit. The
+diagnostic reports the measured resource, the document's usage and its allowance.
 
-The default entity ceiling is **512 distinct text-relevant graph entities per
-collecting/flush epoch**. Repeated changes to the same entity coalesce within an
-epoch. Both nodes and edges can count when a text index observes their changes;
-unrelated entities do not count. Consequently, the number of input IDs alone does
-not establish whether a request fits. Internal text reads can flush an epoch, but
-ordinary bulk deletes accumulate changes until their final text preparation.
+Each document is checked on its own. The index worker later swaps an entity's indexed
+document for its newest one in a single publication, so each document may use at most
+half of that publication's row budget. Only the newest document is analyzed, so it gets
+the whole analysis budget:
 
-Additional active-text defaults remain in force even below 512 entities:
-
-| Resource | Default ceiling |
+| Resource | Default allowance per document |
 | --- | ---: |
-| Retained/input bytes and text analysis | 64 MiB |
-| Output key/value operations | 32,768 |
-| Output key/value bytes | 8 MiB |
-| Individual split payload and retained split payload budget | 64 MiB |
-| Encoded manifest page | 4 MiB |
+| Text analysis (the text, plus about 280 bytes per token and 3 bytes per token byte) | 64 MiB |
+| Output key/value operations (one per unique term, plus 6) | 16,384 |
+| Output key/value bytes (term statistics, marker and manifest rows) | 2 MiB |
+| Input key/value bytes (the text plus the rows it reads) | 28 MiB |
+| Encoded manifest page for the document's tenant partition | 4 MiB |
 
-Admission accounts for complete retained before/after property rows as well as text
-index work. Large properties, multiple indexes, or tenant partitions can therefore
-hit another bound with fewer entities. These are runtime policy limits, not storage
-format maxima; embedded configurations can supply a different validated policy.
+In practice a document holds up to about 16,000 unique terms, or fewer when terms or
+tenant values are long, and about 200,000 short tokens.
 
-Reduce the number or size of mutations before retrying. If the application splits
-one request into several, each new request is a separate atomic transaction. The
-service does not automatically replay the rejected write. There is no time-based
-`Retry-After`: waiting without changing the mutation does not resolve a hard limit.
-See [Error handling](/database/helix-cloud/operate/error-handling) for the response
+Separately, the queued work one write stages for one index is capped at 8 MiB. That
+bounds the combined text of every document the write indexes there; a larger write fails
+with `index_operation_batch_too_large` and should be split.
+
+Index builds apply the same per-document allowances, text analysis included, to existing
+rows. A longer row blocks the build with `oversized_entity`. Shorten or delete the row,
+then retry the build.
+
+These are runtime policy limits, not storage-format maxima; embedded configurations
+can supply a different validated policy. Retrying the same write does not help, and
+there is no time-based `Retry-After`: shorten the document instead. See
+[Error handling](/database/helix-cloud/operate/error-handling) for the response
 contract. HTTP 429 rate limiting below is a separate mechanism.
 
 ## Helix Cloud request rate limits
@@ -6257,8 +6512,8 @@ bucket was exhausted.
 | Dimension matching       | Vectors must exactly match the configured index dimension                                                                                |
 | Distance metrics         | cosine, euclidean, manhattan                                                                                                             |
 | Search type              | Approximate nearest neighbor (ANN)                                                                                                       |
-| Result count              | Unrestricted vector search caps effective `k` at 800. Traversal-scoped vector search rejects when `min(k, unique candidates)` exceeds 800 or when the candidate stream exceeds 1,000,000 unique entities. |
-| Restricted search        | Final membership is the exact current traversal stream; ranking may still use approximate index structures                              |
+| Result count              | Whole-index vector search caps effective `k` at 800. [Prefiltered](/database/helix-db/query-guides/prefiltering#result-limits) vector search rejects when `min(k, unique candidates)` exceeds 800 or when the candidate stream exceeds 1,000,000 unique entities. |
+| Prefiltered search       | Final membership is the exact current traversal stream; ranking may still use approximate index structures                              |
 
 ## Text indexes
 
@@ -6269,7 +6524,7 @@ bucket was exhausted.
 | Unsupported values       | `null` and non-string values are rejected                                                                                                                     |
 | Analyzer config          | Preset analyzers: `standard`, `standard_stem_en`, `whitespace_lowercase`                                                                                      |
 | Term positions           | Optional                                                                                                                                                      |
-| Result count              | Effective `k` is capped at 800. Traversal-scoped text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
+| Result count              | Effective `k` is capped at 800. [Prefiltered](/database/helix-db/query-guides/prefiltering#result-limits) text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
 | Tenant partitioning      | Optional. Tenant-partitioned text indexes currently require the partition property name to be `tenant_id`, and tenant-scoped searches require a tenant value. |
 
 ## Secondary indexes
@@ -6294,7 +6549,8 @@ bucket was exhausted.
 
 | Limit | Value |
 | --- | --- |
-| Activation | Asynchronous and atomic after scan, catch-up, and validation |
+| Activation | Asynchronous and atomic after scan, secondary-index catch-up, and validation |
+| Vector and text publication | Asynchronous. Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work, and one write stages at most 8 MiB for one index; see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure) |
 | Progress | Monotonic entity/byte/operation counters; no percentage or total-work estimate |
 | Controls | Poll all operations; retry blocked operations; abort eligible constructing builds |
 | Memory reporting | Cache and batch budgets do not constitute a hard process-RSS cap |
@@ -6384,7 +6640,7 @@ database engine behind it use the same envelope; see the
 |  400 | `invalid_request`        | A request-specific diagnostic                                               | A required header or request option is missing, malformed, or invalid.    | Fix the request.                                                         |
 |  400 | `tenant_id_required`     | `x-helix-tenant-id or x-helix-database-id is required in GA mode`           | A Cloud request did not identify its database.                            | Use the correct database-scoped Cloud endpoint and configuration.        |
 |  400 | `tenant_id_not_allowed`  | `x-helix-tenant-id and x-helix-database-id are not allowed in cluster mode` | A tenant/database header was sent to an endpoint that does not accept it. | Remove the header or use the correct endpoint.                           |
-|  400 | `active_text_mutation_limit_exceeded` | `db error: Active text mutation exceeds <resource>: observed <usage>, limit <bound>. This is a hard mutation-batch limit; reduce the number or size of mutations.` | A mutation exceeds a hard engine admission limit; graph changes are not committed. | Reduce the mutation before retrying; see [Limits](/database/helix-cloud/operate/limits#active-text-mutation-admission). |
+|  400 | `active_text_mutation_limit_exceeded` | `db error: Active text mutation exceeds <resource>: observed <usage>, limit <bound>. This is a hard per-document limit; shorten the indexed text.` | One indexed text document exceeds a hard per-document admission limit; graph changes are not committed. | Shorten the text before retrying; see [Limits](/database/helix-cloud/operate/limits#active-text-mutation-admission). |
 |  401 | `unauthorized`           | `unauthorized`                                                              | The supplied API key is unknown or no longer active.                      | Refresh or replace the key.                                              |
 |  402 | `tenant_disabled`        | `tenant query processing is disabled because credit is exhausted`           | Query processing is disabled because the tenant has exhausted its credit. | Resolve the account state before retrying.                               |
 |  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation.                       | Use a key with the required permission.                                  |
@@ -13138,8 +13394,12 @@ ACID transaction per request:
   membership, ranking, then top k, so a result outside the candidate set is never
   returned.
 - **Freshness.** On Helix Cloud, readers see new commits after a snapshot refresh;
-  writer-only reads give read-after-write. A newly created index backfills existing
-  data asynchronously and becomes visible only after validation and atomic activation.
+  writer-only reads give read-after-write. An index worker publishes vector and text
+  index updates shortly after each write commits, and searches include committed but
+  unpublished writes unless a read opts into
+  [eventual search consistency](/database/helix-db/query-guides/search-consistency).
+  A newly created index backfills existing data asynchronously and becomes visible
+  only after validation and atomic activation.
 - **Application-side pieces.** The application computes embeddings and fuses vector
   and BM25 results. HelixDB has no built-in rank fusion or reranking.
 

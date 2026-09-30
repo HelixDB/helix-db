@@ -116,7 +116,8 @@ being collapsed or rejected.
 
 For gRPC, the status message remains human-readable and the same static code is
 attached as ASCII metadata under `helix-error-code`. Active-text mutation admission
-failures use `InvalidArgument`, matching their HTTP 400 classification.
+failures use `InvalidArgument`, matching their HTTP 400 classification, and
+`index_backpressure` uses `ResourceExhausted`, matching HTTP 429.
 
 Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
 fields named `error` and `msg`; generated Python, Node, and Go bindings pass
@@ -132,6 +133,9 @@ code from exception text.
   idempotency key.
 - `transaction_conflict` is the only HTTP conflict classification and is
   normally retryable with bounded backoff.
+- `index_backpressure` (HTTP 429) rejects the whole request before it takes
+  effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
+  see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - Availability and lifecycle failures should be retried only after the named
   condition changes. Validation and planning failures require a corrected
   request or schema/index configuration.
@@ -211,24 +215,25 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 ### Active-text mutation limits
 
 `active_text_mutation_limit_exceeded` reports a deterministic rejection before the
-write transaction commits. The request's graph changes are not committed. The error
-is caller-correctable and uses HTTP 400, gRPC `InvalidArgument`, or the embedded
-`InvalidRequest` binding category. It is not a transient rate limit or an unknown
-write outcome; retrying the identical mutation does not resolve the limit.
+write transaction commits: one indexed text document is too large. The request's graph
+changes are not committed. The error is caller-correctable and uses HTTP 400, gRPC
+`InvalidArgument`, or the embedded `InvalidRequest` binding category. It is not a
+transient rate limit or an unknown write outcome; retrying the identical mutation does
+not resolve the limit.
 
 For example, the HTTP query service returns:
 
 ```json
 {
   "error": "active_text_mutation_limit_exceeded",
-  "msg": "db error: Active text mutation exceeds entities: observed 513, limit 512. This is a hard mutation-batch limit; reduce the number or size of mutations."
+  "msg": "db error: Active text mutation exceeds output_operations: observed 20006, limit 16384. This is a hard per-document limit; shorten the indexed text."
 }
 ```
 
 Branch on `error`, not the wording in `msg`. The diagnostic identifies the resource,
-observed usage and configured limit. See [active-text admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission)
-for the default bounds and how entities are counted. The same engine policy applies
-to standalone databases; embedded configurations may override it.
+the document's usage and its allowance. See [active-text admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission)
+for the default allowances. The same engine policy applies to standalone databases;
+embedded configurations may override it.
 
 ### Index lifecycle
 
@@ -236,7 +241,8 @@ to standalone databases; embedded configurations may override it.
 | --- | --- | --- | --- | --- |
 | `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
 | `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
-| `active_text_mutation_limit_exceeded` | An active text mutation exceeded a hard admission limit. | 400 | Reduce the mutation before retrying | Yes |
+| `active_text_mutation_limit_exceeded` | One indexed text document exceeded a hard per-document admission limit. | 400 | Shorten the text before retrying | Yes |
+| `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry. | 400 | Split the write before retrying | Yes |
 | `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
 | `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |
@@ -258,6 +264,7 @@ to standalone databases; embedded configurations may override it.
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
+| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes. | 429 | Yes, bounded backoff | No request change required |
 | `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
 | `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
 | `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |

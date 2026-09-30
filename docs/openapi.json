@@ -404,7 +404,7 @@
         }
       },
       "RateLimited": {
-        "description": "The Helix Cloud gateway rate limit was exceeded, or the database rejected a request with `index_backpressure`: a write because a vector or text index already retains its maximum unpublished work, or a strong search whose answer lies behind more than 800 unpublished changes (eventual searches are never rejected this way). Backpressure rejects the whole request (writes before commit) and is marked `retryable`.",
+        "description": "The Helix Cloud gateway rate limit was exceeded, or the database rejected a request with `index_backpressure`: a write because a vector or text index already retains its maximum unpublished work, or a whole-index strong search whose answer lies behind more than 800 unpublished changes (eventual and prefiltered searches are never rejected this way). Backpressure rejects the whole request (writes before commit) and is marked `retryable`.",
         "headers": {
           "Retry-After": {
             "description": "Delay before retrying, when supplied by the gateway.",
