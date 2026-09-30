@@ -72,7 +72,8 @@ impl ServerConfig {
     /// always runs a hybrid disk cache, rooted at `HELIX_DISK_CACHE_DIR` or
     /// else `/var/cache/helix`; with `HELIX_DATA_DIR` the cache is opt-in
     /// through `HELIX_DISK_CACHE_DIR`, and memory storage rejects every cache
-    /// variable.
+    /// variable. Without `HELIX_DISK_CACHE_BYTES`, the default disk budget
+    /// must fit the cache's filesystem.
     pub fn from_env() -> Result<Self, ServerConfigError> {
         Self::from_lookup(|name| env::var_os(name))
     }
@@ -468,16 +469,51 @@ impl HybridCache {
 
     /// Reads the cache budgets, defaulting each one that is unset, and
     /// validates a cache rooted at `root`. The budgets are parsed before
-    /// `root` is touched.
+    /// `root` is touched. A default disk budget must also fit the cache's
+    /// filesystem ([`Self::fit_default_budget`]); a configured one only
+    /// warns when it does not ([`Self::warn_on_disk_shortfall`]).
     fn from_lookup(
         lookup: &mut impl FnMut(&str) -> Option<OsString>,
         root: OsString,
     ) -> Result<Self, ServerConfigError> {
         let memory_bytes = parse_cache_bytes(lookup, "HELIX_DISK_CACHE_MEMORY_BYTES")?
             .unwrap_or(DEFAULT_CACHE_MEMORY_BYTES);
-        let disk_bytes = parse_cache_bytes(lookup, "HELIX_DISK_CACHE_BYTES")?
-            .unwrap_or(DEFAULT_CACHE_DISK_BYTES);
-        Self::try_new(PathBuf::from(root), memory_bytes, disk_bytes)
+        match parse_cache_bytes(lookup, "HELIX_DISK_CACHE_BYTES")? {
+            Some(disk_bytes) => Self::try_new(PathBuf::from(root), memory_bytes, disk_bytes),
+            None => Self::try_new(PathBuf::from(root), memory_bytes, DEFAULT_CACHE_DISK_BYTES)
+                .and_then(Self::fit_default_budget),
+        }
+    }
+
+    /// Keeps a default disk budget only where the cache's filesystem has room
+    /// for it: its free space plus what the cache already occupies (see
+    /// [`Self::disk_shortfall`]). Nobody sized the default for this machine,
+    /// and without a volume the cache shares the container runtime's
+    /// filesystem, so a default that does not fit fails startup instead of
+    /// filling that filesystem. Only Unix measures; elsewhere the default is
+    /// kept.
+    ///
+    /// When free space alone falls short this walks the cache's files, which
+    /// at the default budget number in the tens of thousands at most.
+    fn fit_default_budget(self) -> Result<Self, ServerConfigError> {
+        #[cfg(unix)]
+        match self.disk_shortfall() {
+            Ok(None) => {}
+            Ok(Some(shortfall)) => {
+                return Err(ServerConfigError::DefaultCacheDiskTooLarge {
+                    path: self.root,
+                    budget: self.disk_bytes,
+                    shortfall,
+                });
+            }
+            Err(source) => {
+                return Err(ServerConfigError::DefaultCacheDiskUnmeasured {
+                    path: self.root,
+                    source,
+                });
+            }
+        }
+        Ok(self)
     }
 
     /// Cache root directory.
@@ -726,12 +762,12 @@ pub enum ServerConfigError {
     #[error("HELIX_DISK_CACHE_DIR must not be empty")]
     EmptyCacheDirectory,
     /// The cache directory or one of its tier subdirectories could not be
-    /// created or written. With S3 storage the directory defaults to
-    /// `/var/cache/helix`, so the message names the variable to set.
+    /// created or written. S3 storage uses `/var/cache/helix` unless
+    /// `HELIX_DISK_CACHE_DIR` is set, which another user or a read-only root
+    /// filesystem cannot write, so the message gives both remedies.
     #[error(
-        "HELIX_DISK_CACHE_DIR: `{}` is not a writable directory; set HELIX_DISK_CACHE_DIR to one the server can write (S3 storage defaults it to {default})",
-        .path.display(),
-        default = DEFAULT_S3_CACHE_DIR
+        "HELIX_DISK_CACHE_DIR: `{}` is not a writable directory; mount a writable volume there or set HELIX_DISK_CACHE_DIR to a writable directory",
+        .path.display()
     )]
     CacheDirectory {
         /// Unwritable directory.
@@ -756,6 +792,32 @@ pub enum ServerConfigError {
     CacheDirectoryInUse {
         /// Locked cache directory.
         path: PathBuf,
+    },
+    /// `HELIX_DISK_CACHE_BYTES` is unset and its default exceeds the room the
+    /// cache's filesystem leaves the cache.
+    #[error(
+        "HELIX_DISK_CACHE_BYTES is unset and its {budget}-byte default exceeds the space free for the disk cache at `{}` by {shortfall} bytes; set HELIX_DISK_CACHE_BYTES to a budget that fits, or mount a larger volume there",
+        .path.display()
+    )]
+    DefaultCacheDiskTooLarge {
+        /// Cache directory.
+        path: PathBuf,
+        /// Default disk budget.
+        budget: usize,
+        /// Bytes by which the budget exceeds the room.
+        shortfall: u64,
+    },
+    /// `HELIX_DISK_CACHE_BYTES` is unset and the room for its default could
+    /// not be measured.
+    #[error(
+        "HELIX_DISK_CACHE_BYTES is unset and the space free for its default at `{}` could not be measured; set HELIX_DISK_CACHE_BYTES",
+        .path.display()
+    )]
+    DefaultCacheDiskUnmeasured {
+        /// Cache directory.
+        path: PathBuf,
+        /// Filesystem error.
+        source: std::io::Error,
     },
     /// The DB crate rejected a derived cache tier.
     #[error(
@@ -907,6 +969,10 @@ mod tests {
             ("AWS_ENDPOINT_URL_S3", "http://seaweedfs:8333".into()),
             ("AWS_ALLOW_HTTP", "TRUE".into()),
             ("HELIX_DISK_CACHE_DIR", cache_root.clone().into_os_string()),
+            (
+                "HELIX_DISK_CACHE_BYTES",
+                MIN_CACHE_DISK_BYTES.to_string().into(),
+            ),
         ]);
         let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
         assert_eq!(
@@ -920,7 +986,7 @@ mod tests {
                     HybridCache::try_new(
                         &cache_root,
                         DEFAULT_CACHE_MEMORY_BYTES,
-                        DEFAULT_CACHE_DISK_BYTES
+                        NonZeroUsize::new(MIN_CACHE_DISK_BYTES).unwrap()
                     )
                     .unwrap()
                 ),
@@ -930,6 +996,7 @@ mod tests {
         let default_region = ServerConfig::from_lookup(|name| match name {
             "S3_BUCKET" => Some("launch-bucket".into()),
             "HELIX_DISK_CACHE_DIR" => Some(cache_root.clone().into_os_string()),
+            "HELIX_DISK_CACHE_BYTES" => Some(MIN_CACHE_DISK_BYTES.to_string().into()),
             _ => None,
         })
         .unwrap();
@@ -982,6 +1049,8 @@ mod tests {
         ));
     }
 
+    /// The default disk budget is set explicitly, so the split it documents
+    /// does not depend on the free space the default itself must fit.
     #[test]
     fn cache_directory_enables_hybrid_tiers_with_documented_defaults() {
         let directory = tempfile::tempdir().unwrap();
@@ -989,6 +1058,10 @@ mod tests {
         let values = BTreeMap::from([
             ("S3_BUCKET", OsString::from("bucket")),
             ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+            (
+                "HELIX_DISK_CACHE_BYTES",
+                DEFAULT_CACHE_DISK_BYTES.to_string().into(),
+            ),
         ]);
         let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
 
@@ -1246,7 +1319,7 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "HELIX_DISK_CACHE_DIR: `{}` is not a writable directory; set HELIX_DISK_CACHE_DIR to one the server can write (S3 storage defaults it to /var/cache/helix)",
+                    "HELIX_DISK_CACHE_DIR: `{}` is not a writable directory; mount a writable volume there or set HELIX_DISK_CACHE_DIR to a writable directory",
                     root.display()
                 )
             );
@@ -1462,6 +1535,110 @@ mod tests {
         );
     }
 
+    /// A default budget fails startup where the cache's filesystem cannot
+    /// hold it, and the message names the variable that sets another.
+    #[cfg(unix)]
+    #[test]
+    fn default_disk_budget_must_fit_the_cache_filesystem() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
+        let mut cache = HybridCache::try_new(
+            &root,
+            NonZeroUsize::new(MIB).unwrap(),
+            NonZeroUsize::new(MIN_CACHE_DISK_BYTES).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.clone().fit_default_budget().unwrap(),
+            cache,
+            "the minimum budget fits the test filesystem"
+        );
+
+        cache.disk_bytes = usize::MAX;
+        let error = cache.clone().fit_default_budget().unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ServerConfigError::DefaultCacheDiskTooLarge { path, budget: usize::MAX, shortfall }
+                    if *path == root && *shortfall > 0
+            ),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!(
+                "HELIX_DISK_CACHE_BYTES is unset and its {}-byte default exceeds the space free for the disk cache at `{}` by ",
+                usize::MAX,
+                root.display()
+            )) && message.ends_with(
+                " bytes; set HELIX_DISK_CACHE_BYTES to a budget that fits, or mount a larger volume there"
+            ),
+            "{message}"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+        let error = cache.fit_default_budget().unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ServerConfigError::DefaultCacheDiskUnmeasured { path, source }
+                    if *path == root && source.kind() == std::io::ErrorKind::NotFound
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "HELIX_DISK_CACHE_BYTES is unset and the space free for its default at `{}` could not be measured; set HELIX_DISK_CACHE_BYTES",
+                root.display()
+            )
+        );
+    }
+
+    /// An unset `HELIX_DISK_CACHE_BYTES` takes the default where it fits and
+    /// fails startup where it does not, while a set budget is kept whatever
+    /// the free space. Which outcome the default gets depends on the test
+    /// filesystem, so both are asserted without branching on it.
+    #[cfg(unix)]
+    #[test]
+    fn unset_disk_budget_defaults_only_where_it_fits() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
+        let default =
+            HybridCache::try_new(&root, DEFAULT_CACHE_MEMORY_BYTES, DEFAULT_CACHE_DISK_BYTES)
+                .unwrap();
+        let fits = default.disk_shortfall().unwrap().is_none();
+        let values = BTreeMap::from([
+            ("S3_BUCKET", OsString::from("bucket")),
+            ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+        ]);
+        let unset = ServerConfig::from_lookup(|name| values.get(name).cloned());
+        assert_eq!(
+            unset.as_ref().ok().and_then(ServerConfig::hybrid_cache),
+            fits.then_some(&default)
+        );
+        let too_large = ServerConfigError::DefaultCacheDiskTooLarge {
+            path: root.clone(),
+            budget: DEFAULT_CACHE_DISK_BYTES.get(),
+            shortfall: 1,
+        };
+        assert_eq!(
+            unset.as_ref().err().map(std::mem::discriminant),
+            (!fits).then_some(std::mem::discriminant(&too_large))
+        );
+
+        // The 1 TiB maximum exceeds most test filesystems, yet only warns.
+        let set = BTreeMap::from([
+            ("S3_BUCKET", OsString::from("bucket")),
+            ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+            (
+                "HELIX_DISK_CACHE_BYTES",
+                MAX_CACHE_DISK_BYTES.to_string().into(),
+            ),
+        ]);
+        assert!(ServerConfig::from_lookup(|name| set.get(name).cloned()).is_ok());
+    }
+
     #[test]
     fn disk_storage_rejects_cache_sizes_without_a_cache_directory() {
         for variable in ["HELIX_DISK_CACHE_MEMORY_BYTES", "HELIX_DISK_CACHE_BYTES"] {
@@ -1543,7 +1720,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; set HELIX_DISK_CACHE_DIR to one the server can write (S3 storage defaults it to /var/cache/helix)"
+            "HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; mount a writable volume there or set HELIX_DISK_CACHE_DIR to a writable directory"
         );
     }
 
@@ -1579,6 +1756,8 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let latin1 = || OsString::from_vec(b"caf\xe9".to_vec());
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
         for (storage, variable) in [
             ("HELIX_DATA_DIR", "HELIX_DISK_CACHE_BYTES"),
             ("HELIX_DATA_DIR", "HELIX_DISK_CACHE_MEMORY_BYTES"),
@@ -1589,10 +1768,7 @@ mod tests {
         ] {
             let values = BTreeMap::from([
                 (storage, OsString::from("value")),
-                (
-                    "HELIX_DISK_CACHE_DIR",
-                    std::env::temp_dir().into_os_string(),
-                ),
+                ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
                 (variable, latin1()),
             ]);
             let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
@@ -1601,6 +1777,8 @@ mod tests {
                 "{variable} produced {error:?}"
             );
             assert_eq!(error.to_string(), format!("{variable} is not valid UTF-8"));
+            // Every other variable is read before the cache directory.
+            assert!(!root.exists(), "{variable} created the cache directory");
         }
 
         let memory = BTreeMap::from([("HELIX_DISK_CACHE_DIR", latin1())]);
@@ -1625,6 +1803,10 @@ mod tests {
         let values = BTreeMap::from([
             ("S3_BUCKET", OsString::from("bucket")),
             ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+            (
+                "HELIX_DISK_CACHE_BYTES",
+                MIN_CACHE_DISK_BYTES.to_string().into(),
+            ),
         ]);
         let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
         assert!(matches!(
