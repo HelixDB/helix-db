@@ -66,7 +66,14 @@ impl ExecutionContext<'_> {
                 .await?,
                 true,
             ),
-            exec::ExecNodeCursor::Bitmap { bitmap } => (self.node_bitmap(bitmap).await?, false),
+            exec::ExecNodeCursor::Bitmap { bitmap } => (
+                self.node_bitmap(
+                    bitmap,
+                    crate::execution::interpreter::access::PARALLEL_INDEX_READS,
+                )
+                .await?,
+                false,
+            ),
             exec::ExecNodeCursor::Unique {
                 lookup,
                 verification,

@@ -17,6 +17,7 @@ pub(in crate::rules) use self::filter::{
     AccessFilterRewrite,
 };
 pub(crate) use self::filter::{missing_index_candidates, CandidateIndexKind};
+pub(in crate::rules) use self::pipeline::membership_rewrite;
 pub(in crate::rules) use self::sets::{
     access_path_has_contradiction_candidate as access_path_has_contradiction_proof_candidate,
     access_path_has_equality_range_intersection_candidate as access_path_has_equality_range_intersection_proof_candidate,

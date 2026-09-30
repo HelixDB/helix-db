@@ -16,7 +16,7 @@ use super::AccessFilterRewrite;
 use crate::{analysis, catalog, context, ir, logical};
 
 pub(in crate::rules) use label_domain::has_candidate as label_domain_has_candidate;
-pub(in crate::rules) use membership::{index_membership_filter, MembershipFilterRewrite};
+pub(in crate::rules) use membership::index_membership_filter;
 
 pub(in crate::rules) fn index_access_filter(
     filter: &logical::AccessFilter,

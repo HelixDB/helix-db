@@ -9,10 +9,10 @@ mod profile;
 mod units;
 mod vector;
 
-pub use profile::{StorageCostProfile, StorageCostProfileOverrides};
+pub use profile::{MembershipLabelDomain, StorageCostProfile, StorageCostProfileOverrides};
 pub use units::{
-    ByteEstimate, EstimatedRows, EstimatedRowsAtMost, LatencyEstimate, MembershipStream,
-    RecordBatchRows, Selectivity, UniqueEqualityRows, RECORD_BATCH_ROWS,
+    ByteEstimate, EstimatedRows, EstimatedRowsAtMost, LatencyEstimate, Selectivity,
+    UniqueEqualityRows, MAX_PARALLEL_KV_READS, RECORD_BATCH_ROWS,
 };
 pub use vector::CostVector;
 

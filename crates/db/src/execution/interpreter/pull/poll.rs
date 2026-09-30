@@ -543,8 +543,8 @@ fn step<'b, 'a: 'b>(
                 let keep = match Box::pin(membership.decide(ctx, plan, row)).await? {
                     stream::RowDecision::Keep => true,
                     stream::RowDecision::Drop => false,
-                    stream::RowDecision::Evaluate => {
-                        Box::pin(ctx.eval_predicate_plan(row, &plan.predicate)).await?
+                    stream::RowDecision::Evaluate(predicate) => {
+                        Box::pin(ctx.eval_predicate_plan(row, predicate)).await?
                     }
                 };
                 if keep {

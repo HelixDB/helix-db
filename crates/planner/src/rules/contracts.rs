@@ -15,7 +15,7 @@ pub(crate) use self::applicability::{
     access_path_has_contradiction_candidate, access_path_has_equality_range_intersection_candidate,
     access_path_has_equality_range_union_candidate, access_path_has_range_intersection_candidate,
     access_path_has_set_canonicalization_candidate, access_path_has_set_subsumption_candidate,
-    root_branch_has_empty_input, root_repeat_has_empty_input,
+    root_branch_has_empty_input, root_repeat_has_empty_input, STREAM_MEMBERSHIP_KINDS,
 };
 pub use self::{
     applicability::{

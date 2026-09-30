@@ -102,6 +102,11 @@ impl optimizer::OptimizerRule for AccessFilterImplementationRule {
         let logical::LogicalExpr::AccessFilter(filter) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
+            .is_some()
+        {
+            return optimizer::RuleResult::NotApplicable;
+        }
         if access_path_is_direct_empty(filter.access()) {
             return optimizer::RuleResult::NotApplicable;
         }

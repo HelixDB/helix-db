@@ -765,6 +765,7 @@ mod tests {
                             .unwrap(),
                             ir::PredicatePlan::new(Predicate::eq_param("status", "status"))
                                 .unwrap(),
+                            None,
                         )
                         .unwrap(),
                     )),

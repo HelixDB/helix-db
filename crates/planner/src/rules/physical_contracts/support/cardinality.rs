@@ -47,8 +47,6 @@ pub(in crate::rules) fn estimated_pipeline_rows(
 /// hold. Every other operator, including an expansion, keeps its input
 /// estimate unless it proves a tighter bound. An expansion's fan-out is
 /// unknown without statistics, so no operator is priced on a guessed fan-out.
-/// Index membership prices an unbounded stream through
-/// `StorageCostProfile::index_membership_filter` instead.
 pub(in crate::rules) fn estimated_rows_after_op(
     op: &logical::StreamPipelineOp,
     delivered: &properties::DeliveredProperties,
@@ -58,7 +56,8 @@ pub(in crate::rules) fn estimated_rows_after_op(
 ) -> cost::EstimatedRows {
     let fallback = match op {
         logical::StreamPipelineOp::IndexMembership { plan } => {
-            rows.min(super::pipeline::membership_set_contract(plan, storage, stats).estimated_rows)
+            let (_, _, matches) = super::pipeline::membership_set_cost(plan, storage, stats);
+            rows.min(matches)
         }
         logical::StreamPipelineOp::Expand { .. }
         | logical::StreamPipelineOp::Filter { .. }

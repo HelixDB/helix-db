@@ -138,29 +138,14 @@ impl StorageCostProfile {
     /// assert_eq!(cost.latency.as_micros(), 120);
     /// ```
     pub fn residual_filter(&self, predicate: &Predicate, rows: EstimatedRows) -> CostVector {
-        self.residual_filter_less_leaves(predicate, rows, 0)
-    }
-
-    /// [`Self::residual_filter`] less `credited` predicate-leaf evaluations,
-    /// never below the blob reads.
-    pub(super) fn residual_filter_less_leaves(
-        &self,
-        predicate: &Predicate,
-        rows: EstimatedRows,
-        credited: u64,
-    ) -> CostVector {
         let mut evaluation = Evaluation::default();
         evaluation.predicate(predicate);
         self.authoritative_verification(EstimatedRows::rows(
             rows.as_rows().saturating_mul(evaluation.reads.len() as u64),
         ))
-        .serial(
-            self.predicate_eval(EstimatedRows::rows(
-                rows.as_rows()
-                    .saturating_mul(evaluation.atoms)
-                    .saturating_sub(credited),
-            )),
-        )
+        .serial(self.predicate_eval(EstimatedRows::rows(
+            rows.as_rows().saturating_mul(evaluation.atoms),
+        )))
     }
 }
 

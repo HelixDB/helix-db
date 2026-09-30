@@ -76,17 +76,7 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
             RuleApplicability::access_pipeline_head_only(logical::StreamPipelineOpKind::Filter)
         }
         KnownRuleId::AccessPipelineMembershipFilter => {
-            RuleApplicability::any_of(ir::AtLeast::<_, 1>::from_one_and_rest(
-                Kind::AccessPipeline,
-                vec![
-                    Kind::RootPipeline,
-                    Kind::StreamReserved,
-                    Kind::StreamCardinality,
-                    Kind::StreamProject,
-                    Kind::StreamAggregate,
-                    Kind::StreamVariableWrite,
-                ],
-            ))
+            RuleApplicability::stream_membership_candidate()
         }
         KnownRuleId::AccessPipelineOrder => {
             RuleApplicability::access_pipeline_head_any_of(ir::AtLeast::<_, 1>::from_one_and_rest(
@@ -153,6 +143,7 @@ mod tests {
                 KnownRuleId::AccessWindow,
                 KnownRuleId::AccessFilterSimplification,
                 KnownRuleId::AccessDistinct,
+                KnownRuleId::AccessPipelineMembershipFilter,
                 KnownRuleId::AccessPipelineSimplification,
                 KnownRuleId::RootControlFlowEmpty,
             ]

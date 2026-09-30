@@ -4,23 +4,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::{exec, ir};
 
-/// Interpreter contract for a node secondary-index membership filter.
+/// Executable set of an index membership, lowered from
+/// [`ir::NodeMembershipSet`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "every executable membership plan is already boxed in its operator"
+)]
+pub enum ExecNodeMembershipSet {
+    /// Nodes of `label` satisfying the decided conjuncts, read from secondary
+    /// indexes.
+    Index {
+        /// Secondary-ID set of `label` nodes.
+        set: exec::ExecNodeSecondarySetPlan,
+        /// Node label shared by every set leaf.
+        label: ir::NonEmptyString,
+        /// Decision for nodes outside `label`.
+        outside_label: ir::NodeMembershipOutsideLabel,
+    },
+    /// Nodes carrying any listed label, read from `$label` bitmaps; every
+    /// other node fails the decided conjuncts.
+    Labels(ir::AtLeast<ir::NonEmptyString, 1>),
+}
+
+/// Interpreter contract for a node index membership filter.
 ///
-/// The interpreter adapts to the stream it sees:
-///
-/// * an execution with at most
-///   [`cost::RECORD_BATCH_ROWS`](crate::cost::RECORD_BATCH_ROWS) node rows
-///   evaluates `predicate` for every row and reads no set;
-/// * a pull cursor does this for its first batch;
-/// * past that, `set` is resolved once through the request-authorized Active
-///   catalog and reused for the rest of the request.
-///
-/// With `set` resolved, rows are retained in place:
-///
-/// * a node in `set` is kept without reading its record;
-/// * a node carrying `label` outside `set` is dropped without reading it;
-/// * other nodes follow `outside_label`;
-/// * edge and element-free rows evaluate `predicate`.
+/// * The first node row that needs deciding resolves the set once through
+///   the request-authorized Active catalog, reusing the set of an equal plan
+///   already resolved in the request. Streams without node rows never
+///   resolve it.
+/// * A node in the set evaluates `residual` only, and is kept without
+///   reading its record when there is none.
+/// * A `label` node outside an [`ExecNodeMembershipSet::Index`] set is
+///   dropped without reading its record.
+/// * Other nodes evaluate `predicate` under the
+///   [`Evaluate`](ir::NodeMembershipOutsideLabel::Evaluate) policy, and are
+///   dropped under [`Reject`](ir::NodeMembershipOutsideLabel::Reject) or for
+///   an [`ExecNodeMembershipSet::Labels`] set.
+/// * Edge and element-free rows evaluate `predicate`.
 ///
 /// When the set cannot be served from indexes alone, including runtime
 /// parameters that bind null or exceed their bound, a range scan, and an
@@ -31,12 +53,20 @@ use crate::{exec, ir};
 /// use helix_ast::expr::Predicate;
 /// use helix_ast::value::PropertyValue;
 /// use helix_planner::catalog::{NodeEqualityIndexMeta, ScopedPropertyKey};
-/// use helix_planner::exec::{ExecNodeIndexMembershipPlan, ExecNodeSecondarySetPlan};
+/// use helix_planner::exec::{
+///     ExecNodeIndexMembershipPlan, ExecNodeMembershipSet, ExecNodeSecondarySetPlan,
+/// };
 /// use helix_planner::ir::{
 ///     IndexValue, NodeAccessPlan, NodeAccessSourcePlan, NodeIndexMembershipPlan,
 ///     NodeMembershipOutsideLabel, PredicatePlan, SecondaryIndexLiteral,
 /// };
 ///
+/// let title = PredicatePlan::new(Predicate::contains("title", "x")).unwrap();
+/// let predicate = PredicatePlan::new(Predicate::and(vec![
+///     Predicate::eq("kind", "B"),
+///     title.predicate().clone(),
+/// ]))
+/// .unwrap();
 /// let plan = NodeIndexMembershipPlan::new(
 ///     NodeAccessSourcePlan::new(NodeAccessPlan::EqualityIndex {
 ///         index: NodeEqualityIndexMeta::try_new("item_kind").unwrap(),
@@ -44,35 +74,68 @@ use crate::{exec, ir};
 ///         value: IndexValue::Literal(SecondaryIndexLiteral::new(PropertyValue::from("B")).unwrap()),
 ///     })
 ///     .unwrap(),
-///     PredicatePlan::new(Predicate::eq("kind", "B")).unwrap(),
+///     predicate.clone(),
+///     Some(title.clone()),
 /// )
 /// .unwrap();
 /// let exec = ExecNodeIndexMembershipPlan::from(&plan);
 ///
-/// assert!(matches!(exec.set, ExecNodeSecondarySetPlan::Bitmap(_)));
-/// assert_eq!(exec.label.as_ref(), "Item");
-/// assert_eq!(exec.outside_label, NodeMembershipOutsideLabel::Evaluate);
+/// let ExecNodeMembershipSet::Index { set, label, outside_label } = &exec.set else {
+///     panic!("an equality set lowers to an index set");
+/// };
+/// assert!(matches!(set, ExecNodeSecondarySetPlan::Bitmap(_)));
+/// assert_eq!(label.as_ref(), "Item");
+/// assert_eq!(*outside_label, NodeMembershipOutsideLabel::Evaluate);
+/// assert_eq!(exec.predicate, predicate);
+/// assert_eq!(exec.residual, Some(title.clone()));
+///
+/// let labels = NodeIndexMembershipPlan::labels(
+///     PredicatePlan::new(Predicate::and(vec![
+///         Predicate::eq("$label", "Item"),
+///         title.predicate().clone(),
+///     ]))
+///     .unwrap(),
+///     Some(title.clone()),
+/// )
+/// .unwrap();
+/// let exec = ExecNodeIndexMembershipPlan::from(&labels);
+/// assert!(matches!(
+///     &exec.set,
+///     ExecNodeMembershipSet::Labels(labels) if labels.as_ref()[0].as_ref() == "Item"
+/// ));
+/// assert_eq!(exec.residual, Some(title));
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecNodeIndexMembershipPlan {
-    /// Exact secondary-ID set of label nodes satisfying `predicate`.
-    pub set: exec::ExecNodeSecondarySetPlan,
-    /// Node label shared by every set leaf.
-    pub label: ir::NonEmptyString,
-    /// Predicate evaluated for rows the set cannot decide.
+    /// Set of nodes satisfying the decided conjuncts.
+    pub set: ExecNodeMembershipSet,
+    /// Whole filter predicate, evaluated for rows the set cannot decide.
     pub predicate: ir::PredicatePlan,
-    /// Decision for node rows outside `label`.
-    pub outside_label: ir::NodeMembershipOutsideLabel,
+    /// Conjuncts of `predicate` that nodes in `set` still evaluate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual: Option<ir::PredicatePlan>,
 }
 
 impl From<&ir::NodeIndexMembershipPlan> for ExecNodeIndexMembershipPlan {
     fn from(plan: &ir::NodeIndexMembershipPlan) -> Self {
         Self {
-            set: exec::node_secondary_set(plan.set().as_ref())
-                .expect("validated membership sets contain only secondary-index leaves"),
-            label: plan.label().clone(),
+            set: match plan.set() {
+                ir::NodeMembershipSet::Index {
+                    set,
+                    label,
+                    outside_label,
+                } => ExecNodeMembershipSet::Index {
+                    set: exec::node_secondary_set(set.as_ref())
+                        .expect("validated membership sets contain only secondary-index leaves"),
+                    label: label.clone(),
+                    outside_label: *outside_label,
+                },
+                ir::NodeMembershipSet::Labels(labels) => {
+                    ExecNodeMembershipSet::Labels(labels.clone())
+                }
+            },
             predicate: plan.predicate().clone(),
-            outside_label: plan.outside_label(),
+            residual: plan.residual().cloned(),
         }
     }
 }

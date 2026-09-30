@@ -101,6 +101,7 @@ fn stream_op(kind: logical::StreamPipelineOpKind) -> logical::StreamPipelineOp {
                             "kind", "kind",
                         ))
                         .unwrap(),
+                        None,
                     )
                     .unwrap(),
                 ),

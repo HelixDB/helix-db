@@ -19,7 +19,7 @@ pub use self::{
     iteration::RangeScanIteration,
     node::{
         NodeAccessPlan, NodeAccessSourcePlan, NodeIndexMembershipError, NodeIndexMembershipPlan,
-        NodeMembershipOutsideLabel,
+        NodeMembershipOutsideLabel, NodeMembershipSet,
     },
 };
 

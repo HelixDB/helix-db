@@ -70,20 +70,20 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
         }
         logical::StreamPipelineOp::IndexMembership { plan } => {
             let upper = delivered.cardinality.upper();
-            let set = membership_set_contract(plan, storage, stats);
+            let (set, label_domain, matches) = membership_set_cost(plan, storage, stats);
             (
                 physical::PhysicalPipelineOp::Stream(physical::PhysicalStreamOp::IndexMembership),
                 with_cardinality(delivered, upper),
                 storage.index_membership_filter(
-                    plan.predicate().as_ref(),
-                    set.secondary_id_cost().unwrap_or(set.cost),
-                    membership_label_domain_cost(
-                        plan.outside_label(),
-                        plan.label(),
-                        stats,
-                        storage,
-                    ),
-                    cost::MembershipStream::new(rows, upper),
+                    set,
+                    label_domain.map(|(read, label_rows)| cost::MembershipLabelDomain {
+                        read,
+                        label_rows,
+                        predicate: plan.predicate().as_ref(),
+                    }),
+                    plan.residual().map(AsRef::as_ref),
+                    rows,
+                    matches,
                 ),
             )
         }
@@ -252,20 +252,74 @@ pub(in crate::rules) fn stream_pipeline_op_contract(
     }
 }
 
-/// Access contract of a membership set, used for its ID cost and row estimate.
-pub(in crate::rules) fn membership_set_contract(
+/// What a membership reads before it probes rows: the set read, the
+/// label-domain bitmap read alongside it with the label's nodes when
+/// outside-label nodes need one, and the rows the set is estimated to hold.
+///
+/// An index set is priced by its secondary-ID reads, exactly like the same
+/// set as a source. A `$label` set reads one bitmap per label concurrently.
+pub(in crate::rules) fn membership_set_cost(
     plan: &ir::NodeIndexMembershipPlan,
     storage: &cost::StorageCostProfile,
     stats: &context::StatsSnapshot,
-) -> super::super::access::AccessPhysicalContract {
-    super::super::access::access_path_contract(
-        &logical::AccessPath::Node(logical::NodeAccessPath::new(plan.set().clone())),
-        storage,
-        stats,
+) -> (
+    cost::CostVector,
+    Option<(cost::CostVector, cost::EstimatedRows)>,
+    cost::EstimatedRows,
+) {
+    match plan.set() {
+        ir::NodeMembershipSet::Index {
+            set,
+            label,
+            outside_label,
+        } => {
+            let contract = super::super::access::access_path_contract(
+                &logical::AccessPath::Node(logical::NodeAccessPath::new(set.clone())),
+                storage,
+                stats,
+            );
+            (
+                contract.secondary_id_cost().unwrap_or(contract.cost),
+                membership_label_domain_cost(*outside_label, label, stats, storage),
+                contract.estimated_rows,
+            )
+        }
+        ir::NodeMembershipSet::Labels(labels) => {
+            let (set, matches) = membership_labels_cost(labels, stats, storage);
+            (set, None, matches)
+        }
+    }
+}
+
+/// Concurrent `$label` bitmap reads of a label membership set, and the nodes
+/// those labels hold.
+pub(in crate::rules) fn membership_labels_cost(
+    labels: &ir::AtLeast<ir::NonEmptyString, 1>,
+    stats: &context::StatsSnapshot,
+    storage: &cost::StorageCostProfile,
+) -> (cost::CostVector, cost::EstimatedRows) {
+    let rows = labels
+        .iter()
+        .map(|label| node_label_rows(label, stats, storage))
+        .collect::<Vec<_>>();
+    (
+        storage.parallel(
+            &rows
+                .iter()
+                .map(|rows| storage.bitmap_equality_lookup(*rows))
+                .collect::<Vec<_>>(),
+            storage.max_parallel_kv_reads,
+        ),
+        cost::EstimatedRows::rows(
+            rows.iter()
+                .map(|rows| rows.as_rows())
+                .fold(0, u64::saturating_add),
+        ),
     )
 }
 
-/// Label bitmap read needed to drop label nodes outside the set.
+/// Label bitmap read needed to drop label nodes outside the set, and the
+/// nodes the label holds.
 ///
 /// Label-scoped predicates reject other labels without the bitmap.
 pub(in crate::rules) fn membership_label_domain_cost(
@@ -273,19 +327,26 @@ pub(in crate::rules) fn membership_label_domain_cost(
     label: &ir::NonEmptyString,
     stats: &context::StatsSnapshot,
     storage: &cost::StorageCostProfile,
-) -> Option<cost::CostVector> {
+) -> Option<(cost::CostVector, cost::EstimatedRows)> {
     match outside_label {
         ir::NodeMembershipOutsideLabel::Reject => None,
-        ir::NodeMembershipOutsideLabel::Evaluate => Some(
-            storage.bitmap_equality_lookup(
-                stats
-                    .node_label_cardinality
-                    .get(label)
-                    .copied()
-                    .map_or(storage.default_unknown_scan_rows, cost::EstimatedRows::rows),
-            ),
-        ),
+        ir::NodeMembershipOutsideLabel::Evaluate => {
+            let rows = node_label_rows(label, stats, storage);
+            Some((storage.bitmap_equality_lookup(rows), rows))
+        }
     }
+}
+
+fn node_label_rows(
+    label: &ir::NonEmptyString,
+    stats: &context::StatsSnapshot,
+    storage: &cost::StorageCostProfile,
+) -> cost::EstimatedRows {
+    stats
+        .node_label_cardinality
+        .get(label)
+        .copied()
+        .map_or(storage.default_unknown_scan_rows, cost::EstimatedRows::rows)
 }
 
 pub(in crate::rules) fn access_pipeline_op(

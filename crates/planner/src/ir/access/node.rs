@@ -12,6 +12,7 @@ use crate::ir;
 
 pub use membership::{
     NodeIndexMembershipError, NodeIndexMembershipPlan, NodeMembershipOutsideLabel,
+    NodeMembershipSet,
 };
 pub use source::NodeAccessSourcePlan;
 

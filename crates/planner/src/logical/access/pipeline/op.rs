@@ -201,6 +201,7 @@ mod tests {
                         })
                         .unwrap(),
                         ir::PredicatePlan::new(Predicate::eq("kind", "B")).unwrap(),
+                        None,
                     )
                     .unwrap(),
                 ),

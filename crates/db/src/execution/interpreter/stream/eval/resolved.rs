@@ -39,22 +39,39 @@ impl<'db> ExecutionContext<'db> {
         Ok(value)
     }
 
-    /// Select rows with the shared validated program. Index membership may
+    /// Keep the rows whose decision holds, in order. Index membership may
     /// already decide a row, and the caller may have prefetched the batch's
     /// element records into `resolver`.
     pub(in crate::execution::interpreter::stream) async fn select_native_rows(
         &self,
-        rows: Vec<(super::super::RowDecision, ExecutionRow)>,
-        predicate: &ir::PredicatePlan,
-        resolver: RowValueResolver<'_, 'db>,
+        rows: Vec<(super::super::RowDecision<'_>, ExecutionRow)>,
+        mut resolver: RowValueResolver<'_, 'db>,
     ) -> Result<Vec<ExecutionRow>> {
-        let mut evaluator = NativeSelection {
-            context: self,
-            resolver,
-            output: Vec::new(),
-        };
-        Box::pin(predicate.program().select(rows, &mut evaluator)).await?;
-        Ok(evaluator.output)
+        use super::super::RowDecision;
+        let mut kept = Vec::new();
+        for (decision, row) in rows {
+            self.check_execution_deadline()?;
+            let keep = match decision {
+                RowDecision::Keep => true,
+                RowDecision::Drop => false,
+                // The root is awaited in place; only nested operands box.
+                RowDecision::Evaluate(predicate) => {
+                    let DbPropertyValue::Bool(value) = self
+                        .eval_resolved(&row, predicate.resolved(), &mut resolver)
+                        .await?
+                    else {
+                        return Err(HelixDbError::InvariantViolation(
+                            "native predicate resolved to a non-boolean".into(),
+                        ));
+                    };
+                    value
+                }
+            };
+            if keep {
+                kept.push(row);
+            }
+        }
+        Ok(kept)
     }
 
     pub(in crate::execution::interpreter::stream) async fn eval_resolved(
@@ -273,48 +290,5 @@ impl<'db> ExecutionContext<'db> {
             // Native conjunctions use `All` and `Any`; its connective is uninhabited.
             E::Connective(never, _) => match *never {},
         }
-    }
-}
-
-struct NativeSelection<'a, 'db> {
-    context: &'a ExecutionContext<'db>,
-    resolver: RowValueResolver<'a, 'db>,
-    output: Vec<ExecutionRow>,
-}
-impl helix_planner::relational::SelectionEvaluator<ir::ResolvedPredicate>
-    for NativeSelection<'_, '_>
-{
-    type Row = (super::super::RowDecision, ExecutionRow);
-    type Error = HelixDbError;
-    async fn evaluate(
-        &mut self,
-        (decision, row): &Self::Row,
-        expression: &ir::ResolvedPredicate,
-    ) -> Result<helix_planner::relational::Selection> {
-        use super::super::RowDecision;
-        self.context.check_execution_deadline()?;
-        let value = match decision {
-            RowDecision::Keep => true,
-            RowDecision::Drop => false,
-            RowDecision::Evaluate => {
-                let DbPropertyValue::Bool(value) = Box::pin(self.context.eval_resolved(
-                    row,
-                    expression.expression(),
-                    &mut self.resolver,
-                ))
-                .await?
-                else {
-                    return Err(HelixDbError::InvariantViolation(
-                        "native predicate resolved to a non-boolean".into(),
-                    ));
-                };
-                value
-            }
-        };
-        Ok(Some(value).into())
-    }
-    fn retain(&mut self, (_, row): Self::Row) -> Result<()> {
-        self.output.push(row);
-        Ok(())
     }
 }

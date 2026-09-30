@@ -21,6 +21,10 @@ fn prune_statically_impossible_branches_inner(
                 match prune_statically_impossible_branches_inner(predicate)? {
                     PrunedPredicate::Impossible => return Ok(PrunedPredicate::Impossible),
                     PrunedPredicate::Tautology => {}
+                    PrunedPredicate::Feasible {
+                        predicate: Predicate::And { predicates },
+                        ..
+                    } => pruned.extend(predicates),
                     PrunedPredicate::Feasible { predicate, .. } => pruned.push(predicate),
                 }
             }

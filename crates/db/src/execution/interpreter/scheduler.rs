@@ -266,6 +266,7 @@ impl<'db> ExecutionContext<'db> {
             row_mode_max_rows: self.row_mode_max_rows,
             execution_control: self.execution_control.clone(),
             prepared_memberships: super::stream::PreparedMemberships::default(),
+            shared_index_reads: Arc::clone(&self.shared_index_reads),
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
             #[cfg(test)]

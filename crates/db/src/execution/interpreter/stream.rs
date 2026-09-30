@@ -15,12 +15,11 @@ mod values;
 mod tests;
 
 /// Rows evaluated per stored-record batch. This bounds the decoded records an
-/// operator holds at once while amortizing one multi-get over many rows. Index
-/// membership also resolves its bitmaps only for streams with more node rows.
+/// operator holds at once while amortizing one multi-get over many rows, and
+/// sizes the multi-get batches of every row-preserving filter.
 ///
-/// The planner prices index membership by this same threshold, so the value
-/// comes from `helix_planner::cost::RECORD_BATCH_ROWS`; changing it changes
-/// pricing and execution together.
+/// The value comes from `helix_planner::cost::RECORD_BATCH_ROWS`, so pricing
+/// and execution batch alike.
 const RECORD_BATCH_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
 
 pub(super) use self::eval::property_value_is_in;

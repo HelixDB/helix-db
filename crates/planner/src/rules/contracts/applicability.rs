@@ -96,7 +96,25 @@ pub enum RuleApplicability {
     /// The rule can only match `LogicalExpr::AccessPath` values whose
     /// top-level residual-free source is in the listed family set.
     AccessSourceKinds(RuleAccessSourceKinds),
+    /// The rule can only match the stream expressions that may hold an
+    /// eligible node-stream filter: `LogicalExpr::AccessFilter`,
+    /// `LogicalExpr::AccessPipeline`, `LogicalExpr::RootPipeline`, and the
+    /// five root-stream terminal wrappers.
+    StreamMembershipCandidate,
 }
+
+/// Expression kinds that may hold a node-stream filter index membership must
+/// replace, shared by applicability matching and schedule compilation.
+pub(crate) const STREAM_MEMBERSHIP_KINDS: [logical::LogicalExprKind; 8] = [
+    logical::LogicalExprKind::AccessFilter,
+    logical::LogicalExprKind::AccessPipeline,
+    logical::LogicalExprKind::RootPipeline,
+    logical::LogicalExprKind::StreamReserved,
+    logical::LogicalExprKind::StreamCardinality,
+    logical::LogicalExprKind::StreamProject,
+    logical::LogicalExprKind::StreamAggregate,
+    logical::LogicalExprKind::StreamVariableWrite,
+];
 
 impl RuleApplicability {
     /// Match every logical expression.
@@ -226,6 +244,11 @@ impl RuleApplicability {
         Self::RootRepeatImplementationCandidate
     }
 
+    /// Match stream expressions that may hold an eligible node-stream filter.
+    pub const fn stream_membership_candidate() -> Self {
+        Self::StreamMembershipCandidate
+    }
+
     /// Whether this rule's rewrite is the only route to a physical
     /// alternative for the expressions it matches.
     ///
@@ -243,9 +266,11 @@ impl RuleApplicability {
     /// - provably redundant access distinct (point IDs, cardinality at most
     ///   one), elided only by `AccessDistinctRule`;
     /// - locally simplifiable access pipelines (adjacent distincts, empty
-    ///   source), simplified only by `AccessPipelineSimplificationRule`; and
+    ///   source), simplified only by `AccessPipelineSimplificationRule`;
     /// - access filters over a direct empty access path, collapsed only by
-    ///   `AccessFilterSimplificationRule`.
+    ///   `AccessFilterSimplificationRule`; and
+    /// - eligible node-stream filters, implemented only through
+    ///   `AccessPipelineMembershipFilterRule`.
     ///
     /// The match is exhaustive so adding an applicability variant forces an
     /// explicit decision about whether its implementation rule defers.
@@ -255,7 +280,8 @@ impl RuleApplicability {
             | Self::AccessWindowRewriteCandidate
             | Self::AccessDistinctNoopCandidate
             | Self::AccessPipelineLocalSimplification
-            | Self::AccessFilterSimplificationCandidate => true,
+            | Self::AccessFilterSimplificationCandidate
+            | Self::StreamMembershipCandidate => true,
             Self::Any
             | Self::LogicalKinds(_)
             | Self::PureOpKinds(_)

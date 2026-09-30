@@ -166,62 +166,29 @@ impl<'de, const MAX: u64> Deserialize<'de> for EstimatedRowsAtMost<MAX> {
 /// Estimated row count for unique equality lookups.
 pub type UniqueEqualityRows = EstimatedRowsAtMost<1>;
 
-/// Node rows the interpreter evaluates per stored-record batch.
-///
-/// An index membership evaluates a stream of at most this many node rows row
-/// by row, exactly like the per-row filter, and reads its set only for longer
-/// streams. The interpreter takes its batch size from here, so pricing and
-/// execution share one threshold.
+/// Stored records the interpreter reads per multi-get batch when a filter or
+/// membership residual evaluates rows. The interpreter takes its batch size
+/// from here, so the planner and execution share one value.
 pub const RECORD_BATCH_ROWS: u64 = 256;
 
-/// Row estimate proven to fit in one record batch.
-pub type RecordBatchRows = EstimatedRowsAtMost<RECORD_BATCH_ROWS>;
-
-/// Node rows reaching an index membership, as far as planning can prove.
+/// Default concurrent key-value reads one operator keeps in flight.
+///
+/// [`StorageCostProfile::max_parallel_kv_reads`] defaults to this value, and
+/// the interpreter bounds the concurrent child reads of one secondary-index set
+/// by it. A profile override tunes pricing only: executable plans carry no
+/// concurrency for index sets, so execution always uses this default.
+///
+/// [`StorageCostProfile::max_parallel_kv_reads`]: crate::cost::StorageCostProfile::max_parallel_kv_reads
 ///
 /// ```
-/// use helix_planner::cost::{EstimatedRows, MembershipStream, RecordBatchRows};
-/// let rows = EstimatedRows::rows(10);
+/// use helix_planner::cost::{StorageCostProfile, MAX_PARALLEL_KV_READS};
 /// assert_eq!(
-///     MembershipStream::new(rows, Some(2)),
-///     MembershipStream::WithinOneBatch(RecordBatchRows::at_most(2))
+///     StorageCostProfile::default().max_parallel_kv_reads.get(),
+///     MAX_PARALLEL_KV_READS.get()
 /// );
-/// assert_eq!(
-///     MembershipStream::new(rows, Some(256)),
-///     MembershipStream::WithinOneBatch(RecordBatchRows::at_most(10))
-/// );
-/// assert_eq!(
-///     MembershipStream::new(rows, Some(257)),
-///     MembershipStream::MayExceedOneBatch(rows)
-/// );
-/// assert_eq!(
-///     MembershipStream::new(rows, None),
-///     MembershipStream::MayExceedOneBatch(rows)
-/// );
-/// assert!(RecordBatchRows::rows(257).is_none());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipStream {
-    /// Proven to hold at most one record batch: the interpreter evaluates every
-    /// row and never reads the set.
-    WithinOneBatch(RecordBatchRows),
-    /// May exceed one batch; the rows are an estimate, not a bound. Every
-    /// expansion output is unbounded.
-    MayExceedOneBatch(EstimatedRows),
-}
-
-impl MembershipStream {
-    /// Classify a stream by its proven upper bound.
-    pub fn new(rows: EstimatedRows, upper: Option<usize>) -> Self {
-        let Some(bound) = upper
-            .and_then(|upper| u64::try_from(upper).ok())
-            .and_then(RecordBatchRows::rows)
-        else {
-            return Self::MayExceedOneBatch(rows);
-        };
-        Self::WithinOneBatch(RecordBatchRows::clamp(rows).min(bound))
-    }
-}
+pub const MAX_PARALLEL_KV_READS: core::num::NonZeroUsize =
+    core::num::NonZeroUsize::new(16).expect("16 is positive");
 
 /// Selectivity represented as parts per million.
 ///

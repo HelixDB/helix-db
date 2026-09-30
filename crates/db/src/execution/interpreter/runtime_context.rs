@@ -289,6 +289,9 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
         crate::execution_control::ExecutionControl,
     /// Index memberships resolved in the current request state.
     pub(in crate::execution::interpreter) prepared_memberships: super::stream::PreparedMemberships,
+    /// Concurrent secondary-set child reads shared by every step context of
+    /// the request.
+    pub(in crate::execution::interpreter) shared_index_reads: Arc<super::access::SharedIndexReads>,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
     #[cfg(test)]
@@ -365,6 +368,7 @@ impl<'db> ExecutionContext<'db> {
             row_mode_max_rows: row_mode::RowModeMaxRowsSetting::default(),
             execution_control,
             prepared_memberships: super::stream::PreparedMemberships::default(),
+            shared_index_reads: Arc::default(),
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
             #[cfg(test)]

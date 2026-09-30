@@ -82,7 +82,16 @@ async fn node_and_edge_bitmap_admission_precedes_boxing_copying_and_storage() {
         value: indexed(P::String("value".repeat(8192))),
     };
     let (futures, allocation) = allocation_testing::observe(|| {
-        [execution.node_bitmap(&node), execution.edge_bitmap(&edge)]
+        [
+            execution.node_bitmap(
+                &node,
+                crate::execution::interpreter::access::PARALLEL_INDEX_READS,
+            ),
+            execution.edge_bitmap(
+                &edge,
+                crate::execution::interpreter::access::PARALLEL_INDEX_READS,
+            ),
+        ]
     });
     assert_eq!(allocation.allocations, 0);
     for future in futures {

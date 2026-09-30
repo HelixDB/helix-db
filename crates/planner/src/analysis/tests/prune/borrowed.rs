@@ -110,6 +110,7 @@ fn borrowed_pruning_matches_original_branch_and_scalar_contracts() {
                 Predicate::not(and.clone()),
                 Predicate::not(or.clone()),
                 Predicate::and(vec![or, left.clone()]),
+                Predicate::and(vec![right.clone(), and.clone()]),
                 Predicate::or(vec![and, right.clone()]),
             ] {
                 verify(&predicate);

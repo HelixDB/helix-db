@@ -28,6 +28,9 @@ impl optimizer::OptimizerRule for AccessPipelineImplementationRule {
         let logical::LogicalExpr::AccessPipeline(pipeline) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if rules::membership_rewrite(input.expr, input.indexes, input.planner_limits).is_some() {
+            return optimizer::RuleResult::NotApplicable;
+        }
         if pipeline.has_local_simplification_candidate()
             && support::simplify_pipeline(pipeline).is_applicable()
         {

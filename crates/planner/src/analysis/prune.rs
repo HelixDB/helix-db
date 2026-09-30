@@ -89,16 +89,30 @@ fn prune_junction<'a>(
             (_, PrunedPredicate::Feasible { predicate, .. }) => Some(predicate),
             _ => None,
         };
+        // A child that prunes to a conjunction (a nested `And`, or an `Or`
+        // left with one conjunctive branch) joins this conjunction, so every
+        // top-level conjunct stays visible to conjunct splits.
+        let joins = matches!(junction, Junction::And)
+            && matches!(retained.as_deref(), Some(Predicate::And { .. }));
         if rewritten.is_none()
+            && !joins
             && matches!(&retained, Some(Cow::Borrowed(next)) if std::ptr::eq(*next, child))
         {
             continue;
         }
         // A borrowed child can be a collapsed descendant, so borrowing alone
         // does not prove the parent remains unchanged.
-        rewritten
-            .get_or_insert_with(|| children[..index].iter().map(Cow::Borrowed).collect())
-            .extend(retained);
+        let rewritten =
+            rewritten.get_or_insert_with(|| children[..index].iter().map(Cow::Borrowed).collect());
+        match retained {
+            Some(Cow::Borrowed(Predicate::And { predicates })) if joins => {
+                rewritten.extend(predicates.iter().map(Cow::Borrowed));
+            }
+            Some(Cow::Owned(Predicate::And { predicates })) if joins => {
+                rewritten.extend(predicates.into_iter().map(Cow::Owned));
+            }
+            retained => rewritten.extend(retained),
+        }
     }
     let Some(mut rewritten) = rewritten else {
         return match children {

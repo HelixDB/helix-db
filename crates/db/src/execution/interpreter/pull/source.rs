@@ -176,12 +176,14 @@ impl<'a> Source<'a> {
                 false,
             )),
             Plan::Access(A::Node(N::Bitmap { bitmap })) => Ok(bitmap_ids(
-                ctx.node_bitmap(bitmap).await?,
+                ctx.node_bitmap(bitmap, access::PARALLEL_INDEX_READS)
+                    .await?,
                 K::NodeProperty,
                 true,
             )),
             Plan::Access(A::Edge(E::Bitmap { bitmap })) => Ok(bitmap_ids(
-                ctx.edge_bitmap(bitmap).await?,
+                ctx.edge_bitmap(bitmap, access::PARALLEL_INDEX_READS)
+                    .await?,
                 K::EdgeEndpoints,
                 true,
             )),
@@ -279,34 +281,32 @@ impl<'a> Source<'a> {
             Plan::Access(A::Node(N::SecondarySet {
                 set: exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters },
             })) => {
-                let mut membership = Vec::new();
-                for filter in filters {
-                    membership.push(ctx.node_secondary_bitmap(filter).await?);
-                }
+                let allowed = ctx
+                    .node_secondary_filter_intersection(filters, access::PARALLEL_INDEX_READS)
+                    .await?;
                 self.open_range(
                     ctx,
                     K::NodeProperty,
                     &driver.key,
                     &driver.range,
                     driver.iteration,
-                    membership,
+                    vec![allowed],
                 )
                 .await
             }
             Plan::Access(A::Edge(E::SecondarySet {
                 set: exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, filters },
             })) => {
-                let mut membership = Vec::new();
-                for filter in filters {
-                    membership.push(ctx.edge_secondary_bitmap(filter).await?);
-                }
+                let allowed = ctx
+                    .edge_secondary_filter_intersection(filters, access::PARALLEL_INDEX_READS)
+                    .await?;
                 self.open_range(
                     ctx,
                     K::EdgeEndpoints,
                     &driver.key,
                     &driver.range,
                     driver.iteration,
-                    membership,
+                    vec![allowed],
                 )
                 .await
             }
