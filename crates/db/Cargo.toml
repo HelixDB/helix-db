@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d" }
+slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d", optional = true }
+http-body = { version = "1", optional = true }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
 helix-value-semantics = { path = "../value-semantics" }
@@ -73,8 +75,8 @@ future-vector-codecs = []
 production-coverage = ["slatedb/wal_disable"]
 production-scale = ["production-coverage", "dep:memmap2"]
 fuzzing = []
-# Benchmark images only.
-async-index-benchmark = []
+# Benchmark images only: object-store connector counters and SlateDB metrics.
+async-index-benchmark = ["dep:http-body", "dep:slatedb-common"]
 force-vector-scalar-kernel = []
 
 [lints]
