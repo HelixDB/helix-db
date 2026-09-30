@@ -25,6 +25,14 @@ impl<'db> ExecutionContext<'db> {
             }
             ir::IndexValue::Param(param) => self.param_value(param),
             ir::IndexValue::ParamSet(values) => self.param_value(values.param()),
+            ir::IndexValue::LiteralSet(values) => {
+                Ok(ast_to_db_value(helix_ast::value::PropertyValue::Array(
+                    values
+                        .iter()
+                        .map(|value| value.as_property_value().clone())
+                        .collect(),
+                )))
+            }
         }
     }
 
@@ -147,8 +155,15 @@ impl<'db> ExecutionContext<'db> {
             property: key.property.as_ref(),
         };
         if let Some(active) = self.active_write_tx() {
-            return unindexed_label_rows_in_view(self, &active.txn, &identity, label, accept, within)
-                .await;
+            return unindexed_label_rows_in_view(
+                self,
+                &active.txn,
+                &identity,
+                label,
+                accept,
+                within,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
             return unindexed_label_rows_in_view(self, view, &identity, label, accept, within)

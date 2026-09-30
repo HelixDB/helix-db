@@ -127,6 +127,22 @@ fn indexed_predicates() -> Vec<Predicate> {
             Predicate::or(vec![Predicate::eq("p0", 1), Predicate::eq("p1", 2)]),
         ]),
         Predicate::eq("p0", PropertyValue::Null),
+        // Literal lists and same-property disjunctions past the union limit
+        // are one batched index read, with or without null.
+        Predicate::is_in("p0", PropertyValue::I64Array((0..100).collect())),
+        Predicate::is_in(
+            "p0",
+            PropertyValue::Array(
+                core::iter::once(PropertyValue::Null)
+                    .chain((0..100).map(PropertyValue::I64))
+                    .collect(),
+            ),
+        ),
+        Predicate::or((0..100).map(|value| Predicate::eq("p0", value)).collect()),
+        Predicate::and(vec![
+            Predicate::eq("p1", 1),
+            Predicate::is_in("p0", PropertyValue::I64Array((0..100).collect())),
+        ]),
         // Partly indexed disjunctions: each branch reads its own index and
         // evaluates only its unindexed conjuncts.
         Predicate::or(vec![
@@ -374,4 +390,98 @@ fn wide_disjunctions_over_many_indexes_plan_one_union() {
     assert!(!plan.metrics().guardrail_hit);
     assert_eq!(statistics.node_accesses.label_scans, 0);
     assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
+}
+
+#[test]
+fn literal_lists_of_any_length_plan_one_batched_read() {
+    // Ten thousand literals stay one literal-set source: set rules never
+    // compare its members pairwise, so planning stays fast.
+    let values = (0..10_000).collect::<Vec<i64>>();
+    for predicate in [
+        Predicate::is_in("p0", PropertyValue::I64Array(values.clone())),
+        Predicate::or(
+            values
+                .iter()
+                .map(|value| Predicate::eq("p0", *value))
+                .collect(),
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let plan = executable_traversal(
+            g().n_with_label_where("Item", predicate).values(vec!["p0"]),
+            ctx(indexes()),
+        );
+        // Quadratic list handling took over a minute here; linear planning
+        // takes well under a second, with headroom for unoptimized builds
+        // sharing the machine with the rest of the suite.
+        let bound = if cfg!(debug_assertions) { 4 } else { 1 };
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(bound),
+            "planning took {:?}",
+            started.elapsed()
+        );
+        assert_batched_node_equality_set(&plan, "Item", "p0", values.len());
+        assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
+    }
+
+    // Null joins the batch as the label rows outside the lane.
+    let plan = executable_traversal(
+        g().n_with_label_where(
+            "Item",
+            Predicate::is_in(
+                "p0",
+                PropertyValue::Array(
+                    (0..100)
+                        .map(PropertyValue::I64)
+                        .chain(core::iter::once(PropertyValue::Null))
+                        .collect(),
+                ),
+            ),
+        )
+        .values(vec!["p0"]),
+        ctx(indexes()),
+    );
+    assert!(matches!(
+        unwrapped_first_exec_access(&plan),
+        ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet {
+            set: crate::exec::ExecNodeSecondarySetPlan::Union { driver, rest },
+        }) if matches!(
+            driver.as_ref(),
+            crate::exec::ExecNodeSecondarySetPlan::Bitmap(
+                crate::exec::ExecNodeBitmapExpr::BatchedUnionRead { values, .. }
+            ) if values.len() == 100
+        ) && matches!(
+            rest.as_ref(),
+            [crate::exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                crate::exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. }
+            )]
+        )
+    ));
+}
+
+#[test]
+fn literal_lists_on_range_only_properties_read_point_ranges() {
+    // Equality on a property with only a range index reads one point range
+    // per value, past the union limit too, never a scan.
+    let planner_ctx = ctx(IndexCatalogSnapshot::default().with_node_range(
+        ScopedPropertyDirectionKey::try_new(
+            "Item",
+            "rank",
+            helix_ast::index::RangeIndexDirection::Asc,
+        )
+        .unwrap(),
+    ));
+    for count in [3_i64, 100, 1_000] {
+        let plan = executable_traversal(
+            g().n_with_label_where(
+                "Item",
+                Predicate::is_in("rank", PropertyValue::I64Array((0..count).collect())),
+            )
+            .values(vec!["rank"]),
+            planner_ctx.clone(),
+        );
+        let statistics = crate::diagnostics::analyze(&plan, &planner_ctx).statistics;
+        assert_eq!(statistics.node_accesses.label_scans, 0, "{count}");
+        assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
+    }
 }

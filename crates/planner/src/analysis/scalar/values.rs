@@ -164,14 +164,31 @@ fn canonical_number(value: &PropertyValue) -> Option<CanonicalNumber> {
     }
 }
 
+/// `values` without repeats under [`property_values_equal`], in first-seen
+/// order, in linear time.
+///
+/// Numbers are keyed by their canonical number; other values by their
+/// serialized form, which equal values share except for signed zeros inside
+/// collections. Such a pair may both stay, which a proof over the allowed
+/// values treats as one value anyway.
 fn dedup_property_values(values: Vec<PropertyValue>) -> Vec<PropertyValue> {
-    values.into_iter().fold(Vec::new(), |mut unique, value| {
-        if !unique
-            .iter()
-            .any(|existing| property_values_equal(existing, &value))
-        {
-            unique.push(value);
-        }
-        unique
-    })
+    #[derive(PartialEq, Eq, Hash)]
+    enum Identity {
+        Number(CanonicalNumber),
+        Serialized(String),
+    }
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| {
+            seen.insert(canonical_number(value).map_or_else(
+                || {
+                    Identity::Serialized(
+                        serde_json::to_string(value).expect("property values serialize"),
+                    )
+                },
+                Identity::Number,
+            ))
+        })
+        .collect()
 }

@@ -1464,6 +1464,105 @@ async fn unsupported_and_oversized_equality_values_return_verified_label_rows() 
 }
 
 #[tokio::test]
+async fn runtime_lists_over_the_bound_use_chunked_multi_gets() {
+    let db = test_support::open_db("access-runtime-lists-over-the-bound").await;
+    let mut matching = Vec::new();
+    for value in 0..10 {
+        matching.push(
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::from(format!("s{value}")))],
+            )
+            .await,
+        );
+    }
+    let values = (0..1_000)
+        .map(|value| format!("s{value}"))
+        .collect::<Vec<_>>();
+    let rows = matching
+        .iter()
+        .enumerate()
+        .map(|(value, id)| (values[value].as_str(), *id))
+        .collect::<Vec<_>>();
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        73,
+        &rows,
+    )
+    .await;
+    let index = catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status"));
+    let key = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+    let expected = ExecutionValue::Scalars(
+        matching
+            .iter()
+            .copied()
+            .map(ExecutionScalar::NodeId)
+            .collect(),
+    );
+
+    // A runtime list of a thousand values is read as unions of at most 64
+    // values each: one multi-get per union, never a scan.
+    let param = test_support::name("statuses");
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            exec::ExecNodeAccessPlan::DynamicMembership {
+                index: index.clone(),
+                key: key.clone(),
+                values: ir::RuntimeEqualitySet::new(
+                    param.clone(),
+                    std::num::NonZeroUsize::new(64).unwrap(),
+                ),
+            },
+            context::ParamBindings::default()
+                .with_value(param, PropertyValue::StringArray(values.clone())),
+        )
+        .await,
+        expected
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.multi_get_calls, 1_000_u64.div_ceil(64));
+    assert_eq!(metrics.scans, 0);
+    assert_eq!(metrics.graph_reads, 0);
+
+    // A literal list of the same size is one batched read, in multi-gets of
+    // one record batch each.
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    assert_eq!(
+        run_node_access(
+            &db,
+            exec::ExecNodeAccessPlan::exact_equality(
+                index,
+                key,
+                ir::IndexValue::LiteralSet(
+                    ir::AtLeast::try_from_vec(
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                ir::SecondaryIndexLiteral::new(PropertyValue::from(value)).unwrap()
+                            })
+                            .collect(),
+                    )
+                    .unwrap(),
+                ),
+            ),
+        )
+        .await,
+        expected
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(
+        metrics.multi_get_calls,
+        1_000_u64.div_ceil(helix_planner::cost::RECORD_BATCH_ROWS)
+    );
+    assert_eq!(metrics.scans, 0);
+    assert_eq!(metrics.graph_reads, 0);
+}
+
+#[tokio::test]
 async fn unordered_edge_secondary_sets_remain_edge_scoped() {
     let db = test_support::open_db("access-unordered-edge-secondary-set").await;
     let from = test_support::add_user(&db, "from").await;

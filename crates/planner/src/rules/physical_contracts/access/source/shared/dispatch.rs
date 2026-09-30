@@ -27,6 +27,7 @@ where
             key,
             kind,
             semantics,
+            indexed_values,
         } => leaf::equality_index_contract(
             leaf::EqualityIndexContractInput {
                 access,
@@ -37,6 +38,7 @@ where
                 label_cardinality: F::label_cardinality(stats, &key.label),
                 kind,
                 semantics,
+                indexed_values,
             },
             storage,
         ),

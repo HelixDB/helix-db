@@ -52,6 +52,7 @@ impl AccessSourceFamily for TestFamily {
                 key,
                 kind: EqualityIndexKind::Unique,
                 semantics: ir::EqualityIndexValueSemantics::Indexed,
+                indexed_values: 1,
             },
             TestPlan::NonUniqueEquality { index_id, key } => AccessSourceParts::EqualityIndex {
                 access: test_equality_access(
@@ -62,6 +63,7 @@ impl AccessSourceFamily for TestFamily {
                 key,
                 kind: EqualityIndexKind::NonUnique,
                 semantics: ir::EqualityIndexValueSemantics::Indexed,
+                indexed_values: 1,
             },
             TestPlan::Range(key) => AccessSourceParts::RangeIndex {
                 key,

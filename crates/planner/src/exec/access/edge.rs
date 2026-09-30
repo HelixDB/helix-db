@@ -110,6 +110,8 @@ pub(in crate::exec) enum ExecEdgeEqualityAccessPlan {
         key: catalog::ScopedPropertyKey,
         values: ir::RuntimeEqualitySet,
     },
+    /// A literal set: batched indexed members, and label rows for null.
+    Set(ExecEdgeSecondarySetPlan),
 }
 
 pub(in crate::exec) fn exact_edge_equality(
@@ -142,6 +144,35 @@ pub(in crate::exec) fn exact_edge_equality(
         ir::IndexValue::ParamSet(values) => {
             ExecEdgeEqualityAccessPlan::DynamicMembership { index, key, values }
         }
+        ir::IndexValue::LiteralSet(values) => {
+            ExecEdgeEqualityAccessPlan::Set(ExecEdgeSecondarySetPlan::exact_equalities(
+                index,
+                key,
+                ir::AtLeast::try_from_vec(
+                    values.into_iter().map(ir::IndexValue::Literal).collect(),
+                )
+                .expect("a literal set holds at least two values"),
+            ))
+        }
+    }
+}
+
+impl From<ExecEdgeEqualityAccessPlan> for ExecEdgeSecondarySetPlan {
+    fn from(plan: ExecEdgeEqualityAccessPlan) -> Self {
+        match plan {
+            ExecEdgeEqualityAccessPlan::Empty => Self::Empty,
+            ExecEdgeEqualityAccessPlan::Bitmap(bitmap) => Self::Bitmap(bitmap),
+            ExecEdgeEqualityAccessPlan::AuthoritativeScan(predicate) => {
+                Self::AuthoritativeScan(predicate)
+            }
+            ExecEdgeEqualityAccessPlan::DynamicEquality { index, key, param } => {
+                Self::DynamicEquality { index, key, param }
+            }
+            ExecEdgeEqualityAccessPlan::DynamicMembership { index, key, values } => {
+                Self::DynamicMembership { index, key, values }
+            }
+            ExecEdgeEqualityAccessPlan::Set(set) => set,
+        }
     }
 }
 
@@ -159,6 +190,7 @@ impl From<ExecEdgeEqualityAccessPlan> for ExecEdgeAccessPlan {
             ExecEdgeEqualityAccessPlan::DynamicMembership { index, key, values } => {
                 Self::DynamicMembership { index, key, values }
             }
+            ExecEdgeEqualityAccessPlan::Set(set) => Self::SecondarySet { set },
         }
     }
 }
@@ -235,50 +267,51 @@ pub enum ExecEdgeSecondarySetPlan {
 
 impl ExecEdgeSecondarySetPlan {
     /// Classify one or more same-index logical equalities into exact set primitives.
+    ///
+    /// Indexed literals share one `BatchedUnionRead`, in the place of its
+    /// first member. Other members (null, runtime parameters) stay separate
+    /// union children, and non-reflexive members are dropped.
     pub fn exact_equalities(
         index: catalog::EdgeEqualityIndexMeta,
         key: catalog::ScopedPropertyKey,
         values: ir::AtLeast<ir::IndexValue, 1>,
     ) -> Self {
-        let mut children = values
+        let children = values
             .into_iter()
-            .map(
-                |value| match exact_edge_equality(index.clone(), key.clone(), value) {
-                    ExecEdgeEqualityAccessPlan::Empty => Self::Empty,
-                    ExecEdgeEqualityAccessPlan::Bitmap(bitmap) => Self::Bitmap(bitmap),
-                    ExecEdgeEqualityAccessPlan::AuthoritativeScan(predicate) => {
-                        Self::AuthoritativeScan(predicate)
-                    }
-                    ExecEdgeEqualityAccessPlan::DynamicEquality { index, key, param } => {
-                        Self::DynamicEquality { index, key, param }
-                    }
-                    ExecEdgeEqualityAccessPlan::DynamicMembership { index, key, values } => {
-                        Self::DynamicMembership { index, key, values }
-                    }
-                },
-            )
+            .map(|value| Self::from(exact_edge_equality(index.clone(), key.clone(), value)))
+            .filter(|child| !matches!(child, Self::Empty))
             .collect::<Vec<_>>();
-        let batch = children
+        let points = children
             .iter()
-            .map(|child| match child {
-                Self::Bitmap(exec::ExecEdgeBitmapExpr::PointRead { index, key, value }) => {
-                    Some((index.clone(), key.clone(), value.clone()))
+            .filter_map(|child| match child {
+                Self::Bitmap(exec::ExecEdgeBitmapExpr::PointRead { index, value, .. }) => {
+                    Some((index.clone(), value.clone()))
                 }
                 _ => None,
             })
-            .collect::<Option<Vec<_>>>();
-        match batch {
-            Some(batch) if batch.len() >= 2 => {
-                let (index, key, _) = batch[0].clone();
-                let values = batch.into_iter().map(|(_, _, value)| value).collect();
-                return Self::Bitmap(exec::ExecEdgeBitmapExpr::BatchedUnionRead {
-                    index,
-                    key,
-                    values: ir::AtLeast::try_from_vec(values)
-                        .expect("same-index batch has at least two values"),
-                });
-            }
-            Some(_) | None => {}
+            .collect::<Vec<_>>();
+        let batched_points = points.len() >= 2;
+        let mut batch = batched_points.then(|| {
+            Self::Bitmap(exec::ExecEdgeBitmapExpr::BatchedUnionRead {
+                index: points[0].0.clone(),
+                key: key.clone(),
+                values: ir::AtLeast::try_from_vec(
+                    points.into_iter().map(|(_, value)| value).collect(),
+                )
+                .expect("a batch holds at least two point reads"),
+            })
+        });
+        let mut children = children
+            .into_iter()
+            .filter_map(|child| match child {
+                Self::Bitmap(exec::ExecEdgeBitmapExpr::PointRead { .. }) if batched_points => {
+                    batch.take()
+                }
+                child => Some(child),
+            })
+            .collect::<Vec<_>>();
+        if children.is_empty() {
+            return Self::Empty;
         }
         let driver = children.remove(0);
         let Some(rest) = ir::AtLeast::try_from_vec(children) else {

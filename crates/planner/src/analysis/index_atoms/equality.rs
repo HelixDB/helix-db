@@ -11,7 +11,7 @@ use crate::ir::{
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EqualityIndexDomain {
     One(IndexValue),
-    Many(crate::ir::AtLeast<IndexValue, 2>),
+    Many(crate::ir::AtLeast<SecondaryIndexLiteral, 2>),
     RuntimeSet(NonEmptyString),
     Empty,
 }
@@ -165,16 +165,9 @@ fn literal_equality_set(value: &PropertyValue) -> Option<EqualityIndexDomain> {
         .map(SecondaryIndexLiteral::new)
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    let mut values = values.into_iter().fold(Vec::new(), |mut unique, value| {
-        if value.semantics() != crate::ir::LiteralEqualityIndexValueSemantics::NonReflexive
-            && !unique.iter().any(|existing: &SecondaryIndexLiteral| {
-                existing.as_property_value() == value.as_property_value()
-            })
-        {
-            unique.push(value);
-        }
-        unique
-    });
+    let mut values = distinct_equality_literals(values.into_iter().filter(|value| {
+        value.semantics() != crate::ir::LiteralEqualityIndexValueSemantics::NonReflexive
+    }));
     Some(match values.len() {
         0 => EqualityIndexDomain::Empty,
         1 => EqualityIndexDomain::One(IndexValue::Literal(
@@ -183,10 +176,28 @@ fn literal_equality_set(value: &PropertyValue) -> Option<EqualityIndexDomain> {
                 .expect("one-value equality domain contains one value"),
         )),
         _ => EqualityIndexDomain::Many(
-            crate::ir::AtLeast::try_from_vec(values.into_iter().map(IndexValue::Literal).collect())
+            crate::ir::AtLeast::try_from_vec(values)
                 .expect("multi-value equality domain contains at least two values"),
         ),
     })
+}
+
+/// `values` without repeats, in first-seen order.
+///
+/// Repeats are found by the literals' serialized form, so a list of any
+/// length is deduplicated in linear time. Values the serialized form tells
+/// apart but equality does not (`0.0` and `-0.0`) may both stay, which only
+/// repeats a lookup.
+pub(crate) fn distinct_equality_literals(
+    values: impl IntoIterator<Item = SecondaryIndexLiteral>,
+) -> Vec<SecondaryIndexLiteral> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| {
+            seen.insert(serde_json::to_string(value).expect("secondary-index literals serialize"))
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -104,7 +104,7 @@ fn selective_equality_type_union_preserves_unindexed_residuals() {
 }
 
 #[test]
-fn unique_membership_uses_the_index_at_small_label_costs_and_scans_past_the_union_limit() {
+fn unique_membership_uses_the_index_at_small_label_costs_and_past_the_union_limit() {
     let mut context = PlannerContext::default();
     context.indexes.node_eq.insert(
         ScopedPropertyKey::try_new("Fixture", "key").unwrap(),
@@ -112,9 +112,9 @@ fn unique_membership_uses_the_index_at_small_label_costs_and_scans_past_the_unio
             .unwrap()
             .with_uniqueness(crate::catalog::IndexUniqueness::Unique),
     );
-    // A one-row label never trades the index for a scan. A list past the
-    // union limit is not index-served, so it scans.
-    for (count, known_rows, label_scans) in [(65, None, 1), (64, Some(1), 0)] {
+    // A one-row label never trades the index for a scan, and a list past
+    // the union limit is one batched owner read.
+    for (count, known_rows, label_scans) in [(65, None, 0), (64, Some(1), 0)] {
         context.stats = known_rows.map_or_else(StatsSnapshot::default, |rows| {
             StatsSnapshot::default()
                 .with_node_label_cardinality(NonEmptyString::new("Fixture").unwrap(), rows)
@@ -289,7 +289,7 @@ fn selective_equality_intersects_every_index_with_absent_or_stale_statistics() {
                     assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
                     assert_eq!(plan.metrics().selected_cost.range_nexts, 0);
                     assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 0);
-        assert_eq!(plan.metrics().selected_cost.parallel_width, 3);
+                    assert_eq!(plan.metrics().selected_cost.parallel_width, 3);
                     // The three sets are read concurrently.
                     assert_eq!(plan.metrics().selected_cost.parallel_width, 3);
                     let diagnostics = crate::diagnostics::analyze(&plan, &context);

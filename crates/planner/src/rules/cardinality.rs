@@ -662,6 +662,12 @@ enum EqualityValue {
     NonReflexive,
     Dynamic(ir::NonEmptyString),
     DynamicSet(ir::RuntimeEqualitySet),
+    /// A literal set: its indexed members, and whether it holds null.
+    /// Non-reflexive members match nothing and are dropped.
+    Set {
+        indexed: Vec<exec::ExecIndexedEqualityValue>,
+        null: bool,
+    },
 }
 
 fn classify_equality(
@@ -675,6 +681,23 @@ fn classify_equality(
         ir::IndexValue::Literal(literal) => literal.clone(),
         ir::IndexValue::ParamSet(values) => {
             return Ok(EqualityValue::DynamicSet(values.clone()));
+        }
+        ir::IndexValue::LiteralSet(values) => {
+            return Ok(EqualityValue::Set {
+                indexed: values
+                    .iter()
+                    .filter(|literal| {
+                        literal.semantics() == ir::LiteralEqualityIndexValueSemantics::Indexed
+                    })
+                    .map(|literal| {
+                        exec::ExecIndexedEqualityValue::try_from(literal.clone())
+                            .expect("indexed literal semantics satisfy the executable wrapper")
+                    })
+                    .collect(),
+                null: values.iter().any(|literal| {
+                    literal.semantics() == ir::LiteralEqualityIndexValueSemantics::AuthoritativeNull
+                }),
+            });
         }
         // A foreach frame expands object fields into the parameter namespace.
         // The AST exposes the container name but cannot enumerate every field
@@ -785,6 +808,76 @@ fn node_equality_count(
                 window,
             })
         }
+        EqualityValue::Set { indexed, null } => {
+            // Batched indexed members, unique owners one leaf each, and the
+            // label rows outside the lane for null, counted as one union.
+            let mut cursors = match index.uniqueness {
+                catalog::IndexUniqueness::NonUnique => {
+                    let index = exec::ExecNodeNonUniqueEqualityIndex::try_from(index.clone())
+                        .expect("non-unique catalog metadata satisfies the bitmap wrapper");
+                    match <[_; 1]>::try_from(indexed) {
+                        Ok([value]) => vec![exec::ExecCountCursorPlan::NodeBitmap(
+                            exec::ExecNodeBitmapExpr::PointRead {
+                                index,
+                                key: key.clone(),
+                                value,
+                            },
+                        )],
+                        Err(indexed) => ir::AtLeast::try_from_vec(indexed)
+                            .map(|values| {
+                                exec::ExecCountCursorPlan::NodeBitmap(
+                                    exec::ExecNodeBitmapExpr::BatchedUnionRead {
+                                        index,
+                                        key: key.clone(),
+                                        values,
+                                    },
+                                )
+                            })
+                            .into_iter()
+                            .collect(),
+                    }
+                }
+                catalog::IndexUniqueness::Unique => {
+                    let index = exec::ExecNodeUniqueEqualityIndex::try_from(index.clone())
+                        .expect("unique catalog metadata satisfies the owner wrapper");
+                    indexed
+                        .into_iter()
+                        .map(|value| exec::ExecCountCursorPlan::NodeUnique {
+                            lookup: exec::ExecNodeUniqueOwnerReadPlan {
+                                index: index.clone(),
+                                key: key.clone(),
+                                value: value.clone(),
+                            },
+                            verification: exec::ExecNodeAuthoritativeVerificationPlan {
+                                key: key.clone(),
+                                value,
+                            },
+                        })
+                        .collect()
+                }
+            };
+            if null {
+                cursors.push(exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key: key.clone() },
+                ));
+            }
+            match cursors.len() {
+                0 => exec::ExecCountPlan::Constant(0),
+                _ => {
+                    let driver = cursors.remove(0);
+                    exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                        cursor: match ir::AtLeast::<_, 1>::try_from_vec(cursors) {
+                            Some(rest) => exec::ExecCountCursorPlan::Union {
+                                driver: Box::new(driver),
+                                rest,
+                            },
+                            None => driver,
+                        },
+                        window,
+                    })
+                }
+            }
+        }
     })
 }
 
@@ -830,6 +923,53 @@ fn edge_equality_count(
                 values,
                 window,
             })
+        }
+        EqualityValue::Set { indexed, null } => {
+            // Batched indexed members and the label rows outside the lane for
+            // null, counted as one union.
+            let index = exec::ExecEdgeNonUniqueEqualityIndex::new(index.clone());
+            let mut cursors = match <[_; 1]>::try_from(indexed) {
+                Ok([value]) => vec![exec::ExecCountCursorPlan::EdgeBitmap(
+                    exec::ExecEdgeBitmapExpr::PointRead {
+                        index,
+                        key: key.clone(),
+                        value,
+                    },
+                )],
+                Err(indexed) => ir::AtLeast::try_from_vec(indexed)
+                    .map(|values| {
+                        exec::ExecCountCursorPlan::EdgeBitmap(
+                            exec::ExecEdgeBitmapExpr::BatchedUnionRead {
+                                index,
+                                key: key.clone(),
+                                values,
+                            },
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            };
+            if null {
+                cursors.push(exec::ExecCountCursorPlan::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key: key.clone() },
+                ));
+            }
+            match cursors.len() {
+                0 => exec::ExecCountPlan::Constant(0),
+                _ => {
+                    let driver = cursors.remove(0);
+                    exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                        cursor: match ir::AtLeast::<_, 1>::try_from_vec(cursors) {
+                            Some(rest) => exec::ExecCountCursorPlan::Union {
+                                driver: Box::new(driver),
+                                rest,
+                            },
+                            None => driver,
+                        },
+                        window,
+                    })
+                }
+            }
         }
     })
 }
@@ -1097,10 +1237,34 @@ fn node_bitmap_expr(
                     key: key.clone(),
                     value,
                 }),
+                EqualityValue::Set {
+                    indexed,
+                    null: false,
+                } => match <[_; 1]>::try_from(indexed) {
+                    Ok([value]) => Some(exec::ExecNodeBitmapExpr::PointRead {
+                        index: index
+                            .clone()
+                            .try_into()
+                            .expect("non-unique catalog metadata satisfies the bitmap wrapper"),
+                        key: key.clone(),
+                        value,
+                    }),
+                    Err(indexed) => ir::AtLeast::try_from_vec(indexed).map(|values| {
+                        exec::ExecNodeBitmapExpr::BatchedUnionRead {
+                            index: index
+                                .clone()
+                                .try_into()
+                                .expect("non-unique catalog metadata satisfies the bitmap wrapper"),
+                            key: key.clone(),
+                            values,
+                        }
+                    }),
+                },
                 EqualityValue::AuthoritativeNull
                 | EqualityValue::NonReflexive
                 | EqualityValue::Dynamic(_)
-                | EqualityValue::DynamicSet(_) => None,
+                | EqualityValue::DynamicSet(_)
+                | EqualityValue::Set { null: true, .. } => None,
             })
         }
         ir::NodeAccessPlan::Union(children) => node_bitmap_set(children, true, rule),
@@ -1132,10 +1296,28 @@ fn edge_bitmap_expr(
                     key: key.clone(),
                     value,
                 }),
+                EqualityValue::Set {
+                    indexed,
+                    null: false,
+                } => match <[_; 1]>::try_from(indexed) {
+                    Ok([value]) => Some(exec::ExecEdgeBitmapExpr::PointRead {
+                        index: exec::ExecEdgeNonUniqueEqualityIndex::new(index.clone()),
+                        key: key.clone(),
+                        value,
+                    }),
+                    Err(indexed) => ir::AtLeast::try_from_vec(indexed).map(|values| {
+                        exec::ExecEdgeBitmapExpr::BatchedUnionRead {
+                            index: exec::ExecEdgeNonUniqueEqualityIndex::new(index.clone()),
+                            key: key.clone(),
+                            values,
+                        }
+                    }),
+                },
                 EqualityValue::AuthoritativeNull
                 | EqualityValue::NonReflexive
                 | EqualityValue::Dynamic(_)
-                | EqualityValue::DynamicSet(_) => None,
+                | EqualityValue::DynamicSet(_)
+                | EqualityValue::Set { null: true, .. } => None,
             })
         }
         ir::EdgeAccessPlan::Union(children) => edge_bitmap_set(children, true, rule),

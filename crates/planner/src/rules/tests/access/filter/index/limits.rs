@@ -33,8 +33,9 @@ fn access_filter_index_rule_applies_union_branch_limits_without_blocking_singlet
         .unwrap(),
     );
 
-    // A limit below the branch count caps distribution only: the same-key
-    // disjunction is still one index union. Disabled unions keep the filter.
+    // A limit below the branch count still uses the index: the same-key
+    // disjunction merges into one literal set. Disabled unions keep the
+    // filter.
     let limited_union = logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &union,
         storage: &storage,
@@ -47,7 +48,10 @@ fn access_filter_index_rule_applies_union_branch_limits_without_blocking_singlet
         logical::AccessPath::Node(path)
             if matches!(
                 path.source().as_ref(),
-                ir::NodeAccessPlan::Union(children) if children.len() == 2
+                ir::NodeAccessPlan::EqualityIndex {
+                    value: ir::IndexValue::LiteralSet(values),
+                    ..
+                } if values.len() == 2
             )
     ));
     assert_eq!(

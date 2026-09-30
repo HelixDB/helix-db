@@ -7,5 +7,7 @@ mod equality;
 mod range;
 mod value;
 
-pub(crate) use equality::{equality_atom, EqualityIndexAtom, EqualityIndexDomain};
+pub(crate) use equality::{
+    distinct_equality_literals, equality_atom, EqualityIndexAtom, EqualityIndexDomain,
+};
 pub(crate) use range::{range_atom, RangeIndexAtom};

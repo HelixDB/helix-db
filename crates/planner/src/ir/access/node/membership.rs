@@ -317,15 +317,14 @@ fn decided_conjuncts<'p>(
 
 /// First set leaf whose cost is not bounded by index reads alone.
 ///
-/// Literal null equality needs an authoritative keyspace scan. A range leaf
+/// Literal null equality verifies the label's rows outside the lane. A range leaf
 /// verifies each in-range record with its own serial authoritative read, so
 /// it can never beat the batched per-row filter it would replace.
 fn unservable_leaf(plan: &NodeAccessPlan) -> Option<NodeIndexMembershipError> {
     match plan {
-        NodeAccessPlan::EqualityIndex {
-            value: ir::IndexValue::Literal(value),
-            ..
-        } if value.semantics() == ir::LiteralEqualityIndexValueSemantics::AuthoritativeNull => {
+        NodeAccessPlan::EqualityIndex { value, .. }
+            if value.semantics() == ir::EqualityIndexValueSemantics::AuthoritativeNull =>
+        {
             Some(NodeIndexMembershipError::AuthoritativeNull)
         }
         NodeAccessPlan::RangeIndex { .. } => Some(NodeIndexMembershipError::RangeScan),

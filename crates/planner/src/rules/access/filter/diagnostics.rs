@@ -364,9 +364,11 @@ mod tests {
             Predicate::eq("username", "alice"),
             Predicate::eq("email", "alice@example.com"),
         ]);
-        for max_index_union_branches in [
-            context::IndexUnionBranchLimit::Disabled,
-            context::IndexUnionBranchLimit::limited(1).unwrap(),
+        // Disabled unions keep the filter; a union past its limit still
+        // uses both indexes, so both are candidates.
+        for (max_index_union_branches, candidates) in [
+            (context::IndexUnionBranchLimit::Disabled, 0),
+            (context::IndexUnionBranchLimit::limited(1).unwrap(), 2),
         ] {
             let ctx = context::PlannerContext {
                 limits: context::PlannerLimits {
@@ -374,9 +376,9 @@ mod tests {
                 },
                 ..context::PlannerContext::default()
             };
-            assert!(
-                missing_index_candidates(catalog::ElementKind::Node, &label, &union, &ctx,)
-                    .is_empty()
+            assert_eq!(
+                missing_index_candidates(catalog::ElementKind::Node, &label, &union, &ctx).len(),
+                candidates
             );
         }
 

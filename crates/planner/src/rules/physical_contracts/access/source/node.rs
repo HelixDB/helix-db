@@ -81,6 +81,17 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
                         catalog::IndexUniqueness::NonUnique => shared::EqualityIndexKind::NonUnique,
                     },
                     semantics: value.semantics(),
+                    indexed_values: match value {
+                        ir::IndexValue::LiteralSet(values) => values
+                            .iter()
+                            .filter(|value| {
+                                value.semantics() == ir::LiteralEqualityIndexValueSemantics::Indexed
+                            })
+                            .count(),
+                        ir::IndexValue::Literal(_)
+                        | ir::IndexValue::Param(_)
+                        | ir::IndexValue::ParamSet(_) => 1,
+                    },
                 }
             }
             ir::NodeAccessPlan::RangeIndex { key, iteration, .. } => {

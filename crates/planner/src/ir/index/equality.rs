@@ -160,21 +160,72 @@ pub enum IndexValue {
     Param(NonEmptyString),
     /// Runtime parameter interpreted as a bounded equality domain.
     ParamSet(RuntimeEqualitySet),
+    /// Finite literal equality domain wider than one index union; read as
+    /// batched multi-gets.
+    ///
+    /// It stays one source however many values it holds, so set rules never
+    /// compare its members pairwise.
+    LiteralSet(super::super::AtLeast<SecondaryIndexLiteral, 2>),
 }
 
 impl IndexValue {
     /// Return the statically known storage behavior for this lookup value.
+    ///
+    /// A literal set is `AuthoritativeNull` when any member is null,
+    /// `Indexed` when another member is indexed, and `NonReflexive` only when
+    /// every member is non-reflexive; non-reflexive members match nothing.
+    ///
+    /// ```
+    /// use helix_ast::value::PropertyValue;
+    /// use helix_planner::ir::{
+    ///     AtLeast, EqualityIndexValueSemantics, IndexValue, SecondaryIndexLiteral,
+    /// };
+    ///
+    /// let literal = |value| SecondaryIndexLiteral::new(value).unwrap();
+    /// let set = |values: Vec<PropertyValue>| {
+    ///     IndexValue::LiteralSet(
+    ///         AtLeast::try_from_vec(values.into_iter().map(literal).collect()).unwrap(),
+    ///     )
+    /// };
+    /// assert_eq!(
+    ///     set(vec![PropertyValue::from(1), PropertyValue::F64(f64::NAN)]).semantics(),
+    ///     EqualityIndexValueSemantics::Indexed
+    /// );
+    /// assert_eq!(
+    ///     set(vec![PropertyValue::from(1), PropertyValue::Null]).semantics(),
+    ///     EqualityIndexValueSemantics::AuthoritativeNull
+    /// );
+    /// assert_eq!(
+    ///     set(vec![PropertyValue::F64(f64::NAN), PropertyValue::F32(f32::NAN)]).semantics(),
+    ///     EqualityIndexValueSemantics::NonReflexive
+    /// );
+    /// ```
     pub fn semantics(&self) -> EqualityIndexValueSemantics {
+        let literal = |value: &SecondaryIndexLiteral| match value.semantics() {
+            LiteralEqualityIndexValueSemantics::Indexed => EqualityIndexValueSemantics::Indexed,
+            LiteralEqualityIndexValueSemantics::AuthoritativeNull => {
+                EqualityIndexValueSemantics::AuthoritativeNull
+            }
+            LiteralEqualityIndexValueSemantics::NonReflexive => {
+                EqualityIndexValueSemantics::NonReflexive
+            }
+        };
         match self {
-            Self::Literal(value) => match value.semantics() {
-                LiteralEqualityIndexValueSemantics::Indexed => EqualityIndexValueSemantics::Indexed,
-                LiteralEqualityIndexValueSemantics::AuthoritativeNull => {
-                    EqualityIndexValueSemantics::AuthoritativeNull
-                }
-                LiteralEqualityIndexValueSemantics::NonReflexive => {
-                    EqualityIndexValueSemantics::NonReflexive
-                }
-            },
+            Self::Literal(value) => literal(value),
+            Self::LiteralSet(values) => values.iter().map(literal).fold(
+                EqualityIndexValueSemantics::NonReflexive,
+                |set, member| match (set, member) {
+                    (EqualityIndexValueSemantics::AuthoritativeNull, _)
+                    | (_, EqualityIndexValueSemantics::AuthoritativeNull) => {
+                        EqualityIndexValueSemantics::AuthoritativeNull
+                    }
+                    (EqualityIndexValueSemantics::Indexed, _)
+                    | (_, EqualityIndexValueSemantics::Indexed) => {
+                        EqualityIndexValueSemantics::Indexed
+                    }
+                    (set, _) => set,
+                },
+            ),
             Self::Param(_) | Self::ParamSet(_) => EqualityIndexValueSemantics::RuntimeDependent,
         }
     }
@@ -182,7 +233,8 @@ impl IndexValue {
 
 /// Genuinely late-bound, bounded equality-domain parameter.
 ///
-/// The positive limit makes an unbounded runtime index union unrepresentable.
+/// The positive limit bounds each runtime index union, so a domain of any size
+/// is read as unions of at most that many values.
 ///
 /// ```
 /// use helix_planner::ir::{NonEmptyString, RuntimeEqualitySet};
@@ -212,7 +264,9 @@ impl RuntimeEqualitySet {
         &self.param
     }
 
-    /// Maximum distinct equality values eligible for the index path.
+    /// Distinct equality values read by one index union: the batch width of
+    /// one multi-get. A wider domain is read as several unions, never by a
+    /// scan.
     pub const fn max_values(&self) -> NonZeroUsize {
         self.max_values
     }

@@ -11,30 +11,7 @@ pub(crate) fn node_secondary_set(
     match plan {
         ir::NodeAccessPlan::Empty => Some(exec::ExecNodeSecondarySetPlan::Empty),
         ir::NodeAccessPlan::EqualityIndex { index, key, value } => {
-            match exec::exact_node_equality(index.clone(), key.clone(), value.clone()) {
-                exec::ExecNodeEqualityAccessPlan::Empty => {
-                    Some(exec::ExecNodeSecondarySetPlan::Empty)
-                }
-                exec::ExecNodeEqualityAccessPlan::Bitmap(bitmap) => {
-                    Some(exec::ExecNodeSecondarySetPlan::Bitmap(bitmap))
-                }
-                exec::ExecNodeEqualityAccessPlan::Unique {
-                    lookup,
-                    verification,
-                } => Some(exec::ExecNodeSecondarySetPlan::Unique {
-                    lookup,
-                    verification,
-                }),
-                exec::ExecNodeEqualityAccessPlan::AuthoritativeScan(predicate) => {
-                    Some(exec::ExecNodeSecondarySetPlan::AuthoritativeScan(predicate))
-                }
-                exec::ExecNodeEqualityAccessPlan::DynamicEquality { index, key, param } => {
-                    Some(exec::ExecNodeSecondarySetPlan::DynamicEquality { index, key, param })
-                }
-                exec::ExecNodeEqualityAccessPlan::DynamicMembership { index, key, values } => {
-                    Some(exec::ExecNodeSecondarySetPlan::DynamicMembership { index, key, values })
-                }
-            }
+            Some(exec::exact_node_equality(index.clone(), key.clone(), value.clone()).into())
         }
         ir::NodeAccessPlan::RangeIndex {
             index,
@@ -81,23 +58,7 @@ pub(crate) fn edge_secondary_set(
     match plan {
         ir::EdgeAccessPlan::Empty => Some(exec::ExecEdgeSecondarySetPlan::Empty),
         ir::EdgeAccessPlan::EqualityIndex { index, key, value } => {
-            match exec::exact_edge_equality(index.clone(), key.clone(), value.clone()) {
-                exec::ExecEdgeEqualityAccessPlan::Empty => {
-                    Some(exec::ExecEdgeSecondarySetPlan::Empty)
-                }
-                exec::ExecEdgeEqualityAccessPlan::Bitmap(bitmap) => {
-                    Some(exec::ExecEdgeSecondarySetPlan::Bitmap(bitmap))
-                }
-                exec::ExecEdgeEqualityAccessPlan::AuthoritativeScan(predicate) => {
-                    Some(exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(predicate))
-                }
-                exec::ExecEdgeEqualityAccessPlan::DynamicEquality { index, key, param } => {
-                    Some(exec::ExecEdgeSecondarySetPlan::DynamicEquality { index, key, param })
-                }
-                exec::ExecEdgeEqualityAccessPlan::DynamicMembership { index, key, values } => {
-                    Some(exec::ExecEdgeSecondarySetPlan::DynamicMembership { index, key, values })
-                }
-            }
+            Some(exec::exact_edge_equality(index.clone(), key.clone(), value.clone()).into())
         }
         ir::EdgeAccessPlan::RangeIndex {
             index,

@@ -13,10 +13,10 @@ pub(crate) use ordering::{
     range_access_can_push_limit,
 };
 
-pub(in crate::exec) use edge::{exact_edge_equality, ExecEdgeEqualityAccessPlan};
+pub(in crate::exec) use edge::exact_edge_equality;
 pub use edge::{ExecEdgeAccessPlan, ExecEdgeSecondaryRangePlan, ExecEdgeSecondarySetPlan};
 pub use limited::{ExecAccessLimit, ExecAccessPlan, ExecAccessReadLimit, ExecLimitedAccessPlan};
-pub(in crate::exec) use node::{exact_node_equality, ExecNodeEqualityAccessPlan};
+pub(in crate::exec) use node::exact_node_equality;
 pub use node::{ExecNodeAccessPlan, ExecNodeSecondaryRangePlan, ExecNodeSecondarySetPlan};
 
 #[cfg(test)]

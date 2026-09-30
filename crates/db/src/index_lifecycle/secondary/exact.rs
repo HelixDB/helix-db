@@ -126,8 +126,10 @@ pub(crate) async fn lookup_active_equality_point_literal_with_compatibility(
 
 /// Executes one planner-selected literal bitmap multi-get.
 ///
-/// Duplicate physical keys are preserved and the primitive always issues one
-/// `multi_get`; executable validation owns the at-least-two invariant.
+/// Duplicate physical keys are preserved and the primitive issues one
+/// `multi_get` per [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, so a
+/// literal set of any size holds one batch of bitmaps at a time; executable
+/// validation owns the at-least-two invariant.
 #[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_equality_literal_batch(
     reader: &(impl DbReadOps + Sync),
@@ -211,11 +213,13 @@ pub(crate) async fn lookup_active_equality_literal_batch_with_compatibility(
         })
         .collect::<Result<Vec<_>>>()?;
     keys.iter().for_each(|_| record_equality_point_read());
-    #[cfg(any(test, feature = "production-coverage"))]
-    BENCHMARK_MULTI_GETS.fetch_add(1, AtomicOrdering::Relaxed);
     let mut owners = roaring::RoaringTreemap::new();
-    for bytes in reader.multi_get(&keys).await?.into_iter().flatten() {
-        owners |= SecondaryEqualityBitmapValue::decode(&bytes)?.into_ids();
+    for keys in keys.chunks(helix_planner::cost::RECORD_BATCH_ROWS as usize) {
+        #[cfg(any(test, feature = "production-coverage"))]
+        BENCHMARK_MULTI_GETS.fetch_add(1, AtomicOrdering::Relaxed);
+        for bytes in reader.multi_get(keys).await?.into_iter().flatten() {
+            owners |= SecondaryEqualityBitmapValue::decode(&bytes)?.into_ids();
+        }
     }
     Ok(owners)
 }

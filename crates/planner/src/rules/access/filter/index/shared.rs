@@ -242,6 +242,9 @@ where
                         .map(|value| F::equality_source(index.clone(), key.clone(), value.clone()))
                         .collect(),
                 ),
+                AccessEqualityDomain::Batch(values) => {
+                    F::equality_source(index, key, ir::IndexValue::LiteralSet(values.clone()))
+                }
                 AccessEqualityDomain::Runtime(values) => {
                     F::equality_source(index, key, ir::IndexValue::ParamSet(values.clone()))
                 }
@@ -286,23 +289,27 @@ fn range_point_source<F>(
 where
     F: AccessFilterIndexFamily,
 {
-    let point = |value: &ir::IndexValue| match value {
-        ir::IndexValue::Literal(literal) => {
-            ir::RangeIndexValue::literal(literal.as_property_value().clone()).map(|value| {
-                ir::IndexRange::Between(
-                    ir::IndexBetweenRange::new(
-                        ir::IndexBound::Inclusive(value.clone()),
-                        ir::IndexBound::Inclusive(value),
-                    )
-                    .expect("a point range over one orderable literal is never inverted"),
+    let literal_point = |literal: &ir::SecondaryIndexLiteral| {
+        ir::RangeIndexValue::literal(literal.as_property_value().clone()).map(|value| {
+            ir::IndexRange::Between(
+                ir::IndexBetweenRange::new(
+                    ir::IndexBound::Inclusive(value.clone()),
+                    ir::IndexBound::Inclusive(value),
                 )
-            })
+                .expect("a point range over one orderable literal is never inverted"),
+            )
+        })
+    };
+    let point = |value: &ir::IndexValue| match value {
+        ir::IndexValue::Literal(literal) => literal_point(literal),
+        ir::IndexValue::Param(_) | ir::IndexValue::ParamSet(_) | ir::IndexValue::LiteralSet(_) => {
+            None
         }
-        ir::IndexValue::Param(_) | ir::IndexValue::ParamSet(_) => None,
     };
     let ranges = match domain {
         AccessEqualityDomain::One(value) => vec![point(value)],
         AccessEqualityDomain::Many(values) => values.iter().map(point).collect(),
+        AccessEqualityDomain::Batch(values) => values.iter().map(literal_point).collect(),
         AccessEqualityDomain::Runtime(_) => vec![None],
     }
     .into_iter()
