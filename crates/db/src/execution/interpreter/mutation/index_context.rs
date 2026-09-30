@@ -25,6 +25,9 @@ pub(crate) struct MutationIndexContext {
     active_vector_runtime: vector::ActiveVectorMutationRuntime,
     vector_cache_writes: vector::VectorCacheWriteSet,
     text_compaction_staged: bool,
+    /// Node index footprint of transitions not yet reported to the request's
+    /// membership cache.
+    node_index_writes: super::NodeIndexWrites,
 }
 
 /// Commit-owned index state after every transaction-local runtime is sealed.
@@ -66,6 +69,7 @@ impl MutationIndexContext {
             vector_cache_writes: vector::VectorCacheWriteSet::new(simhasher_registry)
                 .with_batch_reads(vector_batch_reads),
             text_compaction_staged: false,
+            node_index_writes: super::NodeIndexWrites::default(),
         }
     }
 
@@ -92,6 +96,7 @@ impl MutationIndexContext {
             ),
             vector_cache_writes: vector::VectorCacheWriteSet::new(simhasher_registry),
             text_compaction_staged: false,
+            node_index_writes: super::NodeIndexWrites::default(),
         }
     }
 
@@ -122,12 +127,17 @@ impl MutationIndexContext {
     }
 
     /// Routes one complete graph transition through every configured family.
+    ///
+    /// Every node index and `$label` bitmap change passes through here, so
+    /// the transition's node index footprint is recorded for the request's
+    /// membership cache before any family sees it.
     pub(crate) async fn maintain_graph_indexes(
         &mut self,
         transaction: &slatedb::DbTransaction,
         graph: crate::index_lifecycle::graph_mutation::GraphMutationTransition,
         text_limits: crate::config::ActiveTextMutationLimits,
     ) -> Result<(), crate::HelixDbError> {
+        self.node_index_writes.record(&graph);
         let routes = self.routes.targets_for(&graph);
         self.secondary_runtime
             .collect(graph.scope(), &self.secondary, &routes, &graph)?;
@@ -144,6 +154,11 @@ impl MutationIndexContext {
         let text_relevant = self.text.routed_transition_relevant(&routes, &graph)?;
         self.active_text_runtime
             .collect_routed(graph, text_relevant, text_limits)
+    }
+
+    /// Takes the node index footprint recorded since the last call.
+    pub(super) fn take_node_index_writes(&mut self) -> super::NodeIndexWrites {
+        core::mem::take(&mut self.node_index_writes)
     }
 
     /// Borrows the transaction-local topology collector.
@@ -297,6 +312,7 @@ impl MutationIndexContext {
             active_vector_runtime,
             vector_cache_writes,
             text_compaction_staged,
+            node_index_writes: _,
         } = self;
         topology_runtime.consume_prepared()?;
         active_vector_runtime.consume_prepared()?;

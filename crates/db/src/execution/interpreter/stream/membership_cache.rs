@@ -25,7 +25,10 @@ use super::*;
 ///
 /// * a `ForEach` frame binds, replaces, or restores a parameter its set reads
 ///   ([`Self::forget_params`]);
-/// * index DDL, every mutation, and any failed operation forget every entry
+/// * a request-transaction write reaches its footprint
+///   ([`Self::forget_writes`]);
+/// * index DDL, an isolated mutation scope, the request transaction opening,
+///   committing, or aborting, and any failed operation forget every entry
 ///   ([`Self::clear`]).
 ///
 /// Entries that fell back to per-row evaluation follow the same rules. They
@@ -41,8 +44,9 @@ use super::*;
 ///
 /// Cost: a set resolves on its first node row, with no per-row prefix for
 /// short streams, so a `ForEach` whose set reads a frame parameter reads one
-/// label-sized set per frame, and every write forces the next statement to
-/// read the whole set again.
+/// label-sized set per frame, and a write that creates, deletes, or relabels a
+/// node of the set's label, or changes a property the set reads, forces the
+/// next statement to read the whole set again.
 #[derive(Debug, Default)]
 pub(in crate::execution::interpreter) struct PreparedMemberships(
     Vec<(
@@ -90,6 +94,39 @@ impl PreparedMemberships {
         });
     }
 
+    /// Forget every set whose footprint `writes` reached.
+    ///
+    /// A `Labels` set reads the `$label` bitmaps of its labels, which change
+    /// only when a node of one of them is created, deleted, or relabelled. An
+    /// `Index` set reads its label's secondary indexes on the properties of
+    /// its leaves, and under the `Evaluate` policy the label's `$label`
+    /// bitmap, so it survives writes that only change other properties of its
+    /// label.
+    pub(in crate::execution::interpreter) fn forget_writes(
+        &mut self,
+        writes: &mutation::NodeIndexWrites,
+    ) {
+        self.0.retain(|(plan, _)| match &plan.set {
+            exec::ExecNodeMembershipSet::Labels(labels) => !labels.iter().any(|label| {
+                matches!(
+                    writes.label(label.as_ref()),
+                    Some(mutation::LabelWrites::Nodes)
+                )
+            }),
+            exec::ExecNodeMembershipSet::Index { set, label, .. } => {
+                match writes.label(label.as_ref()) {
+                    None => true,
+                    Some(mutation::LabelWrites::Nodes) => false,
+                    Some(mutation::LabelWrites::Properties(changed)) => point_index_properties(set)
+                        .is_some_and(|read| {
+                            read.iter()
+                                .all(|property| !changed.contains(property.as_ref()))
+                        }),
+                }
+            }
+        });
+    }
+
     #[cfg(test)]
     pub(in crate::execution::interpreter) fn len(&self) -> usize {
         self.0.len()
@@ -121,6 +158,49 @@ fn reads_param(
         | exec::ExecNodeSecondarySetPlan::AuthoritativeScan(_)
         | exec::ExecNodeSecondarySetPlan::Range(_)
         | exec::ExecNodeSecondarySetPlan::OrderedIntersect { .. } => false,
+    }
+}
+
+/// Label properties whose point indexes resolving `set` reads.
+///
+/// Every leaf of a membership set is scoped to the set's label, and a unique
+/// lookup verifies only its owner's value of the same property. `None` marks
+/// shapes validated membership plans never carry: empty sets, and sets with a
+/// range, scan, or bitmap program. They are classified conservatively, so any
+/// write to the label forgets them; ranges and scans resolve per row, so that
+/// costs at most a re-check.
+fn point_index_properties(
+    set: &exec::ExecNodeSecondarySetPlan,
+) -> Option<Vec<&ir::NonEmptyString>> {
+    match set {
+        exec::ExecNodeSecondarySetPlan::Bitmap(
+            exec::ExecNodeBitmapExpr::PointRead { key, .. }
+            | exec::ExecNodeBitmapExpr::BatchedUnionRead { key, .. },
+        )
+        | exec::ExecNodeSecondarySetPlan::UniqueUnion { key, .. }
+        | exec::ExecNodeSecondarySetPlan::Unique {
+            lookup: exec::ExecNodeUniqueOwnerReadPlan { key, .. },
+            ..
+        }
+        | exec::ExecNodeSecondarySetPlan::DynamicEquality { key, .. }
+        | exec::ExecNodeSecondarySetPlan::DynamicMembership { key, .. } => {
+            Some(vec![&key.property])
+        }
+        exec::ExecNodeSecondarySetPlan::Intersect { driver, rest }
+        | exec::ExecNodeSecondarySetPlan::Union { driver, rest } => {
+            core::iter::once(driver.as_ref())
+                .chain(rest.iter())
+                .map(point_index_properties)
+                .collect::<Option<Vec<_>>>()
+                .map(|properties| properties.concat())
+        }
+        exec::ExecNodeSecondarySetPlan::Empty
+        | exec::ExecNodeSecondarySetPlan::Bitmap(
+            exec::ExecNodeBitmapExpr::Union { .. } | exec::ExecNodeBitmapExpr::Intersect { .. },
+        )
+        | exec::ExecNodeSecondarySetPlan::AuthoritativeScan(_)
+        | exec::ExecNodeSecondarySetPlan::Range(_)
+        | exec::ExecNodeSecondarySetPlan::OrderedIntersect { .. } => None,
     }
 }
 
@@ -360,5 +440,104 @@ mod tests {
         assert_eq!(cache.len(), 2);
         cache.clear();
         assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn point_index_properties_list_point_leaves_only() {
+        let props = |set: &exec::ExecNodeSecondarySetPlan| {
+            point_index_properties(set).map(|properties| {
+                properties
+                    .into_iter()
+                    .map(|property| property.to_string())
+                    .collect::<Vec<_>>()
+            })
+        };
+        for (set, expected) in [
+            (point("kind"), vec!["kind"]),
+            (
+                literals("kind", catalog::IndexUniqueness::NonUnique, &["A", "B"]),
+                vec!["kind"],
+            ),
+            (unique("uid"), vec!["uid"]),
+            (unique_union("uid"), vec!["uid"]),
+            (dynamic("kind", "kind"), vec!["kind"]),
+            (domain("status", "kinds"), vec!["status"]),
+            (
+                union(
+                    point("kind"),
+                    intersect(unique("uid"), domain("status", "s")),
+                ),
+                vec!["kind", "uid", "status"],
+            ),
+        ] {
+            assert_eq!(
+                props(&set),
+                Some(expected.iter().map(|p| p.to_string()).collect())
+            );
+        }
+        for set in non_point_sets()
+            .into_iter()
+            .chain([union(point("kind"), exec::ExecNodeSecondarySetPlan::Empty)])
+        {
+            assert_eq!(props(&set), None, "{set:?}");
+        }
+    }
+
+    /// Writes that create a node of each of `nodes` and change `properties`
+    /// of existing nodes of their label.
+    fn writes(nodes: &[&str], properties: &[(&str, &str)]) -> mutation::NodeIndexWrites {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::encoding::v2::values::property::Property;
+        use crate::index_lifecycle::graph_mutation::{
+            CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit,
+            PropertyEditOutcome,
+        };
+
+        let row = |label: &str| CanonicalPropertyRow::new(vec![Property::string("$label", label)]);
+        let mut writes = mutation::NodeIndexWrites::default();
+        for label in nodes {
+            writes.record(&GraphMutationTransition::create(
+                DataScope::LegacyUnscoped,
+                GraphEntity::node(1),
+                row(label),
+            ));
+        }
+        for (label, property) in properties {
+            let PropertyEditOutcome::Changed(transition) = GraphMutationTransition::edit(
+                DataScope::LegacyUnscoped,
+                GraphEntity::node(1),
+                row(label),
+                PropertyEdit::set(Property::string(*property, "v")),
+            ) else {
+                panic!("the edit changes the row");
+            };
+            writes.record(&transition);
+        }
+        writes
+    }
+
+    #[test]
+    fn forgetting_writes_drops_only_sets_whose_footprint_they_reach() {
+        let labels = labels_plan(&["Item", "Group"]);
+        let kind = index_plan(point("kind"));
+        let kind_and_status = index_plan(intersect(point("kind"), dynamic("status", "s")));
+        let uid = index_plan(unique("uid"));
+        let range = index_plan(exec::ExecNodeSecondarySetPlan::Range(range_plan("rank")));
+        let plans = [labels, kind, kind_and_status, uid, range];
+        for (nodes, properties, expected) in [
+            (&[][..], &[][..], [true, true, true, true, true]),
+            (&["Note"], &[("Note", "kind")], [true; 5]),
+            (&["Group"], &[], [false, true, true, true, true]),
+            (&["Item"], &[], [false; 5]),
+            (&[], &[("Item", "title")], [true, true, true, true, false]),
+            (&[], &[("Item", "status")], [true, true, false, true, false]),
+            (&[], &[("Item", "kind")], [true, false, false, true, false]),
+            (&[], &[("Item", "uid")], [true, true, true, false, false]),
+            (&[], &[("Item", "$label")], [false; 5]),
+        ] {
+            let mut cache = cache(&plans);
+            cache.forget_writes(&writes(nodes, properties));
+            assert_eq!(cached(&cache, &plans), expected, "{nodes:?} {properties:?}");
+        }
     }
 }
