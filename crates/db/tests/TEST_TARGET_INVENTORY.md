@@ -53,6 +53,16 @@ The final inventory reports exactly:
 | `vector_batch_insert` | `bench` | `crates/db/benches/vector_batch_insert.rs` | Measures vector batch insertion. |
 | `write_path_mutations` | `bench` | `crates/db/benches/write_path_mutations.rs` | Measures graph mutation write paths. |
 
+Examples are not test targets, so the table omits them. The
+`queue_acceptance_verify` example (`crates/db/examples/queue_acceptance_verify.rs`)
+is an existing-database acceptance runner: it opens a fixture written by the
+pre-queue release through the normal open path and checks graph data,
+secondary lookups, and strong/eventual vector and text search against exact
+oracles before and after new queued writes, publication, and restart, plus
+interrupted pre-queue builds (finish, or block and recover through abort and
+recreate). It is run manually against a copy of a preserved fixture and is
+excluded from coverage.
+
 The vector library also owns the ignored, release-only diagnostic
 `vector_search_scale_gate_reports_recall_and_median_throughput` contract in
 `search/vector/hnsw/scale_contracts.rs`. It is not a separate Cargo target and is

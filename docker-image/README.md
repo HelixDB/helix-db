@@ -72,6 +72,25 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` only for a trusted plain-HTTP endpoint. |
 | `DB_PATH` | Logical database prefix inside the selected store; defaults to `db/`. |
 
+### Benchmark images
+
+`docker-image/build.sh --async-index-benchmark` builds a separate benchmark
+image; `--rust-image` and `--runtime-image` pin base images by digest. It adds:
+
+| Variable | Purpose |
+| --- | --- |
+| `HELIX_BENCHMARK_ROLE` | `writer` (default) or `reader`; a reader needs shared disk or S3 storage. |
+| `HELIX_BENCHMARK_SAMPLE_MS` | Sample interval in milliseconds; defaults to `1000`. |
+| `HELIX_INDEX_QUEUE_LAYOUT` | How pending vector/text index operations are stored: `map` (default, the only layout product images run) or `rows`, the row-per-operation baseline. A database must restart with the layout that wrote it; writers, and readers at open, refuse queues written with the other layout. |
+
+The server prints one JSON line per interval to stdout, marked by
+`"helix_benchmark_sample": 1`, with cumulative counters: index-operation
+backlog and publication (`queue`), exact-operation publication lag (`lag`),
+queue merge costs (`merge`), object-store HTTP attempts and body bytes below
+the client's retry loop (`io`), and SlateDB's own metrics (`storage`).
+Subtract two samples to measure a window. `io` bytes are request/response
+body bytes seen by the client, not network-wire bytes.
+
 `HELIX_DATA_DIR` and `S3_BUCKET` are mutually exclusive. Credentials are runtime-only and are never baked into the image. S3 storage always caches on local disk; see [Disk cache](#disk-cache).
 
 Leave both variables unset for memory storage. Bind mounts and existing volumes
@@ -255,6 +274,20 @@ Archive and secret-scanner unit tests can be run without Docker:
 ```bash
 python3 -m unittest discover -s docker-image/tests -p 'test_*.py'
 ```
+
+Asynchronous vector/text index-queue contracts are long-running and separate
+from `test.sh`:
+
+```bash
+python3 docker-image/tests/index_queue_contracts.py --image IMAGE --scenario all
+python3 docker-image/tests/index_queue_contracts.py --image BENCHMARK_IMAGE --scenario benchmark
+```
+
+`correctness` and `s3` check exact strong/eventual search through ingest,
+restart, and `SIGKILL` on disk and S3-compatible storage; `member-limit` fills
+the 250,000-member limit during a long build (100K existing rows by default);
+`benchmark` checks the benchmark image's samples and a reader container. The S3
+scenarios use a digest-pinned VersityGW gateway.
 
 Pull requests and main-branch pushes build and run this suite natively for both amd64 and arm64. Automatic CI runs do not log in to GHCR or publish an image.
 
