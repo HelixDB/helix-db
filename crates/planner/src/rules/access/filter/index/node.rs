@@ -115,6 +115,14 @@ impl shared::AccessFilterIndexFamily for NodeIndexFamily {
         )
     }
 
+    fn is_single_source(source: &Self::Source) -> bool {
+        matches!(
+            source.as_ref(),
+            ir::NodeAccessPlan::EqualityIndex { index, .. }
+                if matches!(index.uniqueness, catalog::IndexUniqueness::Unique)
+        )
+    }
+
     fn intersect_pair(left: Self::Source, right: Self::Source) -> Self::Source {
         ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::Intersect(
             ir::AtLeast::<_, 2>::from_pair(left, right),

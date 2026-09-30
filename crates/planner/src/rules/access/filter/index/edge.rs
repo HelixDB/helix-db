@@ -115,6 +115,11 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
         )
     }
 
+    /// Edge equality indexes are never unique.
+    fn is_single_source(_source: &Self::Source) -> bool {
+        false
+    }
+
     fn intersect_pair(left: Self::Source, right: Self::Source) -> Self::Source {
         ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::Intersect(
             ir::AtLeast::<_, 2>::from_pair(left, right),

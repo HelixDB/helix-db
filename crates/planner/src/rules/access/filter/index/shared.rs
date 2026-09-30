@@ -41,6 +41,8 @@ pub(super) trait AccessFilterIndexFamily {
     fn union_source(sources: Vec<Self::Source>) -> Self::Source;
     fn intersection_source(sources: Vec<Self::Source>) -> Self::Source;
     fn is_broad_source(source: &Self::Source) -> bool;
+    /// Whether `source` reads at most one element, as a unique equality does.
+    fn is_single_source(source: &Self::Source) -> bool;
     fn intersect_pair(left: Self::Source, right: Self::Source) -> Self::Source;
 }
 
@@ -151,11 +153,10 @@ pub(super) fn visit_equality_seed_filters<F>(
     if terms.len() < 2 {
         return;
     }
-    let mut seeds = Vec::<F::Source>::new();
-    terms
+    let candidates = terms
         .iter()
         .enumerate()
-        .filter_map(|(seed, predicate)| {
+        .filter_map(|(position, predicate)| {
             let AccessFilterIndexPlanMatch::Planned(AccessFilterIndexPlan::Conjunction(atoms)) =
                 super::index_plan(predicate, &label, planner_limits)
             else {
@@ -169,31 +170,49 @@ pub(super) fn visit_equality_seed_filters<F>(
                 return None;
             };
             let source = index_source_for_atom::<F>(&label, atom, indexes).ok()?;
-            // Repeated equalities read the same source; one seed covers them.
-            if seeds.contains(&source) {
-                return None;
-            }
-            seeds.push(source.clone());
-            let residual = terms
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != seed)
-                .map(|(_, predicate)| (*predicate).clone())
-                .collect::<Vec<_>>();
-            Some((
-                source,
-                ir::PredicatePlan::new(helix_ast::expr::Predicate::and(residual))
-                    .expect("conjuncts of a validated predicate remain valid"),
-            ))
+            Some((position, source))
         })
-        .take(MAX_EQUALITY_SEEDS)
-        .for_each(|(source, residual)| emit(source, residual));
+        .collect::<Vec<_>>();
+    // Up to the cap every distinct seed is priced, in written order. Past it,
+    // seeds that read at most one element are kept first, since no other seed
+    // can be narrower, and the rest follow in written order.
+    let priority = |(_, source): &&(usize, F::Source)| {
+        candidates.len() > MAX_EQUALITY_SEEDS && !F::is_single_source(source)
+    };
+    let mut ordered = candidates.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(priority);
+    let mut seeds = Vec::<&(usize, F::Source)>::new();
+    for candidate in ordered {
+        if seeds.len() == MAX_EQUALITY_SEEDS {
+            break;
+        }
+        // Repeated equalities read the same source; one seed covers them.
+        if seeds.iter().any(|(_, seed)| *seed == candidate.1) {
+            continue;
+        }
+        seeds.push(candidate);
+    }
+    seeds.sort_by_key(|(position, _)| *position);
+    for (seed, source) in seeds {
+        let residual = terms
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index != seed)
+            .map(|(_, predicate)| (*predicate).clone())
+            .collect::<Vec<_>>();
+        emit(
+            source.clone(),
+            ir::PredicatePlan::new(helix_ast::expr::Predicate::and(residual))
+                .expect("conjuncts of a validated predicate remain valid"),
+        );
+    }
 }
 
 /// Equality seeds considered for one conjunction. Each seed carries the rest
 /// of the conjunction as its residual and is priced over it, so considering
-/// every one would cost work quadratic in the conjunction's width; the first
-/// distinct seeds in written order stand in for the rest.
+/// every one would cost work quadratic in the conjunction's width; past this
+/// many distinct seeds, single-element seeds and then the first in written
+/// order stand in for the rest.
 const MAX_EQUALITY_SEEDS: usize = 32;
 
 /// Index source for one feasible predicate under one proven label.

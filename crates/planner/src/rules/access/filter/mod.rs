@@ -194,6 +194,61 @@ mod tests {
     }
 
     #[test]
+    fn wide_conjunctions_keep_unique_seeds_written_after_the_cap() {
+        let handle = crate::catalog::ScopedPropertyKey::try_new("User", "handle").unwrap();
+        let mut indexes = (0..40).fold(
+            crate::catalog::IndexCatalogSnapshot::default(),
+            |indexes, index| {
+                indexes.with_node_eq(
+                    crate::catalog::ScopedPropertyKey::try_new("User", format!("p{index}"))
+                        .unwrap(),
+                )
+            },
+        );
+        indexes.node_eq.insert(
+            handle,
+            crate::catalog::NodeEqualityIndexMeta::try_new("user_handle")
+                .unwrap()
+                .with_uniqueness(crate::catalog::IndexUniqueness::Unique),
+        );
+        let access = logical::AccessPath::Node(logical::NodeAccessPath::new(
+            ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::LabelScan {
+                label: ir::NonEmptyString::new("User").unwrap(),
+            }),
+        ));
+        let conjuncts = (0..40)
+            .map(|index| helix_ast::expr::Predicate::eq(format!("p{index}"), index as i64))
+            .chain([helix_ast::expr::Predicate::eq("handle", "ada")])
+            .collect::<Vec<_>>();
+        let filter = logical::AccessFilter::new(
+            access,
+            ir::PredicatePlan::new(helix_ast::expr::Predicate::and(conjuncts)).unwrap(),
+        );
+        let mut seeds = Vec::new();
+        index::visit_equality_seed_rewrites(
+            &filter,
+            &indexes,
+            &crate::context::PlannerLimits::default(),
+            |pipeline| {
+                let logical::AccessPath::Node(path) = pipeline.access() else {
+                    panic!("node filters seed node accesses");
+                };
+                let ir::NodeAccessPlan::EqualityIndex { key, .. } = path.source().as_ref() else {
+                    panic!("equality seeds read equality indexes");
+                };
+                seeds.push(key.property.to_string());
+            },
+        );
+        // The unique seed is kept, the rest are the first non-unique seeds,
+        // and all of them are emitted in written order.
+        let expected = (0..31)
+            .map(|index| format!("p{index}"))
+            .chain(["handle".to_string()])
+            .collect::<Vec<_>>();
+        assert_eq!(seeds, expected);
+    }
+
+    #[test]
     fn access_filter_rewrite_or_else_uses_fallback_only_when_needed() {
         let access = node_access();
 
