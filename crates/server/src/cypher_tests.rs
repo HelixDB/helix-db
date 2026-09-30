@@ -18,7 +18,8 @@ async fn cypher_http_and_grpc_preserve_values_errors_and_atomic_writes() {
         .await
         .unwrap(),
     );
-    let state = state::ServerState::new(Arc::clone(&db), None);
+    let state = state::ServerState::new(Arc::clone(&db), None)
+        .with_cypher_endpoints(crate::CypherEndpoints::Enabled);
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
     let response = router.clone().oneshot(Request::post("/v2/cypher").header("content-type","application/json")
@@ -107,7 +108,10 @@ async fn cypher_explain_has_a_separate_read_only_http_contract() {
         .embedded_default_config()
         .with_query_telemetry(db::config::QueryTelemetry::Disabled);
     let db = Arc::new(db::HelixDB::open_with_config(source, config).await.unwrap());
-    let router = http::router(state::ServerState::new(Arc::clone(&db), None));
+    let router = http::router(
+        state::ServerState::new(Arc::clone(&db), None)
+            .with_cypher_endpoints(crate::CypherEndpoints::Enabled),
+    );
     for (body, status) in [
         (
             json!({"query":"CREATE (:N {key:7})"}).to_string(),
@@ -158,7 +162,8 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
         .embedded_default_config()
         .with_query_telemetry(db::config::QueryTelemetry::Disabled);
     let db = Arc::new(db::HelixDB::open_with_config(source, config).await.unwrap());
-    let state = state::ServerState::new(Arc::clone(&db), None);
+    let state = state::ServerState::new(Arc::clone(&db), None)
+        .with_cypher_endpoints(crate::CypherEndpoints::Enabled);
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
     for (text, warm, durable, detail) in [
@@ -224,5 +229,57 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
     );
     drop(router);
     drop(grpc);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cypher_endpoints_are_unrouted_unless_enabled() {
+    let db = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemory {
+            database: "cypher-disabled".into(),
+        })
+        .await
+        .unwrap(),
+    );
+    let state = state::ServerState::new(Arc::clone(&db), None);
+    assert_eq!(state.cypher_endpoints(), crate::CypherEndpoints::Disabled);
+    let router = http::router(state.clone());
+    for path in ["/v2/cypher", "/v2/cypher/explain"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .body(Body::from(json!({"query":"RETURN 1"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+    let error = grpc::GrpcService::new(state)
+        .execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
+            body: json!({"query":"RETURN 1"}).to_string().into_bytes().into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+    // Native queries are unaffected.
+    let response = router
+        .oneshot(
+            Request::post("/v2/query")
+                .body(Body::from(
+                    serde_json::to_vec(&helix_ast::query::QueryRequest::read(
+                        helix_ast::batch::read_batch()
+                            .var_as("n", helix_ast::traversal::g().n_with_label("X").count())
+                            .returning(["n"]),
+                    ))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     db.close().await.unwrap();
 }

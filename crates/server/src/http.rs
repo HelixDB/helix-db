@@ -38,13 +38,18 @@ pub async fn serve(
 }
 
 pub(crate) fn router(state: ServerState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/v2/query", post(execute_query))
-        .route("/v2/cypher", post(execute_cypher))
-        .route("/v2/cypher/explain", post(explain_cypher))
-        .with_state(state)
+        .route("/v2/query", post(execute_query));
+    // Unrouted Cypher paths fall through to 404, as on a server without Cypher.
+    let router = match state.cypher_endpoints() {
+        crate::CypherEndpoints::Enabled => router
+            .route("/v2/cypher", post(execute_cypher))
+            .route("/v2/cypher/explain", post(explain_cypher)),
+        crate::CypherEndpoints::Disabled => router,
+    };
+    router.with_state(state)
 }
 
 async fn healthz(State(state): State<ServerState>) -> Response {

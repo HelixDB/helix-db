@@ -62,6 +62,11 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
+        let crate::CypherEndpoints::Enabled = self.state.cypher_endpoints() else {
+            return Err(Status::unimplemented(
+                "Cypher is not enabled on this server",
+            ));
+        };
         let request = request.into_inner();
         if request.body.len() > MAX_QUERY_BODY_BYTES {
             return Err(Status::resource_exhausted(

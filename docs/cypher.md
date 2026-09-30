@@ -8,6 +8,11 @@ cloud gateway deployment is separate.
 
 ## Execute a statement
 
+Cypher is off by default. Start the server with `HELIX_ENABLE_CYPHER=true` to
+route `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`;
+without it they return 404 and `Unimplemented`, and only native queries are
+served.
+
 Send one statement to a local server's `POST /v2/cypher` endpoint:
 
 ```sh

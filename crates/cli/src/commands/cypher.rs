@@ -63,6 +63,11 @@ pub async fn run(args: Args) -> Result<()> {
         .await?;
     let status = response.status();
     let bytes = response.bytes().await?;
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(eyre!(
+            "Cypher failed with HTTP {status}: this server does not route Cypher; start it with HELIX_ENABLE_CYPHER=true"
+        ));
+    }
     if !status.is_success() {
         return Err(eyre!(
             "Cypher failed with HTTP {status}: {}",

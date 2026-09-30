@@ -17,6 +17,7 @@ fn memory_config(name: &str) -> ServerConfig {
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
         db_path: name.to_string(),
         storage: StorageConfig::Memory,
+        cypher: crate::CypherEndpoints::Disabled,
     }
 }
 
@@ -504,6 +505,7 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
             root: data_root.clone(),
             cache: CacheConfig::Hybrid(Box::new(cache)),
         },
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let write = query::QueryRequest::write(
         batch::write_batch()
@@ -645,6 +647,7 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
                 .unwrap(),
             )),
         },
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let search = query::QueryRequest::read(
         batch::read_batch()
@@ -791,6 +794,7 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
                 .unwrap(),
             )),
         },
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let first = open_database(&config(128 * MIB)).await.unwrap();
     let partitions = files_below(&cache_root.join("slate"));
