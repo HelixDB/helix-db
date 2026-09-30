@@ -1709,18 +1709,29 @@ impl<'db> ExecutionContext<'db> {
             self.check_execution_deadline()?;
             let search = |k| SearchReadLimit::new(k, None);
             let (ids, existence) = match plan {
-                C::Union { driver, rest } | C::Intersect { driver, rest } => {
-                    let children = self.read_children(
-                        core::iter::once(driver.as_ref())
-                            .chain(rest.iter())
-                            .collect(),
-                        reads,
-                        |child, reads| self.count_cursor_ids(child, reads),
-                    );
-                    return match plan {
-                        C::Intersect { .. } => CountIds::intersection(children).await,
-                        _ => CountIds::union(children).await,
-                    };
+                C::Union { driver, rest } => {
+                    return CountIds::union(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.count_cursor_ids(child, reads),
+                        ),
+                    )
+                    .await;
+                }
+                C::Intersect { driver, rest } => {
+                    return CountIds::intersection(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.count_cursor_ids(child, reads),
+                        ),
+                    )
+                    .await;
                 }
                 C::NodeBitmap(bitmap) => {
                     (self.node_bitmap(bitmap, reads).await?, Existence::Proven)

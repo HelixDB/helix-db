@@ -259,11 +259,7 @@ mod tests {
             PropertyValue::Object(Default::default()),
         ] {
             assert_eq!(
-                classify_members([
-                    PropertyValue::I64(1),
-                    unsafe_member,
-                    PropertyValue::I64(2),
-                ]),
+                classify_members([PropertyValue::I64(1), unsafe_member, PropertyValue::I64(2),]),
                 (
                     vec![PropertyValue::I64(1), PropertyValue::I64(2)],
                     MemberCoverage::WithUnindexed
