@@ -1375,6 +1375,152 @@ mod tests {
         assert!(second_index.get_item(&db, 19).await.unwrap().is_some());
     }
 
+    /// Rows of one physical vector namespace, by key.
+    async fn physical_rows(
+        db: &Db,
+        physical: VectorPhysicalIndexId,
+    ) -> std::collections::BTreeMap<Bytes, Bytes> {
+        let mut rows = db.scan::<std::ops::RangeFull>(..).await.unwrap();
+        let mut physical_rows = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let Ok(DataKey::Data {
+                kind: DataKeyKind::Vector(key),
+                ..
+            }) = DataKey::parse_from_slice(DataScope::LegacyUnscoped, &row.key)
+            else {
+                continue;
+            };
+            if key.index_id() == physical.get() {
+                physical_rows.insert(row.key, row.value);
+            }
+        }
+        physical_rows
+    }
+
+    /// The mapped physical namespace, and its index, of the tenant that
+    /// `properties` routes to.
+    async fn tenant_index(
+        db: &Db,
+        target: &VectorMutationTarget,
+        active: &ActiveIndexHandle,
+        properties: &[Property],
+    ) -> (
+        VectorPhysicalIndexId,
+        VectorIndex<vector::distance::Euclidean>,
+    ) {
+        let document = vector_document(&target.definition, properties)
+            .unwrap()
+            .unwrap();
+        let partition =
+            VectorTenantPartition::try_from_partition(document.partition().clone()).unwrap();
+        let physical = repository::load_vector_partition_mapping(
+            db,
+            DataScope::LegacyUnscoped,
+            target.index_id,
+            target.generation,
+            VectorPhysicalLayout::Partitioned,
+            &partition,
+        )
+        .await
+        .unwrap()
+        .expect("the tenant is mapped");
+        let generation = vector::ValidatedVectorGenerationHandle::try_from_active::<
+            vector::distance::Euclidean,
+        >(active, physical)
+        .unwrap();
+        (
+            physical,
+            VectorIndex::<vector::distance::Euclidean>::from_generation(&generation),
+        )
+    }
+
+    /// A tenant move whose destination already holds the entity's exact
+    /// vector at its layer skips only that upsert: the entity still leaves
+    /// the stale tenant, and no destination row changes.
+    #[tokio::test]
+    async fn active_tenant_move_onto_its_indexed_state_still_removes_the_stale_tenant() {
+        let db = test_db("vector-active-tenant-move-replay").await;
+        let definition = validated_definition(Some("account_id"), VectorDistanceMetric::Euclidean);
+        let (target, active) = active_target(definition, VectorPhysicalLayout::Partitioned);
+        let mutations = VectorMutationSet {
+            targets: vec![target.clone()],
+        };
+        let cache_writes = VectorCacheWriteSet::default();
+        let properties = |tenant: i64, vector: Vec<f32>| {
+            vec![
+                property("$label", PropertyValue::String("Document".to_string())),
+                property("account_id", PropertyValue::I64(tenant)),
+                property("embedding", PropertyValue::F32Array(vector)),
+            ]
+        };
+        let stale = properties(7, vec![1.0, 2.0, 3.0]);
+        let moved = properties(8, vec![1.0, 2.0, 3.0]);
+        let neighbor = properties(7, vec![3.0, 2.0, 1.0]);
+        let fillers = (0..40_u16)
+            .map(|index| properties(8, vec![f32::from(index), f32::from(index % 5), 1.0]))
+            .collect::<Vec<_>>();
+        // No queued chain leaves an entity in two tenants; entity 19 is put
+        // in both directly. Entity 20 keeps tenant 7 from being reclaimed,
+        // and the fillers give tenant 8 links a full replacement would change.
+        for entities in [
+            vec![(19, &stale), (20, &neighbor)],
+            std::iter::once((19, &moved))
+                .chain((100..).zip(&fillers))
+                .collect(),
+        ] {
+            let insert = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            maintain_entities(
+                &db,
+                &insert,
+                &mutations,
+                &cache_writes,
+                &entities
+                    .iter()
+                    .map(|(entity_id, after)| {
+                        VectorEntityMutation::new(IndexElementKind::Node, *entity_id, &[], after)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+            insert.commit().await.unwrap();
+        }
+        let (stale_physical, stale_index) = tenant_index(&db, &target, &active, &stale).await;
+        let (moved_physical, moved_index) = tenant_index(&db, &target, &active, &moved).await;
+        assert!(stale_index.get_item(&db, 19).await.unwrap().is_some());
+        let destination = physical_rows(&db, moved_physical).await;
+
+        let update = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        maintain_entities(
+            &db,
+            &update,
+            &mutations,
+            &cache_writes,
+            &[VectorEntityMutation::new(
+                IndexElementKind::Node,
+                19,
+                &stale,
+                &moved,
+            )],
+        )
+        .await
+        .unwrap();
+        update.commit().await.unwrap();
+
+        assert!(stale_index.get_item(&db, 19).await.unwrap().is_none());
+        assert!(stale_index.get_item(&db, 20).await.unwrap().is_some());
+        assert_ne!(stale_physical, moved_physical);
+        assert!(moved_index.get_item(&db, 19).await.unwrap().is_some());
+        assert_eq!(physical_rows(&db, moved_physical).await, destination);
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn tenant_partition_reclaims_only_after_last_delete_and_reinsert_uses_fresh_id() {
         let db = test_db("vector-active-tenant-last-delete").await;

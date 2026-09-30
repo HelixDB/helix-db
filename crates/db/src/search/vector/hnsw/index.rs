@@ -899,12 +899,12 @@ impl<D: Distance> VectorIndex<D> {
         .await
     }
 
-    /// Stages a deterministic replacement in a caller-owned measured write set.
+    /// Stages a deterministic upsert in a caller-owned measured write set.
     ///
-    /// Catch-up selects and retains `node_layer` during throwaway planning, then
-    /// applies the captured delete-plus-insert graph mutation at commit. The
-    /// existing vector bytes and HNSW encodings remain unchanged by this
-    /// transaction-boundary optimization.
+    /// An upsert that changes the node's vector bytes or layer deletes the
+    /// node, then inserts `vector` at `node_layer`. A node that already holds
+    /// `vector` at `node_layer` stages nothing. Queued publication plans the
+    /// same upsert through [`Self::stage_upsert_at_layer_with_session`].
     #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) async fn stage_upsert_at_layer(
         &self,
@@ -924,6 +924,9 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages one builder-exclusive replacement through a reusable planning session.
+    ///
+    /// A node that already holds `vector` at `node_layer` stages nothing and
+    /// keeps its links, as a queued replay of an indexed value needs.
     pub(crate) async fn stage_upsert_at_layer_with_session(
         &self,
         txn: &MeasuredVectorTransaction<'_>,

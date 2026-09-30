@@ -22,7 +22,7 @@ use super::overlay_tests::vector_search;
 use super::publication::{NextTarget, PublicationOutcome, QueuePublisher};
 use super::tests::{
     add_doc, all_keys, open, publisher_with_limits, queue, queued, release_within_operand_bound,
-    target,
+    rows, target,
 };
 use super::QueueTarget;
 use crate::batch_reads::BatchReads;
@@ -1102,6 +1102,52 @@ async fn restart_and_the_recovery_sweep_resume_publication_without_notifications
     .await
     .expect("the recovery sweep published work whose wake was consumed while paused");
     reopened.close().await.unwrap();
+}
+
+/// Two queued writes that return a published entity to its vector collapse
+/// into one replay: both are acknowledged, as one entity, and no vector row
+/// changes.
+#[tokio::test]
+async fn a_chain_back_to_the_published_vector_acknowledges_both_writes_and_changes_no_row() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open(
+        "publish-replay-chain",
+        store,
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install_vector(&db, None).await;
+    let mut ids = Vec::new();
+    for index in 0..40_u16 {
+        let vector = vec![f32::from(index % 7), f32::from(index / 7)];
+        ids.push(add_doc(&db, vector, "doc").await.unwrap());
+    }
+    let target = target(&db, QueueFamily::Vector).await;
+    assert_eq!(drain(&db, target).await, 40);
+    let replayed = ids[17];
+    set_embedding(&db, replayed, vec![9.5, 9.5]).await;
+    set_embedding(&db, replayed, vec![3.0, 2.0]).await;
+    let published = rows(&db, VectorKey::is_vector_keyspace).await;
+
+    assert_eq!(
+        publisher(&db).publish_once(target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 2,
+            entities: 1
+        }
+    );
+    assert_eq!(
+        publisher(&db).publish_once(target).await.unwrap(),
+        PublicationOutcome::Empty
+    );
+    assert!(queue(&db, QueueFamily::Vector).await.is_none());
+    assert!(db
+        .index_operation_backlog()
+        .outstanding_targets()
+        .is_empty());
+    assert_eq!(rows(&db, VectorKey::is_vector_keyspace).await, published);
+    assert_eq!(search(&db, vec![3.0, 2.0], 1, None).await, vec![replayed]);
+    db.close().await.unwrap();
 }
 
 #[tokio::test]

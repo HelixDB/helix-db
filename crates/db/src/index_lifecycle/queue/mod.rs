@@ -17,7 +17,8 @@
 //! then applies them in commit order as idempotent replacements or deletes:
 //!
 //! - a row changed after the build read it is corrected by its operation;
-//! - a row changed before the build read it is re-applied with the same value;
+//! - a row changed before the build read it is re-applied with the same value,
+//!   which vector publication recognizes and leaves in place;
 //! - a deleted row is removed by its operation;
 //! - an entity above the build's source watermark arrives only from the queue.
 //!

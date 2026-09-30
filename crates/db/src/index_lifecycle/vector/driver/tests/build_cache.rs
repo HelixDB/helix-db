@@ -1203,7 +1203,7 @@ async fn retained_sessions_share_the_budget_max_min_fairly() {
     let first = VectorBuildCheckpoint::new(&operation, &record, operation.progress().clone());
     let second = another_operation(&first);
     let third = another_operation(&first);
-    let per_simhash = 96 + core::mem::size_of::<u64>();
+    let per_simhash = 104 + core::mem::size_of::<u64>();
     let namespace = 4_096;
     let session = |simhashes| {
         VectorBuildSession::<Euclidean>::with_test_simhashes(
@@ -1710,7 +1710,7 @@ async fn reused_sessions_are_checked_out_within_their_rebound_class_caps() {
     let dense = simhashes(BUDGET, 64);
     assert!(!dense.exceeds_limits());
     let dense_bytes = RetainedBuildSession::retained_bytes(&dense);
-    let large = simhashes(1 << 40, 450);
+    let large = simhashes(1 << 40, 440);
     let large_bytes = RetainedBuildSession::retained_bytes(&large);
     assert!(dense_bytes + large_bytes <= BUDGET);
     for (checkpoint, session) in [(&first, dense), (&second, large)] {

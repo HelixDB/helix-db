@@ -96,6 +96,21 @@ pub(super) async fn all_keys(db: &HelixDB) -> std::collections::BTreeSet<bytes::
     keys
 }
 
+/// Rows of `db` whose key `keep` accepts, by key.
+pub(super) async fn rows(
+    db: &HelixDB,
+    keep: impl Fn(&[u8]) -> bool,
+) -> std::collections::BTreeMap<bytes::Bytes, bytes::Bytes> {
+    let mut rows = db.inner_db().scan::<std::ops::RangeFull>(..).await.unwrap();
+    let mut kept = std::collections::BTreeMap::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        if keep(&row.key) {
+            kept.insert(row.key, row.value);
+        }
+    }
+    kept
+}
+
 pub(super) async fn queue(db: &HelixDB, family: QueueFamily) -> Option<OperationQueue> {
     read_queue(db.inner_db().as_ref(), target(db, family).await, family)
         .await

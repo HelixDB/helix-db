@@ -362,7 +362,7 @@ pub(crate) async fn run() {
 /// Bytes one retained session of `simhashes` fixture SimHashes charges: its
 /// namespace plus one SimHash entry each.
 const fn session_bytes(simhashes: usize) -> usize {
-    4_096 + simhashes * (96 + core::mem::size_of::<u64>())
+    4_096 + simhashes * (104 + core::mem::size_of::<u64>())
 }
 
 /// Offers a build session of `simhashes` fixture SimHashes, created under a
