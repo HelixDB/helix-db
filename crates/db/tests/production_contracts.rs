@@ -7640,12 +7640,13 @@ fn public_write_batches_keep_index_memberships_exact_across_frames_and_writes() 
 /// writes answer exactly like the per-row filter.
 ///
 /// Every request runs on a database with equality indexes on `Attribute`
-/// kind and status and a range index on rank, and on one without indexes,
-/// which keeps every per-row filter; both must answer alike. Frames bind the
-/// parameters of runtime equality and IN sets, unions, intersections, and
-/// residuals, including a null binding, and between reads they create, link,
-/// relabel, update, strip, and drop nodes and edges. A failing batch leaves
-/// both databases unchanged.
+/// kind and status, a unique index on code, and a range index on rank, and on
+/// one without indexes, which keeps every per-row filter; both must answer
+/// alike. Frames bind the parameters of runtime equality and IN sets, unions,
+/// intersections, and residuals, including a null binding, next to literal IN
+/// and unique sets, and between reads they create, link, relabel, update,
+/// strip, and drop nodes and edges. A failing batch leaves both databases
+/// unchanged.
 async fn public_write_batches_keep_index_memberships_exact_across_frames_and_writes_contract() {
     let open = |database: &'static str| async move {
         HelixDB::open(HelixDbSource::InMemory {
@@ -7659,6 +7660,7 @@ async fn public_write_batches_keep_index_memberships_exact_across_frames_and_wri
     for spec in [
         index::IndexSpec::node_equality("Attribute", "kind"),
         index::IndexSpec::node_equality("Attribute", "status"),
+        index::IndexSpec::node_unique_equality("Attribute", "code"),
         index::IndexSpec::node_range("Attribute", "rank"),
     ] {
         let receipt = indexed
@@ -7707,6 +7709,11 @@ async fn public_write_batches_keep_index_memberships_exact_across_frames_and_wri
         ];
         properties.extend(kind.map(|kind| ("kind", PropertyInput::from(kind))));
         properties.extend(status.map(|status| ("status", PropertyInput::from(status))));
+        // Only seeded attributes carry a unique code: nodes the frames create
+        // or relabel have none.
+        properties.extend(
+            (label == "Attribute").then(|| ("code", PropertyInput::from(format!("c{uid}")))),
+        );
         traversal::g().add_n(label, properties)
     };
     let edge = |from: &str, label: &str, to: &str| {
@@ -7755,9 +7762,9 @@ async fn public_write_batches_keep_index_memberships_exact_across_frames_and_wri
         .expect("retention graph seeds");
 
     // Post-expansion filters of every set shape: runtime equality and IN
-    // sets, a union and an intersection with a runtime leaf, a `$label` set,
-    // a range filter that stays per-row, and a residual with its own
-    // parameter.
+    // sets, a union and an intersection with a runtime leaf, a literal IN
+    // set, unique equality and IN sets, a `$label` set, a range filter that
+    // stays per-row, and a residual with its own parameter.
     let shapes = [
         ("equality", Predicate::eq_param("kind", "kind")),
         ("domain", Predicate::is_in_param("kind", "kinds")),
@@ -7774,6 +7781,21 @@ async fn public_write_batches_keep_index_memberships_exact_across_frames_and_wri
                 Predicate::eq("kind", "B"),
                 Predicate::eq_param("status", "status"),
             ]),
+        ),
+        (
+            "literal_in",
+            Predicate::is_in(
+                "kind",
+                PropertyValue::StringArray(vec!["A".to_owned(), "C".to_owned()]),
+            ),
+        ),
+        ("unique", Predicate::eq("code", "ca4")),
+        (
+            "unique_in",
+            Predicate::is_in(
+                "code",
+                PropertyValue::StringArray(vec!["ca1".to_owned(), "ca2".to_owned()]),
+            ),
         ),
         ("labels", Predicate::eq("$label", "Attribute")),
         ("range", Predicate::gt("rank", 3_i64)),
@@ -7889,6 +7911,9 @@ async fn public_write_batches_keep_index_memberships_exact_across_frames_and_wri
                     "before_domain",
                     "before_union",
                     "before_intersect",
+                    "before_literal_in",
+                    "before_unique",
+                    "before_unique_in",
                     "before_labels",
                     "before_range",
                     "before_residual",
@@ -7896,6 +7921,9 @@ async fn public_write_batches_keep_index_memberships_exact_across_frames_and_wri
                     "after_domain",
                     "after_union",
                     "after_intersect",
+                    "after_literal_in",
+                    "after_unique",
+                    "after_unique_in",
                     "after_labels",
                     "after_range",
                     "after_residual",
