@@ -104,7 +104,7 @@ fn selective_equality_type_union_preserves_unindexed_residuals() {
 }
 
 #[test]
-fn unique_membership_respects_union_limits_and_small_label_costs() {
+fn unique_membership_uses_the_index_at_small_label_costs_and_scans_past_the_union_limit() {
     let mut context = PlannerContext::default();
     context.indexes.node_eq.insert(
         ScopedPropertyKey::try_new("Fixture", "key").unwrap(),
@@ -112,7 +112,9 @@ fn unique_membership_respects_union_limits_and_small_label_costs() {
             .unwrap()
             .with_uniqueness(crate::catalog::IndexUniqueness::Unique),
     );
-    for (count, known_rows) in [(65, None), (64, Some(1))] {
+    // A one-row label never trades the index for a scan. A list past the
+    // union limit is not index-served, so it scans.
+    for (count, known_rows, label_scans) in [(65, None, 1), (64, Some(1), 0)] {
         context.stats = known_rows.map_or_else(StatsSnapshot::default, |rows| {
             StatsSnapshot::default()
                 .with_node_label_cardinality(NonEmptyString::new("Fixture").unwrap(), rows)
@@ -130,7 +132,7 @@ fn unique_membership_respects_union_limits_and_small_label_costs() {
                 .statistics
                 .node_accesses
                 .label_scans,
-            1
+            label_scans
         );
     }
 }
@@ -299,7 +301,7 @@ fn selective_equality_intersects_every_index_with_absent_or_stale_statistics() {
 }
 
 #[test]
-fn selective_equality_costing_still_allows_measurably_small_label_scans() {
+fn small_labels_still_use_every_index() {
     let mut context = PlannerContext::default();
     for property in ["tenant", "type", "deleted"] {
         let key = ScopedPropertyKey::try_new("Resource", property).unwrap();
@@ -324,18 +326,20 @@ fn selective_equality_costing_still_allows_measurably_small_label_scans() {
             .values(vec!["id"]),
     ] {
         let plan = executable_traversal(traversal, context.clone());
-        assert!(
-            matches!(
-                first_exec_access(&plan),
-                ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { .. })
-                    | ExecAccessPlan::Edge(ExecEdgeAccessPlan::LabelScan { .. })
-            ),
+        // A one-row label would be cheap to scan, yet every conjunct is
+        // index-served, so the source intersects the three sets.
+        assert_eq!(
+            intersected_equality_properties(&plan),
+            Some(vec![
+                "deleted".to_string(),
+                "tenant".to_string(),
+                "type".to_string()
+            ]),
             "{:#?}",
             plan.steps()
         );
-        // One label-scan row verification plus its residual record read.
-        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 2);
-        assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
+        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 0);
+        assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
     }
 }
 
@@ -485,21 +489,15 @@ fn indexed_conjunctions_are_permutation_invariant_full_intersections() {
                         assert!(!plan.metrics().guardrail_hit);
                         // Every permutation intersects all five sets and
                         // evaluates nothing per row.
-                        // No permutation reads one index and evaluates the
-                        // other indexed conjuncts per row.
-                        if !matches!(
-                            first_exec_access(&plan),
-                            ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { .. })
-                                | ExecAccessPlan::Edge(ExecEdgeAccessPlan::LabelScan { .. })
-                        ) {
-                            assert_eq!(
-                                intersected_equality_properties(&plan),
-                                Some(properties.map(str::to_string).to_vec()),
-                                "{:#?}",
-                                plan.steps()
-                            );
-                            assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
-                        }
+                        // Every permutation intersects all five sets and
+                        // evaluates nothing per row.
+                        assert_eq!(
+                            intersected_equality_properties(&plan),
+                            Some(properties.map(str::to_string).to_vec()),
+                            "{:#?}",
+                            plan.steps()
+                        );
+                        assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
                     }
                 }
             }
@@ -508,7 +506,7 @@ fn indexed_conjunctions_are_permutation_invariant_full_intersections() {
 }
 
 #[test]
-fn broad_equality_seeds_can_lose_to_full_intersection_or_a_cheap_scan() {
+fn broad_equalities_use_the_full_intersection_at_any_label_size() {
     let mut context = PlannerContext::default();
     for property in ["p0", "p1", "p2", "p3", "p4"] {
         let key = ScopedPropertyKey::try_new("Fixture", property).unwrap();
@@ -539,19 +537,13 @@ fn broad_equality_seeds_can_lose_to_full_intersection_or_a_cheap_scan() {
                 .values(vec!["p0"]),
         ] {
             let plan = executable_traversal(traversal, context.clone());
-            match (label_rows, first_exec_access(&plan)) {
-                (
-                    1,
-                    ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { .. })
-                    | ExecAccessPlan::Edge(ExecEdgeAccessPlan::LabelScan { .. }),
-                ) => {}
-                (
-                    100_000,
-                    ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet { .. })
-                    | ExecAccessPlan::Edge(ExecEdgeAccessPlan::SecondarySet { .. }),
-                ) => {}
-                (_, other) => panic!("unexpected choice for {label_rows} label rows: {other:?}"),
-            }
+            assert_eq!(
+                intersected_equality_properties(&plan),
+                Some(["p0", "p1", "p2", "p3", "p4"].map(str::to_string).to_vec()),
+                "{label_rows} label rows: {:#?}",
+                plan.steps()
+            );
+            assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
         }
     }
 }

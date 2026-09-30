@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn selective_equality_type_union_retains_full_cost_competition() {
+fn selective_equality_type_union_is_one_index_intersection() {
     let rules = SeedRuleSet::default();
     let indexes = ["tenant", "type"].into_iter().fold(
         catalog::IndexCatalogSnapshot::default(),
@@ -34,6 +34,9 @@ fn selective_equality_type_union_retains_full_cost_competition() {
         .flat_map(|group| &group.alternatives)
         .collect::<Vec<_>>();
     assert!(candidates.len() <= 5);
+    assert!(!candidates
+        .iter()
+        .any(|entry| is_label_scan_pipeline(&entry.alternative.expr)));
     let indexed = candidates
         .iter()
         .find(|entry| {
@@ -53,7 +56,7 @@ fn selective_equality_type_union_retains_full_cost_competition() {
 }
 
 #[test]
-fn selective_equality_retains_full_cost_competition() {
+fn selective_equality_offers_only_the_full_intersection() {
     let rules = SeedRuleSet::default();
     let indexes = ["tenant", "type", "deleted"].into_iter().fold(
         catalog::IndexCatalogSnapshot::default(),
@@ -87,10 +90,11 @@ fn selective_equality_retains_full_cost_competition() {
         candidates.len() <= 5,
         "index exploration must keep the candidate set bounded"
     );
-    let scan = candidates
+    // Every conjunct is index-served, so no group holds a label scan with a
+    // per-row filter, whatever it would cost.
+    assert!(!candidates
         .iter()
-        .find(|entry| matches!(entry.alternative.expr, physical::PhysicalExpr::Pipeline(_)))
-        .unwrap();
+        .any(|entry| is_label_scan_pipeline(&entry.alternative.expr)));
     let indexed = candidates
         .iter()
         .find(|entry| {
@@ -100,8 +104,6 @@ fn selective_equality_retains_full_cost_competition() {
             )
         })
         .unwrap();
-    assert_eq!(scan.alternative.cost.latency.as_micros(), 30_050);
-    assert_eq!(scan.alternative.cost.authoritative_graph_reads, 2000);
     assert_eq!(indexed.alternative.cost.latency.as_micros(), 15_220);
     assert_eq!(indexed.alternative.cost.object_reads, 3);
     assert_eq!(indexed.alternative.cost.cpu_units, 70);
@@ -295,7 +297,7 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_unions() {
 }
 
 #[test]
-fn indexed_conjunction_retains_faithfully_costed_seed_scan_and_intersection() {
+fn indexed_conjunction_offers_only_the_full_intersection() {
     let rules = SeedRuleSet::default();
     let indexes = ["kind", "name", "namespace", "group_id", "tenant_id"]
         .into_iter()
@@ -334,10 +336,9 @@ fn indexed_conjunction_retains_faithfully_costed_seed_scan_and_intersection() {
         candidates.len() <= 5,
         "index exploration must keep the candidate set bounded"
     );
-    let scan = candidates
+    assert!(!candidates
         .iter()
-        .find(|entry| matches!(entry.alternative.expr, physical::PhysicalExpr::Pipeline(_)))
-        .unwrap();
+        .any(|entry| is_label_scan_pipeline(&entry.alternative.expr)));
     let indexed = candidates
         .iter()
         .find(|entry| {
@@ -347,8 +348,6 @@ fn indexed_conjunction_retains_faithfully_costed_seed_scan_and_intersection() {
             )
         })
         .unwrap();
-    assert_eq!(scan.alternative.cost.latency.as_micros(), 32_050);
-    assert_eq!(scan.alternative.cost.authoritative_graph_reads, 2000);
     assert_eq!(indexed.alternative.cost.latency.as_micros(), 25_360);
     assert_eq!(indexed.alternative.cost.object_reads, 5);
     assert_eq!(indexed.alternative.cost.cpu_units, 110);
@@ -356,4 +355,29 @@ fn indexed_conjunction_retains_faithfully_costed_seed_scan_and_intersection() {
     let best = result.best_alternative(result.root()).unwrap();
     assert_eq!(best.cost, indexed.alternative.cost);
     assert_eq!(best.cost.authoritative_graph_reads, 0);
+}
+
+/// Whether `expr` scans a label and filters its rows one by one.
+fn is_label_scan_pipeline(expr: &physical::PhysicalExpr) -> bool {
+    let physical::PhysicalExpr::Pipeline(pipeline) = expr else {
+        return false;
+    };
+    let scans = pipeline.ops().iter().any(|op| match op {
+        physical::PhysicalPipelineOp::Access { access, .. } => match access {
+            physical::PhysicalAccess::LabelScan => true,
+            physical::PhysicalAccess::NodeExact(access) => {
+                matches!(access.as_ref(), exec::ExecNodeAccessPlan::LabelScan { .. })
+            }
+            physical::PhysicalAccess::EdgeExact(access) => {
+                matches!(access.as_ref(), exec::ExecEdgeAccessPlan::LabelScan { .. })
+            }
+            _ => false,
+        },
+        _ => false,
+    });
+    scans
+        && pipeline
+            .ops()
+            .iter()
+            .any(|op| matches!(op, physical::PhysicalPipelineOp::ResidualFilter))
 }

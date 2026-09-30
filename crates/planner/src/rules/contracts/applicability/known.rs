@@ -71,6 +71,7 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
         KnownRuleId::AccessPipelineFilter => {
             RuleApplicability::access_pipeline_head_only(logical::StreamPipelineOpKind::Filter)
         }
+        KnownRuleId::AccessSourceIndexFilter => RuleApplicability::stream_source_index_candidate(),
         KnownRuleId::AccessPipelineMembershipFilter => {
             RuleApplicability::stream_membership_candidate()
         }
@@ -139,6 +140,7 @@ mod tests {
                 KnownRuleId::AccessWindow,
                 KnownRuleId::AccessFilterSimplification,
                 KnownRuleId::AccessDistinct,
+                KnownRuleId::AccessSourceIndexFilter,
                 KnownRuleId::AccessPipelineMembershipFilter,
                 KnownRuleId::AccessPipelineSimplification,
                 KnownRuleId::RootControlFlowEmpty,

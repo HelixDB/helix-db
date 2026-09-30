@@ -117,7 +117,7 @@ fn implementation_rules_defer_eligible_filters_to_membership() {
         logical::LogicalExprKind::StreamAggregate,
         logical::LogicalExprKind::StreamVariableWrite,
     ];
-    assert_eq!(STREAM_MEMBERSHIP_KINDS, expected);
+    assert_eq!(REQUIRED_STREAM_FILTER_KINDS, expected);
 
     for expr in exprs(helix_ast::expr::Predicate::eq("kind", "B")) {
         assert_eq!(

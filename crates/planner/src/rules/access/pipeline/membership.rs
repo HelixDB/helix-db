@@ -67,11 +67,13 @@ pub(in crate::rules) fn membership_rewrite(
     indexes: &catalog::IndexCatalogSnapshot,
     planner_limits: &context::PlannerLimits,
 ) -> Option<logical::LogicalExpr> {
-    Rewrite {
-        indexes,
-        planner_limits,
-    }
-    .expr(expr)
+    super::rewrite_stream_expr(
+        expr,
+        &Rewrite {
+            indexes,
+            planner_limits,
+        },
+    )
 }
 
 struct Rewrite<'a> {
@@ -79,86 +81,10 @@ struct Rewrite<'a> {
     planner_limits: &'a context::PlannerLimits,
 }
 
-impl Rewrite<'_> {
-    fn expr(&self, expr: &logical::LogicalExpr) -> Option<logical::LogicalExpr> {
-        match expr {
-            logical::LogicalExpr::AccessFilter(filter) => self
-                .access_filter(filter)
-                .map(logical::LogicalExpr::AccessPipeline),
-            logical::LogicalExpr::AccessPipeline(pipeline) => self
-                .access_pipeline(pipeline)
-                .map(logical::LogicalExpr::AccessPipeline),
-            logical::LogicalExpr::RootPipeline(pipeline) => self
-                .root_pipeline(pipeline)
-                .map(logical::LogicalExpr::RootPipeline),
-            logical::LogicalExpr::StreamReserved(reserved) => {
-                self.root_stream(reserved.input()).map(|input| {
-                    logical::LogicalExpr::StreamReserved(logical::StreamReserved::new(
-                        input,
-                        reserved.op().clone(),
-                    ))
-                })
-            }
-            logical::LogicalExpr::StreamCardinality(cardinality) => {
-                self.root_stream(cardinality.input()).map(|input| {
-                    logical::LogicalExpr::StreamCardinality(
-                        logical::StreamCardinality::new(input).with_planning_bindings(
-                            cardinality.params().clone(),
-                            cardinality.late_bound_params().clone(),
-                        ),
-                    )
-                })
-            }
-            logical::LogicalExpr::StreamProject(project) => {
-                self.root_stream(project.input()).map(|input| {
-                    logical::LogicalExpr::StreamProject(logical::StreamProject::new(
-                        input,
-                        project.projection().clone(),
-                    ))
-                })
-            }
-            logical::LogicalExpr::StreamAggregate(aggregate) => {
-                self.root_stream(aggregate.input()).map(|input| {
-                    logical::LogicalExpr::StreamAggregate(logical::StreamAggregate::new(
-                        input,
-                        aggregate.aggregate().clone(),
-                    ))
-                })
-            }
-            logical::LogicalExpr::StreamVariableWrite(write) => {
-                self.root_stream(write.input()).map(|input| {
-                    logical::LogicalExpr::StreamVariableWrite(logical::StreamVariableWrite::new(
-                        input,
-                        write.op().clone(),
-                    ))
-                })
-            }
-            _ => None,
-        }
-    }
-
-    fn root_stream(&self, stream: &logical::RootStream) -> Option<logical::RootStream> {
-        match stream {
-            logical::RootStream::Access(logical::AccessStream::Filter(filter)) => {
-                self.access_filter(filter).map(|pipeline| {
-                    logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline))
-                })
-            }
-            logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline)) => {
-                self.access_pipeline(pipeline).map(|pipeline| {
-                    logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline))
-                })
-            }
-            logical::RootStream::Pipeline(pipeline) => self
-                .root_pipeline(pipeline)
-                .map(|pipeline| logical::RootStream::Pipeline(Box::new(pipeline))),
-            _ => None,
-        }
-    }
-
+impl super::StreamFilterRewrite for Rewrite<'_> {
     /// A lone filter over a label-less node source, which the source-index
     /// rule declines, becomes a membership pipeline over the same source.
-    fn access_filter(&self, filter: &logical::AccessFilter) -> Option<logical::AccessPipeline> {
+    fn access_filter(&self, filter: &logical::AccessFilter) -> Option<logical::AccessStream> {
         if !label_less_node_filter(filter.access(), filter.predicate()) {
             return None;
         }
@@ -169,15 +95,13 @@ impl Rewrite<'_> {
                 plan: Box::new(plan),
             }),
         )
+        .map(logical::AccessStream::Pipeline)
     }
 
     /// A leading filter over a labeled source belongs to the source-index
     /// rule, so candidates start after it. Over a label-less node source that
     /// rule declines an unscoped leading filter, so it is a candidate too.
-    fn access_pipeline(
-        &self,
-        pipeline: &logical::AccessPipeline,
-    ) -> Option<logical::AccessPipeline> {
+    fn access_pipeline(&self, pipeline: &logical::AccessPipeline) -> Option<logical::AccessStream> {
         let first_candidate = match pipeline.ops() {
             [logical::StreamPipelineOp::Filter { predicate }, ..]
                 if label_less_node_filter(pipeline.access(), predicate) =>
@@ -192,24 +116,20 @@ impl Rewrite<'_> {
             first_candidate,
         )?;
         logical::AccessPipeline::new(pipeline.access().clone(), ops)
+            .map(logical::AccessStream::Pipeline)
     }
 
     /// A root pipeline follows a complete root stream, so its first filter is
-    /// already behind that stream's source. Its own operators and its input
-    /// stream are rewritten together.
-    fn root_pipeline(&self, pipeline: &logical::RootPipeline) -> Option<logical::RootPipeline> {
-        match (
-            self.ops(root_stream_element(pipeline.input()), pipeline.ops(), 0),
-            self.root_stream(pipeline.input()),
-        ) {
-            (None, None) => None,
-            (ops, input) => logical::RootPipeline::new(
-                input.unwrap_or_else(|| pipeline.input().clone()),
-                ops.unwrap_or_else(|| pipeline.ops_at_least().clone()),
-            ),
-        }
+    /// already behind that stream's source.
+    fn root_pipeline_ops(
+        &self,
+        pipeline: &logical::RootPipeline,
+    ) -> Option<crate::ir::AtLeast<logical::StreamPipelineOp, 1>> {
+        self.ops(root_stream_element(pipeline.input()), pipeline.ops(), 0)
     }
+}
 
+impl Rewrite<'_> {
     /// Replace every eligible filter at or after `first_candidate`, keeping
     /// every other operator in place. A filter is eligible when its rows are
     /// not known to be edges and [`index_membership_filter`] serves its

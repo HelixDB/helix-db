@@ -77,8 +77,8 @@ impl optimizer::OptimizerRule for AccessFilterIndexRule {
     }
 }
 
-/// Implement residual access filters when no exploration rule can eliminate or
-/// index the predicate.
+/// Implement residual access filters only when no required rewrite (index
+/// membership or source index access) applies.
 pub struct AccessFilterImplementationRule {
     metadata: RuleMetadata,
 }
@@ -103,9 +103,11 @@ impl optimizer::OptimizerRule for AccessFilterImplementationRule {
         let logical::LogicalExpr::AccessFilter(filter) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
-            .is_some()
-        {
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
             return optimizer::RuleResult::NotApplicable;
         }
         if access_path_is_direct_empty(filter.access()) {

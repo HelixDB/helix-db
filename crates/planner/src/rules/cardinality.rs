@@ -31,9 +31,11 @@ impl optimizer::OptimizerRule for StreamCardinalityImplementationRule {
         let logical::LogicalExpr::StreamCardinality(cardinality) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
-            .is_some()
-        {
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
             return optimizer::RuleResult::NotApplicable;
         }
         let plans = match count_plans(cardinality.input(), &input) {
