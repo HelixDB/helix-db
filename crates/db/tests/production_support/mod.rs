@@ -32,16 +32,30 @@ mod index_lifecycle;
 mod index_lifecycle_scale;
 mod index_lifecycle_text_rows;
 mod index_lifecycle_typed_boundaries;
+#[cfg(feature = "index-lifecycle-testing")]
+mod index_operation_queue;
 mod migration_text_rebuild;
 mod secondary_equality_hot_path;
+mod text_generation_rows;
 mod v1_migration;
 
 pub use graph_mutation_representation::graph_mutation_representation_contracts;
+#[cfg(feature = "index-lifecycle-testing")]
+pub use index_operation_queue::{
+    index_operation_queue_codec_contracts, index_operation_queue_ledger_contracts,
+    index_operation_queue_reconciliation_contracts,
+    index_operation_queue_recovery_corruption_contracts,
+};
 pub use secondary_equality_hot_path::{
     benchmark_million_sequential_id_bitmap, SecondaryEqualityHotPathFixture,
     SecondaryEqualityInsertMode, SecondaryEqualityInsertSample, SecondaryEqualityInspection,
     SecondaryEqualityLookupInspection, SecondaryEqualityMillionBitmapSample,
     SecondaryEqualityReadMode, SecondaryEqualityReadSample,
+};
+pub use text_generation_rows::{
+    damage_text_build, damage_text_split_object, restore_text_split_object,
+    text_compaction_pointer_count, text_manifest_row_counts, text_manifest_split_counts,
+    TextBuildDamage, TextSplitObjectDamage,
 };
 
 pub use crate::search::text::{
@@ -287,6 +301,29 @@ pub async fn vector_storage_contracts() {
 #[cfg(not(test))]
 pub async fn vector_build_cache_contracts() {
     crate::index_lifecycle::vector::run_build_cache_contracts().await;
+}
+
+/// Drives the vector lifecycle driver's build, cleanup, and planning boundaries.
+///
+/// The owning-module children step builds, cleanups, and legacy adoptions
+/// through the production outbox against raw storage, and prove queued
+/// publication rejects inconsistent tenant partitions, other-family targets,
+/// and non-numeric payloads.
+pub async fn vector_lifecycle_driver_contracts() {
+    crate::index_lifecycle::vector::run_driver_contracts().await;
+    crate::index_lifecycle::vector::run_publication_contracts().await;
+}
+
+/// Drives bounded vector and text queue publication through explicitly
+/// scheduled writers.
+///
+/// Covers budget trims and blocks, selection and collapse boundaries,
+/// uncertain acknowledgements, retired generations, refused, corrupt, and
+/// closed attempts, inconsistent namespace metadata, commit conflicts,
+/// uncertain commits, and fenced writers.
+#[cfg(feature = "index-lifecycle-testing")]
+pub async fn queue_publication_contracts() {
+    crate::index_lifecycle::queue::publication::production_contracts::run().await;
 }
 /// Characterizes the independent finite-score magnitude oracle and active kernels.
 pub fn vector_magnitude_oracle_and_kernel_contracts() {
