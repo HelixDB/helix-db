@@ -351,29 +351,74 @@ pub struct QueryRequest {
 pub const MAX_REQUEST_JSON_DEPTH: usize = 255;
 
 /// Reject JSON nested deeper than [`MAX_REQUEST_JSON_DEPTH`] with one flat
-/// pass that tracks only the depth and whether it is inside a string.
+/// pass that tracks only the depth.
 fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
-    // (depth, inside a string, after a backslash in a string)
-    bytes
-        .iter()
-        .try_fold((0_usize, false, false), |state, &byte| {
-            Ok(match (state, byte) {
-                ((depth, true, true), _) => (depth, true, false),
-                ((depth, true, false), b'\\') => (depth, true, true),
-                ((depth, true, false), b'"') => (depth, false, false),
-                ((depth, true, false), _) => (depth, true, false),
-                ((depth, false, _), b'"') => (depth, true, false),
-                ((depth, false, _), b'[' | b'{') if depth == MAX_REQUEST_JSON_DEPTH => {
-                    return Err(<sonic_rs::Error as serde::de::Error>::custom(format!(
-                        "JSON nesting exceeds {MAX_REQUEST_JSON_DEPTH} levels"
-                    )));
-                }
-                ((depth, false, _), b'[' | b'{') => (depth + 1, false, false),
-                ((depth, false, _), b']' | b'}') => (depth.saturating_sub(1), false, false),
-                ((depth, false, _), _) => (depth, false, false),
-            })
+    // Nesting never exceeds the number of `[` and `{` bytes, wherever they
+    // appear, so one count settles almost every request. `byte | 0x20` maps
+    // exactly `[` and `{` to `{`; counting 255-byte chunks in `u8` lanes
+    // vectorizes.
+    let opens = bytes
+        .chunks(usize::from(u8::MAX))
+        .map(|chunk| {
+            usize::from(
+                chunk
+                    .iter()
+                    .fold(0_u8, |opens, &byte| opens + u8::from(byte | 0x20 == b'{')),
+            )
         })
-        .map(|_| ())
+        .sum::<usize>();
+    if opens <= MAX_REQUEST_JSON_DEPTH {
+        return Ok(());
+    }
+    // An 8-byte word outside strings without a quote or bracket keeps the
+    // depth, so it is skipped whole; numeric arrays such as vectors are
+    // mostly such words. `| 0x20` folds `[`/`{` to `{` and `]`/`}` to `}`.
+    const WORD: usize = size_of::<u64>();
+    const ONES: u64 = u64::from_ne_bytes([0x01; WORD]);
+    let holds = |word: u64, byte: u8| {
+        let equal = word ^ (ONES * u64::from(byte));
+        equal.wrapping_sub(ONES) & !equal & (ONES << 7) != 0
+    };
+    let mut depth = 0_usize;
+    let mut rest = bytes;
+    loop {
+        if let Some(word) = rest.first_chunk::<WORD>() {
+            let word = u64::from_ne_bytes(*word);
+            let folded = word | (ONES * 0x20);
+            if !(holds(word, b'"') || holds(folded, b'{') || holds(folded, b'}')) {
+                rest = &rest[WORD..];
+                continue;
+            }
+        }
+        let Some((&byte, tail)) = rest.split_first() else {
+            return Ok(());
+        };
+        rest = tail;
+        match byte {
+            b'[' | b'{' if depth == MAX_REQUEST_JSON_DEPTH => {
+                return Err(<sonic_rs::Error as serde::de::Error>::custom(format!(
+                    "JSON nesting exceeds {MAX_REQUEST_JSON_DEPTH} levels"
+                )));
+            }
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            // A string ends at its next unescaped quote; nothing inside it
+            // is structure. An unterminated string ends the body.
+            b'"' => loop {
+                let Some(end) = rest.iter().position(|&byte| matches!(byte, b'"' | b'\\')) else {
+                    return Ok(());
+                };
+                let escaped = rest[end] == b'\\';
+                rest = rest
+                    .get(end + 1 + usize::from(escaped)..)
+                    .unwrap_or_default();
+                if !escaped {
+                    break;
+                }
+            },
+            _ => {}
+        }
+    }
 }
 
 impl QueryRequest {
@@ -964,6 +1009,62 @@ mod tests {
         // Brackets and escaped quotes inside strings are not structure.
         assert!(
             check_json_depth(format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()).is_ok()
+        );
+        // Word skipping agrees with a byte-at-a-time scan, with quotes,
+        // escapes and brackets at every offset around word boundaries.
+        let oracle = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .try_fold((0_usize, false, false), |state, &byte| {
+                    match (state, byte) {
+                        ((depth, true, true), _) => Some((depth, true, false)),
+                        ((depth, true, false), b'\\') => Some((depth, true, true)),
+                        ((depth, true, false), b'"') => Some((depth, false, false)),
+                        ((depth, true, false), _) => Some((depth, true, false)),
+                        ((depth, false, _), b'"') => Some((depth, true, false)),
+                        ((depth, false, _), b'[' | b'{') => {
+                            (depth < MAX_REQUEST_JSON_DEPTH).then_some((depth + 1, false, false))
+                        }
+                        ((depth, false, _), b']' | b'}') => {
+                            Some((depth.saturating_sub(1), false, false))
+                        }
+                        ((depth, false, _), _) => Some((depth, false, false)),
+                    }
+                })
+                .is_some()
+        };
+        let fragments: [&[u8]; 12] = [
+            b"[",
+            b"]",
+            b"{",
+            b"}",
+            b"\"",
+            b"\\",
+            b"\\\"",
+            b"|",
+            b"abcdefgh",
+            b"1,",
+            b"[[",
+            b"]]",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for case in 0..4_000 {
+            // Every case has enough brackets to reach the full scan.
+            let mut body = b"[".repeat(250 + case % 8);
+            for _ in 0..(case % 97) {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                body.extend_from_slice(fragments[(seed >> 33) as usize % fragments.len()]);
+            }
+            assert_eq!(
+                check_json_depth(&body).is_ok(),
+                oracle(&body),
+                "{:?}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        // Many shallow siblings pass the full scan.
+        assert!(
+            check_json_depth(format!("{{\"x\":[{}[]]}}", "[],".repeat(1_000)).as_bytes()).is_ok()
         );
         let request = QueryRequest::read(read_batch());
         assert_eq!(
