@@ -148,6 +148,10 @@ pub(super) async fn add_doc(db: &HelixDB, embedding: Vec<f32>, body: &str) -> cr
 }
 
 /// A publisher over `db`'s storage and caches with its own limits and schedule.
+///
+/// It shares the writer publisher's planning cache, as every publisher of one
+/// writer must: each attempt then takes its target's retained session out
+/// before it plans, whichever publisher committed last.
 pub(super) fn publisher_with_limits(
     db: &HelixDB,
     limits: SearchIndexBatchLimits,
@@ -162,11 +166,11 @@ pub(super) fn publisher_with_limits(
             cache_registry: Arc::clone(&db.inner.caches.vector_memory.registry),
             simhasher_registry: Arc::clone(db.simhasher_registry()),
             batch_reads: db.batch_reads(),
-            planning_cache: Arc::new(crate::index_lifecycle::vector::VectorBuildCache::new(
-                DbConfig::new()
-                    .search_index_backfill()
-                    .vector_build_cache_bytes(),
-            )),
+            planning_cache: Arc::clone(
+                db.index_queue_publisher()
+                    .expect("the writer runs a publisher")
+                    .planning_cache(),
+            ),
         },
         limits,
         super::publication::TextPublicationResources {

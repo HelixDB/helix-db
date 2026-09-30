@@ -139,13 +139,14 @@ pub(crate) async fn run() {
     let cache = VectorBuildCache::new(NonZeroU64::new(BUDGET).expect("budget is positive"));
     let marked = |checkpoint: &VectorBuildCheckpoint| {
         Some(CommittedStepState::VectorBuild(Box::new(
-            RetainedVectorBuild {
-                checkpoint: checkpoint.clone(),
-                session: Box::new(VectorBuildSession::<Euclidean>::with_test_simhashes(
+            OfferedVectorBuild::for_tests(
+                &cache,
+                VectorPlanningCheckpoint::Build(checkpoint.clone()),
+                Box::new(VectorBuildSession::<Euclidean>::with_test_simhashes(
                     NonZeroU64::new(BUDGET).expect("marker budget is positive"),
                     u64::try_from(MARKED).expect("marker count fits u64"),
                 )),
-            },
+            ),
         )))
     };
     let retained_checkpoints = || {
@@ -154,7 +155,7 @@ pub(crate) async fn run() {
             .try_lock()
             .expect("no commit is trimming the retained sessions")
             .iter()
-            .map(|retained| retained.checkpoint.clone())
+            .filter_map(|retained| retained.build_checkpoint().cloned())
             .collect::<Vec<_>>()
     };
 
@@ -164,7 +165,7 @@ pub(crate) async fn run() {
     .retaining(
         &first,
         &first_record,
-        VectorBuildSession::<Euclidean>::new(NonZeroU64::new(BUDGET).expect("budget is positive")),
+        cache.checkout_fresh::<Euclidean>().await,
     )
     .into_execution();
     assert!(format!("{execution:?}").contains("CommittedStepState::VectorBuild"));
@@ -181,9 +182,7 @@ pub(crate) async fn run() {
             .retaining(
                 &first,
                 &first_record,
-                VectorBuildSession::<Euclidean>::new(
-                    NonZeroU64::new(BUDGET).expect("budget is positive"),
-                ),
+                cache.checkout_fresh::<Euclidean>().await,
             )
             .into_execution();
         assert!(

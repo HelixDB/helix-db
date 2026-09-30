@@ -10,7 +10,10 @@
 //! deterministic layers, each admitted against the publication budget beside
 //! the acknowledgement. The first effect that does not fit ends the batch, and
 //! the captured writes of the admitted prefix are applied to the serializable
-//! publication transaction. No source graph row is read.
+//! publication transaction. No source graph row is read. Like a build's
+//! session between steps, the session outlives an attempt only once that
+//! attempt commits, and the next attempt on the target reuses it only at
+//! exactly that commit ([`VectorPublicationCheckpoint`]).
 //!
 //! A generation's physical state for an entity is always one state of its
 //! queued chain: the state before the first outstanding operation, or, after
@@ -24,17 +27,15 @@
 //! # Sole writer
 //!
 //! Planning reads HNSW rows from a snapshot outside the publication
-//! transaction, so those reads register no serializable conflicts. That is
-//! sound because the publisher is the only writer of an Active generation's
-//! physical rows: foreground writes only enqueue operations, a build writes
-//! only its hidden generation, cleanup starts only after retirement, which
-//! conflicts with the publication transaction's read of the index record, and
-//! one attempt per generation runs at a time under its publication permit.
-//! Tenant mappings and the physical-ID watermark are still read through the
+//! transaction, or from a session retained since the target's last commit, so
+//! those reads register no serializable conflicts. That is sound because the
+//! publisher is the only writer of an Active generation's physical rows:
+//! [`VectorPublicationCheckpoint`] goes through every other writer. Tenant
+//! mappings and the physical-ID watermark are still read through the
 //! publication transaction, and a physical ID another index allocates before
 //! the snapshot opens is a retryable conflict.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 use slatedb::{Db, DbTransaction, IsolationLevel};
@@ -56,7 +57,12 @@ use crate::search::vector::{
 
 use super::super::queue::publication::VectorPublicationResources;
 use super::super::queue::storage::AcknowledgementOutput;
-use super::driver::{plan_and_apply, EntityPlanOutcome, VectorBatchAccounting, VectorPlanTarget};
+use super::super::queue::QueueTarget;
+use super::super::IndexGenerationPublicationPermit;
+use super::driver::{
+    plan_and_apply, EntityPlanOutcome, OfferedVectorBuild, VectorBatchAccounting, VectorPlanTarget,
+    VectorPublicationCheckpoint,
+};
 use super::{
     corruption, ActiveIndexHandle, IndexEntityId, TextPartition, ValidatedVectorIndexDefinition,
     VectorIndexedDocument,
@@ -74,10 +80,15 @@ pub(crate) struct QueuedVectorEffect {
 }
 
 /// How many effects one publication staged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StagedEffects {
-    /// The first `n` effects fit the budget and were staged; no later one was.
-    Prefix(NonZeroUsize),
+    /// The first `staged` effects fit the budget and were staged; no later
+    /// one was.
+    Prefix {
+        staged: NonZeroUsize,
+        /// The attempt's clean planning session, to retain once the commit it
+        /// was offered at succeeds.
+        retained: Option<Box<OfferedVectorBuild>>,
+    },
     /// Not even the first effect fits beside the reserved output; nothing was
     /// staged.
     NoneFits,
@@ -89,25 +100,52 @@ pub(crate) enum StagedEffects {
 /// Every admitted write to a resident-cache row is recorded in `cache_writes`,
 /// and every tenant partition an admitted removal empties is reclaimed and
 /// recorded there for retirement.
+///
+/// Planning reuses the session retained after the target's commit numbered
+/// `latest_commit` when that is still the retained one, and offers its own
+/// session for retention at `commit`, the number this attempt's commit takes.
 #[allow(
     clippy::too_many_arguments,
-    reason = "publication binds the exact storage, generation, budget, planner resources, and cache effects"
+    reason = "publication binds the exact storage, generation, budget, planner resources, cache effects, and session checkpoints"
 )]
 pub(crate) async fn stage_active_effects(
     db: &Db,
     transaction: &DbTransaction,
+    permit: &IndexGenerationPublicationPermit,
     handle: &ActiveIndexHandle,
     effects: &[QueuedVectorEffect],
     limits: SearchIndexBatchLimits,
     reserved: AcknowledgementOutput,
     resources: &VectorPublicationResources,
     cache_writes: &VectorCacheWriteSet,
+    latest_commit: Option<NonZeroU64>,
+    commit: NonZeroU64,
 ) -> Result<StagedEffects> {
-    let ActiveIndexHandle::Vector { definition, .. } = handle else {
+    let ActiveIndexHandle::Vector {
+        scope,
+        index_id,
+        generation,
+        record_revision,
+        definition,
+        ..
+    } = handle
+    else {
         return Err(corruption(
             "vector publication received another family handle",
         ));
     };
+    assert_eq!(
+        QueueTarget::new(*scope, *index_id, *generation),
+        permit.target(),
+        "publication plans only the generation it owns"
+    );
+    let checkpoint = |commit| VectorPublicationCheckpoint {
+        target: permit.target(),
+        index_record_revision: *record_revision,
+        commit,
+    };
+    let reuse = latest_commit.map(checkpoint);
+    let retain = checkpoint(commit);
     let target = VectorPlanTarget::publication(handle, cache_writes)?;
     match definition.metric() {
         VectorDistanceMetric::Cosine => {
@@ -120,6 +158,9 @@ pub(crate) async fn stage_active_effects(
                 limits,
                 reserved,
                 resources,
+                permit,
+                reuse,
+                retain,
             )
             .await
         }
@@ -133,6 +174,9 @@ pub(crate) async fn stage_active_effects(
                 limits,
                 reserved,
                 resources,
+                permit,
+                reuse,
+                retain,
             )
             .await
         }
@@ -146,6 +190,9 @@ pub(crate) async fn stage_active_effects(
                 limits,
                 reserved,
                 resources,
+                permit,
+                reuse,
+                retain,
             )
             .await
         }
@@ -154,7 +201,7 @@ pub(crate) async fn stage_active_effects(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "publication binds the exact storage, target, budget, and planner resources"
+    reason = "publication binds the exact storage, target, budget, planner resources, and session checkpoints"
 )]
 async fn stage_with_distance<D: Distance>(
     db: &Db,
@@ -165,12 +212,18 @@ async fn stage_with_distance<D: Distance>(
     limits: SearchIndexBatchLimits,
     reserved: AcknowledgementOutput,
     resources: &VectorPublicationResources,
+    permit: &IndexGenerationPublicationPermit,
+    reuse: Option<VectorPublicationCheckpoint>,
+    retain: VectorPublicationCheckpoint,
 ) -> Result<StagedEffects> {
     let planning = db.begin(IsolationLevel::Snapshot).await?;
     let recorder = VectorWriteRecorder::new();
     let mut accounting =
         VectorBatchAccounting::reserving(limits, reserved.operations, reserved.bytes);
-    let mut session = resources.planning_cache.checkout_fresh::<D>().await;
+    let mut session = resources
+        .planning_cache
+        .checkout_publication::<D>(permit, reuse.as_ref(), limits.max_input_bytes())
+        .await;
     let mut staged = 0_usize;
     for effect in effects {
         let next = effect
@@ -215,7 +268,21 @@ async fn stage_with_distance<D: Distance>(
         )?;
         staged += 1;
     }
-    Ok(NonZeroUsize::new(staged).map_or(StagedEffects::NoneFits, StagedEffects::Prefix))
+    #[cfg(test)]
+    {
+        let stats = session.stats();
+        resources.planning_cache.record_publication_planning(
+            recorder.reads(),
+            stats.item_evictions() + stats.neighbor_evictions() + stats.simhash_evictions(),
+        );
+    }
+    let Some(staged) = NonZeroUsize::new(staged) else {
+        return Ok(StagedEffects::NoneFits);
+    };
+    Ok(StagedEffects::Prefix {
+        staged,
+        retained: OfferedVectorBuild::publication(retain, session).map(Box::new),
+    })
 }
 
 /// Stages the reclamation of a tenant partition `write` emptied, returning

@@ -307,6 +307,9 @@ impl PlannedVectorMutation {
 pub(crate) struct VectorWriteRecorder {
     identity: Arc<()>,
     writes: Arc<Mutex<VectorWriteState>>,
+    /// Keys read through every transaction bound to this recorder.
+    #[cfg(test)]
+    reads: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl VectorWriteRecorder {
@@ -315,7 +318,21 @@ impl VectorWriteRecorder {
         Self {
             identity: Arc::new(()),
             writes: Arc::new(Mutex::new(VectorWriteState::default())),
+            #[cfg(test)]
+            reads: Arc::default(),
         }
+    }
+
+    /// Returns the keys read through every transaction bound to this recorder.
+    #[cfg(test)]
+    pub(crate) fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// Counts `keys` read through a bound transaction.
+    #[cfg(test)]
+    fn record_reads(&self, keys: usize) {
+        self.reads.fetch_add(keys as u64, Ordering::Relaxed);
     }
 
     /// Borrows a SlateDB transaction while sharing this recorder's write state.
@@ -355,6 +372,8 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
         }
         #[cfg(feature = "production-coverage")]
         crate::search::vector::record_benchmark_point_get();
+        #[cfg(test)]
+        self.recorder.record_reads(1);
         self.inner.get_with_options(key, options).await
     }
 
@@ -369,6 +388,8 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
         }
         #[cfg(feature = "production-coverage")]
         crate::search::vector::record_benchmark_point_get();
+        #[cfg(test)]
+        self.recorder.record_reads(1);
         self.inner.get_key_value_with_options(key, options).await
     }
 
@@ -386,6 +407,8 @@ impl slatedb::DbReadOps for MeasuredVectorTransaction<'_> {
         }
         #[cfg(feature = "production-coverage")]
         crate::search::vector::record_benchmark_multi_get(keys.len());
+        #[cfg(test)]
+        self.recorder.record_reads(keys.len());
         self.inner.multi_get_with_options(keys, options).await
     }
 

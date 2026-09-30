@@ -50,14 +50,17 @@ use crate::search::vector::{
 };
 use crate::HelixDB;
 
-fn publisher(db: &HelixDB) -> &Arc<QueuePublisher> {
+pub(super) fn publisher(db: &HelixDB) -> &Arc<QueuePublisher> {
     db.index_queue_publisher()
         .expect("writer runs an automatic publisher")
 }
 
 /// Batch limits with `max_input_bytes` and `max_output_operations`; every
 /// other limit is generous.
-fn batch_limits(max_input_bytes: u64, max_output_operations: u64) -> SearchIndexBatchLimits {
+pub(super) fn batch_limits(
+    max_input_bytes: u64,
+    max_output_operations: u64,
+) -> SearchIndexBatchLimits {
     SearchIndexBatchLimits::try_new(
         NonZeroUsize::new(512).unwrap(),
         NonZeroU64::new(max_input_bytes).unwrap(),
@@ -83,7 +86,7 @@ async fn physical(db: &HelixDB, query: [f32; 2]) -> Vec<(u64, f64)> {
         .collect()
 }
 
-async fn install_vector(db: &HelixDB, tenant: Option<&str>) {
+pub(super) async fn install_vector(db: &HelixDB, tenant: Option<&str>) {
     let definition =
         VectorIndexDefinition::new_node("Doc", "embedding", 2, VectorDistanceMetric::Euclidean)
             .unwrap();
@@ -613,7 +616,7 @@ async fn a_prefix_advances_the_cursor_past_its_last_published_entity() {
 }
 
 /// Returns the physical namespace of every tenant partition mapping.
-async fn mapped_partitions(db: &HelixDB) -> Vec<u64> {
+pub(super) async fn mapped_partitions(db: &HelixDB) -> Vec<u64> {
     let prefix = ManagedIndexKey::data_prefix(
         DataScope::LegacyUnscoped,
         ScopedKey::logical_prefix(RecordKind::VectorPartitionMapping),
@@ -633,7 +636,10 @@ async fn mapped_partitions(db: &HelixDB) -> Vec<u64> {
 }
 
 /// Returns every physical row of one vector namespace, in key order.
-async fn physical_rows(db: &HelixDB, physical_index_id: u64) -> Vec<(bytes::Bytes, bytes::Bytes)> {
+pub(super) async fn physical_rows(
+    db: &HelixDB,
+    physical_index_id: u64,
+) -> Vec<(bytes::Bytes, bytes::Bytes)> {
     let storage = db.inner_db();
     let mut rows = Vec::new();
     for lane in VectorStorageLane::ALL {
@@ -706,7 +712,7 @@ async fn one_batch_reclaims_a_partition_and_recreates_it_in_a_fresh_namespace() 
 
 /// Returns every physical row of the default scope's one unpartitioned
 /// Active vector generation.
-async fn unpartitioned_vector_rows(db: &HelixDB) -> Vec<(bytes::Bytes, bytes::Bytes)> {
+pub(super) async fn unpartitioned_vector_rows(db: &HelixDB) -> Vec<(bytes::Bytes, bytes::Bytes)> {
     let active = db
         .active_index_handles_loaded(DataScope::LegacyUnscoped)
         .into_iter()
@@ -1555,6 +1561,10 @@ async fn assert_contradicting_metadata_fails_closed(
         "every physical row is unchanged"
     );
     assert_eq!(queued_operations(db).await, 1);
+    assert!(publisher(db)
+        .planning_cache()
+        .retained_publication(target)
+        .is_none());
 }
 
 #[tokio::test]
@@ -1579,6 +1589,8 @@ async fn an_upsert_into_contradicting_metadata_fails_closed_and_writes_nothing()
     else {
         panic!("one Active unpartitioned vector generation");
     };
+    // The drain ended with Empty; one more commit leaves a warm session,
+    // which the failed attempt then drops.
     add_doc(&db, vec![1.0, 1.0], "b").await.unwrap();
     assert!(matches!(
         publisher(&db).publish_once(target).await.unwrap(),
@@ -1586,6 +1598,10 @@ async fn an_upsert_into_contradicting_metadata_fails_closed_and_writes_nothing()
     ));
     contradict_metadata(&db, physical_index_id.get()).await;
     add_doc(&db, vec![2.0, 2.0], "c").await.unwrap();
+    assert!(publisher(&db)
+        .planning_cache()
+        .retained_publication(target)
+        .is_some());
     assert_contradicting_metadata_fails_closed(&db, target, physical_index_id.get()).await;
     db.close().await.unwrap();
 }
@@ -2091,6 +2107,29 @@ async fn a_publication_conflict_retries_without_evicting_the_resident_store() {
 async fn a_failure_after_the_batch_applies_evicts_its_rows_and_leaves_the_acknowledgement_uncertain(
 ) {
     let fixture = FencedPublication::open("publish-fence-post-apply").await;
+    // A committed move leaves a retained session, and a hydrated store caches
+    // the moved entity again before its next move.
+    assert_eq!(
+        publisher(&fixture.db)
+            .publish_once(fixture.target)
+            .await
+            .unwrap(),
+        PublicationOutcome::Published {
+            operations: 1,
+            entities: 1
+        }
+    );
+    fixture
+        .db
+        .refresh_vector_memory_cache()
+        .await
+        .expect("the writer hydrates its vector cache");
+    assert!(fixture.resident().get_simhash(fixture.moved).is_some());
+    set_embedding(&fixture.db, fixture.moved, vec![6.0, 6.0]).await;
+    assert!(publisher(&fixture.db)
+        .planning_cache()
+        .retained_publication(fixture.target)
+        .is_some());
     fixture.gate.uploads.send_replace(WalUploads::Failing);
     assert_eq!(
         publisher(&fixture.db)
@@ -2098,6 +2137,13 @@ async fn a_failure_after_the_batch_applies_evicts_its_rows_and_leaves_the_acknow
             .await
             .unwrap(),
         PublicationOutcome::Retry
+    );
+    assert!(
+        publisher(&fixture.db)
+            .planning_cache()
+            .retained_publication(fixture.target)
+            .is_none(),
+        "an uncertain commit forgets the session"
     );
     assert_eq!(
         publisher(&fixture.db)
@@ -2267,6 +2313,49 @@ async fn no_fence_is_outstanding_while_publication_waits_before_its_commit() {
         (fixture.moved, 0.0),
         "with the queue empty, the published rows answer"
     );
+    fixture.db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn searches_see_each_commit_planned_by_a_retained_session() {
+    let fixture = FencedPublication::open("publish-fence-retained").await;
+    let publisher = publisher(&fixture.db);
+    // The fixture's drain ended with an empty queue, which forgot the session.
+    let mut previous = publisher
+        .planning_cache()
+        .retained_publication(fixture.target);
+    for round in 0..3_u8 {
+        assert_eq!(previous.is_some(), round > 0, "round {round}");
+        assert_eq!(
+            publisher.publish_once(fixture.target).await.unwrap(),
+            PublicationOutcome::Published {
+                operations: 1,
+                entities: 1
+            }
+        );
+        let retained = publisher
+            .planning_cache()
+            .retained_publication(fixture.target)
+            .expect("the commit retains its session");
+        assert!(previous.is_none_or(|previous| retained.commit > previous.commit));
+        previous = Some(retained);
+        assert!(!fixture.commit_pending(), "the commit resolved its fence");
+        fixture.assert_only_moved_evicted().await;
+        let moved_to = [5.0 + f32::from(round); 2];
+        for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+            let hits = vector_search(&fixture.db, moved_to, 1, None, consistency)
+                .await
+                .into_iter()
+                .map(|(id, distance)| (id, f64::from_bits(distance)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hits,
+                [(fixture.moved, 0.0)],
+                "round {round}: {consistency:?} search right after the commit"
+            );
+        }
+        set_embedding(&fixture.db, fixture.moved, vec![6.0 + f32::from(round); 2]).await;
+    }
     fixture.db.close().await.unwrap();
 }
 

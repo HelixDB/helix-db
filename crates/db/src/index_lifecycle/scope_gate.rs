@@ -56,7 +56,15 @@ pub(crate) struct IndexScopeLifecyclePermit {
 /// and SlateDB writer fencing.
 #[derive(Debug)]
 pub(crate) struct IndexGenerationPublicationPermit {
+    target: super::queue::QueueTarget,
     _guard: OwnedMutexGuard<()>,
+}
+
+impl IndexGenerationPublicationPermit {
+    /// Returns the generation this permit owns.
+    pub(crate) const fn target(&self) -> super::queue::QueueTarget {
+        self.target
+    }
 }
 
 /// Exact-scope gate registry shared by mutation contexts and family drivers.
@@ -116,6 +124,7 @@ impl IndexScopeGates {
         target: super::queue::QueueTarget,
     ) -> IndexGenerationPublicationPermit {
         IndexGenerationPublicationPermit {
+            target,
             _guard: self.publication_gate(target).lock_owned().await,
         }
     }

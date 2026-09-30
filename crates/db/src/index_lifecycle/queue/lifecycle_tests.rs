@@ -37,7 +37,7 @@ use crate::index_lifecycle::{
 use crate::HelixDB;
 
 /// Queued mode, paused publication, and four-entity build batches.
-fn config() -> DbConfig {
+pub(super) fn config() -> DbConfig {
     let defaults = SearchIndexBackfillLimits::default();
     let batch = defaults.batch();
     let limits = SearchIndexBackfillLimits::try_new(
@@ -57,7 +57,7 @@ fn config() -> DbConfig {
     queued(IndexOperationQueueTuning::default()).with_search_index_backfill_limits(limits)
 }
 
-fn vector_spec() -> IndexSpec {
+pub(super) fn vector_spec() -> IndexSpec {
     IndexSpec::node_vector(
         "Doc",
         "embedding",
@@ -87,7 +87,7 @@ fn operation_id(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-async fn create(db: &HelixDB, spec: IndexSpec) -> String {
+pub(super) async fn create(db: &HelixDB, spec: IndexSpec) -> String {
     let receipt = write(db, || {
         QueryRequest::write(
             batch::write_batch()
@@ -102,7 +102,7 @@ async fn create(db: &HelixDB, spec: IndexSpec) -> String {
     operation_id(&receipt).unwrap_or_else(|| panic!("create accepted a build: {receipt}"))
 }
 
-async fn drop_index(db: &HelixDB, spec: IndexSpec) -> Option<String> {
+pub(super) async fn drop_index(db: &HelixDB, spec: IndexSpec) -> Option<String> {
     let receipt = write(db, || {
         QueryRequest::write(
             batch::write_batch()
@@ -134,7 +134,7 @@ fn scanned(status: &serde_json::Value) -> u64 {
         .unwrap_or_else(|| panic!("status reports progress: {status}"))
 }
 
-async fn wait_terminal(db: &HelixDB, operation: &str) -> String {
+pub(super) async fn wait_terminal(db: &HelixDB, operation: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let current = status(db, operation).await;
@@ -176,7 +176,7 @@ async fn pause_when(
     }
 }
 
-async fn set_tenant(db: &HelixDB, id: u64, tenant: &str) {
+pub(super) async fn set_tenant(db: &HelixDB, id: u64, tenant: &str) {
     write(db, || {
         QueryRequest::write(
             batch::write_batch().var_as(
