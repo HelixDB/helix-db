@@ -7,7 +7,7 @@ use super::super::{
 };
 use crate::encoding::keys;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
-use crate::error::Result;
+use crate::error::{HelixDbError, Result};
 use crate::search::text::TextSearchHit;
 use crate::search::vector::{DistanceOutputVersion, TypedVectorSearchResult, VectorEntityId};
 
@@ -49,19 +49,14 @@ impl<'db> ExecutionContext<'db> {
         &self,
         ids: Vec<u64>,
     ) -> Result<Vec<ExecutionRow>> {
-        let mut rows = Vec::new();
-        for id in ids {
-            self.check_execution_deadline()?;
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                rows.push(ExecutionRow::current(ElementRef::Node(id)));
-            }
-        }
-        Ok(rows)
+        Ok(self
+            .retain_existing(ids, |id| {
+                keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id))
+            })
+            .await?
+            .into_iter()
+            .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+            .collect())
     }
 
     pub(in crate::execution::interpreter) async fn edge_rows(
@@ -75,19 +70,14 @@ impl<'db> ExecutionContext<'db> {
         &self,
         ids: Vec<u64>,
     ) -> Result<Vec<ExecutionRow>> {
-        let mut rows = Vec::new();
-        for id in ids {
-            self.check_execution_deadline()?;
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                rows.push(ExecutionRow::current(ElementRef::Edge(id)));
-            }
-        }
-        Ok(rows)
+        Ok(self
+            .retain_existing(ids, |id| {
+                keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(*id))
+            })
+            .await?
+            .into_iter()
+            .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
+            .collect())
     }
 
     pub(in crate::execution::interpreter) async fn node_search_rows(
@@ -99,28 +89,29 @@ impl<'db> ExecutionContext<'db> {
             .map(ExecutionValue::Stream)
     }
 
+    /// Keeps the node hits whose record still exists, in rank order. A hit
+    /// bound to an edge generation fails the batch before any read.
     pub(in crate::execution::interpreter) async fn node_search_row_vec(
         &self,
         results: Vec<TypedVectorSearchResult>,
     ) -> Result<Vec<ExecutionRow>> {
-        let mut rows = Vec::new();
-        for result in results {
-            self.check_execution_deadline()?;
-            let VectorEntityId::Node(entity_id) = result.entity_id() else {
-                return Err(crate::error::HelixDbError::InvariantViolation(
+        let hits = results
+            .into_iter()
+            .map(|result| match result.entity_id() {
+                VectorEntityId::Node(id) => Ok((id, result)),
+                VectorEntityId::Edge(_) => Err(HelixDbError::InvariantViolation(
                     "edge-bound vector result reached node row materialization".to_string(),
-                ));
-            };
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(entity_id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                rows.push(search_row(ElementRef::Node(entity_id), result));
-            }
-        }
-        Ok(rows)
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self
+            .retain_existing(hits, |(id, _)| {
+                keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id))
+            })
+            .await?
+            .into_iter()
+            .map(|(id, result)| search_row(ElementRef::Node(id), result))
+            .collect())
     }
 
     pub(in crate::execution::interpreter) async fn edge_search_rows(
@@ -132,28 +123,29 @@ impl<'db> ExecutionContext<'db> {
             .map(ExecutionValue::Stream)
     }
 
+    /// Keeps the edge hits whose record still exists, in rank order. A hit
+    /// bound to a node generation fails the batch before any read.
     pub(in crate::execution::interpreter) async fn edge_search_row_vec(
         &self,
         results: Vec<TypedVectorSearchResult>,
     ) -> Result<Vec<ExecutionRow>> {
-        let mut rows = Vec::new();
-        for result in results {
-            self.check_execution_deadline()?;
-            let VectorEntityId::Edge(entity_id) = result.entity_id() else {
-                return Err(crate::error::HelixDbError::InvariantViolation(
+        let hits = results
+            .into_iter()
+            .map(|result| match result.entity_id() {
+                VectorEntityId::Edge(id) => Ok((id, result)),
+                VectorEntityId::Node(_) => Err(HelixDbError::InvariantViolation(
                     "node-bound vector result reached edge row materialization".to_string(),
-                ));
-            };
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(entity_id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                rows.push(search_row(ElementRef::Edge(entity_id), result));
-            }
-        }
-        Ok(rows)
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self
+            .retain_existing(hits, |(id, _)| {
+                keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(*id))
+            })
+            .await?
+            .into_iter()
+            .map(|(id, result)| search_row(ElementRef::Edge(id), result))
+            .collect())
     }
 
     pub(in crate::execution::interpreter) async fn node_text_search_rows(
@@ -169,18 +161,14 @@ impl<'db> ExecutionContext<'db> {
         &self,
         results: Vec<TextSearchHit>,
     ) -> Result<Vec<ExecutionRow>> {
-        let mut rows = Vec::new();
-        for result in results {
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(result.entity_id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                rows.push(text_search_row(ElementRef::Node(result.entity_id), result));
-            }
-        }
-        Ok(rows)
+        Ok(self
+            .retain_existing(results, |hit| {
+                keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(hit.entity_id))
+            })
+            .await?
+            .into_iter()
+            .map(|hit| text_search_row(ElementRef::Node(hit.entity_id), hit))
+            .collect())
     }
 
     pub(in crate::execution::interpreter) async fn edge_text_search_rows(
@@ -196,22 +184,49 @@ impl<'db> ExecutionContext<'db> {
         &self,
         results: Vec<TextSearchHit>,
     ) -> Result<Vec<ExecutionRow>> {
-        let mut rows = Vec::new();
-        for result in results {
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(
-                    result.entity_id,
-                )),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                rows.push(text_search_row(ElementRef::Edge(result.entity_id), result));
-            }
+        Ok(self
+            .retain_existing(results, |hit| {
+                keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(hit.entity_id))
+            })
+            .await?
+            .into_iter()
+            .map(|hit| text_search_row(ElementRef::Edge(hit.entity_id), hit))
+            .collect())
+    }
+
+    /// Keeps the `items` whose stored record exists, in input order.
+    ///
+    /// The deadline is checked per item before any read. Records are read
+    /// [`EXISTENCE_BATCH_ROWS`] at a time through one overlapped multi-get,
+    /// so a cold batch waits for a few block fetches rather than one per
+    /// item, and at most one batch of values is held at once.
+    async fn retain_existing<T>(
+        &self,
+        items: Vec<T>,
+        record: impl Fn(&T) -> keys::DataKeyKind<'static>,
+    ) -> Result<Vec<T>> {
+        let mut exists = Vec::with_capacity(items.len());
+        for batch in items.chunks(EXISTENCE_BATCH_ROWS) {
+            let keys = batch
+                .iter()
+                .map(|item| {
+                    self.check_execution_deadline()?;
+                    Ok(self.storage_key(record(item)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            exists.extend(self.multi_get_raw(&keys).await?.iter().map(Option::is_some));
         }
-        Ok(rows)
+        Ok(items
+            .into_iter()
+            .zip(exists)
+            .filter_map(|(item, exists)| exists.then_some(item))
+            .collect())
     }
 }
+
+/// Records one existence batch reads. Bounds the values held at once (a
+/// record can carry an embedding) and matches the planner's record batch.
+const EXISTENCE_BATCH_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
 
 fn search_row(element: ElementRef, result: TypedVectorSearchResult) -> ExecutionRow {
     let distance = result.materialize_distance(DistanceOutputVersion::CurrentScore);
@@ -399,5 +414,161 @@ mod tests {
             Some(DbPropertyValue::F64(f64::from(0.75_f32)))
         );
         assert!(edge_rows[0].virtual_properties.get(&distance).is_none());
+    }
+
+    /// Existence checks read whole record batches through multi-gets rather
+    /// than one get per hit, keep input order across batch boundaries, drop
+    /// only missing records, and keep each hit's own score.
+    #[tokio::test]
+    async fn existence_checks_keep_input_order_across_record_batches() {
+        let db = test_support::open_db("existence-batches").await;
+        let mut users = Vec::new();
+        for index in 0..EXISTENCE_BATCH_ROWS + 40 {
+            users.push(test_support::add_user(&db, &format!("user-{index}")).await);
+        }
+        // Newest first, with a missing id after every fifth user.
+        let ids = users
+            .iter()
+            .rev()
+            .enumerate()
+            .flat_map(|(index, id)| match index % 5 {
+                0 => vec![*id, u64::MAX - index as u64],
+                _ => vec![*id],
+            })
+            .collect::<Vec<_>>();
+        let expected = users.iter().rev().copied().collect::<Vec<_>>();
+
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        assert_eq!(
+            current_node_ids(ctx.node_rows(ids.clone()).await.unwrap()),
+            expected
+        );
+        let hits = ids
+            .iter()
+            .map(|id| vector_result(VectorEntityKind::Node, *id))
+            .collect();
+        assert_eq!(
+            current_node_ids(ctx.node_search_rows(hits).await.unwrap()),
+            expected
+        );
+        let score = ir::NonEmptyString::new("$score").unwrap();
+        let text_hits = ids
+            .iter()
+            .enumerate()
+            .map(|(rank, id)| TextSearchHit {
+                entity_id: *id,
+                score: rank as f32,
+            })
+            .collect();
+        let ExecutionValue::Stream(text_rows) = ctx.node_text_search_rows(text_hits).await.unwrap()
+        else {
+            panic!("text node rows materialize as a stream");
+        };
+        let kept = text_rows
+            .iter()
+            .map(|row| {
+                let Some(ElementRef::Node(id)) = row.current else {
+                    panic!("text rows are node rows");
+                };
+                let rank = ids.iter().position(|candidate| *candidate == id).unwrap();
+                assert_eq!(
+                    row.virtual_properties.get(&score),
+                    Some(DbPropertyValue::F64(f64::from(rank as f32)))
+                );
+                id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kept, expected);
+
+        let work = ctx.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0, "no per-hit point reads");
+        assert_eq!(work.multi_get_keys, 3 * ids.len());
+    }
+
+    /// A hit of the wrong entity kind fails the whole batch before any read,
+    /// wherever it sits in the batch.
+    #[tokio::test]
+    async fn search_rows_reject_the_wrong_kind_before_reading() {
+        let db = test_support::open_db("existence-wrong-kind").await;
+        let alice = test_support::add_user(&db, "alice").await;
+        let bob = test_support::add_user(&db, "bob").await;
+        let follows = test_support::add_edge(&db, alice, bob, "FOLLOWS").await;
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+        assert!(matches!(
+            ctx.node_search_rows(vec![
+                vector_result(VectorEntityKind::Node, alice),
+                vector_result(VectorEntityKind::Node, bob),
+                vector_result(VectorEntityKind::Edge, follows),
+            ])
+            .await,
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+        assert!(matches!(
+            ctx.edge_search_rows(vec![
+                vector_result(VectorEntityKind::Edge, follows),
+                vector_result(VectorEntityKind::Node, alice),
+            ])
+            .await,
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 0);
+    }
+
+    /// Every materializer checks the deadline per item before reading, and
+    /// once more as the batch read starts.
+    #[tokio::test]
+    async fn existence_checks_respect_the_deadline() {
+        let db = test_support::open_db("existence-deadline").await;
+        let alice = test_support::add_user(&db, "alice").await;
+        let bob = test_support::add_user(&db, "bob").await;
+        let follows = test_support::add_edge(&db, alice, bob, "FOLLOWS").await;
+
+        for successful_checks in [0, 1, 2] {
+            let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            let deadline = |result: Result<ExecutionValue>| {
+                assert!(
+                    matches!(result, Err(HelixDbError::QueryDeadlineExceeded)),
+                    "{successful_checks}"
+                );
+                ctx.fail_deadline_after(successful_checks);
+            };
+            ctx.fail_deadline_after(successful_checks);
+            deadline(ctx.node_rows(vec![alice, bob]).await);
+            deadline(ctx.edge_rows(vec![follows, follows]).await);
+            deadline(
+                ctx.node_search_rows(vec![
+                    vector_result(VectorEntityKind::Node, alice),
+                    vector_result(VectorEntityKind::Node, bob),
+                ])
+                .await,
+            );
+            deadline(
+                ctx.edge_search_rows(vec![
+                    vector_result(VectorEntityKind::Edge, follows),
+                    vector_result(VectorEntityKind::Edge, follows),
+                ])
+                .await,
+            );
+            let text = |id| {
+                vec![
+                    TextSearchHit {
+                        entity_id: id,
+                        score: 1.0,
+                    },
+                    TextSearchHit {
+                        entity_id: id,
+                        score: 0.5,
+                    },
+                ]
+            };
+            deadline(ctx.node_text_search_rows(text(alice)).await);
+            deadline(ctx.edge_text_search_rows(text(follows)).await);
+            assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 0);
+        }
+
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        assert!(ctx.node_rows(Vec::new()).await.is_ok());
+        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 0);
     }
 }
