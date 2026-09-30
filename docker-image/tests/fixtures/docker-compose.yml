@@ -63,6 +63,13 @@ services:
         condition: service_started
     ports:
       - "${HELIX_IMAGE_TEST_PORT:-18120}:8080"
+    # S3 storage always caches on local disk, in /var/cache/helix unless
+    # HELIX_DISK_CACHE_DIR moves it. On tmpfs every container start begins
+    # cold, so reopened reads must come from SeaweedFS and the idle refresh
+    # regression can see hydration reach the object store. A tmpfs root is
+    # root-owned 0755 unless its mode lets the 65532 runtime user write.
+    tmpfs:
+      - /var/cache/helix:mode=1777
     environment:
       S3_BUCKET: helix-db
       S3_REGION: us-east-1

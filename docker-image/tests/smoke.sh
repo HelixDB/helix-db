@@ -291,6 +291,8 @@ run_invalid_configuration_tests() {
   local conflicting_storage="helixdb-image-conflicting-storage-$resource_suffix"
   local memory_cache="helixdb-image-memory-cache-$resource_suffix"
   local bad_cache_size="helixdb-image-bad-cache-size-$resource_suffix"
+  local s3_bad_cache_size="helixdb-image-s3-bad-cache-size-$resource_suffix"
+  local s3_unwritable_cache="helixdb-image-s3-unwritable-cache-$resource_suffix"
 
   log "Testing invalid startup configuration"
   start_container "$bad_address" "$((base_port + 4))" -e HELIX_HTTP_ADDR=not-an-address
@@ -315,6 +317,25 @@ run_invalid_configuration_tests() {
   wait_for_exit "$bad_cache_size"
   assert_nonzero_exit "$bad_cache_size"
   assert_error_names "$bad_cache_size" HELIX_DISK_CACHE_BYTES
+
+  # S3 always caches on disk, so its size variables need no cache directory.
+  # Configuration fails before the server contacts the bucket.
+  start_container "$s3_bad_cache_size" "$((base_port + 11))" \
+    -e S3_BUCKET=unreachable \
+    -e HELIX_DISK_CACHE_BYTES=not-a-number
+  wait_for_exit "$s3_bad_cache_size"
+  assert_nonzero_exit "$s3_bad_cache_size"
+  assert_error_names "$s3_bad_cache_size" 'invalid HELIX_DISK_CACHE_BYTES'
+
+  # Another user cannot write the image's default S3 cache directory, and the
+  # error says which variable moves it.
+  start_container "$s3_unwritable_cache" "$((base_port + 12))" \
+    --user 1000:1000 \
+    -e S3_BUCKET=unreachable
+  wait_for_exit "$s3_unwritable_cache"
+  assert_nonzero_exit "$s3_unwritable_cache"
+  assert_error_names "$s3_unwritable_cache" \
+    'HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; set HELIX_DISK_CACHE_DIR'
 }
 
 run_signal_test() {

@@ -83,6 +83,9 @@ def run(args):
         try:
             time.sleep(2)
             assert trace.poll() is None, "S3 request trace must stay connected"
+            # The fixture keeps Helix's disk cache on tmpfs, so the restart
+            # empties it and hydration reads reach the trace. A range read
+            # again later is served from that cache and never traced.
             subprocess.run(["docker", "restart", container], check=True, stdout=subprocess.DEVNULL)
             deadline = time.monotonic() + 120
             while True:
