@@ -35,6 +35,9 @@ use helix_ast::value::{PropertyInput, PropertyValue};
 use helix_planner::{catalog, context, cost, exec, ir, planning, properties, trace};
 use slatedb::object_store::memory::InMemory;
 
+#[path = "production_contracts/pull_paths.rs"]
+mod pull_paths;
+
 fn run_high_stack_contract<F, Fut>(name: &'static str, contract: F)
 where
     F: FnOnce() -> Fut + Send + 'static,

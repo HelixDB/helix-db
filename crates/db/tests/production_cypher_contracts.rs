@@ -78,6 +78,12 @@ mod relationship_types;
 #[path = "cypher/boolean_chains.rs"]
 mod boolean_chains;
 
+#[path = "cypher/graph_mutations.rs"]
+mod graph_mutations;
+
+#[path = "cypher/production_paths_matching.rs"]
+mod production_paths_matching;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;
