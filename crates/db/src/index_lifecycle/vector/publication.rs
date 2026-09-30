@@ -22,7 +22,9 @@
 //! (each `previous` is the prior replacement's partition), so the union of
 //! `previous` partitions covers every state the entity can physically occupy.
 //! Removal tolerates an absent entity or partition, and HNSW deletion of an
-//! absent node stages no semantic change.
+//! absent node stages no semantic change. An upsert of the exact vector the
+//! entity already holds at its deterministic layer stages nothing, so a replay
+//! of a state the build indexed costs only its reads.
 //!
 //! # Sole writer
 //!

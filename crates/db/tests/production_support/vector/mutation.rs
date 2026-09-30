@@ -986,15 +986,17 @@ async fn run_graph_delete_contracts(db: &Db) {
     rows.put_layer0_neighbors(6, &[]).unwrap();
     rows.put_layer0_neighbors(3, &[4, 997]).unwrap();
     let mut relink = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
-    index
-        .relink_neighbor(
+    let candidates = index
+        .load_relink_candidates(
             &measured,
             0,
-            6,
             &collections::HashSet::from([3, 997]),
-            2,
             &mut relink,
         )
+        .await
+        .unwrap();
+    index
+        .relink_neighbor(&measured, 6, &candidates, 2, &mut relink)
         .await
         .unwrap();
     index
@@ -1013,15 +1015,17 @@ async fn run_graph_delete_contracts(db: &Db) {
         .await
         .unwrap()
         .is_empty());
-    index
-        .relink_neighbor(
+    let candidates = index
+        .load_relink_candidates(
             &measured,
             0,
-            992,
             &collections::HashSet::from([1]),
-            4,
             &mut empty_delete,
         )
+        .await
+        .unwrap();
+    index
+        .relink_neighbor(&measured, 992, &candidates, 4, &mut empty_delete)
         .await
         .unwrap();
     txn.rollback();

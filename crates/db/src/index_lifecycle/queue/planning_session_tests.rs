@@ -22,7 +22,7 @@ use super::publication_tests::{
     batch_limits, install_vector, mapped_partitions, physical_rows, publisher,
     unpartitioned_vector_rows,
 };
-use super::tests::{open, publisher_with_limits, queued, target};
+use super::tests::{open, publisher_with_limits, queue, queued, target};
 use super::QueueTarget;
 use crate::config::{
     DbConfig, IndexOperationQueueTuning, SearchIndexBackfillLimits, VectorIndexDefinition,
@@ -60,6 +60,7 @@ async fn publish_all(publisher: &QueuePublisher, target: QueueTarget, retain: bo
             publisher.planning_cache().forget_publication(target).await;
         }
         match outcome {
+            PublicationOutcome::Trimmed => {}
             PublicationOutcome::Published { .. } => {
                 commits += 1;
                 assert_eq!(
@@ -75,7 +76,6 @@ async fn publish_all(publisher: &QueuePublisher, target: QueueTarget, retain: bo
             outcome @ (PublicationOutcome::Discarded { .. }
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Trimmed
             | PublicationOutcome::Blocked) => panic!("publication did not progress: {outcome:?}"),
         }
     }
@@ -367,6 +367,211 @@ async fn evicting_sessions_publish_what_cold_sessions_publish() {
     for db in [warm, cold] {
         db.close().await.unwrap();
     }
+}
+
+/// An update a full batch discards is planned again, first, by the target's
+/// next attempt, through the session the discarding attempt retained. The
+/// discarded plan staged the node's new vector into that session, so were
+/// the discard to keep it, the retry would read the new vector back, take
+/// the update for a replay of the indexed state, and skip it.
+///
+/// Every document moves at its unchanged layer, so each update a batch
+/// discards replaces an indexed vector. Retained sessions publish exactly
+/// what fresh sessions that replace every upsert publish.
+#[tokio::test]
+async fn updates_discarded_from_full_batches_publish_through_the_retained_session() {
+    let moved = |index: u8| [f32::from(index % 5) + 0.5, f32::from(index / 5) + 10.0];
+    let mut runs = Vec::new();
+    for retain in [true, false] {
+        let name = if retain {
+            "discarded-updates-warm"
+        } else {
+            "discarded-updates-cold"
+        };
+        let db = open(
+            name,
+            Arc::new(InMemory::new()),
+            queued(IndexOperationQueueTuning::default()),
+        )
+        .await;
+        install_vector(&db, None).await;
+        let mut ids = Vec::new();
+        for index in 0..24_u8 {
+            let embedding = [f32::from(index % 5), f32::from(index / 5)];
+            ids.push(add(&db, embedding, "doc", None).await);
+        }
+        let target = target(&db, QueueFamily::Vector).await;
+        drain(&db, target).await;
+        for (index, id) in (0_u8..).zip(&ids) {
+            update(&db, *id, moved(index), "doc").await;
+        }
+
+        // Every attempt selects each queued update, so each commit that
+        // leaves one queued planned it and discarded it as `BatchFull`.
+        let publisher = narrow_publisher(&db, 256);
+        let reads = publisher.planning_cache().publication_reads();
+        let commits = if retain {
+            publish_all(&publisher, target, true).await
+        } else {
+            crate::search::vector::REPLACE_REPLAYS
+                .scope((), publish_all(&publisher, target, false))
+                .await
+        };
+        let reads = publisher.planning_cache().publication_reads() - reads;
+        assert!(queue(&db, QueueFamily::Vector).await.is_none());
+        assert!(db
+            .index_operation_backlog()
+            .outstanding_targets()
+            .is_empty());
+        for (index, id) in (0_u8..).zip(&ids) {
+            let hits = vector_search(&db, moved(index), 1, None, SearchConsistency::Strong).await;
+            assert_eq!(
+                (hits[0].0, f64::from_bits(hits[0].1)),
+                (*id, 0.0),
+                "document {index} holds its new vector (retained sessions: {retain})"
+            );
+        }
+        runs.push((commits, reads, unpartitioned_vector_rows(&db).await));
+        db.close().await.unwrap();
+    }
+    let [(warm_commits, warm_reads, warm_rows), (cold_commits, cold_reads, cold_rows)] =
+        <[_; 2]>::try_from(runs).unwrap();
+    assert_eq!(warm_commits, cold_commits);
+    assert!(
+        warm_commits > 2,
+        "full batches discarded several updates: {warm_commits} commits"
+    );
+    assert!(
+        warm_reads < cold_reads,
+        "retries planned through retained sessions: {warm_reads} against {cold_reads}"
+    );
+    assert!(warm_rows == cold_rows, "warm and cold graphs differ");
+}
+
+/// SHA-256 over every physical row [`publish_golden_workload`] leaves.
+///
+/// Planning caches decide only which rows publication reads again, so no
+/// cache policy may change a byte of this graph.
+const PUBLISHED_GOLDEN_DIGEST: &str =
+    "0c933d927973144e6870f7aa399767947beac1304a980e7ec94b377d558c26b4";
+/// Physical row count [`publish_golden_workload`] leaves.
+const PUBLISHED_GOLDEN_ROWS: usize = 7_511;
+
+/// Integral embedding of `seed`. Every squared distance is exact in `f32`,
+/// and embeddings repeat, so neighbor selection breaks many distance ties.
+fn golden_embedding(seed: u16) -> [f32; 2] {
+    [
+        f32::from(seed.wrapping_mul(7) % 23),
+        f32::from(seed.wrapping_mul(11) % 17),
+    ]
+}
+
+/// Publishes 192 inserts, then two rounds of updates, same-value updates,
+/// update chains, deletes, and inserts, each drained by `publisher`.
+///
+/// Returns the row count and SHA-256 of the graph it leaves.
+async fn publish_golden_workload(
+    db: &HelixDB,
+    publisher: &QueuePublisher,
+    retain: bool,
+) -> (usize, String) {
+    use sha2::{Digest, Sha256};
+
+    let mut live = Vec::new();
+    for seed in 0..192 {
+        let embedding = golden_embedding(seed);
+        live.push((add(db, embedding, "doc", None).await, embedding));
+    }
+    let target = target(db, QueueFamily::Vector).await;
+    publish_all(publisher, target, retain).await;
+    for round in 1..=2_u16 {
+        let mut kept = Vec::new();
+        for (index, (id, embedding)) in (0_u16..).zip(std::mem::take(&mut live)) {
+            let moved = golden_embedding(index.wrapping_mul(3).wrapping_add(211 * round));
+            let embedding = match (index + round) % 8 {
+                0 | 3 => moved,
+                // The queue replays the embedding the graph already holds.
+                5 => embedding,
+                // The chain collapses to its last value.
+                6 => {
+                    update(db, id, golden_embedding(index), "doc").await;
+                    moved
+                }
+                7 => {
+                    delete(db, id).await;
+                    continue;
+                }
+                _ => {
+                    kept.push((id, embedding));
+                    continue;
+                }
+            };
+            update(db, id, embedding, "doc").await;
+            kept.push((id, embedding));
+        }
+        for seed in 0..32 {
+            let embedding = golden_embedding(1_000 * round + seed);
+            kept.push((add(db, embedding, "doc", None).await, embedding));
+        }
+        live = kept;
+        publish_all(publisher, target, retain).await;
+    }
+    let rows = unpartitioned_vector_rows(db).await;
+    let mut digest = Sha256::new();
+    for (key, value) in &rows {
+        digest.update((key.len() as u64).to_be_bytes());
+        digest.update(key);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+    let bytes: [u8; 32] = digest.finalize().into();
+    (
+        rows.len(),
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+    )
+}
+
+/// Warm, cold, and evicting planning sessions publish the pinned graph.
+///
+/// The digest pins the whole workload, so it cannot shrink, and its three
+/// runs take minutes in a debug build: the nightly workflow runs it in
+/// release.
+#[tokio::test]
+#[ignore = "minutes in debug; the nightly workflow runs it in release"]
+async fn every_session_policy_publishes_the_pinned_golden_graph() {
+    let default = SearchIndexBackfillLimits::default();
+    let evicting =
+        default.with_vector_build_cache_bytes(std::num::NonZeroU64::new(24 * 1024).unwrap());
+    let mut published = Vec::new();
+    for (name, limits, retain) in [
+        ("published-golden-warm", default, true),
+        ("published-golden-cold", default, false),
+        ("published-golden-evicting", evicting, true),
+    ] {
+        let db = open(
+            name,
+            Arc::new(InMemory::new()),
+            queued(IndexOperationQueueTuning::default()).with_search_index_backfill_limits(limits),
+        )
+        .await;
+        install_vector(&db, None).await;
+        let publisher = narrow_publisher(&db, 2_048);
+        let graph = publish_golden_workload(&db, &publisher, retain).await;
+        let evictions = publisher.planning_cache().publication_evictions();
+        published.push((name, graph, evictions));
+        db.close().await.unwrap();
+    }
+    for (name, (rows, digest), evictions) in &published {
+        assert_eq!(
+            (*rows, digest.as_str()),
+            (PUBLISHED_GOLDEN_ROWS, PUBLISHED_GOLDEN_DIGEST),
+            "{name} ({evictions} evictions): {published:?}"
+        );
+    }
+    assert!(
+        published[2].2 > 0,
+        "the small budget evicted while planning: {published:?}"
+    );
 }
 
 /// More vector targets with queued work than the cache keeps sessions for,

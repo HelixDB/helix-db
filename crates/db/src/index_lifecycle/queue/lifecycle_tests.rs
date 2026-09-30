@@ -21,7 +21,7 @@ use super::backlog::OperationCharge;
 use super::overlay_tests::{add, delete, drain, text_search, update, vector_search, write};
 use super::publication::PublicationOutcome;
 use super::tests::{
-    open, publisher_with_limits, queue, queued, release_within_operand_bound, target,
+    open, publisher_with_limits, queue, queued, release_within_operand_bound, rows, target,
 };
 use super::text_publication_tests::{distinct_terms, tight_publication_config};
 use super::QueueTarget;
@@ -29,7 +29,9 @@ use crate::config::{
     DbConfig, IndexOperationQueueTuning, QueueLayout, SearchIndexBackfillLimits,
     SearchIndexBatchLimits, TextIndexDefinition,
 };
-use crate::encoding::v2::keys::IndexEntity;
+use crate::encoding::v2::keys::indexes::vector::VectorKey;
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::{DataKey, DataKeyKind, IndexEntity};
 use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
 use crate::index_lifecycle::outbox::step_pause::{self, StepPause};
 use crate::index_lifecycle::{
@@ -790,6 +792,145 @@ async fn builds_under_continuous_writes_match_cold_builds_once_the_queue_drains(
         });
     assert_matches_cold_builds(&db, &documents, "build-continuous-writes-reference").await;
     db.close().await.unwrap();
+}
+
+/// Seeds 120 documents and creates the vector index, holding its first
+/// `Scan` step once it staged. That step read the four lowest IDs, so a write
+/// to any later document, or an insert under the source watermark, commits
+/// before the build reads it and later publishes as a replay.
+async fn hold_first_vector_scan(db: &HelixDB) -> (Vec<u64>, VectorState, String, StepPause) {
+    let (ids, state) = seed_vectors(db, 120).await;
+    let pause = StepPause::arm(db.inner_db().as_ref(), |progress| {
+        matches!(
+            progress,
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::Scan(SourceScanProgress { cursor: None, .. })
+            ))
+        )
+    });
+    let operation = create(db, vector_spec()).await;
+    tokio::time::timeout(Duration::from_secs(60), pause.reached())
+        .await
+        .expect("the first scan step stages");
+    (ids, state, operation, pause)
+}
+
+/// Writes documents the held first scan step has not read: updates, a
+/// two-write chain, tenant moves, and inserts under the source watermark.
+async fn write_ahead_of_the_scan(db: &HelixDB, ids: &[u64], state: &mut VectorState) {
+    for (position, embedding) in [(10, [20.5, 3.0]), (60, [9.25, 0.75]), (60, [0.5, 10.5])] {
+        update(db, ids[position], embedding, "doc").await;
+        state.get_mut(&ids[position]).unwrap().1 = embedding;
+    }
+    for (position, tenant) in [(11, "c"), (70, "b")] {
+        set_tenant(db, ids[position], tenant).await;
+        state.get_mut(&ids[position]).unwrap().0 = tenant;
+    }
+    for (tenant, embedding) in [("a", [3.5, 2.5]), ("c", [15.5, 1.5])] {
+        let id = add(db, embedding, "doc", Some(tenant)).await;
+        state.insert(id, (tenant, embedding));
+    }
+}
+
+/// Whether `key` is a node's property row or a vector row that places a
+/// node: its vector, SimHash, or layer, but not its links or index metadata.
+fn places_or_documents_a_node(key: &[u8]) -> bool {
+    matches!(
+        DataKey::parse_from_slice(DataScope::LegacyUnscoped, key),
+        Ok(DataKey::Data {
+            kind: DataKeyKind::NodeProperty(_)
+                | DataKeyKind::Vector(
+                    VectorKey::Vector(_)
+                        | VectorKey::UpperVector(_)
+                        | VectorKey::SimHash(_)
+                        | VectorKey::SimHashDirectory(_)
+                        | VectorKey::EntryCandidateSorted(_)
+                        | VectorKey::EntryCandidateNode(_)
+                ),
+            ..
+        })
+    )
+}
+
+/// Every queued write replays a state the build read, so publication
+/// acknowledges each chain without changing a single vector row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn draining_replays_of_a_build_changes_no_vector_row() {
+    let db = open("build-replays", Arc::new(InMemory::new()), config()).await;
+    let (ids, mut state, operation, pause) = hold_first_vector_scan(&db).await;
+    write_ahead_of_the_scan(&db, &ids, &mut state).await;
+    pause.release();
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    let built = rows(&db, VectorKey::is_vector_keyspace).await;
+
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    assert!(queue(&db, QueueFamily::Vector).await.is_none());
+    assert!(db
+        .index_operation_backlog()
+        .outstanding_targets()
+        .is_empty());
+    assert_eq!(rows(&db, VectorKey::is_vector_keyspace).await, built);
+    assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+    assert_exact_vectors(&db, &state, SearchConsistency::Eventual).await;
+    db.close().await.unwrap();
+}
+
+/// A build under replays and real changes, drained once with replays
+/// skipped and once through the full path, holds the same documents and the
+/// same vector, SimHash, and layer of every node; only links differ.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_then_drain_places_every_node_as_the_unskipped_run_does() {
+    let mut runs = Vec::new();
+    for replace in [false, true] {
+        let name = if replace {
+            "build-replays-replaced"
+        } else {
+            "build-replays-skipped"
+        };
+        let db = open(name, Arc::new(InMemory::new()), config()).await;
+        let (ids, mut state, operation, pause) = hold_first_vector_scan(&db).await;
+        // Real changes to documents the held step read, and a chain back to
+        // the value it read.
+        update(&db, ids[0], [20.25, 3.25], "doc").await;
+        state.get_mut(&ids[0]).unwrap().1 = [20.25, 3.25];
+        set_tenant(&db, ids[1], "c").await;
+        state.get_mut(&ids[1]).unwrap().0 = "c";
+        delete(&db, ids[2]).await;
+        state.remove(&ids[2]);
+        update(&db, ids[3], [7.5, 7.5], "doc").await;
+        update(&db, ids[3], state[&ids[3]].1, "doc").await;
+        write_ahead_of_the_scan(&db, &ids, &mut state).await;
+        pause.release();
+        assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+        let built = rows(&db, VectorKey::is_vector_keyspace).await;
+
+        let target = target(&db, QueueFamily::Vector).await;
+        if replace {
+            crate::search::vector::REPLACE_REPLAYS
+                .scope((), drain(&db, target))
+                .await;
+        } else {
+            drain(&db, target).await;
+        }
+        assert!(queue(&db, QueueFamily::Vector).await.is_none());
+        for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+            assert_exact_vectors(&db, &state, consistency).await;
+        }
+        runs.push((
+            built,
+            rows(&db, VectorKey::is_vector_keyspace).await,
+            rows(&db, places_or_documents_a_node).await,
+        ));
+        db.close().await.unwrap();
+    }
+    let [(skipped_built, skipped, skipped_nodes), (replaced_built, replaced, replaced_nodes)] =
+        <[_; 2]>::try_from(runs).unwrap();
+    assert_eq!(
+        skipped_built, replaced_built,
+        "both builds wrote the same rows"
+    );
+    assert_eq!(skipped_nodes, replaced_nodes);
+    assert_ne!(skipped, replaced, "the full path relinked replayed nodes");
 }
 
 async fn discard_all(db: &HelixDB, target: QueueTarget) -> u64 {
