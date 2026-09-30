@@ -2015,6 +2015,28 @@ fn cursor_cost(
         | exec::ExecCountCursorPlan::EdgeDynamicMembership { .. } => storage
             .bitmap_equality_lookup(storage.default_equality_index_rows)
             .serial(storage.null_equality_scan(storage.default_unknown_scan_rows)),
+        // The executor reads a set of ID leaves concurrently and combines
+        // their bitmaps; point IDs cost one batched existence read.
+        exec::ExecCountCursorPlan::Union { driver, rest }
+        | exec::ExecCountCursorPlan::Intersect { driver, rest }
+            if count_id_set(cursor) =>
+        {
+            storage
+                .parallel_reads(
+                    &core::iter::once(driver.as_ref())
+                        .chain(rest.iter())
+                        .map(|child| match child {
+                            exec::ExecCountCursorPlan::NodePointReads(ids)
+                            | exec::ExecCountCursorPlan::EdgePointReads(ids) => storage.multi_get(
+                                properties::PositiveUsize::at_least_one(ids.as_ref().len()),
+                                properties::KeyLocality::Sparse,
+                            ),
+                            child => cursor_cost(child, stats, storage),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .serial(storage.secondary_set_operation(storage.default_unknown_scan_rows))
+        }
         exec::ExecCountCursorPlan::Union { driver, rest }
         | exec::ExecCountCursorPlan::Intersect { driver, rest } => {
             rest.iter()
@@ -2066,6 +2088,66 @@ fn cursor_cost(
         | exec::ExecCountCursorPlan::Distinct { input, .. } => cursor_cost(input, stats, storage)
             .serial(storage.stream_operator(storage.default_unknown_scan_rows)),
     }
+}
+
+/// Whether `cursor` is made only of ID leaves of one element kind (point
+/// reads, runtime inputs, search results, and index, range, label and
+/// null-equality sets), unions and intersections of them included. The
+/// executor counts such a cursor on ID bitmaps, never building a row.
+fn count_id_set(cursor: &exec::ExecCountCursorPlan) -> bool {
+    fn element(cursor: &exec::ExecCountCursorPlan) -> Option<properties::ElementKind> {
+        use exec::ExecCountCursorPlan as C;
+        match cursor {
+            C::Union { driver, rest } | C::Intersect { driver, rest } => {
+                let kind = element(driver)?;
+                rest.iter()
+                    .all(|child| element(child) == Some(kind))
+                    .then_some(kind)
+            }
+            C::NodeBitmap(_)
+            | C::NodeUnique { .. }
+            | C::NodeRange(_)
+            | C::NodeLabelBitmap(_)
+            | C::NodeDynamicEquality { .. }
+            | C::NodeDynamicMembership { .. }
+            | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                ..
+            })
+            | C::NodePointReads(_)
+            | C::NodeRuntimeInput(_)
+            | C::NodeVectorSearch { .. }
+            | C::NodeTextSearch { .. } => Some(properties::ElementKind::Node),
+            C::EdgeBitmap(_)
+            | C::EdgeRange(_)
+            | C::EdgeLabelBitmap(_)
+            | C::EdgeDynamicEquality { .. }
+            | C::EdgeDynamicMembership { .. }
+            | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::NullEquality {
+                ..
+            })
+            | C::EdgePointReads(_)
+            | C::EdgeRuntimeInput(_)
+            | C::EdgeVectorSearch { .. }
+            | C::EdgeTextSearch { .. } => Some(properties::ElementKind::Edge),
+            C::EmptyRows
+            | C::InputRows
+            | C::RuntimeInput(_)
+            | C::NodeFullScan
+            | C::EdgeFullScan
+            | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(_))
+            | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_))
+            | C::Filter { .. }
+            | C::IndexMembership { .. }
+            | C::Window { .. }
+            | C::Order { .. }
+            | C::Expand { .. }
+            | C::VectorSearch { .. }
+            | C::TextSearch { .. }
+            | C::Variable { .. }
+            | C::Distinct { .. } => None,
+        }
+    }
+    element(cursor).is_some()
 }
 
 fn node_scan_rows(

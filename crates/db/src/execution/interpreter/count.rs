@@ -228,23 +228,45 @@ impl<'db> ExecutionContext<'db> {
             }
             exec::ExecCountPlan::NodePointReads { ids, .. } => {
                 let window = evaluated_window.expect("point-read counts carry a window");
-                let read = self.existing_node_count(ids.as_ref(), window.threshold());
+                let read = self.existing_count(
+                    exec::ElementKeyspace::NodeProperty,
+                    ids.as_ref(),
+                    window.threshold(),
+                );
                 window.apply(read.await?)
             }
             exec::ExecCountPlan::EdgePointReads { ids, .. } => {
                 let window = evaluated_window.expect("point-read counts carry a window");
-                let read = self.existing_edge_count(ids.as_ref(), window.threshold());
+                let read = self.existing_count(
+                    exec::ElementKeyspace::EdgeEndpoints,
+                    ids.as_ref(),
+                    window.threshold(),
+                );
                 window.apply(read.await?)
             }
             exec::ExecCountPlan::NodeRuntimeInput { input, .. } => {
                 let window = evaluated_window.expect("runtime counts carry a window");
                 let ids = self.runtime_ids(input)?;
-                window.apply(self.existing_node_count(&ids, window.threshold()).await?)
+                window.apply(
+                    self.existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?,
+                )
             }
             exec::ExecCountPlan::EdgeRuntimeInput { input, .. } => {
                 let window = evaluated_window.expect("runtime counts carry a window");
                 let ids = self.runtime_ids(input)?;
-                window.apply(self.existing_edge_count(&ids, window.threshold()).await?)
+                window.apply(
+                    self.existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?,
+                )
             }
             exec::ExecCountPlan::RuntimeInput { input, .. } => {
                 let window = evaluated_window.expect("runtime counts carry a window");
@@ -292,7 +314,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id().local_id())
                     .collect::<Vec<_>>();
                 return self
-                    .existing_node_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -312,7 +338,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id().local_id())
                     .collect::<Vec<_>>();
                 return self
-                    .existing_edge_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -332,7 +362,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id)
                     .collect::<Vec<_>>();
                 return self
-                    .existing_node_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -352,7 +386,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id)
                     .collect::<Vec<_>>();
                 return self
-                    .existing_edge_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -535,40 +573,47 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 
-    async fn existing_node_count(&self, ids: &[u64], threshold: Option<usize>) -> Result<usize> {
+    /// How many of `ids` exist, counting no further than `threshold`.
+    ///
+    /// Existence is read in multi-gets of at most
+    /// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, and never of more keys
+    /// than the threshold still needs.
+    async fn existing_count(
+        &self,
+        keyspace: exec::ElementKeyspace,
+        mut ids: &[u64],
+        threshold: Option<usize>,
+    ) -> Result<usize> {
+        const BATCH: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
         let mut count = 0usize;
-        for id in ids {
-            if threshold.is_some_and(|threshold| count >= threshold) {
-                break;
+        loop {
+            let wanted = threshold.map_or(BATCH, |threshold| {
+                threshold.saturating_sub(count).min(BATCH)
+            });
+            if wanted == 0 || ids.is_empty() {
+                return Ok(count);
             }
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                count = count.saturating_add(1);
-            }
+            let (batch, rest) = ids.split_at(wanted.min(ids.len()));
+            ids = rest;
+            let keys = batch
+                .iter()
+                .map(|id| {
+                    access::kv::physical_element_key(
+                        self.tenant_scope,
+                        &exec::KvKey::from_id(keyspace, *id),
+                    )
+                    .2
+                })
+                .collect::<Vec<_>>();
+            // Boxed: the recursive count frames that await this stay small.
+            count = count.saturating_add(
+                Box::pin(self.multi_get_raw(&keys))
+                    .await?
+                    .iter()
+                    .filter(|record| record.is_some())
+                    .count(),
+            );
         }
-        Ok(count)
-    }
-
-    async fn existing_edge_count(&self, ids: &[u64], threshold: Option<usize>) -> Result<usize> {
-        let mut count = 0usize;
-        for id in ids {
-            if threshold.is_some_and(|threshold| count >= threshold) {
-                break;
-            }
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(*id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                count = count.saturating_add(1);
-            }
-        }
-        Ok(count)
     }
 
     async fn authoritative_node_rows(
@@ -909,20 +954,38 @@ impl<'db> ExecutionContext<'db> {
                         .await?
                 }
                 exec::ExecCountCursorPlan::NodePointReads(ids) => {
-                    self.existing_node_count(ids.as_ref(), window.threshold())
-                        .await?
+                    self.existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        ids.as_ref(),
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::EdgePointReads(ids) => {
-                    self.existing_edge_count(ids.as_ref(), window.threshold())
-                        .await?
+                    self.existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        ids.as_ref(),
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::NodeRuntimeInput(input) => {
                     let ids = self.runtime_ids(input)?;
-                    self.existing_node_count(&ids, window.threshold()).await?
+                    self.existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::EdgeRuntimeInput(input) => {
                     let ids = self.runtime_ids(input)?;
-                    self.existing_edge_count(&ids, window.threshold()).await?
+                    self.existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::RuntimeInput(input) => self.runtime_row_count(input)?,
                 exec::ExecCountCursorPlan::NodeFullScan => {
@@ -969,7 +1032,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id().local_id())
                         .collect::<Vec<_>>();
                     return self
-                        .existing_node_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::NodeProperty,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -994,7 +1061,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id().local_id())
                         .collect::<Vec<_>>();
                     return self
-                        .existing_edge_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::EdgeEndpoints,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -1019,7 +1090,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id)
                         .collect::<Vec<_>>();
                     return self
-                        .existing_node_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::NodeProperty,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -1044,7 +1119,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id)
                         .collect::<Vec<_>>();
                     return self
-                        .existing_edge_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::EdgeEndpoints,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -1591,6 +1670,333 @@ impl<'db> ExecutionContext<'db> {
         .boxed()
     }
 
+    /// The existing elements a set of ID leaves yields, and their keyspace.
+    ///
+    /// Boxed, and out of line, so recursive cursor polls stay small.
+    pub(in crate::execution::interpreter) fn count_id_set<'a>(
+        &'a self,
+        plan: &'a exec::ExecCountCursorPlan,
+    ) -> BoxFuture<'a, Result<(roaring::RoaringTreemap, exec::ElementKeyspace)>> {
+        async move {
+            let keyspace = id_set_keyspace(plan).ok_or_else(|| {
+                HelixDbError::InvariantViolation(
+                    "count set leaf holds a cursor that is not an ID leaf".into(),
+                )
+            })?;
+            let ids = self
+                .count_cursor_ids(plan, access::PARALLEL_INDEX_READS)
+                .await?
+                .existing(self, keyspace)
+                .await?;
+            Ok((ids, keyspace))
+        }
+        .boxed()
+    }
+
+    /// IDs of a count cursor over ID leaves: one leaf, or a union or
+    /// intersection of them, nested to any depth.
+    ///
+    /// Set children are read concurrently within `reads`, in plan order, and
+    /// combined as bitmaps: no row is built for any of them. Callers only pass
+    /// plans [`id_set_keyspace`] accepts.
+    pub(in crate::execution::interpreter) fn count_cursor_ids<'a>(
+        &'a self,
+        plan: &'a exec::ExecCountCursorPlan,
+        reads: core::num::NonZeroUsize,
+    ) -> BoxFuture<'a, Result<CountIds>> {
+        use exec::ExecCountCursorPlan as C;
+        async move {
+            self.check_execution_deadline()?;
+            let search = |k| SearchReadLimit::new(k, None);
+            let (ids, existence) = match plan {
+                C::Union { driver, rest } | C::Intersect { driver, rest } => {
+                    let children = self.read_children(
+                        core::iter::once(driver.as_ref())
+                            .chain(rest.iter())
+                            .collect(),
+                        reads,
+                        |child, reads| self.count_cursor_ids(child, reads),
+                    );
+                    return match plan {
+                        C::Intersect { .. } => CountIds::intersection(children).await,
+                        _ => CountIds::union(children).await,
+                    };
+                }
+                C::NodeBitmap(bitmap) => {
+                    (self.node_bitmap(bitmap, reads).await?, Existence::Proven)
+                }
+                C::EdgeBitmap(bitmap) => {
+                    (self.edge_bitmap(bitmap, reads).await?, Existence::Proven)
+                }
+                C::NodeUnique {
+                    lookup,
+                    verification,
+                } => (
+                    self.verified_node_unique_owner(lookup, verification)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    Existence::Proven,
+                ),
+                C::NodeRange(range) => (
+                    self.validated_node_range_ids(range)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    Existence::Proven,
+                ),
+                C::EdgeRange(range) => (
+                    self.validated_edge_range_ids(range)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    Existence::Proven,
+                ),
+                C::NodeLabelBitmap(label) => (
+                    self.lookup_equality_index_set(
+                        "$label",
+                        &DbPropertyValue::String(label.as_ref().to_string()),
+                    )
+                    .await?,
+                    Existence::Proven,
+                ),
+                C::EdgeLabelBitmap(label) => (
+                    self.lookup_global_edge_label_index(label.as_ref()).await?,
+                    Existence::Proven,
+                ),
+                C::NodeDynamicEquality { index, key, param } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    let value = self.param_value(param)?;
+                    (
+                        self.lookup_managed_equality_union(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            core::slice::from_ref(&value),
+                        )
+                        .await?,
+                        Existence::Proven,
+                    )
+                }
+                C::EdgeDynamicEquality { index, key, param } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    let value = self.param_value(param)?;
+                    (
+                        self.lookup_managed_equality_union(
+                            crate::index_lifecycle::IndexElementKind::Edge,
+                            key,
+                            core::slice::from_ref(&value),
+                        )
+                        .await?,
+                        Existence::Proven,
+                    )
+                }
+                C::NodeDynamicMembership { index, key, values } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    (
+                        self.dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            values,
+                            reads,
+                        )
+                        .await?,
+                        Existence::Proven,
+                    )
+                }
+                C::EdgeDynamicMembership { index, key, values } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    (
+                        self.dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Edge,
+                            key,
+                            values,
+                            reads,
+                        )
+                        .await?,
+                        Existence::Proven,
+                    )
+                }
+                C::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                ) => (
+                    self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        None,
+                    )
+                    .await?,
+                    Existence::Proven,
+                ),
+                C::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                ) => (
+                    self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        None,
+                    )
+                    .await?,
+                    Existence::Proven,
+                ),
+                C::NodePointReads(ids) | C::EdgePointReads(ids) => {
+                    (ids.as_ref().iter().copied().collect(), Existence::Unproven)
+                }
+                C::NodeRuntimeInput(input) | C::EdgeRuntimeInput(input) => (
+                    self.runtime_ids(input)?.into_iter().collect(),
+                    Existence::Unproven,
+                ),
+                C::NodeVectorSearch {
+                    key,
+                    index,
+                    query_vector,
+                    k,
+                } => (
+                    self.vector_search_results(
+                        VectorElementType::Node,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_vector,
+                        search(k),
+                    )
+                    .await?
+                    .into_iter()
+                    .filter_map(|result| match result.entity_id() {
+                        crate::search::vector::VectorEntityId::Node(id) => Some(id),
+                        crate::search::vector::VectorEntityId::Edge(_) => None,
+                    })
+                    .collect(),
+                    Existence::Unproven,
+                ),
+                C::EdgeVectorSearch {
+                    key,
+                    index,
+                    query_vector,
+                    k,
+                } => (
+                    self.vector_search_results(
+                        VectorElementType::Edge,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_vector,
+                        search(k),
+                    )
+                    .await?
+                    .into_iter()
+                    .filter_map(|result| match result.entity_id() {
+                        crate::search::vector::VectorEntityId::Edge(id) => Some(id),
+                        crate::search::vector::VectorEntityId::Node(_) => None,
+                    })
+                    .collect(),
+                    Existence::Unproven,
+                ),
+                C::NodeTextSearch {
+                    key,
+                    index,
+                    query_text,
+                    k,
+                } => (
+                    self.text_search_hits(
+                        TextElementType::Node,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_text,
+                        search(k),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|hit| hit.entity_id)
+                    .collect(),
+                    Existence::Unproven,
+                ),
+                C::EdgeTextSearch {
+                    key,
+                    index,
+                    query_text,
+                    k,
+                } => (
+                    self.text_search_hits(
+                        TextElementType::Edge,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_text,
+                        search(k),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|hit| hit.entity_id)
+                    .collect(),
+                    Existence::Unproven,
+                ),
+                C::EmptyRows
+                | C::InputRows
+                | C::RuntimeInput(_)
+                | C::NodeFullScan
+                | C::EdgeFullScan
+                | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                    _,
+                ))
+                | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(
+                    _,
+                ))
+                | C::Filter { .. }
+                | C::IndexMembership { .. }
+                | C::Window { .. }
+                | C::Order { .. }
+                | C::Expand { .. }
+                | C::VectorSearch { .. }
+                | C::TextSearch { .. }
+                | C::Variable { .. }
+                | C::Distinct { .. } => {
+                    return Err(HelixDbError::InvariantViolation(
+                        "count ID set received a cursor that is not an ID leaf".to_string(),
+                    ));
+                }
+            };
+            Ok(CountIds::leaf(ids, existence))
+        }
+        .boxed()
+    }
+
+    /// The elements of `ids` that exist, read in multi-gets of at most
+    /// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys.
+    pub(in crate::execution::interpreter) async fn existing_ids(
+        &self,
+        keyspace: exec::ElementKeyspace,
+        ids: roaring::RoaringTreemap,
+    ) -> Result<roaring::RoaringTreemap> {
+        let mut ids = ids.into_iter();
+        let mut existing = roaring::RoaringTreemap::new();
+        loop {
+            let batch = ids
+                .by_ref()
+                .take(helix_planner::cost::RECORD_BATCH_ROWS as usize)
+                .collect::<Vec<_>>();
+            if batch.is_empty() {
+                return Ok(existing);
+            }
+            let keys = batch
+                .iter()
+                .map(|id| {
+                    access::kv::physical_element_key(
+                        self.tenant_scope,
+                        &exec::KvKey::from_id(keyspace, *id),
+                    )
+                    .2
+                })
+                .collect::<Vec<_>>();
+            existing.extend(
+                batch
+                    .into_iter()
+                    .zip(Box::pin(self.multi_get_raw(&keys)).await?)
+                    .filter_map(|(id, record)| record.map(|_| id)),
+            );
+        }
+    }
+
     async fn validated_node_range_ids(
         &self,
         plan: &exec::ExecNodeVerifiedRangeScanPlan,
@@ -1607,6 +2013,144 @@ impl<'db> ExecutionContext<'db> {
         validate_range_index("edge_range:", &plan.index.index_id, &plan.key)?;
         self.edge_range_index_ids(&plan.key, &plan.range, None)
             .await
+    }
+}
+
+/// Whether storage already proves that the elements of a set exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Existence {
+    /// Index, range, label and null-equality sets hold only live elements.
+    Proven,
+    /// Point IDs, runtime inputs and search results may name deleted ones.
+    Unproven,
+}
+
+/// IDs a count cursor over ID leaves yields, split by whether storage already
+/// proves each element exists. The two sets are disjoint.
+#[derive(Debug, Default, PartialEq)]
+pub(in crate::execution::interpreter) struct CountIds {
+    proven: roaring::RoaringTreemap,
+    unproven: roaring::RoaringTreemap,
+}
+
+impl CountIds {
+    fn leaf(ids: roaring::RoaringTreemap, existence: Existence) -> Self {
+        match existence {
+            Existence::Proven => Self {
+                proven: ids,
+                unproven: roaring::RoaringTreemap::new(),
+            },
+            Existence::Unproven => Self {
+                proven: roaring::RoaringTreemap::new(),
+                unproven: ids,
+            },
+        }
+    }
+
+    /// Every child's IDs; an ID any child proves is proven.
+    async fn union(children: impl futures::Stream<Item = Result<Self>>) -> Result<Self> {
+        let united = children
+            .try_fold(Self::default(), |mut united, child| {
+                united.proven |= child.proven;
+                united.unproven |= child.unproven;
+                futures::future::ready(Ok(united))
+            })
+            .await?;
+        Ok(Self {
+            unproven: united.unproven - &united.proven,
+            proven: united.proven,
+        })
+    }
+
+    /// The IDs every child holds; an ID any child proves is proven.
+    async fn intersection(children: impl futures::Stream<Item = Result<Self>>) -> Result<Self> {
+        let (all, proven) = children
+            .try_fold(
+                (None, roaring::RoaringTreemap::new()),
+                |(all, mut proven): (Option<roaring::RoaringTreemap>, _), child| {
+                    proven |= &child.proven;
+                    let ids = child.proven | child.unproven;
+                    futures::future::ready(Ok((
+                        Some(all.map_or(ids.clone(), |all| all & ids)),
+                        proven,
+                    )))
+                },
+            )
+            .await?;
+        let all = all.unwrap_or_default();
+        let proven = &all & proven;
+        Ok(Self {
+            unproven: all - &proven,
+            proven,
+        })
+    }
+
+    /// Proven IDs plus the unproven ones that exist.
+    pub(in crate::execution::interpreter) async fn existing(
+        self,
+        ctx: &ExecutionContext<'_>,
+        keyspace: exec::ElementKeyspace,
+    ) -> Result<roaring::RoaringTreemap> {
+        Ok(self.proven | ctx.existing_ids(keyspace, self.unproven).await?)
+    }
+}
+
+/// Element keyspace of a count cursor made only of ID leaves of one element
+/// kind (point reads, runtime inputs, search results, and index, range,
+/// label and null-equality sets), unions and intersections of them included;
+/// `None` for any other cursor. Such a cursor is counted on ID bitmaps.
+pub(in crate::execution::interpreter) fn id_set_keyspace(
+    plan: &exec::ExecCountCursorPlan,
+) -> Option<exec::ElementKeyspace> {
+    use exec::ExecCountCursorPlan as C;
+    match plan {
+        C::Union { driver, rest } | C::Intersect { driver, rest } => {
+            let keyspace = id_set_keyspace(driver)?;
+            rest.iter()
+                .all(|child| id_set_keyspace(child) == Some(keyspace))
+                .then_some(keyspace)
+        }
+        C::NodeBitmap(_)
+        | C::NodeUnique { .. }
+        | C::NodeRange(_)
+        | C::NodeLabelBitmap(_)
+        | C::NodeDynamicEquality { .. }
+        | C::NodeDynamicMembership { .. }
+        | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+            ..
+        })
+        | C::NodePointReads(_)
+        | C::NodeRuntimeInput(_)
+        | C::NodeVectorSearch { .. }
+        | C::NodeTextSearch { .. } => Some(exec::ElementKeyspace::NodeProperty),
+        C::EdgeBitmap(_)
+        | C::EdgeRange(_)
+        | C::EdgeLabelBitmap(_)
+        | C::EdgeDynamicEquality { .. }
+        | C::EdgeDynamicMembership { .. }
+        | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::NullEquality {
+            ..
+        })
+        | C::EdgePointReads(_)
+        | C::EdgeRuntimeInput(_)
+        | C::EdgeVectorSearch { .. }
+        | C::EdgeTextSearch { .. } => Some(exec::ElementKeyspace::EdgeEndpoints),
+        C::EmptyRows
+        | C::InputRows
+        | C::RuntimeInput(_)
+        | C::NodeFullScan
+        | C::EdgeFullScan
+        | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(_))
+        | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_))
+        | C::Filter { .. }
+        | C::IndexMembership { .. }
+        | C::Window { .. }
+        | C::Order { .. }
+        | C::Expand { .. }
+        | C::VectorSearch { .. }
+        | C::TextSearch { .. }
+        | C::Variable { .. }
+        | C::Distinct { .. } => None,
     }
 }
 
@@ -4834,6 +5378,81 @@ mod tests {
     }
 
     #[cfg(test)]
+    #[cfg_attr(test, tokio::test)]
+    async fn count_intersection_of_point_ids_and_index_uses_bitmaps() {
+        let db = test_support::open_db_with_config(
+            test_support::in_memory_config("count-id-set-bitmaps")
+                .with_equality_index("User", "status"),
+        )
+        .await;
+        let mut active = Vec::new();
+        for _ in 0..3 {
+            active.push(
+                test_support::add_node_with_properties(
+                    &db,
+                    "User",
+                    vec![("status", PropertyValue::from("active"))],
+                )
+                .await,
+            );
+        }
+        let paused = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("status", PropertyValue::from("paused"))],
+        )
+        .await;
+        // Never written, as if deleted: point IDs do not prove existence.
+        let missing = paused + 1_000;
+        let points = || {
+            exec::ExecCountCursorPlan::NodePointReads(test_support::ids(vec![
+                active[0], paused, missing,
+            ]))
+        };
+        let status =
+            || exec::ExecCountCursorPlan::NodeBitmap(node_point("User", "status", "active"));
+
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        // The index proves the one ID both sets hold: no row is built and no
+        // existence is read.
+        let intersect = exec::ExecCountCursorPlan::Intersect {
+            driver: Box::new(points()),
+            rest: ir::AtLeast::from_one(status()),
+        };
+        assert_eq!(
+            execution
+                .pull_count_cardinality(&intersect, &mut None, 0, None)
+                .await
+                .unwrap(),
+            1
+        );
+        let work = execution.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0);
+        assert_eq!(work.multi_get_keys, 0);
+        assert_eq!(work.source_visits, 1);
+
+        // A union verifies only the point IDs the index does not prove, in
+        // one batched read, and drops the missing one.
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        let union = exec::ExecCountCursorPlan::Union {
+            driver: Box::new(status()),
+            rest: ir::AtLeast::from_one(points()),
+        };
+        assert_eq!(
+            execution
+                .pull_count_cardinality(&union, &mut None, 0, None)
+                .await
+                .unwrap(),
+            4
+        );
+        let work = execution.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0);
+        assert_eq!(work.multi_get_keys, 2);
+        assert_eq!(work.source_visits, 4);
+    }
+
     #[tokio::test]
     async fn randomized_recursive_counts_match_the_materialized_row_oracle() {
         let db = test_support::open_db("count-randomized-recursive-oracle").await;

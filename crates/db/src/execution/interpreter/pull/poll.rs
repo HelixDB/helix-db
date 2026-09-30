@@ -132,6 +132,11 @@ impl<'a> Cursor<'a> {
                                     false,
                                 ))
                             }
+                            exec::ExecCountCursorPlan::Union { .. }
+                            | exec::ExecCountCursorPlan::Intersect { .. } => {
+                                let (ids, keyspace) = ctx.count_id_set(plan).await?;
+                                Some(source::Source::bitmap(ids, keyspace, true))
+                            }
                             exec::ExecCountCursorPlan::NodeLabelBitmap(label) => {
                                 Some(source::Source::bitmap(
                                     ctx.lookup_equality_index_set(
@@ -170,8 +175,6 @@ impl<'a> Cursor<'a> {
                             | exec::ExecCountCursorPlan::EdgeDynamicEquality { .. }
                             | exec::ExecCountCursorPlan::NodeDynamicMembership { .. }
                             | exec::ExecCountCursorPlan::EdgeDynamicMembership { .. }
-                            | exec::ExecCountCursorPlan::Union { .. }
-                            | exec::ExecCountCursorPlan::Intersect { .. }
                             | exec::ExecCountCursorPlan::Filter { .. }
                             | exec::ExecCountCursorPlan::IndexMembership { .. }
                             | exec::ExecCountCursorPlan::Window { .. }

@@ -176,6 +176,8 @@ fn node_shapes(predicate: &Predicate) -> Vec<Traversal<helix_ast::traversal::Ter
             .values(vec!["p0"]),
         source().count(),
         leading().count(),
+        source().as_("saved").count(),
+        leading().store("saved").count(),
         source().exists(),
         source().project(vec![Projection::property("$id", "id")]),
         source().group_count("rank"),
@@ -193,6 +195,8 @@ fn edge_shapes(predicate: &Predicate) -> Vec<Traversal<helix_ast::traversal::Ter
             .values(vec!["p0"]),
         source().count(),
         leading().count(),
+        source().as_("saved").count(),
+        leading().store("saved").count(),
         source().exists(),
         source().project(vec![Projection::property("$id", "id")]),
     ]
@@ -482,6 +486,34 @@ fn literal_lists_on_range_only_properties_read_point_ranges() {
         );
         let statistics = crate::diagnostics::analyze(&plan, &planner_ctx).statistics;
         assert_eq!(statistics.node_accesses.label_scans, 0, "{count}");
+        assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
+    }
+}
+
+#[test]
+fn counts_over_saved_streams_read_the_index() {
+    // `.as()` and `.store()` save the stream the count reads; the filter
+    // before them stays with the access, so the count reads a bitmap.
+    for shape in [
+        g().n_with_label_where("Item", Predicate::eq("p0", 0))
+            .as_("x")
+            .count(),
+        g().n_with_label("Item")
+            .where_(Predicate::eq("p0", 0))
+            .store("x")
+            .count(),
+    ] {
+        let plan = executable_traversal(shape, ctx(indexes()));
+        let json = semantic(&plan);
+        let mut bitmaps = 0;
+        visit(&json, &mut |value| {
+            if value.get("node_bitmap").is_some() || value.get("bitmap").is_some() {
+                bitmaps += 1;
+            }
+        });
+        assert!(bitmaps > 0, "{json:#}");
+        assert!(scans(&json).is_empty(), "{json:#}");
+        assert!(filter_strings(&json).is_empty(), "{json:#}");
         assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
     }
 }

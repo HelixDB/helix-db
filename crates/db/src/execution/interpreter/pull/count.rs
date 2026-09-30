@@ -125,6 +125,11 @@ impl<'a> Program<'a> {
                 input: Box::new(Self::new(input)),
                 window,
             },
+            // A set of ID leaves of one element kind is one leaf counted on
+            // ID bitmaps; other sets combine their child rows.
+            C::Union { .. } | C::Intersect { .. } if count::id_set_keyspace(plan).is_some() => {
+                Self::Leaf(plan)
+            }
             C::Union { driver, rest } | C::Intersect { driver, rest } => Self::Set {
                 inputs: std::iter::once(driver.as_ref())
                     .chain(rest.as_ref())
