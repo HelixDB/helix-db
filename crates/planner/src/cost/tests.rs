@@ -377,8 +377,9 @@ fn graph_scans_charge_rows_at_empty_small_and_saturating_estimates() {
         let rows = EstimatedRows::rows(count);
         let label = profile.label_scan(rows);
         let elements = profile.element_scan(rows);
-        assert_eq!(label.object_reads, count.saturating_add(1));
-        assert_eq!(label.authoritative_graph_reads, count);
+        // A label scan reads its bitmap and trusts it: no graph row per ID.
+        assert_eq!(label.object_reads, 1);
+        assert_eq!(label.authoritative_graph_reads, 0);
         assert_eq!(label.range_nexts, 0);
         assert_eq!(elements.object_reads, count);
         assert_eq!(elements.authoritative_graph_reads, count);

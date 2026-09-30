@@ -108,24 +108,23 @@ impl StorageCostProfile {
         }
     }
 
-    /// Cost a label bitmap followed by graph-row reads and row construction.
+    /// Cost a label bitmap followed by row construction.
     ///
-    /// Label access uses the shared equality bitmap, then checks each graph
-    /// row before emitting it. Unlike managed equality access, these IDs do
-    /// not bypass graph-row reads. Charge the row read/decode budget even
-    /// when statistics are missing; residual predicates are charged separately.
+    /// Deletes remove label memberships in the same transaction, so the
+    /// executor trusts the bitmap like any index set and reads no graph row
+    /// to emit its IDs. Charge row construction even when statistics are
+    /// missing; residual predicates are charged separately.
     ///
     /// ```
     /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
     /// let profile = StorageCostProfile::default();
     /// let cost = profile.label_scan(EstimatedRows::rows(1000));
-    /// assert_eq!(cost.object_reads, 1001);
-    /// assert_eq!(cost.authoritative_graph_reads, 1000);
+    /// assert_eq!(cost.object_reads, 1);
+    /// assert_eq!(cost.authoritative_graph_reads, 0);
     /// assert_eq!(cost.range_nexts, 0);
     /// ```
     pub fn label_scan(&self, rows: EstimatedRows) -> CostVector {
         self.bitmap_equality_lookup(rows)
-            .serial(self.authoritative_verification(rows))
             .serial(self.secondary_row_materialization(rows))
     }
 
