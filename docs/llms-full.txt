@@ -524,10 +524,11 @@ docker run --rm --name helixdb \
 
 In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
 named volume mounted there is already writable; a bind mount must be owned by
-`65532:65532`. Running as another user or outside the image, set
-`HELIX_DISK_CACHE_DIR` to a directory that user can write. Use one cache directory
-per running server and per database; changing `DB_PATH` on the same directory
-leaves the old database's full-text cache behind.
+`65532:65532`. When running as another user or outside the image, set
+`HELIX_DISK_CACHE_DIR` to a directory that user can write. With a read-only root
+filesystem, mount a writable volume (for example a tmpfs or `emptyDir`) at the cache
+directory. Use one cache directory per running server and per database; changing
+`DB_PATH` on the same directory leaves the old database's full-text cache behind.
 
 | Variable | Purpose |
 | --- | --- |
@@ -553,8 +554,11 @@ checksums the whole split, up to 64 MiB, before it answers. Budget at least twic
 the data the server reads often: the object-store cache fetches whole file parts
 (4 MiB, or smaller under a 2 GiB budget), so once that data outgrows half the
 budget, cold reads fetch more than memory-only caches would. The budget must also
-fit on the cache's filesystem; the server logs a warning at startup when it exceeds
-the free space there plus what the cache already uses.
+fit on the cache's filesystem: its free space plus what the cache already uses.
+When `HELIX_DISK_CACHE_BYTES` is unset and the 32 GiB default does not fit, startup
+fails naming the variable; without a volume the cache would otherwise share, and
+could fill, the filesystem of the container runtime. A budget you set that does not
+fit only logs a warning at startup.
 
 The block cache also indexes its disk share in memory, outside
 `HELIX_DISK_CACHE_MEMORY_BYTES`. Once full, the index takes roughly 2–9 MiB of RAM
@@ -567,14 +571,24 @@ open files in the worst case (26,600 at the default budget), plus one per open
 full-text split. It raises its soft open-file limit to the hard limit at startup.
 If the container's hard limit is below that minimum, startup fails naming
 `HELIX_DISK_CACHE_BYTES`; raise the hard limit with `--ulimit nofile=65536:65536`.
-Lowering the budget is not a reliable fix. Run natively on macOS, the limit is also
-capped by `sysctl kern.maxfilesperproc`.
+Lowering the budget is not a reliable fix above about 3 GiB, where the file count
+does not fall steadily with it; budgets of 1 GiB or less need about 8,200 or fewer.
+Run natively on macOS, the limit is also capped by `sysctl kern.maxfilesperproc`.
 
 Startup also fails with a message naming the variable when a size is invalid or
 out of range, a size is set with `HELIX_DATA_DIR` but without `HELIX_DISK_CACHE_DIR`,
-the cache directory is not writable or cannot be locked (some network and FUSE
-filesystems do not support locks), or another running server already uses it. Stop
-the old container before starting its replacement on the same cache directory.
+the default budget does not fit, the cache directory is not writable or cannot be
+locked (some network and FUSE filesystems do not support locks), or another running
+server already uses it. Stop the old container before starting its replacement on
+the same cache directory.
+
+An S3 container that ran v0.0.8 or earlier used no local disk, so it can fail or
+use more resources after upgrading: it needs a hard open-file limit of at least
+26,600 at the default budget (about 8,200 or fewer at 1 GiB or less), about 70–280
+MiB more RAM at the default budget, a writable cache directory (mount a volume with
+a read-only root filesystem, and set `HELIX_DISK_CACHE_DIR` when running as a user
+other than `65532`), and room for the 32 GiB default unless `HELIX_DISK_CACHE_BYTES`
+is set.
 
 ## Stop or inspect
 
@@ -6578,6 +6592,8 @@ helix start persistent
 
 Disk mode starts a SeaweedFS S3 sidecar, creates the `helix-db` bucket, and stores data in a Helix-managed Docker/Podman volume named `helix-<project>-<instance>-seaweedfs-data`. `helix stop` removes the containers but keeps the volume. `helix prune <instance>` removes the volume and deletes the persisted local data.
 
+Disk mode and S3 storage also get a `helix-<project>-<instance>-cache` volume for the server's disk cache, with a 64 MiB budget in disk mode and 1 GiB for an S3 bucket. `helix stop` keeps it and `helix prune <instance>` removes it.
+
 ## Migrate MinIO disk data
 
 Earlier CLI releases ran disk mode on MinIO. MinIO has withdrawn its community container images, so disk mode now uses SeaweedFS, which cannot read MinIO's on-disk format. When the old `helix-<project>-<instance>-minio-data` volume exists, `helix start` removes the old MinIO sidecar, leaves that volume untouched, starts the instance on a new SeaweedFS volume, and prints a warning. `helix stop` keeps both volumes. `helix prune <instance>` deletes both, including anything written to the new volume since the upgrade.
@@ -6651,7 +6667,7 @@ helix start staging
 helix status
 ```
 
-Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume.
+Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
 
 ## Inspecting logs
 
@@ -6668,7 +6684,7 @@ helix logs dev --follow      # stream
 |------|---------|
 | Stop one instance | `helix stop <instance>` |
 | Restart one instance | `helix restart <instance>` |
-| Remove containers, workspace state, and disk-mode volume for one instance | `helix prune <instance>` |
+| Remove containers, workspace state, and Helix-managed volumes for one instance | `helix prune <instance>` |
 | Remove everything Helix-owned, for every local instance | `helix prune --all` (`--yes` in non-TTY) |
 | Permanently delete an instance from `helix.toml` | `helix delete <instance>` (`--yes` in non-TTY) |
 
@@ -7422,7 +7438,7 @@ helix delete <INSTANCE> [OPTIONS]
 
 ## Behavior
 
-- For local instances, Helix-owned containers, networks, disk-mode volumes, and the per-instance directory under `.helix/` are deleted.
+- For local instances, Helix-owned containers, networks, disk-mode and disk-cache volumes, and the per-instance directory under `.helix/` are deleted.
 - For Helix Cloud instances, only the `[enterprise.<name>]` block in `helix.toml` is removed — the database itself is untouched.
 - Remote S3 object-store data is not deleted.
 - The CLI refuses to delete the last instance in `helix.toml`; add a replacement first.
@@ -7812,6 +7828,7 @@ helix prune [INSTANCE] [OPTIONS]
 
 - The container named `helix-<project>-<instance>`.
 - The disk-mode SeaweedFS sidecar, network, and persistent volume when present, plus any MinIO sidecar and volume left by an older CLI.
+- The disk-cache volume of a disk-mode or S3 instance.
 - The per-instance directory under `.helix/`.
 
 It never runs a broad `docker system prune` or `podman system prune`, and it never deletes remote S3
@@ -8121,6 +8138,7 @@ helix start [INSTANCE] [OPTIONS]
 - Names the container `helix-<project>-<instance>` and publishes the configured port to container port `8080`.
 - Uses Docker or Podman based on `[project] container_runtime` in `helix.toml`.
 - Default storage is in-memory. Passing `--disk` starts a SeaweedFS S3 sidecar (`ghcr.io/chrislusf/seaweedfs:4.47`, pinned by digest) that creates the `helix-db` bucket, waits up to 60 seconds for the bucket to accept signed requests, and runs `helixdb` with S3-compatible storage environment variables.
+- With `--disk` or S3 storage, the server caches data on disk in a per-instance `helix-<project>-<instance>-cache` volume mounted at `/var/cache/helix`. The CLI sets its budget (`HELIX_DISK_CACHE_BYTES`) to 64 MiB in disk mode, where SeaweedFS already keeps the data on your machine, and to 1 GiB for an S3 bucket.
 - `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`, unless the instance already uses S3 storage; then they override its saved S3 settings for this run.
 - The CLI loads `.env` from the project root before starting. For S3 storage, it passes any `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, and `AWS_DEFAULT_REGION` values from the environment into the container.
 - Background mode (`-d`, `--restart unless-stopped`) waits up to ~30 seconds for `GET /healthz` readiness and prints the URL and container name when ready. Progress goes to stderr.
@@ -8128,7 +8146,7 @@ helix start [INSTANCE] [OPTIONS]
 
 The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data. The CLI shows this warning the first time you start each in-memory instance.
 
-With `--disk`, `helix stop` removes the Helix and SeaweedFS containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data. With S3 storage, `helix stop`, `helix restart`, and `helix prune` never delete remote data.
+With `--disk`, `helix stop` removes the Helix and SeaweedFS containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data. `helix stop` also keeps the disk-cache volume, so the next start reads recently used data locally, and `helix prune` removes it. With S3 storage, `helix stop`, `helix restart`, and `helix prune` never delete remote data.
 
 Older CLI releases stored disk-mode data with MinIO, which SeaweedFS cannot read. `helix start` removes an old MinIO sidecar, starts on a new SeaweedFS volume, and warns while the MinIO volume remains. See [Migrate MinIO disk data](/cli/workflows/local#migrate-minio-disk-data).
 
@@ -8254,6 +8272,7 @@ helix stop [INSTANCE]
 - `helix stop` is idempotent — if the instance is not running, the CLI exits successfully without error.
 - Default in-memory data is wiped when the container is removed.
 - For disk-mode instances, `helix stop` removes the Helix and SeaweedFS containers, and any MinIO sidecar left by an older CLI, but keeps the persistent local volumes. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
+- The disk-cache volume of a disk-mode or S3 instance is kept too, so the next start reads recently used data locally.
 - Remote S3 data is never touched.
 
 ## Examples

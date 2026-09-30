@@ -50,6 +50,7 @@ helix start [INSTANCE] [OPTIONS]
 - Names the container `helix-<project>-<instance>` and publishes the configured port to container port `8080`.
 - Uses Docker or Podman based on `[project] container_runtime` in `helix.toml`.
 - Default storage is in-memory. Passing `--disk` starts a SeaweedFS S3 sidecar (`ghcr.io/chrislusf/seaweedfs:4.47`, pinned by digest) that creates the `helix-db` bucket, waits up to 60 seconds for the bucket to accept signed requests, and runs `helixdb` with S3-compatible storage environment variables.
+- With `--disk` or S3 storage, the server caches data on disk in a per-instance `helix-<project>-<instance>-cache` volume mounted at `/var/cache/helix`. The CLI sets its budget (`HELIX_DISK_CACHE_BYTES`) to 64 MiB in disk mode, where SeaweedFS already keeps the data on your machine, and to 1 GiB for an S3 bucket.
 - `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`, unless the instance already uses S3 storage; then they override its saved S3 settings for this run.
 - The CLI loads `.env` from the project root before starting. For S3 storage, it passes any `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, and `AWS_DEFAULT_REGION` values from the environment into the container.
 - Background mode (`-d`, `--restart unless-stopped`) waits up to ~30 seconds for `GET /healthz` readiness and prints the URL and container name when ready. Progress goes to stderr.
@@ -59,7 +60,7 @@ helix start [INSTANCE] [OPTIONS]
 The default `helixdb` storage mode is in-memory. Stopping or restarting an in-memory instance wipes all local data. The CLI shows this warning the first time you start each in-memory instance.
 </Warning>
 
-With `--disk`, `helix stop` removes the Helix and SeaweedFS containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data. With S3 storage, `helix stop`, `helix restart`, and `helix prune` never delete remote data.
+With `--disk`, `helix stop` removes the Helix and SeaweedFS containers but keeps the persistent local volume. `helix prune` removes that volume and deletes the persisted local data. `helix stop` also keeps the disk-cache volume, so the next start reads recently used data locally, and `helix prune` removes it. With S3 storage, `helix stop`, `helix restart`, and `helix prune` never delete remote data.
 
 Older CLI releases stored disk-mode data with MinIO, which SeaweedFS cannot read. `helix start` removes an old MinIO sidecar, starts on a new SeaweedFS volume, and warns while the MinIO volume remains. See [Migrate MinIO disk data](/cli/workflows/local#migrate-minio-disk-data).
 
