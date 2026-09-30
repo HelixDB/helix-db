@@ -133,7 +133,7 @@ budget, parts keep evicting each other and cold reads fetch more from the object
 store than memory-only caches would.
 
 The budget must also fit on the cache's filesystem: its free space plus what the
-cache already occupies. When `HELIX_DISK_CACHE_BYTES` is unset and the 32 GiB
+cache already occupies. When `HELIX_DISK_CACHE_BYTES` is unset and the 8 GiB
 default does not fit, startup fails naming the variable; set a budget that fits or
 mount a larger volume. Without a volume the cache shares the filesystem of the
 container runtime's writable layers, so an unchecked default could fill it. A
@@ -144,13 +144,13 @@ too.
 | Variable | Purpose |
 | --- | --- |
 | `HELIX_DISK_CACHE_DIR` | Disk cache directory, created with its `slate/`, `object-store/` and `fts/` subdirectories if needed. With S3 it defaults to `/var/cache/helix`. With `HELIX_DATA_DIR`, setting it enables the disk cache and leaving it unset keeps memory-only caches. Rejected with memory storage. |
-| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 32 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). With S3, `object-store/` also keeps the SSTs the server writes; with `HELIX_DATA_DIR` those are already on local disk, so it keeps only SSTs the server reads. |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). With S3, `object-store/` also keeps the SSTs the server writes; with `HELIX_DATA_DIR` those are already on local disk, so it keeps only SSTs the server reads. |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the SlateDB block cache in bytes; defaults to 640 MiB, the memory-only default. |
 
 Size the container's memory for more than `HELIX_DISK_CACHE_MEMORY_BYTES`: the block
 cache also indexes everything in `slate/` in memory. Once `slate/` fills, that index
-takes roughly 2–9 MiB of RAM per GiB of `HELIX_DISK_CACHE_BYTES`, about 70–280 MiB
-at the 32 GiB default and 2–9 GiB at 1 TiB. A restart rebuilds it from disk before
+takes roughly 2–9 MiB of RAM per GiB of `HELIX_DISK_CACHE_BYTES`, about 20–70 MiB
+at the 8 GiB default and 2–9 GiB at 1 TiB. A restart rebuilds it from disk before
 the server listens, briefly using about twice as much memory.
 
 The block cache holds one file open per partition: its 3/8 share divided by a
@@ -180,12 +180,12 @@ or earlier can fail or use more resources after the upgrade:
 
 - The hard open-file limit must be at least 26,600 at the default budget. Budgets
   of 1 GiB or less need about 8,200 or fewer.
-- RSS grows by the block cache's index, about 70–280 MiB at the default budget and
+- RSS grows by the block cache's index, about 20–70 MiB at the default budget and
   twice that briefly after a restart; size memory limits for it.
 - The cache directory must be writable. Mount a volume there with a read-only root
   filesystem, and set `HELIX_DISK_CACHE_DIR` when running as a user other than
   `65532` (for example on platforms that assign arbitrary UIDs).
-- Without `HELIX_DISK_CACHE_BYTES`, the 32 GiB default must fit the cache's
+- Without `HELIX_DISK_CACHE_BYTES`, the 8 GiB default must fit the cache's
   filesystem.
 
 ## Test

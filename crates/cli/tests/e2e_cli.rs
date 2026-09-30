@@ -345,7 +345,7 @@ fn s3_local_config_is_written_by_init_add_and_start_persist() {
     );
 
     // S3 storage always caches on disk: on a labeled per-instance volume,
-    // with a development budget instead of the server's 32 GiB default.
+    // with a development budget instead of the server's 8 GiB default.
     let log = fixture.runtime_log();
     let container = "helix-s3-init-project-dev";
     assert!(

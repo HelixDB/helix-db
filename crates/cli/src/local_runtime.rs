@@ -59,7 +59,7 @@ const CACHE_DIR: &str = "/var/cache/helix";
 /// already keeps the data on this machine and a larger cache only copies it.
 const DISK_MODE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// Disk-cache budget for an S3 bucket: room for a development working set
-/// that needs about 8,200 open files, instead of the server's 32 GiB default,
+/// that needs about 8,200 open files, instead of the server's 8 GiB default,
 /// which needs 26,600 and fails startup where it does not fit.
 const S3_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const TEST_CONTAINER_RUNTIME_BIN_ENV: &str = "HELIX_TEST_CONTAINER_RUNTIME_BIN";
@@ -2069,7 +2069,7 @@ mod tests {
         assert!(args.contains(&"AWS_ENDPOINT=https://s3.example.com".to_string()));
         assert!(!args.contains(&"AWS_ALLOW_HTTP=true".to_string()));
         // A bucket gets a 1 GiB development cache instead of the server's
-        // 32 GiB default.
+        // 8 GiB default.
         assert!(has_pair(
             &args,
             "-v",

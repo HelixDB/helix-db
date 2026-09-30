@@ -70,7 +70,7 @@ services:
     # so the idle refresh check proves only that idle refreshes fetch no
     # uncached SST ranges. A tmpfs root is root-owned 0755 unless its mode
     # lets the 65532 runtime user write, and the explicit budget stays within
-    # its size, where the 32 GiB default would not fit and fail startup.
+    # its size, where the 8 GiB default would not fit and fail startup.
     tmpfs:
       - /var/cache/helix:mode=1777,size=2g
     environment:

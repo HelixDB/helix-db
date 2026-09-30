@@ -350,7 +350,7 @@ run_invalid_configuration_tests() {
   assert_error_names "$s3_read_only_root" \
     'HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; mount a writable volume there'
 
-  # The 32 GiB default must fit the cache's filesystem, here a 64 MiB tmpfs,
+  # The 8 GiB default must fit the cache's filesystem, here a 64 MiB tmpfs,
   # rather than fill it; a budget that is set is only warned about.
   start_container "$s3_default_budget" "$((base_port + 14))" \
     --tmpfs /var/cache/helix:size=64m,mode=1777 \
@@ -358,7 +358,7 @@ run_invalid_configuration_tests() {
   wait_for_exit "$s3_default_budget"
   assert_nonzero_exit "$s3_default_budget"
   assert_error_names "$s3_default_budget" \
-    'HELIX_DISK_CACHE_BYTES is unset and its 34359738368-byte default exceeds the space free for the disk cache at `/var/cache/helix`'
+    'HELIX_DISK_CACHE_BYTES is unset and its 8589934592-byte default exceeds the space free for the disk cache at `/var/cache/helix`'
 }
 
 run_signal_test() {

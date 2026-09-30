@@ -533,7 +533,7 @@ directory. Use one cache directory per running server and per database; changing
 | Variable | Purpose |
 | --- | --- |
 | `HELIX_DISK_CACHE_DIR` | Disk cache directory, created if needed. Defaults to `/var/cache/helix` with `S3_BUCKET`; with `HELIX_DATA_DIR`, setting it enables the disk cache |
-| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 32 GiB |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
 
 Half of the disk budget caches object-store files, 3/8 caches database blocks,
@@ -555,14 +555,14 @@ the data the server reads often: the object-store cache fetches whole file parts
 (4 MiB, or smaller under a 2 GiB budget), so once that data outgrows half the
 budget, cold reads fetch more than memory-only caches would. The budget must also
 fit on the cache's filesystem: its free space plus what the cache already uses.
-When `HELIX_DISK_CACHE_BYTES` is unset and the 32 GiB default does not fit, startup
+When `HELIX_DISK_CACHE_BYTES` is unset and the 8 GiB default does not fit, startup
 fails naming the variable; without a volume the cache would otherwise share, and
 could fill, the filesystem of the container runtime. A budget you set that does not
 fit only logs a warning at startup.
 
 The block cache also indexes its disk share in memory, outside
 `HELIX_DISK_CACHE_MEMORY_BYTES`. Once full, the index takes roughly 2–9 MiB of RAM
-per GiB of `HELIX_DISK_CACHE_BYTES` (about 70–280 MiB at the default, 2–9 GiB at
+per GiB of `HELIX_DISK_CACHE_BYTES` (about 20–70 MiB at the default, 2–9 GiB at
 1 TiB), and a restart briefly needs about twice that while it rebuilds the index.
 Size the container's memory limit for this index as well as the memory tier.
 
@@ -584,10 +584,10 @@ the same cache directory.
 
 An S3 container that ran v0.0.8 or earlier used no local disk, so it can fail or
 use more resources after upgrading: it needs a hard open-file limit of at least
-26,600 at the default budget (about 8,200 or fewer at 1 GiB or less), about 70–280
+26,600 at the default budget (about 8,200 or fewer at 1 GiB or less), about 20–70
 MiB more RAM at the default budget, a writable cache directory (mount a volume with
 a read-only root filesystem, and set `HELIX_DISK_CACHE_DIR` when running as a user
-other than `65532`), and room for the 32 GiB default unless `HELIX_DISK_CACHE_BYTES`
+other than `65532`), and room for the 8 GiB default unless `HELIX_DISK_CACHE_BYTES`
 is set.
 
 ## Stop or inspect

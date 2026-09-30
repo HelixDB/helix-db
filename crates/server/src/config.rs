@@ -21,10 +21,12 @@ const DEFAULT_CACHE_MEMORY_BYTES: NonZeroUsize = NonZeroUsize::new(
         + slatedb::db_cache::DEFAULT_META_CACHE_CAPACITY) as usize,
 )
 .expect("SlateDB default cache capacities are nonzero");
-/// Disk bytes shared by every disk tier when `HELIX_DISK_CACHE_BYTES` is unset.
-/// The object-store tier receives half, which is SlateDB's own 16 GiB default.
+/// Disk bytes shared by every disk tier when `HELIX_DISK_CACHE_BYTES` is unset:
+/// 4 GiB for object-store parts, 3 GiB for the block cache in 24,576
+/// partition files, and 1 GiB for full-text splits. It stays small because a
+/// default that does not fit the cache's filesystem fails startup.
 const DEFAULT_CACHE_DISK_BYTES: NonZeroUsize =
-    NonZeroUsize::new(32 * 1024 * 1024 * 1024).expect("default cache disk budget is nonzero");
+    NonZeroUsize::new(8 * 1024 * 1024 * 1024).expect("default cache disk budget is nonzero");
 /// Smallest disk budget: its 32 MiB object-store share still holds
 /// [`OBJECT_STORE_MIN_PARTS`] parts of 128 KiB.
 const MIN_CACHE_DISK_BYTES: usize = 64 * 1024 * 1024;
@@ -1102,23 +1104,19 @@ mod tests {
         };
         assert_eq!(slate_db.memory_bytes(), 640 * MIB);
         assert_eq!(slate_db.disk().root(), root.join("slate"));
-        assert_eq!(slate_db.disk().bytes(), 12 * 1024 * MIB);
+        assert_eq!(slate_db.disk().bytes(), 3 * 1024 * MIB);
+        assert_eq!(slate_db.disk_block_bytes(), 128 * 1024);
         assert_eq!(slate_db.disk_partitions(), 24_576);
         assert_eq!(object_store.root(), root.join("object-store"));
         assert_eq!(object_store.warm(), db::config::ObjectStoreWarmLevel::Off);
         let options = object_store.to_slate_options();
-        assert_eq!(options.max_cache_size_bytes, Some(16 * 1024 * MIB));
-        assert_eq!(
-            options.max_cache_size_bytes,
-            slatedb::config::ObjectStoreCacheOptions::default().max_cache_size_bytes,
-            "the object-store tier keeps SlateDB's default capacity"
-        );
+        assert_eq!(options.max_cache_size_bytes, Some(4 * 1024 * MIB));
         assert_eq!(options.part_size_bytes, 4 * MIB);
         assert_eq!(options.max_open_file_handles, 1000);
         assert!(options.cache_puts);
         assert_eq!(slate_warm, db::config::SlateWarmConfig::default());
         assert_eq!(fts.disk_root(), root.join("fts"));
-        assert_eq!(fts.disk_bytes(), 4 * 1024 * 1024 * 1024);
+        assert_eq!(fts.disk_bytes(), 1024 * 1024 * 1024);
         assert_eq!(
             fts.warm_mode(),
             db::config::CacheWarmMode::Off,
