@@ -718,40 +718,44 @@ async fn resolved_memberships_are_reused_across_executions_of_one_plan() {
     ctx.close_request_read_view().unwrap();
 }
 
-/// A NaN constant makes a plan unequal to itself, so no lookup could find a
-/// stored entry. Such a plan resolves on every execution instead of keeping
-/// one set per execution until the request ends.
+/// Entries are keyed by set, so a NaN predicate constant, which makes a plan
+/// unequal to itself, still reuses its set, and a plan with the same set but
+/// another predicate shares it.
 #[tokio::test]
-async fn plans_unequal_to_themselves_resolve_without_being_stored() {
+async fn plans_sharing_a_set_share_its_entry() {
     let fixture = fixture("membership-nan-reuse").await;
-    let predicate = Predicate::is_in(
+    let nan = Predicate::is_in(
         "kind",
         PropertyValue::array([PropertyValue::F64(f64::NAN), PropertyValue::from("B")]),
     );
-    let op = membership(kind_equality(literal("B")), predicate.clone());
-    let exec::ExecOp::IndexMembership { plan } = &op else {
+    let ops = [nan, Predicate::eq("kind", "B")].map(|predicate| {
+        (
+            membership(kind_equality(literal("B")), predicate.clone()),
+            filter(predicate),
+        )
+    });
+    let exec::ExecOp::IndexMembership { plan } = &ops[0].0 else {
         unreachable!("the membership helper builds membership");
     };
-    assert_ne!(*plan, plan.clone());
-    let (expected, _) = run(
-        &fixture,
-        &filter(predicate),
-        traversal_rows(&fixture),
-        context::ParamBindings::default(),
-    )
-    .await;
-    let expected = expected.unwrap();
+    assert_ne!(**plan, (**plan).clone());
     let mut ctx = ExecutionContext::new(&fixture.db, context::ParamBindings::default());
     ctx.enable_request_read_view().await.unwrap();
-    for _ in 0..3 {
+    for (op, filter) in ops.iter().chain(ops.iter()) {
+        let (expected, _) = run(
+            &fixture,
+            filter,
+            traversal_rows(&fixture),
+            context::ParamBindings::default(),
+        )
+        .await;
         let rows = ctx
-            .execute_op(&op, ExecutionValue::Stream(traversal_rows(&fixture)))
+            .execute_op(op, ExecutionValue::Stream(traversal_rows(&fixture)))
             .await
             .unwrap();
-        assert_eq!(rows, expected);
+        assert_eq!(rows, expected.unwrap());
     }
-    assert_eq!(ctx.prepared_memberships.len(), 0);
-    assert_eq!(resolved(&fixture.db), 3);
+    assert_eq!(ctx.prepared_memberships.len(), 1);
+    assert_eq!(resolved(&fixture.db), 1);
     ctx.close_request_read_view().unwrap();
 }
 

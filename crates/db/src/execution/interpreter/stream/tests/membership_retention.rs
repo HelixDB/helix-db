@@ -657,6 +657,8 @@ async fn writes_forget_only_sets_whose_footprint_they_reach_contract() {
         ),
         label_membership(Predicate::eq("$label", "Attribute"), None),
     ];
+    // The first two plans differ only in their residual, so they share one
+    // entry: the second finds the set the first resolved.
     for (write, resolves) in [
         (Write::CreateNote, [0, 0, 0, 0]),
         (Write::AddEdge, [0, 0, 0, 0]),
@@ -664,12 +666,12 @@ async fn writes_forget_only_sets_whose_footprint_they_reach_contract() {
         (Write::SetTitle, [0, 0, 0, 0]),
         (Write::SetUnindexed, [0, 0, 0, 0]),
         (Write::SetKindUnchanged, [0, 0, 0, 0]),
-        (Write::SetKind, [1, 1, 0, 0]),
-        (Write::RemoveKind, [1, 1, 0, 0]),
+        (Write::SetKind, [1, 0, 0, 0]),
+        (Write::RemoveKind, [1, 0, 0, 0]),
         (Write::SetUid, [0, 0, 1, 0]),
-        (Write::CreateAttribute, [1, 1, 1, 1]),
-        (Write::DropAttribute, [1, 1, 1, 1]),
-        (Write::Relabel, [1, 1, 1, 1]),
+        (Write::CreateAttribute, [1, 0, 1, 1]),
+        (Write::DropAttribute, [1, 0, 1, 1]),
+        (Write::Relabel, [1, 0, 1, 1]),
     ] {
         let fixture = fixture(&format!("retention-write-{write:?}")).await;
         let mut ctx = write_context(&fixture, context::ParamBindings::default()).await;
@@ -678,7 +680,8 @@ async fn writes_forget_only_sets_whose_footprint_they_reach_contract() {
         for set in &sets {
             warm.push(exact(&mut ctx, set, &before).await);
         }
-        assert_eq!(resolved(&fixture.db), sets.len(), "{write:?}");
+        assert_eq!(resolved(&fixture.db), sets.len() - 1, "{write:?}");
+        assert_eq!(ctx.prepared_memberships.len(), sets.len() - 1, "{write:?}");
 
         let (created, deleted) = write.apply(&mut ctx, &fixture).await;
         let after = live_rows(&fixture, created, deleted);

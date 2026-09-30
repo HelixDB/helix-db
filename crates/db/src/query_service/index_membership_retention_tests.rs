@@ -297,3 +297,50 @@ async fn statements_after_writes_contract() {
     assert_ne!(response["before"], response["after"]);
     pair.close().await;
 }
+
+/// Statement pairs that update an unread property and then probe one set with
+/// their own residual parameter read the set once per request: entries are
+/// keyed by set, so a residual that differs per statement still shares it.
+#[test]
+fn statements_probing_one_set_with_different_residuals_resolve_it_once() {
+    run_high_stack(statements_probing_one_set_contract);
+}
+
+async fn statements_probing_one_set_contract() {
+    let pair = Pair::seeded("retention-e2e-probes").await;
+    let tags = ["t1", "t2", "t3"];
+    let batch = (0..tags.len()).fold(batch::write_batch(), |batch, unit| {
+        batch
+            .var_as(
+                &format!("touch{unit}"),
+                g().n_with_label_where("Attribute", Predicate::eq("uid", "a1"))
+                    .set_property("tagged", PropertyInput::param(format!("t{unit}"))),
+            )
+            .var_as(
+                &format!("probe{unit}"),
+                narrow(attribute(Predicate::and(vec![
+                    Predicate::eq("kind", "B"),
+                    Predicate::eq_param("tagged", format!("t{unit}")),
+                ]))),
+            )
+    });
+    let probes = (0..tags.len())
+        .map(|unit| format!("probe{unit}"))
+        .collect::<Vec<_>>();
+    let request = tags.iter().enumerate().fold(
+        QueryRequest::write(batch.returning(probes.clone())),
+        |request, (unit, tag)| {
+            request.with_parameter_value(format!("t{unit}"), QueryValue::String((*tag).to_owned()))
+        },
+    );
+    let (response, resolves) = pair.query(request).await;
+    let response = response.unwrap();
+    assert_eq!(resolves, 1);
+    for probe in probes {
+        assert!(
+            !response[&probe].as_array().unwrap().is_empty(),
+            "{probe}: {response}"
+        );
+    }
+    pair.close().await;
+}

@@ -9,10 +9,10 @@
 //! a predicate only for rows the set cannot decide, plus the residual
 //! conjuncts of nodes in the set. There is no row-count threshold: the first
 //! node row that needs a decision resolves the set, and a resolved set is
-//! reused by later executions of the same plan in the request, such as branch
-//! and `ForEach` bodies, until something it depends on may have changed (see
-//! [`PreparedMemberships`](super::PreparedMemberships)). Streams without node
-//! rows never resolve it.
+//! reused by later executions in the request of any plan with the same set,
+//! such as branch and `ForEach` bodies, until something it depends on may
+//! have changed (see [`PreparedMemberships`](super::PreparedMemberships)).
+//! Streams without node rows never resolve it.
 
 use std::sync::Arc;
 
@@ -178,22 +178,12 @@ impl<'db> ExecutionContext<'db> {
         &mut self,
         plan: &exec::ExecNodeIndexMembershipPlan,
     ) -> Result<Arc<PreparedIndexMembership>> {
-        match self.prepared_memberships.get(plan) {
+        match self.prepared_memberships.get(&plan.set) {
             Some(prepared) => Ok(prepared),
             None => {
                 let prepared = Arc::new(self.prepare_index_membership(plan).await?);
-                // A lookup could never find an entry for a plan unequal to
-                // itself, so storing it would only hold its set until the
-                // request ends.
-                #[expect(
-                    clippy::eq_op,
-                    reason = "a NaN constant makes plan equality irreflexive"
-                )]
-                let reusable = plan == plan;
-                if reusable {
-                    self.prepared_memberships
-                        .insert(plan, Arc::clone(&prepared));
-                }
+                self.prepared_memberships
+                    .insert(&plan.set, Arc::clone(&prepared));
                 Ok(prepared)
             }
         }

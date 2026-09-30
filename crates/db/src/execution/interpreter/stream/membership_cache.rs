@@ -8,10 +8,16 @@ use super::*;
 /// Memberships resolved in one request, reused by later executions.
 ///
 /// Branch bodies run their pipeline once per parent row and `ForEach` bodies
-/// once per item, so the same plan can resolve many times per request. An
-/// entry depends on:
+/// once per item, so the same set can resolve many times per request. Entries
+/// are keyed by the membership set alone (its secondary set, label, and
+/// outside-label policy), since that is all resolving reads: the predicate
+/// and residual are evaluated per row against whichever plan decides the
+/// row. Plans that differ only in a predicate or residual, such as statements
+/// probing one set with different residual constants, share one entry.
 ///
-/// * the plan;
+/// An entry depends on:
+///
+/// * its set;
 /// * the request snapshot or write transaction, and the Active catalog loaded
 ///   with it, which decides whether an index still serves the set;
 /// * the parameters its set reads while resolving, which are only those of
@@ -34,9 +40,11 @@ use super::*;
 /// Entries that fell back to per-row evaluation follow the same rules. They
 /// read no index, so keeping them is always exact.
 ///
-/// Entries hold at most one set per distinct plan in the request. A plan that
-/// is not equal to itself, because a predicate constant is NaN, is never
-/// stored and resolves on every execution instead.
+/// Set equality is reflexive, so every stored set can be found again: a
+/// predicate may hold a NaN constant, but executable set leaves hold only
+/// index values that reject NaN (`ExecIndexedEqualityValue` and range
+/// literals), parameter names, and labels. At most [`Self::MAX_ENTRIES`] sets are
+/// held; storing another evicts the oldest, which only costs a later re-read.
 ///
 /// The cache is per step context. Parallel step contexts start empty, and
 /// never resolve a membership: only serial steps run membership and count
@@ -46,16 +54,22 @@ use super::*;
 /// short streams, so a `ForEach` whose set reads a frame parameter reads one
 /// label-sized set per frame, and a write that creates, deletes, or relabels a
 /// node of the set's label, or changes a property the set reads, forces the
-/// next statement to read the whole set again.
+/// next statement to read the whole set again. Lookups scan at most
+/// [`Self::MAX_ENTRIES`] sets.
 #[derive(Debug, Default)]
 pub(in crate::execution::interpreter) struct PreparedMemberships(
-    Vec<(
-        exec::ExecNodeIndexMembershipPlan,
-        Arc<PreparedIndexMembership>,
-    )>,
+    Vec<(exec::ExecNodeMembershipSet, Arc<PreparedIndexMembership>)>,
 );
 
 impl PreparedMemberships {
+    /// Sets one request holds at once.
+    ///
+    /// Each entry holds up to two label-sized bitmaps (the set and, under the
+    /// `Evaluate` policy, the label domain), so this bounds a request's cache
+    /// memory and lookup scan. Requests rarely execute more distinct sets than
+    /// this; ones that do re-read the evicted sets they execute again.
+    pub(in crate::execution::interpreter) const MAX_ENTRIES: usize = 64;
+
     /// Forget every resolved set before the state they were read from changes.
     pub(in crate::execution::interpreter) fn clear(&mut self) {
         self.0.clear();
@@ -63,21 +77,25 @@ impl PreparedMemberships {
 
     pub(super) fn get(
         &self,
-        plan: &exec::ExecNodeIndexMembershipPlan,
+        set: &exec::ExecNodeMembershipSet,
     ) -> Option<Arc<PreparedIndexMembership>> {
         self.0
             .iter()
-            .find(|(cached, _)| cached == plan)
+            .find(|(cached, _)| cached == set)
             .map(|(_, prepared)| Arc::clone(prepared))
     }
 
-    /// Store the set resolved for `plan`, which has no entry yet.
+    /// Store the membership resolved for `set`, which has no entry yet,
+    /// evicting the oldest entry when the cache is full.
     pub(super) fn insert(
         &mut self,
-        plan: &exec::ExecNodeIndexMembershipPlan,
+        set: &exec::ExecNodeMembershipSet,
         prepared: Arc<PreparedIndexMembership>,
     ) {
-        self.0.push((plan.clone(), prepared));
+        if self.0.len() == Self::MAX_ENTRIES {
+            self.0.remove(0);
+        }
+        self.0.push((set.clone(), prepared));
     }
 
     /// Forget every set that reads a parameter `rebound` names.
@@ -88,7 +106,7 @@ impl PreparedMemberships {
         &mut self,
         rebound: impl Fn(&ir::NonEmptyString) -> bool,
     ) {
-        self.0.retain(|(plan, _)| match &plan.set {
+        self.0.retain(|(set, _)| match set {
             exec::ExecNodeMembershipSet::Index { set, .. } => !reads_param(set, &rebound),
             exec::ExecNodeMembershipSet::Labels(_) => true,
         });
@@ -106,7 +124,7 @@ impl PreparedMemberships {
         &mut self,
         writes: &mutation::NodeIndexWrites,
     ) {
-        self.0.retain(|(plan, _)| match &plan.set {
+        self.0.retain(|(set, _)| match set {
             exec::ExecNodeMembershipSet::Labels(labels) => !labels.iter().any(|label| {
                 matches!(
                     writes.label(label.as_ref()),
@@ -117,17 +135,15 @@ impl PreparedMemberships {
                 match writes.label(label.as_ref()) {
                     None => true,
                     Some(mutation::LabelWrites::Nodes) => false,
-                    Some(mutation::LabelWrites::Properties(changed)) => point_index_properties(set)
-                        .is_some_and(|read| {
-                            read.iter()
-                                .all(|property| !changed.contains(property.as_ref()))
-                        }),
+                    Some(mutation::LabelWrites::Properties(changed)) => {
+                        !reads_property(set, &|property| changed.contains(property.as_ref()))
+                    }
                 }
             }
         });
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(in crate::execution::interpreter) fn len(&self) -> usize {
         self.0.len()
     }
@@ -161,17 +177,20 @@ fn reads_param(
     }
 }
 
-/// Label properties whose point indexes resolving `set` reads.
+/// Whether resolving `set` may read the index of a label property `changed`
+/// names.
 ///
 /// Every leaf of a membership set is scoped to the set's label, and a unique
-/// lookup verifies only its owner's value of the same property. `None` marks
-/// shapes validated membership plans never carry: empty sets, and sets with a
-/// range, scan, or bitmap program. They are classified conservatively, so any
-/// write to the label forgets them; ranges and scans resolve per row, so that
-/// costs at most a re-check.
-fn point_index_properties(
+/// lookup verifies only its owner's value of the same property, so a point
+/// leaf reads exactly its key's property. Shapes validated membership plans
+/// never carry (empty sets, and sets with a range, scan, or bitmap program)
+/// are classified conservatively as reading every property, so any write to
+/// the label forgets them; ranges and scans resolve per row, so that costs at
+/// most a re-check.
+fn reads_property(
     set: &exec::ExecNodeSecondarySetPlan,
-) -> Option<Vec<&ir::NonEmptyString>> {
+    changed: &impl Fn(&ir::NonEmptyString) -> bool,
+) -> bool {
     match set {
         exec::ExecNodeSecondarySetPlan::Bitmap(
             exec::ExecNodeBitmapExpr::PointRead { key, .. }
@@ -183,16 +202,12 @@ fn point_index_properties(
             ..
         }
         | exec::ExecNodeSecondarySetPlan::DynamicEquality { key, .. }
-        | exec::ExecNodeSecondarySetPlan::DynamicMembership { key, .. } => {
-            Some(vec![&key.property])
-        }
+        | exec::ExecNodeSecondarySetPlan::DynamicMembership { key, .. } => changed(&key.property),
         exec::ExecNodeSecondarySetPlan::Intersect { driver, rest }
         | exec::ExecNodeSecondarySetPlan::Union { driver, rest } => {
             core::iter::once(driver.as_ref())
                 .chain(rest.iter())
-                .map(point_index_properties)
-                .collect::<Option<Vec<_>>>()
-                .map(|properties| properties.concat())
+                .any(|child| reads_property(child, changed))
         }
         exec::ExecNodeSecondarySetPlan::Empty
         | exec::ExecNodeSecondarySetPlan::Bitmap(
@@ -200,7 +215,7 @@ fn point_index_properties(
         )
         | exec::ExecNodeSecondarySetPlan::AuthoritativeScan(_)
         | exec::ExecNodeSecondarySetPlan::Range(_)
-        | exec::ExecNodeSecondarySetPlan::OrderedIntersect { .. } => None,
+        | exec::ExecNodeSecondarySetPlan::OrderedIntersect { .. } => true,
     }
 }
 
@@ -377,7 +392,7 @@ mod tests {
     fn cache(plans: &[exec::ExecNodeIndexMembershipPlan]) -> PreparedMemberships {
         let mut cache = PreparedMemberships::default();
         for plan in plans {
-            cache.insert(plan, Arc::new(PreparedIndexMembership::PerRow));
+            cache.insert(&plan.set, Arc::new(PreparedIndexMembership::PerRow));
         }
         cache
     }
@@ -386,7 +401,72 @@ mod tests {
         cache: &PreparedMemberships,
         plans: &[exec::ExecNodeIndexMembershipPlan],
     ) -> Vec<bool> {
-        plans.iter().map(|plan| cache.get(plan).is_some()).collect()
+        plans
+            .iter()
+            .map(|plan| cache.get(&plan.set).is_some())
+            .collect()
+    }
+
+    /// Plans with one set share its entry whatever their predicate and
+    /// residual.
+    #[test]
+    fn entries_are_keyed_by_set_alone() {
+        let plan = index_plan(point("kind"));
+        let probed = exec::ExecNodeIndexMembershipPlan {
+            predicate: ir::PredicatePlan::new(Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::eq("uid", "u1"),
+            ]))
+            .unwrap(),
+            residual: Some(ir::PredicatePlan::new(Predicate::eq("uid", "u1")).unwrap()),
+            ..plan.clone()
+        };
+        let cache = cache(std::slice::from_ref(&plan));
+        assert_eq!(
+            cached(&cache, &[probed, index_plan(point("status"))]),
+            [true, false]
+        );
+    }
+
+    /// The cache holds at most `MAX_ENTRIES` sets, evicting the oldest.
+    #[test]
+    fn a_full_cache_evicts_its_oldest_set() {
+        let plans = (0..=PreparedMemberships::MAX_ENTRIES)
+            .map(|value| {
+                index_plan(literals(
+                    "kind",
+                    catalog::IndexUniqueness::NonUnique,
+                    &[&format!("v{value}")],
+                ))
+            })
+            .collect::<Vec<_>>();
+        let cache = cache(&plans);
+        assert_eq!(cache.len(), PreparedMemberships::MAX_ENTRIES);
+        assert_eq!(
+            cached(&cache, &plans),
+            core::iter::once(false)
+                .chain(core::iter::repeat_n(true, PreparedMemberships::MAX_ENTRIES))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Set leaves cannot hold NaN, so a set with a NaN literal still equals
+    /// itself and every stored set can be found again.
+    #[test]
+    fn sets_equal_themselves_even_for_nan_literals() {
+        let nan = || {
+            ir::SecondaryIndexLiteral::new(helix_ast::value::PropertyValue::F64(f64::NAN)).unwrap()
+        };
+        assert!(exec::ExecIndexedEqualityValue::try_from(nan()).is_err());
+        let set = index_plan(exec::ExecNodeSecondarySetPlan::exact_equalities(
+            index("kind"),
+            key("kind"),
+            ir::AtLeast::from_one(ir::IndexValue::Literal(nan())),
+        ))
+        .set;
+        assert_eq!(set, set.clone());
+        let cache = cache(&[index_plan(point("kind"))]);
+        assert!(cache.get(&index_plan(point("kind")).set).is_some());
     }
 
     #[test]
@@ -443,43 +523,42 @@ mod tests {
     }
 
     #[test]
-    fn point_index_properties_list_point_leaves_only() {
-        let props = |set: &exec::ExecNodeSecondarySetPlan| {
-            point_index_properties(set).map(|properties| {
-                properties
-                    .into_iter()
-                    .map(|property| property.to_string())
-                    .collect::<Vec<_>>()
-            })
+    fn only_point_leaves_of_unchanged_properties_are_unread() {
+        let changed = |names: &'static [&'static str]| {
+            move |property: &ir::NonEmptyString| names.contains(&property.as_ref())
         };
-        for (set, expected) in [
-            (point("kind"), vec!["kind"]),
+        for (set, read) in [
+            (point("kind"), &["kind"][..]),
             (
                 literals("kind", catalog::IndexUniqueness::NonUnique, &["A", "B"]),
-                vec!["kind"],
+                &["kind"],
             ),
-            (unique("uid"), vec!["uid"]),
-            (unique_union("uid"), vec!["uid"]),
-            (dynamic("kind", "kind"), vec!["kind"]),
-            (domain("status", "kinds"), vec!["status"]),
+            (unique("uid"), &["uid"]),
+            (unique_union("uid"), &["uid"]),
+            (dynamic("kind", "kind"), &["kind"]),
+            (domain("status", "kinds"), &["status"]),
             (
                 union(
                     point("kind"),
                     intersect(unique("uid"), domain("status", "s")),
                 ),
-                vec!["kind", "uid", "status"],
+                &["kind", "uid", "status"],
             ),
         ] {
-            assert_eq!(
-                props(&set),
-                Some(expected.iter().map(|p| p.to_string()).collect())
-            );
+            assert!(!reads_property(&set, &changed(&["title"])), "{set:?}");
+            for property in read {
+                let property = name(property);
+                assert!(
+                    reads_property(&set, &|changed| *changed == property),
+                    "{set:?} {property:?}"
+                );
+            }
         }
         for set in non_point_sets()
             .into_iter()
             .chain([union(point("kind"), exec::ExecNodeSecondarySetPlan::Empty)])
         {
-            assert_eq!(props(&set), None, "{set:?}");
+            assert!(reads_property(&set, &changed(&["title"])), "{set:?}");
         }
     }
 
