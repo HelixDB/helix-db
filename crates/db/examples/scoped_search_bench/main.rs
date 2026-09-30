@@ -9,8 +9,11 @@
 //! - `BENCH_S3_BUCKET=bucket` (+ `BENCH_S3_REGION`): embedded, S3 object store.
 //!
 //! Modes: `load` (graph + indexes; `BENCH_VECTOR=before|after|skip`), `index`
-//! (build the vector index by backfill), `query` (default), and the batch-write
-//! benchmark's `batch-load` and `batch-run` (see [`batch`]).
+//! (build the vector index by backfill), `index-product` (an equality index on
+//! `Item.owner`, so product-scoped probes start from an index), `probe`
+//! (mixed-template probes against a server, see `probe.rs`), `query`
+//! (default), and the batch-write benchmark's `batch-load` and `batch-run`
+//! (see [`batch`]).
 //!
 //! `BENCH_INDEX_TIMEOUT_SECS` (default 14,400) bounds each wait for index
 //! builds; a reference-scale backfill needs a long deadline.
@@ -22,6 +25,7 @@
 
 mod batch;
 mod fixture;
+mod probe;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -86,22 +90,36 @@ fn bench_config() -> DbConfig {
 
 /// Default config; `BENCH_CACHE_DIR` switches to cloud-like hybrid caches on
 /// local disk, `BENCH_BLOCK_CACHE_MB` shrinks the in-memory block cache.
+///
+/// `BENCH_CACHE_DISK_MB` splits one disk budget across the tiers as the server
+/// splits `HELIX_DISK_CACHE_BYTES`: half to the object-store tier (in parts of
+/// at most 4 MiB), 3/8 to the block cache and the rest to full-text splits.
 fn cache_config() -> DbConfig {
     if let Ok(dir) = std::env::var("BENCH_CACHE_DIR") {
         let dir = std::path::PathBuf::from(dir);
+        let (object_store_bytes, part_bytes, slate_bytes, fts_bytes) =
+            match env_or("BENCH_CACHE_DISK_MB", 0usize) * 1024 * 1024 {
+                0 => (64 << 30, 4 << 20, 32 << 30, 8 << 30),
+                disk => (
+                    disk / 2,
+                    (1usize << (disk / 2 / 256).ilog2()).min(4 << 20),
+                    disk / 8 * 3,
+                    disk - disk / 2 - disk / 8 * 3,
+                ),
+            };
         return DbConfig::new().with_cache(db::config::CacheConfig::new(
             db::config::VectorMemorySettings::default(),
             db::config::CacheMode::Hybrid {
                 slate_db: db::config::SlateHybridCacheConfig::try_new(
                     env_or("BENCH_BLOCK_CACHE_MB", 512usize) * 1024 * 1024,
                     dir.join("slate"),
-                    32 * 1024 * 1024 * 1024,
+                    slate_bytes,
                 )
                 .unwrap(),
                 object_store: db::config::SlateObjectStoreCacheSettings::try_new(
                     dir.join("object-store"),
-                    Some(64 * 1024 * 1024 * 1024),
-                    4 * 1024 * 1024,
+                    Some(object_store_bytes),
+                    part_bytes,
                     true,
                     db::config::ObjectStoreWarmLevel::Off,
                     None,
@@ -113,7 +131,7 @@ fn cache_config() -> DbConfig {
                     db::config::FtsHybridCacheConfig::try_new(
                         256 * 1024 * 1024,
                         dir.join("fts"),
-                        8 * 1024 * 1024 * 1024,
+                        fts_bytes,
                         db::config::FtsWarmConfig::Off,
                         60,
                     )
@@ -227,10 +245,11 @@ async fn run_queries(label: &str, backend: &Backend) {
             ),
         };
         println!(
-            "{name:<36} first={:>8.1}ms p50={:>8.1}ms p95={:>8.1}ms gets_p50={:>6.0}{recall_text}",
+            "{name:<36} first={:>8.1}ms p50={:>8.1}ms p95={:>8.1}ms first_gets={:>5.0} gets_p50={:>6.0}{recall_text}",
             latencies[0],
             percentile(warm, 50),
             percentile(warm, 95),
+            gets[0],
             percentile(&gets, 50),
         );
     }
@@ -254,6 +273,10 @@ async fn main() {
             }
             "batch-load" => batch::load(&backend, &batch::Options::from_env()).await,
             "batch-run" => batch::run(&backend, &batch::Options::from_env()).await,
+            "index-product" => {
+                fixture::create_indexes(&backend, &["item_owner"], 0, index_deadline()).await
+            }
+            "probe" => probe::run(&backend).await,
             _ => run_queries("server", &backend).await,
         }
         return;
