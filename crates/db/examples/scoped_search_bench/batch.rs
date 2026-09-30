@@ -17,6 +17,11 @@
 //!   change the set, and some frames probe the item they just created.
 //! - `c`: one statement pair per item, without `ForEach`: an update of the
 //!   unindexed `touched` property of an `Item`, then the filter and link.
+//!   Each statement probes its own residual parameter, but every filter
+//!   decides the same `kind` and `status` set, and the update reads no index
+//!   the set does, so a server that keeps sets across writes reads it once
+//!   per request, and one that forgets them on every write reads it once per
+//!   statement.
 //!
 //! Modes (`BENCH_HTTP_URL` or an embedded backend, see `main.rs`):
 //! - `batch-load`: indexes, groups, then items in `ForEach` chunks
