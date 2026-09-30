@@ -33,8 +33,12 @@ impl optimizer::OptimizerRule for AccessFilterSimplificationRule {
     }
 }
 
-/// Explore full, partial, and label-domain index alternatives for access
-/// filters.
+/// Explore label-domain and index alternatives for access filters.
+///
+/// Property-index rewrites are required via `AccessSourceIndexFilterRule`,
+/// which produces the same index alternatives even after the exploration
+/// budget; the memo keeps one copy. Only the label-domain alternatives are
+/// optional.
 pub struct AccessFilterIndexRule {
     metadata: RuleMetadata,
 }
