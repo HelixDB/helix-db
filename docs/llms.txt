@@ -61,6 +61,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Vector indexes](https://docs.helix-db.com/database/helix-db/query-guides/vector-indexes): Create vector indexes and run nearest-neighbor search — Page type: Guide
 - [Text indexes](https://docs.helix-db.com/database/helix-db/query-guides/text-indexes): Create BM25 indexes and run ranked full-text search — Page type: Guide
 - [Prefiltered search](https://docs.helix-db.com/database/helix-db/query-guides/prefiltering): Rank only the nodes or edges a traversal reaches with vector or BM25 search — Page type: Guide
+- [Search consistency](https://docs.helix-db.com/database/helix-db/query-guides/search-consistency): Choose whether vector and text searches include unpublished index work, and handle index backpressure — Page type: Guide
 - [HelixDB HTTP API and OpenAPI specification](https://docs.helix-db.com/database/helix-db/query-guides/http-api): Call the HelixDB v2 query endpoint and discover its machine-readable OpenAPI 3.1 contract — Page type: Reference
 - [Query error reference](https://docs.helix-db.com/database/helix-db/query-guides/error-handling): Branch on stable error codes, apply retry rules, and look up every HelixDB query error — Page type: Reference
 - [Troubleshoot HelixDB](https://docs.helix-db.com/database/helix-db/query-guides/troubleshooting): Diagnose query, index, vector, embedded, and local runtime failures — Page type: Troubleshooting

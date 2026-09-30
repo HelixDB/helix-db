@@ -180,6 +180,13 @@ To rank only the nodes or edges a traversal reaches, such as documents a user ca
 read, search within the traversal instead of the whole index. See
 [Prefiltered search](/database/helix-db/query-guides/prefiltering#full-text-search-prefiltering).
 
+## Search consistency
+
+By default, searches include committed writes that the index worker has not published
+into the index yet. A read request can opt into `eventual` search, which bounds that
+work per search. See [Search consistency](/database/helix-db/query-guides/search-consistency)
+for both modes, searches in write batches, and `index_backpressure`.
+
 ## Result limits
 
 The server caps the effective result count of a whole-index search at 800.
@@ -188,9 +195,12 @@ Prefiltered searches have their own [limits](/database/helix-db/query-guides/pre
 ## Indexed values
 
 - Store searchable text in a top-level `String` or `StringArray` property.
-- `null` and non-string values are rejected; fix them before retrying a blocked backfill.
+- `null` and non-string values are rejected. Fix, shorten or delete them before retrying a blocked
+  backfill; those writes are accepted while the backfill is blocked.
 - Keep tenant property names and values consistent with the definition.
 - Treat analyzer and term-position behavior as part of the index definition.
+- Keep each document within the [per-document admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission).
+  Writes with longer text fail, and existing longer rows block a backfill with `oversized_entity`.
 
 ## Next steps
 

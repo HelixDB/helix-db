@@ -12,39 +12,39 @@ fundamental architectural boundaries.
 
 ## Active-text mutation admission
 
-The engine bounds foreground mutations that affect full-text indexes. These limits
-apply to Cloud and standalone HelixDB. Exceeding a bound rejects the write transaction
-before commit with HTTP 400 and code `active_text_mutation_limit_exceeded`; it does
-not partially commit graph changes. The diagnostic reports the measured resource,
-observed usage and configured limit.
+The engine checks each text document a write indexes before the write commits. When one
+document's final text exceeds a bound, the write fails with HTTP 400 and code
+`active_text_mutation_limit_exceeded`, and none of its graph changes commit. The
+diagnostic reports the measured resource, the document's usage and its allowance.
 
-The default entity ceiling is **512 distinct text-relevant graph entities per
-collecting/flush epoch**. Repeated changes to the same entity coalesce within an
-epoch. Both nodes and edges can count when a text index observes their changes;
-unrelated entities do not count. Consequently, the number of input IDs alone does
-not establish whether a request fits. Internal text reads can flush an epoch, but
-ordinary bulk deletes accumulate changes until their final text preparation.
+Each document is checked on its own. The index worker later swaps an entity's indexed
+document for its newest one in a single publication, so each document may use at most
+half of that publication's row budget. Only the newest document is analyzed, so it gets
+the whole analysis budget:
 
-Additional active-text defaults remain in force even below 512 entities:
-
-| Resource | Default ceiling |
+| Resource | Default allowance per document |
 | --- | ---: |
-| Retained/input bytes and text analysis | 64 MiB |
-| Output key/value operations | 32,768 |
-| Output key/value bytes | 8 MiB |
-| Individual split payload and retained split payload budget | 64 MiB |
-| Encoded manifest page | 4 MiB |
+| Text analysis (the text, plus about 280 bytes per token and 3 bytes per token byte) | 64 MiB |
+| Output key/value operations (one per unique term, plus 6) | 16,384 |
+| Output key/value bytes (term statistics, marker and manifest rows) | 2 MiB |
+| Input key/value bytes (the text plus the rows it reads) | 28 MiB |
+| Encoded manifest page for the document's tenant partition | 4 MiB |
 
-Admission accounts for complete retained before/after property rows as well as text
-index work. Large properties, multiple indexes, or tenant partitions can therefore
-hit another bound with fewer entities. These are runtime policy limits, not storage
-format maxima; embedded configurations can supply a different validated policy.
+In practice a document holds up to about 16,000 unique terms, or fewer when terms or
+tenant values are long, and about 200,000 short tokens.
 
-Reduce the number or size of mutations before retrying. If the application splits
-one request into several, each new request is a separate atomic transaction. The
-service does not automatically replay the rejected write. There is no time-based
-`Retry-After`: waiting without changing the mutation does not resolve a hard limit.
-See [Error handling](/database/helix-cloud/operate/error-handling) for the response
+Separately, the queued work one write stages for one index is capped at 8 MiB. That
+bounds the combined text of every document the write indexes there; a larger write fails
+with `index_operation_batch_too_large` and should be split.
+
+Index builds apply the same per-document allowances, text analysis included, to existing
+rows. A longer row blocks the build with `oversized_entity`. Shorten or delete the row,
+then retry the build.
+
+These are runtime policy limits, not storage-format maxima; embedded configurations
+can supply a different validated policy. Retrying the same write does not help, and
+there is no time-based `Retry-After`: shorten the document instead. See
+[Error handling](/database/helix-cloud/operate/error-handling) for the response
 contract. HTTP 429 rate limiting below is a separate mechanism.
 
 ## Helix Cloud request rate limits
@@ -147,8 +147,8 @@ bucket was exhausted.
 | Dimension matching       | Vectors must exactly match the configured index dimension                                                                                |
 | Distance metrics         | cosine, euclidean, manhattan                                                                                                             |
 | Search type              | Approximate nearest neighbor (ANN)                                                                                                       |
-| Result count              | Unrestricted vector search caps effective `k` at 800. Traversal-scoped vector search rejects when `min(k, unique candidates)` exceeds 800 or when the candidate stream exceeds 1,000,000 unique entities. |
-| Restricted search        | Final membership is the exact current traversal stream; ranking may still use approximate index structures                              |
+| Result count              | Whole-index vector search caps effective `k` at 800. [Prefiltered](/database/helix-db/query-guides/prefiltering#result-limits) vector search rejects when `min(k, unique candidates)` exceeds 800 or when the candidate stream exceeds 1,000,000 unique entities. |
+| Prefiltered search       | Final membership is the exact current traversal stream; ranking may still use approximate index structures                              |
 
 ## Text indexes
 
@@ -159,7 +159,7 @@ bucket was exhausted.
 | Unsupported values       | `null` and non-string values are rejected                                                                                                                     |
 | Analyzer config          | Preset analyzers: `standard`, `standard_stem_en`, `whitespace_lowercase`                                                                                      |
 | Term positions           | Optional                                                                                                                                                      |
-| Result count              | Effective `k` is capped at 800. Traversal-scoped text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
+| Result count              | Effective `k` is capped at 800. [Prefiltered](/database/helix-db/query-guides/prefiltering#result-limits) text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
 | Tenant partitioning      | Optional. Tenant-partitioned text indexes currently require the partition property name to be `tenant_id`, and tenant-scoped searches require a tenant value. |
 
 ## Secondary indexes
@@ -184,7 +184,8 @@ bucket was exhausted.
 
 | Limit | Value |
 | --- | --- |
-| Activation | Asynchronous and atomic after scan, catch-up, and validation |
+| Activation | Asynchronous and atomic after scan, secondary-index catch-up, and validation |
+| Vector and text publication | Asynchronous. Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work, and one write stages at most 8 MiB for one index; see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure) |
 | Progress | Monotonic entity/byte/operation counters; no percentage or total-work estimate |
 | Controls | Poll all operations; retry blocked operations; abort eligible constructing builds |
 | Memory reporting | Cache and batch budgets do not constitute a hard process-RSS cap |
