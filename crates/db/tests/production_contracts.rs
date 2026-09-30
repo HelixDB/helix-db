@@ -9980,3 +9980,771 @@ fn public_float_distance_kernels_cover_long_vectors_and_invalid_zero_cosine() {
         })
     );
 }
+
+#[test]
+fn public_query_boundary_serves_source_filters_and_counts_from_indexes() {
+    run_high_stack_contract(
+        "public-index-served-source-filters",
+        public_query_boundary_serves_source_filters_and_counts_from_indexes_contract,
+    );
+}
+
+/// Source filters and counts that indexes answer return exactly what per-row
+/// evaluation returns.
+///
+/// Two databases hold the same `Item` nodes and `Link` edges; only one has
+/// the equality, unique and range indexes. Every request, read or write, must
+/// return the same response from both. The shapes cover null and absent
+/// equality alone and inside intersections and unions, runtime equality and
+/// IN parameters (with null, and wider than one index union), range-only
+/// equality, unique lookups and batches, point and runtime IDs intersected
+/// with an index, saved-stream counts, range bounds no index entry can hold,
+/// and null equality read inside a write transaction. Plans with late-bound
+/// parameters, executed directly, add the runtime equality, membership and
+/// ID leaves that bound request parameters are specialized away from.
+async fn public_query_boundary_serves_source_filters_and_counts_from_indexes_contract() {
+    const ITEMS: i64 = 40;
+    // Every seventh element has no `kind`, every other fifth an explicit null.
+    let kind = |n: i64| match (n % 7, n % 5) {
+        (0, _) => None,
+        (_, 0) => Some(PropertyValue::Null),
+        _ => Some(PropertyValue::from(["A", "B", "C"][(n % 3) as usize])),
+    };
+    let seed = (0..ITEMS).fold(batch::write_batch(), |write, n| {
+        let mut item = vec![
+            ("uid", PropertyInput::from(format!("i{n}"))),
+            ("tier", PropertyInput::from(n % 4)),
+            ("rank", PropertyInput::from(n)),
+            (
+                "note",
+                PropertyInput::from(if n % 3 == 0 { "needle" } else { "hay" }),
+            ),
+        ];
+        item.extend(kind(n).map(|kind| ("kind", PropertyInput::from(kind))));
+        write.var_as(&format!("i{n}"), traversal::g().add_n("Item", item))
+    });
+    let seed = (0..ITEMS).fold(seed, |write, n| {
+        let mut link = vec![
+            ("tier", PropertyInput::from(n % 4)),
+            ("weight", PropertyInput::from(n)),
+            (
+                "note",
+                PropertyInput::from(if n % 4 == 0 { "needle" } else { "hay" }),
+            ),
+        ];
+        link.extend(kind(n).map(|kind| ("kind", PropertyInput::from(kind))));
+        write.var_as(
+            &format!("l{n}"),
+            traversal::g().n(NodeRef::var(format!("i{n}"))).add_e(
+                "Link",
+                NodeRef::var(format!("i{}", (n + 1) % ITEMS)),
+                link,
+            ),
+        )
+    });
+    let mut databases = Vec::new();
+    for (name, indexed) in [
+        ("production-index-served-sources-indexed", true),
+        ("production-index-served-sources-unindexed", false),
+    ] {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: name.to_owned(),
+        })
+        .await
+        .expect("index-served source fixture opens");
+        let operations = [
+            index::IndexSpec::node_equality("Item", "kind"),
+            index::IndexSpec::node_equality("Item", "tier"),
+            index::IndexSpec::node_unique_equality("Item", "uid"),
+            index::IndexSpec::node_range("Item", "rank"),
+            index::IndexSpec::edge_equality("Link", "kind"),
+            index::IndexSpec::edge_equality("Link", "tier"),
+            index::IndexSpec::edge_range("Link", "weight"),
+        ]
+        .map(|spec| traversal::g().create_index_if_not_exists(spec))
+        .into_iter()
+        .chain([
+            traversal::g().create_text_index_nodes("Item", "note", None::<String>),
+            traversal::g().create_text_index_edges("Link", "note", None::<String>),
+        ]);
+        for operation in operations.filter(|_| indexed) {
+            let receipt = db
+                .query(QueryRequest::write(
+                    batch::write_batch()
+                        .var_as("operation", operation)
+                        .returning(["operation"]),
+                ))
+                .await
+                .unwrap();
+            let operation_id = receipt["operation"]["operation_id"]
+                .as_str()
+                .expect("accepted source-filter index operation has an ID");
+            await_index_operation_success(&db, operation_id, "source-filter index").await;
+        }
+        db.query(QueryRequest::write(
+            seed.clone().returning(Vec::<String>::new()),
+        ))
+        .await
+        .expect("index-served source fixture seeds");
+        databases.push(db);
+    }
+
+    // IDs are read back per database, so point-ID shapes name the same rows
+    // in both.
+    let mut id_maps = Vec::new();
+    for db in &databases {
+        let ids = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "items",
+                        traversal::g()
+                            .n_with_label("Item")
+                            .values(vec!["$id", "rank"]),
+                    )
+                    .var_as(
+                        "links",
+                        traversal::g()
+                            .e_with_label("Link")
+                            .values(vec!["$id", "weight"]),
+                    )
+                    .returning(["items", "links"]),
+            ))
+            .await
+            .unwrap();
+        let by_ordinal = |rows: &serde_json::Value, ordinal: &str| {
+            rows.as_array()
+                .expect("ID rows are an array")
+                .iter()
+                .map(|row| {
+                    (
+                        row[ordinal].as_i64().expect("ordinal is an integer"),
+                        row["$id"].as_u64().expect("ID is an integer"),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        id_maps.push((
+            by_ordinal(&ids["items"], "rank"),
+            by_ordinal(&ids["links"], "weight"),
+        ));
+    }
+
+    let items = |predicate: Predicate| traversal::g().n_with_label_where("Item", predicate);
+    let links = |predicate: Predicate| traversal::g().e_with_label_where("Link", predicate);
+    let read = |result: traversal::Traversal<traversal::Terminal>| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as("result", result)
+                .returning(["result"]),
+        )
+    };
+    let wide_tiers = QueryValue::Array((0..100).map(QueryValue::I64).collect());
+    let kind_or_null = QueryValue::Array(vec![QueryValue::String("A".into()), QueryValue::Null]);
+    let requests = |(nodes, edges): &(BTreeMap<i64, u64>, BTreeMap<i64, u64>)| {
+        // A point ID no element holds proves nothing on its own.
+        let missing = nodes.values().chain(edges.values()).max().unwrap() + 1_000;
+        let points = |ids: &BTreeMap<i64, u64>| {
+            [1, 2, 3, 6, 9, 10]
+                .map(|ordinal| ids[&ordinal])
+                .into_iter()
+                .chain([missing])
+                .collect::<Vec<_>>()
+        };
+        let (node_ids, edge_ids) = (points(nodes), points(edges));
+        let id_values = |ids: &[u64]| {
+            QueryValue::Array(ids.iter().map(|id| QueryValue::I64(*id as i64)).collect())
+        };
+        vec![
+            // Null equality alone, inside intersections and unions, as rows
+            // and as counts.
+            read(items(Predicate::eq("kind", PropertyValue::Null)).count()),
+            read(links(Predicate::eq("kind", PropertyValue::Null)).count()),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            ),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 3),
+                ]))
+                .values(vec!["weight"]),
+            ),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("uid", "i4"),
+                    Predicate::eq("kind", PropertyValue::Null),
+                ]))
+                .count(),
+            ),
+            // Runtime equality and IN parameters, with null and wider than
+            // one index union.
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyInput::param("kind")),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kind", QueryValue::String("B".into())),
+            read(items(Predicate::eq("kind", PropertyInput::param("kind"))).count())
+                .with_parameter_value("kind", QueryValue::Null),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyInput::param("kind")),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kind", QueryValue::String("C".into())),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kinds", kind_or_null.clone()),
+            read(items(Predicate::is_in_param("kind", "kinds")).values(vec!["uid"]))
+                .with_parameter_value("kinds", kind_or_null.clone()),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kinds", kind_or_null.clone()),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "B"),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("tiers", wide_tiers.clone()),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "A"),
+                ]))
+                .values(vec!["weight"]),
+            )
+            .with_parameter_value("tiers", wide_tiers.clone()),
+            // Range-only equality, unique lookups and batches, and unions of
+            // sets read in different ways.
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("rank", 5),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+            ),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("weight", 6),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("uid", "i3"),
+                    Predicate::eq("kind", "A"),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in(
+                        "uid",
+                        vec!["i1".to_owned(), "i2".to_owned(), "i5".to_owned()],
+                    ),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+            ),
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("kind", PropertyInput::param("kind")),
+                    Predicate::eq("rank", 7),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kind", QueryValue::String("C".into())),
+            // Point and runtime IDs intersected with an index.
+            read(
+                traversal::g()
+                    .n(node_ids.clone())
+                    .where_(Predicate::eq("tier", 1))
+                    .count(),
+            ),
+            read(
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(Predicate::eq("kind", "B"))
+                    .count(),
+            )
+            .with_parameter_value("ids", id_values(&node_ids)),
+            read(
+                traversal::g()
+                    .e(edge_ids.clone())
+                    .where_(Predicate::eq("tier", 2))
+                    .count(),
+            ),
+            read(
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(Predicate::eq("kind", "C"))
+                    .count(),
+            )
+            .with_parameter_value("ids", id_values(&edge_ids)),
+            // Point IDs united with index sets.
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("$id", node_ids[0] as i64),
+                    Predicate::eq("$id", missing as i64),
+                    Predicate::eq("kind", PropertyValue::Null),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("$id", node_ids[1] as i64),
+                    Predicate::eq("rank", 30),
+                    Predicate::eq("uid", "i31"),
+                ]))
+                .count(),
+            ),
+            read(
+                links(Predicate::or(vec![
+                    Predicate::eq("$id", edge_ids[1] as i64),
+                    Predicate::eq("weight", 30),
+                    Predicate::eq("tier", 3),
+                ]))
+                .count(),
+            ),
+            // Saved-stream counts.
+            read(items(Predicate::eq("kind", "B")).as_("saved").count()),
+            read(
+                traversal::g()
+                    .e_with_label("Link")
+                    .where_(Predicate::eq("tier", 3))
+                    .store("saved")
+                    .count(),
+            ),
+            // Range bounds no index entry can hold match nothing.
+            read(items(Predicate::between("rank", 9, 3)).count()),
+            read(items(Predicate::gt("rank", f64::NAN)).count()),
+            read(links(Predicate::lt("weight", "heavy")).count()),
+            // Null equality read inside a write transaction.
+            QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "added",
+                        traversal::g().add_n(
+                            "Item",
+                            vec![
+                                ("uid", PropertyInput::from("added")),
+                                ("tier", PropertyInput::from(1_i64)),
+                                ("kind", PropertyInput::from(PropertyValue::Null)),
+                            ],
+                        ),
+                    )
+                    .var_as(
+                        "result",
+                        items(Predicate::and(vec![
+                            Predicate::eq("kind", PropertyValue::Null),
+                            Predicate::eq("tier", 1),
+                        ]))
+                        .values(vec!["uid"]),
+                    )
+                    .returning(["result"]),
+            ),
+        ]
+    };
+    let [indexed, unindexed] = [&id_maps[0], &id_maps[1]].map(requests);
+    for (request, (indexed, unindexed)) in indexed.into_iter().zip(unindexed).enumerate() {
+        let sorted = |mut response: serde_json::Value| {
+            let Some(rows) = response["result"].as_array_mut() else {
+                return response;
+            };
+            rows.sort_by_key(|row| row.to_string());
+            response
+        };
+        let expected = sorted(databases[1].query(unindexed).await.unwrap());
+        let actual = sorted(databases[0].query(indexed).await.unwrap());
+        assert_eq!(actual, expected, "request {request}");
+    }
+
+    // Bound parameters are specialized into literals before planning, so
+    // late-bound ones reach the runtime equality, membership and ID leaves.
+    // Each database plans with its own catalog.
+    let param = |name: &str| ir::NonEmptyString::new(name).expect("parameter name is non-empty");
+    let late_bound = ["kind", "kinds", "tiers", "ids"]
+        .map(param)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let bind = |bindings: &[(&str, PropertyValue)]| {
+        bindings.iter().fold(
+            context::ParamBindings::default(),
+            |params, (name, value)| params.with_value(param(name), value.clone()),
+        )
+    };
+    let kind_or_null = PropertyValue::Array(vec![PropertyValue::from("A"), PropertyValue::Null]);
+    let wide_tiers = PropertyValue::I64Array((0..100).collect());
+    let late_reads = |(nodes, edges): &(BTreeMap<i64, u64>, BTreeMap<i64, u64>)| {
+        let points = |ids: &BTreeMap<i64, u64>| {
+            PropertyValue::I64Array(
+                [1, 2, 3, 6, 9, 10]
+                    .map(|ordinal| ids[&ordinal] as i64)
+                    .into(),
+            )
+        };
+        vec![
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("B"))]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+                bind(&[("kind", PropertyValue::from("A"))]),
+            ),
+            (
+                items(Predicate::eq_param("kind", "kind")).count(),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("C"))]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 3),
+                ]))
+                .values(vec!["weight"]),
+                bind(&[("kind", PropertyValue::from("B"))]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                items(Predicate::is_in_param("kind", "kinds")).values(vec!["uid"]),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                links(Predicate::is_in_param("kind", "kinds")).values(vec!["weight"]),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "B"),
+                ]))
+                .count(),
+                bind(&[("tiers", wide_tiers.clone())]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "A"),
+                ]))
+                .count(),
+                bind(&[("tiers", wide_tiers.clone())]),
+            ),
+            (
+                items(Predicate::or(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("rank", 7),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("C"))]),
+            ),
+            (
+                links(Predicate::or(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("weight", 7),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("A"))]),
+            ),
+            (
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(Predicate::eq("tier", 1))
+                    .count(),
+                bind(&[("ids", points(nodes))]),
+            ),
+            (
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(Predicate::eq("kind", "C"))
+                    .count(),
+                bind(&[("ids", points(edges))]),
+            ),
+        ]
+    };
+    let [indexed, unindexed] = [&id_maps[0], &id_maps[1]].map(late_reads);
+    for (request, ((indexed, indexed_params), (unindexed, unindexed_params))) in
+        indexed.into_iter().zip(unindexed).enumerate()
+    {
+        let mut results = Vec::new();
+        for (db, read, params) in [
+            (&databases[0], indexed, indexed_params),
+            (&databases[1], unindexed, unindexed_params),
+        ] {
+            let read = batch::read_batch()
+                .var_as("result", read)
+                .returning(["result"]);
+            let plan = planning::plan_read_batch(
+                &read,
+                &context::PlannerContext {
+                    late_bound_params: late_bound.clone(),
+                    ..db.planner_context(context::ParamBindings::default())
+                },
+            )
+            .unwrap_or_else(|error| panic!("late-bound request {request} plans: {error}"));
+            let result = db
+                .execute(&plan, params)
+                .await
+                .unwrap_or_else(|error| panic!("late-bound request {request} executes: {error}"))
+                .last;
+            // Index reads and scans may yield rows in different orders.
+            let Some(ExecutionValue::Scalars(mut rows)) = result else {
+                results.push(format!("{result:?}"));
+                continue;
+            };
+            rows.sort_by_key(|row| format!("{row:?}"));
+            results.push(format!("{rows:?}"));
+        }
+        assert_eq!(results[0], results[1], "late-bound request {request}");
+    }
+
+    // Count sets may also hold point IDs, runtime IDs, whole labels and text
+    // searches, which no planned shape above places there, so hand-built
+    // plans add them. Their index and search children come from planned
+    // counts.
+    let (nodes, edges) = &id_maps[0];
+    let indexed_context = databases[0].planner_context(context::ParamBindings::default());
+    let planned_count = |read: traversal::Traversal<traversal::Terminal>| {
+        let plan = planning::plan_read_batch(
+            &batch::read_batch()
+                .var_as("result", read)
+                .returning(["result"]),
+            &indexed_context,
+        )
+        .expect("index count plans");
+        plan.steps()
+            .iter()
+            .find_map(|step| {
+                let exec::ExecOp::Count { plan } = &step.op else {
+                    return None;
+                };
+                Some(plan.as_ref().clone())
+            })
+            .expect("count request plans a count step")
+    };
+    let exec::ExecCountPlan::NodeBitmap(node_tier) =
+        planned_count(items(Predicate::eq("tier", 1)).count())
+    else {
+        panic!("a node equality count reads its bitmap");
+    };
+    let exec::ExecCountPlan::EdgeBitmap(edge_tier) =
+        planned_count(links(Predicate::eq("tier", 3)).count())
+    else {
+        panic!("an edge equality count reads its bitmap");
+    };
+    let exec::ExecCountPlan::NodeTextSearch(node_needles) = planned_count(
+        traversal::g()
+            .text_search_nodes("Item", "note", "needle", 100, None)
+            .count(),
+    ) else {
+        panic!("a node text-search count reads its search");
+    };
+    let exec::ExecCountPlan::EdgeTextSearch(edge_needles) = planned_count(
+        traversal::g()
+            .text_search_edges("Link", "note", "needle", 100, None)
+            .count(),
+    ) else {
+        panic!("an edge text-search count reads its search");
+    };
+    let missing = nodes.values().chain(edges.values()).max().unwrap() + 1_000;
+    let points = |ids: &BTreeMap<i64, u64>| {
+        [1, 2, 3, 6, 9, 10]
+            .map(|ordinal| ids[&ordinal])
+            .into_iter()
+            .chain([missing])
+            .collect::<Vec<_>>()
+    };
+    let element_ids = |ids: Vec<u64>| {
+        ir::ElementIds::new(ir::AtLeast::try_from_vec(ids).expect("point IDs are non-empty"))
+            .expect("point IDs are distinct")
+    };
+    let label = |label: &str| ir::NonEmptyString::new(label).expect("label is non-empty");
+    let runtime_ids = || exec::ExecRuntimeInputPlan::Param(param("ids"));
+    let id_params = |ids: Vec<u64>| {
+        bind(&[(
+            "ids",
+            PropertyValue::I64Array(ids.into_iter().map(|id| id as i64).collect()),
+        )])
+    };
+    for (cursor, params, expected) in [
+        // Items 1 and 9 of the points have tier 1; the missing ID drops.
+        (
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::NodePointReads(element_ids(
+                    points(nodes),
+                ))),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeBitmap(
+                    node_tier.bitmap.clone(),
+                )),
+            },
+            context::ParamBindings::default(),
+            2,
+        ),
+        // Ten links have tier 3; five more points are not among them.
+        (
+            exec::ExecCountCursorPlan::Union {
+                driver: Box::new(exec::ExecCountCursorPlan::EdgeBitmap(
+                    edge_tier.bitmap.clone(),
+                )),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::EdgePointReads(
+                    element_ids(points(edges)),
+                )),
+            },
+            context::ParamBindings::default(),
+            15,
+        ),
+        (
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::NodeLabelBitmap(label("Item"))),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeRuntimeInput(
+                    runtime_ids(),
+                )),
+            },
+            id_params(points(nodes)),
+            6,
+        ),
+        (
+            exec::ExecCountCursorPlan::Union {
+                driver: Box::new(exec::ExecCountCursorPlan::EdgeRuntimeInput(runtime_ids())),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::EdgeLabelBitmap(label(
+                    "Link",
+                ))),
+            },
+            id_params(points(edges)),
+            40,
+        ),
+        // Items 9, 21 and 33 hold the needle and have tier 1.
+        (
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::NodeTextSearch {
+                    key: node_needles.key,
+                    index: node_needles.index,
+                    query_text: node_needles.query_text,
+                    k: node_needles.k,
+                }),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeBitmap(
+                    node_tier.bitmap.clone(),
+                )),
+            },
+            context::ParamBindings::default(),
+            3,
+        ),
+        // Every fourth link holds the needle and ten others have tier 3.
+        (
+            exec::ExecCountCursorPlan::Union {
+                driver: Box::new(exec::ExecCountCursorPlan::EdgeTextSearch {
+                    key: edge_needles.key,
+                    index: edge_needles.index,
+                    query_text: edge_needles.query_text,
+                    k: edge_needles.k,
+                }),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::EdgeBitmap(
+                    edge_tier.bitmap.clone(),
+                )),
+            },
+            context::ParamBindings::default(),
+            20,
+        ),
+    ] {
+        let root = exec::ExecStepId::first();
+        let plan = exec::ExecutablePlan::new(
+            ir::PlanKind::Read,
+            ir::ReturnPlan::None,
+            ir::AtLeast::<_, 1>::from_one(exec::ExecStep {
+                id: root,
+                dependencies: Vec::new(),
+                output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
+                condition: exec::ExecCondition::Always,
+                op: exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                        cursor: cursor.clone(),
+                        window: exec::ExecCountWindowPlan::identity(),
+                    })),
+                },
+                schedule: exec::ExecSchedule::Pipeline,
+                delivered: properties::DeliveredProperties::default(),
+                cost: cost::CostVector::ZERO,
+            }),
+            root,
+            trace::PlanningTrace::default(),
+            exec::PlannerMetrics::default(),
+        )
+        .expect("hand-built count plan validates");
+        let counted = databases[0]
+            .execute(&plan, params)
+            .await
+            .unwrap_or_else(|error| panic!("{cursor:?} counts: {error}"))
+            .last;
+        assert_eq!(counted, Some(ExecutionValue::Count(expected)), "{cursor:?}");
+    }
+    for db in databases {
+        db.close().await.unwrap();
+    }
+}
