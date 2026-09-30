@@ -79,7 +79,8 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::InvalidIndexSourceData { .. }
             | HelixDbError::SecondaryIndexValue(_)
             | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode
-            | HelixDbError::MigrationSteppingRequiresDisabledMode => Self::InvalidRequest {
+            | HelixDbError::MigrationSteppingRequiresDisabledMode
+            | HelixDbError::IndexOperationBatchTooLarge { .. } => Self::InvalidRequest {
                 error: error_code,
                 msg,
             },
@@ -91,7 +92,8 @@ impl From<HelixDbError> for HelixError {
             }
             HelixDbError::TransactionConflict(_)
             | HelixDbError::RequestReadViewChanged
-            | HelixDbError::StaleIndexGeneration { .. } => Self::Transaction {
+            | HelixDbError::StaleIndexGeneration { .. }
+            | HelixDbError::IndexBackpressure { .. } => Self::Transaction {
                 error: error_code,
                 msg,
             },
@@ -197,6 +199,16 @@ mod tests {
         assert!(matches!(
             HelixError::from(HelixDbError::RequestReadViewChanged),
             HelixError::Transaction { .. }
+        ));
+        assert!(matches!(
+            HelixError::from(HelixDbError::IndexBackpressure {
+                scope: db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                index_id: 7,
+                resource: db::error::IndexBackpressureResource::PendingMembers,
+                requested: 2,
+                limit: 1,
+            }),
+            HelixError::Transaction { error, .. } if error == "index_backpressure"
         ));
     }
 

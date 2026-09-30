@@ -660,6 +660,54 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
             code: "transaction_conflict",
         },
         Case {
+            class: QueryFailureClass::Backpressure,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    resource: db::error::IndexBackpressureResource::PendingMembers,
+                    requested: 250_001,
+                    limit: 250_000,
+                })
+            },
+            http_status: StatusCode::TOO_MANY_REQUESTS,
+            retryable: Some(true),
+            grpc_code: tonic::Code::ResourceExhausted,
+            code: "index_backpressure",
+        },
+        // A strong search, in a read request too, is rejected the same way.
+        Case {
+            class: QueryFailureClass::Backpressure,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    resource: db::error::IndexBackpressureResource::SuppressedSearchResults,
+                    requested: 810,
+                    limit: 800,
+                })
+            },
+            http_status: StatusCode::TOO_MANY_REQUESTS,
+            retryable: Some(true),
+            grpc_code: tonic::Code::ResourceExhausted,
+            code: "index_backpressure",
+        },
+        Case {
+            class: QueryFailureClass::InvalidRequest,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexOperationBatchTooLarge {
+                    index_id: 4,
+                    resource: db::error::IndexOperationBatchResource::OperandBytes,
+                    observed: 9 * 1024 * 1024,
+                    limit: 8 * 1024 * 1024,
+                })
+            },
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "index_operation_batch_too_large",
+        },
+        Case {
             class: QueryFailureClass::InvalidRequest,
             error: || QueryServiceError::InvalidRequest("bad request".to_string()),
             http_status: StatusCode::BAD_REQUEST,

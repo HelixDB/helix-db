@@ -804,6 +804,8 @@ struct HelixDBInner {
     index_worker: Mutex<Option<index_lifecycle::worker::IndexWorkerSupervisor>>,
     migration_worker: Mutex<Option<migrations::background::MigrationWorkerSupervisor>>,
     index_claim_sequences: Arc<index_lifecycle::worker::ClaimSequenceAllocator>,
+    index_operation_backlog: Arc<index_lifecycle::queue::backlog::IndexOperationBacklog>,
+    index_queue_store: Arc<index_lifecycle::queue::storage::QueueStore>,
     secondary_lifecycle_step: Mutex<()>,
     #[cfg(feature = "index-lifecycle-testing")]
     lifecycle_test_scheduling: IndexLifecycleScheduling,
@@ -1108,7 +1110,11 @@ impl HelixDB {
             fts_cache,
             index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
-        let finish_result = migrations::startup::finish_writer(&db).await;
+        let finish_result: Result<()> = async {
+            migrations::startup::finish_writer(&db).await?;
+            db.load_index_operation_backlog().await
+        }
+        .await;
         db.close_on_open_error(finish_result).await?;
         db.start_background_migration_worker().await;
         Ok(db)
@@ -1310,6 +1316,9 @@ impl HelixDB {
             db.run_configured_vector_memory_warm(vector_memory_settings, allow_blocking_warm)
                 .await?;
             log_stage("vector_memory_warm", stage_started);
+            let stage_started = Instant::now();
+            db.load_index_operation_backlog().await?;
+            log_stage("index_operation_backlog_load", stage_started);
             Ok(())
         }
         .await;
@@ -1384,6 +1393,11 @@ impl HelixDB {
             .await?;
         let compatibility =
             index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        index_lifecycle::queue::recovery::require_layout(
+            &reader,
+            config.index_operation_queue().layout(),
+        )
+        .await?;
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1427,6 +1441,14 @@ impl HelixDB {
         let reader = builder.build().await?;
         let compatibility =
             index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        // Product builds cannot select another queue layout, so only builds
+        // that can pay this per-tenant-scope probe.
+        #[cfg(any(test, feature = "async-index-benchmark"))]
+        index_lifecycle::queue::recovery::require_layout(
+            &reader,
+            config.index_operation_queue().layout(),
+        )
+        .await?;
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1568,6 +1590,24 @@ impl HelixDB {
         let lifecycle_metrics = Arc::new(index_lifecycle_testing::AutomaticLifecycleMetrics::new());
         let index_claim_sequences =
             Arc::new(index_lifecycle::worker::ClaimSequenceAllocator::new());
+        let queue_tuning = config.db().index_operation_queue();
+        let index_operation_backlog = index_lifecycle::queue::backlog::IndexOperationBacklog::new(
+            index_lifecycle::queue::backlog::BacklogLimits {
+                max_retained_bytes: queue_tuning.max_retained_bytes().get(),
+                max_members: queue_tuning.max_members().get(),
+            },
+        );
+        let index_queue_store = Arc::new(index_lifecycle::queue::storage::QueueStore::new(
+            queue_tuning.layout(),
+            queue_tuning.effective_operand_bytes(
+                config
+                    .db()
+                    .slate()
+                    .to_writer_settings(None)
+                    .wal_replay
+                    .max_inflight_bytes,
+            ),
+        ));
         let index_worker = match storage.handle() {
             HelixStorage::Writer(writer) => {
                 Some(index_lifecycle::worker::IndexWorkerSupervisor::start(
@@ -1605,6 +1645,8 @@ impl HelixDB {
                 index_worker: Mutex::new(index_worker),
                 migration_worker: Mutex::new(None),
                 index_claim_sequences,
+                index_operation_backlog,
+                index_queue_store,
                 secondary_lifecycle_step: Mutex::new(()),
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_test_scheduling: index_scheduling,
@@ -3081,6 +3123,31 @@ impl HelixDB {
         scope: DataScope,
     ) -> index_lifecycle::IndexScopeCatalogPermit {
         self.inner.index_scope_gates.catalog_permit(scope).await
+    }
+
+    /// Rebuilds retained-operation accounting from durable queues.
+    ///
+    /// Writers run this before returning from open so the first graph write is
+    /// admitted against exact durable usage.
+    async fn load_index_operation_backlog(&self) -> Result<()> {
+        let HelixStorage::Writer(writer) = self.storage() else {
+            return Ok(());
+        };
+        let summary = index_lifecycle::queue::recovery::load_backlog(
+            writer.db(),
+            &self.inner.index_queue_store,
+            &self.inner.index_operation_backlog,
+        )
+        .await?;
+        tracing::info!(
+            queues = summary.queues,
+            operations = summary.operations,
+            "HelixDB index operation backlog loaded"
+        );
+        if summary.operations > 0 {
+            self.notify_index_worker();
+        }
+        Ok(())
     }
 
     /// Wakes the parent-owned lifecycle worker after migration enqueues work.

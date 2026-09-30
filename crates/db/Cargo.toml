@@ -73,6 +73,8 @@ future-vector-codecs = []
 production-coverage = ["slatedb/wal_disable"]
 production-scale = ["production-coverage", "dep:memmap2"]
 fuzzing = []
+# Benchmark images only.
+async-index-benchmark = []
 force-vector-scalar-kernel = []
 
 [lints]

@@ -169,6 +169,7 @@ pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
     let code = match error.classify() {
         QueryFailureClass::CommitOutcomeUnknown => tonic::Code::Unavailable,
         QueryFailureClass::Conflict => tonic::Code::Aborted,
+        QueryFailureClass::Backpressure => tonic::Code::ResourceExhausted,
         QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => {
             tonic::Code::InvalidArgument
         }
