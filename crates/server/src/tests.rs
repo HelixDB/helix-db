@@ -835,6 +835,69 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
     rustix::process::setrlimit(rustix::process::Resource::Nofile, original_limit).unwrap();
 }
 
+#[cfg(feature = "async-index-benchmark")]
+#[tokio::test]
+async fn a_benchmark_writer_holds_its_hybrid_cache_directory_like_the_server() {
+    const MIB: usize = 1024 * 1024;
+    #[cfg(unix)]
+    let _limit = OPEN_FILE_LIMIT.lock().await;
+    #[cfg(unix)]
+    let original_limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    let directory = tempfile::tempdir().unwrap();
+    let data_root = directory.path().join("data");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let cache_root = directory.path().join("cache");
+    let config = ServerConfig {
+        http_addr: "127.0.0.1:0".parse().unwrap(),
+        grpc_addr: "127.0.0.1:0".parse().unwrap(),
+        db_path: "benchmark-cache-lock".to_string(),
+        storage: StorageConfig::Disk {
+            root: data_root,
+            cache: CacheConfig::Hybrid(Box::new(
+                HybridCache::try_new(
+                    &cache_root,
+                    NonZeroUsize::new(16 * MIB).unwrap(),
+                    NonZeroUsize::new(128 * MIB).unwrap(),
+                )
+                .unwrap(),
+            )),
+        },
+    };
+    let benchmark = crate::benchmark::open_database(
+        crate::benchmark::Role::Writer,
+        db::config::QueueLayout::Map,
+        &config,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !files_below(&cache_root.join("slate")).is_empty(),
+        "the benchmark writer opens storage through the configured disk cache"
+    );
+    let Err(error) = open_database(&config).await else {
+        panic!("a server opened a cache directory the benchmark writer holds");
+    };
+    assert!(
+        matches!(
+            error.downcast_ref::<ServerConfigError>(),
+            Some(ServerConfigError::CacheDirectoryInUse { path }) if *path == cache_root
+        ),
+        "{error:?}"
+    );
+
+    benchmark.db.close().await.unwrap();
+    drop(benchmark);
+    open_database(&config)
+        .await
+        .unwrap()
+        .db
+        .close()
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, original_limit).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn open_file_limit_rises_to_the_hard_limit_or_fails_below_the_minimum() {

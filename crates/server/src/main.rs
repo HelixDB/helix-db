@@ -4,7 +4,11 @@ use std::process::ExitCode;
 /// beneath it rather than its debug form.
 #[tokio::main]
 async fn main() -> ExitCode {
-    let Err(error) = server::run_from_env().await else {
+    #[cfg(feature = "async-index-benchmark")]
+    let result = server::benchmark::run_from_env().await;
+    #[cfg(not(feature = "async-index-benchmark"))]
+    let result = server::run_from_env().await;
+    let Err(error) = result else {
         return ExitCode::SUCCESS;
     };
     eprintln!("{}", server::error_report(&*error));

@@ -6,6 +6,9 @@
 extern crate self as db;
 
 mod batch_reads;
+#[cfg(feature = "async-index-benchmark")]
+#[doc(hidden)]
+pub mod benchmark;
 pub mod config;
 pub mod encoding;
 pub mod error;
@@ -397,6 +400,8 @@ impl HelixDbSource {
                 if let Some(endpoint) = endpoint {
                     builder = builder.with_endpoint(endpoint);
                 }
+                #[cfg(feature = "async-index-benchmark")]
+                let builder = builder.with_http_connector(benchmark::io::Connector::default());
                 Ok((database, Arc::new(builder.build()?)))
             }
         }
@@ -1190,6 +1195,10 @@ impl HelixDB {
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }
+        #[cfg(feature = "async-index-benchmark")]
+        {
+            builder = builder.with_metrics_recorder(benchmark::storage_recorder());
+        }
 
         match config.cache().mode() {
             CacheMode::VectorMemoryOnly => builder = builder.with_db_cache_disabled(),
@@ -1352,6 +1361,41 @@ impl HelixDB {
         Ok(db.with_embedded_query_metrics().await)
     }
 
+    /// Opens a read-only handle for a transport server that owns its metrics
+    /// recorder.
+    ///
+    /// Unlike [`Self::open_reader_with_config`], no embedded query-metrics
+    /// recorder is attached, so the server's queries are not also reported
+    /// under the embedded source; `config` selects the server's cache tiers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DbConfig, HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
+    ///
+    /// let token = ProcessLocalDatabaseToken::new("server-reader-open").unwrap();
+    /// let source = || HelixDbSource::InMemoryToken {
+    ///     token: token.clone(),
+    /// };
+    /// HelixDB::open_for_server(source(), DbConfig::new())
+    ///     .await
+    ///     .unwrap()
+    ///     .close()
+    ///     .await
+    ///     .unwrap();
+    /// let reader = HelixDB::open_reader_for_server(source(), DbConfig::new())
+    ///     .await
+    ///     .unwrap();
+    /// reader.close().await.unwrap();
+    /// # });
+    /// ```
+    #[doc(hidden)]
+    pub async fn open_reader_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
+        let (path, object_store) = source.into_parts()?;
+        Self::open_reader_inner(path, object_store, config).await
+    }
+
     /// Opens a read-only handle over a caller-provided object store.
     pub async fn open_reader_with_object_store(
         database: impl Into<String>,
@@ -1441,6 +1485,10 @@ impl HelixDB {
                 };
                 builder = builder.with_db_cache(Arc::clone(cache));
             }
+        }
+        #[cfg(feature = "async-index-benchmark")]
+        {
+            builder = builder.with_metrics_recorder(benchmark::storage_recorder());
         }
         let reader = builder.build().await?;
         let compatibility =
