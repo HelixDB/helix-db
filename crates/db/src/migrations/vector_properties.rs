@@ -164,7 +164,7 @@ async fn materialize_batch(
     };
     debug_assert_eq!(stage, job.state.running_stage().unwrap_or(stage));
     let bounds = scan_bounds_for_prefix(&prefix, resume_after_key.as_ref());
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadBefore)?;
     let mut rows = transaction.scan(bounds).await?;
     let mut processed_rows = 0_u64;
@@ -272,10 +272,10 @@ async fn materialize_batch(
             break;
         }
         if changed {
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
             transaction.put(property_key, encoded)?;
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         }
         admitted_bytes = next_admitted_bytes;
@@ -283,7 +283,7 @@ async fn materialize_batch(
         committed_cursor = MigrationResumeKey::new(row.key.to_vec());
     }
 
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadAfter)?;
     let Some(resume_after_key) = committed_cursor else {
         return Ok(MigrationBatch::StageComplete);

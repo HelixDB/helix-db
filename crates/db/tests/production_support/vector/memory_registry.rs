@@ -428,6 +428,8 @@ pub(crate) async fn run() {
     run_retention_contracts().await;
     run_commit_fence_contracts().await;
     run_commit_outcome_contracts().await;
+    // A registry that never saw the identity's scope has nothing to forget.
+    assert!(!VectorCacheRegistry::default().forget_validated_closed(&validated(1)));
     let first = VectorCacheIdentity::from_validated(&validated(1));
     let same = VectorCacheIdentity::from_validated(&validated(1));
     let successor = VectorCacheIdentity::from_validated(&validated(2));

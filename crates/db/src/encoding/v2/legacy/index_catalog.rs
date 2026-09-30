@@ -197,7 +197,7 @@ pub(crate) fn catalog_scan_prefix(scope: DataScope) -> Bytes {
     data_metadata_key(scope, DYNAMIC_INDEX_PREFIX)
 }
 
-#[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) fn catalog_storage_key(scope: DataScope, encoded_identity: &[u8]) -> Bytes {
     let mut name = Vec::with_capacity(DYNAMIC_INDEX_PREFIX.len() + encoded_identity.len());
     name.extend_from_slice(DYNAMIC_INDEX_PREFIX);
@@ -205,7 +205,7 @@ pub(crate) fn catalog_storage_key(scope: DataScope, encoded_identity: &[u8]) -> 
     data_metadata_key(scope, &name)
 }
 
-#[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) fn encode_row_for_contract(
     scope: DataScope,
     identity: &LegacyDynamicIndexKey,

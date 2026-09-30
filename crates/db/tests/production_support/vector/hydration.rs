@@ -1083,10 +1083,261 @@ async fn run_idle_refresh_contracts() {
     db.close().await.unwrap();
 }
 
+/// How the gated object store treats reads of compacted SSTs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SstReads {
+    Open,
+    Held,
+}
+
+/// In-memory object store that can hold reads of compacted SSTs, so a
+/// reader load stays in flight while the reader replays newer WAL.
+#[derive(Debug)]
+struct GatedSstStore {
+    inner: InMemory,
+    reads: watch::Sender<SstReads>,
+    /// Counts compacted SST reads that found the gate held.
+    held_reads: watch::Sender<usize>,
+}
+
+impl std::fmt::Display for GatedSstStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("gated-sst-memory")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for GatedSstStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> ObjectStoreResult<PutResult> {
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
+        if location.as_ref().contains("/compacted/") {
+            let mut reads = self.reads.subscribe();
+            if *reads.borrow_and_update() == SstReads::Held {
+                self.held_reads.send_modify(|held| *held += 1);
+            }
+            reads
+                .wait_for(|reads| *reads == SstReads::Open)
+                .await
+                .expect("the gate outlives its store");
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, ObjectStoreResult<Path>>,
+    ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> ObjectStoreResult<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// Proves a reader drops only the load it outruns: while one target's load
+/// waits on a held compacted-SST read, the reader replays newer WAL, so that
+/// load publishes nothing and the next target loads from a fresh snapshot.
+async fn run_reader_outrun_contracts() {
+    let path = "vector-cache-reader-outrun";
+    let gate = Arc::new(GatedSstStore {
+        inner: InMemory::new(),
+        reads: watch::Sender::new(SstReads::Open),
+        held_reads: watch::Sender::new(0),
+    });
+    let object_store: Arc<dyn ObjectStore> = Arc::clone(&gate) as Arc<dyn ObjectStore>;
+    let db = Db::builder(path, Arc::clone(&object_store))
+        .build()
+        .await
+        .unwrap();
+    let scope = DataScope::LegacyUnscoped;
+    let (outrun, outrun_handle) = active_vector(scope, 7, 71, false);
+    let (fresh, fresh_handle) = active_vector(scope, 8, 81, false);
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    transaction
+        .put(
+            upper_vector_key(scope, 71, 1),
+            Bytes::from_static(b"outrun"),
+        )
+        .unwrap();
+    transaction
+        .put(upper_vector_key(scope, 81, 1), Bytes::from_static(b"fresh"))
+        .unwrap();
+    transaction.commit().await.unwrap();
+    // Both rows live only in a compacted SST, so each load reads through the gate.
+    db.flush_with_options(slatedb::config::FlushOptions {
+        flush_type: slatedb::config::FlushType::MemTable,
+    })
+    .await
+    .unwrap();
+    let reader = slatedb::DbReader::open(
+        path,
+        object_store,
+        None,
+        slatedb::config::DbReaderOptions {
+            manifest_poll_interval: std::time::Duration::from_millis(10),
+            wal_poll_interval: std::time::Duration::from_millis(10),
+            ..slatedb::config::DbReaderOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let hydrated_seq = reader.snapshot().await.unwrap().seq();
+    let registry = VectorCacheRegistry::default();
+
+    gate.reads.send_replace(SstReads::Held);
+    let hydrate = hydrate_active_generations(
+        VectorCacheSnapshotSource::Reader(&reader),
+        scope,
+        vec![fresh, outrun],
+        &registry,
+        VectorCacheHydrationBudget::Unbounded,
+        None,
+    );
+    let advance = async {
+        // The first target in canonical order is loading and waits on the gate.
+        gate.held_reads
+            .subscribe()
+            .wait_for(|held| *held > 0)
+            .await
+            .unwrap();
+        db.put(b"unrelated-graph-row", Bytes::from_static(b"row"))
+            .await
+            .unwrap();
+        reader
+            .subscribe()
+            .wait_for(|status| status.durable_seq > hydrated_seq)
+            .await
+            .unwrap();
+        gate.reads.send_replace(SstReads::Open);
+    };
+    let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(hydrate, advance)
+    })
+    .await
+    .expect("the pass finishes once the gate opens");
+
+    assert_eq!(outcome.unwrap(), VectorCacheHydrationOutcome::Outrun);
+    assert!(
+        matches!(
+            registry.resident_guard_for(&outrun_handle),
+            Err(
+                crate::search::vector::cache::registry::VectorCacheReadGuardError::Unavailable(
+                    crate::search::vector::cache::registry::VectorCacheLifecycle::Vacant
+                )
+            )
+        ),
+        "the outrun load publishes nothing and leaves its entry for the next pass"
+    );
+    let fresh_guard = registry.resident_guard_for(&fresh_handle).unwrap();
+    assert!(
+        fresh_guard.store().visible_seq() > hydrated_seq,
+        "the next target loads from a fresh snapshot the reader has not moved past"
+    );
+    assert_eq!(
+        fresh_guard.store().visible_seq(),
+        reader.snapshot().await.unwrap().seq()
+    );
+    assert_eq!(
+        fresh_guard.store().get_upper_vector(1).as_deref(),
+        Some(b"fresh".as_slice())
+    );
+    drop(fresh_guard);
+    reader.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Drives every exit and outcome of the reader refresh loop with scripted
+/// passes, so no assertion depends on timing.
+async fn run_reader_refresh_contracts() {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    const INTERVAL: Duration = Duration::from_secs(3600);
+
+    // Shutdown requested before the loop starts: no pass runs.
+    let (_status_tx, status) = watch::channel(0_u64);
+    let (_shutdown_tx, shutdown) = watch::channel(true);
+    let (initial_tx, initial) = watch::channel(false);
+    let passes = AtomicUsize::new(0);
+    crate::search::vector::run_reader_refreshes(
+        status,
+        |sequence: &u64| *sequence,
+        INTERVAL,
+        shutdown,
+        initial_tx,
+        || {
+            passes.fetch_add(1, Ordering::Relaxed);
+            async { Some(VectorCacheHydrationOutcome::Settled) }
+        },
+    )
+    .await;
+    assert_eq!(passes.load(Ordering::Relaxed), 0);
+    assert!(!*initial.borrow());
+
+    // The first pass is outrun, so the next one is due at once. Meanwhile a
+    // shutdown change that keeps `false` is ignored, and the closed status
+    // channel never makes a pass due. The second pass finds the database gone.
+    let (status_tx, status) = watch::channel(0_u64);
+    let (shutdown_tx, shutdown) = watch::channel(false);
+    let (initial_tx, initial) = watch::channel(false);
+    let mut status_tx = Some(status_tx);
+    let passes = AtomicUsize::new(0);
+    crate::search::vector::run_reader_refreshes(
+        status,
+        |sequence: &u64| *sequence,
+        INTERVAL,
+        shutdown,
+        initial_tx,
+        || {
+            let pass = passes.fetch_add(1, Ordering::Relaxed);
+            if pass == 0 {
+                shutdown_tx.send_replace(false);
+                drop(status_tx.take());
+            }
+            async move { (pass == 0).then_some(VectorCacheHydrationOutcome::Outrun) }
+        },
+    )
+    .await;
+    assert_eq!(passes.load(Ordering::Relaxed), 2);
+    assert!(*initial.borrow());
+}
+
 pub(crate) async fn run() {
     run_idle_refresh_contracts().await;
     run_empty_contracts().await;
     run_refresh_and_budget_contracts().await;
     run_partition_contracts().await;
     run_shutdown_and_corruption_contracts().await;
+    run_reader_outrun_contracts().await;
+    run_reader_refresh_contracts().await;
 }

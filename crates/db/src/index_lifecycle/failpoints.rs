@@ -54,7 +54,6 @@ impl IndexOutboxFailpoint {
     /// Complete set used by crash-matrix tests and external harnesses.
     #[cfg(any(
         test,
-        feature = "migration-parity",
         feature = "production-coverage",
         feature = "index-lifecycle-testing"
     ))]

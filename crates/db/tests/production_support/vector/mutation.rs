@@ -1228,6 +1228,22 @@ async fn run_build_session_limit_contract<D: Distance>() {
     dirty_session.enforce_limits(&measured).unwrap();
     assert_eq!(dirty_session.neighbor_count(), 1);
     assert_eq!(dirty_session.stats().dirty_neighbor_flushes(), 1);
+
+    // A retained session holds only clean rows, so shrinking it evicts
+    // without a transaction.
+    let retained_identity = session_identity(DataScope::LegacyUnscoped, 43);
+    let mut retained =
+        VectorBuildSession::<D>::with_test_limits(NonZeroU64::new(1 << 20).unwrap(), 8, 8, 8);
+    let mut retained_cache = retained.take_cache(&retained_identity, 8, 4).unwrap();
+    retained_cache.install_loaded_neighbor(
+        MutationOpCache::<D>::node_row_id(0, 20),
+        NeighborRowValue::KnownAbsent,
+    );
+    retained.restore_cache(retained_identity, retained_cache);
+    assert_eq!(retained.neighbor_count(), 1);
+    retained.shrink_to(0).unwrap();
+    assert_eq!(retained.neighbor_count(), 0);
+    assert_eq!(retained.stats().dirty_neighbor_flushes(), 0);
 }
 
 async fn run_build_session_flush_recovery_contract<D: Distance>() {

@@ -8,7 +8,7 @@ pub(crate) mod metadata {
     pub(crate) use crate::encoding::v2::keys::metadata::*;
     #[deprecated(note = "use encoding::v2::legacy::index_catalog::catalog_scan_prefix")]
     pub(crate) use crate::encoding::v2::legacy::index_catalog::catalog_scan_prefix as dynamic_index_prefix_scoped;
-    #[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(any(test, feature = "production-coverage"))]
     #[deprecated(note = "use encoding::v2::legacy::index_catalog::catalog_storage_key")]
     pub(crate) use crate::encoding::v2::legacy::index_catalog::catalog_storage_key as dynamic_index_storage_key_scoped;
     #[deprecated(note = "use encoding::v2::legacy::text::storage_keys")]

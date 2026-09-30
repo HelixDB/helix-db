@@ -2097,6 +2097,54 @@ async fn run_read_fault_contracts() {
 }
 
 /// Exercises scoped keys, typed row codecs, opaque tokens, and lane cleanup.
+/// Proves the concurrent batch policy returns the same rows, in caller order,
+/// as one `multi_get` when a batch spans several chunks and waves.
+async fn run_batch_read_contracts() {
+    let db = Db::open("production-vector-batch-reads", Arc::new(InMemory::new()))
+        .await
+        .unwrap();
+    let keyspace = VectorRowKeyspace::new(
+        "production-vector-batch-reads".into(),
+        DataScope::LegacyUnscoped,
+    );
+    let batch_len = CONCURRENT_MULTI_GET_CHUNK_KEYS * CONCURRENT_MULTI_GET_MAX_CHUNKS + 5;
+    let present = |node_id: NodeId| !node_id.is_multiple_of(3);
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    (1..=batch_len as NodeId)
+        .filter(|node_id| present(*node_id))
+        .for_each(|node_id| {
+            transaction
+                .put(
+                    keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+                        keyspace.index_id(),
+                        node_id,
+                    ))),
+                    encode_simhash(node_id),
+                )
+                .unwrap();
+        });
+    transaction.commit().await.unwrap();
+
+    // Descending order is the opposite of physical key order.
+    let node_ids = (1..=batch_len as NodeId).rev().collect::<Vec<_>>();
+    let expected = node_ids
+        .iter()
+        .map(|node_id| match present(*node_id) {
+            true => SimHashRow::Present(SimHash::from_bits(*node_id)),
+            false => SimHashRow::Missing,
+        })
+        .collect::<Vec<_>>();
+    for batch_reads in [VectorBatchReads::Single, VectorBatchReads::Concurrent] {
+        let keyspace = keyspace.clone().with_batch_reads(batch_reads);
+        let rows = VectorRows::new(&db, &keyspace)
+            .simhash_rows(&node_ids)
+            .await
+            .unwrap();
+        assert_eq!(rows, expected, "{batch_reads:?}");
+    }
+    db.close().await.unwrap();
+}
+
 pub(crate) async fn run() {
     run_legacy_validation_codec_contracts();
     run_legacy_migration_read_contracts().await;
@@ -2106,6 +2154,7 @@ pub(crate) async fn run() {
     run_legacy_validation_entry_point_contracts().await;
     run_keyspace_contracts();
     run_row_contracts().await;
+    run_batch_read_contracts().await;
     run_corruption_contracts().await;
     run_read_fault_contracts().await;
 }

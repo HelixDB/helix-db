@@ -13,43 +13,43 @@
   },
   {
     "path": "crates/db/src/search/vector/cache/hydration.rs",
-    "line": 157,
+    "line": 206,
     "reason": "The exact typed generation prefix fixes the V2 kind byte to VectorPartitionMapping; malformed suffixes fail parsing and a successfully parsed row cannot have another kind.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries"
   },
   {
     "path": "crates/db/src/search/vector/cache/hydration.rs",
-    "line": 201,
+    "line": 250,
     "reason": "This error value belongs to the platform-gated usize-to-u64 failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/cache/hydration.rs",
-    "line": 228,
+    "line": 277,
     "reason": "This error value belongs to the platform-gated usize-to-u64 failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/cache/hydration.rs",
-    "line": 245,
+    "line": 294,
     "reason": "The Unavailable branch is exercised, but LLVM does not attribute the tracing macro field expression to the enclosing covered branch.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries"
   },
   {
     "path": "crates/db/src/search/vector/cache/hydration.rs",
-    "line": 287,
+    "line": 364,
     "reason": "This error value belongs to the platform-gated resident-byte overflow that cannot occur in a supported 64-bit address space.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/cache/hydration.rs",
-    "line": 296,
+    "line": 373,
     "reason": "Each bounded loader admits at most its deterministic quotient-plus-remainder share, and those shares sum to no more than the configured budget.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries"
   },
   {
     "path": "crates/db/src/search/vector/cache/hydration.rs",
-    "line": 311,
+    "line": 388,
     "reason": "The immutable Unavailable hydration variant is handled by an earlier match and continues before any storage load, so it cannot reach completion dispatch.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries"
   },
@@ -115,157 +115,157 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 1168,
+    "line": 1177,
     "reason": "This closing edge belongs to an impossible empty-recency result after the absent payload admission loop proved the item cache is non-empty.",
     "evidence": "vector_index_exercises_facade_and_row_safety_contracts"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 495,
+    "line": 540,
     "reason": "Each lane iterator is created from that lane's exact physical prefix, and every successfully parsed key under it carries the same physical index and lane discriminant.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 505,
+    "line": 550,
     "reason": "This error value belongs to the platform-gated input-size overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 508,
+    "line": 553,
     "reason": "This propagation belongs to the platform-gated input-size overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 770,
+    "line": 816,
     "reason": "A live metadata key and value allocation cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 773,
+    "line": 819,
     "reason": "This propagation belongs to the platform-gated metadata-size overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 803,
+    "line": 849,
     "reason": "The measured metadata and SimHash point reads are live allocations whose bounded cumulative size cannot overflow u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 806,
+    "line": 852,
     "reason": "This propagation belongs to the platform-gated cumulative SimHash-read overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 825,
+    "line": 871,
     "reason": "The measured metadata, SimHash, and layer-zero point reads are live allocations whose bounded cumulative size cannot overflow u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 828,
+    "line": 874,
     "reason": "This propagation belongs to the platform-gated cumulative layer-zero-read overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 854,
+    "line": 900,
     "reason": "The measured metadata, SimHash, and vector-payload point reads are live allocations whose bounded cumulative size cannot overflow u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 857,
+    "line": 903,
     "reason": "This propagation belongs to the platform-gated cumulative payload-read overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 901,
+    "line": 947,
     "reason": "Legacy validation accepts a ValidatedVectorIndexDefinition whose nonzero bounded dimension has already crossed the closed V2 definition boundary.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 902,
+    "line": 948,
     "reason": "Legacy validation accepts a ValidatedVectorIndexDefinition whose nonzero bounded dimension has already crossed the closed V2 definition boundary.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 930,
+    "line": 976,
     "reason": "A live key and value allocation cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 936,
+    "line": 982,
     "reason": "The production adoption driver bounds each committed validation step to 8 MiB, so cumulative u64 input bytes cannot overflow.",
     "evidence": "populated_legacy_vector_is_adopted_in_place and vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 952,
+    "line": 998,
     "reason": "The iterator is created from the same keyspace's exact physical prefix, so every returned key necessarily strips that prefix.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 953,
+    "line": 999,
     "reason": "The iterator is created from the same keyspace's exact physical prefix, so every returned key necessarily strips that prefix.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 967,
+    "line": 1013,
     "reason": "The exact lane prefix fixes both the physical index ID and lane discriminant before the row can be returned by the scan.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1743,
+    "line": 1789,
     "reason": "This error value belongs to the platform-gated metadata-size overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1746,
+    "line": 1792,
     "reason": "This propagation belongs to the platform-gated metadata-size overflow that cannot occur for live allocations on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 2027,
+    "line": 2073,
     "reason": "A live SlateDB directory key and value allocation cannot have a combined usize length outside the supported address space.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 2030,
+    "line": 2076,
     "reason": "This propagation belongs to the platform-gated directory row-size overflow that cannot occur for live allocations.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 2032,
+    "line": 2078,
     "reason": "The iterator admits at most max_rows live key/value allocations, so their cumulative decoded usize size cannot overflow the process address space.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 2043,
+    "line": 2089,
     "reason": "The exact SimHashDirectory prefix fixes the parsed vector row-family discriminant before a row can be returned by the scan.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 2165,
+    "line": 2211,
     "reason": "The reverse-edge scan prefix includes the exact target node ID, so a successfully parsed locator under that prefix cannot contain another target.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
@@ -301,199 +301,199 @@
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 526,
+    "line": 571,
     "reason": "The iterator is created from the exact SimHashDirectory prefix, so a successfully parsed row under that prefix cannot carry another vector key kind.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 531,
+    "line": 576,
     "reason": "The exact SimHashDirectory prefix embeds the same physical index ID used to parse every returned marker.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 541,
+    "line": 586,
     "reason": "A live SlateDB directory key and value allocation cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 544,
+    "line": 589,
     "reason": "This propagation belongs to the platform-gated directory cleanup row-size overflow that cannot occur for live allocations.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1005,
+    "line": 1051,
     "reason": "One live typed marker key plus its fixed marker value cannot exceed u64 bytes on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1013,
+    "line": 1059,
     "reason": "A bounded validation page cannot accumulate u64::MAX prior marker operations while retaining its live output tokens.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1019,
+    "line": 1065,
     "reason": "A bounded validation page cannot accumulate more than u64 bytes of live marker keys and fixed marker values.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1171,
+    "line": 1217,
     "reason": "One live directory key and marker value cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1177,
+    "line": 1223,
     "reason": "A bounded directory validation page cannot retain cumulative live input whose size exceeds u64.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1193,
+    "line": 1239,
     "reason": "The directory iterator is constructed from this keyspace's exact DataScope-qualified prefix, so a returned key cannot escape that scope.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1194,
+    "line": 1240,
     "reason": "This return belongs to an impossible scope escape after SlateDB has enforced the exact physical scan prefix.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1202,
+    "line": 1248,
     "reason": "A successfully parsed key under the exact SimHashDirectory discriminant prefix cannot resolve to another vector key kind.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1213,
+    "line": 1259,
     "reason": "The exact directory prefix fixes the physical index ID before the marker can be returned by the scan.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1234,
+    "line": 1280,
     "reason": "A live canonical key plus its optional live value cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1241,
+    "line": 1287,
     "reason": "A bounded directory preflight cannot retain cumulative live marker and canonical proof input whose size exceeds u64.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1262,
+    "line": 1308,
     "reason": "ValidatedVectorIndexDefinition has already rejected zero or unsupported dimensions before this closed storage boundary.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1263,
+    "line": 1309,
     "reason": "This return is dominated by the impossible reconstruction failure for an already validated vector dimension.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1295,
+    "line": 1341,
     "reason": "A live metadata key and optional live metadata value cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1300,
+    "line": 1346,
     "reason": "A bounded final directory proof cannot retain cumulative live marker and metadata input whose size exceeds u64.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1331,
+    "line": 1377,
     "reason": "The enclosing branch explicitly excludes PreflightCanonicalCorrespondence before dispatching the two final metadata codecs.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1369,
+    "line": 1415,
     "reason": "A live entry-point SimHash key and optional live value cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1374,
+    "line": 1420,
     "reason": "A bounded entry-point proof cannot retain cumulative live metadata and SimHash input whose size exceeds u64.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1420,
+    "line": 1466,
     "reason": "A live entry-point marker key and optional live value cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1426,
+    "line": 1472,
     "reason": "A bounded entry-point proof cannot retain cumulative live metadata, SimHash, and marker input whose size exceeds u64.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1498,
+    "line": 1544,
     "reason": "ValidatedVectorIndexDefinition has already rejected zero or unsupported dimensions before canonical-directory backfill.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1499,
+    "line": 1545,
     "reason": "This return is dominated by the impossible reconstruction failure for an already validated vector dimension.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1522,
+    "line": 1568,
     "reason": "The canonical iterator is constructed from this keyspace's exact DataScope-qualified vector prefix, so a returned key cannot escape that scope.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1523,
+    "line": 1569,
     "reason": "This return belongs to an impossible scope escape after SlateDB has enforced the exact physical scan prefix.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1531,
+    "line": 1577,
     "reason": "A successfully parsed key under the exact canonical Vector discriminant prefix cannot resolve to another vector key kind.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1542,
+    "line": 1588,
     "reason": "The exact canonical vector prefix fixes the physical index ID before the row can be returned by the scan.",
     "evidence": "vector_storage_exercises_all_current_row_families"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1574,
+    "line": 1620,
     "reason": "One live canonical row, marker key, and optional marker value cannot have a combined usize length outside u64 on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1579,
+    "line": 1625,
     "reason": "A bounded canonical backfill page cannot retain cumulative live input whose size exceeds u64.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/storage/mod.rs",
-    "line": 1592,
+    "line": 1638,
     "reason": "One live typed marker key plus its fixed marker value cannot exceed u64 bytes on supported 64-bit targets.",
     "evidence": "vector_storage_exercises_all_current_row_families and db-vector-production-coverage architecture matrix"
   },
@@ -577,13 +577,13 @@
   },
   {
     "path": "crates/db/src/search/vector/mod.rs",
-    "line": 910,
+    "line": 912,
     "reason": "After checked round-up addition succeeds, dividing by the nonzero word size and multiplying by that same word size cannot exceed the rounded dividend.",
     "evidence": "vector_primitives_exercise_active_codec_and_runtime_boundaries and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/cache/commit.rs",
-    "line": 53,
+    "line": 68,
     "reason": "This statement re-raises a panic from the detached commit task. The task only awaits the SlateDB commit and resolves its fences, and nothing it runs panics, so joining it yields the commit result or a cancellation, never a panic payload.",
     "evidence": "vector_memory_registry_exercises_every_lifecycle_transition"
   },
@@ -595,8 +595,32 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/restricted.rs",
-    "line": 1163,
+    "line": 1297,
     "reason": "Scoring skips nodes it has already scored, so each node enters the restricted frontier at most once and inserting a popped node into the expanded set always succeeds; this closing edge belongs to the never-taken repeat case.",
     "evidence": "vector_restricted_search_exercises_bounded_graph_and_directory_paths"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 3503,
+    "reason": "Only shrink_to evicts without a transaction, and it runs only on sessions the lifecycle driver retained. The driver retains a session only when it holds no unflushed rows, after flush_all has written every dirty neighbor for the step, so this arm cannot meet a dirty neighbor row.",
+    "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 3599,
+    "reason": "This error value belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
+    "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 3602,
+    "reason": "This closing edge belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
+    "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
+  },
+  {
+    "path": "crates/db/src/search/vector/cache/hydration.rs",
+    "line": 345,
+    "reason": "The reader-outrun branch is exercised, but LLVM does not attribute the tracing macro field expression to the enclosing covered branch.",
+    "evidence": "vector_hydration_exercises_active_generation_boundaries"
   }
 ]

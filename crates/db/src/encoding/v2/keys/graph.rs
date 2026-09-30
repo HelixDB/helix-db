@@ -56,7 +56,7 @@ impl AdjacencyKey {
         Ok(Self::new(read_u64(slice, PREFIX_LEN)?))
     }
 
-    #[cfg(any(test, feature = "migration-parity"))]
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) const fn node_id(&self) -> NodeId {
         self.node_id
     }
@@ -201,12 +201,12 @@ impl EdgePairIndexKey {
         ))
     }
 
-    #[cfg(any(test, feature = "migration-parity"))]
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) const fn from(&self) -> NodeId {
         self.from
     }
 
-    #[cfg(any(test, feature = "migration-parity"))]
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) const fn to(&self) -> NodeId {
         self.to
     }

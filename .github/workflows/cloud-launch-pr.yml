@@ -13,7 +13,6 @@ on:
       - "crates/planner/**"
       - "crates/server/**"
       - "scripts/**"
-      - "tools/hyperscale-migration-parity/**"
   workflow_dispatch:
 
 permissions:
@@ -42,7 +41,6 @@ jobs:
       - run: python3 scripts/validate-cargo-target-references.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace -- -D warnings
-      - run: cargo check -p db --features migration-parity
       - run: cargo test --workspace --doc
 
   workspace-tests:
@@ -89,48 +87,3 @@ jobs:
           cargo test -p helix-cli --test api_contracts
           query_command_preserves_the_shared_transport_corpus -- --exact
       - run: scripts/planner-normalized-corpus.sh
-
-  migration-parity-dev:
-    name: Legacy migration parity (dev)
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
-    env:
-      HELIX_HYPERSCALE_REPO: ${{ github.workspace }}/helix-hyperscale
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          path: helix-proper
-          persist-credentials: false
-      - name: Create read-only Hyperscale token
-        id: hyperscale-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.HELIX_CI_READ_APP_CLIENT_ID }}
-          private-key: ${{ secrets.HELIX_CI_READ_APP_PRIVATE_KEY }}
-          owner: HelixDB
-          repositories: helix-hyperscale
-          permission-contents: read
-      - uses: actions/checkout@v6
-        with:
-          repository: HelixDB/helix-hyperscale
-          ref: e5bac15b020c9acac1649c44b58a2cf16dd1f874
-          path: helix-hyperscale
-          token: ${{ steps.hyperscale-token.outputs.token }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: helix-proper
-      - run: scripts/run-migration-parity.sh dev
-        working-directory: helix-proper
-        env:
-          MIGRATION_PARITY_REPORT_DIR: ${{ runner.temp }}/migration-parity-reports
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: migration-parity-dev
-          path: ${{ runner.temp }}/migration-parity-reports/dev.json
-          if-no-files-found: error

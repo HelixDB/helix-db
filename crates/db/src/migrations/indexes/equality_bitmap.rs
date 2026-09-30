@@ -17,15 +17,15 @@ use crate::encoding::property::decode_properties;
 use crate::encoding::v2::keys::scope::DataScope;
 #[cfg(test)]
 use crate::encoding::v2::keys::scope::TenantId;
-#[cfg(feature = "migration-parity")]
+#[cfg(all(test, feature = "production-coverage"))]
 use crate::encoding::v2::keys::SecondaryEntryKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, GlobalKey, IndexEntity, ManagedIndexKey, RecordKind, ScopedKey,
     SecondaryEntryLane, SecondaryEqualityBitmapKey,
 };
-#[cfg(feature = "migration-parity")]
+#[cfg(all(test, feature = "production-coverage"))]
 use crate::encoding::v2::values::decode_metadata_value;
-#[cfg(feature = "migration-parity")]
+#[cfg(all(test, feature = "production-coverage"))]
 use crate::encoding::v2::values::encode_secondary_entry;
 use crate::encoding::v2::values::{
     decode_index_record, decode_operation_record, encode_metadata_value, encode_operation_record,
@@ -33,7 +33,7 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 
-#[cfg(feature = "migration-parity")]
+#[cfg(all(test, feature = "production-coverage"))]
 use crate::index_lifecycle::IndexElementKind;
 use crate::index_lifecycle::{
     self, IndexOperationExecutionState, IndexOperationProgress, IndexOperationRecord, IndexStateV2,
@@ -204,11 +204,10 @@ pub(crate) async fn cleanup_v3_nonunique_equality_rows(db: &Db) -> Result<()> {
 
 /// Adds legacy non-unique equality rows and publishes an exact V2/V3 fixture.
 ///
-/// This inverse exists only for the migration-parity and Kind acceptance
-/// harnesses. Existing bitmaps remain as a valid partial-migration state so
-/// already-open current readers stay correct. The caller must quiesce every
-/// write before invoking it.
-#[cfg(feature = "migration-parity")]
+/// This inverse exists only for storage-version compatibility tests. Existing
+/// bitmaps remain as a valid partial-migration state so already-open current
+/// readers stay correct. The caller must quiesce every write before invoking it.
+#[cfg(all(test, feature = "production-coverage"))]
 pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Result<()> {
     if !matches!(version, 2 | 3) {
         return Err(HelixDbError::Config(format!(
@@ -262,7 +261,7 @@ pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "migration-parity")]
+#[cfg(all(test, feature = "production-coverage"))]
 async fn copy_bitmap_generation_to_legacy_entries(
     db: &Db,
     generation: &EqualityGeneration,
@@ -1213,7 +1212,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "migration-parity")]
+    #[cfg(feature = "production-coverage")]
     #[tokio::test]
     async fn migration_parity_fixture_adds_v2_and_v3_rows_without_removing_bitmaps() {
         let _guard = TEST_LOCK.lock().await;
