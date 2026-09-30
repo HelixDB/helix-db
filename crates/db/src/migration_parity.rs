@@ -1163,6 +1163,8 @@ async fn scan_v2_state(
             }
             ScopedKey::BuildDelta(_)
             | ScopedKey::AppliedState(_)
+            | ScopedKey::IndexOperationQueue(_)
+            | ScopedKey::IndexOperationRow(_)
             | ScopedKey::SecondaryEntry(_)
             | ScopedKey::SecondaryEqualityBitmap(_)
             | ScopedKey::TextManifestRoot(_)

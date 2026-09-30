@@ -538,7 +538,9 @@ fn scoped_cursor_is_valid(
             | ScopedKey::Operation(_)
             | ScopedKey::SecondaryEntry(_)
             | ScopedKey::VectorPartitionMapping(_)
-            | ScopedKey::SecondaryEqualityBitmap(_) => false,
+            | ScopedKey::SecondaryEqualityBitmap(_)
+            | ScopedKey::IndexOperationQueue(_)
+            | ScopedKey::IndexOperationRow(_) => false,
         },
         (
             ScopedCursorExpectation::AppliedState

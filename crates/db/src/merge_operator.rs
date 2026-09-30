@@ -1,7 +1,11 @@
 //! SlateDB merge operator for Helix-owned keyspaces.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
 use bytes::Bytes;
 use roaring::RoaringTreemap;
+use serde::Serialize;
 use slatedb::{MergeOperator, MergeOperatorError, MergeResult};
 
 use crate::encoding::keys::scope::DataScope;
@@ -10,6 +14,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 };
 use crate::encoding::v2::keys::{DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{ManagedIndexKey as V2Key, ScopedKey as V2ScopedKey};
+use crate::encoding::v2::values::indexes::operation_queue;
 use crate::encoding::v2::values::{adjacency as edges, indexes::vector as vectors};
 use crate::encoding::v2::values::{BitmapMembershipDelta, SecondaryEqualityBitmapValue};
 use crate::encoding::NodeId;
@@ -515,18 +520,247 @@ impl MergeOperator for CounterMergeOperator {
     }
 }
 
+/// Process-wide cost of one kind of operation-queue merge call.
+///
+/// SlateDB never hands a whole merge chain to one call: it folds raw operands
+/// in batches of at most 100 without a base, then resolves only those batch
+/// results against the base. No field measures merge-chain length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct QueueMergeCost {
+    /// Merge invocations that succeeded.
+    pub merges: u64,
+    /// Operands folded across those merges: raw operands for partial folds,
+    /// batch results for resolutions.
+    pub operands: u64,
+    /// Largest operand count folded by one call: at most SlateDB's batch of
+    /// 100 for partial folds, the batch count for resolutions.
+    pub max_operands: u64,
+    /// Encoded bytes read: the base value plus every operand. A resolution's
+    /// operands are partial outputs, so summing both kinds double-counts them.
+    pub input_bytes: u64,
+    /// Encoded bytes produced (zero for an empty-queue tombstone).
+    pub output_bytes: u64,
+    /// Wall-clock nanoseconds spent merging.
+    pub nanos: u64,
+}
+
+/// Process-wide operation-queue merge costs since process start.
+///
+/// Merges run wherever SlateDB folds operands (reads, flushes, and
+/// compaction) in every database handle of the process. Queue writes stage
+/// blind operands and never validate a merge. Counters are cumulative, so a
+/// window is a difference of samples.
+///
+/// ```
+/// let before = db::operation_queue_merge_stats();
+/// let after = db::operation_queue_merge_stats();
+/// assert!(after.partial.merges >= before.partial.merges);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct OperationQueueMergeStats {
+    /// Folds without a known base: every read, flush, and compaction folds
+    /// raw operands this way in batches of at most 100, and flushes and upper
+    /// compactions also fold chains whose base is not yet known.
+    pub partial: QueueMergeCost,
+    /// Resolutions of batch results against a known base (reads, bottom
+    /// compaction).
+    pub resolved: QueueMergeCost,
+}
+
+/// Returns the process-wide operation-queue merge costs.
+pub fn operation_queue_merge_stats() -> OperationQueueMergeStats {
+    QUEUE_MERGES.stats()
+}
+
+struct QueueMergeCounters {
+    merges: AtomicU64,
+    operands: AtomicU64,
+    max_operands: AtomicU64,
+    input_bytes: AtomicU64,
+    output_bytes: AtomicU64,
+    nanos: AtomicU64,
+}
+
+impl QueueMergeCounters {
+    const fn new() -> Self {
+        Self {
+            merges: AtomicU64::new(0),
+            operands: AtomicU64::new(0),
+            max_operands: AtomicU64::new(0),
+            input_bytes: AtomicU64::new(0),
+            output_bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, base: Option<&Bytes>, operands: &[Bytes], output: usize, started: Instant) {
+        let input = base.map_or(0, Bytes::len) + operands.iter().map(Bytes::len).sum::<usize>();
+        self.merges.fetch_add(1, Ordering::Relaxed);
+        self.operands
+            .fetch_add(operands.len() as u64, Ordering::Relaxed);
+        self.max_operands
+            .fetch_max(operands.len() as u64, Ordering::Relaxed);
+        self.input_bytes.fetch_add(input as u64, Ordering::Relaxed);
+        self.output_bytes
+            .fetch_add(output as u64, Ordering::Relaxed);
+        self.nanos.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn load(&self) -> QueueMergeCost {
+        QueueMergeCost {
+            merges: self.merges.load(Ordering::Relaxed),
+            operands: self.operands.load(Ordering::Relaxed),
+            max_operands: self.max_operands.load(Ordering::Relaxed),
+            input_bytes: self.input_bytes.load(Ordering::Relaxed),
+            output_bytes: self.output_bytes.load(Ordering::Relaxed),
+            nanos: self.nanos.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Partial and resolved queue merge counters.
+pub(crate) struct QueueMerges {
+    partial: QueueMergeCounters,
+    resolved: QueueMergeCounters,
+}
+
+impl QueueMerges {
+    pub(crate) const fn new() -> Self {
+        Self {
+            partial: QueueMergeCounters::new(),
+            resolved: QueueMergeCounters::new(),
+        }
+    }
+
+    pub(crate) fn stats(&self) -> OperationQueueMergeStats {
+        OperationQueueMergeStats {
+            partial: self.partial.load(),
+            resolved: self.resolved.load(),
+        }
+    }
+}
+
+/// Process-wide because merge operators are constructed per storage handle
+/// while compaction and reads share the stored queues.
+static QUEUE_MERGES: QueueMerges = QueueMerges::new();
+
+/// Immutable index-operation queue algebra.
+///
+/// Partial merges keep removals and unconditional sets so an unresolved older
+/// base cannot defeat them; resolution against a known base yields the
+/// ordered retained operations or a tombstone for the empty queue.
+struct OperationQueueMergeOperator {
+    /// Cost counters: the process-wide set outside tests.
+    merges: &'static QueueMerges,
+}
+
+impl Default for OperationQueueMergeOperator {
+    fn default() -> Self {
+        Self {
+            merges: &QUEUE_MERGES,
+        }
+    }
+}
+
+impl OperationQueueMergeOperator {
+    fn partial(
+        &self,
+        existing_value: Option<&Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        let started = Instant::now();
+        let merged =
+            operation_queue::merge_partial(existing_value.map(|value| &value[..]), operands)
+                .map_err(merge_decode_error)?;
+        self.merges
+            .partial
+            .record(existing_value, operands, merged.len(), started);
+        Ok(merged)
+    }
+}
+
+impl MergeOperator for OperationQueueMergeOperator {
+    fn merge(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        value: Bytes,
+    ) -> Result<Bytes, MergeOperatorError> {
+        self.partial(existing_value.as_ref(), std::slice::from_ref(&value))
+    }
+
+    fn merge_batch(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        self.partial(existing_value.as_ref(), operands)
+    }
+
+    fn merge_batch_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<MergeResult, MergeOperatorError> {
+        let started = Instant::now();
+        let resolved = match operation_queue::merge_with_base(existing_value.as_deref(), operands)
+            .map_err(merge_decode_error)?
+        {
+            operation_queue::QueueMergeResult::Value(value) => MergeResult::Value(value),
+            operation_queue::QueueMergeResult::Empty => MergeResult::Tombstone,
+        };
+        let output = match &resolved {
+            MergeResult::Value(value) => value.len(),
+            MergeResult::Tombstone => 0,
+        };
+        self.merges
+            .resolved
+            .record(existing_value.as_ref(), operands, output, started);
+        Ok(resolved)
+    }
+
+    /// Validates without counting: queue writes stage blind operands, so only
+    /// a checked merge a caller adds for a queue key reaches this.
+    fn validate_merge_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<(), MergeOperatorError> {
+        operation_queue::merge_with_base(existing_value.as_deref(), operands)
+            .map(|_| ())
+            .map_err(merge_decode_error)
+    }
+}
+
 /// Combined merge operator for durable Helix storage keyspaces.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub(crate) struct HelixMergeOperator {
     edge: EdgeMergeOperator,
     bitmap: BitmapMergeOperator,
     layer0: Layer0NeighborMergeOperator,
     counter: CounterMergeOperator,
+    operation_queue: OperationQueueMergeOperator,
 }
 
 impl HelixMergeOperator {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Counts queue merges into `merges` instead of the process-wide set, so
+    /// a test observes only its own database's merges.
+    #[cfg(test)]
+    pub(crate) fn with_queue_merges(merges: &'static QueueMerges) -> Self {
+        Self {
+            operation_queue: OperationQueueMergeOperator { merges },
+            ..Self::default()
+        }
     }
 
     fn is_hnsw_layer0_key(key: &[u8]) -> bool {
@@ -536,8 +770,16 @@ impl HelixMergeOperator {
     }
 
     fn key_type(key: &[u8]) -> MergeKeyType {
-        if is_v4_secondary_equality_bitmap_key(key) {
-            return MergeKeyType::Bitmap;
+        match V2Key::parse_data_from_slice(key) {
+            Ok(V2Key::Data {
+                kind: V2ScopedKey::SecondaryEqualityBitmap(_),
+                ..
+            }) => return MergeKeyType::Bitmap,
+            Ok(V2Key::Data {
+                kind: V2ScopedKey::IndexOperationQueue(_),
+                ..
+            }) => return MergeKeyType::OperationQueue,
+            Ok(_) | Err(_) => {}
         }
         let logical = logical_key(key);
         if Self::is_hnsw_layer0_key(logical) {
@@ -561,16 +803,6 @@ impl HelixMergeOperator {
     }
 }
 
-fn is_v4_secondary_equality_bitmap_key(key: &[u8]) -> bool {
-    matches!(
-        V2Key::parse_data_from_slice(key),
-        Ok(V2Key::Data {
-            kind: V2ScopedKey::SecondaryEqualityBitmap(_),
-            ..
-        })
-    )
-}
-
 impl MergeOperator for HelixMergeOperator {
     fn merge(
         &self,
@@ -583,6 +815,9 @@ impl MergeOperator for HelixMergeOperator {
             MergeKeyType::Bitmap => self.bitmap.merge(key, existing_value, operand),
             MergeKeyType::Layer0 => self.layer0.merge(key, existing_value, operand),
             MergeKeyType::Counter => self.counter.merge(key, existing_value, operand),
+            MergeKeyType::OperationQueue => {
+                self.operation_queue.merge(key, existing_value, operand)
+            }
             MergeKeyType::Other => Ok(operand),
         }
     }
@@ -598,6 +833,10 @@ impl MergeOperator for HelixMergeOperator {
             MergeKeyType::Bitmap => self.bitmap.merge_batch(key, existing_value, operands),
             MergeKeyType::Layer0 => self.layer0.merge_batch(key, existing_value, operands),
             MergeKeyType::Counter => self.counter.merge_batch(key, existing_value, operands),
+            MergeKeyType::OperationQueue => {
+                self.operation_queue
+                    .merge_batch(key, existing_value, operands)
+            }
             MergeKeyType::Other => operands
                 .first()
                 .cloned()
@@ -628,6 +867,10 @@ impl MergeOperator for HelixMergeOperator {
                 .counter
                 .merge_batch(key, existing_value, operands)
                 .map(MergeResult::Value),
+            MergeKeyType::OperationQueue => {
+                self.operation_queue
+                    .merge_batch_with_base(key, existing_value, operands)
+            }
             MergeKeyType::Other => operands
                 .first()
                 .cloned()
@@ -659,6 +902,10 @@ impl MergeOperator for HelixMergeOperator {
                 self.counter
                     .validate_merge_with_base(key, existing_value, operands)
             }
+            MergeKeyType::OperationQueue => {
+                self.operation_queue
+                    .validate_merge_with_base(key, existing_value, operands)
+            }
             MergeKeyType::Other => operands
                 .first()
                 .or(existing_value.as_ref())
@@ -674,6 +921,7 @@ enum MergeKeyType {
     Bitmap,
     Layer0,
     Counter,
+    OperationQueue,
     Other,
 }
 

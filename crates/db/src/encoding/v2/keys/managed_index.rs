@@ -27,7 +27,10 @@ use super::indexes::vector::VectorPartitionMappingKey;
 use super::indexes::{
     CanonicalSecondaryValue, SecondaryEntryKey, SecondaryEntryLane, SecondaryEqualityBitmapKey,
 };
-use super::lifecycle::{IndexEntity, IndexEntityStateKey, IndexOperationKey, IndexRecordKey};
+use super::lifecycle::{
+    IndexEntity, IndexEntityStateKey, IndexOperationKey, IndexOperationQueueKey,
+    IndexOperationRowKey, IndexRecordKey,
+};
 use super::scope::{DataScope, TENANT_ENVELOPE_LEN, TENANT_KEY_PREFIX};
 
 pub(super) const PREFIX_LEN: usize = core::mem::size_of::<u8>();
@@ -140,6 +143,8 @@ pub(crate) enum RecordKind {
     TextTermStatistics = 0x11,
     TextStatisticsEntity = 0x12,
     SecondaryEqualityBitmap = 0x13,
+    IndexOperationQueue = 0x14,
+    IndexOperationRow = 0x15,
 }
 
 impl RecordKind {
@@ -163,6 +168,8 @@ impl RecordKind {
             0x11 => Ok(Self::TextTermStatistics),
             0x12 => Ok(Self::TextStatisticsEntity),
             0x13 => Ok(Self::SecondaryEqualityBitmap),
+            0x14 => Ok(Self::IndexOperationQueue),
+            0x15 => Ok(Self::IndexOperationRow),
             unknown => Err(EncodingError::InvalidKey(format!(
                 "unknown V2 index record kind {unknown:#04x}"
             ))),
@@ -187,6 +194,8 @@ pub(crate) enum ScopedKey {
     TextCorpusStatistics(TextCorpusStatisticsKey),
     TextTermStatistics(TextTermStatisticsKey),
     TextStatisticsEntity(TextStatisticsEntityKey),
+    IndexOperationQueue(IndexOperationQueueKey),
+    IndexOperationRow(IndexOperationRowKey),
 }
 
 impl ScopedKey {
@@ -206,6 +215,8 @@ impl ScopedKey {
             Self::TextCorpusStatistics(_) => RecordKind::TextCorpusStatistics,
             Self::TextTermStatistics(_) => RecordKind::TextTermStatistics,
             Self::TextStatisticsEntity(_) => RecordKind::TextStatisticsEntity,
+            Self::IndexOperationQueue(_) => RecordKind::IndexOperationQueue,
+            Self::IndexOperationRow(_) => RecordKind::IndexOperationRow,
         }
     }
 
@@ -316,6 +327,8 @@ impl ScopedKey {
             Self::TextCorpusStatistics(_) => U64_LEN + U64_LEN + HASH_LEN,
             Self::TextTermStatistics(_) => U64_LEN + U64_LEN + HASH_LEN + HASH_LEN,
             Self::TextStatisticsEntity(_) => U64_LEN + U64_LEN + KIND_LEN + U64_LEN,
+            Self::IndexOperationQueue(_) => U64_LEN + U64_LEN,
+            Self::IndexOperationRow(_) => U64_LEN + U64_LEN + U64_LEN,
         };
         PREFIX_LEN + KIND_LEN + suffix
     }
@@ -358,6 +371,15 @@ impl ScopedKey {
                 buffer.put_u64(key.generation.get());
                 buffer.put_u8(key.entity.kind as u8);
                 buffer.put_u64(key.entity.id.get());
+            }
+            Self::IndexOperationQueue(key) => {
+                buffer.put_u64(key.index_id.get());
+                buffer.put_u64(key.generation.get());
+            }
+            Self::IndexOperationRow(key) => {
+                buffer.put_u64(key.index_id.get());
+                buffer.put_u64(key.generation.get());
+                buffer.put_u64(key.sequence);
             }
         }
     }
@@ -436,6 +458,15 @@ impl ScopedKey {
                     entity: decode_entity(&mut decoder)?,
                 })
             }
+            RecordKind::IndexOperationQueue => Self::IndexOperationQueue(IndexOperationQueueKey {
+                index_id: decode_index_id(&mut decoder)?,
+                generation: decode_generation(&mut decoder)?,
+            }),
+            RecordKind::IndexOperationRow => Self::IndexOperationRow(IndexOperationRowKey {
+                index_id: decode_index_id(&mut decoder)?,
+                generation: decode_generation(&mut decoder)?,
+                sequence: decoder.take_u64()?,
+            }),
         };
         decoder.finish()?;
         Ok(key)
