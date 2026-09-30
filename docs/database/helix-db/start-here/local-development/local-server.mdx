@@ -254,6 +254,7 @@ SeaweedFS 4.09 or later enforce both.
 | `AWS_SESSION_TOKEN` | Optional temporary-credential token |
 | `AWS_ENDPOINT` or `AWS_ENDPOINT_URL_S3` | Non-AWS S3 endpoint |
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
+| `HELIX_ENABLE_CYPHER` | Set to `true` or `1` to serve Cypher at `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`; off by default |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
 the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use
