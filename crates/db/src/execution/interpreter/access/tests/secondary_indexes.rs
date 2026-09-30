@@ -4273,3 +4273,94 @@ async fn set_errors_surface_in_plan_order_and_empty_children_do_not_short_circui
     }
     context.close_request_read_view().unwrap();
 }
+
+#[tokio::test]
+async fn range_bounds_without_an_encoding_are_empty() {
+    let config = test_support::in_memory_config("access-range-unencodable-bounds")
+        .with_range_index("User", "score");
+    let db = test_support::open_db_with_config(config).await;
+    for score in [10, 20, 30] {
+        test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("score", PropertyValue::I64(score))],
+        )
+        .await;
+    }
+    let min = test_support::name("min_score");
+    let max = test_support::name("max_score");
+    let key = catalog::ScopedPropertyDirectionKey::try_new(
+        "User",
+        "score",
+        helix_ast::index::RangeIndexDirection::Asc,
+    )
+    .expect("valid key");
+    let plan = |range: ir::IndexRange, iteration| exec::ExecNodeAccessPlan::RangeIndex {
+        iteration,
+        index: catalog::NodeRangeIndexMeta::new(test_support::name("node_range:User:score:asc")),
+        key: key.clone(),
+        range,
+    };
+    let lower = ir::IndexRange::Lower {
+        lower: ir::IndexBound::Inclusive(ir::RangeIndexValue::Param(min.clone())),
+    };
+    // No stored value orders against null, bool or NaN, nor between bounds
+    // of different domains: every such range is empty, never an error.
+    for (low, high) in [
+        (PropertyValue::Null, PropertyValue::I64(40)),
+        (PropertyValue::Bool(true), PropertyValue::I64(40)),
+        (PropertyValue::F64(f64::NAN), PropertyValue::I64(40)),
+        (PropertyValue::I64(20), PropertyValue::from("z")),
+    ] {
+        let params = context::ParamBindings::default()
+            .with_value(min.clone(), low.clone())
+            .with_value(max.clone(), high);
+        for iteration in [
+            helix_planner::ir::RangeScanIteration::Forward,
+            helix_planner::ir::RangeScanIteration::Reverse,
+        ] {
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    plan(
+                        parameterized_i64_between(min.clone(), max.clone()),
+                        iteration
+                    ),
+                    params.clone(),
+                )
+                .await,
+                ExecutionValue::Scalars(Vec::new()),
+                "{low:?}"
+            );
+            assert_eq!(
+                run_limited_node_access_with_params(
+                    &db,
+                    plan(
+                        parameterized_i64_between(min.clone(), max.clone()),
+                        iteration
+                    ),
+                    2,
+                    params.clone(),
+                )
+                .await,
+                ExecutionValue::Scalars(Vec::new()),
+                "{low:?}"
+            );
+        }
+        if low.as_i64().is_none() {
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    plan(
+                        lower.clone(),
+                        helix_planner::ir::RangeScanIteration::Forward
+                    ),
+                    params,
+                )
+                .await,
+                ExecutionValue::Scalars(Vec::new()),
+                "{low:?}"
+            );
+        }
+    }
+}

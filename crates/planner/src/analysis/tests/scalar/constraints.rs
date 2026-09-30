@@ -124,3 +124,40 @@ fn scalar_conjunction_keeps_feasible_property_constraints() {
         ));
     });
 }
+
+#[test]
+fn range_literals_without_an_ordered_domain_are_impossible() {
+    for predicate in [
+        Predicate::gt("age", PropertyValue::Null),
+        Predicate::gte("age", true),
+        Predicate::lt("age", PropertyValue::F64(f64::NAN)),
+        Predicate::lte("age", PropertyValue::I64Array(vec![1])),
+        Predicate::between("age", 1, "z"),
+        Predicate::between("age", PropertyValue::Null, 5),
+        Predicate::and(vec![
+            Predicate::eq("name", "a"),
+            Predicate::gt("age", false),
+        ]),
+    ] {
+        assert_eq!(
+            prune_statically_impossible_branches(&predicate).unwrap(),
+            PrunedPredicate::Impossible,
+            "{predicate:?}"
+        );
+    }
+    // Orderable bounds, and the negation of an impossible bound, stay.
+    for predicate in [
+        Predicate::gt("age", 3),
+        Predicate::between("age", 1, 2.5),
+        Predicate::between("name", "a", "z"),
+        Predicate::not(Predicate::gt("age", PropertyValue::Null)),
+    ] {
+        assert!(
+            matches!(
+                prune_statically_impossible_branches(&predicate).unwrap(),
+                PrunedPredicate::Feasible { .. } | PrunedPredicate::Tautology
+            ),
+            "{predicate:?}"
+        );
+    }
+}

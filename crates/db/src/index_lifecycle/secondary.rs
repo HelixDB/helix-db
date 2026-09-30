@@ -2828,25 +2828,6 @@ fn mutation_value_error(
     }
 }
 
-fn property_value_type_name(value: &PropertyValue) -> &'static str {
-    match value {
-        PropertyValue::Null => "Null",
-        PropertyValue::Bool(_) => "Bool",
-        PropertyValue::I64(_) => "I64",
-        PropertyValue::DateTime(_) => "DateTime",
-        PropertyValue::F64(_) => "F64",
-        PropertyValue::F32(_) => "F32",
-        PropertyValue::String(_) => "String",
-        PropertyValue::Bytes(_) => "Bytes",
-        PropertyValue::I64Array(_) => "I64Array",
-        PropertyValue::F64Array(_) => "F64Array",
-        PropertyValue::F32Array(_) => "F32Array",
-        PropertyValue::StringArray(_) => "StringArray",
-        PropertyValue::Array(_) => "Array",
-        PropertyValue::Object(_) => "Object",
-    }
-}
-
 /// Reads one exact Active equality generation from its typed physical row.
 ///
 /// The caller must run this function inside the request lease batch associated
@@ -3269,7 +3250,10 @@ async fn equality_lane_rows(
         };
         let owner =
             decode_secondary_entry_value(handle.index_id(), handle.generation(), lane, &row.value)?;
-        if entry.entity_id().is_some_and(|key_owner| key_owner != owner) {
+        if entry
+            .entity_id()
+            .is_some_and(|key_owner| key_owner != owner)
+        {
             return Err(corruption("equality entry key and value owners disagree"));
         }
         held.insert(owner.get());
@@ -3405,6 +3389,12 @@ pub(crate) async fn scan_active_range_generation(
 }
 
 /// Produces suffix bounds for one generation/lane `scan_prefix` call.
+///
+/// `None` is an empty range: inverted bounds, and bounds a range lane cannot
+/// encode (null, bool, NaN, or a value of no range domain) or cannot order
+/// against each other (different domains). A row's value compares with such a
+/// bound in no domain, so the per-row predicate is false for every row. An
+/// oversized bound stays an error; it reads nothing.
 fn secondary_range_scan_bounds(
     direction: StorageRangeIndexDirection,
     query: &SecondaryRangeQuery,
@@ -3412,7 +3402,9 @@ fn secondary_range_scan_bounds(
     let physical = |value: &PropertyValue| project_query_range_value(value, direction);
     Ok(Some(match query {
         SecondaryRangeQuery::Lower { value, inclusive } => {
-            let value = physical(value)?;
+            let Some(value) = physical(value)? else {
+                return Ok(None);
+            };
             let (domain_start, domain_end) = value.domain_key_bounds();
             match direction {
                 StorageRangeIndexDirection::Asc => (
@@ -3434,7 +3426,9 @@ fn secondary_range_scan_bounds(
             }
         }
         SecondaryRangeQuery::Upper { value, inclusive } => {
-            let value = physical(value)?;
+            let Some(value) = physical(value)? else {
+                return Ok(None);
+            };
             let (domain_start, domain_end) = value.domain_key_bounds();
             match direction {
                 StorageRangeIndexDirection::Asc => (
@@ -3462,17 +3456,14 @@ fn secondary_range_scan_bounds(
             upper_inclusive,
         } => {
             let Some(ordering) = lower.compare(upper) else {
-                return Err(SecondaryIndexValueError::NonComparableDynamicBounds {
-                    lower_type: property_value_type_name(lower),
-                    upper_type: property_value_type_name(upper),
-                }
-                .into());
+                return Ok(None);
             };
             if ordering.is_gt() || (ordering.is_eq() && (!*lower_inclusive || !*upper_inclusive)) {
                 return Ok(None);
             }
-            let lower = physical(lower)?;
-            let upper = physical(upper)?;
+            let (Some(lower), Some(upper)) = (physical(lower)?, physical(upper)?) else {
+                return Ok(None);
+            };
             match direction {
                 StorageRangeIndexDirection::Asc => (
                     if *lower_inclusive {
@@ -3503,16 +3494,15 @@ fn secondary_range_scan_bounds(
     }))
 }
 
+/// The range-lane encoding of a query bound, or `None` when no range lane
+/// entry can compare with it.
 fn project_query_range_value(
     value: &PropertyValue,
     direction: StorageRangeIndexDirection,
-) -> Result<CanonicalRangeValue> {
+) -> Result<Option<CanonicalRangeValue>> {
     match project_range_value(value, direction) {
-        RangeValueProjection::Indexed(value) => Ok(value),
-        RangeValueProjection::Unsupported(value_type) => {
-            Err(SecondaryIndexValueError::UnsupportedRangeValue { value_type }.into())
-        }
-        RangeValueProjection::NaN => Err(SecondaryIndexValueError::NaNRangeValue.into()),
+        RangeValueProjection::Indexed(value) => Ok(Some(value)),
+        RangeValueProjection::Unsupported(_) | RangeValueProjection::NaN => Ok(None),
         RangeValueProjection::Oversized {
             encoded_len,
             maximum,
@@ -4823,18 +4813,22 @@ mod tests {
             oversized_error,
             HelixDbError::SecondaryIndexValue(SecondaryIndexValueError::EncodedKeyTooLarge { .. })
         ));
-        assert!(scan_active_range_generation_with_membership(
-            &db,
-            &range,
-            Some(&SecondaryRangeQuery::Lower {
-                value: PropertyValue::Array(vec![PropertyValue::I64(1)]),
-                inclusive: true,
-            }),
-            None,
-            &[],
-        )
-        .await
-        .is_err());
+        // A bound no range lane can order against is an empty range.
+        assert_eq!(
+            scan_active_range_generation_with_membership(
+                &db,
+                &range,
+                Some(&SecondaryRangeQuery::Lower {
+                    value: PropertyValue::Array(vec![PropertyValue::I64(1)]),
+                    inclusive: true,
+                }),
+                None,
+                &[],
+            )
+            .await
+            .unwrap(),
+            Vec::<u64>::new()
+        );
 
         db.close()
             .await
@@ -5193,8 +5187,7 @@ mod tests {
         }
     }
 
-    /// Covers the pure range-bound, diagnostic, and checked-arithmetic
-    /// contracts that lifecycle integration tests otherwise exercise only
+    /// Covers the pure range-bound and checked-arithmetic contracts that lifecycle integration tests otherwise exercise only
     /// through their successful branches.
     #[test]
     fn secondary_helper_boundaries_are_total_and_typed() {
@@ -5206,28 +5199,41 @@ mod tests {
             "SecondaryIndexDriver { catch_up_tail_delay_millis: 1 }"
         );
 
-        let mut object = std::collections::BTreeMap::new();
-        object.insert("nested".to_string(), PropertyValue::Bool(true));
-        for (value, expected) in [
-            (PropertyValue::Null, "Null"),
-            (PropertyValue::Bool(true), "Bool"),
-            (PropertyValue::I64(1), "I64"),
-            (PropertyValue::DateTime(2), "DateTime"),
-            (PropertyValue::F64(3.0), "F64"),
-            (PropertyValue::F32(4.0), "F32"),
-            (PropertyValue::String("value".to_string()), "String"),
-            (PropertyValue::Bytes(vec![1]), "Bytes"),
-            (PropertyValue::I64Array(vec![1]), "I64Array"),
-            (PropertyValue::F64Array(vec![2.0]), "F64Array"),
-            (PropertyValue::F32Array(vec![3.0]), "F32Array"),
-            (
-                PropertyValue::StringArray(vec!["value".to_string()]),
-                "StringArray",
-            ),
-            (PropertyValue::Array(vec![PropertyValue::Null]), "Array"),
-            (PropertyValue::Object(object), "Object"),
+        // Bounds no range lane can encode or order are empty ranges.
+        for query in [
+            SecondaryRangeQuery::Lower {
+                value: PropertyValue::Null,
+                inclusive: true,
+            },
+            SecondaryRangeQuery::Upper {
+                value: PropertyValue::Bool(true),
+                inclusive: false,
+            },
+            SecondaryRangeQuery::Lower {
+                value: PropertyValue::F64(f64::NAN),
+                inclusive: false,
+            },
+            SecondaryRangeQuery::Between {
+                lower: PropertyValue::I64(1),
+                lower_inclusive: true,
+                upper: PropertyValue::String("a".to_string()),
+                upper_inclusive: true,
+            },
+            SecondaryRangeQuery::Between {
+                lower: PropertyValue::Null,
+                lower_inclusive: true,
+                upper: PropertyValue::I64(5),
+                upper_inclusive: true,
+            },
         ] {
-            assert_eq!(property_value_type_name(&value), expected);
+            for direction in [
+                StorageRangeIndexDirection::Asc,
+                StorageRangeIndexDirection::Desc,
+            ] {
+                assert!(secondary_range_scan_bounds(direction, &query)
+                    .unwrap()
+                    .is_none());
+            }
         }
 
         for direction in [
