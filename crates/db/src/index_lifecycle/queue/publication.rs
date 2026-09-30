@@ -22,16 +22,18 @@
 //!    ([`crate::index_lifecycle::vector::publication`]), text as one epoch.
 //! 7. Stage one acknowledgement naming exactly the published IDs.
 //! 8. Commit through the vector cache's commit fence, release accounting,
-//!    then retire emptied partition caches.
+//!    then retire emptied partition caches and retain the vector planning
+//!    session for the target's next attempt: in a fair share of the planning
+//!    budget while the target has work left, in spare budget once drained.
 //!
 //! Only this attempt acknowledges its generation's queue: callers never run
 //! two attempts for one generation at once (the worker skips in-flight
-//! targets). Conflicts and uncertain outcomes discard all prepared work; the
-//! next attempt rediscovers durable state instead of reusing an
-//! acknowledgement.
+//! targets). Conflicts and uncertain outcomes discard all prepared work,
+//! including the planning session; the next attempt rediscovers durable
+//! state instead of reusing an acknowledgement.
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,8 +51,11 @@ use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::vector::publication::{
     stage_active_effects, QueuedVectorEffect, StagedEffects,
 };
-use crate::index_lifecycle::vector::VectorBuildCache;
-use crate::index_lifecycle::{ActiveIndexHandle, IndexRecordV2, IndexScopeGates, IndexStateV2};
+use crate::index_lifecycle::vector::{PublicationBacklog, VectorBuildCache};
+use crate::index_lifecycle::{
+    ActiveIndexHandle, IndexGenerationPublicationPermit, IndexRecordV2, IndexScopeGates,
+    IndexStateV2,
+};
 use crate::search::vector::{self, SimHasherRegistry, VectorCacheRegistry};
 
 use super::backlog::IndexOperationBacklog;
@@ -123,6 +128,9 @@ struct TargetSchedule {
     /// Current operation ceiling, reduced when not even the first entity fit
     /// beside the selection's acknowledgement.
     operation_limit: NonZeroUsize,
+    /// Publisher sequence number of the target's latest vector commit; a
+    /// retained planning session is reused only at exactly this commit.
+    last_vector_commit: Option<NonZeroU64>,
     /// Earliest instant the target is eligible again.
     not_before: Option<Instant>,
     /// Consecutive attempts without progress.
@@ -136,6 +144,7 @@ impl TargetSchedule {
             cursor: None,
             entity_limit,
             operation_limit: NonZeroUsize::MAX,
+            last_vector_commit: None,
             not_before: None,
             failures: 0,
         }
@@ -175,6 +184,8 @@ pub(crate) struct QueuePublisher {
     /// Targets with an attempt running: an attempt is its queue's only
     /// acknowledger, and reconciliation and discard rely on that.
     attempts: Mutex<HashSet<QueueTarget>>,
+    /// Sequence numbers handed to vector commits, never reused.
+    vector_commits: AtomicU64,
     metrics: QueuePublicationMetrics,
     #[cfg(test)]
     hooks: test_hooks::PublicationHooks,
@@ -252,6 +263,7 @@ impl QueuePublisher {
             schedules: Mutex::new(HashMap::new()),
             cursor: Mutex::new(None),
             attempts: Mutex::new(HashSet::new()),
+            vector_commits: AtomicU64::new(0),
             metrics: QueuePublicationMetrics::default(),
             #[cfg(test)]
             hooks: test_hooks::PublicationHooks::default(),
@@ -267,6 +279,12 @@ impl QueuePublisher {
     /// Returns publication counters.
     pub(crate) const fn metrics(&self) -> &QueuePublicationMetrics {
         &self.metrics
+    }
+
+    /// Returns the planning budget this publisher shares with builds.
+    #[cfg(test)]
+    pub(crate) fn planning_cache(&self) -> &Arc<VectorBuildCache> {
+        &self.vector.planning_cache
     }
 
     /// Returns whether any generation retains outstanding or uncertain work.
@@ -365,6 +383,20 @@ impl QueuePublisher {
             | PublicationOutcome::Trimmed
             | PublicationOutcome::Blocked => {}
         }
+        // Only a vector commit retains a planning session; every other outcome
+        // forgets the target's, so no session outlives the attempt that could
+        // have written past it.
+        match outcome {
+            PublicationOutcome::Published { .. } => {}
+            PublicationOutcome::Discarded { .. }
+            | PublicationOutcome::Empty
+            | PublicationOutcome::Deferred
+            | PublicationOutcome::Retry
+            | PublicationOutcome::Trimmed
+            | PublicationOutcome::Blocked => {
+                self.vector.planning_cache.forget_publication(target).await;
+            }
+        }
         self.reschedule(target, outcome);
         Ok(outcome)
     }
@@ -442,12 +474,12 @@ impl QueuePublisher {
         }
         // Retirement while awaiting ownership is caught by the publication
         // transaction's own read of the record.
-        let _ownership = self.scope_gates.publication_permit(target).await;
+        let ownership = self.scope_gates.publication_permit(target).await;
         let Some(stored) = self.read_queue(target).await? else {
             return Ok(PublicationOutcome::Empty);
         };
         match stored.queue().family() {
-            QueueFamily::Vector => self.publish_vector(target, &stored).await,
+            QueueFamily::Vector => self.publish_vector(&ownership, &stored).await,
             QueueFamily::Text => self.publish_text(target, &stored).await,
         }
     }
@@ -575,13 +607,20 @@ impl QueuePublisher {
 
     async fn publish_vector(
         &self,
-        target: QueueTarget,
+        ownership: &IndexGenerationPublicationPermit,
         stored: &StoredQueue,
     ) -> Result<PublicationOutcome> {
+        let target = ownership.target();
         let queue = stored.queue();
-        // Vector batches are sized by planning admission, so only the cursor
-        // and a trimmed operation ceiling carry over between attempts.
-        let (cursor, _, operation_limit) = self.schedule_state(target);
+        // Vector batches are sized by planning admission, so only the cursor,
+        // a trimmed operation ceiling, and the latest commit carry over
+        // between attempts.
+        let TargetSchedule {
+            cursor,
+            operation_limit,
+            last_vector_commit,
+            ..
+        } = self.schedule(target);
         // The acknowledgement may take at most half of each output budget,
         // leaving its effects the rest: one filling the budget would leave a
         // hot entity's selection no room.
@@ -630,19 +669,24 @@ impl QueuePublisher {
                 .collect::<Vec<_>>(),
         )?;
         let cache_writes = vector::VectorCacheWriteSet::default();
-        let staged = match stage_active_effects(
+        let commit =
+            NonZeroU64::MIN.saturating_add(self.vector_commits.fetch_add(1, Ordering::Relaxed));
+        let (staged, retained) = match stage_active_effects(
             &self.db,
             &transaction,
+            ownership,
             &handle,
             &effects,
             self.limits,
             reserved,
             &self.vector,
             &cache_writes,
+            last_vector_commit,
+            commit,
         )
         .await
         {
-            Ok(StagedEffects::Prefix(staged)) => staged.get(),
+            Ok(StagedEffects::Prefix { staged, retained }) => (staged.get(), retained),
             Ok(StagedEffects::NoneFits) => {
                 let outcome = self.shrink(target, &selection, 0);
                 if outcome == PublicationOutcome::Blocked {
@@ -691,6 +735,13 @@ impl QueuePublisher {
                 ));
             }
         }
+        // Numbered before committing, so whatever the outcome, only a session
+        // retained at this commit matches the target's next attempt.
+        self.schedules
+            .lock()
+            .entry(target)
+            .or_insert(TargetSchedule::new(self.limits.max_entities().get()))
+            .last_vector_commit = Some(commit);
         // Fences are taken only once nothing but the commit remains, so an
         // early return never leaves one outstanding. The fenced commit
         // resolves them from the storage outcome: a conflict releases them
@@ -762,6 +813,23 @@ impl QueuePublisher {
                 ));
             }
         }
+        // The session now mirrors exactly the committed rows. A target this
+        // commit drained is not scheduled again until new work arrives, so
+        // its session keeps only budget nothing else claims.
+        match retained {
+            Some(retained) => {
+                let backlog = if self.backlog.has_charges(target) {
+                    PublicationBacklog::Pending
+                } else {
+                    PublicationBacklog::Drained
+                };
+                self.vector
+                    .planning_cache
+                    .retain_publication(ownership, *retained, backlog)
+                    .await;
+            }
+            None => self.vector.planning_cache.forget_publication(target).await,
+        }
         Ok(PublicationOutcome::Published {
             operations,
             entities,
@@ -770,17 +838,13 @@ impl QueuePublisher {
 }
 
 impl QueuePublisher {
-    fn schedule_state(&self, target: QueueTarget) -> (Option<IndexEntity>, usize, NonZeroUsize) {
-        self.schedules.lock().get(&target).map_or(
-            (None, self.limits.max_entities().get(), NonZeroUsize::MAX),
-            |schedule| {
-                (
-                    schedule.cursor,
-                    schedule.entity_limit,
-                    schedule.operation_limit,
-                )
-            },
-        )
+    /// Returns `target`'s schedule, or a new one's.
+    fn schedule(&self, target: QueueTarget) -> TargetSchedule {
+        self.schedules
+            .lock()
+            .get(&target)
+            .copied()
+            .unwrap_or(TargetSchedule::new(self.limits.max_entities().get()))
     }
 
     /// Shrinks the next selection of `target` after `selection`'s exact
@@ -835,7 +899,12 @@ impl QueuePublisher {
         stored: &StoredQueue,
     ) -> Result<PublicationOutcome> {
         let queue = stored.queue();
-        let (cursor, entity_limit, operation_limit) = self.schedule_state(target);
+        let TargetSchedule {
+            cursor,
+            entity_limit,
+            operation_limit,
+            ..
+        } = self.schedule(target);
         // As for vectors, the acknowledgement leaves its epoch half of each
         // budget.
         let capacity = self.store.acknowledgement_capacity(

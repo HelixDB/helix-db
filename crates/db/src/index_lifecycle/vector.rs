@@ -30,7 +30,9 @@ mod driver;
 #[cfg(all(feature = "production-coverage", not(test)))]
 pub(crate) use driver::build_cache_production_contracts::run as run_build_cache_contracts;
 pub(crate) mod publication;
-pub(crate) use driver::{RetainedVectorBuild, VectorBuildCache, VectorIndexDriver};
+pub(crate) use driver::{
+    OfferedVectorBuild, PublicationBacklog, VectorBuildCache, VectorIndexDriver,
+};
 
 /// Validated vector and its canonical physical-partition identity.
 #[derive(Debug, Clone, PartialEq)]
@@ -393,21 +395,44 @@ mod tests {
             let Some(expected) = NonZeroUsize::new(effects.len()) else {
                 continue;
             };
-            let staged = publication::stage_active_effects(
-                db,
-                transaction,
-                handle,
-                &effects,
-                SearchIndexBackfillLimits::default().batch(),
-                AcknowledgementOutput {
-                    operations: 0,
-                    bytes: 0,
-                },
-                &resources,
-                cache_writes,
-            )
-            .await?;
-            assert_eq!(staged, publication::StagedEffects::Prefix(expected));
+            let ActiveIndexHandle::Vector {
+                scope,
+                index_id,
+                generation,
+                ..
+            } = handle
+            else {
+                panic!("an Active vector target projects a vector handle");
+            };
+            let permit = crate::index_lifecycle::IndexScopeGates::default()
+                .publication_permit(crate::index_lifecycle::queue::QueueTarget::new(
+                    *scope,
+                    *index_id,
+                    *generation,
+                ))
+                .await;
+            let publication::StagedEffects::Prefix { staged, .. } =
+                publication::stage_active_effects(
+                    db,
+                    transaction,
+                    &permit,
+                    handle,
+                    &effects,
+                    SearchIndexBackfillLimits::default().batch(),
+                    AcknowledgementOutput {
+                        operations: 0,
+                        bytes: 0,
+                    },
+                    &resources,
+                    cache_writes,
+                    None,
+                    std::num::NonZeroU64::MIN,
+                )
+                .await?
+            else {
+                panic!("every effect fits the default budget");
+            };
+            assert_eq!(staged, expected);
         }
         Ok(())
     }

@@ -9,19 +9,21 @@
 //! ([`plan_and_apply`], see [`super::publication`]).
 //!
 //! The decoded rows planning reads are kept in one bounded
-//! [`VectorBuildSession`] per build that outlives its step only after that step
-//! commits: see [`RetainedVectorBuild`] for why a matching checkpoint proves
-//! the cached rows still equal the committed builder-exclusive generation.
-//! Interleaved builds each retain their own session, and queue publication
-//! checks sessions out, under one shared budget ([`VectorBuildCache`]).
+//! [`VectorBuildSession`] per build, and one per queue publication target,
+//! that outlives its step or attempt only after that commits: see
+//! [`RetainedVectorBuild`] and [`VectorPublicationCheckpoint`] for why a
+//! matching checkpoint proves the cached rows still equal the committed rows
+//! of a generation its owner writes exclusively. Every retained and
+//! checked-out session shares one budget ([`VectorBuildCache`]).
 //!
 //! No vector row codec is defined here. Physical reads and writes remain behind
 //! [`crate::search::vector::VectorIndex`] and the typed `encoding/v2` boundary.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::ops::Bound;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -62,14 +64,16 @@ use crate::index_lifecycle::outbox::{
     IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep,
     StepResourceUsage, VectorPlanningUsage,
 };
+use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::work::{
     AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue, VectorTenantPartition,
 };
 use crate::index_lifecycle::{
     ActiveIndexHandle, BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId,
-    IndexGenerationId, IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationId,
-    IndexOperationOutcome, IndexOperationProgress, IndexOperationRecord, IndexRecordV2,
-    IndexV2MetadataValue, LegacyVectorDirectoryValidationProgress, LegacyVectorPhysicalReservation,
+    IndexGenerationId, IndexGenerationPublicationPermit, IndexId, IndexOperationBlocker,
+    IndexOperationFamily, IndexOperationId, IndexOperationOutcome, IndexOperationProgress,
+    IndexOperationRecord, IndexRecordV2, IndexV2MetadataValue,
+    LegacyVectorDirectoryValidationProgress, LegacyVectorPhysicalReservation,
     LegacyVectorValidationLane, LegacyVectorValidationProgress, NoCursorProgress,
     OperationCounters, PhysicalGeneration, PrefixScanProgress, SourceScanProgress, TextPartition,
     ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition, VectorBuildProgress,
@@ -116,23 +120,140 @@ impl VectorBuildCheckpoint {
     }
 }
 
-/// Build planning cache proven equal to committed physical rows at a checkpoint.
+/// Exact committed state a retained queue publication session mirrors.
+///
+/// A publication attempt plans against rows it reads outside its serializable
+/// transaction, so a session retained after its commit is sound only while
+/// the publisher stays the sole writer of the Active generation's physical
+/// rows. Every other writer of vector rows is excluded or invalidates:
+///
+/// - Foreground mutations only enqueue operations.
+/// - A build writes only its own `Building` generation, which publication
+///   defers; the generation becomes Active in the build's last step, before
+///   any publication into it can retain a session. Legacy adoption transcodes
+///   its namespace's metadata in that same step.
+/// - Retirement (drop) rewrites the index record, so `index_record_revision`
+///   no longer matches and the publication transaction's record read
+///   conflicts. Publication then discards the generation's queue, and cleanup
+///   deletes its rows under the generation's publication permit; either
+///   forgets the session.
+/// - Publication itself reclaims emptied tenant partitions inside its commit.
+///   Physical IDs only advance, so a reclaimed namespace's cached rows are
+///   never read again.
+/// - Startup migrations (legacy vector conversion, SimHash-directory
+///   adoption, legacy namespace retirement) run while the writer opens, before
+///   the queue ledger loads, so no attempt runs and the new cache holds no
+///   session. SimHash-directory publication also rewrites the record.
+/// - One writer runs one publisher, and every publisher of a writer shares its
+///   cache. One attempt per target runs at a time under the generation's
+///   [`crate::index_lifecycle::IndexGenerationPublicationPermit`], which
+///   build, abort, and cleanup steps take too.
+///
+/// Every attempt takes its target's retained session out of the cache before
+/// it plans, and ends by retaining its own clean session after a successful
+/// commit or by forgetting the target's session. No commit can therefore
+/// leave an older session behind, and `commit`, the publisher's sequence
+/// number of the target's latest commit, is a second check of that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VectorPublicationCheckpoint {
+    pub(crate) target: QueueTarget,
+    pub(crate) index_record_revision: crate::index_lifecycle::IndexRevision,
+    pub(crate) commit: NonZeroU64,
+}
+
+/// Owner of at most one retained planning session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VectorPlanningOwner {
+    Build(IndexOperationId),
+    Publication(QueueTarget),
+}
+
+/// Committed state a retained planning session mirrors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VectorPlanningCheckpoint {
+    Build(VectorBuildCheckpoint),
+    Publication(VectorPublicationCheckpoint),
+}
+
+impl VectorPlanningCheckpoint {
+    const fn owner(&self) -> VectorPlanningOwner {
+        match self {
+            Self::Build(checkpoint) => VectorPlanningOwner::Build(checkpoint.operation_id),
+            Self::Publication(checkpoint) => VectorPlanningOwner::Publication(checkpoint.target),
+        }
+    }
+}
+
+/// Planning cache proven equal to committed physical rows at a checkpoint.
 ///
 /// Only the V2 builder writes a `Building` generation's physical vector rows:
 /// foreground mutations of a building index enqueue their operations for that
 /// generation, and queue publication defers a `Building` generation without
 /// touching its rows until activation. The planning/apply contract of
 /// [`crate::search::vector::PlannedVectorMutation::apply_to`] relies on the same
-/// exclusivity. A session is retained only through
+/// exclusivity. A build session is retained only through
 /// [`CommittedStepState`], which the outbox releases after the step that
 /// produced it committed. Every later commit that writes the generation's rows
 /// is a builder step that starts from `checkpoint` and admits at least one
 /// entity, advancing the persisted progress counters, so a checkpoint match
-/// proves no other write intervened.
-pub(crate) struct RetainedVectorBuild {
-    checkpoint: VectorBuildCheckpoint,
+/// proves no other write intervened. [`VectorPublicationCheckpoint`] states
+/// the same for queue publication into an Active generation.
+struct RetainedVectorBuild {
+    checkpoint: VectorPlanningCheckpoint,
     /// `VectorBuildSession<D>` for the index's distance metric.
     session: Box<dyn RetainedBuildSession>,
+}
+
+/// A clean session offered for retention while its owner commits.
+///
+/// It keeps its checkout's lease, lowered to the bytes it holds, until the
+/// commit settles, so the budget counts it exactly once throughout: as a
+/// lease until [`VectorBuildCache`] retains it, then as retained bytes. An
+/// offer dropped because its commit failed releases its lease with it.
+pub(crate) struct OfferedVectorBuild {
+    retained: RetainedVectorBuild,
+    lease: SessionLease,
+}
+
+impl OfferedVectorBuild {
+    /// Offers a publication attempt's `session` for retention once its commit
+    /// at `checkpoint` succeeds; a session holding unflushed rows is dropped.
+    pub(super) fn publication<D: Distance>(
+        checkpoint: VectorPublicationCheckpoint,
+        session: CheckedOutSession<D>,
+    ) -> Option<Self> {
+        session.into_offer(VectorPlanningCheckpoint::Publication(checkpoint))
+    }
+
+    /// Offers `session` at `checkpoint` under a new lease of `cache`'s budget.
+    #[cfg(any(test, feature = "production-coverage"))]
+    fn for_tests(
+        cache: &VectorBuildCache,
+        checkpoint: VectorPlanningCheckpoint,
+        session: Box<dyn RetainedBuildSession>,
+    ) -> Self {
+        Self {
+            lease: SessionLease::new(
+                &cache.leases,
+                LeaseDemand::Bounded(session.retained_bytes()),
+            ),
+            retained: RetainedVectorBuild {
+                checkpoint,
+                session,
+            },
+        }
+    }
+}
+
+impl RetainedVectorBuild {
+    /// Returns the build checkpoint this session mirrors, if a build retained it.
+    #[cfg(any(test, feature = "production-coverage"))]
+    fn build_checkpoint(&self) -> Option<&VectorBuildCheckpoint> {
+        match &self.checkpoint {
+            VectorPlanningCheckpoint::Build(checkpoint) => Some(checkpoint),
+            VectorPlanningCheckpoint::Publication(_) => None,
+        }
+    }
 }
 
 /// Build planning session retained between committed steps, erased over its metric.
@@ -173,11 +294,89 @@ impl<D: Distance> RetainedBuildSession for VectorBuildSession<D> {
     }
 }
 
-/// Most operations whose build planning sessions one driver retains at once.
+/// Most build operations whose planning sessions one driver retains at once.
 ///
 /// More concurrently interleaved builds than this evict the least recently
-/// committed session whole.
+/// committed build session whole. Publication commits never evict one.
 const MAX_RETAINED_VECTOR_BUILDS: usize = 16;
+
+/// Most queue publication targets whose planning sessions one driver retains
+/// at once.
+///
+/// A commit beyond it evicts the least recently retained drained session.
+/// When every retained target still has queued work, the new session is
+/// dropped instead: evicting one would only make that target's next attempt
+/// cold in turn, so under round-robin over `N` targets this many stay warm
+/// rather than none. It also bounds the per-session work of every rebalance.
+const MAX_RETAINED_PUBLICATIONS: usize = 16;
+
+/// Whether a publication target still had queued work after the commit that
+/// retained its session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationBacklog {
+    /// Its next attempt comes round, so the session shares the budget fairly.
+    Pending,
+    /// The commit drained its queue and no attempt is scheduled until new
+    /// work arrives, so the session keeps only budget nothing else claims.
+    Drained,
+}
+
+/// Retained planning sessions, each list least recently committed first.
+///
+/// An owner has at most one session across all lists.
+#[derive(Default)]
+struct RetainedSessions {
+    /// Build sessions between committed Scan steps.
+    builds: Vec<RetainedVectorBuild>,
+    /// Sessions of publication targets with queued work left.
+    pending: Vec<RetainedVectorBuild>,
+    /// Sessions of publication targets whose commit drained their queue.
+    drained: Vec<RetainedVectorBuild>,
+}
+
+impl RetainedSessions {
+    /// Takes `owner`'s session out, if one is retained.
+    fn take(&mut self, owner: VectorPlanningOwner) -> Option<RetainedVectorBuild> {
+        [&mut self.builds, &mut self.pending, &mut self.drained]
+            .into_iter()
+            .find_map(|sessions| {
+                let index = sessions
+                    .iter()
+                    .position(|retained| retained.checkpoint.owner() == owner)?;
+                Some(sessions.remove(index))
+            })
+    }
+
+    /// Retains a build step's session within [`MAX_RETAINED_VECTOR_BUILDS`].
+    fn admit_build(&mut self, retained: RetainedVectorBuild) {
+        self.builds.push(retained);
+        if self.builds.len() > MAX_RETAINED_VECTOR_BUILDS {
+            self.builds.remove(0);
+        }
+    }
+
+    /// Retains a publication attempt's session within
+    /// [`MAX_RETAINED_PUBLICATIONS`], or drops it when every retained target
+    /// still has queued work.
+    fn admit_publication(&mut self, retained: RetainedVectorBuild, backlog: PublicationBacklog) {
+        if self.pending.len() + self.drained.len() >= MAX_RETAINED_PUBLICATIONS {
+            if self.drained.is_empty() {
+                return;
+            }
+            self.drained.remove(0);
+        }
+        match backlog {
+            PublicationBacklog::Pending => self.pending.push(retained),
+            PublicationBacklog::Drained => self.drained.push(retained),
+        }
+    }
+
+    /// Returns every retained session.
+    #[cfg(any(test, feature = "production-coverage"))]
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &RetainedVectorBuild> {
+        self.builds.iter().chain(&self.pending).chain(&self.drained)
+    }
+}
 
 /// Returns the max-min fair cap of sessions sharing `budget`, or `None` if all fit.
 ///
@@ -198,20 +397,39 @@ fn max_min_cap(budget: usize, sizes: impl IntoIterator<Item = usize>) -> Option<
 /// Vector planning sessions of build steps and queue publication attempts,
 /// under one byte budget.
 ///
-/// Sessions retained between committed build steps and sessions checked out
-/// by running steps and attempts split `budget` max-min fairly: a retained
-/// session demands its bytes and a checked-out one demands without bound, so
-/// every checked-out session is bound to the same share. At most one session
-/// per operation and [`MAX_RETAINED_VECTOR_BUILDS`] in total are retained,
-/// least recently committed first, so interleaved builds each check out their
-/// own session instead of evicting each other's.
+/// Every session is counted exactly once, and `budget` is split between them
+/// max-min fairly:
 ///
-/// Every checkout and retaining commit rebalances: retained sessions over the
-/// new cap shrink, and checked-out sessions take the new share at their next
-/// entity boundary ([`CheckedOutSession::rebind`]). A released checkout leaves
-/// the share as it is until the next rebalance, so the split only errs low.
-/// Together the sessions exceed the budget by at most what each checked-out
-/// session plans for one entity beyond its latest share.
+/// - A retained session, kept between committed build steps or publication
+///   attempts of a target with queued work left, demands its bytes.
+/// - A build step's checked-out session demands without bound: it plans with
+///   whatever share it is given.
+/// - A publication attempt's checked-out session demands what it resumed
+///   with plus the larger of that and its attempt's input allowance (at
+///   least a [`MAX_RETAINED_PUBLICATIONS`]th of the budget), so a small
+///   target takes little and a growing one at least doubles per attempt
+///   until it reaches its fair share.
+/// - A session offered for retention ([`OfferedVectorBuild`]) keeps its lease,
+///   lowered to its bytes, until its owner's commit settles.
+///
+/// A session retained by a commit that drained its target's queue
+/// ([`PublicationBacklog::Drained`]) demands nothing: it keeps, newest first,
+/// only what the fair split leaves free, and is shrunk or dropped as soon as
+/// a checkout claims that, such as any build step's. It serves only a trickle
+/// of later writes to its target, which is not scheduled until one arrives.
+///
+/// At most one session per build operation or publication target is
+/// retained, and at most [`MAX_RETAINED_VECTOR_BUILDS`] builds and
+/// [`MAX_RETAINED_PUBLICATIONS`] targets, so publication never evicts a build.
+///
+/// Every checkout and retaining commit rebalances: retained sessions over
+/// their new limit shrink, and each checked-out session takes its new share
+/// at its next entity boundary ([`CheckedOutSession::rebind`]). A dropped
+/// checkout or offer leaves the other shares as they are until the next
+/// rebalance, so the split only errs low. A checked-out session holds up to
+/// the share it was last bound to until that boundary, so when shares fall,
+/// the sessions together exceed the budget transiently by that difference
+/// plus what each plans for one entity.
 ///
 /// No bulk eviction runs on the async executor. Rebalancing shrinks retained
 /// sessions on the blocking pool while holding the lock, so no checkout
@@ -222,35 +440,97 @@ fn max_min_cap(budget: usize, sizes: impl IntoIterator<Item = usize>) -> Option<
 pub(crate) struct VectorBuildCache {
     budget: NonZeroU64,
     /// An async lock, because rebalancing holds it while its trim runs off the executor.
-    retained: Arc<tokio::sync::Mutex<Vec<RetainedVectorBuild>>>,
+    retained: Arc<tokio::sync::Mutex<RetainedSessions>>,
     leases: Arc<SessionLeases>,
+    /// Keys publication planning read through its planning transactions.
+    #[cfg(test)]
+    publication_reads: AtomicU64,
+    /// Entries publication planning evicted from its checked-out sessions.
+    #[cfg(test)]
+    publication_evictions: AtomicU64,
 }
 
-/// Checked-out sessions and the share of the budget each is bound to.
+/// What one leased session demands of the budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseDemand {
+    /// A build step, which plans with whatever share it is given.
+    Unbounded,
+    /// A publication attempt's resumed bytes and headroom, or the bytes an
+    /// offered session holds.
+    Bounded(usize),
+}
+
+impl LeaseDemand {
+    /// Returns the demand as a max-min size.
+    const fn bytes(self) -> usize {
+        match self {
+            Self::Unbounded => usize::MAX,
+            Self::Bounded(bytes) => bytes,
+        }
+    }
+}
+
+/// Every live lease's demand and share, by lease.
+#[derive(Default)]
 struct SessionLeases {
-    count: AtomicUsize,
-    /// Written only while rebalancing, under the retained lock.
-    share: AtomicU64,
+    next: AtomicU64,
+    /// A sync lock, so a lease releases on drop without awaiting.
+    live: parking_lot::Mutex<HashMap<u64, LiveLease>>,
 }
 
-/// One checked-out session's claim on a share of the budget, released on drop.
-struct SessionLease(Arc<SessionLeases>);
+/// One live lease's demand and the share the latest rebalance bound it to.
+struct LiveLease {
+    demand: LeaseDemand,
+    share: NonZeroU64,
+}
+
+/// One session's claim on a share of the budget, released on drop.
+struct SessionLease {
+    leases: Arc<SessionLeases>,
+    id: u64,
+}
 
 impl SessionLease {
-    fn new(leases: &Arc<SessionLeases>) -> Self {
-        leases.count.fetch_add(1, Ordering::SeqCst);
-        Self(Arc::clone(leases))
+    /// Registers `demand`; the next rebalance sets its share.
+    fn new(leases: &Arc<SessionLeases>, demand: LeaseDemand) -> Self {
+        let id = leases.next.fetch_add(1, Ordering::Relaxed);
+        leases.live.lock().insert(
+            id,
+            LiveLease {
+                demand,
+                share: NonZeroU64::MIN,
+            },
+        );
+        Self {
+            leases: Arc::clone(leases),
+            id,
+        }
     }
 
-    /// Returns the share every checked-out session is bound to.
+    /// Returns the share the latest rebalance bound this lease to.
     fn share(&self) -> NonZeroU64 {
-        NonZeroU64::new(self.0.share.load(Ordering::SeqCst)).unwrap_or(NonZeroU64::MIN)
+        self.leases
+            .live
+            .lock()
+            .get(&self.id)
+            .expect("a lease stays registered until it drops")
+            .share
+    }
+
+    /// Demands exactly `bytes`, what a session that stopped planning holds.
+    fn hold(&self, bytes: usize) {
+        self.leases
+            .live
+            .lock()
+            .get_mut(&self.id)
+            .expect("a lease stays registered until it drops")
+            .demand = LeaseDemand::Bounded(bytes);
     }
 }
 
 impl Drop for SessionLease {
     fn drop(&mut self) {
-        self.0.count.fetch_sub(1, Ordering::SeqCst);
+        self.leases.live.lock().remove(&self.id);
     }
 }
 
@@ -295,9 +575,21 @@ impl<D: Distance> CheckedOutSession<D> {
             .unwrap_or_else(|| VectorBuildSession::new(share));
     }
 
-    /// Releases the session's share, returning it for retention.
-    fn into_session(self) -> VectorBuildSession<D> {
-        self.session
+    /// Offers the session for retention at `checkpoint`, keeping its lease
+    /// lowered to the bytes it holds; a session holding unflushed rows is
+    /// dropped with its lease instead.
+    fn into_offer(self, checkpoint: VectorPlanningCheckpoint) -> Option<OfferedVectorBuild> {
+        let Self { session, lease, .. } = self;
+        (!session.has_dirty_neighbors()).then(|| {
+            lease.hold(RetainedBuildSession::retained_bytes(&session));
+            OfferedVectorBuild {
+                retained: RetainedVectorBuild {
+                    checkpoint,
+                    session: Box::new(session),
+                },
+                lease,
+            }
+        })
     }
 }
 
@@ -337,44 +629,129 @@ impl VectorBuildCache {
     pub(crate) fn new(budget: NonZeroU64) -> Self {
         Self {
             budget,
-            retained: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            leases: Arc::new(SessionLeases {
-                count: AtomicUsize::new(0),
-                share: AtomicU64::new(budget.get()),
-            }),
+            retained: Arc::new(tokio::sync::Mutex::new(RetainedSessions::default())),
+            leases: Arc::new(SessionLeases::default()),
+            #[cfg(test)]
+            publication_reads: AtomicU64::new(0),
+            #[cfg(test)]
+            publication_evictions: AtomicU64::new(0),
         }
     }
 
-    /// Checks out a fresh session for work that retains none between
-    /// attempts: queue publication.
+    /// Counts the keys one publication attempt's planning read from storage
+    /// and the entries it evicted after checkout: per entity and at rebinds,
+    /// not the checkout's own trim.
+    #[cfg(test)]
+    pub(super) fn record_publication_planning(&self, reads: u64, evictions: u64) {
+        self.publication_reads.fetch_add(reads, Ordering::Relaxed);
+        self.publication_evictions
+            .fetch_add(evictions, Ordering::Relaxed);
+    }
+
+    /// Returns keys publication planning has read from storage.
+    #[cfg(test)]
+    pub(crate) fn publication_reads(&self) -> u64 {
+        self.publication_reads.load(Ordering::Relaxed)
+    }
+
+    /// Returns entries publication planning has evicted.
+    #[cfg(test)]
+    pub(crate) fn publication_evictions(&self) -> u64 {
+        self.publication_evictions.load(Ordering::Relaxed)
+    }
+
+    /// Checks out a fresh session of unbounded demand, as a build step
+    /// would, without taking any retained one.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) async fn checkout_fresh<D: Distance>(&self) -> CheckedOutSession<D> {
-        let (lease, share, _) = self.lease(None).await;
+        let (lease, _) = self
+            .lease(None, |_| false, |_| LeaseDemand::Unbounded)
+            .await;
+        let share = lease.share();
         CheckedOutSession::fresh(lease, share)
     }
 
-    /// Checks out the retained session for exactly `checkpoint`, or a fresh one.
+    /// Checks out a build step's retained session for exactly `checkpoint`,
+    /// or a fresh one.
+    async fn checkout<D: Distance>(
+        &self,
+        checkpoint: &VectorBuildCheckpoint,
+    ) -> CheckedOutSession<D> {
+        self.checkout_owned(
+            VectorPlanningOwner::Build(checkpoint.operation_id),
+            |retained| {
+                matches!(
+                    retained,
+                    VectorPlanningCheckpoint::Build(retained) if retained == checkpoint
+                )
+            },
+            |_| LeaseDemand::Unbounded,
+        )
+        .await
+    }
+
+    /// Checks out the session retained for `permit`'s target when it mirrors
+    /// exactly `reuse`, or a fresh one, demanding what it resumes with plus
+    /// the larger of that and `allowance`.
     ///
-    /// A retained session for the same operation at any other checkpoint, or
-    /// of another metric, is stale and dropped; other operations' sessions stay.
-    /// The returned session is bound to its share: the whole budget when it is
-    /// the only session.
+    /// The allowance is at least a [`MAX_RETAINED_PUBLICATIONS`]th of the
+    /// budget, so a batch of little input still leaves its session room to
+    /// grow across attempts.
+    ///
+    /// The target's retained session is taken out either way, so the attempt
+    /// can never leave it behind its own commit ([`VectorPublicationCheckpoint`]).
+    pub(crate) async fn checkout_publication<D: Distance>(
+        &self,
+        permit: &IndexGenerationPublicationPermit,
+        reuse: Option<&VectorPublicationCheckpoint>,
+        allowance: NonZeroU64,
+    ) -> CheckedOutSession<D> {
+        assert!(
+            reuse.is_none_or(|reuse| reuse.target == permit.target()),
+            "a publication checks out only its permitted target's session"
+        );
+        let allowance = usize::try_from(allowance.get()).unwrap_or(usize::MAX).max(
+            usize::try_from(self.budget.get()).unwrap_or(usize::MAX) / MAX_RETAINED_PUBLICATIONS,
+        );
+        self.checkout_owned(
+            VectorPlanningOwner::Publication(permit.target()),
+            |retained| {
+                matches!(
+                    retained,
+                    VectorPlanningCheckpoint::Publication(retained) if Some(retained) == reuse
+                )
+            },
+            |resumed| LeaseDemand::Bounded(resumed.saturating_add(resumed.max(allowance))),
+        )
+        .await
+    }
+
+    /// Checks out `owner`'s retained session when `reusable` accepts its
+    /// checkpoint, or a fresh one, under the lease `demand` sets from the
+    /// bytes it resumes with.
+    ///
+    /// Any other session of `owner`, or one of another metric, is stale and
+    /// dropped; other owners' sessions stay. The returned session is bound to
+    /// its share: the whole budget when it is the only session and demands
+    /// without bound.
     ///
     /// The returned session is within every limit of that share. A reused
     /// session can hold more: its bytes when the share fell since its commit,
     /// or entries of a class whose cap scales with the share, such as a session
     /// dense in SimHashes or low-dimension items, whose count caps bind before
     /// its bytes. That excess is evicted on the blocking pool before the
-    /// session is returned, so the step's first
-    /// [`VectorBuildSession::enforce_limits`] evicts only what the step itself
-    /// adds. Like a commit's trim, it is not step telemetry.
-    async fn checkout<D: Distance>(
+    /// session is returned, so the first [`VectorBuildSession::enforce_limits`]
+    /// evicts only what the step or attempt itself adds. Like a commit's trim,
+    /// it is not step telemetry.
+    async fn checkout_owned<D: Distance>(
         &self,
-        checkpoint: &VectorBuildCheckpoint,
+        owner: VectorPlanningOwner,
+        reusable: impl FnOnce(&VectorPlanningCheckpoint) -> bool,
+        demand: impl FnOnce(usize) -> LeaseDemand,
     ) -> CheckedOutSession<D> {
-        let (lease, share, own) = self.lease(Some(checkpoint.operation_id)).await;
-        let Some(RetainedVectorBuild { mut session, .. }) =
-            own.filter(|retained| retained.checkpoint == *checkpoint)
-        else {
+        let (lease, own) = self.lease(Some(owner), reusable, demand).await;
+        let share = lease.share();
+        let Some(RetainedVectorBuild { mut session, .. }) = own else {
             return CheckedOutSession::fresh(lease, share);
         };
         session.set_max_retained_bytes(share);
@@ -400,94 +777,202 @@ impl VectorBuildCache {
         }
     }
 
-    /// Leases a share of the budget for one checkout, first taking
-    /// `operation`'s retained session out, and returns the share.
+    /// Leases a share of the budget for one checkout and rebalances.
+    ///
+    /// `owner`'s retained session is taken out first and returned when
+    /// `reusable` accepts its checkpoint; `demand` sets the lease from the
+    /// bytes of that session, or zero.
     async fn lease(
         &self,
-        operation: Option<IndexOperationId>,
-    ) -> (SessionLease, NonZeroU64, Option<RetainedVectorBuild>) {
-        let lease = SessionLease::new(&self.leases);
+        owner: Option<VectorPlanningOwner>,
+        reusable: impl FnOnce(&VectorPlanningCheckpoint) -> bool,
+        demand: impl FnOnce(usize) -> LeaseDemand,
+    ) -> (SessionLease, Option<RetainedVectorBuild>) {
         let mut retained = Arc::clone(&self.retained).lock_owned().await;
-        let own = operation
-            .and_then(|operation| {
-                retained
-                    .iter()
-                    .position(|retained| retained.checkpoint.operation_id == operation)
-            })
-            .map(|index| retained.remove(index));
-        let share = self.rebalance(retained).await;
-        (lease, share, own)
+        let own = owner
+            .and_then(|owner| retained.take(owner))
+            .filter(|own| reusable(&own.checkpoint));
+        let lease = SessionLease::new(
+            &self.leases,
+            demand(own.as_ref().map_or(0, |own| own.session.retained_bytes())),
+        );
+        self.rebalance(retained).await;
+        (lease, own)
     }
 
     /// Retains a committed step's session, or forgets the operation's session.
-    ///
-    /// A retained session rebalances the budget.
     async fn after_commit(
         &self,
         operation_id: IndexOperationId,
         committed: CommittedOperationStep,
         state: Option<CommittedStepState>,
     ) {
-        let mut retained = Arc::clone(&self.retained).lock_owned().await;
-        retained.retain(|retained| retained.checkpoint.operation_id != operation_id);
+        let owner = VectorPlanningOwner::Build(operation_id);
         let (CommittedOperationStep::Progressed, Some(CommittedStepState::VectorBuild(next))) =
             (committed, state)
         else {
-            return;
+            return self.forget(owner).await;
         };
-        retained.push(*next);
-        if retained.len() > MAX_RETAINED_VECTOR_BUILDS {
-            retained.remove(0);
-        }
-        self.rebalance(retained).await;
+        self.retain(owner, *next, RetainedSessions::admit_build)
+            .await;
     }
 
-    /// Splits the budget max-min fairly between the retained sessions and
-    /// every checked-out one, publishes the checked-out share, and shrinks
-    /// every retained session over the cap. Returns the share.
-    ///
-    /// Sessions under their fair share keep every entry, and the rest shrink
-    /// to the one cap that exactly fills what remains. Shrinking runs on the
-    /// blocking pool with `retained` still locked, so no checkout observes a
-    /// session mid-trim. A session that cannot shrink is dropped.
-    async fn rebalance(
+    /// Retains the clean session of a publication attempt that committed at
+    /// its checkpoint, replacing its target's session; `backlog` is whether
+    /// the target has queued work left.
+    pub(crate) async fn retain_publication(
         &self,
-        mut retained: tokio::sync::OwnedMutexGuard<Vec<RetainedVectorBuild>>,
-    ) -> NonZeroU64 {
-        let budget = usize::try_from(self.budget.get()).unwrap_or(usize::MAX);
-        let cap = max_min_cap(
-            budget,
-            retained
-                .iter()
-                .map(|retained| retained.session.retained_bytes())
-                .chain(core::iter::repeat_n(
-                    usize::MAX,
-                    self.leases.count.load(Ordering::SeqCst),
-                )),
+        permit: &IndexGenerationPublicationPermit,
+        offered: OfferedVectorBuild,
+        backlog: PublicationBacklog,
+    ) {
+        self.retain(
+            VectorPlanningOwner::Publication(permit.target()),
+            offered,
+            |sessions, retained| sessions.admit_publication(retained, backlog),
+        )
+        .await;
+    }
+
+    /// Forgets the session retained for `target`, if any.
+    pub(crate) async fn forget_publication(&self, target: QueueTarget) {
+        self.forget(VectorPlanningOwner::Publication(target)).await;
+    }
+
+    /// Forgets `owner`'s retained session, if any.
+    async fn forget(&self, owner: VectorPlanningOwner) {
+        drop(self.retained.lock().await.take(owner));
+    }
+
+    /// Replaces `owner`'s retained session with `offered` through `admit`,
+    /// then rebalances the budget.
+    ///
+    /// The offer's lease is released only once `admit` ran, so no rebalance
+    /// misses the session or counts it twice.
+    async fn retain(
+        &self,
+        owner: VectorPlanningOwner,
+        offered: OfferedVectorBuild,
+        admit: impl FnOnce(&mut RetainedSessions, RetainedVectorBuild),
+    ) {
+        let OfferedVectorBuild { retained, lease } = offered;
+        assert_eq!(
+            retained.checkpoint.owner(),
+            owner,
+            "a session is retained only for the owner that planned with it"
         );
-        // Only an unbounded budget fits an unbounded demand.
-        let share = NonZeroU64::new(u64::try_from(cap.unwrap_or(budget)).unwrap_or(u64::MAX))
-            .unwrap_or(NonZeroU64::MIN);
-        self.leases.share.store(share.get(), Ordering::SeqCst);
-        let Some(cap) = cap.filter(|cap| {
-            retained
+        let mut sessions = Arc::clone(&self.retained).lock_owned().await;
+        drop(sessions.take(owner));
+        admit(&mut sessions, retained);
+        drop(lease);
+        self.rebalance(sessions).await;
+    }
+
+    /// Returns the checkpoint of the session retained for `target`.
+    #[cfg(test)]
+    pub(crate) fn retained_publication(
+        &self,
+        target: QueueTarget,
+    ) -> Option<VectorPublicationCheckpoint> {
+        self.retained
+            .try_lock()
+            .expect("no rebalance is trimming the retained sessions")
+            .iter()
+            .find_map(|retained| match &retained.checkpoint {
+                VectorPlanningCheckpoint::Publication(checkpoint)
+                    if checkpoint.target == target =>
+                {
+                    Some(*checkpoint)
+                }
+                VectorPlanningCheckpoint::Publication(_) | VectorPlanningCheckpoint::Build(_) => {
+                    None
+                }
+            })
+    }
+
+    /// Splits the budget max-min fairly between the retained build and
+    /// pending publication sessions and every lease, binds each lease to its
+    /// share, then fits the drained sessions, newest first, into what that
+    /// split leaves free.
+    ///
+    /// Sessions and leases under their fair share keep every byte they
+    /// demand, and the rest are capped at the one level that exactly fills
+    /// what remains. Every retained session over its limit shrinks to it,
+    /// except that a drained session left no room is dropped. Shrinking runs
+    /// on the blocking pool with `sessions` still locked, so no checkout
+    /// observes a session mid-trim. A session that cannot shrink is dropped.
+    async fn rebalance(&self, mut sessions: tokio::sync::OwnedMutexGuard<RetainedSessions>) {
+        let budget = usize::try_from(self.budget.get()).unwrap_or(usize::MAX);
+        let (cap, free) = {
+            let mut live = self.leases.live.lock();
+            let demands = sessions
+                .builds
                 .iter()
-                .any(|retained| retained.session.retained_bytes() > *cap)
-        }) else {
-            return share;
+                .chain(&sessions.pending)
+                .map(|retained| retained.session.retained_bytes())
+                .chain(live.values().map(|lease| lease.demand.bytes()))
+                .collect::<Vec<_>>();
+            let cap = max_min_cap(budget, demands.iter().copied());
+            for lease in live.values_mut() {
+                // Only an unbounded budget fits an unbounded demand.
+                let share = cap.unwrap_or(budget).min(lease.demand.bytes());
+                lease.share = NonZeroU64::new(u64::try_from(share).unwrap_or(u64::MAX))
+                    .unwrap_or(NonZeroU64::MIN);
+            }
+            let granted = demands
+                .into_iter()
+                .map(|demand| cap.map_or(demand, |cap| demand.min(cap)))
+                .fold(0_usize, usize::saturating_add);
+            (cap.unwrap_or(usize::MAX), budget.saturating_sub(granted))
         };
+        let mut drained_limits = sessions
+            .drained
+            .iter()
+            .rev()
+            .scan(free, |free, retained| {
+                let kept = retained.session.retained_bytes().min(*free);
+                *free -= kept;
+                Some(kept)
+            })
+            .collect::<Vec<_>>();
+        drained_limits.reverse();
+        let over = |retained: &RetainedVectorBuild, limit: usize| {
+            retained.session.retained_bytes() > limit
+        };
+        let trims = sessions
+            .builds
+            .iter()
+            .chain(&sessions.pending)
+            .any(|retained| over(retained, cap))
+            || sessions
+                .drained
+                .iter()
+                .zip(&drained_limits)
+                .any(|(retained, limit)| over(retained, *limit));
+        if !trims {
+            return;
+        }
         let trimmed = tokio::task::spawn_blocking(move || {
-            retained.retain_mut(|retained| {
-                retained.session.retained_bytes() <= cap || retained.session.shrink_to(cap).is_ok()
+            let fits = |retained: &mut RetainedVectorBuild, limit: usize| {
+                retained.session.retained_bytes() <= limit
+                    || retained.session.shrink_to(limit).is_ok()
+            };
+            sessions.builds.retain_mut(|retained| fits(retained, cap));
+            sessions.pending.retain_mut(|retained| fits(retained, cap));
+            let mut limits = drained_limits.into_iter();
+            sessions.drained.retain_mut(|retained| {
+                let limit = limits.next().expect("one limit per drained session");
+                retained.session.retained_bytes() <= limit
+                    || (limit > 0 && retained.session.shrink_to(limit).is_ok())
             });
         })
         .await;
         // A trim cancelled by runtime shutdown leaves the sessions whole.
         let Err(error) = trimmed else {
-            return share;
+            return;
         };
         let Ok(panic) = error.try_into_panic() else {
-            return share;
+            return;
         };
         std::panic::resume_unwind(panic);
     }
@@ -565,7 +1050,7 @@ impl IndexOperationDriver for VectorIndexDriver {
     ) -> Box<dyn IndexOperationStepPermit> {
         Box::new(
             self.scope_gates
-                .publication_permit(crate::index_lifecycle::queue::QueueTarget::new(
+                .publication_permit(QueueTarget::new(
                     scope,
                     operation.index_id(),
                     operation.generation(),
@@ -760,6 +1245,20 @@ impl IndexOperationDriver for VectorIndexDriver {
         self.build_cache
             .after_commit(operation.operation_id(), committed, state)
             .await;
+        // Cleanup runs only on a retired generation, which publication never
+        // writes again.
+        if matches!(
+            operation.progress(),
+            IndexOperationProgress::VectorCleanup(_)
+        ) {
+            self.build_cache
+                .forget_publication(QueueTarget::new(
+                    scope,
+                    operation.index_id(),
+                    operation.generation(),
+                ))
+                .await;
+        }
         if committed != CommittedOperationStep::Completed
             || !matches!(
                 operation.progress(),
@@ -1473,7 +1972,7 @@ struct VectorStepResult {
     physical_operations: u64,
     output_bytes: u64,
     vector_planning: VectorPlanningUsage,
-    retained: Option<RetainedVectorBuild>,
+    retained: Option<OfferedVectorBuild>,
 }
 
 impl VectorStepResult {
@@ -1493,12 +1992,12 @@ impl VectorStepResult {
     /// Only a step that progressed to another Scan step, the only stage that
     /// checks a session out, and whose session holds no unflushed rows can
     /// hand committed state to a later step; every other outcome drops the
-    /// session here.
+    /// session and its lease here.
     fn retaining<D: Distance>(
         mut self,
         operation: &IndexOperationRecord,
         record: &IndexRecordV2,
-        session: VectorBuildSession<D>,
+        session: CheckedOutSession<D>,
     ) -> Self {
         let IndexOperationStepResult::Progressed(
             next @ IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
@@ -1508,13 +2007,9 @@ impl VectorStepResult {
         else {
             return self;
         };
-        if session.has_dirty_neighbors() {
-            return self;
-        }
-        self.retained = Some(RetainedVectorBuild {
-            checkpoint: VectorBuildCheckpoint::new(operation, record, next.clone()),
-            session: Box::new(session),
-        });
+        self.retained = session.into_offer(VectorPlanningCheckpoint::Build(
+            VectorBuildCheckpoint::new(operation, record, next.clone()),
+        ));
         self
     }
 
@@ -1633,7 +2128,7 @@ async fn step_build<D: Distance>(
                 &mut session,
             )
             .await?;
-            Ok(step.retaining(operation, record, session.into_session()))
+            Ok(step.retaining(operation, record, session))
         }
         VectorBuildStage::CatchUp(progress) => {
             // Only builds started before operations were queued persist this
@@ -2454,7 +2949,7 @@ async fn scan_source<D: Distance>(
 /// Either owner is the only writer of the generation's physical rows while it
 /// plans, so planning may read committed rows outside the transaction that
 /// commits the plan: [`RetainedVectorBuild`] states the build's exclusivity and
-/// [`super::publication`] the publisher's.
+/// [`VectorPublicationCheckpoint`] the publisher's.
 pub(super) struct VectorPlanTarget<'a> {
     scope: DataScope,
     index_id: IndexId,

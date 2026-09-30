@@ -275,7 +275,7 @@ impl StepResourceUsage {
 /// can never observe state derived from uncommitted writes.
 pub(crate) enum CommittedStepState {
     /// Vector planning cache that mirrors the physical rows this step commits.
-    VectorBuild(Box<super::vector::RetainedVectorBuild>),
+    VectorBuild(Box<super::vector::OfferedVectorBuild>),
 }
 
 impl core::fmt::Debug for CommittedStepState {

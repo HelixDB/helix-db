@@ -390,13 +390,18 @@ impl SearchIndexBackfillLimits {
 
     /// Replaces the memory budget of the vector planning cache.
     ///
-    /// Vector builds and queued vector publication share up to this many bytes
-    /// of decoded vectors, neighbor rows, and SimHashes: the sessions builds
-    /// retain between committed steps and those running steps and publication
-    /// attempts plan with split it max-min fairly. The budget charges each
-    /// entry's payload plus its estimated bookkeeping, and caps each entry
-    /// class at one entry per KiB. The cache is process-local and never
-    /// persisted.
+    /// Vector builds and queued vector publication share this many bytes of
+    /// decoded vectors, neighbor rows, and SimHashes: the sessions retained
+    /// between committed build steps and publication attempts, and those
+    /// running steps and attempts plan with, split it max-min fairly. A
+    /// publication attempt claims at most what it resumes with plus the larger
+    /// of that, its batch's input bytes, and a sixteenth of the budget, and a
+    /// target whose queue drained keeps its session only in budget nothing
+    /// else claims. When the split tightens, a running session shrinks at its
+    /// next entity, so the total can briefly exceed the budget by what it held
+    /// above its new share plus one entity's rows. The budget charges each entry's payload plus its
+    /// estimated bookkeeping, and caps each entry class at one entry per KiB.
+    /// The cache is process-local and never persisted.
     ///
     /// The default is one eighth of the process memory ceiling, clamped to
     /// 64 MiB..=2 GiB. The ceiling is the tightest cgroup (v2 or v1) memory
@@ -404,8 +409,11 @@ impl SearchIndexBackfillLimits {
     /// when neither is readable. A host with 16 GiB or more keeps the planning
     /// working set of roughly half a million 768-dimensional vectors resident;
     /// once a build outgrows the budget, evicted rows are re-read and decoded
-    /// from storage on every insert and throughput falls steeply. Retention is
-    /// demand-filled, so smaller builds hold only what they touch. Set the
+    /// from storage on every insert and throughput falls steeply. Queue
+    /// publication into an Active index falls the same way once that graph
+    /// outgrows its share: about 7 KiB per node at 1536 dimensions and 4 KiB at
+    /// 768, split with running builds and other publishing indexes. Retention
+    /// is demand-filled, so smaller builds hold only what they touch. Set the
     /// budget explicitly for a result that does not depend on the host.
     ///
     /// ```
