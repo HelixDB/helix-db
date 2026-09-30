@@ -462,6 +462,21 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     /// Family this driver is authorized to mutate.
     fn family(&self) -> IndexOperationFamily;
 
+    /// Acquires exclusive ownership of the operation's physical generation.
+    ///
+    /// The outbox holds it from before preparation through commit, so family
+    /// steps (build, activation, abort, cleanup) and queued publication of the
+    /// same generation never interleave. It is taken before any scope permit;
+    /// holders of this permit never wait for another generation's. Families
+    /// without queued publication use this unit default.
+    async fn acquire_generation_ownership(
+        &self,
+        _scope: DataScope,
+        _operation: &IndexOperationRecord,
+    ) -> Box<dyn IndexOperationStepPermit> {
+        Box::new(())
+    }
+
     /// Acquires any family-owned coordination required before the step snapshot.
     ///
     /// The returned permit is retained through the repository transaction and
@@ -1030,6 +1045,9 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         ));
     }
 
+    let _ownership = driver
+        .acquire_generation_ownership(claimed.scope, &claimed.record)
+        .await;
     let prepared = match driver
         .prepare_step(db, claimed.scope, &claimed.record, limits)
         .await

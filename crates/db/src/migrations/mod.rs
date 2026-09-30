@@ -456,7 +456,6 @@ pub enum MigrationFailpoint {
 pub enum LegacyTextMigrationCheckpoint {
     BeforeEnqueue,
     SourceScan,
-    CatchUp,
     ValidatePages,
     ValidateRoots,
     ValidateEntityStates,
@@ -568,7 +567,6 @@ pub(crate) fn observe_legacy_text_migration_operation(
     };
     let checkpoint = match stage {
         TextBuildStage::ScanSource(_) => Some(LegacyTextMigrationCheckpoint::SourceScan),
-        TextBuildStage::CatchUp(_) => Some(LegacyTextMigrationCheckpoint::CatchUp),
         TextBuildStage::ValidateManifests(validation) => Some(match validation {
             TextManifestValidationProgress::Pages(_) => {
                 LegacyTextMigrationCheckpoint::ValidatePages
@@ -580,7 +578,10 @@ pub(crate) fn observe_legacy_text_migration_operation(
                 LegacyTextMigrationCheckpoint::ValidateEntityStates
             }
         }),
+        // Queued builds never persist CatchUp; pre-queue records holding it
+        // block before any migration boundary.
         TextBuildStage::ScanPartitions(_)
+        | TextBuildStage::CatchUp(_)
         | TextBuildStage::Compact(_)
         | TextBuildStage::PrepareManifests(_)
         | TextBuildStage::Activate(_) => None,

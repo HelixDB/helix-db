@@ -263,12 +263,22 @@ impl PlannedVectorMutation {
         self.measurement
     }
 
+    /// Iterates the encoded keys this plan writes, in encoded-key order.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &[u8]> {
+        self.writes.iter().map(|write| match write {
+            PlannedVectorWrite::Put { key, .. } | PlannedVectorWrite::Delete { key } => {
+                key.as_ref()
+            }
+        })
+    }
+
     /// Consumes this plan and stages its encoded writes in the target transaction.
     ///
     /// The planning and target transactions must begin from the same committed
-    /// vector state. Lifecycle callers establish that contract only for a
-    /// builder-exclusive hidden generation whose foreground changes are durable
-    /// deltas. Any staging failure must abort the target outbox transaction.
+    /// vector state. Lifecycle callers establish that contract only while they
+    /// are the generation's sole writer: a hidden generation's build, or the
+    /// queue publisher of an Active one. Any staging failure must abort the
+    /// target transaction.
     pub(crate) fn apply_to(self, target: &slatedb::DbTransaction) -> Result<(), slatedb::Error> {
         self.apply_with(|write| match write {
             PlannedVectorWrite::Put { key, value } => target.put_bytes(key, value),

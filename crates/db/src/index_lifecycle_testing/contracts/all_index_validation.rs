@@ -9,11 +9,10 @@ use helix_ast::value::PropertyValue as AstPropertyValue;
 use helix_planner::{catalog, context, exec, ir};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
-use slatedb::IsolationLevel;
 
 use crate::config::{TextElementType, VectorElementType};
 use crate::encoding::property::property_value::PropertyValue;
-use crate::encoding::property::{decode_properties, encode_properties, Property};
+use crate::encoding::property::{decode_properties, Property};
 use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 use crate::encoding::v2::keys::{
     DataKey, DataKeyKind, EdgeEndpointsKey, IndexEntity, IndexEntityStateKey, ManagedIndexKey,
@@ -34,10 +33,11 @@ use crate::search::{text_index_name, vector_index_name};
 use crate::HelixDB;
 
 use super::{
-    allocate_edge_ids, allocate_node_ids, assert_build_delta_count_at_least,
-    assert_build_deltas_empty, assert_identity_active, assert_monotonic_step, drive_to_terminal,
-    edge_source_key, family_shapes, mutate_edge_source, mutate_source, public_executable,
-    public_name, public_step, put_edge_source, put_source, source_key, MAXIMUM_CONTROLLER_TURNS,
+    allocate_edge_ids, allocate_node_ids, assert_build_deltas_empty, assert_identity_active,
+    assert_late_work_at_least, assert_monotonic_step, drive_to_terminal, edge_source_key,
+    enqueue_search_mutation, family_shapes, mutate_edge_source, mutate_source, public_executable,
+    public_name, public_step, put_edge_source, put_source, queued_operations, source_key,
+    MAXIMUM_CONTROLLER_TURNS,
 };
 
 const INDEX_PROPERTY: &str = "value";
@@ -70,23 +70,17 @@ impl SecondaryLatePoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VectorLatePoint {
     Scan,
-    CatchUp,
     ValidateDescriptor,
     Activate,
 }
 
 impl VectorLatePoint {
-    const ALL: [Self; 4] = [
-        Self::Scan,
-        Self::CatchUp,
-        Self::ValidateDescriptor,
-        Self::Activate,
-    ];
+    /// Queued vector builds go from Scan straight to descriptor validation.
+    const ALL: [Self; 3] = [Self::Scan, Self::ValidateDescriptor, Self::Activate];
 
     const fn stage(self) -> IndexOperationStage {
         match self {
             Self::Scan => IndexOperationStage::Scan,
-            Self::CatchUp => IndexOperationStage::CatchUp,
             Self::ValidateDescriptor => IndexOperationStage::ValidateDescriptor,
             Self::Activate => IndexOperationStage::Activate,
         }
@@ -142,7 +136,7 @@ enum FixtureValue {
     Inserted,
 }
 
-/// Runs 220 exact tenant-scope races: 28 secondary, 48 vector, and 144 text.
+/// Runs 208 exact tenant-scope races: 28 secondary, 36 vector, and 144 text.
 pub(super) async fn run() {
     let mut ordinal = 0usize;
     let mut secondary_cases = 0usize;
@@ -178,11 +172,11 @@ pub(super) async fn run() {
         "every secondary shape and lifecycle stage runs"
     );
     assert_eq!(
-        vector_cases, 48,
+        vector_cases, 36,
         "every vector shape and lifecycle stage runs"
     );
     assert_eq!(text_cases, 144, "every text shape and late stage runs");
-    assert_eq!(ordinal, 220, "the complete all-index race matrix runs");
+    assert_eq!(ordinal, 208, "the complete all-index race matrix runs");
 }
 
 async fn run_case(
@@ -374,31 +368,29 @@ async fn run_case(
         &fixture_properties_with_tenant(&definition, FixtureValue::Inserted, final_tenant),
     )
     .await;
-    assert_build_delta_count_at_least(&db, scope, &definition, 3).await;
+    assert_late_work_at_least(&db, scope, &definition, 3).await;
 
-    if !matches!(definition, ValidatedDynamicIndexDefinition::Text(_)) {
-        db.close()
-            .await
-            .expect("secondary/vector writer closes with pending deltas");
-        db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
-            &database,
-            Arc::clone(&object_store),
-            crate::DbConfig::new(),
-            crate::index_lifecycle_testing::LifecycleTestScheduling::Explicit,
-        )
+    db.close()
         .await
-        .expect("secondary/vector writer reopens with pending deltas");
-        assert_build_delta_count_at_least(&db, scope, &definition, 3).await;
-        assert_eq!(
-            db.get_index_operation(scope, operation_id)
-                .await
-                .expect("reopened operation remains readable")
-                .common()
-                .stage,
-            stage,
-            "{definition:?} must preserve {stage:?} while pending deltas survive a cold reopen"
-        );
-    }
+        .expect("writer closes with pending late work");
+    db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
+        &database,
+        Arc::clone(&object_store),
+        crate::DbConfig::new(),
+        crate::index_lifecycle_testing::LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("writer reopens with pending late work");
+    assert_late_work_at_least(&db, scope, &definition, 3).await;
+    assert_eq!(
+        db.get_index_operation(scope, operation_id)
+            .await
+            .expect("reopened operation remains readable")
+            .common()
+            .stage,
+        stage,
+        "{definition:?} must preserve {stage:?} while late work survives a cold reopen"
+    );
 
     let evidence = controller
         .advance(
@@ -411,19 +403,33 @@ async fn run_case(
         .await
         .expect("late validation mutation re-entry step succeeds");
     assert_monotonic_step(&evidence);
-    if !matches!(
-        stage,
-        IndexOperationStage::Scan | IndexOperationStage::CatchUp
-    ) {
-        let reentered = db
-            .get_index_operation(scope, operation_id)
-            .await
-            .expect("re-entered operation remains readable");
-        assert_eq!(
-            reentered.common().stage,
-            IndexOperationStage::CatchUp,
-            "{definition:?} must leave {stage:?} for catch-up after late mutations"
-        );
+    let reentered = db
+        .get_index_operation(scope, operation_id)
+        .await
+        .expect("re-entered operation remains readable")
+        .common()
+        .stage;
+    match definition {
+        ValidatedDynamicIndexDefinition::Secondary(_)
+            if !matches!(
+                stage,
+                IndexOperationStage::Scan | IndexOperationStage::CatchUp
+            ) =>
+        {
+            assert_eq!(
+                reentered,
+                IndexOperationStage::CatchUp,
+                "{definition:?} must leave {stage:?} for catch-up after late mutations"
+            );
+        }
+        ValidatedDynamicIndexDefinition::Secondary(_) => {}
+        ValidatedDynamicIndexDefinition::Vector(_) | ValidatedDynamicIndexDefinition::Text(_) => {
+            assert_ne!(
+                reentered,
+                IndexOperationStage::CatchUp,
+                "queued {definition:?} late writes never send {stage:?} back to catch-up"
+            );
+        }
     }
 
     let terminal = drive_to_terminal(&db, &controller, scope, operation_id).await;
@@ -443,7 +449,15 @@ async fn run_case(
         inserted_id,
     )
     .await;
+    // Strong searches overlay late work the queue has not published yet.
     assert_active_results(&db, scope, &definition, updated_id, stable_id, inserted_id).await;
+    if !matches!(definition, ValidatedDynamicIndexDefinition::Secondary(_)) {
+        db.publish_index_queues_for_lifecycle_testing()
+            .await
+            .expect("late queued work publishes after activation");
+        assert_eq!(queued_operations(&db, scope, &definition).await, 0);
+        assert_active_results(&db, scope, &definition, updated_id, stable_id, inserted_id).await;
+    }
     db.close()
         .await
         .expect("all-index validation writer closes");
@@ -749,100 +763,11 @@ async fn mutate_entity(
             IndexElementKind::Edge => mutate_edge_source(db, scope, entity_id, before, after).await,
         }
         .expect("late secondary mutation commits"),
-        ValidatedDynamicIndexDefinition::Vector(_) => {
-            let writer = db
-                .lifecycle_test_writer_db()
-                .expect("late vector mutation has writer storage");
-            let transaction = writer
-                .begin(IsolationLevel::SerializableSnapshot)
+        ValidatedDynamicIndexDefinition::Vector(_) | ValidatedDynamicIndexDefinition::Text(_) => {
+            enqueue_search_mutation(db, scope, element_kind, entity_id, before, after)
                 .await
-                .expect("late vector mutation transaction begins");
-            let mutations = crate::index_lifecycle::vector::load_mutation_set(&transaction, scope)
-                .await
-                .expect("late vector mutation loads its building generation");
-            let cache_writes = crate::search::vector::VectorCacheWriteSet::default();
-            crate::index_lifecycle::vector::maintain_entity(
-                &transaction,
-                scope,
-                &mutations,
-                &cache_writes,
-                crate::index_lifecycle::vector::VectorEntityMutation::new(
-                    element_kind,
-                    entity_id,
-                    before,
-                    after,
-                ),
-            )
-            .await
-            .expect("late vector mutation records its build delta");
-            stage_source_row(&transaction, scope, element_kind, entity_id, after);
-            transaction
-                .commit()
-                .await
-                .expect("late vector source and build delta commit atomically");
+                .expect("late vector/text mutation enqueues with its source row");
         }
-        ValidatedDynamicIndexDefinition::Text(_) => {
-            let writer = db
-                .lifecycle_test_writer_db()
-                .expect("late text mutation has writer storage");
-            let transaction = writer
-                .begin(IsolationLevel::SerializableSnapshot)
-                .await
-                .expect("late text mutation transaction begins");
-            let mutations =
-                crate::index_lifecycle::text::mutation::load_mutation_set(&transaction, scope)
-                    .await
-                    .expect("late text mutation loads its building generation");
-            let prepared = crate::index_lifecycle::text::mutation::prepare_text_build_deltas(
-                &transaction,
-                scope,
-                &mutations,
-                crate::index_lifecycle::text::mutation::TextEntityMutation::new(
-                    element_kind,
-                    entity_id,
-                    before,
-                    after,
-                ),
-            )
-            .await
-            .expect("late text mutation prepares its build delta");
-            let validated = crate::index_lifecycle::text::mutation::validate_text_build_deltas(
-                &transaction,
-                &prepared,
-            )
-            .await
-            .expect("late text mutation revalidates its build delta");
-            crate::index_lifecycle::text::mutation::stage_validated_text_build_deltas(
-                &transaction,
-                validated,
-            )
-            .expect("late text mutation stages its validated build delta");
-            stage_source_row(&transaction, scope, element_kind, entity_id, after);
-            transaction
-                .commit()
-                .await
-                .expect("late text source, statistics, and build delta commit atomically");
-        }
-    }
-}
-
-fn stage_source_row(
-    transaction: &slatedb::DbTransaction,
-    scope: DataScope,
-    element_kind: IndexElementKind,
-    entity_id: u64,
-    after: &[Property],
-) {
-    let key = match element_kind {
-        IndexElementKind::Node => source_key(scope, entity_id),
-        IndexElementKind::Edge => edge_source_key(scope, entity_id),
-    };
-    if after.is_empty() {
-        transaction.delete(key).expect("late source delete stages");
-    } else {
-        transaction
-            .put(key, encode_properties(after))
-            .expect("late source replacement stages");
     }
 }
 

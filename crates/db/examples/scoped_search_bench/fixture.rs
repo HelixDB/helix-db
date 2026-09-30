@@ -403,12 +403,59 @@ pub async fn create_indexes(
 /// When the vector index is built relative to the graph load (`BENCH_VECTOR`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum VectorBuild {
-    /// Incremental HNSW inserts during the load (`before`, default).
+    /// Index before the load (`before`, default): each load batch queues
+    /// vector operations that the index worker publishes while the load runs,
+    /// and the load then waits for the queue to drain.
     Before,
     /// Backfill once the graph is loaded (`after`).
     After,
     /// Graph only; build later with the `index` mode (`skip`).
     Skip,
+}
+
+/// Waits until the embedded writer has published every queued index
+/// operation, so timed searches and recall run against published indexes
+/// rather than a strong search's exact overlay of the unpublished backlog.
+///
+/// Prints the drain time and how many operations it acknowledged, so
+/// publisher throughput is its own line. Panics with the last queue stats
+/// when `deadline` passes first. A server's queue cannot be polled over
+/// HTTP, so for [`Backend::Http`] this only prints a reminder.
+pub async fn wait_for_publication(backend: &Backend, deadline: Duration) {
+    let Backend::Embedded { db, .. } = backend else {
+        println!(
+            "server backend: the server may still be publishing queued index work; \
+             confirm queue.pending_operations is 0 in its benchmark samples before timing queries"
+        );
+        return;
+    };
+    let started = Instant::now();
+    let acknowledged = db.index_operation_queue_stats().acknowledged_operations;
+    let mut reported = Instant::now();
+    loop {
+        let stats = db.index_operation_queue_stats();
+        if stats.pending_operations == 0 {
+            println!(
+                "index queue drained in {:.0}s ({} operations published)",
+                started.elapsed().as_secs_f64(),
+                stats.acknowledged_operations.saturating_sub(acknowledged)
+            );
+            return;
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "index queue did not drain within {deadline:?}; last stats: {stats:?}"
+        );
+        if reported.elapsed() > Duration::from_secs(60) {
+            println!(
+                "waiting for {} queued index operations ({:.0}s)",
+                stats.pending_operations,
+                started.elapsed().as_secs_f64()
+            );
+            reported = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 pub async fn build_vector_index(backend: &Backend, dimension: usize, deadline: Duration) {
@@ -429,7 +476,12 @@ pub struct LoadOptions {
     pub index_deadline: Duration,
 }
 
-pub async fn load(backend: &Backend, options: LoadOptions) {
+/// Creates the indexes, loads the graph, and returns once every queued index
+/// operation is published.
+///
+/// Returns how many times a load batch was resent after index backpressure,
+/// which is also printed with the load time.
+pub async fn load(backend: &Backend, options: LoadOptions) -> u32 {
     let LoadOptions {
         scale,
         dimension,
@@ -481,7 +533,7 @@ pub async fn load(backend: &Backend, options: LoadOptions) {
         .collect::<Vec<_>>();
 
     let started = Instant::now();
-    let mut attributes = 0usize;
+    let (mut attributes, mut backpressured) = (0usize, 0u32);
     for (chunk_index, chunk) in assigned.chunks(items_per_batch).enumerate() {
         let mut batch = write_batch();
         for (offset, group) in chunk.iter().copied().enumerate() {
@@ -538,37 +590,59 @@ pub async fn load(backend: &Backend, options: LoadOptions) {
                 attributes += 1;
             }
         }
-        // Background index maintenance can conflict with a load batch; a
-        // conflicted transaction is rolled back, so retrying is safe.
+        // A rejected transaction did not commit, so retrying it unchanged is
+        // safe. Background index maintenance can conflict with a load batch
+        // briefly. The async index queue rejects a write with a retryable
+        // backpressure error (HTTP 429 `index_backpressure`) once an index
+        // holds 250k pending members or 1e9 bytes, which clears only as the
+        // index worker publishes, so that wait is bounded by `index_deadline`.
+        // Every other error, such as a batch over the 8 MiB per-transaction
+        // operand limit, fails at once.
         let request = QueryRequest::write(batch);
-        for attempt in 1.. {
-            match backend.query(request.clone()).await {
-                Ok(_) => break,
-                Err(error) if error.contains("transaction conflict") && attempt < 20 => {
-                    tokio::time::sleep(Duration::from_millis(25 * attempt)).await;
-                }
-                Err(error) => panic!("load batch {chunk_index} failed: {error}"),
-            }
+        let first = Instant::now();
+        let (mut conflicts, mut backpressure) = (0u32, 0u32);
+        while let Err(error) = backend.query(request.clone()).await {
+            let delay = if error.contains("transaction conflict") && conflicts < 19 {
+                conflicts += 1;
+                Duration::from_millis(25 * u64::from(conflicts))
+            } else if error.contains("index backpressure") || error.contains("index_backpressure") {
+                let waited = first.elapsed();
+                assert!(
+                    waited < index_deadline,
+                    "load batch {chunk_index} still backpressured after {index_deadline:?}: {error}"
+                );
+                let delay = Duration::from_millis(25 << backpressure.min(8))
+                    .min(Duration::from_secs(5))
+                    .min(index_deadline - waited);
+                backpressure += 1;
+                delay
+            } else {
+                panic!("load batch {chunk_index} failed: {error}");
+            };
+            tokio::time::sleep(delay).await;
         }
+        backpressured += backpressure;
         if chunk_index % 50 == 0 {
             let elapsed = started.elapsed().as_secs_f64();
             println!(
-                "loaded {attributes} attributes in {elapsed:.0}s ({:.0}/s)",
+                "loaded {attributes} attributes in {elapsed:.0}s ({:.0}/s, {backpressured} backpressure retries)",
                 attributes as f64 / elapsed
             );
         }
     }
     println!(
-        "graph loaded: {item_count} items, {attributes} attributes in {:.0}s",
+        "graph loaded: {item_count} items, {attributes} attributes in {:.0}s ({backpressured} backpressure retries)",
         started.elapsed().as_secs_f64()
     );
     if vector == VectorBuild::After {
         build_vector_index(backend, dimension, index_deadline).await;
     }
+    wait_for_publication(backend, index_deadline).await;
     if let Backend::Embedded { db, .. } = backend {
         db.flush_writer().await.unwrap();
     }
     println!("load complete in {:.0}s", started.elapsed().as_secs_f64());
+    backpressured
 }
 
 pub fn group_scope() -> Traversal<OnNodes> {

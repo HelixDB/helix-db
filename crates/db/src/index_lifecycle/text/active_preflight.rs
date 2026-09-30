@@ -190,14 +190,21 @@ mod tests {
         production_contracts::run();
     }
 
+    /// Distinct ceilings, each above the smallest document's per-document share.
+    const INPUT: u64 = 40_000;
+    const OPERATIONS: u64 = 20;
+    const OUTPUT: u64 = 3_000;
+    const SPLIT: u64 = 20_000;
+    const PAGE: u64 = 500;
+
     /// Constructs distinct ceilings so every rejection identifies one resource.
     fn limits() -> ActiveTextMutationLimits {
         SearchIndexBackfillLimits::try_new(
             SearchIndexBatchLimits::try_new(
                 NonZeroUsize::MIN,
-                NonZeroU64::new(10).unwrap(),
-                NonZeroU64::new(20).unwrap(),
-                NonZeroU64::new(60).unwrap(),
+                NonZeroU64::new(INPUT).unwrap(),
+                NonZeroU64::new(OPERATIONS).unwrap(),
+                NonZeroU64::new(OUTPUT).unwrap(),
                 NonZeroU64::MIN,
             )
             .unwrap(),
@@ -205,10 +212,10 @@ mod tests {
             TextBuildArtifactLimits::new(NonZeroUsize::MIN, NonZeroU64::MIN),
             TextBackfillCompactionLimits::new(
                 NonZeroUsize::MIN,
-                NonZeroU64::new(10).unwrap(),
-                NonZeroU64::new(40).unwrap(),
-                NonZeroU64::new(40).unwrap(),
-                NonZeroU64::new(50).unwrap(),
+                NonZeroU64::new(INPUT).unwrap(),
+                NonZeroU64::new(SPLIT).unwrap(),
+                NonZeroU64::new(SPLIT).unwrap(),
+                NonZeroU64::new(PAGE).unwrap(),
             ),
         )
         .unwrap()
@@ -217,48 +224,60 @@ mod tests {
 
     #[test]
     fn exact_limits_are_admitted_and_retained() {
-        let admitted =
-            ActiveTextMutationMeasurements::try_admit(limits(), 10, 20, 60, 40, 50).unwrap();
-        assert_eq!(admitted.input_bytes(), 10);
-        assert_eq!(admitted.output_operations(), 20);
-        assert_eq!(admitted.output_bytes(), 60);
-        assert_eq!(admitted.split_bytes(), 40);
-        assert_eq!(admitted.manifest_page_bytes(), 50);
+        let admitted = ActiveTextMutationMeasurements::try_admit(
+            limits(),
+            INPUT,
+            OPERATIONS,
+            OUTPUT,
+            SPLIT,
+            PAGE,
+        )
+        .unwrap();
+        assert_eq!(admitted.input_bytes(), INPUT);
+        assert_eq!(admitted.output_operations(), OPERATIONS);
+        assert_eq!(admitted.output_bytes(), OUTPUT);
+        assert_eq!(admitted.split_bytes(), SPLIT);
+        assert_eq!(admitted.manifest_page_bytes(), PAGE);
 
         let epoch = ActiveTextMutationMeasurements::try_admit_epoch(
             limits(),
             ActiveTextMutationUsage {
                 entities: 1,
-                input_bytes: 10,
-                output_operations: 20,
-                output_bytes: 60,
-                split_bytes: 40,
-                retained_split_bytes: 10,
-                manifest_page_bytes: 50,
+                input_bytes: INPUT,
+                output_operations: OPERATIONS,
+                output_bytes: OUTPUT,
+                split_bytes: SPLIT,
+                retained_split_bytes: INPUT,
+                manifest_page_bytes: PAGE,
             },
         )
         .unwrap();
         assert_eq!(epoch.entities(), 1);
-        assert_eq!(epoch.retained_split_bytes(), 10);
+        assert_eq!(epoch.retained_split_bytes(), INPUT);
     }
 
     #[test]
     fn epoch_entity_and_retained_payload_limits_are_independent() {
         for (entities, retained, expected_resource, expected_limit) in [
-            (2, 10, ActiveTextMutationResource::Entities, 1),
-            (1, 11, ActiveTextMutationResource::RetainedSplitBytes, 10),
+            (2, INPUT, ActiveTextMutationResource::Entities, 1),
+            (
+                1,
+                INPUT + 1,
+                ActiveTextMutationResource::RetainedSplitBytes,
+                INPUT,
+            ),
         ] {
             assert!(matches!(
                 ActiveTextMutationMeasurements::try_admit_epoch(
                     limits(),
                     ActiveTextMutationUsage {
                         entities,
-                        input_bytes: 10,
-                        output_operations: 20,
-                        output_bytes: 60,
-                        split_bytes: 40,
+                        input_bytes: INPUT,
+                        output_operations: OPERATIONS,
+                        output_bytes: OUTPUT,
+                        split_bytes: SPLIT,
                         retained_split_bytes: retained,
-                        manifest_page_bytes: 50,
+                        manifest_page_bytes: PAGE,
                     },
                 ),
                 Err(HelixDbError::ActiveTextMutationLimitExceeded {
@@ -276,29 +295,29 @@ mod tests {
     fn every_resource_rejects_before_a_capability_exists() {
         let cases = [
             (
-                [11, 20, 60, 40, 50],
+                [INPUT + 1, OPERATIONS, OUTPUT, SPLIT, PAGE],
                 ActiveTextMutationResource::InputBytes,
-                10,
+                INPUT,
             ),
             (
-                [10, 21, 60, 40, 50],
+                [INPUT, OPERATIONS + 1, OUTPUT, SPLIT, PAGE],
                 ActiveTextMutationResource::OutputOperations,
-                20,
+                OPERATIONS,
             ),
             (
-                [10, 20, 61, 40, 50],
+                [INPUT, OPERATIONS, OUTPUT + 1, SPLIT, PAGE],
                 ActiveTextMutationResource::OutputBytes,
-                60,
+                OUTPUT,
             ),
             (
-                [10, 20, 60, 41, 50],
+                [INPUT, OPERATIONS, OUTPUT, SPLIT + 1, PAGE],
                 ActiveTextMutationResource::SplitBytes,
-                40,
+                SPLIT,
             ),
             (
-                [10, 20, 60, 40, 51],
+                [INPUT, OPERATIONS, OUTPUT, SPLIT, PAGE + 1],
                 ActiveTextMutationResource::ManifestPageBytes,
-                50,
+                PAGE,
             ),
         ];
         for (values, expected_resource, expected_limit) in cases {
@@ -339,7 +358,7 @@ mod tests {
             Err(HelixDbError::ActiveTextMutationLimitExceeded {
                 resource: ActiveTextMutationResource::InputBytes,
                 observed: u64::MAX,
-                limit: 10,
+                limit: INPUT,
             })
         ));
     }

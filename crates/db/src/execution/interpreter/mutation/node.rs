@@ -77,17 +77,7 @@ impl<'db> ExecutionContext<'db> {
             .expect("a create transition has an after row")
             .encoded()
             .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition)?;
         let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
             node_id,
         )));
@@ -196,17 +186,7 @@ impl<'db> ExecutionContext<'db> {
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition)?;
         txn.put(
             self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
                 node_id,
@@ -280,17 +260,7 @@ impl<'db> ExecutionContext<'db> {
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition)?;
         txn.put(
             self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
                 node_id,
@@ -399,17 +369,7 @@ impl<'db> ExecutionContext<'db> {
                 node_id,
             )?;
         }
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition)?;
         txn.delete(&key)?;
         txn.delete(
             self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
@@ -506,12 +466,6 @@ mod tests {
 
     use super::super::super::test_support;
     use super::*;
-
-    fn index_context(db: &HelixDB) -> MutationIndexContext {
-        MutationIndexContext::for_configured_index_test(std::sync::Arc::clone(
-            db.simhasher_registry(),
-        ))
-    }
 
     async fn all_rows(db: &HelixDB) -> BTreeMap<Bytes, Bytes> {
         let mut scan = db.inner_db().scan(..).await.unwrap();
@@ -718,7 +672,7 @@ mod tests {
         let db = test_support::open_db("mutation-node-label-updates").await;
         let node_id = test_support::add_user(&db, "alice").await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)
@@ -757,9 +711,14 @@ mod tests {
             Some(encoded_before),
             "a no-op set retains the exact canonical bytes"
         );
-        assert_eq!(
-            index_context.pending_active_text_entities(),
-            0,
+        assert!(
+            index_context
+                .finalize_queued(
+                    u64::MAX,
+                    crate::config::SearchIndexBackfillLimits::default().active_text_mutation(),
+                )
+                .unwrap()
+                .is_empty(),
             "a no-op set creates no downstream text work"
         );
         context
@@ -771,10 +730,15 @@ mod tests {
             )
             .await
             .expect("changing the label moves indexes");
-        assert_eq!(
-            index_context.pending_active_text_entities(),
-            0,
-            "an empty text catalog retains no graph transition"
+        assert!(
+            index_context
+                .finalize_queued(
+                    u64::MAX,
+                    crate::config::SearchIndexBackfillLimits::default().active_text_mutation(),
+                )
+                .unwrap()
+                .is_empty(),
+            "an empty text catalog queues no operation"
         );
 
         assert!(
@@ -808,7 +772,7 @@ mod tests {
         let to = test_support::add_user(&db, "bob").await;
         let edge_id = test_support::add_edge(&db, from, to, "FOLLOWS").await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)

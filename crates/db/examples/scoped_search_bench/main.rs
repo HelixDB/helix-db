@@ -15,8 +15,24 @@
 //! (default), and the batch-write benchmark's `batch-load` and `batch-run`
 //! (see [`batch`]).
 //!
+//! Vector and text indexing is asynchronous: writes queue index operations
+//! that the writer's index worker publishes in the background. With
+//! `BENCH_VECTOR=before` (the default) the vector index exists during the
+//! load, so publication runs alongside it. Once an index holds 250k pending
+//! members the load is throttled by retryable backpressure to the publication
+//! rate, and it then waits for the queue to drain. `BENCH_ITEMS_PER_BATCH` of
+//! about 35 or more at 768 dimensions exceeds the 8 MiB per-transaction
+//! operand limit and fails the load.
+//!
+//! Embedded `load`, `index` and `query` wait until every queued operation is
+//! published before closing or timing, so searches measure published indexes
+//! rather than a strong search's overlay of the backlog. A server's queue
+//! cannot be polled over HTTP: with `BENCH_HTTP_URL`, run `query` only once
+//! the server's benchmark samples show `queue.pending_operations` of 0.
+//!
 //! `BENCH_INDEX_TIMEOUT_SECS` (default 14,400) bounds each wait for index
-//! builds; a reference-scale backfill needs a long deadline.
+//! builds and for the queue to drain; a reference-scale backfill needs a long
+//! deadline.
 //!
 //! Embedded `query` waits for every startup cache warm before its first query,
 //! including the object-store warm of vector rows when `BENCH_CACHE_DIR` is
@@ -271,10 +287,13 @@ async fn main() {
             url,
         };
         match mode.as_str() {
-            "load" => fixture::load(&backend, load_options()).await,
+            "load" => {
+                fixture::load(&backend, load_options()).await;
+            }
             "index" => {
                 fixture::build_vector_index(&backend, env_or("BENCH_DIM", 768), index_deadline())
-                    .await
+                    .await;
+                fixture::wait_for_publication(&backend, index_deadline()).await;
             }
             "batch-load" => batch::load(&backend, &batch::Options::from_env()).await,
             "batch-run" => batch::run(&backend, &batch::Options::from_env()).await,
@@ -305,7 +324,9 @@ async fn main() {
         "load" | "index" | "index-product" | "probe" | "batch-load" | "batch-run"
     ) {
         match mode.as_str() {
-            "load" => fixture::load(&backend, load_options()).await,
+            "load" => {
+                fixture::load(&backend, load_options()).await;
+            }
             "index-product" => {
                 fixture::create_indexes(&backend, &["item_owner"], 0, index_deadline()).await
             }
@@ -316,7 +337,8 @@ async fn main() {
             "batch-run" => batch::run(&backend, &batch::Options::from_env()).await,
             _ => {
                 fixture::build_vector_index(&backend, env_or("BENCH_DIM", 768), index_deadline())
-                    .await
+                    .await;
+                fixture::wait_for_publication(&backend, index_deadline()).await;
             }
         }
         let Backend::Embedded { db, .. } = backend else {
@@ -326,6 +348,8 @@ async fn main() {
         return;
     }
 
+    // The writer loads any unpublished backlog at open, so this sees it.
+    fixture::wait_for_publication(&backend, index_deadline()).await;
     let Backend::Embedded { db: writer, .. } = &backend else {
         unreachable!("embedded backend was constructed above")
     };

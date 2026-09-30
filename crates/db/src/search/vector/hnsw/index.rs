@@ -34,14 +34,12 @@ use crate::encoding::keys::scope::DataScope;
 use crate::encoding::v2::keys::indexes::vector::VectorKey;
 #[cfg(test)]
 use crate::encoding::v2::keys::indexes::vector::{
-    VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorIndexMetadataKey, VectorItemKey,
+    VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorIndexMetadataKey,
     VectorL0PrefixKey, VectorLayer0NeighborsKey, VectorMemoryPrefixKey, VectorReverseEdgeKey,
     VectorReverseEdgePrefixKey, VectorSimHashKey, VectorUpperVectorKey,
 };
 #[cfg(test)]
 use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey as VectorTxnGuardKey;
-#[cfg(test)]
-use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 #[cfg(test)]
@@ -62,8 +60,7 @@ use super::randomness::{LayerSelector, SearchRandomness};
 use super::search;
 use super::search::{SearchObserver, SearchSession};
 use crate::search::vector::cache::store::{
-    SimHashReadStats, VectorMemoryAccess, VectorMemoryDirtyRows, VectorMemoryPendingDirtyRows,
-    VectorMemoryStore,
+    SimHashReadStats, VectorMemoryAccess, VectorMemoryPendingDirtyRows, VectorMemoryStore,
 };
 use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
 use crate::search::vector::item::Item;
@@ -568,15 +565,6 @@ impl<D: Distance> VectorIndex<D> {
         Ok(self)
     }
 
-    /// Attach transaction-local dirty tracking even when no shared memory store exists yet.
-    pub(in crate::search::vector) fn with_write_dirty_rows(
-        mut self,
-        dirty_rows: Arc<VectorMemoryDirtyRows>,
-    ) -> Self {
-        self.memory_access = VectorMemoryAccess::write_tracking(dirty_rows);
-        self
-    }
-
     /// Rejects cache attachment when scope or physical index identity differs.
     fn validate_memory_store_identity(
         &self,
@@ -600,26 +588,6 @@ impl<D: Distance> VectorIndex<D> {
     #[cfg(test)]
     fn is_memory_upper_neighbors_dirty(&self, layer: u16, node_id: NodeId) -> bool {
         self.memory_access.is_upper_neighbors_dirty(layer, node_id)
-    }
-
-    /// Fences one node's SimHash and upper-vector rows from shared-cache reads.
-    ///
-    /// Mutation paths call this immediately after staging either row family;
-    /// the surrounding write transaction owns publication or abort cleanup.
-    #[inline]
-    pub(in crate::search::vector) fn mark_memory_node_dirty(&self, node_id: NodeId) {
-        self.memory_access.mark_node_dirty(node_id);
-    }
-
-    /// Marks an upper-neighbor row unsafe for shared-cache reads in this write.
-    #[inline]
-    pub(in crate::search::vector) fn mark_memory_upper_neighbors_dirty(
-        &self,
-        layer: u16,
-        node_id: NodeId,
-    ) {
-        self.memory_access
-            .mark_upper_neighbors_dirty(layer, node_id);
     }
 
     /// Get the index name
@@ -1671,6 +1639,7 @@ mod tests {
     use crate::encoding::v2::values::indexes::vector::{
         decode_layer0_neighbors, encode_layer0_neighbors,
     };
+    use crate::search::vector::cache::store::VectorMemoryDirtyRows;
     use crate::search::vector::distance::{Cosine, Euclidean};
     use crate::search::vector::{SimHash, VectorConfigError, VectorDimensionError};
 
@@ -2148,13 +2117,6 @@ mod tests {
             ),
             Err(crate::search::vector::VectorGenerationValidationError::CacheIdentityMismatch)
         ));
-
-        let dirty = Arc::new(VectorMemoryDirtyRows::default());
-        let write = VectorIndex::<Cosine>::new("modes").with_write_dirty_rows(Arc::clone(&dirty));
-        write.mark_memory_node_dirty(7);
-        write.mark_memory_upper_neighbors_dirty(2, 9);
-        assert!(write.is_memory_node_dirty(7));
-        assert!(write.is_memory_upper_neighbors_dirty(2, 9));
 
         let close = Candidate::try_new(1, 1.0).unwrap();
         let far = Candidate::try_new(2, 2.0).unwrap();
@@ -3140,127 +3102,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_batch_item_fetch_ignores_dirty_upper_vector_cache_in_write_mode() {
-        let db = test_inner_db("batch_fetch_dirty_upper_vector_cache").await;
-        let base_index = VectorIndex::<Cosine>::new("batch_fetch_dirty_upper_vector_cache_idx");
-        let store = Arc::new(VectorMemoryStore::new(
-            DataScope::LegacyUnscoped,
-            base_index.id(),
-            u64::MAX,
-        ));
-        let dirty_rows = Arc::new(VectorMemoryDirtyRows::default());
-        let index = base_index.with_write_dirty_rows(Arc::clone(&dirty_rows));
-        index.remember_dimension(2).unwrap();
-
-        let node_id = 7u64;
-        let stale_item = cosine_test_item(&[1.0, 0.0]);
-        store.insert_upper_vector(node_id, encode_item(&stale_item));
-        dirty_rows.mark_node_dirty(node_id);
-
-        let fresh_item = cosine_test_item(&[-1.0, 0.0]);
-        let upper_key =
-            VectorKey::UpperVector(VectorUpperVectorKey::new(index.id(), node_id)).to_bytes();
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        txn.put(&upper_key, encode_item(&fresh_item)).unwrap();
-
-        let mut mutation_cache = MutationOpCache::<Cosine>::default();
-        let items = index
-            .get_items_for_layer_cached_batch(&txn, 1, &[node_id], &mut mutation_cache)
-            .await
-            .unwrap();
-        let fetched = items.get(&node_id).expect("expected fresh upper vector");
-
-        assert!(
-            Cosine::distance(&fresh_item, fetched.as_ref()) < 1e-6,
-            "write-mode batch fetch should bypass stale memory cache for dirty nodes"
-        );
-        assert!(
-            Cosine::distance(&stale_item, fetched.as_ref()) > 0.5,
-            "write-mode batch fetch returned the stale cached vector"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_batch_item_fetch_does_not_mutate_upper_vector_cache_in_write_mode() {
-        let db = test_inner_db("batch_fetch_no_write_cache_mutation").await;
-        let base_index = VectorIndex::<Cosine>::new("batch_fetch_no_write_cache_mutation_idx");
-        let store = Arc::new(VectorMemoryStore::new(
-            DataScope::LegacyUnscoped,
-            base_index.id(),
-            u64::MAX,
-        ));
-        let dirty_rows = Arc::new(VectorMemoryDirtyRows::default());
-        let index = base_index.with_write_dirty_rows(Arc::clone(&dirty_rows));
-        index.remember_dimension(2).unwrap();
-
-        let node_id = 8u64;
-        dirty_rows.mark_node_dirty(node_id);
-        let fresh_item = cosine_test_item(&[0.25, 0.75]);
-        let upper_key =
-            VectorKey::UpperVector(VectorUpperVectorKey::new(index.id(), node_id)).to_bytes();
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        txn.put(&upper_key, encode_item(&fresh_item)).unwrap();
-
-        let mut mutation_cache = MutationOpCache::<Cosine>::default();
-        let items = index
-            .get_items_for_layer_cached_batch(&txn, 1, &[node_id], &mut mutation_cache)
-            .await
-            .unwrap();
-
-        assert!(items.contains_key(&node_id));
-        assert!(
-            store.get_upper_vector(node_id).is_none(),
-            "write-mode batch fetch must not publish uncommitted upper vectors to shared memory cache"
-        );
-    }
-
-    #[tokio::test]
-    async fn write_tracking_get_item_uses_authoritative_simhash_for_dirty_node() {
-        let db = test_inner_db("write_mode_get_item_dirty_simhash_bypass").await;
-        let base_index = VectorIndex::<Cosine>::new("write_mode_get_item_dirty_simhash_bypass_idx");
-        let dirty_rows = Arc::new(VectorMemoryDirtyRows::default());
-        let index = base_index.with_write_dirty_rows(Arc::clone(&dirty_rows));
-        index.remember_dimension(2).unwrap();
-
-        let node_id = 33u64;
-        let stale_simhash =
-            crate::search::vector::SimHash::from_bits(0x1111_0000_0000_0000 ^ node_id);
-        let fresh_simhash =
-            crate::search::vector::SimHash::from_bits(0x2222_0000_0000_0000 ^ node_id);
-        let stale_item = cosine_test_item(&[1.0, 0.0]);
-        let fresh_item = cosine_test_item(&[0.0, 1.0]);
-        let stale_key = VectorKey::Vector(VectorItemKey::new(
-            index.id(),
-            order_code_from_simhash_bits(stale_simhash.bits()),
-            node_id,
-        ))
-        .to_bytes();
-        let fresh_key = VectorKey::Vector(VectorItemKey::new(
-            index.id(),
-            order_code_from_simhash_bits(fresh_simhash.bits()),
-            node_id,
-        ))
-        .to_bytes();
-        let simhash_key = VectorKey::SimHash(VectorSimHashKey::new(index.id(), node_id)).to_bytes();
-
-        dirty_rows.mark_node_dirty(node_id);
-
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        txn.put(&simhash_key, encode_simhash(fresh_simhash.bits()))
-            .unwrap();
-        txn.put(&stale_key, encode_item(&stale_item)).unwrap();
-        txn.put(&fresh_key, encode_item(&fresh_item)).unwrap();
-
-        let fetched = index
-            .get_item(&txn, node_id)
-            .await
-            .unwrap()
-            .expect("dirty write-mode fetch should use fresh simhash row");
-        assert_eq!(fetched.vector.to_vec(), fresh_item.vector.to_vec());
-        assert_ne!(fetched.vector.to_vec(), stale_item.vector.to_vec());
     }
 
     #[tokio::test]

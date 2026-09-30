@@ -683,19 +683,19 @@ fn build_delta_row(
     (key, value)
 }
 
-fn assert_catch_up_with_counters(result: IndexOperationStepResult, expected: OperationCounters) {
-    let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
-        TextBuildProgress::Constructing(TextBuildStage::CatchUp(progress)),
-    )) = result
-    else {
-        panic!("pending build delta must preempt manifest validation")
-    };
-    assert!(progress.cursor.is_none());
-    assert_eq!(progress.counters, expected);
+/// Pre-queue build deltas are never replayed: validation blocks the build.
+fn assert_pre_queue_delta_blocks(result: IndexOperationStepResult) {
+    assert!(
+        matches!(
+            result,
+            IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
+        ),
+        "a pre-queue build delta must block manifest validation: {result:?}"
+    );
 }
 
 #[tokio::test]
-async fn pending_delta_preempts_every_validation_lane_and_preserves_counters() {
+async fn pre_queue_delta_blocks_every_validation_lane() {
     let db = Db::open(
         "text-validation-pending-delta-lanes",
         Arc::new(InMemory::new()),
@@ -736,14 +736,14 @@ async fn pending_delta_preempts_every_validation_lane_and_preserves_counters() {
         )
         .await
         .unwrap() else {
-            panic!("pending build delta selects a database-only catch-up transition")
+            panic!("a pre-queue build delta selects a database-only blocker")
         };
-        assert_catch_up_with_counters(prepared.stage(&transaction).await.unwrap(), counters);
+        assert_pre_queue_delta_blocks(prepared.stage(&transaction).await.unwrap());
     }
 }
 
 #[tokio::test]
-async fn live_state_with_absent_marker_catches_up_only_when_a_delta_explains_it() {
+async fn live_state_with_absent_marker_blocks_with_or_without_a_pre_queue_delta() {
     let db = Db::open(
         "text-validation-live-absent-delta",
         Arc::new(InMemory::new()),
@@ -836,12 +836,9 @@ async fn live_state_with_absent_marker_catches_up_only_when_a_delta_explains_it(
     )
     .await
     .unwrap() else {
-        panic!("explained marker mismatch selects database-only catch-up")
+        panic!("a pre-queue delta selects a database-only blocker")
     };
-    assert_catch_up_with_counters(
-        explained.stage(&transaction).await.unwrap(),
-        OperationCounters::default(),
-    );
+    assert_pre_queue_delta_blocks(explained.stage(&transaction).await.unwrap());
 }
 
 #[tokio::test]

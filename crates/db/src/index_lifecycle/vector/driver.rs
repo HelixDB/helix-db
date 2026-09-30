@@ -1,16 +1,19 @@
 //! Bounded outbox driver for hidden vector construction.
 //!
-//! Each source or catch-up step plans deterministic HNSW writes in a disposable
+//! Each source step plans deterministic HNSW writes in a disposable
 //! transaction, admits the complete last-write-wins vector write set, and then
 //! applies those captured writes in the outbox transaction. The outbox
-//! transaction also owns tenant mappings, builder-applied state,
-//! delta deletion, and the next durable checkpoint.
+//! transaction also owns tenant mappings, builder-applied state, and the next
+//! durable checkpoint. Writes made during a build are queued for the hidden
+//! generation and published only after activation, by the same planner
+//! ([`plan_and_apply`], see [`super::publication`]).
 //!
 //! The decoded rows planning reads are kept in one bounded
 //! [`VectorBuildSession`] per build that outlives its step only after that step
 //! commits: see [`RetainedVectorBuild`] for why a matching checkpoint proves
 //! the cached rows still equal the committed builder-exclusive generation.
-//! Interleaved builds each retain their own session under one shared budget.
+//! Interleaved builds each retain their own session, and queue publication
+//! checks sessions out, under one shared budget ([`VectorBuildCache`]).
 //!
 //! No vector row codec is defined here. Physical reads and writes remain behind
 //! [`crate::search::vector::VectorIndex`] and the typed `encoding/v2` boundary.
@@ -18,6 +21,7 @@
 use std::any::Any;
 use std::num::NonZeroU64;
 use std::ops::Bound;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -27,8 +31,10 @@ use sha2::{Digest, Sha256};
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
 use crate::config::{IndexLifecycleScanTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits};
-use crate::encoding::property::{decode_properties, Property};
-use crate::encoding::v2::keys::indexes::vector::VectorStorageLane;
+use crate::encoding::property::decode_properties;
+use crate::encoding::v2::keys::indexes::vector::{
+    VectorIndexMetadataKey, VectorKey, VectorStorageLane,
+};
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind, KeyPrefix};
@@ -44,9 +50,10 @@ use crate::encoding::v2::values::{
 use crate::error::{HelixDbError, Result};
 use crate::search::vector::{
     self, Distance, MeasuredVectorTransaction, PlannedVectorMutation,
-    ValidatedVectorBuildGenerationHandle, ValidatedVectorCleanupAuthority, VectorBuildSession,
-    VectorBuildSessionStats, VectorCleanupRow, VectorDistanceMetric, VectorIndex,
-    VectorIndexConfig, VectorWriteMeasurement, VectorWriteRecorder,
+    ValidatedVectorBuildGenerationHandle, ValidatedVectorCleanupAuthority,
+    ValidatedVectorGenerationHandle, VectorBuildSession, VectorBuildSessionStats, VectorCleanupRow,
+    VectorDistanceMetric, VectorIndex, VectorIndexConfig, VectorWriteMeasurement,
+    VectorWriteRecorder,
 };
 
 use super::{vector_document, VectorIndexedDocument};
@@ -59,10 +66,10 @@ use crate::index_lifecycle::work::{
     AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue, VectorTenantPartition,
 };
 use crate::index_lifecycle::{
-    BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId, IndexGenerationId,
-    IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationId, IndexOperationOutcome,
-    IndexOperationProgress, IndexOperationRecord, IndexRecordV2, IndexV2MetadataValue,
-    LegacyVectorDirectoryValidationProgress, LegacyVectorPhysicalReservation,
+    ActiveIndexHandle, BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId,
+    IndexGenerationId, IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationId,
+    IndexOperationOutcome, IndexOperationProgress, IndexOperationRecord, IndexRecordV2,
+    IndexV2MetadataValue, LegacyVectorDirectoryValidationProgress, LegacyVectorPhysicalReservation,
     LegacyVectorValidationLane, LegacyVectorValidationProgress, NoCursorProgress,
     OperationCounters, PhysicalGeneration, PrefixScanProgress, SourceScanProgress, TextPartition,
     ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition, VectorBuildProgress,
@@ -78,7 +85,8 @@ pub(crate) struct VectorIndexDriver {
     scan_tuning: IndexLifecycleScanTuning,
     /// How build handles fetch HNSW row batches, fixed by the database's cache mode.
     batch_reads: crate::batch_reads::BatchReads,
-    build_cache: VectorBuildCache,
+    /// Planning budget shared with queue publication.
+    build_cache: Arc<VectorBuildCache>,
 }
 
 /// Exact durable checkpoint a retained build planning cache mirrors.
@@ -111,8 +119,9 @@ impl VectorBuildCheckpoint {
 /// Build planning cache proven equal to committed physical rows at a checkpoint.
 ///
 /// Only the V2 builder writes a `Building` generation's physical vector rows:
-/// foreground mutations of a building index record coalesced build deltas
-/// instead, and the planning/apply contract of
+/// foreground mutations of a building index enqueue their operations for that
+/// generation, and queue publication defers a `Building` generation without
+/// touching its rows until activation. The planning/apply contract of
 /// [`crate::search::vector::PlannedVectorMutation::apply_to`] relies on the same
 /// exclusivity. A session is retained only through
 /// [`CommittedStepState`], which the outbox releases after the step that
@@ -186,120 +195,233 @@ fn max_min_cap(budget: usize, sizes: impl IntoIterator<Item = usize>) -> Option<
     })
 }
 
-/// Driver-owned build planning sessions retained between committed steps.
+/// Vector planning sessions of build steps and queue publication attempts,
+/// under one byte budget.
 ///
-/// Holds at most one session per operation and [`MAX_RETAINED_VECTOR_BUILDS`]
-/// in total, least recently committed first, so interleaved builds each check
-/// out their own session instead of evicting each other's. The retained
-/// sessions share `budget` max-min fairly and fit it together once each
-/// commit's trim completes.
+/// Sessions retained between committed build steps and sessions checked out
+/// by running steps and attempts split `budget` max-min fairly: a retained
+/// session demands its bytes and a checked-out one demands without bound, so
+/// every checked-out session is bound to the same share. At most one session
+/// per operation and [`MAX_RETAINED_VECTOR_BUILDS`] in total are retained,
+/// least recently committed first, so interleaved builds each check out their
+/// own session instead of evicting each other's.
 ///
-/// No bulk eviction runs on the async executor. A checked-out session is bound
-/// to its max-min share of `budget` beside the other retained sessions, so
-/// per-entity [`VectorBuildSession::enforce_limits`] evicts it incrementally
-/// between the step's awaits instead of letting it grow back to the whole
-/// budget. That starts from a session within every limit of its share: a
-/// reused session's bytes already fit it, and when a smaller share lowers its
-/// class caps below what it holds, checkout evicts the excess on the blocking
-/// pool. A commit then only trims what its step added beyond the budget,
-/// which happens when a build joins others already holding it or when steps
-/// run concurrently, and that trim runs on the blocking pool too. A dropped
-/// large session frees its entries on a background thread.
-struct VectorBuildCache {
+/// Every checkout and retaining commit rebalances: retained sessions over the
+/// new cap shrink, and checked-out sessions take the new share at their next
+/// entity boundary ([`CheckedOutSession::rebind`]). A released checkout leaves
+/// the share as it is until the next rebalance, so the split only errs low.
+/// Together the sessions exceed the budget by at most what each checked-out
+/// session plans for one entity beyond its latest share.
+///
+/// No bulk eviction runs on the async executor. Rebalancing shrinks retained
+/// sessions on the blocking pool while holding the lock, so no checkout
+/// observes a session mid-trim, and a checked-out session over its share is
+/// shrunk there too, at checkout or between entities. Per-entity
+/// [`VectorBuildSession::enforce_limits`] then evicts only what one entity
+/// adds. A dropped large session frees its entries on a background thread.
+pub(crate) struct VectorBuildCache {
     budget: NonZeroU64,
-    /// An async lock, because a commit holds it while its trim runs off the executor.
+    /// An async lock, because rebalancing holds it while its trim runs off the executor.
     retained: Arc<tokio::sync::Mutex<Vec<RetainedVectorBuild>>>,
+    leases: Arc<SessionLeases>,
 }
 
-impl VectorBuildCache {
-    fn new(budget: NonZeroU64) -> Self {
+/// Checked-out sessions and the share of the budget each is bound to.
+struct SessionLeases {
+    count: AtomicUsize,
+    /// Written only while rebalancing, under the retained lock.
+    share: AtomicU64,
+}
+
+/// One checked-out session's claim on a share of the budget, released on drop.
+struct SessionLease(Arc<SessionLeases>);
+
+impl SessionLease {
+    fn new(leases: &Arc<SessionLeases>) -> Self {
+        leases.count.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(leases))
+    }
+
+    /// Returns the share every checked-out session is bound to.
+    fn share(&self) -> NonZeroU64 {
+        NonZeroU64::new(self.0.share.load(Ordering::SeqCst)).unwrap_or(NonZeroU64::MIN)
+    }
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        self.0.count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A planning session checked out of a [`VectorBuildCache`], bound to a share
+/// of its budget until it is dropped or handed back for retention.
+pub(crate) struct CheckedOutSession<D: Distance> {
+    session: VectorBuildSession<D>,
+    /// Share the session is bound to.
+    bound: NonZeroU64,
+    lease: SessionLease,
+}
+
+impl<D: Distance> CheckedOutSession<D> {
+    fn fresh(lease: SessionLease, share: NonZeroU64) -> Self {
         Self {
-            budget,
-            retained: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            session: VectorBuildSession::new(share),
+            bound: share,
+            lease,
         }
     }
 
-    /// Returns the retained session for exactly `checkpoint`, or a fresh one.
+    /// Binds the session to its latest share of the budget.
+    ///
+    /// Call between entities, with every dirty row flushed. When the share
+    /// fell below what the session holds, the session shrinks on the blocking
+    /// pool. One that cannot shrink is replaced by a fresh session, which
+    /// plans alike because the planning transaction holds every flushed row.
+    async fn rebind(&mut self) {
+        let share = self.lease.share();
+        if share == self.bound {
+            return;
+        }
+        let fell = share < self.bound;
+        self.bound = share;
+        self.session.set_max_retained_bytes(share);
+        if !fell || !self.session.exceeds_limits() {
+            return;
+        }
+        let session = core::mem::replace(&mut self.session, VectorBuildSession::new(share));
+        self.session = shrink_off_executor(session, |session| session.shrink_to(usize::MAX))
+            .await
+            .unwrap_or_else(|| VectorBuildSession::new(share));
+    }
+
+    /// Releases the session's share, returning it for retention.
+    fn into_session(self) -> VectorBuildSession<D> {
+        self.session
+    }
+}
+
+impl<D: Distance> core::ops::Deref for CheckedOutSession<D> {
+    type Target = VectorBuildSession<D>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl<D: Distance> core::ops::DerefMut for CheckedOutSession<D> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
+    }
+}
+
+/// Runs `shrink` on `session` on the blocking pool.
+///
+/// Returns `None` when the session could not shrink or runtime shutdown
+/// cancelled the shrink; the session was then dropped on the blocking pool.
+async fn shrink_off_executor<S: Send + 'static>(
+    mut session: S,
+    shrink: impl FnOnce(&mut S) -> Result<()> + Send + 'static,
+) -> Option<S> {
+    let shrunk = tokio::task::spawn_blocking(move || shrink(&mut session).map(|()| session)).await;
+    match shrunk {
+        Ok(shrunk) => shrunk.ok(),
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => None,
+        },
+    }
+}
+
+impl VectorBuildCache {
+    pub(crate) fn new(budget: NonZeroU64) -> Self {
+        Self {
+            budget,
+            retained: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            leases: Arc::new(SessionLeases {
+                count: AtomicUsize::new(0),
+                share: AtomicU64::new(budget.get()),
+            }),
+        }
+    }
+
+    /// Checks out a fresh session for work that retains none between
+    /// attempts: queue publication.
+    pub(crate) async fn checkout_fresh<D: Distance>(&self) -> CheckedOutSession<D> {
+        let (lease, share, _) = self.lease(None).await;
+        CheckedOutSession::fresh(lease, share)
+    }
+
+    /// Checks out the retained session for exactly `checkpoint`, or a fresh one.
     ///
     /// A retained session for the same operation at any other checkpoint, or
     /// of another metric, is stale and dropped; other operations' sessions stay.
-    /// The returned session is bound to its max-min share of the budget, with
-    /// its own demand unbounded, beside the other retained sessions: the whole
-    /// budget when it is the only build.
+    /// The returned session is bound to its share: the whole budget when it is
+    /// the only session.
     ///
-    /// The returned session is within every limit of that share. Because the
-    /// retained sessions fit the budget together, a reused session's bytes
-    /// already fit it. Its class caps scale with the share, though, so a share
-    /// smaller than the one it last stepped with can leave it holding more
-    /// entries of a class than it now allows: a session dense in SimHashes or
-    /// low-dimension items, whose count caps bind before its bytes. That excess
-    /// is evicted on the blocking pool before the session is returned, so the
-    /// step's first [`VectorBuildSession::enforce_limits`] evicts only what the
-    /// step itself adds. Like a commit's trim, it is not step telemetry.
+    /// The returned session is within every limit of that share. A reused
+    /// session can hold more: its bytes when the share fell since its commit,
+    /// or entries of a class whose cap scales with the share, such as a session
+    /// dense in SimHashes or low-dimension items, whose count caps bind before
+    /// its bytes. That excess is evicted on the blocking pool before the
+    /// session is returned, so the step's first
+    /// [`VectorBuildSession::enforce_limits`] evicts only what the step itself
+    /// adds. Like a commit's trim, it is not step telemetry.
     async fn checkout<D: Distance>(
         &self,
         checkpoint: &VectorBuildCheckpoint,
-    ) -> VectorBuildSession<D> {
-        let budget = usize::try_from(self.budget.get()).unwrap_or(usize::MAX);
-        let (own, share) = {
-            let mut retained = self.retained.lock().await;
-            let own = retained
-                .iter()
-                .position(|retained| retained.checkpoint.operation_id == checkpoint.operation_id)
-                .map(|index| retained.remove(index));
-            let share = max_min_cap(
-                budget,
-                retained
-                    .iter()
-                    .map(|retained| retained.session.retained_bytes())
-                    .chain(core::iter::once(usize::MAX)),
-            )
-            // Only an unbounded budget fits an unbounded demand.
-            .unwrap_or(budget);
-            (own, share)
-        };
-        let share =
-            NonZeroU64::new(u64::try_from(share).unwrap_or(u64::MAX)).unwrap_or(NonZeroU64::MIN);
+    ) -> CheckedOutSession<D> {
+        let (lease, share, own) = self.lease(Some(checkpoint.operation_id)).await;
         let Some(RetainedVectorBuild { mut session, .. }) =
             own.filter(|retained| retained.checkpoint == *checkpoint)
         else {
-            return VectorBuildSession::new(share);
+            return CheckedOutSession::fresh(lease, share);
         };
         session.set_max_retained_bytes(share);
         if session.exceeds_limits() {
             // Retained sessions are clean, so the shrink needs no transaction.
-            let shrunk = tokio::task::spawn_blocking(move || {
-                session.shrink_to(usize::MAX).map(|()| session)
-            })
-            .await;
-            session = match shrunk {
-                Ok(Ok(session)) => session,
-                // A session that cannot shrink was dropped on the blocking pool.
-                Ok(Err(_)) => return VectorBuildSession::new(share),
-                Err(error) => match error.try_into_panic() {
-                    Ok(panic) => std::panic::resume_unwind(panic),
-                    // A shrink cancelled by runtime shutdown dropped the session.
-                    Err(_) => return VectorBuildSession::new(share),
-                },
+            let Some(shrunk) =
+                shrink_off_executor(session, |session| session.shrink_to(usize::MAX)).await
+            else {
+                return CheckedOutSession::fresh(lease, share);
             };
+            session = shrunk;
         }
         let session: Box<dyn Any> = session;
         let Ok(session) = session.downcast::<VectorBuildSession<D>>() else {
-            return VectorBuildSession::new(share);
+            return CheckedOutSession::fresh(lease, share);
         };
         let mut session = *session;
         session.reset_stats();
-        session
+        CheckedOutSession {
+            session,
+            bound: share,
+            lease,
+        }
+    }
+
+    /// Leases a share of the budget for one checkout, first taking
+    /// `operation`'s retained session out, and returns the share.
+    async fn lease(
+        &self,
+        operation: Option<IndexOperationId>,
+    ) -> (SessionLease, NonZeroU64, Option<RetainedVectorBuild>) {
+        let lease = SessionLease::new(&self.leases);
+        let mut retained = Arc::clone(&self.retained).lock_owned().await;
+        let own = operation
+            .and_then(|operation| {
+                retained
+                    .iter()
+                    .position(|retained| retained.checkpoint.operation_id == operation)
+            })
+            .map(|index| retained.remove(index));
+        let share = self.rebalance(retained).await;
+        (lease, share, own)
     }
 
     /// Retains a committed step's session, or forgets the operation's session.
     ///
-    /// The shared budget is then split max-min fairly: sessions under their
-    /// fair share keep every entry, and the rest shrink to the one cap that
-    /// exactly fills what remains. Shrinking runs on the blocking pool while
-    /// the lock is held, so no checkout observes a session mid-trim and the
-    /// executor thread never runs the evictions. A session that cannot shrink
-    /// is dropped.
+    /// A retained session rebalances the budget.
     async fn after_commit(
         &self,
         operation_id: IndexOperationId,
@@ -317,13 +439,42 @@ impl VectorBuildCache {
         if retained.len() > MAX_RETAINED_VECTOR_BUILDS {
             retained.remove(0);
         }
-        let Some(cap) = max_min_cap(
-            usize::try_from(self.budget.get()).unwrap_or(usize::MAX),
+        self.rebalance(retained).await;
+    }
+
+    /// Splits the budget max-min fairly between the retained sessions and
+    /// every checked-out one, publishes the checked-out share, and shrinks
+    /// every retained session over the cap. Returns the share.
+    ///
+    /// Sessions under their fair share keep every entry, and the rest shrink
+    /// to the one cap that exactly fills what remains. Shrinking runs on the
+    /// blocking pool with `retained` still locked, so no checkout observes a
+    /// session mid-trim. A session that cannot shrink is dropped.
+    async fn rebalance(
+        &self,
+        mut retained: tokio::sync::OwnedMutexGuard<Vec<RetainedVectorBuild>>,
+    ) -> NonZeroU64 {
+        let budget = usize::try_from(self.budget.get()).unwrap_or(usize::MAX);
+        let cap = max_min_cap(
+            budget,
             retained
                 .iter()
-                .map(|retained| retained.session.retained_bytes()),
-        ) else {
-            return;
+                .map(|retained| retained.session.retained_bytes())
+                .chain(core::iter::repeat_n(
+                    usize::MAX,
+                    self.leases.count.load(Ordering::SeqCst),
+                )),
+        );
+        // Only an unbounded budget fits an unbounded demand.
+        let share = NonZeroU64::new(u64::try_from(cap.unwrap_or(budget)).unwrap_or(u64::MAX))
+            .unwrap_or(NonZeroU64::MIN);
+        self.leases.share.store(share.get(), Ordering::SeqCst);
+        let Some(cap) = cap.filter(|cap| {
+            retained
+                .iter()
+                .any(|retained| retained.session.retained_bytes() > *cap)
+        }) else {
+            return share;
         };
         let trimmed = tokio::task::spawn_blocking(move || {
             retained.retain_mut(|retained| {
@@ -333,10 +484,10 @@ impl VectorBuildCache {
         .await;
         // A trim cancelled by runtime shutdown leaves the sessions whole.
         let Err(error) = trimmed else {
-            return;
+            return share;
         };
         let Ok(panic) = error.try_into_panic() else {
-            return;
+            return share;
         };
         std::panic::resume_unwind(panic);
     }
@@ -363,9 +514,9 @@ impl VectorIndexDriver {
             simhasher_registry,
             scan_tuning: IndexLifecycleScanTuning::default(),
             batch_reads: crate::batch_reads::BatchReads::Single,
-            build_cache: VectorBuildCache::new(
+            build_cache: Arc::new(VectorBuildCache::new(
                 SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
-            ),
+            )),
         }
     }
 
@@ -375,7 +526,7 @@ impl VectorIndexDriver {
         self
     }
 
-    /// Applies the database's row-batch fetch policy to build and catch-up handles.
+    /// Applies the database's row-batch fetch policy to build handles.
     ///
     /// Builds issue one `multi_get` per batch until the database opts into
     /// concurrent chunks, which it does only when a SlateDB block cache
@@ -388,13 +539,16 @@ impl VectorIndexDriver {
         self
     }
 
-    /// Bounds the build planning sessions retained across committed steps.
-    ///
-    /// Every retained session shares this budget, and each in-flight step's
-    /// session is bounded by its max-min share of it when checked out.
+    /// Bounds the planning sessions of builds and of queue publication
+    /// through [`Self::build_cache`] together.
     pub(crate) fn with_build_cache_bytes(mut self, budget: NonZeroU64) -> Self {
-        self.build_cache = VectorBuildCache::new(budget);
+        self.build_cache = Arc::new(VectorBuildCache::new(budget));
         self
+    }
+
+    /// Returns the planning budget builds share with queue publication.
+    pub(crate) fn build_cache(&self) -> Arc<VectorBuildCache> {
+        Arc::clone(&self.build_cache)
     }
 }
 
@@ -402,6 +556,22 @@ impl VectorIndexDriver {
 impl IndexOperationDriver for VectorIndexDriver {
     fn family(&self) -> IndexOperationFamily {
         IndexOperationFamily::Vector
+    }
+
+    async fn acquire_generation_ownership(
+        &self,
+        scope: DataScope,
+        operation: &IndexOperationRecord,
+    ) -> Box<dyn IndexOperationStepPermit> {
+        Box::new(
+            self.scope_gates
+                .publication_permit(crate::index_lifecycle::queue::QueueTarget::new(
+                    scope,
+                    operation.index_id(),
+                    operation.generation(),
+                ))
+                .await,
+        )
     }
 
     async fn acquire_step_permit(
@@ -414,7 +584,6 @@ impl IndexOperationDriver for VectorIndexDriver {
             IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
                 VectorBuildStage::AdoptLegacy(_)
                     | VectorBuildStage::ValidateAdoptedDirectory(_)
-                    | VectorBuildStage::CatchUp(_)
                     | VectorBuildStage::ValidateDescriptor(_)
                     | VectorBuildStage::Activate(_)
             )) | IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(_))
@@ -1321,10 +1490,10 @@ impl VectorStepResult {
 
     /// Offers `session` for reuse once this step commits its progress.
     ///
-    /// Only a step that progressed to another Scan or CatchUp step, the only
-    /// stages that check a session out, and whose session holds no unflushed
-    /// rows can hand committed state to a later step; every other outcome
-    /// drops the session here.
+    /// Only a step that progressed to another Scan step, the only stage that
+    /// checks a session out, and whose session holds no unflushed rows can
+    /// hand committed state to a later step; every other outcome drops the
+    /// session here.
     fn retaining<D: Distance>(
         mut self,
         operation: &IndexOperationRecord,
@@ -1333,7 +1502,7 @@ impl VectorStepResult {
     ) -> Self {
         let IndexOperationStepResult::Progressed(
             next @ IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
-                VectorBuildStage::Scan(_) | VectorBuildStage::CatchUp(_),
+                VectorBuildStage::Scan(_),
             )),
         ) = &self.result
         else {
@@ -1464,31 +1633,22 @@ async fn step_build<D: Distance>(
                 &mut session,
             )
             .await?;
-            Ok(step.retaining(operation, record, session))
+            Ok(step.retaining(operation, record, session.into_session()))
         }
         VectorBuildStage::CatchUp(progress) => {
-            let mut session = build_cache
-                .checkout::<D>(&VectorBuildCheckpoint::new(
-                    operation,
-                    record,
-                    operation.progress().clone(),
-                ))
-                .await;
-            let step = catch_up::<D>(
-                db,
-                transaction,
-                scope,
-                operation,
-                record,
-                definition,
-                progress,
-                limits,
-                simhasher_registry,
-                batch_reads,
-                &mut session,
-            )
-            .await?;
-            Ok(step.retaining(operation, record, session))
+            // Only builds started before operations were queued persist this
+            // stage; queued builds go from Scan to ValidateDescriptor.
+            if has_pre_queue_deltas(transaction, scope, operation).await? {
+                return Ok(VectorStepResult::ordinary(
+                    IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation),
+                ));
+            }
+            Ok(VectorStepResult::ordinary(progressed_build(
+                VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
+                    cursor: None,
+                    counters: progress.counters,
+                }),
+            )))
         }
         VectorBuildStage::ValidateDescriptor(progress) => Ok(VectorStepResult::ordinary(
             validate_descriptor::<D>(
@@ -1637,21 +1797,10 @@ async fn step_build<D: Distance>(
                     measurement,
                 ));
             }
-            if generation_has_rows(
-                transaction,
-                scope,
-                RecordKind::BuildDelta,
-                operation.index_id(),
-                operation.generation(),
-            )
-            .await?
-            {
-                return Ok(VectorStepResult::ordinary(progressed_build(
-                    VectorBuildStage::CatchUp(PrefixScanProgress {
-                        cursor: None,
-                        counters: progress.counters,
-                    }),
-                )));
+            if has_pre_queue_deltas(transaction, scope, operation).await? {
+                return Ok(VectorStepResult::ordinary(
+                    IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation),
+                ));
             }
             if generation_has_rows(
                 transaction,
@@ -1676,6 +1825,34 @@ async fn step_build<D: Distance>(
             ))
         }
     }
+}
+
+/// Detects build deltas written before vector operations were queued.
+///
+/// Queued builds never write `BuildDelta` rows: writes during a build enqueue
+/// complete operations that the publisher applies after activation. Rows left
+/// by an in-flight pre-queue build are not replayed, so that build blocks
+/// until it is aborted and the index is created again.
+async fn has_pre_queue_deltas(
+    transaction: &DbTransaction,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+) -> Result<bool> {
+    let found = generation_has_rows(
+        transaction,
+        scope,
+        RecordKind::BuildDelta,
+        operation.index_id(),
+        operation.generation(),
+    )
+    .await?;
+    if found {
+        tracing::error!(
+            operation_id = %operation.operation_id().as_uuid(),
+            "vector build holds pre-queue build deltas; abort it and create the index again"
+        );
+    }
+    Ok(found)
 }
 
 #[allow(
@@ -2094,7 +2271,7 @@ async fn scan_source<D: Distance>(
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
-    build_session: &mut VectorBuildSession<D>,
+    build_session: &mut CheckedOutSession<D>,
 ) -> Result<VectorStepResult> {
     let source_prefix = source_prefix(scope, definition.element_kind());
     let start = cursor_suffix(&source_prefix, progress.cursor.as_ref())?;
@@ -2108,7 +2285,7 @@ async fn scan_source<D: Distance>(
         }
         Some(std::cmp::Ordering::Equal) => {
             return Ok(VectorStepResult::ordinary(progressed_build(
-                VectorBuildStage::CatchUp(PrefixScanProgress {
+                VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
                     cursor: None,
                     counters: progress.counters,
                 }),
@@ -2125,6 +2302,7 @@ async fn scan_source<D: Distance>(
             &scan_options,
         )
         .await?;
+    let target = VectorPlanTarget::build(scope, operation, record)?;
     let planning = db.begin(IsolationLevel::Snapshot).await?;
     let planning_recorder = VectorWriteRecorder::new();
     let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
@@ -2194,17 +2372,13 @@ async fn scan_source<D: Distance>(
             &planning,
             &planning_recorder,
             transaction,
-            scope,
-            operation,
-            record,
+            &target,
             definition,
             Arc::clone(&simhasher_registry),
             batch_reads,
             entity_id,
-            None,
+            &[],
             document.as_ref(),
-            true,
-            false,
             &accounting,
             build_session,
         )
@@ -2254,7 +2428,7 @@ async fn scan_source<D: Distance>(
     let vector_planning = accounting.planning_usage(build_session.stats());
     let (counters, single_vector_output_bytes) = accounting.finish_with_max()?;
     let next = if exhausted {
-        VectorBuildStage::CatchUp(PrefixScanProgress {
+        VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
             cursor: None,
             counters,
         })
@@ -2275,269 +2449,231 @@ async fn scan_source<D: Distance>(
     })
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "catch-up retains exact operation and physical planning authority"
-)]
-async fn catch_up<D: Distance>(
-    db: &Db,
-    transaction: &DbTransaction,
+/// Generation one planner writes, and the owner its physical rows answer to.
+///
+/// Either owner is the only writer of the generation's physical rows while it
+/// plans, so planning may read committed rows outside the transaction that
+/// commits the plan: [`RetainedVectorBuild`] states the build's exclusivity and
+/// [`super::publication`] the publisher's.
+pub(super) struct VectorPlanTarget<'a> {
     scope: DataScope,
-    operation: &IndexOperationRecord,
-    record: &IndexRecordV2,
-    definition: &ValidatedVectorIndexDefinition,
-    progress: &PrefixScanProgress,
-    limits: SearchIndexBatchLimits,
-    simhasher_registry: Arc<vector::SimHasherRegistry>,
-    batch_reads: crate::batch_reads::BatchReads,
-    build_session: &mut VectorBuildSession<D>,
-) -> Result<VectorStepResult> {
-    let prefix = generation_prefix(
-        scope,
-        RecordKind::BuildDelta,
-        operation.index_id(),
-        operation.generation(),
-    );
-    let mut rows = transaction.scan_prefix(&prefix, ..).await?;
-    let planning = db.begin(IsolationLevel::Snapshot).await?;
-    let planning_recorder = VectorWriteRecorder::new();
-    let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
-    let mut saw_row = false;
-    while accounting.can_read_another() {
-        let Some(row) = rows.next().await? else {
-            break;
-        };
-        saw_row = true;
-        let input_bytes = row.key.len().saturating_add(row.value.len()) as u64;
-        let (entity, delta) = decode_delta(scope, &row.key, &row.value)?;
-        if delta.index_id != operation.index_id()
-            || delta.generation != operation.generation()
-            || entity.kind != definition.element_kind()
-        {
-            return Err(corruption("vector delta ownership mismatch"));
-        }
-        if !accounting.can_admit_input(input_bytes) {
-            if accounting.is_empty() {
-                return Ok(VectorStepResult::ordinary(
-                    IndexOperationStepResult::Blocked(IndexOperationBlocker::OversizedEntity {
-                        entity_kind: entity.kind,
-                        entity_id: entity.id,
-                        observed: input_bytes,
-                        limit: limits.max_input_bytes().get(),
-                    }),
-                ));
-            }
-            break;
-        }
-        let mut previous = load_applied(
-            transaction,
-            scope,
-            operation.index_id(),
-            operation.generation(),
-            entity.kind,
-            entity.id,
-        )
-        .await?;
-        if previous.is_none() {
-            previous = match &delta.state {
-                crate::index_lifecycle::work::CoalescedBuildDeltaState::VectorBefore(previous) => {
-                    previous.clone()
-                }
-                crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker => {
-                    return Err(corruption(
-                        "vector build delta has no original partition after applied-state release",
-                    ));
-                }
-                crate::index_lifecycle::work::CoalescedBuildDeltaState::SecondaryBefore(_) => {
-                    return Err(corruption(
-                        "vector build delta contains secondary recovery state",
-                    ));
-                }
-            };
-        }
-        let properties = read_authoritative_properties(transaction, scope, entity).await?;
-        let next = match properties {
-            Some(properties) => match vector_document(definition, &properties) {
-                Ok(document) => document,
-                Err(_) => {
-                    return Ok(VectorStepResult::ordinary(invalid_source(
-                        entity.kind,
-                        entity.id,
-                    )));
-                }
-            },
-            None => None,
-        };
-        let outcome = plan_and_apply::<D>(
-            &planning,
-            &planning_recorder,
-            transaction,
-            scope,
-            operation,
-            record,
-            definition,
-            Arc::clone(&simhasher_registry),
-            batch_reads,
-            entity.id,
-            previous.as_ref(),
-            next.as_ref(),
-            false,
-            true,
-            &accounting,
-            build_session,
-        )
-        .await?;
-        accounting.record_planning();
-        let EntityPlanOutcome::Admitted {
-            vector_writes,
-            single_vector_output_bytes,
-            lifecycle_operations,
-            lifecycle_bytes,
-            next_partition,
-        } = outcome
-        else {
-            build_session.discard_entity();
-            if let EntityPlanOutcome::Blocked(blocker) = outcome {
-                return Ok(
-                    VectorStepResult::ordinary(IndexOperationStepResult::Blocked(blocker))
-                        .with_vector_planning(accounting.planning_usage(build_session.stats())),
-                );
-            }
-            break;
-        };
-        if previous.is_some() || next_partition.is_some() {
-            stage_applied(
-                transaction,
-                scope,
-                operation,
-                entity.kind,
-                entity.id,
-                next_partition,
-            )?;
-        }
-        transaction.delete(row.key)?;
-        accounting.admit(
-            input_bytes,
-            vector_writes,
-            single_vector_output_bytes,
-            lifecycle_operations,
-            lifecycle_bytes,
-        )?;
-    }
-    let vector_planning = accounting.planning_usage(build_session.stats());
-    let (counters, single_vector_output_bytes) = accounting.finish_with_max()?;
-    if saw_row {
-        return Ok(VectorStepResult {
-            result: progressed_build(VectorBuildStage::CatchUp(PrefixScanProgress {
-                cursor: None,
-                counters,
-            })),
-            single_vector_output_bytes,
-            physical_operations: 0,
-            output_bytes: 0,
-            vector_planning,
-            retained: None,
-        });
-    }
-    Ok(VectorStepResult {
-        result: progressed_build(VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
-            cursor: None,
-            counters,
-        })),
-        single_vector_output_bytes,
-        physical_operations: 0,
-        output_bytes: 0,
-        vector_planning,
-        retained: None,
-    })
+    index_id: IndexId,
+    generation: IndexGenerationId,
+    layout: VectorPhysicalLayout,
+    owner: VectorPlanOwner<'a>,
 }
 
+/// Lifecycle owner of a planned generation.
+#[derive(Clone, Copy)]
+enum VectorPlanOwner<'a> {
+    /// The build of a hidden generation. It plans each source entity once,
+    /// before any other state of it, so its insertions are proven fresh.
+    Build {
+        operation: &'a IndexOperationRecord,
+        record: &'a IndexRecordV2,
+    },
+    /// Queue publication into an Active generation. An entity may already be
+    /// indexed, a tenant partition its removal empties is reclaimed, and the
+    /// admitted writes to resident-cache rows are fenced in `cache_writes`.
+    /// Publication writes no applied-state rows.
+    Publication {
+        active: &'a ActiveIndexHandle,
+        cache_writes: &'a vector::VectorCacheWriteSet,
+    },
+}
+
+impl<'a> VectorPlanTarget<'a> {
+    /// Targets the hidden generation `operation` builds.
+    fn build(
+        scope: DataScope,
+        operation: &'a IndexOperationRecord,
+        record: &'a IndexRecordV2,
+    ) -> Result<Self> {
+        let IndexStateVectorPhysical { layout } = IndexStateVectorPhysical::from_record(record)?;
+        Ok(Self {
+            scope,
+            index_id: operation.index_id(),
+            generation: operation.generation(),
+            layout,
+            owner: VectorPlanOwner::Build { operation, record },
+        })
+    }
+
+    /// Targets the Active generation `active` for queue publication.
+    pub(super) fn publication(
+        active: &'a ActiveIndexHandle,
+        cache_writes: &'a vector::VectorCacheWriteSet,
+    ) -> Result<Self> {
+        let ActiveIndexHandle::Vector {
+            scope,
+            index_id,
+            generation,
+            layout,
+            ..
+        } = active
+        else {
+            return Err(corruption(
+                "vector publication received another family handle",
+            ));
+        };
+        Ok(Self {
+            scope: *scope,
+            index_id: *index_id,
+            generation: *generation,
+            layout: *layout,
+            owner: VectorPlanOwner::Publication {
+                active,
+                cache_writes,
+            },
+        })
+    }
+
+    /// Projects one physical namespace of the generation under its owner.
+    fn physical<D: Distance>(
+        &self,
+        physical_index_id: VectorPhysicalIndexId,
+    ) -> Result<ValidatedVectorGenerationHandle> {
+        match self.owner {
+            VectorPlanOwner::Build { operation, record } => {
+                ValidatedVectorBuildGenerationHandle::try_from_building::<D>(
+                    self.scope,
+                    record,
+                    operation.operation_id(),
+                    physical_index_id,
+                )
+                .map(|handle| handle.generation().clone())
+            }
+            VectorPlanOwner::Publication { active, .. } => {
+                ValidatedVectorGenerationHandle::try_from_active::<D>(active, physical_index_id)
+            }
+        }
+        .map_err(|error| corruption(error.to_string()))
+    }
+}
+
+/// Plans one entity's transition and applies it to `transaction` if it fits.
+///
+/// The entity is removed from every `previous` partition other than its next
+/// one, then inserted at its deterministic layer. Planning reads and writes
+/// only the disposable `planning` transaction; `transaction` receives new
+/// tenant mappings, publication's reclamations, and the captured plan only
+/// once `accounting` admits the entity.
 #[allow(
     clippy::too_many_arguments,
-    reason = "planning binds the exact operation, descriptor, source state, and target transaction"
+    reason = "planning binds the exact target, descriptor, entity transition, and both transactions"
 )]
-async fn plan_and_apply<D: Distance>(
+pub(super) async fn plan_and_apply<D: Distance>(
     planning: &DbTransaction,
     planning_recorder: &VectorWriteRecorder,
     transaction: &DbTransaction,
-    scope: DataScope,
-    operation: &IndexOperationRecord,
-    record: &IndexRecordV2,
+    target: &VectorPlanTarget<'_>,
     definition: &ValidatedVectorIndexDefinition,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
     entity_id: IndexEntityId,
-    previous_partition: Option<&TextPartition>,
+    previous: &[TextPartition],
     next_document: Option<&VectorIndexedDocument>,
-    known_fresh: bool,
-    delete_delta: bool,
     accounting: &VectorBatchAccounting,
-    build_session: &mut VectorBuildSession<D>,
+    build_session: &mut CheckedOutSession<D>,
 ) -> Result<EntityPlanOutcome> {
     let next_partition = next_document.map(|document| document.partition().clone());
-    let next_resolution = match next_document {
-        Some(document) => Some(
-            resolve_build_physical(
-                transaction,
-                scope,
-                operation,
-                record,
-                document.partition(),
-                true,
-            )
-            .await?,
-        ),
+    let next = match next_document {
+        Some(document) => {
+            let resolution =
+                resolve_build_physical(transaction, target, document.partition(), true).await?;
+            let handle = target.physical::<D>(resolution.physical_index_id)?;
+            if resolution.mapping_is_new {
+                require_unallocated_namespace(planning, transaction, &handle).await?;
+            }
+            Some((resolution, handle))
+        }
         None => None,
     };
-    let previous_resolution = match previous_partition {
-        Some(partition)
-            if Some(partition) != next_document.map(VectorIndexedDocument::partition) =>
-        {
-            resolve_existing_build_physical(transaction, scope, operation, record, partition)
-                .await?
-        }
-        Some(_) | None => None,
-    };
-    let layer = next_document
-        .map(|document| deterministic_layer(operation, definition, entity_id, document));
+    let mut removals = Vec::new();
+    for partition in previous
+        .iter()
+        .filter(|partition| Some(*partition) != next_partition.as_ref())
+    {
+        let Some(physical_index_id) =
+            resolve_existing_build_physical(transaction, target, partition).await?
+        else {
+            // The partition never materialized, so nothing is indexed there.
+            continue;
+        };
+        removals.push((partition, target.physical::<D>(physical_index_id)?));
+    }
+    let layer = next_document.map(|document| {
+        deterministic_layer(
+            target.index_id,
+            target.generation,
+            definition,
+            entity_id,
+            document,
+        )
+    });
     let planning_write = planning_recorder.bind(planning);
     let checkpoint = planning_write.checkpoint();
     apply_planned_change::<D>(
         &planning_write,
-        operation,
-        record,
+        target,
         definition,
         Arc::clone(&simhasher_registry),
         batch_reads,
         entity_id,
-        previous_resolution.as_ref(),
-        next_resolution.as_ref(),
+        &removals,
+        next.as_ref(),
         next_document,
         layer,
-        known_fresh,
         build_session,
     )
     .await?;
     build_session.flush_all(&planning_write)?;
+    build_session.rebind().await;
     build_session.enforce_limits(&planning_write)?;
+    let reclaimed = match target.owner {
+        VectorPlanOwner::Build { .. } => Vec::new(),
+        VectorPlanOwner::Publication { .. } => {
+            let mut reclaimed = Vec::new();
+            for (partition, handle) in &removals {
+                let TextPartition::TenantValue(_) = partition else {
+                    continue;
+                };
+                if super::publication::stage_empty_tenant_reclamation::<D>(&planning_write, handle)
+                    .await?
+                {
+                    let tenant = VectorTenantPartition::try_from_partition((*partition).clone())
+                        .map_err(|error| corruption(error.to_string()))?;
+                    reclaimed.push((tenant, handle.clone()));
+                }
+            }
+            reclaimed
+        }
+    };
     let plan: PlannedVectorMutation = planning_write
         .plan_since(checkpoint)
         .map_err(measurement_error)?;
     let entity_vector = plan.measurement();
     let cumulative_vector = planning_write.measurement().map_err(measurement_error)?;
-    let applied_transition = match (previous_partition.is_some(), next_partition.as_ref()) {
-        (_, Some(partition)) => AppliedStateTransition::Put(partition),
-        (true, None) => AppliedStateTransition::Delete,
-        (false, None) => AppliedStateTransition::Absent,
+    let applied_transition = match (target.owner, next_partition.as_ref()) {
+        (VectorPlanOwner::Publication { .. }, _) => AppliedStateTransition::Absent,
+        (VectorPlanOwner::Build { .. }, Some(partition)) => AppliedStateTransition::Put(partition),
+        (VectorPlanOwner::Build { .. }, None) if previous.is_empty() => {
+            AppliedStateTransition::Absent
+        }
+        (VectorPlanOwner::Build { .. }, None) => AppliedStateTransition::Delete,
     };
+    let new_mapping = next_partition.as_ref().zip(
+        next.as_ref()
+            .filter(|(resolution, _)| resolution.mapping_is_new)
+            .map(|(resolution, _)| resolution.physical_index_id),
+    );
     let (lifecycle_operations, lifecycle_bytes) = lifecycle_write_measurement(
-        scope,
-        operation,
+        target,
         definition.element_kind(),
         entity_id,
         applied_transition,
-        next_resolution.as_ref(),
-        delete_delta,
+        new_mapping,
+        &reclaimed,
     )?;
     if entity_vector.encoded_bytes() > accounting.limits.max_single_vector_output_bytes().get() {
         return Ok(EntityPlanOutcome::Blocked(
@@ -2565,27 +2701,50 @@ async fn plan_and_apply<D: Distance>(
         }
         return Ok(EntityPlanOutcome::BatchFull);
     }
-    if let Some(resolution) = next_resolution.as_ref()
-        && resolution.mapping_is_new
-    {
-        let Some(partition) = next_partition.clone() else {
-            return Err(corruption("new vector mapping has no partition"));
-        };
-        let partition = VectorTenantPartition::try_from_partition(partition)
+    if let Some((partition, physical_index_id)) = new_mapping {
+        let partition = VectorTenantPartition::try_from_partition(partition.clone())
             .map_err(|error| corruption(error.to_string()))?;
         let allocated = crate::index_lifecycle::repository::stage_vector_partition_mapping(
             transaction,
-            scope,
-            operation.index_id(),
-            operation.generation(),
+            target.scope,
+            target.index_id,
+            target.generation,
             VectorPhysicalLayout::Partitioned,
             &partition,
         )
         .await?;
-        if allocated != resolution.physical_index_id {
+        if allocated != physical_index_id {
             return Err(corruption(
                 "vector physical allocation changed after admitted planning",
             ));
+        }
+    }
+    match target.owner {
+        VectorPlanOwner::Build { .. } => {}
+        VectorPlanOwner::Publication { cache_writes, .. } => {
+            for (tenant, handle) in &reclaimed {
+                crate::index_lifecycle::repository::stage_delete_vector_partition_mapping(
+                    transaction,
+                    target.scope,
+                    target.index_id,
+                    target.generation,
+                    target.layout,
+                    tenant,
+                    handle.identity().physical_index_id(),
+                )
+                .await?;
+            }
+            for handle in removals
+                .iter()
+                .map(|(_, handle)| handle)
+                .chain(next.iter().map(|(_, handle)| handle))
+            {
+                cache_writes.record_planned(handle, &plan)?;
+            }
+            // Retirement replaces the reclaimed namespaces' dirty rows.
+            for (_, handle) in &reclaimed {
+                cache_writes.retire_after_commit(handle);
+            }
         }
     }
     plan.apply_to(transaction)?;
@@ -2601,110 +2760,124 @@ async fn plan_and_apply<D: Distance>(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "one deterministic HNSW plan binds both partition endpoints and exact build authority"
+    reason = "one deterministic HNSW plan binds every partition endpoint and the exact owner"
 )]
 async fn apply_planned_change<D: Distance>(
     write: &MeasuredVectorTransaction<'_>,
-    operation: &IndexOperationRecord,
-    record: &IndexRecordV2,
+    target: &VectorPlanTarget<'_>,
     definition: &ValidatedVectorIndexDefinition,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
     entity_id: IndexEntityId,
-    previous: Option<&BuildPhysicalResolution>,
-    next: Option<&BuildPhysicalResolution>,
+    removals: &[(&TextPartition, ValidatedVectorGenerationHandle)],
+    next: Option<&(BuildPhysicalResolution, ValidatedVectorGenerationHandle)>,
     next_document: Option<&VectorIndexedDocument>,
     layer: Option<u16>,
-    known_fresh: bool,
     build_session: &mut VectorBuildSession<D>,
 ) -> Result<()> {
-    if let Some(previous) = previous {
-        let handle = ValidatedVectorBuildGenerationHandle::try_from_building::<D>(
-            previous.scope,
-            record,
-            operation.operation_id(),
-            previous.physical_index_id,
-        )
-        .map_err(|error| corruption(error.to_string()))?;
-        let index = VectorIndex::<D>::from_generation(handle.generation())
+    // Every existing namespace is checked against the canonical definition
+    // before planning reads its degree limits or entry point, so corrupt
+    // metadata fails closed instead of being planned under.
+    for (_, handle) in removals {
+        let index = VectorIndex::<D>::from_generation(handle)
             .with_simhasher_registry(Arc::clone(&simhasher_registry))
             .with_batch_reads(batch_reads);
+        let Some(metadata) = index.get_metadata(write).await? else {
+            return Err(corruption("vector physical namespace has no metadata"));
+        };
+        validate_metadata_config(
+            &metadata.config,
+            &VectorIndexConfig::from_v2_definition(definition, handle.physical_name()),
+        )?;
         index
             .stage_delete_with_build_session(write, entity_id.get(), build_session)
             .await?;
     }
-    let (Some(next), Some(document), Some(layer)) = (next, next_document, layer) else {
+    let (Some((resolution, handle)), Some(document), Some(layer)) = (next, next_document, layer)
+    else {
         return Ok(());
     };
-    let handle = ValidatedVectorBuildGenerationHandle::try_from_building::<D>(
-        next.scope,
-        record,
-        operation.operation_id(),
-        next.physical_index_id,
-    )
-    .map_err(|error| corruption(error.to_string()))?;
-    let index = VectorIndex::<D>::from_generation(handle.generation())
+    let index = VectorIndex::<D>::from_generation(handle)
         .with_simhasher_registry(simhasher_registry)
         .with_batch_reads(batch_reads);
-    let metadata = index.get_metadata(write).await?;
-    if metadata.is_none() {
-        if !next.mapping_is_new
-            && !matches!(next.layout, VectorPhysicalLayout::Unpartitioned { .. })
-        {
-            return Err(corruption(
-                "persisted vector partition mapping has no physical metadata",
-            ));
-        }
+    // A newly allocated namespace was proven absent before planning. Only a
+    // build creates an existing namespace, its unpartitioned one, with its
+    // first scanned entity: an Active generation's metadata was written before
+    // activation, and a tenant mapping commits with its namespace's metadata.
+    let create = resolution.mapping_is_new
+        || match (
+            index.get_metadata(write).await?,
+            target.owner,
+            target.layout,
+        ) {
+            (Some(metadata), ..) => {
+                validate_metadata_config(
+                    &metadata.config,
+                    &VectorIndexConfig::from_v2_definition(definition, handle.physical_name()),
+                )?;
+                false
+            }
+            (None, VectorPlanOwner::Build { .. }, VectorPhysicalLayout::Unpartitioned { .. }) => {
+                true
+            }
+            (None, ..) => {
+                return Err(corruption("vector physical namespace has no metadata"));
+            }
+        };
+    if create {
         index
             .stage_create(
                 write,
-                VectorIndexConfig::from_v2_definition(
-                    definition,
-                    handle.generation().physical_name(),
-                ),
+                VectorIndexConfig::from_v2_definition(definition, handle.physical_name()),
             )
             .await?;
     }
-    if known_fresh {
-        index
-            .stage_known_fresh_at_layer_with_session(
-                write,
-                entity_id.get(),
-                document.vector(),
-                layer,
-                handle.fresh_insert_proof(),
-                build_session,
+    match target.owner {
+        VectorPlanOwner::Build { operation, record } => {
+            let proof = ValidatedVectorBuildGenerationHandle::try_from_building::<D>(
+                target.scope,
+                record,
+                operation.operation_id(),
+                resolution.physical_index_id,
             )
-            .await
-    } else {
-        index
-            .stage_upsert_at_layer_with_session(
-                write,
-                entity_id.get(),
-                document.vector(),
-                layer,
-                build_session,
-            )
-            .await
+            .map_err(|error| corruption(error.to_string()))?
+            .fresh_insert_proof();
+            index
+                .stage_known_fresh_at_layer_with_session(
+                    write,
+                    entity_id.get(),
+                    document.vector(),
+                    layer,
+                    proof,
+                    build_session,
+                )
+                .await
+        }
+        VectorPlanOwner::Publication { .. } => {
+            index
+                .stage_upsert_at_layer_with_session(
+                    write,
+                    entity_id.get(),
+                    document.vector(),
+                    layer,
+                    build_session,
+                )
+                .await
+        }
     }
 }
 
 async fn resolve_build_physical(
     transaction: &DbTransaction,
-    scope: DataScope,
-    operation: &IndexOperationRecord,
-    record: &IndexRecordV2,
+    target: &VectorPlanTarget<'_>,
     partition: &TextPartition,
     create_missing: bool,
 ) -> Result<BuildPhysicalResolution> {
-    let IndexStateVectorPhysical { layout } = IndexStateVectorPhysical::from_record(record)?;
-    match (layout, partition) {
+    match (target.layout, partition) {
         (
             VectorPhysicalLayout::Unpartitioned { physical_index_id },
             TextPartition::Unpartitioned,
         ) => Ok(BuildPhysicalResolution {
-            scope,
-            layout,
             physical_index_id,
             mapping_is_new: false,
         }),
@@ -2714,17 +2887,15 @@ async fn resolve_build_physical(
             if let Some(physical_index_id) =
                 crate::index_lifecycle::repository::load_vector_partition_mapping(
                     transaction,
-                    scope,
-                    operation.index_id(),
-                    operation.generation(),
-                    layout,
+                    target.scope,
+                    target.index_id,
+                    target.generation,
+                    target.layout,
                     &tenant,
                 )
                 .await?
             {
                 return Ok(BuildPhysicalResolution {
-                    scope,
-                    layout,
                     physical_index_id,
                     mapping_is_new: false,
                 });
@@ -2735,8 +2906,6 @@ async fn resolve_build_physical(
                 ));
             }
             Ok(BuildPhysicalResolution {
-                scope,
-                layout,
                 physical_index_id: crate::index_lifecycle::repository::peek_vector_physical_id(
                     transaction,
                 )
@@ -2746,61 +2915,79 @@ async fn resolve_build_physical(
         }
         (VectorPhysicalLayout::Unpartitioned { .. }, TextPartition::TenantValue(_))
         | (VectorPhysicalLayout::Partitioned, TextPartition::Unpartitioned) => Err(corruption(
-            "vector build document partition disagrees with physical layout",
+            "vector document partition disagrees with physical layout",
         )),
     }
 }
 
 async fn resolve_existing_build_physical(
     transaction: &DbTransaction,
-    scope: DataScope,
-    operation: &IndexOperationRecord,
-    record: &IndexRecordV2,
+    target: &VectorPlanTarget<'_>,
     partition: &TextPartition,
-) -> Result<Option<BuildPhysicalResolution>> {
-    let IndexStateVectorPhysical { layout } = IndexStateVectorPhysical::from_record(record)?;
-    match (layout, partition) {
+) -> Result<Option<VectorPhysicalIndexId>> {
+    match (target.layout, partition) {
         (
             VectorPhysicalLayout::Unpartitioned { physical_index_id },
             TextPartition::Unpartitioned,
-        ) => Ok(Some(BuildPhysicalResolution {
-            scope,
-            layout,
-            physical_index_id,
-            mapping_is_new: false,
-        })),
+        ) => Ok(Some(physical_index_id)),
         (VectorPhysicalLayout::Partitioned, TextPartition::TenantValue(_)) => {
             let tenant = VectorTenantPartition::try_from_partition(partition.clone())
                 .map_err(|error| corruption(error.to_string()))?;
-            Ok(
-                crate::index_lifecycle::repository::load_vector_partition_mapping(
-                    transaction,
-                    scope,
-                    operation.index_id(),
-                    operation.generation(),
-                    layout,
-                    &tenant,
-                )
-                .await?
-                .map(|physical_index_id| BuildPhysicalResolution {
-                    scope,
-                    layout,
-                    physical_index_id,
-                    mapping_is_new: false,
-                }),
+            crate::index_lifecycle::repository::load_vector_partition_mapping(
+                transaction,
+                target.scope,
+                target.index_id,
+                target.generation,
+                target.layout,
+                &tenant,
             )
+            .await
         }
         (VectorPhysicalLayout::Unpartitioned { .. }, TextPartition::TenantValue(_))
         | (VectorPhysicalLayout::Partitioned, TextPartition::Unpartitioned) => Err(corruption(
-            "vector build recovery partition disagrees with physical layout",
+            "vector removal partition disagrees with physical layout",
         )),
     }
 }
 
+/// Proves the namespace `transaction` newly allocates has no metadata row
+/// under any name in the `planning` snapshot.
+///
+/// `transaction` read the physical-ID watermark before `planning` opened, so
+/// another index in the scope may have allocated the same ID and committed its
+/// namespace in between. That commit postdates the transaction's snapshot and
+/// the transaction read the watermark it advanced, so the transaction cannot
+/// commit: the conflict is returned now, before planning reads the foreign
+/// namespace, and either owner retries. A row the transaction sees too means
+/// the watermark trails an existing namespace, which fails closed.
+async fn require_unallocated_namespace(
+    planning: &DbTransaction,
+    transaction: &DbTransaction,
+    handle: &ValidatedVectorGenerationHandle,
+) -> Result<()> {
+    let key = DataKey::Data {
+        scope: handle.scope(),
+        kind: DataKeyKind::Vector(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
+            handle.physical_index_id(),
+        ))),
+    }
+    .to_bytes();
+    if planning.get(&key).await?.is_none() {
+        return Ok(());
+    }
+    if transaction.get(&key).await?.is_some() {
+        return Err(corruption(
+            "vector physical-ID watermark trails an existing namespace",
+        ));
+    }
+    Err(HelixDbError::TransactionConflict(format!(
+        "vector physical index {} was allocated by a concurrent commit",
+        handle.physical_index_id()
+    )))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BuildPhysicalResolution {
-    scope: DataScope,
-    layout: VectorPhysicalLayout,
     physical_index_id: VectorPhysicalIndexId,
     mapping_is_new: bool,
 }
@@ -2820,15 +3007,21 @@ impl IndexStateVectorPhysical {
     }
 }
 
+/// Selects the HNSW layer of one entity in one partition of a generation.
+///
+/// The layer depends only on the logical index, generation, entity, and
+/// partition, so a build and queue publication place an entity alike and a
+/// replanned entity keeps its layer.
 fn deterministic_layer(
-    operation: &IndexOperationRecord,
+    index_id: IndexId,
+    generation: IndexGenerationId,
     definition: &ValidatedVectorIndexDefinition,
     entity_id: IndexEntityId,
     document: &VectorIndexedDocument,
 ) -> u16 {
     let mut digest = Sha256::new();
-    digest.update(operation.index_id().get().to_be_bytes());
-    digest.update(operation.generation().get().to_be_bytes());
+    digest.update(index_id.get().to_be_bytes());
+    digest.update(generation.get().to_be_bytes());
     digest.update(entity_id.get().to_be_bytes());
     digest.update(document.partition().canonical_bytes());
     let bytes: [u8; 32] = digest.finalize().into();
@@ -2856,21 +3049,10 @@ async fn validate_descriptor<D: Distance>(
     limits: SearchIndexBatchLimits,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
 ) -> Result<IndexOperationStepResult> {
-    if generation_has_rows(
-        transaction,
-        scope,
-        RecordKind::BuildDelta,
-        operation.index_id(),
-        operation.generation(),
-    )
-    .await?
-    {
-        return Ok(progressed_build(VectorBuildStage::CatchUp(
-            PrefixScanProgress {
-                cursor: None,
-                counters: progress.counters,
-            },
-        )));
+    if has_pre_queue_deltas(transaction, scope, operation).await? {
+        return Ok(IndexOperationStepResult::Blocked(
+            IndexOperationBlocker::InvariantViolation,
+        ));
     }
     let cursor_kind = progress
         .cursor
@@ -3140,8 +3322,13 @@ async fn validate_partition_metadata<D: Distance>(
     partition: &TextPartition,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
 ) -> Result<()> {
-    let resolution =
-        resolve_build_physical(transaction, scope, operation, record, partition, false).await?;
+    let resolution = resolve_build_physical(
+        transaction,
+        &VectorPlanTarget::build(scope, operation, record)?,
+        partition,
+        false,
+    )
+    .await?;
     let handle = ValidatedVectorBuildGenerationHandle::try_from_building::<D>(
         scope,
         record,
@@ -3172,6 +3359,8 @@ fn validate_metadata_config(
 }
 
 /// Closed applied-state write selected by one authoritative entity transition.
+///
+/// Only builds keep applied state; publication always measures `Absent`.
 #[derive(Debug, Clone, Copy)]
 enum AppliedStateTransition<'a> {
     Absent,
@@ -3179,27 +3368,29 @@ enum AppliedStateTransition<'a> {
     Put(&'a TextPartition),
 }
 
+/// Measures the lifecycle rows one admitted entity stages beside its vector
+/// writes: its applied state, a new tenant mapping with the physical-ID
+/// watermark, and the mapping deletion of every partition it reclaims.
 fn lifecycle_write_measurement(
-    scope: DataScope,
-    operation: &IndexOperationRecord,
+    target: &VectorPlanTarget<'_>,
     entity_kind: IndexElementKind,
     entity_id: IndexEntityId,
     applied_transition: AppliedStateTransition<'_>,
-    next_resolution: Option<&BuildPhysicalResolution>,
-    delete_delta: bool,
+    new_mapping: Option<(&TextPartition, VectorPhysicalIndexId)>,
+    reclaimed: &[(VectorTenantPartition, ValidatedVectorGenerationHandle)],
 ) -> Result<(u64, u64)> {
     let applied_key = applied_key(
-        scope,
-        operation.index_id(),
-        operation.generation(),
+        target.scope,
+        target.index_id,
+        target.generation,
         entity_kind,
         entity_id,
     );
     let (mut operations, mut bytes) = match applied_transition {
         AppliedStateTransition::Put(partition) => {
             let value = encode_applied_state(&AppliedEntityStateValue {
-                index_id: operation.index_id(),
-                generation: operation.generation(),
+                index_id: target.index_id,
+                generation: target.generation,
                 entity_kind,
                 entity_id,
                 state: AppliedFamilyState::Vector(Some(partition.clone())),
@@ -3209,45 +3400,28 @@ fn lifecycle_write_measurement(
         AppliedStateTransition::Delete => (1, applied_key.len() as u64),
         AppliedStateTransition::Absent => (0, 0),
     };
-    if delete_delta {
-        let delta_key = scoped_index_key(
-            scope,
-            ScopedKey::BuildDelta(IndexEntityStateKey {
-                index_id: operation.index_id(),
-                generation: operation.generation(),
-                entity: IndexEntity {
-                    kind: entity_kind,
-                    id: entity_id,
-                },
-            }),
-        );
-        operations = operations.saturating_add(1);
-        bytes = bytes.saturating_add(delta_key.len() as u64);
-    }
-    if let Some(resolution) = next_resolution
-        && resolution.mapping_is_new
-    {
-        let AppliedStateTransition::Put(partition) = applied_transition else {
-            return Err(corruption("new vector mapping has no partition"));
-        };
-        let tenant = VectorTenantPartition::try_from_partition(partition.clone())
-            .map_err(|error| corruption(error.to_string()))?;
-        let mapping_key = scoped_index_key(
-            scope,
+    let mapping_key = |tenant: &VectorTenantPartition| {
+        scoped_index_key(
+            target.scope,
             ScopedKey::VectorPartitionMapping(
                 crate::encoding::v2::keys::VectorPartitionMappingKey {
-                    index_id: operation.index_id(),
-                    generation: operation.generation(),
+                    index_id: target.index_id,
+                    generation: target.generation,
                     partition: tenant.fingerprint(),
                 },
             ),
-        );
+        )
+    };
+    if let Some((partition, physical_index_id)) = new_mapping {
+        let tenant = VectorTenantPartition::try_from_partition(partition.clone())
+            .map_err(|error| corruption(error.to_string()))?;
+        let mapping_key = mapping_key(&tenant);
         let mapping_value =
             encode_partition_mapping(&crate::index_lifecycle::work::VectorPartitionMappingValue {
-                index_id: operation.index_id(),
-                generation: operation.generation(),
+                index_id: target.index_id,
+                generation: target.generation,
                 partition: tenant,
-                physical_index_id: resolution.physical_index_id,
+                physical_index_id,
             });
         let watermark_key = IndexKey::Global {
             kind: GlobalKey::VectorPhysicalIdWatermark,
@@ -3255,13 +3429,17 @@ fn lifecycle_write_measurement(
         .to_bytes();
         let watermark_value = encode_metadata_value(
             &IndexV2MetadataValue::VectorPhysicalIdWatermark(VectorPhysicalIdWatermark {
-                next_id: resolution.physical_index_id.checked_next()?,
+                next_id: physical_index_id.checked_next()?,
             }),
         );
         operations = operations.saturating_add(2);
         bytes = bytes
             .saturating_add(mapping_key.len().saturating_add(mapping_value.len()) as u64)
             .saturating_add(watermark_key.len().saturating_add(watermark_value.len()) as u64);
+    }
+    for (tenant, _) in reclaimed {
+        operations = operations.saturating_add(1);
+        bytes = bytes.saturating_add(mapping_key(tenant).len() as u64);
     }
     Ok((operations, bytes))
 }
@@ -3425,34 +3603,6 @@ fn decode_mapping(
     Ok(value)
 }
 
-async fn read_authoritative_properties(
-    transaction: &DbTransaction,
-    scope: DataScope,
-    entity: IndexEntity,
-) -> Result<Option<Vec<Property>>> {
-    let key = match entity.kind {
-        IndexElementKind::Node => DataKey::Data {
-            scope,
-            kind: DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(
-                entity.id.get(),
-            )),
-        }
-        .to_bytes(),
-        IndexElementKind::Edge => DataKey::Data {
-            scope,
-            kind: DataKeyKind::EdgePropertyById(
-                crate::encoding::v2::keys::EdgePropertyByIdKey::new(entity.id.get()),
-            ),
-        }
-        .to_bytes(),
-    };
-    transaction
-        .get(key)
-        .await?
-        .map(|bytes| decode_properties(&bytes).map_err(HelixDbError::from))
-        .transpose()
-}
-
 async fn load_operation_index(
     transaction: &DbTransaction,
     scope: DataScope,
@@ -3600,7 +3750,9 @@ fn finish_or_block_scan(
     }
 }
 
-enum EntityPlanOutcome {
+/// Admission of one planned entity.
+pub(super) enum EntityPlanOutcome {
+    /// The plan was applied to the target transaction.
     Admitted {
         vector_writes: VectorWriteMeasurement,
         single_vector_output_bytes: u64,
@@ -3608,11 +3760,14 @@ enum EntityPlanOutcome {
         lifecycle_bytes: u64,
         next_partition: Option<TextPartition>,
     },
+    /// The entity does not fit beside the admitted ones; nothing was applied.
     BatchFull,
+    /// The entity cannot fit any batch; nothing was applied.
     Blocked(IndexOperationBlocker),
 }
 
-struct VectorBatchAccounting {
+/// Input and output one batch has admitted against its limits.
+pub(super) struct VectorBatchAccounting {
     counters: OperationCounters,
     limits: SearchIndexBatchLimits,
     entities: usize,
@@ -3636,6 +3791,20 @@ impl VectorBatchAccounting {
             lifecycle_operations: 0,
             lifecycle_bytes: 0,
             planning_executions: 0,
+        }
+    }
+
+    /// Starts a batch whose output budget already carries writes staged beside
+    /// its entities, such as a queue acknowledgement.
+    pub(super) fn reserving(
+        limits: SearchIndexBatchLimits,
+        reserved_operations: u64,
+        reserved_bytes: u64,
+    ) -> Self {
+        Self {
+            lifecycle_operations: reserved_operations,
+            lifecycle_bytes: reserved_bytes,
+            ..Self::new(OperationCounters::default(), limits)
         }
     }
 
@@ -3692,7 +3861,7 @@ impl VectorBatchAccounting {
         }
     }
 
-    fn admit(
+    pub(super) fn admit(
         &mut self,
         input_bytes: u64,
         cumulative_vector: VectorWriteMeasurement,
@@ -3784,7 +3953,7 @@ mod tests {
     use super::*;
     use crate::config::{SearchIndexBackfillLimits, VectorIndexDefinition};
     use crate::encoding::property::property_value::PropertyValue;
-    use crate::encoding::v2::keys::indexes::vector::VectorKey;
+    use crate::encoding::property::Property;
     use crate::encoding::v2::keys::NodePropertyKey;
     use crate::encoding::v2::values::property::encode_properties;
     use crate::index_lifecycle::lifecycle::{
@@ -3796,9 +3965,6 @@ mod tests {
         CommittedOperationStep, OperationPointerObservation,
     };
     use crate::index_lifecycle::repository::peek_vector_physical_id;
-    use crate::index_lifecycle::vector::{
-        load_mutation_set, maintain_entity, VectorEntityMutation,
-    };
     use crate::index_lifecycle::{
         ActiveIndexHandle, ClaimSequence, IndexDdlReceipt, IndexOperationId, IndexScopeGates,
         IndexStateV2, WriterEpoch,
@@ -3806,7 +3972,7 @@ mod tests {
     use crate::migrations::startup::bootstrap_writer;
     use crate::search::vector::{
         DistanceScore, SearchParams, SimHashMode, SimHasherRegistry,
-        ValidatedVectorGenerationHandle, VectorCacheRegistry, VectorCacheWriteSet,
+        ValidatedVectorGenerationHandle, VectorCacheRegistry,
     };
 
     const NOW_MILLIS: u64 = 1;
@@ -4076,63 +4242,6 @@ mod tests {
         values
     }
 
-    async fn physical_vector_rows(
-        db: &Db,
-        scope: DataScope,
-        physical_index_id: VectorPhysicalIndexId,
-    ) -> Vec<(Bytes, Bytes)> {
-        let mut result = Vec::new();
-        for lane in VectorStorageLane::ALL {
-            let prefix = DataKey::Data {
-                scope,
-                kind: DataKeyKind::Vector(lane.prefix_key(physical_index_id.get())),
-            }
-            .to_bytes();
-            let mut rows = db
-                .scan_prefix(prefix, ..)
-                .await
-                .expect("physical vector lane scans");
-            while let Some(row) = rows.next().await.expect("physical vector row reads") {
-                result.push((row.key, row.value));
-            }
-        }
-        result.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        result
-    }
-
-    async fn mutate_building_source(
-        db: &Db,
-        scope: DataScope,
-        entity_id: u64,
-        before: &[Property],
-        after: &[Property],
-    ) {
-        let transaction = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .expect("vector mutation transaction opens");
-        let mutations = load_mutation_set(&transaction, scope)
-            .await
-            .expect("building vector generations load");
-        let cache_writes = VectorCacheWriteSet::default();
-        maintain_entity(
-            &transaction,
-            scope,
-            &mutations,
-            &cache_writes,
-            VectorEntityMutation::new(IndexElementKind::Node, entity_id, before, after),
-        )
-        .await
-        .expect("building mutation records its coalesced delta");
-        transaction
-            .put(source_key(scope, entity_id), encode_properties(after))
-            .expect("authoritative vector source update stages");
-        transaction
-            .commit()
-            .await
-            .expect("authoritative source and delta commit together");
-    }
-
     #[tokio::test]
     async fn unpartitioned_build_restarts_activates_and_drop_removes_physical_rows() {
         let db = test_db("vector-driver-unpartitioned-build-drop").await;
@@ -4297,65 +4406,6 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-        db.close().await.expect("vector test database closes");
-    }
-
-    #[tokio::test]
-    async fn partitioned_build_catches_up_tenant_move_into_exact_physical_mapping() {
-        let db = test_db("vector-driver-partition-catch-up").await;
-        let scope = DataScope::LegacyUnscoped;
-        let definition = definition(Some("account_id"));
-        let before = properties([1.0, 2.0, 3.0], Some(10));
-        let after = properties([4.0, 5.0, 6.0], Some(20));
-        put_source(&db, scope, 0, &before).await;
-        let (build_id, index_id, generation_id) = create_build(&db, scope, &definition, 0).await;
-        let mut claim_sequence = 1;
-        let driver = driver();
-        assert_eq!(
-            drive_one(
-                &db,
-                &driver,
-                build_id,
-                &mut claim_sequence,
-                SearchIndexBackfillLimits::default().batch(),
-            )
-            .await,
-            CommittedOperationStep::Progressed
-        );
-        mutate_building_source(&db, scope, 0, &before, &after).await;
-        assert_eq!(
-            drive_to_terminal(&db, &driver, build_id, &mut claim_sequence).await,
-            CommittedOperationStep::Completed
-        );
-        let active = read_index(&db, scope, &definition).await;
-        let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
-            .expect("active partitioned vector projects a handle");
-        let ValidatedDynamicIndexDefinition::Vector(vector_definition) = &definition else {
-            unreachable!("test definition is vector");
-        };
-        let before_document = vector_document(vector_definition, &before)
-            .unwrap()
-            .expect("before document is indexed");
-        let after_document = vector_document(vector_definition, &after)
-            .unwrap()
-            .expect("after document is indexed");
-        let mappings = mapping_values(&db, scope, index_id, generation_id).await;
-        assert_eq!(mappings.len(), 2);
-        for (document, should_exist) in [(&before_document, false), (&after_document, true)] {
-            let mapping = mappings
-                .iter()
-                .find(|mapping| mapping.partition.as_partition() == document.partition())
-                .expect("each observed tenant has one mapping");
-            let generation = ValidatedVectorGenerationHandle::try_from_active::<
-                vector::distance::Euclidean,
-            >(&active_handle, mapping.physical_index_id)
-            .expect("mapped active generation validates");
-            let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
-            assert_eq!(
-                index.get_item(&db, 0).await.unwrap().is_some(),
-                should_exist
-            );
-        }
         db.close().await.expect("vector test database closes");
     }
 
@@ -4611,13 +4661,13 @@ mod tests {
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
                 driver.batch_reads,
-                &mut VectorBuildSession::new(limits.max_input_bytes()),
+                &mut driver.build_cache.checkout_fresh().await,
             )
             .await
             .unwrap()
             .result,
             IndexOperationStepResult::Progressed(IndexOperationProgress::VectorBuild(
-                VectorBuildProgress::Constructing(VectorBuildStage::CatchUp(_))
+                VectorBuildProgress::Constructing(VectorBuildStage::ValidateDescriptor(_))
             ))
         ));
         let greater = SourceScanProgress {
@@ -4638,7 +4688,7 @@ mod tests {
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
                 driver.batch_reads,
-                &mut VectorBuildSession::new(limits.max_input_bytes()),
+                &mut driver.build_cache.checkout_fresh().await,
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(_))
@@ -4667,7 +4717,7 @@ mod tests {
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
                 driver.batch_reads,
-                &mut VectorBuildSession::new(limits.max_input_bytes()),
+                &mut driver.build_cache.checkout_fresh().await,
             )
             .await
             .unwrap()
@@ -4696,7 +4746,7 @@ mod tests {
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
                 driver.batch_reads,
-                &mut VectorBuildSession::new(limits.max_input_bytes()),
+                &mut driver.build_cache.checkout_fresh().await,
             )
             .await
             .unwrap()
@@ -4727,7 +4777,7 @@ mod tests {
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
                 driver.batch_reads,
-                &mut VectorBuildSession::new(limits.max_input_bytes()),
+                &mut driver.build_cache.checkout_fresh().await,
             )
             .await
             .unwrap()
@@ -4760,7 +4810,7 @@ mod tests {
                 IndexLifecycleScanTuning::default(),
                 Arc::clone(&driver.simhasher_registry),
                 driver.batch_reads,
-                &mut VectorBuildSession::new(limits.max_input_bytes()),
+                &mut driver.build_cache.checkout_fresh().await,
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(reason))
@@ -4805,295 +4855,6 @@ mod tests {
                 }
             ) if *blocked_entity_id == IndexEntityId::new(entity_id)
         ));
-    }
-
-    #[tokio::test]
-    async fn rejected_active_magnitude_mutation_preserves_every_durable_state_family() {
-        let db = test_db("vector-driver-magnitude-active-rollback").await;
-        let scope = DataScope::LegacyUnscoped;
-        let definition = definition(None);
-        let before_properties = properties([0.0, 0.0, 0.0], None);
-        put_source(&db, scope, 1, &before_properties).await;
-        let (operation_id, _, _) = create_build(&db, scope, &definition, 1).await;
-        let mut claim_sequence = 1;
-        assert_eq!(
-            drive_to_terminal(&db, &driver(), operation_id, &mut claim_sequence).await,
-            CommittedOperationStep::Completed
-        );
-        let record = read_index(&db, scope, &definition).await;
-        let IndexStateV2::Active {
-            physical:
-                PhysicalGeneration::Vector {
-                    layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
-                    ..
-                },
-            ..
-        } = record.state()
-        else {
-            panic!("fixture vector generation is active and unpartitioned")
-        };
-        let physical_index_id = *physical_index_id;
-        let source_before = db.get(source_key(scope, 1)).await.unwrap();
-        let index_key = scoped_index_key(scope, ScopedKey::index_record(definition.identity()));
-        let index_before = db.get(&index_key).await.unwrap();
-        let operation_key =
-            crate::index_lifecycle::outbox::scoped_operation_key(scope, operation_id);
-        let operation_before = db.get(&operation_key).await.unwrap();
-        let vector_before = physical_vector_rows(&db, scope, physical_index_id).await;
-
-        let limit = crate::search::vector::magnitude_oracle::inclusive_limit(
-            VectorDistanceMetric::Euclidean,
-            3,
-        )
-        .unwrap();
-        let after_properties = properties(
-            [
-                crate::search::vector::magnitude_oracle::next_up(limit),
-                0.0,
-                0.0,
-            ],
-            None,
-        );
-        let transaction = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .expect("active magnitude mutation transaction opens");
-        transaction
-            .put(source_key(scope, 1), encode_properties(&after_properties))
-            .expect("authoritative graph update stages");
-        let mutations = load_mutation_set(&transaction, scope)
-            .await
-            .expect("active vector mutation set loads");
-        let cache_writes = VectorCacheWriteSet::default();
-        let result = maintain_entity(
-            &transaction,
-            scope,
-            &mutations,
-            &cache_writes,
-            VectorEntityMutation::new(
-                IndexElementKind::Node,
-                1,
-                &before_properties,
-                &after_properties,
-            ),
-        )
-        .await;
-        let cache_entries = cache_writes.entries().len();
-        transaction.rollback();
-
-        let source_after = db.get(source_key(scope, 1)).await.unwrap();
-        let index_after = db.get(index_key).await.unwrap();
-        let operation_after = db.get(operation_key).await.unwrap();
-        let vector_after = physical_vector_rows(&db, scope, physical_index_id).await;
-        db.close().await.expect("vector test database closes");
-
-        let mut failures = Vec::new();
-        match result {
-            Err(HelixDbError::VectorComponentMagnitudeExceeded {
-                metric: VectorDistanceMetric::Euclidean,
-                dimension: 3,
-                component_index: 0,
-                observed_magnitude,
-                inclusive_maximum,
-            }) if observed_magnitude == crate::search::vector::magnitude_oracle::next_up(limit)
-                && inclusive_maximum == limit => {}
-            Err(error) => failures.push(format!(
-                "active mutation returned {error:?} instead of its exact magnitude error"
-            )),
-            Ok(()) => {
-                failures.push("active mutation accepted an out-of-domain finite vector".to_string())
-            }
-        }
-        if cache_entries != 0 {
-            failures.push(format!(
-                "active mutation retained {cache_entries} transaction-local cache effect(s)"
-            ));
-        }
-        if source_after != source_before {
-            failures.push("graph source row changed after rollback".to_string());
-        }
-        if index_after != index_before || operation_after != operation_before {
-            failures.push("lifecycle rows changed after rollback".to_string());
-        }
-        if vector_after != vector_before {
-            failures.push("one or more physical vector lanes changed after rollback".to_string());
-        }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
-    }
-
-    #[tokio::test]
-    async fn invalid_active_physical_row_stays_untouched_until_explicit_drop_recreate() {
-        let db = test_db("vector-driver-magnitude-active-recovery").await;
-        let scope = DataScope::LegacyUnscoped;
-        let definition = definition(None);
-        let valid_properties = properties([0.0, 0.0, 0.0], None);
-        put_source(&db, scope, 1, &valid_properties).await;
-        let (build_id, _, _) = create_build(&db, scope, &definition, 1).await;
-        let driver = driver();
-        let mut claim_sequence = 1;
-        assert_eq!(
-            drive_to_terminal(&db, &driver, build_id, &mut claim_sequence).await,
-            CommittedOperationStep::Completed
-        );
-        let active = read_index(&db, scope, &definition).await;
-        let IndexStateV2::Active {
-            physical:
-                PhysicalGeneration::Vector {
-                    layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
-                    ..
-                },
-            ..
-        } = active.state()
-        else {
-            panic!("fixture vector generation is active and unpartitioned")
-        };
-        let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
-            .expect("active vector record projects a handle");
-        let generation = ValidatedVectorGenerationHandle::try_from_active::<
-            vector::distance::Euclidean,
-        >(&active_handle, *physical_index_id)
-        .expect("active physical generation validates");
-        let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
-        let (item_key, _) = physical_vector_rows(&db, scope, *physical_index_id)
-            .await
-            .into_iter()
-            .find(|(key, _)| {
-                matches!(
-                    DataKey::parse_from_slice(scope, key),
-                    Ok(DataKey::Data {
-                        kind: DataKeyKind::Vector(VectorKey::Vector(_)),
-                        ..
-                    })
-                )
-            })
-            .expect("active generation contains its canonical item row");
-        let limit = crate::search::vector::magnitude_oracle::inclusive_limit(
-            VectorDistanceMetric::Euclidean,
-            3,
-        )
-        .unwrap();
-        let outside = crate::search::vector::magnitude_oracle::next_up(limit);
-        let invalid_properties = properties([outside, 0.0, 0.0], None);
-        let invalid_item =
-            crate::search::vector::encode_item(&crate::search::vector::Item::<
-                vector::distance::Euclidean,
-            >::new(vec![outside, 0.0, 0.0]));
-        let injection = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-        injection
-            .put(source_key(scope, 1), encode_properties(&invalid_properties))
-            .unwrap();
-        injection
-            .put(item_key.clone(), invalid_item.clone())
-            .unwrap();
-        injection.commit().await.unwrap();
-
-        assert!(matches!(
-            index.get_item(&db, 1).await,
-            Err(HelixDbError::InvalidVectorItem(
-                vector::VectorItemDecodeError::ComponentMagnitudeExceeded {
-                    metric: VectorDistanceMetric::Euclidean,
-                    dimension: 3,
-                    component_index: 0,
-                    observed_magnitude,
-                    inclusive_maximum,
-                }
-            )) if observed_magnitude == outside && inclusive_maximum == limit
-        ));
-
-        let corrected_properties = properties([0.5, 0.0, 0.0], None);
-        let correction = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-        let mutations = load_mutation_set(&correction, scope).await.unwrap();
-        let cache_writes = VectorCacheWriteSet::default();
-        maintain_entity(
-            &correction,
-            scope,
-            &mutations,
-            &cache_writes,
-            VectorEntityMutation::new(
-                IndexElementKind::Node,
-                1,
-                &invalid_properties,
-                &corrected_properties,
-            ),
-        )
-        .await
-        .expect("authoritative correction does not rewrite invalid physical data");
-        assert!(
-            cache_writes.entries().is_empty(),
-            "authoritative correction must not stage cache effects for invalid physical data"
-        );
-        correction
-            .put(
-                source_key(scope, 1),
-                encode_properties(&corrected_properties),
-            )
-            .unwrap();
-        correction.commit().await.unwrap();
-        assert_eq!(db.get(&item_key).await.unwrap(), Some(invalid_item));
-        assert!(matches!(
-            index.get_item(&db, 1).await,
-            Err(HelixDbError::InvalidVectorItem(
-                vector::VectorItemDecodeError::ComponentMagnitudeExceeded { .. }
-            ))
-        ));
-
-        let IndexDdlReceipt::Accepted {
-            operation_id: drop_id,
-            ..
-        } = drop_index_operation(&db, scope, &definition)
-            .await
-            .expect("explicit drop enqueues")
-        else {
-            panic!("active invalid generation requires one explicit drop operation")
-        };
-        assert_eq!(
-            drive_to_terminal(&db, &driver, drop_id, &mut claim_sequence).await,
-            CommittedOperationStep::Completed
-        );
-        assert!(db.get(&item_key).await.unwrap().is_none());
-
-        let (rebuild_id, _, _) = create_build(&db, scope, &definition, 1).await;
-        assert_eq!(
-            drive_to_terminal(&db, &driver, rebuild_id, &mut claim_sequence).await,
-            CommittedOperationStep::Completed
-        );
-        let rebuilt = read_index(&db, scope, &definition).await;
-        let IndexStateV2::Active {
-            physical:
-                PhysicalGeneration::Vector {
-                    layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
-                    ..
-                },
-            ..
-        } = rebuilt.state()
-        else {
-            panic!("explicit rebuild activates a fresh vector generation")
-        };
-        let rebuilt_handle = ActiveIndexHandle::try_from_record(scope, &rebuilt)
-            .expect("rebuilt active record projects a handle");
-        let rebuilt_generation = ValidatedVectorGenerationHandle::try_from_active::<
-            vector::distance::Euclidean,
-        >(&rebuilt_handle, *physical_index_id)
-        .expect("rebuilt generation validates");
-        let rebuilt_index =
-            VectorIndex::<vector::distance::Euclidean>::from_generation(&rebuilt_generation);
-        assert_eq!(
-            rebuilt_index
-                .get_item(&db, 1)
-                .await
-                .unwrap()
-                .unwrap()
-                .vector
-                .to_vec(),
-            vec![0.5, 0.0, 0.0]
-        );
-        db.close().await.expect("vector test database closes");
     }
 
     /// Verifies descriptor-validation cursors fail on malformed bytes and
@@ -5189,6 +4950,113 @@ mod tests {
         )
         .await
         .expect("typed mapping cursor resumes mapping validation");
+        drop(transaction);
+        db.close().await.expect("vector test database closes");
+    }
+
+    /// A build started before operations were queued may hold `BuildDelta`
+    /// rows that nothing replays; every stage that could activate them
+    /// blocks. Without a delta the same stages move on, so each block is the
+    /// delta's.
+    #[tokio::test]
+    async fn pre_queue_build_deltas_block_catch_up_validation_and_activation() {
+        let db = test_db("vector-driver-pre-queue-deltas").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = definition(None);
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let operation = read_operation(&db, scope, operation_id).await;
+        let record = read_index(&db, scope, &definition).await;
+        let ValidatedDynamicIndexDefinition::Vector(vector_definition) = &definition else {
+            unreachable!("fixture definition is vector");
+        };
+        let driver = driver();
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let counters = OperationCounters::default();
+        let catch_up = VectorBuildStage::CatchUp(PrefixScanProgress {
+            cursor: None,
+            counters,
+        });
+        let validate = VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
+            cursor: None,
+            counters,
+        });
+        let activate = VectorBuildStage::Activate(NoCursorProgress { counters });
+        let step = |stage: VectorBuildStage| {
+            let (db, transaction, operation, record, driver) =
+                (&db, &transaction, &operation, &record, &driver);
+            let registry = Arc::clone(&driver.simhasher_registry);
+            async move {
+                step_build::<vector::distance::Euclidean>(
+                    db,
+                    transaction,
+                    scope,
+                    operation,
+                    record,
+                    vector_definition,
+                    &stage,
+                    SearchIndexBackfillLimits::default().batch(),
+                    IndexLifecycleScanTuning::default(),
+                    registry,
+                    driver.batch_reads,
+                    &driver.build_cache,
+                )
+                .await
+                .expect("vector build step runs")
+                .result
+            }
+        };
+
+        assert!(matches!(
+            step(catch_up.clone()).await,
+            IndexOperationStepResult::Progressed(IndexOperationProgress::VectorBuild(
+                VectorBuildProgress::Constructing(VectorBuildStage::ValidateDescriptor(_))
+            ))
+        ));
+        assert!(matches!(
+            step(validate.clone()).await,
+            IndexOperationStepResult::Progressed(IndexOperationProgress::VectorBuild(
+                VectorBuildProgress::Constructing(VectorBuildStage::Activate(_))
+            ))
+        ));
+        assert!(matches!(
+            step(activate.clone()).await,
+            IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Succeeded
+            ))
+        ));
+
+        let entity = IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(0),
+        };
+        transaction
+            .put(
+                scoped_index_key(
+                    scope,
+                    ScopedKey::BuildDelta(IndexEntityStateKey {
+                        index_id,
+                        generation,
+                        entity,
+                    }),
+                ),
+                encode_build_delta(&CoalescedBuildDeltaValue {
+                    index_id,
+                    generation,
+                    entity_kind: entity.kind,
+                    entity_id: entity.id,
+                    state: crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker,
+                }),
+            )
+            .unwrap();
+        for stage in [catch_up, validate, activate] {
+            assert!(
+                matches!(
+                    step(stage.clone()).await,
+                    IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
+                ),
+                "{stage:?} must block on a pre-queue build delta"
+            );
+        }
         drop(transaction);
         db.close().await.expect("vector test database closes");
     }
@@ -5407,12 +5275,6 @@ mod tests {
         .await
         .unwrap());
 
-        assert!(
-            read_authoritative_properties(&transaction, scope, other_entity)
-                .await
-                .unwrap()
-                .is_none()
-        );
         let edge = IndexEntity {
             kind: IndexElementKind::Edge,
             id: IndexEntityId::new(7),
@@ -5424,12 +5286,6 @@ mod tests {
             ),
         }
         .to_bytes();
-        transaction
-            .put(edge_key.clone(), Bytes::from_static(&[0xff]))
-            .unwrap();
-        assert!(read_authoritative_properties(&transaction, scope, edge)
-            .await
-            .is_err());
         assert_eq!(
             source_entity(scope, IndexElementKind::Edge, &edge_key).unwrap(),
             Some(edge.id)
@@ -5550,44 +5406,35 @@ mod tests {
         assert_eq!(planning.replay_executions, 0);
 
         let record = read_index(&db, scope, &definition).await;
-        let unpartitioned = BuildPhysicalResolution {
-            scope,
-            layout: VectorPhysicalLayout::Unpartitioned {
-                physical_index_id: VectorPhysicalIndexId::initial(),
-            },
-            physical_index_id: VectorPhysicalIndexId::initial(),
-            mapping_is_new: true,
-        };
-        assert!(lifecycle_write_measurement(
-            scope,
-            &operation,
-            entity.kind,
-            entity.id,
-            AppliedStateTransition::Absent,
-            Some(&unpartitioned),
-            false,
-        )
-        .is_err());
-        assert!(lifecycle_write_measurement(
-            scope,
-            &operation,
-            entity.kind,
-            entity.id,
-            AppliedStateTransition::Put(&TextPartition::Unpartitioned),
-            Some(&unpartitioned),
-            false,
-        )
-        .is_err());
-        assert!(lifecycle_write_measurement(
-            scope,
-            &operation,
-            entity.kind,
-            entity.id,
-            AppliedStateTransition::Delete,
-            None,
-            true,
-        )
-        .is_ok());
+        let target = VectorPlanTarget::build(scope, &operation, &record).unwrap();
+        assert!(
+            lifecycle_write_measurement(
+                &target,
+                entity.kind,
+                entity.id,
+                AppliedStateTransition::Put(&TextPartition::Unpartitioned),
+                Some((
+                    &TextPartition::Unpartitioned,
+                    VectorPhysicalIndexId::initial()
+                )),
+                &[],
+            )
+            .is_err(),
+            "only a tenant partition owns a mapping"
+        );
+        assert_eq!(
+            lifecycle_write_measurement(
+                &target,
+                entity.kind,
+                entity.id,
+                AppliedStateTransition::Delete,
+                None,
+                &[],
+            )
+            .unwrap()
+            .0,
+            1
+        );
         assert!(matches!(record.state(), IndexStateV2::Building { .. }));
         drop(transaction);
         db.close().await.expect("vector test database closes");
@@ -6274,6 +6121,158 @@ mod tests {
             Some(LegacyVectorPhysicalReservation::AdoptedActive { .. })
         ));
         db.close().await.expect("active adoption closes");
+    }
+
+    /// Plans `entity_id` into a fresh tenant partition of the build `operation`,
+    /// reading the watermark through `transaction` and rows through a planning
+    /// snapshot opened now.
+    async fn plan_new_partition(
+        db: &Db,
+        transaction: &DbTransaction,
+        operation: &IndexOperationRecord,
+        record: &IndexRecordV2,
+        definition: &ValidatedVectorIndexDefinition,
+        tenant: i64,
+    ) -> Result<EntityPlanOutcome> {
+        let planning = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let document = vector_document(definition, &properties([1.0, 2.0, 3.0], Some(tenant)))
+            .unwrap()
+            .unwrap();
+        plan_and_apply::<vector::distance::Euclidean>(
+            &planning,
+            &VectorWriteRecorder::new(),
+            transaction,
+            &VectorPlanTarget::build(DataScope::LegacyUnscoped, operation, record)?,
+            definition,
+            Arc::new(SimHasherRegistry::default()),
+            crate::batch_reads::BatchReads::Single,
+            IndexEntityId::new(1),
+            &[],
+            Some(&document),
+            &VectorBatchAccounting::new(
+                OperationCounters::default(),
+                SearchIndexBackfillLimits::default().batch(),
+            ),
+            &mut driver().build_cache.checkout_fresh().await,
+        )
+        .await
+    }
+
+    /// A physical ID the step transaction sees as free but another index in
+    /// the scope allocated, with its namespace, before planning opened is a
+    /// retryable conflict; a namespace the transaction sees too means the
+    /// watermark trails it, which fails closed.
+    #[tokio::test]
+    async fn a_physical_id_allocated_before_planning_conflicts_and_a_stale_watermark_fails_closed()
+    {
+        let db = test_db("vector-driver-allocation-race").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = definition(Some("account_id"));
+        let ValidatedDynamicIndexDefinition::Vector(vector_definition) = &definition else {
+            unreachable!("fixture definition is vector");
+        };
+        put_source(&db, scope, 1, &properties([1.0, 2.0, 3.0], Some(7))).await;
+        let (operation_id, _, _) = create_build(&db, scope, &definition, 1).await;
+        let record = read_index(&db, scope, &definition).await;
+        let operation = read_operation(&db, scope, operation_id).await;
+        let other = ValidatedDynamicIndexDefinition::Vector(
+            ValidatedVectorIndexDefinition::try_from_runtime(
+                &VectorIndexDefinition::new_node(
+                    "Picture",
+                    "embedding",
+                    3,
+                    VectorDistanceMetric::Euclidean,
+                )
+                .unwrap()
+                .with_tenant_property("account_id")
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let (other_id, _, _) = create_build(&db, scope, &other, 1).await;
+        let other_record = read_index(&db, scope, &other).await;
+        let other_namespace = |physical_index_id| {
+            let handle = ValidatedVectorBuildGenerationHandle::try_from_building::<
+                vector::distance::Euclidean,
+            >(scope, &other_record, other_id, physical_index_id)
+            .unwrap();
+            let ValidatedDynamicIndexDefinition::Vector(other_vector) = &other else {
+                unreachable!("fixture definition is vector");
+            };
+            (
+                VectorIndex::<vector::distance::Euclidean>::from_generation(handle.generation()),
+                VectorIndexConfig::from_v2_definition(
+                    other_vector,
+                    handle.generation().physical_name(),
+                ),
+            )
+        };
+
+        // The step transaction reads the watermark, then the other build
+        // allocates the same ID and creates its namespace.
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let peeked = peek_vector_physical_id(&transaction).await.unwrap();
+        let concurrent = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let allocated = crate::index_lifecycle::repository::stage_vector_partition_mapping(
+            &concurrent,
+            scope,
+            other_record.index_id(),
+            other_record.state().generation(),
+            VectorPhysicalLayout::Partitioned,
+            &VectorTenantPartition::try_from_partition(
+                vector_document(vector_definition, &properties([0.0, 0.0, 1.0], Some(8)))
+                    .unwrap()
+                    .unwrap()
+                    .partition()
+                    .clone(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(allocated, peeked);
+        let (index, config) = other_namespace(allocated);
+        index.create(&concurrent, config).await.unwrap();
+        concurrent.commit().await.unwrap();
+        assert!(matches!(
+            plan_new_partition(&db, &transaction, &operation, &record, vector_definition, 7).await,
+            Err(error) if error.is_transaction_conflict()
+        ));
+        drop(transaction);
+
+        // A later transaction reads the advanced watermark and plans.
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        assert!(matches!(
+            plan_new_partition(&db, &transaction, &operation, &record, vector_definition, 7).await,
+            Ok(EntityPlanOutcome::Admitted { .. })
+        ));
+        drop(transaction);
+
+        // A namespace at the next ID that the watermark never covered.
+        let stale = peek_vector_physical_id(&db).await.unwrap();
+        let (index, config) = other_namespace(stale);
+        let create = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        index.create(&create, config).await.unwrap();
+        create.commit().await.unwrap();
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        assert!(matches!(
+            plan_new_partition(&db, &transaction, &operation, &record, vector_definition, 7).await,
+            Err(HelixDbError::IndexCatalogCorruption(reason)) if reason.contains("watermark")
+        ));
+        drop(transaction);
+        db.close().await.expect("vector test database closes");
     }
 
     mod build_cache;

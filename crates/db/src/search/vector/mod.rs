@@ -158,7 +158,6 @@ use crate::encoding::NodeId;
 pub(crate) use access::read::production_contracts::run as run_read_boundary_contracts;
 pub(crate) use access::read::{ValidatedVectorReadIndex, VectorReadVisibility};
 pub(crate) use access::read_view::VectorReadView;
-pub(crate) use access::write::managed_vector_write_index;
 #[cfg(feature = "production-coverage")]
 pub(crate) use benchmarks::{
     observe_retained_payload as observe_benchmark_retained_payload,
@@ -175,6 +174,8 @@ pub use benchmarks::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
+#[cfg(test)]
+pub(crate) use cache::commit::gated_wal;
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::commit::production_contracts::run as run_write_cache_contracts;
 pub(crate) use cache::commit::{commit_fenced, VectorCacheWriteSet};
@@ -211,9 +212,7 @@ pub(crate) use hnsw::index::VectorIndex;
 pub(crate) use hnsw::model::Candidate;
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::mutation::production_contracts::run as run_mutation_contracts;
-pub(crate) use hnsw::mutation::{
-    ActiveVectorMutationRuntime, VectorBuildSession, VectorBuildSessionStats,
-};
+pub(crate) use hnsw::mutation::{VectorBuildSession, VectorBuildSessionStats};
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
 #[cfg(feature = "production-coverage")]
@@ -228,6 +227,7 @@ pub(crate) use hnsw::restricted::{
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::search::production_contracts::run as run_search_contracts;
+pub(crate) use hnsw::search::score_exact_in_memory;
 pub use item::Item;
 #[cfg(feature = "production-coverage")]
 pub(crate) use magnitude_regressions::{

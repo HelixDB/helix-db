@@ -276,6 +276,24 @@ impl ActiveTextMutationLimits {
         }
     }
 
+    /// Builds limits that bypass policy validation, so unit tests can place a
+    /// publication input allowance, split ceiling, or page ceiling at an exact
+    /// boundary that no validated policy reaches.
+    #[cfg(test)]
+    pub(crate) fn unchecked_for_tests(
+        batch: SearchIndexBatchLimits,
+        max_input_bytes: NonZeroU64,
+        max_split_bytes: NonZeroU64,
+        max_manifest_page_bytes: NonZeroU64,
+    ) -> Self {
+        Self {
+            max_input_bytes,
+            batch,
+            max_split_bytes,
+            max_manifest_page_bytes,
+        }
+    }
+
     /// Returns the maximum serialized bytes read by one text mutation plan.
     pub const fn max_input_bytes(self) -> NonZeroU64 {
         self.max_input_bytes
@@ -313,7 +331,13 @@ impl SearchIndexBackfillLimits {
     /// The edge-property width is currently required to be one because the
     /// underlying `multi_get` API cannot stop after a returned-byte ceiling.
     /// Artifact pages and the final current-format text manifest must also fit
-    /// the transaction that publishes them. Rejecting those configurations
+    /// the transaction that publishes them. Every indexed text document is
+    /// admitted to a per-document share of one publication (half of each
+    /// output and compaction-input budget after reserving manifest-page
+    /// values), and the split that publishes it alone must fit the split
+    /// ceiling and the retained-split (compaction-input) budget. Those
+    /// allowances must admit the smallest one-term document; otherwise every
+    /// text write and build would be rejected. Rejecting those configurations
     /// here keeps workers from starting work that cannot be committed safely.
     pub fn try_new(
         batch: SearchIndexBatchLimits,
@@ -342,7 +366,7 @@ impl SearchIndexBackfillLimits {
                 },
             );
         }
-        Ok(Self {
+        let limits = Self {
             batch,
             edge_property_read_batch,
             text_artifacts,
@@ -350,16 +374,29 @@ impl SearchIndexBackfillLimits {
             vector_build_cache_bytes: default_vector_build_cache_bytes(
                 super::host_memory::memory_ceiling_bytes(),
             ),
-        })
+        };
+        crate::index_lifecycle::text::active_batch::TextDocumentFootprint::SMALLEST
+            .first_exceeded(limits.active_text_mutation())
+            .map_or(Ok(limits), |(resource, required, allowance)| {
+                Err(
+                    SearchIndexBackfillLimitError::TextDocumentAllowanceTooSmall {
+                        resource,
+                        required,
+                        allowance,
+                    },
+                )
+            })
     }
 
-    /// Replaces the memory budget of the vector build planning cache.
+    /// Replaces the memory budget of the vector planning cache.
     ///
-    /// One vector build retains up to this many bytes of decoded vectors,
-    /// neighbor rows, and SimHashes between its committed steps, plus the same
-    /// amount per in-flight vector build task. The budget charges each entry's
-    /// payload plus its estimated bookkeeping, and caps each entry class at one
-    /// entry per KiB. The cache is process-local and never persisted.
+    /// Vector builds and queued vector publication share up to this many bytes
+    /// of decoded vectors, neighbor rows, and SimHashes: the sessions builds
+    /// retain between committed steps and those running steps and publication
+    /// attempts plan with split it max-min fairly. The budget charges each
+    /// entry's payload plus its estimated bookkeeping, and caps each entry
+    /// class at one entry per KiB. The cache is process-local and never
+    /// persisted.
     ///
     /// The default is one eighth of the process memory ceiling, clamped to
     /// 64 MiB..=2 GiB. The ceiling is the tightest cgroup (v2 or v1) memory
@@ -416,7 +453,7 @@ impl SearchIndexBackfillLimits {
         ActiveTextMutationLimits::from_backfill(self)
     }
 
-    /// Returns the byte budget of each vector build planning cache.
+    /// Returns the byte budget vector builds and publication plan within.
     pub const fn vector_build_cache_bytes(self) -> NonZeroU64 {
         self.vector_build_cache_bytes
     }
@@ -496,6 +533,18 @@ pub enum SearchIndexBackfillLimitError {
         /// Configured whole-transaction encoded output cap.
         transaction: NonZeroU64,
     },
+    /// A per-document text allowance cannot admit even one term.
+    #[error(
+        "text document {resource} allowance {allowance} is below the {required} the smallest one-term document needs"
+    )]
+    TextDocumentAllowanceTooSmall {
+        /// Resource whose per-document allowance is too small.
+        resource: crate::error::ActiveTextMutationResource,
+        /// What the smallest one-term document uses.
+        required: u64,
+        /// What this policy allows one document.
+        allowance: u64,
+    },
 }
 
 #[cfg(test)]
@@ -546,6 +595,127 @@ mod tests {
         );
     }
 
+    /// A policy with exactly these per-document inputs to the text allowances.
+    fn document_policy(
+        operations: u64,
+        output: u64,
+        input: u64,
+        page: u64,
+        split: u64,
+    ) -> Result<SearchIndexBackfillLimits, SearchIndexBackfillLimitError> {
+        SearchIndexBackfillLimits::try_new(
+            SearchIndexBatchLimits::try_new(nzu(1), nz(1), nz(operations), nz(output), nz(1))
+                .unwrap(),
+            nzu(1),
+            artifacts(1),
+            TextBackfillCompactionLimits::new(nzu(1), nz(input), nz(1), nz(split), nz(page)),
+        )
+    }
+
+    #[test]
+    fn every_policy_admits_the_smallest_one_term_document_at_the_exact_boundary() {
+        use crate::error::ActiveTextMutationResource;
+        let smallest = crate::index_lifecycle::text::active_batch::TextDocumentFootprint::SMALLEST;
+        let split = crate::search::text::single_document_split_bytes(smallest.analysis_bytes());
+        let page = smallest.single_split_page_bytes();
+        let operations = 2 * smallest.output_operations();
+        let output = page + 2 * smallest.output_bytes();
+        // The retained split needs more input than the input share, so the
+        // share's own boundary reserves pages that take up the difference.
+        let wide_page = (split - 2 * smallest.input_bytes()).div_ceil(2);
+        let wide_output = wide_page + 2 * smallest.output_bytes();
+        let share_input = 2 * wide_page + 2 * smallest.input_bytes();
+        document_policy(operations, output, split, page, split)
+            .expect("allowances equal to the smallest document's footprint admit it");
+        document_policy(operations, wide_output, share_input, wide_page, split)
+            .expect("an input share equal to the smallest document's input admits it");
+        for (policy, resource, required) in [
+            (
+                document_policy(operations - 1, output, split, page, split),
+                ActiveTextMutationResource::OutputOperations,
+                smallest.output_operations(),
+            ),
+            (
+                document_policy(operations, output - 1, split, page, split),
+                ActiveTextMutationResource::OutputBytes,
+                smallest.output_bytes(),
+            ),
+            (
+                document_policy(operations, output, split, page - 1, split),
+                ActiveTextMutationResource::ManifestPageBytes,
+                page,
+            ),
+            (
+                document_policy(operations, output, split, page, split - 1),
+                ActiveTextMutationResource::SplitBytes,
+                split,
+            ),
+            (
+                document_policy(operations, output, split - 1, page, split),
+                ActiveTextMutationResource::RetainedSplitBytes,
+                split,
+            ),
+            (
+                document_policy(operations, wide_output, share_input - 1, wide_page, split),
+                ActiveTextMutationResource::InputBytes,
+                smallest.input_bytes(),
+            ),
+        ] {
+            assert_eq!(
+                policy,
+                Err(
+                    SearchIndexBackfillLimitError::TextDocumentAllowanceTooSmall {
+                        resource,
+                        required,
+                        allowance: required - 1,
+                    }
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_pages_filling_a_budget_leave_documents_no_share() {
+        use crate::error::ActiveTextMutationResource;
+        let defaults = SearchIndexBackfillLimits::default();
+        let compaction = defaults.text_compaction();
+        let with = |input: u64, manifest: u64| {
+            SearchIndexBackfillLimits::try_new(
+                defaults.batch(),
+                NonZeroUsize::MIN,
+                defaults.text_artifacts(),
+                TextBackfillCompactionLimits::new(
+                    compaction.max_fan_in(),
+                    nz(input),
+                    compaction.max_temporary_disk_bytes(),
+                    compaction.max_output_blob_bytes(),
+                    nz(manifest),
+                ),
+            )
+        };
+        let output = defaults.batch().max_output_bytes().get();
+        assert!(matches!(
+            with(compaction.max_input_bytes().get(), output),
+            Err(
+                SearchIndexBackfillLimitError::TextDocumentAllowanceTooSmall {
+                    resource: ActiveTextMutationResource::OutputBytes,
+                    allowance: 0,
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            with(8 * 1024 * 1024, 4 * 1024 * 1024),
+            Err(
+                SearchIndexBackfillLimitError::TextDocumentAllowanceTooSmall {
+                    resource: ActiveTextMutationResource::InputBytes,
+                    allowance: 0,
+                    ..
+                }
+            )
+        ));
+    }
+
     #[test]
     fn vector_build_cache_default_is_an_eighth_of_the_memory_ceiling() {
         const MIB: u64 = 1024 * 1024;
@@ -586,5 +756,37 @@ mod tests {
             SearchIndexBackfillLimits::try_new(batch(), nzu(1), artifacts(20), compaction(81)),
             Err(SearchIndexBackfillLimitError::ManifestExceedsTransactionBytes { .. })
         ));
+    }
+
+    /// A split ceiling no document's split fits would admit writes that
+    /// block publication forever, so validation rejects it.
+    #[test]
+    fn split_ceilings_below_the_smallest_document_split_are_rejected() {
+        let defaults = SearchIndexBackfillLimits::default();
+        let compaction = defaults.text_compaction();
+        assert_eq!(
+            SearchIndexBackfillLimits::try_new(
+                defaults.batch(),
+                NonZeroUsize::MIN,
+                defaults.text_artifacts(),
+                TextBackfillCompactionLimits::new(
+                    compaction.max_fan_in(),
+                    compaction.max_input_bytes(),
+                    compaction.max_temporary_disk_bytes(),
+                    NonZeroU64::MIN,
+                    compaction.max_manifest_bytes(),
+                ),
+            ),
+            Err(
+                SearchIndexBackfillLimitError::TextDocumentAllowanceTooSmall {
+                    resource: crate::error::ActiveTextMutationResource::SplitBytes,
+                    required: crate::search::text::single_document_split_bytes(
+                        crate::index_lifecycle::text::active_batch::TextDocumentFootprint::SMALLEST
+                            .analysis_bytes()
+                    ),
+                    allowance: 1,
+                }
+            )
+        );
     }
 }

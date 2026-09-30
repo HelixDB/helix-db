@@ -42,9 +42,6 @@ use crate::search::vector::{
     VectorIndexState,
 };
 
-mod active;
-pub(crate) use active::ActiveVectorMutationRuntime;
-
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MIN_TARGETS: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_MUTATION: usize = 8;
@@ -701,7 +698,6 @@ impl<D: Distance> VectorIndex<D> {
         let simhash_cache = self.simhash_cache(metadata.config.dimension)?;
         let simhash = simhash_cache.compute_and_cache_measured(txn, node_id, vector)?;
         mutation_cache.put_simhash(node_id, Some(simhash));
-        self.mark_memory_node_dirty(node_id);
 
         let node_layer =
             selected_layer.unwrap_or_else(|| self.select_mutation_layer(metadata.config.ml));
@@ -714,7 +710,6 @@ impl<D: Distance> VectorIndex<D> {
         if node_layer > 0 {
             rows.put_canonical_vector(&canonical_key, encoded_item.clone())?;
             rows.put_upper_vector(node_id, encoded_item)?;
-            self.mark_memory_node_dirty(node_id);
         } else {
             rows.put_canonical_vector(&canonical_key, encoded_item)?;
         }
@@ -1136,7 +1131,7 @@ impl<D: Distance> VectorIndex<D> {
         VectorWriteRows::new(txn, self.row_keyspace()).put_layer0_neighbors(node_id, neighbors)
     }
 
-    /// Stages one canonical upper-neighbor row and fences its shared-cache copy.
+    /// Stages one canonical upper-neighbor row through typed storage.
     pub(in crate::search::vector) fn store_upper_neighbors(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1145,9 +1140,7 @@ impl<D: Distance> VectorIndex<D> {
         neighbors: &[NodeId],
     ) -> Result<(), HelixDbError> {
         VectorWriteRows::new(txn, self.row_keyspace())
-            .put_upper_neighbors(layer, node_id, neighbors)?;
-        self.mark_memory_upper_neighbors_dirty(layer, node_id);
-        Ok(())
+            .put_upper_neighbors(layer, node_id, neighbors)
     }
 
     /// Computes the exact linear reverse-locator delta between canonical rows.
@@ -1443,30 +1436,6 @@ impl<D: Distance> VectorIndex<D> {
         row: NeighborRowId,
         evict_after_flush: bool,
     ) -> Result<(), HelixDbError> {
-        self.flush_one_cached_neighbor_mode(txn, mutation_cache, row, evict_after_flush, true)
-            .await
-    }
-
-    /// Flushes an Active-session canonical row whose locator delta was staged at its entity boundary.
-    pub(in crate::search::vector) async fn flush_one_active_cached_neighbor(
-        &self,
-        txn: &MeasuredVectorTransaction<'_>,
-        mutation_cache: &mut MutationOpCache<D>,
-        row: NeighborRowId,
-        evict_after_flush: bool,
-    ) -> Result<(), HelixDbError> {
-        self.flush_one_cached_neighbor_mode(txn, mutation_cache, row, evict_after_flush, false)
-            .await
-    }
-
-    async fn flush_one_cached_neighbor_mode(
-        &self,
-        txn: &MeasuredVectorTransaction<'_>,
-        mutation_cache: &mut MutationOpCache<D>,
-        row: NeighborRowId,
-        evict_after_flush: bool,
-        stage_reverse_locators: bool,
-    ) -> Result<(), HelixDbError> {
         let Some(cached) = mutation_cache.neighbor(row).cloned() else {
             return Ok(());
         };
@@ -1490,15 +1459,13 @@ impl<D: Distance> VectorIndex<D> {
         };
 
         if original != cached.current() {
-            if stage_reverse_locators {
-                self.update_reverse_edge_locator(
-                    txn,
-                    layer,
-                    node_id,
-                    &previous_neighbors,
-                    current_neighbors,
-                )?;
-            }
+            self.update_reverse_edge_locator(
+                txn,
+                layer,
+                node_id,
+                &previous_neighbors,
+                current_neighbors,
+            )?;
             if layer == 0 {
                 self.store_neighbors_layer0(txn, node_id, current_neighbors.as_slice())
                     .await?;
@@ -1743,13 +1710,10 @@ impl<D: Distance> VectorIndex<D> {
         rows.delete_layer0_neighbors(node_id)?;
         for layer in 1..=node_max_layer {
             rows.delete_upper_neighbors(layer, node_id)?;
-            self.mark_memory_upper_neighbors_dirty(layer, node_id);
         }
 
         rows.delete_upper_vector(node_id)?;
-        self.mark_memory_node_dirty(node_id);
         rows.delete_simhash(node_id)?;
-        self.mark_memory_node_dirty(node_id);
         self.remove_entry_candidate(txn, node_id).await?;
         mutation_cache.invalidate_items(node_id);
         mutation_cache.invalidate_simhash(node_id);
@@ -3534,10 +3498,10 @@ impl<D: Distance> VectorBuildSession<D> {
 
     /// Returns aggregate cache behavior for lifecycle-testing metrics.
     ///
-    /// Hidden-generation planning has always reported the maximum retained
-    /// payload after enforcing its global ceiling. Cache-local telemetry also
-    /// observes transient Active-mutation peaks, which must not change that
-    /// lifecycle contract, so [`Self::attach`] folds every other counter only.
+    /// Planning reports the maximum retained payload after enforcing the
+    /// session's global ceiling. Cache-local telemetry also observes transient
+    /// peaks within one entity, before that ceiling is enforced, so
+    /// [`Self::attach`] folds every other counter only.
     pub(crate) fn stats(&self) -> VectorBuildSessionStats {
         self.session_stats
     }

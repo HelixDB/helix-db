@@ -489,15 +489,14 @@ fn legacy_text_rebuild_retires_only_after_active_and_cold_reopens() {
 fn legacy_text_rebuild_recovers_at_every_durable_boundary() {
     run_contract(|| async {
         use db::migrations::LegacyTextMigrationCheckpoint::{
-            AfterActivationBeforeRetirement, BeforeEnqueue, CatchUp, SourceScan,
-            ValidateEntityStates, ValidatePages, ValidateRoots,
+            AfterActivationBeforeRetirement, BeforeEnqueue, SourceScan, ValidateEntityStates,
+            ValidatePages, ValidateRoots,
         };
 
         let mut observed_versions = Vec::new();
         for checkpoint in [
             BeforeEnqueue,
             SourceScan,
-            CatchUp,
             ValidatePages,
             ValidateRoots,
             ValidateEntityStates,
@@ -557,7 +556,7 @@ fn legacy_text_rebuild_recovers_at_every_durable_boundary() {
         }
         assert_eq!(
             observed_versions,
-            vec![Some(db::production_coverage::CURRENT_INDEX_STORAGE_VERSION); 7]
+            vec![Some(db::production_coverage::CURRENT_INDEX_STORAGE_VERSION); 6]
         );
     });
 }

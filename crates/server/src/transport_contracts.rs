@@ -412,7 +412,7 @@ async fn active_text_limits_preserve_the_shared_code_message_and_input_classific
             })
         };
         let code = helix_ast::error_code::QueryErrorCode::ActiveTextMutationLimitExceeded.as_str();
-        let message = format!("db error: Active text mutation exceeds {resource}: observed 513, limit 512. This is a hard mutation-batch limit; reduce the number or size of mutations.");
+        let message = format!("db error: Active text mutation exceeds {resource}: observed 513, limit 512. This is a hard per-document limit; shorten the indexed text.");
         let response = http::service_error_response(error());
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(!response.headers().contains_key("retry-after"));

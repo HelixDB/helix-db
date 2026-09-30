@@ -273,8 +273,11 @@ pub enum HelixDbError {
     #[error("Explicit migration stepping requires Disabled worker mode")]
     MigrationSteppingRequiresDisabledMode,
 
-    /// A request-owned Active text mutation exceeded exact serialized admission.
-    #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}. This is a hard mutation-batch limit; reduce the number or size of mutations.")]
+    /// An indexed text document exceeds its per-document admission allowance.
+    ///
+    /// Writes report it before commit. The queue publisher also raises it
+    /// internally when one publication exceeds its budget, and trims instead.
+    #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}. This is a hard per-document limit; shorten the indexed text.")]
     ActiveTextMutationLimitExceeded {
         /// Resource rejected before intent creation or object I/O.
         resource: ActiveTextMutationResource,
@@ -1309,7 +1312,7 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "Active text mutation exceeds output_bytes: observed 11, limit 10. This is a hard mutation-batch limit; reduce the number or size of mutations."
+            "Active text mutation exceeds output_bytes: observed 11, limit 10. This is a hard per-document limit; shorten the indexed text."
         );
         assert_eq!(
             error.index_error_code(),

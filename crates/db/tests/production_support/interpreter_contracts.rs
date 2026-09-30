@@ -1158,7 +1158,10 @@ async fn seed_active_text_generation_with(
     root
 }
 
-/// Runs a real serializable graph conflict through Active-text resolution.
+/// Runs a real serializable graph conflict through a queued Active-text write.
+///
+/// The losing transaction staged a text operation: nothing is uploaded, no
+/// queue operand or index row commits, and its admission charge is released.
 pub(crate) async fn run_active_text_graph_conflict() {
     let database = "production-interpreter-active-text-conflict";
     let token = ProcessLocalDatabaseToken::new(database).expect("process-local token validates");
@@ -1201,19 +1204,10 @@ pub(crate) async fn run_active_text_graph_conflict() {
         created,
         ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(0))])
     );
-    execution
-        .flush_active_index_mutations()
-        .await
-        .expect("the explicit read barrier publishes the pending text epoch");
-    let blobs_after_upload = text_blob_paths(&object_store).await;
-    let uploaded_orphans = blobs_after_upload
-        .difference(&blobs_before)
-        .cloned()
-        .collect::<BTreeSet<_>>();
     assert_eq!(
-        uploaded_orphans.len(),
-        1,
-        "the prepared Active mutation uploads exactly one immutable blob"
+        text_blob_paths(&object_store).await,
+        blobs_before,
+        "staging a queued Active-text write uploads nothing"
     );
 
     let graph_key = DataKey::Data {
@@ -1263,15 +1257,24 @@ pub(crate) async fn run_active_text_graph_conflict() {
         v2_before,
         "the losing transaction must not change any scoped Index V2 lane"
     );
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(
+        (
+            stats.pending_operations,
+            stats.uncertain_operations,
+            stats.committed_operations
+        ),
+        (0, 0, 0),
+        "a definite conflict commits no operation and releases its charge"
+    );
     db.close()
         .await
         .expect("Active-text production fixture closes");
     assert_eq!(
         text_blob_paths(&object_store).await,
-        blobs_after_upload,
-        "database close must not delete the conflict orphan"
+        blobs_before,
+        "a losing graph transaction never leaves text blobs"
     );
-    assert!(uploaded_orphans.is_subset(&blobs_after_upload));
 }
 
 /// Proves internal storage and index reads fail closed without a request view.
@@ -2542,7 +2545,15 @@ mod text_transaction_benchmark {
         }
     }
 
-    /// Proves destination batching, delete-only publication, versions, partitions, and barriers.
+    /// Publishes every queued text operation, as the automatic worker would.
+    async fn publish(db: &crate::HelixDB) {
+        db.publish_index_queues_for_lifecycle_testing()
+            .await
+            .expect("queued text operations publish");
+    }
+
+    /// Proves queued publication batches by destination, delete-only publication,
+    /// versions, partitions, and in-request read-your-writes without barriers.
     pub async fn run_text_transaction_batching_contracts() {
         let temporary = tempfile::tempdir().expect("batching contract directory creates");
         let local: Arc<dyn ObjectStore> = Arc::new(
@@ -2569,6 +2580,12 @@ mod text_transaction_benchmark {
         db.execute(&insert_plan(100), context::ParamBindings::default())
             .await
             .expect("one hundred inserts commit");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 1);
         let inserted_root = manifest_root(writer_db(&db), root)
             .await
@@ -2609,6 +2626,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("two updates for one entity coalesce");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 1);
         let updated_root = manifest_root(writer_db(&db), root)
             .await
@@ -2638,6 +2661,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("create/delete net-zero epoch commits");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 0);
         assert_eq!(
             manifest_root(writer_db(&db), root)
@@ -2650,6 +2679,12 @@ mod text_transaction_benchmark {
         db.execute(&delete_all_plan(), context::ParamBindings::default())
             .await
             .expect("delete-only epoch commits");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 0);
         let deleted_root = manifest_root(writer_db(&db), root)
             .await
@@ -2681,19 +2716,31 @@ mod text_transaction_benchmark {
         measured.reset_fts_uploads();
         db.execute(&write_read_write_plan(), context::ParamBindings::default())
             .await
-            .expect("write/read/write request commits both flush epochs");
-        assert_eq!(measured.fts_uploads().0, 2);
+            .expect("write/read/write request commits one queued transaction");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
+        // The in-request read saw the first write through the overlay; both
+        // writes publish in one epoch.
+        assert_eq!(measured.fts_uploads().0, 1);
         let barrier_root = manifest_root(writer_db(&db), root)
             .await
             .expect("barrier root reads");
-        assert_eq!(barrier_root.split_count(), 4);
+        assert_eq!(barrier_root.split_count(), 3);
+        assert_eq!(
+            barrier_root.revision().get(),
+            deleted_root.revision().get() + 1
+        );
         assert_eq!(
             entity_state(writer_db(&db), root, 101)
                 .await
                 .expect("pre-read entity state reads")
                 .logical_version
                 .get(),
-            deleted_root.revision().get() + 1
+            barrier_root.revision().get()
         );
         assert_eq!(
             entity_state(writer_db(&db), root, 102)
@@ -2715,11 +2762,17 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("update/delete coalesces to a retirement");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 0);
         let update_delete_root = manifest_root(writer_db(&db), root)
             .await
             .expect("update/delete root reads");
-        assert_eq!(update_delete_root.split_count(), 4);
+        assert_eq!(update_delete_root.split_count(), 3);
         assert_eq!(
             update_delete_root.revision().get(),
             barrier_root.revision().get() + 1
@@ -2788,6 +2841,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("dual-index inserts commit");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 2);
         let body_value = manifest_root(writer_db(&db), body_root)
             .await
@@ -2867,6 +2926,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("two-partition inserts commit");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 2);
         for (entity_id, tenant) in [(0, "acme"), (1, "globex")] {
             let root = tenant_root(tenant);
@@ -2895,6 +2960,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("two tenant changes coalesce to one partition move");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 1);
         let acme_after = manifest_root(writer_db(&db), acme_root)
             .await
