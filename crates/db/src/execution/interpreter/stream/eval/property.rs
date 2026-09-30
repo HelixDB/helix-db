@@ -72,7 +72,7 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         if let Some(value) = row.virtual_properties.get(property) {
             return Ok(Some(value));
         }
-        let Some(element) = row.current.as_ref() else {
+        let Some(element) = record_read(row, property) else {
             return Ok(None);
         };
         let properties = self.element_properties(element).await?;
@@ -129,6 +129,25 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         self.edge_endpoints.insert(edge_id, endpoints);
         Ok(endpoints)
     }
+}
+
+/// The element whose stored record [`RowValueResolver::row_property`] reads
+/// to resolve `property` on `row`, or `None` when it resolves without one:
+/// `$id`, a virtual property the row carries, or, on an edge row, an endpoint
+/// path, which reads the endpoint's record rather than the edge's.
+///
+/// `row_property` takes its record read from here, so prefetching these
+/// elements never reads a record that per-row resolution would skip.
+pub(in crate::execution::interpreter::stream) fn record_read<'r>(
+    row: &'r ExecutionRow,
+    property: &ir::NonEmptyString,
+) -> Option<&'r ElementRef> {
+    let element = row.current.as_ref()?;
+    let name = property.as_ref();
+    let endpoint_path = matches!(element, ElementRef::Edge(_))
+        && (matches!(name, "$from" | "$to") || edge_endpoint_property(name).is_some());
+    (!endpoint_path && name != "$id" && !row.virtual_properties.contains(property))
+        .then_some(element)
 }
 
 impl<'db> ExecutionContext<'db> {

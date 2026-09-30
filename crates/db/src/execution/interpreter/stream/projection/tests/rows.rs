@@ -448,9 +448,11 @@ async fn inline_and_virtual_projection_fields_do_not_load_stored_properties() {
     assert_projection_reads(&ctx, 0, 0, 0);
 }
 
+/// A projection reads each element's record once per record batch, however
+/// many rows and items of the batch resolve against it, missing or not.
 #[tokio::test]
-async fn missing_property_blobs_are_cached_only_for_the_current_row() {
-    let db = test_support::open_db("projection-missing-blob-row-scope").await;
+async fn missing_property_blobs_are_cached_for_the_record_batch() {
+    let db = test_support::open_db("projection-missing-blob-batch-scope").await;
     let projection = ir::ProjectionPlan::Project(projection_items(vec![
         ir::ProjectionItem::Property {
             source: name("first"),
@@ -461,27 +463,26 @@ async fn missing_property_blobs_are_cached_only_for_the_current_row() {
             alias: name("second"),
         },
     ]));
-    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let batch = crate::execution::interpreter::stream::filter::RECORD_BATCH_ROWS;
+    for (rows, reads) in [(2, 1), (batch, 1), (batch + 1, 2)] {
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let result = ctx
+            .project(
+                ExecutionValue::Stream(vec![
+                    ExecutionRow::current(ElementRef::Node(u64::MAX));
+                    rows
+                ]),
+                &projection,
+            )
+            .await
+            .expect("missing properties remain a valid projection");
 
-    let result = ctx
-        .project(
-            ExecutionValue::Stream(vec![
-                ExecutionRow::current(ElementRef::Node(u64::MAX)),
-                ExecutionRow::current(ElementRef::Node(u64::MAX)),
-            ]),
-            &projection,
-        )
-        .await
-        .expect("missing properties remain a valid projection");
-
-    assert_eq!(
-        result,
-        ExecutionValue::Scalars(vec![
-            ExecutionScalar::Object(BTreeMap::new()),
-            ExecutionScalar::Object(BTreeMap::new()),
-        ])
-    );
-    assert_projection_reads(&ctx, 2, 0, 0);
+        assert_eq!(
+            result,
+            ExecutionValue::Scalars(vec![ExecutionScalar::Object(BTreeMap::new()); rows])
+        );
+        assert_projection_reads(&ctx, reads, 0, 0);
+    }
 }
 
 #[tokio::test]
@@ -1034,4 +1035,174 @@ async fn project_rejects_folded_stream_inputs() {
         .expect_err("folded stream projection is rejected")
         .to_string()
         .contains("project expected stream input, got folded stream"));
+}
+
+/// Property projections over many rows load each record batch with one
+/// multi-get and no per-row reads, keep row order and each row's own virtual
+/// values, and read nothing for row-local items.
+#[tokio::test]
+async fn projections_prefetch_each_record_batch_with_one_multi_get() {
+    let db = test_support::open_db("projection-batch-prefetch").await;
+    let batch = crate::execution::interpreter::stream::filter::RECORD_BATCH_ROWS;
+    let mut users = Vec::new();
+    for index in 0..batch + 20 {
+        users.push(test_support::add_user(&db, &format!("user-{index}")).await);
+    }
+    // Newest first, each user twice, plus a missing node.
+    let distance = name("$distance");
+    let rows = users
+        .iter()
+        .rev()
+        .flat_map(|id| [*id, *id])
+        .chain([u64::MAX])
+        .enumerate()
+        .map(|(rank, id)| {
+            ExecutionRow::current_with_virtual_properties(
+                ElementRef::Node(id),
+                RowVirtualProperties::from_one(distance.clone(), DbPropertyValue::F64(rank as f64)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let username = |id: u64| {
+        users
+            .iter()
+            .position(|user| *user == id)
+            .map(|index| DbPropertyValue::from(format!("user-{index}")))
+    };
+
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let projected = ctx
+        .project(
+            ExecutionValue::Stream(rows.clone()),
+            &ir::ProjectionPlan::Project(projection_items(vec![
+                ir::ProjectionItem::Property {
+                    source: name("$id"),
+                    alias: name("id"),
+                },
+                ir::ProjectionItem::Property {
+                    source: name("name"),
+                    alias: name("name"),
+                },
+                ir::ProjectionItem::Property {
+                    source: distance.clone(),
+                    alias: name("distance"),
+                },
+            ])),
+        )
+        .await
+        .unwrap();
+    let expected = rows
+        .iter()
+        .enumerate()
+        .map(|(rank, row)| {
+            let Some(ElementRef::Node(id)) = row.current else {
+                unreachable!("every row is a node row");
+            };
+            let mut object = BTreeMap::from([
+                (
+                    "id".to_string(),
+                    DbPropertyValue::I64(id.try_into().unwrap_or(i64::MAX)),
+                ),
+                ("distance".to_string(), DbPropertyValue::F64(rank as f64)),
+            ]);
+            if let Some(name) = username(id) {
+                object.insert("name".to_string(), name);
+            }
+            ExecutionScalar::Object(object)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected, ExecutionValue::Scalars(expected));
+    let work = ctx.pull_work.snapshot();
+    assert_eq!(work.raw_gets, 0, "no per-row record reads");
+    // One read per distinct element per batch; a user's two rows may straddle
+    // the batch boundary.
+    assert!((users.len() + 1..=users.len() + 2).contains(&work.multi_get_keys));
+
+    let values = ctx
+        .project(
+            ExecutionValue::Stream(rows.clone()),
+            &ir::ProjectionPlan::Values(property_names(vec!["name"])),
+        )
+        .await
+        .unwrap();
+    let ExecutionValue::Scalars(values) = values else {
+        panic!("values projection returns scalars");
+    };
+    assert_eq!(
+        values.len(),
+        rows.len() - 1,
+        "the missing node has no values"
+    );
+
+    let before = ctx.pull_work.snapshot();
+    ctx.project(
+        ExecutionValue::Stream(rows),
+        &ir::ProjectionPlan::Project(projection_items(vec![
+            ir::ProjectionItem::Property {
+                source: name("$id"),
+                alias: name("id"),
+            },
+            ir::ProjectionItem::Property {
+                source: distance,
+                alias: name("distance"),
+            },
+        ])),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ctx.pull_work.snapshot(),
+        before,
+        "row-local items read no record"
+    );
+}
+
+/// `record_read` names exactly the current-element record per-row
+/// resolution reads: none for `$id`, a virtual value the row carries, or an
+/// edge's endpoint paths, and the current element for anything else.
+#[tokio::test]
+async fn record_read_matches_the_current_record_row_property_reads() {
+    let db = test_support::open_db("projection-record-read").await;
+    let ada = test_support::add_user(&db, "ada").await;
+    let bob = test_support::add_user(&db, "bob").await;
+    let edge = test_support::add_edge(&db, ada, bob, "KNOWS").await;
+    let distance = name("$distance");
+    let scored = ExecutionRow::current_with_virtual_properties(
+        ElementRef::Node(ada),
+        RowVirtualProperties::from_one(distance.clone(), DbPropertyValue::F64(0.5)),
+    );
+    let node = ExecutionRow::current(ElementRef::Node(ada));
+    let edge_row = ExecutionRow::current(ElementRef::Edge(edge));
+    let empty = ExecutionRow::empty();
+    for (row, property, reads_current) in [
+        (&node, "$id", false),
+        (&node, "name", true),
+        (&node, "missing", true),
+        (&node, "$distance", true),
+        (&scored, "$distance", false),
+        (&scored, "name", true),
+        (&edge_row, "$from", false),
+        (&edge_row, "$to", false),
+        (&edge_row, "$from.name", false),
+        (&edge_row, "$to.$id", false),
+        (&edge_row, "since", true),
+        (&empty, "name", false),
+    ] {
+        let property = name(property);
+        assert_eq!(
+            eval::record_read(row, &property),
+            reads_current.then_some(row.current.as_ref()).flatten(),
+            "{property:?}"
+        );
+        // Per-row resolution reads a record only where the classifier says,
+        // apart from endpoint paths, which read the endpoint's record.
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.row_property(row, &property).await.unwrap();
+        let endpoint_record = property.as_ref().starts_with("$from.name");
+        assert_eq!(
+            ctx.projection_read_snapshot().property_gets,
+            usize::from(reads_current || endpoint_record),
+            "{property:?}"
+        );
+    }
 }
