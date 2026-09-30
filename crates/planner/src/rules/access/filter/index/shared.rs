@@ -263,7 +263,9 @@ where
     match atom {
         AccessFilterIndexAtom::Equality { property, domain } => {
             let key = catalog::ScopedPropertyKey::new(label.clone(), property.clone());
-            let index = F::equality_index(indexes, &key).ok_or(MissingAccessIndex::Equality)?;
+            let Some(index) = F::equality_index(indexes, &key) else {
+                return range_point_source::<F>(label, property, domain, indexes);
+            };
             Ok(match domain {
                 AccessEqualityDomain::One(value) => F::equality_source(index, key, value.clone()),
                 AccessEqualityDomain::Many(values) => F::union_source(
@@ -292,6 +294,71 @@ where
         })
         .ok_or(MissingAccessIndex::Range),
     }
+}
+
+/// Equality answered by a range index on a property without an equality
+/// index: one inclusive point range per literal value, unioned for `IN`.
+///
+/// This is exact. A range scan verifies every candidate against the stored
+/// record, and range ordering agrees with equality on every value a range
+/// bound accepts (for example `I64(5)` and `F64(5.0)` are equal under both).
+///
+/// Only literals a range bound accepts (non-null, non-NaN numbers, datetimes,
+/// and strings) qualify. Parameters, parameter sets, and null, bool, bytes,
+/// or array literals stay residual: a range lane holds no null entries, so a
+/// null binding, which must match rows whose property is missing or null,
+/// would read an empty point range. Answering those needs a null lane
+/// (HEL-873) or runtime classification of the bound value.
+fn range_point_source<F>(
+    label: &ir::NonEmptyString,
+    property: &ir::NonEmptyString,
+    domain: &AccessEqualityDomain,
+    indexes: &catalog::IndexCatalogSnapshot,
+) -> Result<F::Source, MissingAccessIndex>
+where
+    F: AccessFilterIndexFamily,
+{
+    let point = |value: &ir::IndexValue| match value {
+        ir::IndexValue::Literal(literal) => {
+            ir::RangeIndexValue::literal(literal.as_property_value().clone()).map(|value| {
+                ir::IndexRange::Between(
+                    ir::IndexBetweenRange::new(
+                        ir::IndexBound::Inclusive(value.clone()),
+                        ir::IndexBound::Inclusive(value),
+                    )
+                    .expect("a point range over one orderable literal is never inverted"),
+                )
+            })
+        }
+        ir::IndexValue::Param(_) | ir::IndexValue::ParamSet(_) => None,
+    };
+    let ranges = match domain {
+        AccessEqualityDomain::One(value) => vec![point(value)],
+        AccessEqualityDomain::Many(values) => values.iter().map(point).collect(),
+        AccessEqualityDomain::Runtime(_) => vec![None],
+    }
+    .into_iter()
+    .collect::<Option<Vec<_>>>()
+    .ok_or(MissingAccessIndex::Equality)?;
+    let (index, key) = [
+        helix_ast::index::RangeIndexDirection::Asc,
+        helix_ast::index::RangeIndexDirection::Desc,
+    ]
+    .into_iter()
+    .find_map(|direction| {
+        let key =
+            catalog::ScopedPropertyDirectionKey::new(label.clone(), property.clone(), direction);
+        F::range_index(indexes, &key).map(|index| (index, key))
+    })
+    .ok_or(MissingAccessIndex::Equality)?;
+    let mut sources = ranges
+        .into_iter()
+        .map(|range| F::range_source(index.clone(), key.clone(), range))
+        .collect::<Vec<_>>();
+    Ok(match sources.len() {
+        1 => sources.pop().expect("one point range was checked"),
+        _ => F::union_source(sources),
+    })
 }
 
 pub(super) fn combine_indexed_filter_source<F>(
