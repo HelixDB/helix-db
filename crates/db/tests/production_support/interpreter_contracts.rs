@@ -219,8 +219,11 @@ pub async fn run_request_mode_and_isolated_mutation_contracts() {
 /// One operation's writes are homogeneous, so only a transaction's sequence
 /// of transitions shows a label's property footprint growing and being
 /// absorbed by a node write. Validated plans never carry a range set, but a
-/// hand-built one resolves per row and is still forgotten by any write to
-/// its label, since it reads more than point indexes.
+/// hand-built one resolves per row, is stored, and is forgotten by every
+/// write to its label, since it reads more than point indexes; its rows stay
+/// equal to the per-row filter's, including after the write that drops the
+/// row. A request that executes more distinct sets than the cache holds
+/// keeps only the newest ones.
 pub async fn run_membership_retention_contracts() {
     use crate::index_lifecycle::graph_mutation::{
         CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit,
@@ -297,7 +300,8 @@ pub async fn run_membership_retention_contracts() {
         .await
         .expect("request transaction opens");
     let kept = ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(item))]);
-    for rank in [4, 2] {
+    // The row has rank 5, then 4, then 2: kept, kept, dropped.
+    for (write, kept_rows) in [(Some(4), 1), (Some(2), 1), (None, 0)] {
         execution
             .flush_active_index_mutations()
             .await
@@ -316,6 +320,14 @@ pub async fn run_membership_retention_contracts() {
             .await
             .expect("per-row filter evaluates rows");
         assert_eq!(membership, filter);
+        let ExecutionValue::Stream(rows) = membership else {
+            panic!("membership returns rows");
+        };
+        assert_eq!(rows.len(), kept_rows);
+        assert_eq!(execution.prepared_memberships.len(), 1);
+        let Some(rank) = write else {
+            break;
+        };
         execution
             .execute_op(
                 &exec::ExecOp::Mutation {
@@ -330,7 +342,34 @@ pub async fn run_membership_retention_contracts() {
             )
             .await
             .expect("rank update succeeds");
+        assert_eq!(execution.prepared_memberships.len(), 0);
     }
+
+    // One more distinct `$label` set than the cache holds evicts the oldest.
+    let capacity = super::stream::PreparedMemberships::MAX_ENTRIES;
+    for label in 0..=capacity {
+        let label = test_support::name(&format!("L{label}"));
+        execution
+            .execute_op(
+                &exec::ExecOp::IndexMembership {
+                    plan: Box::new(exec::ExecNodeIndexMembershipPlan {
+                        set: exec::ExecNodeMembershipSet::Labels(ir::AtLeast::from_one(
+                            label.clone(),
+                        )),
+                        predicate: ir::PredicatePlan::new(Predicate::eq(
+                            "$label",
+                            label.to_string(),
+                        ))
+                        .expect("label predicate is valid"),
+                        residual: None,
+                    }),
+                },
+                kept.clone(),
+            )
+            .await
+            .expect("label membership resolves");
+    }
+    assert_eq!(execution.prepared_memberships.len(), capacity);
     execution.abort_request_write_scope();
     drop(execution);
     db.close().await.expect("range retention fixture closes");
