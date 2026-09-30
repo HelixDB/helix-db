@@ -454,13 +454,16 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                 };
                 // WHERE filters the rows a WITH returns, after its SKIP and
                 // LIMIT. Without a window the order is unobservable and
-                // filtering first is cheaper. A predicate over bindings the
-                // WITH does not project cannot follow it and keeps its place.
+                // filtering first is cheaper. After a window only the WITH's
+                // own bindings remain, so the predicate may use no other.
                 let (predicate, filter) = match predicate {
-                    Some(predicate)
-                        if (skip.is_some() || limit.is_some())
-                            && predicate.references().is_subset(items.outputs()) =>
-                    {
+                    Some(predicate) if skip.is_some() || limit.is_some() => {
+                        if !predicate.references().is_subset(items.outputs()) {
+                            return Err(semantic(
+                                "UndefinedVariable",
+                                "WHERE after SKIP or LIMIT may use only the bindings its WITH projects",
+                            ));
+                        }
                         (None, Some(predicate))
                     }
                     predicate => (predicate, None),

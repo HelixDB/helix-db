@@ -1,4 +1,6 @@
 use super::{database, run};
+use db::cypher;
+use helix_planner::relational as r;
 use serde_json::json;
 
 /// WHERE filters the rows a WITH returns, so it applies after the clause's
@@ -48,5 +50,43 @@ async fn with_where_filters_after_the_window() {
     ] {
         assert_eq!(run(&db, query).await.rows, expected, "{query}");
     }
+    db.close().await.unwrap();
+}
+
+/// After SKIP or LIMIT only the WITH's own bindings remain, so a WHERE that
+/// names an unprojected binding is rejected instead of filtering before the
+/// window, which would change which rows the window keeps.
+#[tokio::test]
+async fn with_where_after_a_window_uses_only_projected_bindings() {
+    let db = database().await;
+    run(&db, "CREATE (:H {k: 1}), (:H {k: 2})").await;
+    for query in [
+        "UNWIND range(1, 10) AS x WITH x AS y ORDER BY y LIMIT 3 WHERE x > 5 RETURN y",
+        "MATCH (n:H) WITH n.k AS k ORDER BY k LIMIT 1 WHERE n.k > 1 RETURN k",
+        "UNWIND range(1, 10) AS x WITH x AS y SKIP 2 WHERE x > 5 RETURN y",
+    ] {
+        let cypher::Error::Query(error) = db.cypher(cypher::Request::new(query)).await.unwrap_err()
+        else {
+            panic!("expected a compile error: {query}");
+        };
+        assert_eq!(error.phase, r::ErrorPhase::Compile, "{query}");
+        assert_eq!(error.detail, "UndefinedVariable", "{query}");
+    }
+    // The projected form and an unwindowed WITH keep working.
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND range(1, 10) AS x WITH x AS y ORDER BY y LIMIT 3 WHERE y > 5 RETURN y"
+        )
+        .await
+        .rows,
+        Vec::<Vec<serde_json::Value>>::new()
+    );
+    assert_eq!(
+        run(&db, "MATCH (n:H) WITH n.k AS k WHERE n.k > 1 RETURN k")
+            .await
+            .rows,
+        vec![vec![json!(2)]]
+    );
     db.close().await.unwrap();
 }

@@ -115,8 +115,9 @@ configuration.
 
 The `WHERE` of a `WITH` filters the rows the clause returns, after its
 `DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
-keeps at most the third row. One exception remains: when such a `WHERE` reads a
-variable the `WITH` does not project, it filters before `SKIP` and `LIMIT`.
+keeps at most the third row. After `SKIP` or `LIMIT` only the variables the `WITH`
+projects remain, so such a `WHERE` that reads any other variable is rejected with
+`UndefinedVariable`.
 
 `MERGE`, variable-length and shortest paths, `UNION`, subqueries, comprehensions,
 procedures, schema DDL, temporal/spatial functions, and Bolt are outside this

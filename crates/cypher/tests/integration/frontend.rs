@@ -92,11 +92,11 @@ fn windowed_with_where_filters_after_the_window() {
         shape("UNWIND [1] AS x WITH x ORDER BY x WHERE x > 0 RETURN x"),
         ["unwind", "project+where", "project"]
     );
-    // A WHERE over a binding the WITH drops cannot follow the projection.
-    assert_eq!(
-        shape("MATCH (a) WITH a.x AS x LIMIT 1 WHERE a.y = 1 RETURN x"),
-        ["match", "project+where", "project"]
-    );
+    // After a window only the WITH's own bindings remain, so a WHERE over a
+    // binding the WITH drops is rejected rather than moved before the window.
+    let error = helix_cypher::compile("MATCH (a) WITH a.x AS x LIMIT 1 WHERE a.y = 1 RETURN x")
+        .unwrap_err();
+    assert_eq!(error.detail, "UndefinedVariable");
 }
 
 #[test]
