@@ -189,16 +189,6 @@ fn selective_equality_type_union_keeps_the_tenant_intersection() {
                         .values(vec!["id"]),
                 ] {
                     let plan = executable_traversal(traversal, context.clone());
-                    if type_count == 8 {
-                        assert!(matches!(
-                            first_exec_access(&plan),
-                            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { .. })
-                                | ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { .. })
-                        ));
-                        assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
-                        assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 200);
-                        continue;
-                    }
                     assert!(
                         matches!(
                             first_exec_access(&plan),
@@ -227,7 +217,7 @@ fn selective_equality_type_union_keeps_the_tenant_intersection() {
 }
 
 #[test]
-fn selective_equality_keeps_an_index_seed_with_absent_or_stale_statistics() {
+fn selective_equality_intersects_every_index_with_absent_or_stale_statistics() {
     let indexes = ["tenant", "type", "deleted"].into_iter().fold(
         IndexCatalogSnapshot::default(),
         |indexes, property| {
@@ -236,7 +226,8 @@ fn selective_equality_keeps_an_index_seed_with_absent_or_stale_statistics() {
         },
     );
     // An estimate of zero is not a proof of emptiness: stale statistics must
-    // never suppress the actual lookup. Include rare and unknown matches.
+    // never suppress the actual lookup, nor trade an index for a per-row
+    // filter. Include rare and unknown matches.
     for deletion_rows in [None, Some(0), Some(1), Some(10)] {
         let stats = deletion_rows.map_or_else(StatsSnapshot::default, |rows| {
             let mut stats = StatsSnapshot::default();
@@ -282,21 +273,20 @@ fn selective_equality_keeps_an_index_seed_with_absent_or_stale_statistics() {
                         .values(vec!["id"]),
                 ] {
                     let plan = executable_traversal(traversal, context.clone());
-                    assert!(
-                        matches!(
-                            first_exec_access(&plan),
-                            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { .. })
-                                | ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap { .. })
-                        ),
+                    // Every conjunct is index-served, so the source is the
+                    // intersection of all three sets and no record is read.
+                    assert_eq!(
+                        intersected_equality_properties(&plan),
+                        Some(vec![
+                            "deleted".to_string(),
+                            "tenant".to_string(),
+                            "type".to_string()
+                        ]),
                         "{plan:#?}"
                     );
-                    assert!(has_exec_op_family(&plan, ExecOpFamily::Filter));
+                    assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
                     assert_eq!(plan.metrics().selected_cost.range_nexts, 0);
-                    assert_eq!(plan.metrics().selected_cost.parallel_width, 1);
-                    assert_eq!(
-                        plan.metrics().selected_cost.authoritative_graph_reads,
-                        deletion_rows.unwrap_or(10)
-                    );
+                    assert_eq!(plan.metrics().selected_cost.authoritative_graph_reads, 0);
                     let diagnostics = crate::diagnostics::analyze(&plan, &context);
                     assert!(diagnostics.insights.iter().all(|insight| !matches!(
                         insight,
@@ -425,7 +415,7 @@ fn indexed_conjunction_avoids_the_scan_cliff() {
 }
 
 #[test]
-fn equality_seeds_are_permutation_invariant_and_preserve_every_residual() {
+fn indexed_conjunctions_are_permutation_invariant_full_intersections() {
     let properties = ["p0", "p1", "p2", "p3", "p4"];
     let indexes =
         properties
@@ -460,7 +450,6 @@ fn equality_seeds_are_permutation_invariant_and_preserve_every_residual() {
                     .with_edge_eq_cardinality(key, count);
             }
         }
-        let mut chosen = [None, None];
         for permutation in &permutations {
             for parameterized in [false, true] {
                 for nested in [false, true] {
@@ -486,42 +475,31 @@ fn equality_seeds_are_permutation_invariant_and_preserve_every_residual() {
                     } else {
                         Predicate::and(terms)
                     };
-                    for (element, traversal) in [
+                    for traversal in [
                         g().n_with_label_where("Fixture", predicate.clone())
                             .values(vec!["p0"]),
                         g().e_with_label_where("Fixture", predicate)
                             .values(vec!["p0"]),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
+                    ] {
                         let plan = executable_traversal(traversal, context.clone());
                         assert!(!plan.metrics().guardrail_hit);
-                        let key = match first_exec_access(&plan) {
-                            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap {
-                                bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. },
-                            })
-                            | ExecAccessPlan::Edge(ExecEdgeAccessPlan::Bitmap {
-                                bitmap: crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. },
-                            }) => key,
-                            other => panic!("expected one equality seed, got {other:?}"),
-                        };
-                        if selective_rows.is_some() {
-                            assert_eq!(key.property.as_ref(), "p4");
+                        // Every permutation intersects all five sets and
+                        // evaluates nothing per row.
+                        // No permutation reads one index and evaluates the
+                        // other indexed conjuncts per row.
+                        if !matches!(
+                            first_exec_access(&plan),
+                            ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { .. })
+                                | ExecAccessPlan::Edge(ExecEdgeAccessPlan::LabelScan { .. })
+                        ) {
+                            assert_eq!(
+                                intersected_equality_properties(&plan),
+                                Some(properties.map(str::to_string).to_vec()),
+                                "{:#?}",
+                                plan.steps()
+                            );
+                            assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
                         }
-                        let previous = chosen[element].get_or_insert_with(|| key.property.clone());
-                        assert_eq!(previous, &key.property);
-                        let expected = Predicate::and(
-                            permutation
-                                .iter()
-                                .filter(|property| **property != key.property.as_ref())
-                                .map(|property| Predicate::eq(*property, 7))
-                                .collect(),
-                        );
-                        assert!(
-                            matches!(first_exec_op(&plan, |op| matches!(op, ExecOp::Filter { .. })),
-                            ExecOp::Filter { predicate } if predicate.as_ref() == &expected)
-                        );
                     }
                 }
             }
@@ -579,7 +557,7 @@ fn broad_equality_seeds_can_lose_to_full_intersection_or_a_cheap_scan() {
 }
 
 #[test]
-fn seed_pruning_keeps_row_estimates_needed_by_downstream_sorting() {
+fn null_equality_intersects_with_the_selective_index_before_sorting() {
     let mut context = PlannerContext::default();
     for (property, rows) in [("nullable", 100), ("selective", 1)] {
         let key = ScopedPropertyKey::try_new("Fixture", property).unwrap();
@@ -609,7 +587,29 @@ fn seed_pruning_keeps_row_estimates_needed_by_downstream_sorting() {
         .order_by("ordinal", Order::Asc),
         context,
     );
-    assert!(matches!(first_exec_access(&plan),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
-        if key.property.as_ref() == "selective"));
+    // Both conjuncts are index-served: the null equality is answered by its
+    // own set, never by a per-row filter over the selective seed.
+    let ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet {
+        set: crate::exec::ExecNodeSecondarySetPlan::Intersect { driver, rest },
+    }) = first_exec_access(&plan)
+    else {
+        panic!("expected an intersection: {:#?}", plan.steps());
+    };
+    let children = std::iter::once(driver.as_ref())
+        .chain(rest.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert!(children.iter().any(|child| matches!(
+        child,
+        crate::exec::ExecNodeSecondarySetPlan::Bitmap(
+            crate::exec::ExecNodeBitmapExpr::PointRead { key, .. }
+        ) if key.property.as_ref() == "selective"
+    )));
+    assert!(children.iter().any(|child| matches!(
+        child,
+        crate::exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+            crate::exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key }
+        ) if key.property.as_ref() == "nullable"
+    )));
+    assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
 }

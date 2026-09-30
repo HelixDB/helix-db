@@ -46,10 +46,10 @@ fn selective_equality_type_union_retains_full_cost_competition() {
     assert_eq!(indexed.alternative.cost.latency.as_micros(), 6_020);
     assert_eq!(indexed.alternative.cost.object_reads, 3);
     assert_eq!(indexed.alternative.cost.multi_get_calls, 1);
+    // No single-index seed evaluates the other indexed conjuncts per row.
     let best = result.best_alternative(result.root()).unwrap();
-    assert_eq!(best.cost.latency.as_micros(), 5_190);
-    assert_eq!(best.cost.authoritative_graph_reads, 10);
-    assert!(best.cost.latency < indexed.alternative.cost.latency);
+    assert_eq!(best.cost, indexed.alternative.cost);
+    assert_eq!(best.cost.authoritative_graph_reads, 0);
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn selective_equality_retains_full_cost_competition() {
         .collect::<Vec<_>>();
     assert!(
         candidates.len() <= 5,
-        "seed pruning must keep the candidate set bounded"
+        "index exploration must keep the candidate set bounded"
     );
     let scan = candidates
         .iter()
@@ -107,11 +107,8 @@ fn selective_equality_retains_full_cost_competition() {
     assert_eq!(indexed.alternative.cost.cpu_units, 70);
     assert_eq!(indexed.alternative.cost.parallel_width, 1);
     let best = result.best_alternative(result.root()).unwrap();
-    assert_eq!(best.cost.latency.as_micros(), 5_190);
-    assert_eq!(best.cost.object_reads, 11);
-    assert_eq!(best.cost.authoritative_graph_reads, 10);
-    assert_eq!(best.cost.cpu_units, 50);
-    assert_eq!(best.cost.parallel_width, 1);
+    assert_eq!(best.cost, indexed.alternative.cost);
+    assert_eq!(best.cost.authoritative_graph_reads, 0);
 }
 
 #[test]
@@ -335,7 +332,7 @@ fn indexed_conjunction_retains_faithfully_costed_seed_scan_and_intersection() {
         .collect::<Vec<_>>();
     assert!(
         candidates.len() <= 5,
-        "seed pruning must keep the candidate set bounded"
+        "index exploration must keep the candidate set bounded"
     );
     let scan = candidates
         .iter()
@@ -357,9 +354,6 @@ fn indexed_conjunction_retains_faithfully_costed_seed_scan_and_intersection() {
     assert_eq!(indexed.alternative.cost.cpu_units, 110);
     assert_eq!(indexed.alternative.cost.parallel_width, 1);
     let best = result.best_alternative(result.root()).unwrap();
-    assert_eq!(best.cost.latency.as_micros(), 5_210);
-    assert_eq!(best.cost.object_reads, 11);
-    assert_eq!(best.cost.authoritative_graph_reads, 10);
-    assert_eq!(best.cost.cpu_units, 70);
-    assert_eq!(best.cost.parallel_width, 1);
+    assert_eq!(best.cost, indexed.alternative.cost);
+    assert_eq!(best.cost.authoritative_graph_reads, 0);
 }

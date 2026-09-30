@@ -53,7 +53,8 @@ pub enum KnownRuleId {
     SeedAccessWindow,
     /// Simplify residual filters over access.
     AccessFilterSimplification,
-    /// Explore catalog-backed indexes for access filters.
+    /// Explore catalog-backed index and label-domain alternatives for access
+    /// filters.
     AccessFilterIndex,
     /// Implement residual access filters.
     SeedAccessFilter,

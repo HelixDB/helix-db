@@ -33,7 +33,8 @@ impl optimizer::OptimizerRule for AccessFilterSimplificationRule {
     }
 }
 
-/// Explore full index coverage and equality seeds with residual filters.
+/// Explore full, partial, and label-domain index alternatives for access
+/// filters.
 pub struct AccessFilterIndexRule {
     metadata: RuleMetadata,
 }
