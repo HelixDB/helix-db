@@ -1005,9 +1005,13 @@ async fn transaction_boundaries_contract() {
     // A mutation outside the request transaction commits its own scope.
     let mut ctx = read_context(&fixture, context::ParamBindings::default()).await;
     exact(&mut ctx, &op, &input).await;
-    mutate(&mut ctx, set_property("title", "u"), &nodes(&[fixture.group]))
-        .await
-        .unwrap();
+    mutate(
+        &mut ctx,
+        set_property("title", "u"),
+        &nodes(&[fixture.group]),
+    )
+    .await
+    .unwrap();
     assert_eq!(ctx.prepared_memberships.len(), 0);
     exact(&mut ctx, &op, &input).await;
     ctx.close_request_read_view().unwrap();

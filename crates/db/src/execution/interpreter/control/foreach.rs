@@ -33,7 +33,8 @@ impl<'db> ExecutionContext<'db> {
         let param_restore = RestoredParamBinding::remove(&mut self.params, param.clone());
         // Membership sets are forgotten only when a binding they read
         // changes: the body runs with the batch parameter unbound.
-        self.prepared_memberships.forget_params(|name| name == param);
+        self.prepared_memberships
+            .forget_params(|name| name == param);
         let result = async {
             let mut last = None;
             for frame in frames {
@@ -55,7 +56,8 @@ impl<'db> ExecutionContext<'db> {
         .await;
         param_restore.restore(&mut self.params);
         // Sets the body resolved while the batch parameter was unbound.
-        self.prepared_memberships.forget_params(|name| name == param);
+        self.prepared_memberships
+            .forget_params(|name| name == param);
         result
     }
 
