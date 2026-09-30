@@ -595,6 +595,9 @@ pub struct SlateCacheStateSnapshot {
 struct StartupCacheTasks {
     slate: Mutex<Option<CacheWarmTask>>,
     fts: Mutex<Option<CacheWarmTask>>,
+    /// Streams vector search rows into the object-store tier after the first
+    /// vector memory refresh; see [`HelixDB::warm_vector_object_store_parts`].
+    vector_parts: Mutex<Option<CacheWarmTask>>,
 }
 
 impl StartupCacheTasks {
@@ -602,6 +605,7 @@ impl StartupCacheTasks {
         Self {
             slate: Mutex::new(None),
             fts: Mutex::new(None),
+            vector_parts: Mutex::new(None),
         }
     }
 }
@@ -2256,6 +2260,17 @@ impl HelixDB {
             if let Some(task) = self
                 .inner
                 .caches
+                .startup_tasks
+                .vector_parts
+                .lock()
+                .await
+                .take()
+            {
+                task.stop().await;
+            }
+            if let Some(task) = self
+                .inner
+                .caches
                 .vector_memory
                 .refresh_task
                 .lock()
@@ -2503,6 +2518,17 @@ impl HelixDB {
             if initial_vector_refresh.changed().await.is_err() {
                 break;
             }
+        }
+        if let Some(task) = self
+            .inner
+            .caches
+            .startup_tasks
+            .vector_parts
+            .lock()
+            .await
+            .take()
+        {
+            task.wait().await;
         }
     }
 
@@ -2791,13 +2817,113 @@ impl HelixDB {
                 })
             }
         };
+        let mut first_refresh = initial_refresh.clone();
         *self.inner.caches.vector_memory.refresh_task.lock().await =
             Some(VectorMemoryRefreshTask {
                 shutdown,
                 initial_refresh,
                 handle,
             });
+
+        // Only in front of a remote durable store, where the tier also caches
+        // the SSTs this node writes: a local store serves cold reads itself.
+        let Some(tier) = self
+            .inner
+            .config
+            .db()
+            .cache()
+            .object_store_cache()
+            .map(config::SlateObjectStoreCacheSettings::to_slate_options)
+            .filter(|tier| tier.cache_puts)
+        else {
+            return Ok(());
+        };
+        // Half the tier, so the warm never evicts everything else.
+        let budget = tier.max_cache_size_bytes.map_or(u64::MAX, |bytes| {
+            u64::try_from(bytes / 2).unwrap_or(u64::MAX)
+        });
+        let runtime = Arc::downgrade(&self.inner);
+        let handle = tokio::spawn(async move {
+            // After the first refresh, so the resident rows load first.
+            while !*first_refresh.borrow() {
+                if first_refresh.changed().await.is_err() {
+                    return;
+                }
+            }
+            let Some(inner) = runtime.upgrade() else {
+                return;
+            };
+            let started = Instant::now();
+            match (HelixDB { inner })
+                .warm_vector_object_store_parts(tier.part_size_bytes, budget)
+                .await
+            {
+                Ok(summary) => tracing::info!(
+                    warmed_targets = summary.warmed_targets,
+                    failed_targets = summary.failed_targets,
+                    read = ?summary.read,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "vector search rows warmed into the object-store cache"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "vector object-store cache warm failed");
+                }
+            }
+        });
+        *self.inner.caches.startup_tasks.vector_parts.lock().await = Some(CacheWarmTask { handle });
         Ok(())
+    }
+
+    /// Streams the search rows of every loaded scope's Active vector
+    /// generations through the object-store cache tier once, reading at most
+    /// `budget` key and value bytes, with `read_ahead` bytes (one part) read
+    /// ahead of each scan.
+    ///
+    /// Generations are enumerated from one snapshot; the rows are read
+    /// through the live handle. See [`search::vector::warm_object_store_parts`]
+    /// for what is warmed and its limits.
+    async fn warm_vector_object_store_parts(
+        &self,
+        read_ahead: usize,
+        budget: u64,
+    ) -> Result<search::vector::VectorPartWarmSummary> {
+        let scopes = self
+            .inner
+            .runtime_state
+            .read()
+            .expect("runtime state lock is not poisoned")
+            .loaded_scopes();
+        let inventory = match self.storage() {
+            HelixStorage::Writer(writer) => writer.db().snapshot().await?,
+            HelixStorage::Reader(reader) => reader.snapshot().await?,
+        };
+        let mut targets = Vec::new();
+        for scope in scopes {
+            targets.extend(
+                search::vector::active_vector_targets(
+                    inventory.as_ref(),
+                    scope,
+                    self.active_index_handles_loaded(scope),
+                )
+                .await?,
+            );
+        }
+        drop(inventory);
+        Ok(match self.storage() {
+            HelixStorage::Writer(writer) => {
+                search::vector::warm_object_store_parts(writer.db(), &targets, read_ahead, budget)
+                    .await
+            }
+            HelixStorage::Reader(reader) => {
+                search::vector::warm_object_store_parts(
+                    reader.as_ref(),
+                    &targets,
+                    read_ahead,
+                    budget,
+                )
+                .await
+            }
+        })
     }
 
     async fn run_configured_startup_cache_warm(&self, allow_blocking: bool) -> Result<()> {
