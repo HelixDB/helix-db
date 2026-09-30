@@ -2755,7 +2755,7 @@ async fn drive_with(
 ) -> CommittedOperationStep {
     match drivers {
         StepDrivers::Shared(shared) => {
-            drive_one(db, shared, operation_id, claim_sequence, limits).await
+            drive_one(db, shared.as_ref(), operation_id, claim_sequence, limits).await
         }
         StepDrivers::FreshPerStep => {
             drive_one(db, &driver(), operation_id, claim_sequence, limits).await

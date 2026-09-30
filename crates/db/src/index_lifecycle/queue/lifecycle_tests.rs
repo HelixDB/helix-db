@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,9 +31,11 @@ use crate::config::{
 };
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
+use crate::index_lifecycle::outbox::step_pause::{self, StepPause};
 use crate::index_lifecycle::{
-    IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit,
-    ValidatedDynamicIndexDefinition,
+    IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit, IndexOperationProgress,
+    SourceScanProgress, TextBuildProgress, TextBuildStage, ValidatedDynamicIndexDefinition,
+    VectorBuildProgress, VectorBuildStage,
 };
 use crate::HelixDB;
 
@@ -478,6 +481,314 @@ async fn text_build_with_concurrent_writes_matches_a_fresh_build_through_publica
         }
     }
     reference.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+const VOCABULARY: [&str; 4] = [
+    "rust storage",
+    "graph engine",
+    "rust graph storage",
+    "engine",
+];
+
+/// Live source documents by node ID, as vector and text index state.
+#[derive(Default)]
+struct Documents {
+    live: Vec<u64>,
+    vectors: VectorState,
+    texts: TextState,
+}
+
+/// One document's tenant, embedding, and body.
+type Document = (&'static str, [f32; 2], String);
+
+/// Seeded document `index`: tenant "a" or "b", an embedding on the integer
+/// grid, and a body from [`VOCABULARY`].
+fn seeded(index: u16) -> Document {
+    let tenant = if index.is_multiple_of(2) { "a" } else { "b" };
+    let embedding = [f32::from(index % 11), f32::from(index / 11)];
+    let body = format!(
+        "{} doc{index}",
+        VOCABULARY[usize::from(index) % VOCABULARY.len()]
+    );
+    (tenant, embedding, body)
+}
+
+impl Documents {
+    /// Adds `documents` in one write.
+    async fn add(&mut self, db: &HelixDB, documents: Vec<Document>) {
+        let name = |ordinal: usize| format!("created{ordinal}");
+        let result = write(db, || {
+            let batch = documents.iter().enumerate().fold(
+                batch::write_batch(),
+                |batch, (ordinal, (tenant, embedding, body))| {
+                    batch.var_as(
+                        &name(ordinal),
+                        traversal::g().add_n(
+                            "Doc",
+                            vec![
+                                ("embedding", PropertyInput::from(embedding.to_vec())),
+                                ("body", PropertyInput::from(body.clone())),
+                                ("tenant", PropertyInput::from(tenant.to_string())),
+                            ],
+                        ),
+                    )
+                },
+            );
+            QueryRequest::write(batch.returning((0..documents.len()).map(name)))
+        })
+        .await;
+        for (ordinal, (tenant, embedding, body)) in documents.into_iter().enumerate() {
+            let id = result[name(ordinal)][0]["$id"].as_u64().unwrap();
+            self.live.push(id);
+            self.vectors.insert(id, (tenant, embedding));
+            self.texts.insert(id, body);
+        }
+    }
+
+    /// Applies change `round % 8` to live document `id`: an update (0-3), a
+    /// tenant move (4, to "a" when `round % 16 == 4`, else to "c"), an insert
+    /// of a new document (5), a delete (6), or an update to empty text (7).
+    /// `serial` numbers the write among all writers, so every written
+    /// embedding is distinct and off the seeded grid, and exact search has
+    /// no ties.
+    async fn change(&mut self, db: &HelixDB, id: u64, round: u64, serial: u64) {
+        let embedding = [
+            (serial % 20) as f32 + 0.5 + (serial / 20) as f32 * 0.001,
+            (serial % 7) as f32 + 0.25,
+        ];
+        let body = format!(
+            "revision {} {serial}",
+            VOCABULARY[usize::try_from(serial).unwrap() % VOCABULARY.len()]
+        );
+        match round % 8 {
+            0..=3 => {
+                update(db, id, embedding, &body).await;
+                self.vectors.get_mut(&id).unwrap().1 = embedding;
+                self.texts.insert(id, body);
+            }
+            4 => {
+                let tenant = if round % 16 == 4 { "a" } else { "c" };
+                set_tenant(db, id, tenant).await;
+                self.vectors.get_mut(&id).unwrap().0 = tenant;
+            }
+            5 => self.add(db, vec![("c", embedding, body)]).await,
+            6 => {
+                delete(db, id).await;
+                self.live.retain(|live| *live != id);
+                self.vectors.remove(&id);
+                self.texts.remove(&id);
+            }
+            _ => {
+                update(db, id, embedding, "").await;
+                self.vectors.get_mut(&id).unwrap().1 = embedding;
+                self.texts.insert(id, String::new());
+            }
+        }
+    }
+
+    /// Writes to these documents until `building` clears, spreading writes
+    /// over both sides of every build cursor and above the source watermark.
+    /// Returns the number of writes.
+    async fn write_while(
+        &mut self,
+        db: &HelixDB,
+        building: &AtomicBool,
+        serial: &AtomicU64,
+    ) -> u64 {
+        let mut round = 0_u64;
+        while building.load(Ordering::SeqCst) {
+            let id = self.live[usize::try_from(round * 37).unwrap() % self.live.len()];
+            self.change(db, id, round, serial.fetch_add(1, Ordering::SeqCst))
+                .await;
+            round += 1;
+        }
+        round
+    }
+}
+
+/// Publishes both queues of `db`, then asserts its vector and text searches
+/// equal exact search over `documents` and a cold build of them.
+async fn assert_matches_cold_builds(db: &HelixDB, documents: &Documents, reference: &str) {
+    for family in [QueueFamily::Vector, QueueFamily::Text] {
+        assert!(
+            queue(db, family).await.is_some(),
+            "{family:?} writes during the build stay queued until published"
+        );
+        drain(db, target(db, family).await).await;
+        assert!(queue(db, family).await.is_none());
+    }
+
+    // Reference: cold builds over the final documents, in default batches.
+    let reference = open(
+        reference,
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    let mut cold = Documents::default();
+    cold.add(
+        &reference,
+        documents
+            .live
+            .iter()
+            .map(|id| {
+                let (tenant, embedding) = documents.vectors[id];
+                (tenant, embedding, documents.texts[id].clone())
+            })
+            .collect(),
+    )
+    .await;
+    for spec in [vector_spec(), text_spec()] {
+        let operation = create(&reference, spec).await;
+        assert_eq!(wait_terminal(&reference, &operation).await, "succeeded");
+    }
+
+    assert_exact_vectors(&reference, &cold.vectors, SearchConsistency::Strong).await;
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        assert_exact_vectors(db, &documents.vectors, consistency).await;
+        for query in TEXT_QUERIES {
+            assert_eq!(
+                text_hits(db, &documents.texts, query, consistency).await,
+                text_hits(&reference, &cold.texts, query, SearchConsistency::Strong).await,
+                "{consistency:?} {query:?}"
+            );
+        }
+    }
+    reference.close().await.unwrap();
+}
+
+/// The first vector `Scan` step, then the first text `ScanSource` step, is
+/// held after it stages while queued writes commit: updates, a tenant move,
+/// a delete, and empty text on rows the step read and on rows ahead of it,
+/// and an insert above its source watermark. Each step still commits on its
+/// first attempt, and once the queue drains both indexes equal cold builds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_scan_steps_commit_through_queued_writes_in_their_window() {
+    let db = open(
+        "build-step-window-writes",
+        Arc::new(InMemory::new()),
+        config(),
+    )
+    .await;
+    let mut documents = Documents::default();
+    documents.add(&db, (0..24).map(seeded).collect()).await;
+    let first_scans: [(IndexSpec, step_pause::StepMatcher); 2] = [
+        (vector_spec(), |progress| {
+            matches!(
+                progress,
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::Scan(SourceScanProgress { cursor: None, .. })
+                ))
+            )
+        }),
+        (text_spec(), |progress| {
+            matches!(
+                progress,
+                IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
+                    TextBuildStage::ScanSource(SourceScanProgress { cursor: None, .. })
+                ))
+            )
+        }),
+    ];
+    let mut serial = 0;
+    let mut builds = Vec::new();
+    for (spec, first_scan) in first_scans {
+        let pause = StepPause::arm(db.inner_db().as_ref(), first_scan);
+        let operation = create(&db, spec).await;
+        tokio::time::timeout(Duration::from_secs(60), pause.reached())
+            .await
+            .expect("the first scan step stages");
+        // The held step read one four-entity batch: the lowest live IDs.
+        let mut live = documents.live.clone();
+        live.sort_unstable();
+        let (read, ahead) = live.split_at(4);
+        for (id, round) in [
+            (read[0], 0),
+            (read[1], 4),
+            (read[2], 6),
+            (read[3], 7),
+            (ahead[0], 0),
+            (ahead[1], 12),
+            (ahead[2], 6),
+            (ahead[3], 7),
+            // Round 5 inserts a new document.
+            (ahead[4], 5),
+        ] {
+            documents.change(&db, id, round, serial).await;
+            serial += 1;
+        }
+        pause.release();
+        builds.push((operation, pause));
+    }
+    for (operation, pause) in builds {
+        assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+        assert_eq!(
+            pause.stagings(),
+            1,
+            "the held step committed on its first attempt"
+        );
+    }
+    assert_matches_cold_builds(&db, &documents, "build-step-window-writes-reference").await;
+    db.close().await.unwrap();
+}
+
+/// Concurrent writers, each over its own documents.
+const WRITERS: u16 = 4;
+
+/// Writers update, move, delete, and insert documents concurrently for as
+/// long as unpaused vector and text builds run, so writes commit inside
+/// nearly every build step. Both builds activate, and once the queue drains,
+/// searches equal exact search and a cold build of the final documents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn builds_under_continuous_writes_match_cold_builds_once_the_queue_drains() {
+    let db = open(
+        "build-continuous-writes",
+        Arc::new(InMemory::new()),
+        config(),
+    )
+    .await;
+    let mut shards = Vec::new();
+    for writer in 0..WRITERS {
+        let mut shard = Documents::default();
+        shard
+            .add(&db, (writer * 8..(writer + 1) * 8).map(seeded).collect())
+            .await;
+        shards.push(shard);
+    }
+    let vector_operation = create(&db, vector_spec()).await;
+    let text_operation = create(&db, text_spec()).await;
+    let building = AtomicBool::new(true);
+    let serial = AtomicU64::new(0);
+    let (outcomes, writes) = tokio::join!(
+        async {
+            let outcomes = [
+                wait_terminal(&db, &vector_operation).await,
+                wait_terminal(&db, &text_operation).await,
+            ];
+            building.store(false, Ordering::SeqCst);
+            outcomes
+        },
+        futures::future::join_all(
+            shards
+                .iter_mut()
+                .map(|shard| shard.write_while(&db, &building, &serial)),
+        ),
+    );
+    assert_eq!(outcomes, ["succeeded", "succeeded"]);
+    assert!(
+        writes.iter().all(|count| *count > 0),
+        "every writer ran during the builds: {writes:?}"
+    );
+    let documents = shards
+        .into_iter()
+        .fold(Documents::default(), |mut documents, shard| {
+            documents.live.extend(shard.live);
+            documents.vectors.extend(shard.vectors);
+            documents.texts.extend(shard.texts);
+            documents
+        });
+    assert_matches_cold_builds(&db, &documents, "build-continuous-writes-reference").await;
     db.close().await.unwrap();
 }
 

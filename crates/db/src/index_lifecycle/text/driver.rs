@@ -15,11 +15,14 @@
 //! (see `PreparedPartitionReconciliation`); an entity that was deleted,
 //! moved, or un-indexed in between is retired rather than left live.
 //!
-//! The driver owns no database handle. Source staging borrows the repository
-//! transaction supplied by the outbox dispatcher. Partition construction uses
-//! a short-lived read snapshot, drops it before CPU-heavy split construction,
-//! and retains only immutable bytes plus the exact database observations needed
-//! to attach the uploaded split transactionally.
+//! The driver owns no database handle. Source staging reads graph rows from a
+//! snapshot and stages into the repository transaction supplied by the outbox
+//! dispatcher. Partition construction uses a short-lived read snapshot, drops
+//! it before CPU-heavy split construction, and retains only immutable bytes
+//! plus the exact database observations needed to attach the uploaded split
+//! transactionally. Neither pass fences graph rows through its commit, except
+//! the row a blocker was decided from; see "Build source reads" in
+//! [`crate::index_lifecycle::queue`].
 
 use std::ops::Bound;
 use std::sync::Arc;
@@ -747,7 +750,7 @@ impl IndexOperationDriver for TextIndexDriver {
 
     async fn step(
         &self,
-        _db: &slatedb::Db,
+        db: &slatedb::Db,
         transaction: &DbTransaction,
         scope: DataScope,
         operation: &IndexOperationRecord,
@@ -761,7 +764,9 @@ impl IndexOperationDriver for TextIndexDriver {
             IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
                 TextBuildStage::ScanSource(progress),
             )) => {
+                let source = db.begin(IsolationLevel::Snapshot).await?;
                 scan_source(
+                    &source,
                     transaction,
                     scope,
                     operation,
@@ -831,8 +836,10 @@ struct PartitionDocuments {
 
 /// Closed partition-scan decision with all writes needed by its transition.
 enum PartitionScanSelection {
-    /// A durable blocker; nothing is staged.
-    Blocked(IndexOperationBlocker),
+    /// A durable blocker; nothing is staged. A blocker decided from an
+    /// entity's graph row carries that row as observed, so a repair racing
+    /// the step retries it instead of committing a stale blocker.
+    Blocked(IndexOperationBlocker, Option<PreparedTextExpectedRead>),
     /// Progress without an upload: root creation, a run without documents, or exhaustion.
     Repository {
         empty_root: Option<PreparedEmptyManifestRoot>,
@@ -853,7 +860,9 @@ enum PartitionScanSelection {
 /// marker) when it was deleted, moved to another partition, or stopped being
 /// indexed, as Active retirement does. Text applied state keeps the value
 /// `ScanSource` wrote: only that scan's pre-existing-state check reads it. The
-/// retained observations fence every row through the step's commit.
+/// retained observations fence every build-owned row they read through the
+/// step's commit; graph rows are not fenced, since queued publication
+/// replaces any document a later write changes.
 #[derive(Default)]
 struct PreparedPartitionReconciliation {
     expected_reads: Vec<PreparedTextExpectedRead>,
@@ -916,11 +925,11 @@ async fn prepare_partition_step_with_scan_tuning(
     drop(snapshot);
 
     let documents = match prepared {
-        PartitionScanSelection::Blocked(blocker) => {
+        PartitionScanSelection::Blocked(blocker, graph_read) => {
             return Ok(PreparedTextOperationStep::Repository(Box::new(
                 PreparedTextRepositoryStep {
                     source_operation: operation.clone(),
-                    expected_reads: Vec::new(),
+                    expected_reads: graph_read.into_iter().collect(),
                     writes: Vec::new(),
                     result: IndexOperationStepResult::Blocked(blocker),
                 },
@@ -1784,6 +1793,7 @@ async fn scan_partition_documents(
                             observed: root_input_bytes,
                             limit: batch.max_input_bytes().get(),
                         },
+                        None,
                     ));
                 }
                 let root_output_operations = root.output_operations();
@@ -1795,6 +1805,7 @@ async fn scan_partition_documents(
                             observed: root_output_bytes,
                             limit: batch.max_output_bytes().get(),
                         },
+                        None,
                     ));
                 }
                 if root.requires_creation() {
@@ -1809,6 +1820,7 @@ async fn scan_partition_documents(
                                 observed: seed_input_bytes,
                                 limit: batch.max_input_bytes().get(),
                             },
+                            None,
                         ));
                     }
                     let counters = OperationCounters {
@@ -1865,12 +1877,18 @@ async fn scan_partition_documents(
                 .await
             },
         )?;
+        // Every blocker below is decided from this graph row, so it carries
+        // the row as observed.
+        let graph_read = PreparedTextExpectedRead {
+            key: graph_key,
+            value: graph_value,
+        };
         let source_bytes = u64::try_from(
             row.key
                 .len()
                 .saturating_add(row.value.len())
-                .saturating_add(graph_key.len())
-                .saturating_add(graph_value.as_ref().map_or(0, Bytes::len)),
+                .saturating_add(graph_read.key.len())
+                .saturating_add(graph_read.value.as_ref().map_or(0, Bytes::len)),
         )
         .unwrap_or(u64::MAX);
         let admitted_input_bytes = batch_input_bytes.saturating_add(source_bytes);
@@ -1890,7 +1908,7 @@ async fn scan_partition_documents(
                         limit: batch.max_input_bytes().get(),
                     }
                 };
-                return Ok(PartitionScanSelection::Blocked(blocker));
+                return Ok(PartitionScanSelection::Blocked(blocker, Some(graph_read)));
             }
             exhausted = false;
             break;
@@ -1900,13 +1918,16 @@ async fn scan_partition_documents(
             entity_kind: key.entity.kind,
             entity_id: key.entity.id,
         };
-        let document = match graph_value {
+        let document = match &graph_read.value {
             Some(value) if state.live => {
-                let Ok(properties) = property::decode_properties(&value) else {
-                    return Ok(PartitionScanSelection::Blocked(invalid_source));
-                };
-                let Ok(document) = text_document(definition, &properties, &state) else {
-                    return Ok(PartitionScanSelection::Blocked(invalid_source));
+                let Some(document) = property::decode_properties(value)
+                    .ok()
+                    .and_then(|properties| text_document(definition, &properties, &state).ok())
+                else {
+                    return Ok(PartitionScanSelection::Blocked(
+                        invalid_source,
+                        Some(graph_read),
+                    ));
                 };
                 document
             }
@@ -1983,7 +2004,7 @@ async fn scan_partition_documents(
                         limit,
                     }
                 };
-                return Ok(PartitionScanSelection::Blocked(blocker));
+                return Ok(PartitionScanSelection::Blocked(blocker, Some(graph_read)));
             }
             Some(_) => {
                 exhausted = false;
@@ -2031,6 +2052,7 @@ async fn scan_partition_documents(
                     observed: root_input_bytes,
                     limit: batch.max_input_bytes().get(),
                 },
+                None,
             ));
         }
         let root_output_operations = root.output_operations();
@@ -2042,6 +2064,7 @@ async fn scan_partition_documents(
                     observed: root_output_bytes,
                     limit: batch.max_output_bytes().get(),
                 },
+                None,
             ));
         }
         if root.requires_creation() {
@@ -2404,6 +2427,13 @@ fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
 
 /// Stages one bounded authoritative graph scan as partition-qualified state.
 ///
+/// Graph rows are read from `source`, a snapshot outside the step's
+/// serializable `transaction`; see "Build source reads" in
+/// [`crate::index_lifecycle::queue`]. Entity-state, applied-state, and
+/// statistics rows the build owns are read through `transaction`, as is the
+/// graph row of any blocker: a blocker is durable, so a write that repairs
+/// its row before this step commits must fail the commit.
+///
 /// Writes are accumulated in memory and staged only after every admitted row
 /// validates. A blocking source row therefore cannot commit earlier rows while
 /// leaving the durable cursor behind them. The enclosing outbox transaction
@@ -2417,9 +2447,10 @@ fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
 /// publication share yet still exceed this transaction.
 #[allow(
     clippy::too_many_arguments,
-    reason = "a source scan binds one snapshot, operation, record, cursor, both budgets, and tuning"
+    reason = "a source scan binds its snapshot, transaction, operation, record, cursor, both budgets, and tuning"
 )]
 async fn scan_source(
+    source: &DbTransaction,
     transaction: &DbTransaction,
     scope: DataScope,
     operation: &IndexOperationRecord,
@@ -2463,7 +2494,7 @@ async fn scan_source(
 
     let start = start.map_or(Bound::Unbounded, Bound::Excluded);
     let scan_options = scan_tuning.scan_options();
-    let mut rows = transaction
+    let mut rows = source
         .scan_prefix_with_options(
             &source_prefix,
             (start, Bound::Included(upper)),
@@ -2488,6 +2519,7 @@ async fn scan_source(
             if batch_entities == 0 {
                 let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
                     .unwrap_or(IndexEntityId::initial());
+                transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::OversizedEntity {
                         entity_kind: definition.element_kind(),
@@ -2508,23 +2540,16 @@ async fn scan_source(
             let Some(entity_id) = entity_id else {
                 break 'stage_entity;
             };
-            let properties = match property::decode_properties(&row.value) {
-                Ok(properties) => properties,
-                Err(_) => {
-                    return Ok(IndexOperationStepResult::Blocked(
-                        IndexOperationBlocker::InvalidSourceData {
-                            entity_kind: definition.element_kind(),
-                            entity_id,
-                        },
-                    ));
-                }
-            };
-            let (partition, text) = match super::projection::project(definition, &properties) {
-                Ok(super::projection::TextSourceProjection::NotIndexed) => break 'stage_entity,
-                Ok(super::projection::TextSourceProjection::Indexed { partition, text }) => {
+            let projection = property::decode_properties(&row.value)
+                .ok()
+                .and_then(|properties| super::projection::project(definition, &properties).ok());
+            let (partition, text) = match projection {
+                Some(super::projection::TextSourceProjection::NotIndexed) => break 'stage_entity,
+                Some(super::projection::TextSourceProjection::Indexed { partition, text }) => {
                     (partition, text)
                 }
-                Err(_) => {
+                None => {
+                    transaction.get(&row.key).await?;
                     return Ok(IndexOperationStepResult::Blocked(
                         IndexOperationBlocker::InvalidSourceData {
                             entity_kind: definition.element_kind(),
@@ -2564,6 +2589,7 @@ async fn scan_source(
                         limit,
                         "text build blocked on a document over its per-document allowance"
                     );
+                    transaction.get(&row.key).await?;
                     return Ok(IndexOperationStepResult::Blocked(
                         IndexOperationBlocker::OversizedEntity {
                             entity_kind: definition.element_kind(),
@@ -2606,6 +2632,7 @@ async fn scan_source(
             if batch_input_bytes.saturating_add(entity_input_bytes) > limits.max_input_bytes().get()
             {
                 if batch_entities == 0 {
+                    transaction.get(&row.key).await?;
                     return Ok(IndexOperationStepResult::Blocked(
                         IndexOperationBlocker::OversizedEntity {
                             entity_kind: definition.element_kind(),
@@ -2700,6 +2727,7 @@ async fn scan_source(
                         } else {
                             (entity_output_bytes, limits.max_output_bytes().get())
                         };
+                    transaction.get(&row.key).await?;
                     return Ok(IndexOperationStepResult::Blocked(
                         IndexOperationBlocker::OversizedEntity {
                             entity_kind: definition.element_kind(),

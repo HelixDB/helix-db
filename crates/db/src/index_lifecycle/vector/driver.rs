@@ -2788,7 +2788,12 @@ async fn scan_source<D: Distance>(
     }
     let start = start.map_or(Bound::Unbounded, Bound::Excluded);
     let scan_options = scan_tuning.scan_options();
-    let mut rows = transaction
+    let planning = db.begin(IsolationLevel::Snapshot).await?;
+    // Source rows are read untracked, from the planning snapshot; see
+    // "Build source reads" in [`crate::index_lifecycle::queue`]. A blocker
+    // is durable, so each one first reads its row through `transaction`: a
+    // write that repairs the row before this step commits fails the commit.
+    let mut rows = planning
         .scan_prefix_with_options(
             &source_prefix,
             (start, Bound::Included(upper)),
@@ -2796,7 +2801,6 @@ async fn scan_source<D: Distance>(
         )
         .await?;
     let target = VectorPlanTarget::build(scope, operation, record)?;
-    let planning = db.begin(IsolationLevel::Snapshot).await?;
     let planning_recorder = VectorWriteRecorder::new();
     let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
     let mut cursor = progress.cursor.clone();
@@ -2810,6 +2814,7 @@ async fn scan_source<D: Distance>(
             if accounting.is_empty() {
                 let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
                     .unwrap_or(IndexEntityId::initial());
+                transaction.get(&row.key).await?;
                 return Ok(VectorStepResult::ordinary(
                     IndexOperationStepResult::Blocked(IndexOperationBlocker::OversizedEntity {
                         entity_kind: definition.element_kind(),
@@ -2828,23 +2833,15 @@ async fn scan_source<D: Distance>(
             cursor = Some(complete_cursor);
             continue;
         };
-        let properties = match decode_properties(&row.value) {
-            Ok(properties) => properties,
-            Err(_) => {
-                return Ok(VectorStepResult::ordinary(invalid_source(
-                    definition.element_kind(),
-                    entity_id,
-                )));
-            }
-        };
-        let document = match vector_document(definition, &properties) {
-            Ok(document) => document,
-            Err(_) => {
-                return Ok(VectorStepResult::ordinary(invalid_source(
-                    definition.element_kind(),
-                    entity_id,
-                )));
-            }
+        let Some(document) = decode_properties(&row.value)
+            .ok()
+            .and_then(|properties| vector_document(definition, &properties).ok())
+        else {
+            transaction.get(&row.key).await?;
+            return Ok(VectorStepResult::ordinary(invalid_source(
+                definition.element_kind(),
+                entity_id,
+            )));
         };
         if load_applied(
             transaction,
@@ -2886,6 +2883,9 @@ async fn scan_source<D: Distance>(
         } = outcome
         else {
             build_session.discard_entity();
+            if matches!(outcome, EntityPlanOutcome::Blocked(_)) {
+                transaction.get(&row.key).await?;
+            }
             return finish_or_block_scan(
                 outcome,
                 accounting,
@@ -4453,7 +4453,7 @@ mod tests {
 
     use super::driver_contracts::{
         create_build, definition, drive_one, drive_to_terminal, driver, mapping_values, properties,
-        put_source, read_index, read_operation, source_cursor, source_key, test_db,
+        put_source, read_index, read_operation, source_cursor, source_key, test_db, NOW_MILLIS,
     };
     use super::*;
     use crate::config::{SearchIndexBackfillLimits, VectorIndexDefinition};
@@ -4463,9 +4463,14 @@ mod tests {
     use crate::index_lifecycle::lifecycle::{
         create_legacy_vector_adoption_operation, drop_index_operation,
     };
-    use crate::index_lifecycle::outbox::CommittedOperationStep;
+    use crate::index_lifecycle::outbox::{
+        claim_operation, execute_claimed_step, observe_operation_pointer, ClaimPermission,
+        CommittedOperationStep, OperationPointerObservation, SameEpochRecoveryProof,
+        WriteDuringStepDriver,
+    };
     use crate::index_lifecycle::{
-        ActiveIndexHandle, IndexDdlReceipt, IndexOperationId, IndexScopeGates, IndexStateV2,
+        ActiveIndexHandle, ClaimSequence, IndexDdlReceipt, IndexOperationId, IndexScopeGates,
+        IndexStateV2, WriterEpoch,
     };
     use crate::migrations::startup::bootstrap_writer;
     use crate::search::vector::{
@@ -4728,6 +4733,198 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        db.close().await.expect("vector test database closes");
+    }
+
+    /// Writes to a source row the step already read (1) and to one ahead of
+    /// its batch (6) commit between the step's reads and its commit. Source
+    /// rows are read from the planning snapshot, so the step still commits;
+    /// a serializable scan of the range fails that commit with a conflict.
+    /// The step indexes its snapshot, and the next step reads the new row.
+    #[tokio::test]
+    async fn scan_step_commits_through_writes_to_its_source_range() {
+        let db = test_db("vector-driver-scan-concurrent-source-writes").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = definition(None);
+        for entity_id in 0..8_u8 {
+            let vector = [f32::from(entity_id), 1.0, 2.0];
+            put_source(&db, scope, u64::from(entity_id), &properties(vector, None)).await;
+        }
+        let (build_id, _, _) = create_build(&db, scope, &definition, 7).await;
+        let inner = driver();
+        let rewritten = encode_properties(&properties([9.0, 9.0, 9.0], None));
+        let racing = WriteDuringStepDriver {
+            inner: &inner,
+            writes: vec![
+                (source_key(scope, 1), rewritten.clone()),
+                (source_key(scope, 6), rewritten),
+            ],
+        };
+        let defaults = SearchIndexBackfillLimits::default().batch();
+        let four_entities = SearchIndexBatchLimits::try_new(
+            NonZeroUsize::new(4).expect("four is positive"),
+            defaults.max_input_bytes(),
+            defaults.max_output_operations(),
+            defaults.max_output_bytes(),
+            defaults.max_single_vector_output_bytes(),
+        )
+        .expect("four-entity limits validate");
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one(&db, &racing, build_id, &mut claim_sequence, four_entities).await,
+            CommittedOperationStep::Progressed
+        );
+        let IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::Scan(progress),
+        )) = read_operation(&db, scope, build_id)
+            .await
+            .progress()
+            .clone()
+        else {
+            panic!("the racing step stays in the source scan");
+        };
+        assert_eq!(progress.cursor, Some(source_cursor(scope, 3)));
+        assert_eq!(progress.counters.entities, 4);
+
+        assert_eq!(
+            drive_to_terminal(&db, &inner, build_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        let active = read_index(&db, scope, &definition).await;
+        let IndexStateV2::Active {
+            physical:
+                PhysicalGeneration::Vector {
+                    layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                    ..
+                },
+            ..
+        } = active.state()
+        else {
+            panic!("completed vector build is active and unpartitioned");
+        };
+        let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+            .expect("active vector record projects a handle");
+        let generation = ValidatedVectorGenerationHandle::try_from_active::<
+            vector::distance::Euclidean,
+        >(&active_handle, *physical_index_id)
+        .expect("active physical generation validates");
+        let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
+        for (entity_id, vector) in [(1, [1.0, 1.0, 2.0]), (6, [9.0, 9.0, 9.0])] {
+            let item = index
+                .get_item(&db, entity_id)
+                .await
+                .unwrap()
+                .expect("scanned entity is indexed");
+            assert_eq!(item.vector.to_vec(), vector, "entity {entity_id}");
+        }
+        db.close().await.expect("vector test database closes");
+    }
+
+    /// A write repairs the invalid source row 0 after the Scan step reads it
+    /// and before the step commits. The step reads its blocker's row through
+    /// the serializable transaction, so the commit fails instead of blocking
+    /// the build durably, and the retried step indexes the repaired row.
+    #[tokio::test]
+    async fn scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
+        let db = test_db("vector-driver-scan-repaired-blocker").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = definition(None);
+        db.put(source_key(scope, 0), Bytes::from_static(b"malformed"))
+            .await
+            .expect("invalid vector source is written");
+        for entity_id in 1..4_u8 {
+            let vector = [f32::from(entity_id), 1.0, 2.0];
+            put_source(&db, scope, u64::from(entity_id), &properties(vector, None)).await;
+        }
+        let (build_id, _, _) = create_build(&db, scope, &definition, 3).await;
+        let inner = driver();
+        let repaired = [7.0, 1.0, 2.0];
+        let racing = WriteDuringStepDriver {
+            inner: &inner,
+            writes: vec![(
+                source_key(scope, 0),
+                encode_properties(&properties(repaired, None)),
+            )],
+        };
+        let writer_epoch = WriterEpoch::from_bytes([0x6B; 16]).expect("writer epoch is non-nil");
+        let limits = SearchIndexBackfillLimits::default().batch();
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(&db, build_id, writer_epoch, NOW_MILLIS)
+                .await
+                .expect("vector operation pointer is readable")
+        else {
+            panic!("the queued vector build is eligible");
+        };
+        let claimed = claim_operation(
+            &db,
+            &eligible,
+            writer_epoch,
+            ClaimSequence::new(1).expect("claim sequence is non-zero"),
+            NOW_MILLIS,
+            ClaimPermission::Normal,
+        )
+        .await
+        .expect("vector claim succeeds")
+        .expect("vector revision is claimable");
+        let error = execute_claimed_step(&db, &claimed, &racing, limits, NOW_MILLIS)
+            .await
+            .expect_err("a blocker whose row was repaired does not commit");
+        assert!(error.is_transaction_conflict(), "{error}");
+
+        // The supervisor rejoins its task and retries the same step.
+        let OperationPointerObservation::ClaimedByCurrentWriter(eligible) =
+            observe_operation_pointer(&db, build_id, writer_epoch, NOW_MILLIS)
+                .await
+                .expect("vector operation pointer is readable")
+        else {
+            panic!("the failed step leaves its claim with this writer");
+        };
+        let claimed = claim_operation(
+            &db,
+            &eligible,
+            writer_epoch,
+            ClaimSequence::new(2).expect("claim sequence is non-zero"),
+            NOW_MILLIS,
+            ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(writer_epoch)),
+        )
+        .await
+        .expect("vector recovery claim succeeds")
+        .expect("vector revision is reclaimable");
+        assert_eq!(
+            execute_claimed_step(&db, &claimed, &inner, limits, NOW_MILLIS)
+                .await
+                .expect("the retried vector step commits"),
+            CommittedOperationStep::Progressed
+        );
+        let mut claim_sequence = 3;
+        assert_eq!(
+            drive_to_terminal(&db, &inner, build_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        let active = read_index(&db, scope, &definition).await;
+        let IndexStateV2::Active {
+            physical:
+                PhysicalGeneration::Vector {
+                    layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                    ..
+                },
+            ..
+        } = active.state()
+        else {
+            panic!("completed vector build is active and unpartitioned");
+        };
+        let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+            .expect("active vector record projects a handle");
+        let generation = ValidatedVectorGenerationHandle::try_from_active::<
+            vector::distance::Euclidean,
+        >(&active_handle, *physical_index_id)
+        .expect("active physical generation validates");
+        let item = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation)
+            .get_item(&db, 0)
+            .await
+            .unwrap()
+            .expect("the repaired entity is indexed");
+        assert_eq!(item.vector.to_vec(), repaired);
         db.close().await.expect("vector test database closes");
     }
 
