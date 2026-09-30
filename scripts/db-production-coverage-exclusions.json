@@ -114,12 +114,6 @@
     "evidence": "populated_legacy_vector_is_adopted_in_place and db-vector-production-coverage architecture matrix"
   },
   {
-    "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 1177,
-    "reason": "This closing edge belongs to an impossible empty-recency result after the absent payload admission loop proved the item cache is non-empty.",
-    "evidence": "vector_index_exercises_facade_and_row_safety_contracts"
-  },
-  {
     "path": "crates/db/src/search/vector/storage/mod.rs",
     "line": 540,
     "reason": "Each lane iterator is created from that lane's exact physical prefix, and every successfully parsed key under it carries the same physical index and lane discriminant.",
@@ -577,7 +571,7 @@
   },
   {
     "path": "crates/db/src/search/vector/mod.rs",
-    "line": 912,
+    "line": 914,
     "reason": "After checked round-up addition succeeds, dividing by the nonzero word size and multiplying by that same word size cannot exceed the rounded dividend.",
     "evidence": "vector_primitives_exercise_active_codec_and_runtime_boundaries and db-vector-production-coverage architecture matrix"
   },
@@ -601,19 +595,19 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3503,
+    "line": 3501,
     "reason": "Only shrink_to evicts without a transaction, and it runs only on sessions the lifecycle driver retained. The driver retains a session only when it holds no unflushed rows, after flush_all has written every dirty neighbor for the step, so this arm cannot meet a dirty neighbor row.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3599,
+    "line": 3597,
     "reason": "This error value belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3602,
+    "line": 3600,
     "reason": "This closing edge belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },
