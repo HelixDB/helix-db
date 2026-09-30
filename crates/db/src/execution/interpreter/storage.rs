@@ -199,6 +199,10 @@ impl<'db> ExecutionContext<'db> {
         end: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        self.check_execution_deadline()?;
         if let Some(budget) = &self.row_memory {
             budget.record_reads(crate::cypher::StorageReadUsage {
                 scans: 1,
@@ -264,6 +268,10 @@ impl<'db> ExecutionContext<'db> {
         prefix: Bytes,
         limit: Option<usize>,
     ) -> Result<Vec<(Bytes, Bytes)>> {
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        self.check_execution_deadline()?;
         if let Some(budget) = &self.row_memory {
             budget.record_reads(crate::cypher::StorageReadUsage {
                 scans: 1,
@@ -489,6 +497,31 @@ mod tests {
             Some(Bytes::from_static(b"value"))
         );
         assert_eq!(ctx.get_raw(b"storage/get/missing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn limited_scans_return_nothing_for_a_zero_limit_and_check_the_deadline_first() {
+        let db = test_support::open_db("storage-limited-scan").await;
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let (start, end) = (Bytes::from_static(b"a"), Bytes::from_static(b"z"));
+        ctx.fail_deadline_after(0);
+        // A zero limit reads nothing, so an expired deadline never fails it.
+        assert!(ctx
+            .scan_raw_range_limited(start.clone(), end.clone(), Some(0))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(ctx
+            .scan_raw_prefix_limited(start.clone(), Some(0))
+            .await
+            .unwrap()
+            .is_empty());
+        // Otherwise an expired deadline fails before the scan opens.
+        assert!(ctx
+            .scan_raw_range_limited(start.clone(), end, Some(1))
+            .await
+            .is_err());
+        assert!(ctx.scan_raw_prefix_limited(start, None).await.is_err());
     }
 
     #[tokio::test]
