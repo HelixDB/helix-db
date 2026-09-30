@@ -283,3 +283,59 @@ async fn cypher_endpoints_are_unrouted_unless_enabled() {
     assert_eq!(response.status(), StatusCode::OK);
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn cypher_rejects_malformed_bodies_and_options_before_executing() {
+    let db = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemory {
+            database: "cypher-rejections".into(),
+        })
+        .await
+        .unwrap(),
+    );
+    let state = state::ServerState::new(Arc::clone(&db), None)
+        .with_cypher_endpoints(crate::CypherEndpoints::Enabled);
+    let router = http::router(state.clone());
+    let malformed = router
+        .clone()
+        .oneshot(Request::post("/v2/cypher").body(Body::from("{")).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    // A warm read option cannot apply to a modifying statement.
+    let warm_write = router
+        .clone()
+        .oneshot(
+            Request::post("/v2/cypher")
+                .header("x-helix-warm", "true")
+                .body(Body::from(
+                    json!({"query":"CREATE (:Rejected)"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(warm_write.status(), StatusCode::BAD_REQUEST);
+    let error = grpc::GrpcService::new(state)
+        .execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
+            body: b"{".to_vec().into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    let count = router
+        .oneshot(
+            Request::post("/v2/cypher")
+                .body(Body::from(
+                    json!({"query":"MATCH (n:Rejected) RETURN count(n) AS n"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(count.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(value["rows"], json!([[0]]));
+    db.close().await.unwrap();
+}

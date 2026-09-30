@@ -43,30 +43,6 @@ impl HelixQueryService {
         crate::cypher::explain(&self.db, request, scope, control, limits).await
     }
 
-    /// Execute an additive Cypher request under explicit storage and cancellation authority.
-    pub async fn execute_cypher_scoped_controlled(
-        &self,
-        request: crate::cypher::Request,
-        mode: QueryMode,
-        scope: DataScope,
-        control: ExecutionControl,
-        limits: crate::cypher::Limits,
-    ) -> crate::cypher::Result<crate::cypher::Response> {
-        crate::cypher::execute(&self.db, request, scope, mode, control, limits).await
-    }
-
-    /// Prepare Cypher JSON under the same request authority, before committing writes.
-    pub async fn execute_cypher_json_scoped_controlled(
-        &self,
-        request: crate::cypher::Request,
-        mode: QueryMode,
-        scope: DataScope,
-        control: ExecutionControl,
-        limits: crate::cypher::Limits,
-    ) -> crate::cypher::Result<crate::cypher::EncodedResponse> {
-        crate::cypher::execute_json(&self.db, request, scope, mode, control, limits).await
-    }
-
     /// Execute an already compiled Cypher request after transport routing checks.
     /// Catalog acquisition, planning, parameters and transactions use this attempt.
     pub async fn execute_compiled_cypher_json_scoped_controlled(
