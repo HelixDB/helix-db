@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use helix_ast::{
-    batch,
+    batch, expr,
     graph::NodeRef,
     query::{QueryRequest, SearchConsistency},
     traversal,
     value::{PropertyInput, PropertyValue},
 };
+use helix_planner::{context, exec, planning};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
@@ -16,7 +17,8 @@ use super::publication::PublicationOutcome;
 use super::tests::{open, queue, queued, target};
 use super::QueueTarget;
 use crate::config::{
-    DbConfig, IndexOperationQueueTuning, TextIndexDefinition, VectorIndexDefinition,
+    DbConfig, IndexOperationQueueTuning, SecondaryIndexDefinition, TextIndexDefinition,
+    VectorIndexDefinition,
 };
 use crate::encoding::v2::values::indexes::operation_queue::QueueFamily;
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
@@ -1313,4 +1315,488 @@ async fn traversal_scoped_text_search_scores_superseded_candidates_exactly() {
     }
     reference.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+/// A full-text disk tier admits a split on its second successful use.
+fn with_full_text_disk_tier(config: DbConfig, root: &std::path::Path) -> DbConfig {
+    use crate::config::{
+        CacheConfig, CacheMode, FtsHybridCacheConfig, FtsWarmConfig, ObjectStoreWarmLevel,
+        SlateHybridCacheConfig, SlateObjectStoreCacheSettings, SlateWarmConfig,
+        VectorMemorySettings,
+    };
+    config.with_cache(CacheConfig::new(
+        VectorMemorySettings::default(),
+        CacheMode::Hybrid {
+            slate_db: SlateHybridCacheConfig::try_new(
+                1024 * 1024,
+                root.join("foyer"),
+                16 * 1024 * 1024,
+            )
+            .unwrap(),
+            object_store: SlateObjectStoreCacheSettings::try_new(
+                root.join("object-store"),
+                Some(1024 * 1024),
+                4096,
+                false,
+                ObjectStoreWarmLevel::Off,
+                None,
+                1,
+            )
+            .unwrap(),
+            slate_warm: SlateWarmConfig::Off,
+            fts: Some(
+                FtsHybridCacheConfig::try_new(
+                    1024 * 1024,
+                    root.join("fts"),
+                    1024 * 1024,
+                    FtsWarmConfig::Off,
+                    1,
+                )
+                .unwrap(),
+            ),
+        },
+    ))
+}
+
+#[tokio::test]
+async fn a_widened_text_search_records_one_use_of_each_split() {
+    let root = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open(
+        "overlay-text-split-demand",
+        store,
+        with_full_text_disk_tier(queued(IndexOperationQueueTuning::default()), root.path()),
+    )
+    .await;
+    db.wait_for_startup_cache_warm().await;
+    install(&db, None).await;
+    // Identical bodies tie on BM25, so the search ranks them by ID.
+    let ids = add_many(&db, (0..3).map(|index| [index as f32, 0.0])).await;
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    // The top result no longer matches once its rewrite publishes, so the
+    // strong search skips it and widens with a second physical search.
+    update(&db, ids[0], [0.0, 0.0], "beta").await;
+    let attempts = || async { db.fts_cache_state().await.unwrap().hydration_attempts };
+
+    let found = text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await;
+    assert_eq!(
+        found.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [ids[1]]
+    );
+    // A hydration the search spawned counts its attempt when first polled.
+    tokio::task::yield_now().await;
+    assert_eq!(
+        attempts().await,
+        0,
+        "one widened search is one use of each split, which admits nothing"
+    );
+
+    let again = text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await;
+    assert_eq!(again, found);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while attempts().await == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a second search admits the splits it used");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn restricted_searches_skip_the_physical_search_when_every_candidate_is_superseded() {
+    let db = open(
+        "overlay-restricted-superseded",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&db, None).await;
+    let ids = add_many(&db, (0..4).map(|index| [index as f32, 0.0])).await;
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    // Pending rewrites supersede the first three docs in both indexes; the
+    // last stays published.
+    for (index, id) in ids[..3].iter().enumerate() {
+        update(&db, *id, [index as f32 + 0.5, 0.0], "alpha rewritten").await;
+    }
+    let vector = |candidates: &[u64], consistency| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g()
+                        .n(NodeRef::from(candidates.to_vec()))
+                        .vector_search("Doc", "embedding", vec![0.0, 0.0], 10, None),
+                )
+                .returning(["hits"]),
+        )
+        .with_search_consistency(consistency)
+        .unwrap()
+    };
+    let text = |candidates: &[u64], consistency| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g()
+                        .n(NodeRef::from(candidates.to_vec()))
+                        .text_search("Doc", "body", "alpha", 10, None),
+                )
+                .returning(["hits"]),
+        )
+        .with_search_consistency(consistency)
+        .unwrap()
+    };
+
+    let mut overlaid = Vec::new();
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        // Only the pending vectors can rank, and no physical search runs.
+        let (result, stats) = crate::search::vector::observe_restricted_search(Box::pin(
+            db.query(vector(&ids[..3], consistency)),
+        ))
+        .await;
+        let vector_hits = hits(&result.unwrap(), "hits");
+        assert_eq!(
+            vector_hits,
+            [
+                (ids[0], 0.25_f64.to_bits()),
+                (ids[1], 2.25_f64.to_bits()),
+                (ids[2], 6.25_f64.to_bits()),
+            ],
+            "{consistency:?}"
+        );
+        assert!(stats.is_none(), "{consistency:?}: {stats:?}");
+        // A published candidate still reaches the physical search.
+        let (result, stats) = crate::search::vector::observe_restricted_search(Box::pin(
+            db.query(vector(&ids, consistency)),
+        ))
+        .await;
+        assert_eq!(
+            hits(&result.unwrap(), "hits").last(),
+            Some(&(ids[3], 9.0_f64.to_bits())),
+            "{consistency:?}"
+        );
+        assert!(
+            stats.as_ref().is_some_and(|stats| stats.strategy.is_some()),
+            "{consistency:?}: {stats:?}"
+        );
+
+        // Text likewise scores only the pending documents and loads no
+        // manifest.
+        let (result, loads) = crate::index_lifecycle::text::serving::observe_manifest_root_loads(
+            Box::pin(db.query(text(&ids[..3], consistency))),
+        )
+        .await;
+        let text_hits = hits(&result.unwrap(), "hits");
+        assert_eq!(
+            text_hits.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            ids[..3],
+            "{consistency:?}"
+        );
+        assert_eq!(loads, 0, "{consistency:?}");
+        let (result, loads) = crate::index_lifecycle::text::serving::observe_manifest_root_loads(
+            Box::pin(db.query(text(&ids, consistency))),
+        )
+        .await;
+        assert_eq!(hits(&result.unwrap(), "hits").len(), 4, "{consistency:?}");
+        assert_eq!(loads, 1, "{consistency:?}");
+        overlaid.push((vector_hits, text_hits));
+    }
+
+    // Published, the same searches read only physical rows and agree.
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    for (vector_hits, text_hits) in overlaid {
+        assert_eq!(
+            hits(
+                &Box::pin(db.query(vector(&ids[..3], SearchConsistency::Strong)))
+                    .await
+                    .unwrap(),
+                "hits"
+            ),
+            vector_hits
+        );
+        assert_eq!(
+            hits(
+                &Box::pin(db.query(text(&ids[..3], SearchConsistency::Strong)))
+                    .await
+                    .unwrap(),
+                "hits"
+            ),
+            text_hits
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// Writes `docs`, each linked from the hub and, but for the first, to the
+/// doc written before it, then `search` as `result`.
+///
+/// Doc `d` embeds at `d * 7 % 320` on one axis, so each of the first 320 docs
+/// has its own vector distance, and every third doc has kind `B`.
+fn docs_batch(
+    docs: std::ops::Range<usize>,
+    search: Option<traversal::Traversal<traversal::OnNodes>>,
+) -> batch::WriteBatch {
+    let first = docs.start;
+    let names = docs
+        .clone()
+        .map(|doc| format!("d{doc}"))
+        .collect::<Vec<_>>();
+    let written = docs
+        .zip(&names)
+        .fold(batch::write_batch(), |written, (doc, name)| {
+            let written = written
+                .var_as(
+                    name,
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![
+                            (
+                                "embedding",
+                                PropertyInput::from(vec![(doc * 7 % 320) as f32, 0.0]),
+                            ),
+                            (
+                                "body",
+                                PropertyInput::from(if doc % 2 == 0 {
+                                    "rust storage"
+                                } else {
+                                    "rust planner engine"
+                                }),
+                            ),
+                            (
+                                "kind",
+                                PropertyInput::from(if doc % 3 == 0 { "B" } else { "A" }),
+                            ),
+                        ],
+                    ),
+                )
+                .var_as(
+                    &format!("{name}_linked"),
+                    traversal::g().n_with_label("Hub").add_e(
+                        "HAS",
+                        NodeRef::var(name),
+                        Vec::<(&str, PropertyInput)>::new(),
+                    ),
+                );
+            if doc == first {
+                return written;
+            }
+            written.var_as(
+                &format!("{name}_next"),
+                traversal::g().n(NodeRef::var(name)).add_e(
+                    "NEXT",
+                    NodeRef::var(format!("d{}", doc - 1)),
+                    Vec::<(&str, PropertyInput)>::new(),
+                ),
+            )
+        });
+    match search {
+        Some(search) => written
+            .var_as("result", search)
+            .returning(names.into_iter().chain(["result".to_string()])),
+        None => written.returning(names),
+    }
+}
+
+/// Filters kind-`B` docs after an overlaid search, directly or behind an
+/// expansion. Each filter sees more than one record batch of node rows, so
+/// index membership resolves its set instead of evaluating every row.
+///
+/// Without statistics the planner estimates a search's rows by its `k`, so
+/// each search asks for the 800-result cap to make index membership pay.
+///
+/// `label` scopes the filter to `Doc`: `$label = Doc` plans index
+/// membership, while the per-row oracle's negated inequality is not a finite
+/// `$label` domain, so it plans a true per-row filter.
+fn membership_shapes(
+    label: &expr::Predicate,
+) -> [(&'static str, traversal::Traversal<traversal::OnNodes>); 4] {
+    let kind_b = || expr::Predicate::and(vec![label.clone(), expr::Predicate::eq("kind", "B")]);
+    [
+        (
+            "vector search then expansion",
+            traversal::g()
+                .vector_search_nodes("Doc", "embedding", vec![0.0, 0.0], 800, None)
+                .out(Some("NEXT"))
+                .where_(kind_b()),
+        ),
+        (
+            "expansion then vector search",
+            traversal::g()
+                .n_with_label("Hub")
+                .out(Some("HAS"))
+                .vector_search("Doc", "embedding", vec![0.0, 0.0], 800, None)
+                .where_(kind_b()),
+        ),
+        (
+            "text search then expansion",
+            traversal::g()
+                .text_search_nodes("Doc", "body", "rust", 800, None)
+                .out(Some("NEXT"))
+                .where_(kind_b()),
+        ),
+        (
+            "expansion then text search",
+            traversal::g()
+                .n_with_label("Hub")
+                .out(Some("HAS"))
+                .text_search("Doc", "body", "rust", 800, None)
+                .where_(kind_b()),
+        ),
+    ]
+}
+
+/// Index membership after vector and text searches needs no search-index
+/// flush: while the queue holds every doc unpublished, it keeps exactly the
+/// rows the per-row filter keeps, in order, for strong and eventual reads and
+/// inside a write batch that adds its own docs.
+#[tokio::test]
+async fn index_membership_after_overlaid_searches_matches_the_per_row_filter() {
+    // Both databases hold the same unpublished docs. Only the first indexes
+    // `kind`, and only its filters state the label as `$label = Doc`, so only
+    // they plan index membership.
+    let fixture = async |name: &str, indexed: bool| {
+        let db = open(
+            name,
+            Arc::new(InMemory::new()),
+            queued(IndexOperationQueueTuning::default()),
+        )
+        .await;
+        install(&db, None).await;
+        if indexed {
+            db.install_index_for_tests(
+                SecondaryIndexDefinition::node_equality("Doc", "kind")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        write(&db, || {
+            QueryRequest::write(batch::write_batch().var_as(
+                "hub",
+                traversal::g().add_n("Hub", Vec::<(&str, PropertyInput)>::new()),
+            ))
+        })
+        .await;
+        let mut ids = Vec::new();
+        for start in (0..300).step_by(100) {
+            let written = docs_batch(start..start + 100, None);
+            let result = write(&db, || QueryRequest::write(written.clone())).await;
+            ids.extend(
+                (start..start + 100)
+                    .map(|doc| result[format!("d{doc}")][0]["$id"].as_u64().unwrap()),
+            );
+        }
+        (db, ids)
+    };
+    let (indexed, mut indexed_ids) = fixture("overlay-membership-indexed", true).await;
+    let (per_row, mut per_row_ids) = fixture("overlay-membership-per-row", false).await;
+    assert_eq!(
+        indexed.index_operation_queue_stats().pending_members,
+        600,
+        "every doc's vector and text insert is unpublished"
+    );
+    let membership_steps = |plan: exec::ExecutablePlan| {
+        plan.steps()
+            .iter()
+            .filter(|step| matches!(step.op, exec::ExecOp::IndexMembership { .. }))
+            .count()
+    };
+    let resolved = || {
+        indexed
+            .inner
+            .resolved_index_memberships
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+
+    let indexed_label = expr::Predicate::eq("$label", "Doc");
+    let per_row_label = expr::Predicate::not(expr::Predicate::neq("$label", "Doc"));
+    let shapes = || {
+        membership_shapes(&indexed_label)
+            .into_iter()
+            .zip(membership_shapes(&per_row_label))
+    };
+
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        for ((shape, search), (_, oracle)) in shapes() {
+            let read = |search| {
+                batch::read_batch()
+                    .var_as("result", search)
+                    .returning(["result"])
+            };
+            let (read, oracle) = (read(search), read(oracle));
+            let plan = |db: &HelixDB, read: &batch::ReadBatch| {
+                planning::plan_read_batch(
+                    read,
+                    &db.planner_context(context::ParamBindings::default()),
+                )
+                .unwrap()
+            };
+            assert_eq!(membership_steps(plan(&indexed, &read)), 1, "{shape}");
+            assert_eq!(membership_steps(plan(&per_row, &oracle)), 0, "{shape}");
+            let run = async |db: &HelixDB, read: &batch::ReadBatch, ids: &[u64]| {
+                let request = QueryRequest::read(read.clone())
+                    .with_search_consistency(consistency)
+                    .unwrap();
+                ordinals(
+                    hits(&Box::pin(db.query(request)).await.unwrap(), "result"),
+                    ids,
+                )
+            };
+            let before = resolved();
+            let found = run(&indexed, &read, &indexed_ids).await;
+            assert_eq!(
+                resolved(),
+                before + 1,
+                "{shape}, {consistency:?}: membership reads its index set"
+            );
+            let expected = run(&per_row, &oracle, &per_row_ids).await;
+            assert!(!expected.is_empty(), "{shape}, {consistency:?}");
+            assert_eq!(found, expected, "{shape}, {consistency:?}");
+        }
+    }
+
+    // A write batch adds docs, their vectors, text, and hub links, then
+    // filters its own search.
+    for (index, ((shape, search), (_, oracle))) in shapes().enumerate() {
+        let docs = 300 + index * 5..305 + index * 5;
+        let written = docs_batch(docs.clone(), Some(search));
+        let oracle = docs_batch(docs.clone(), Some(oracle));
+        let plan = |db: &HelixDB, written: &batch::WriteBatch| {
+            planning::plan_write_batch(
+                written,
+                &db.planner_context(context::ParamBindings::default()),
+            )
+            .unwrap()
+        };
+        assert_eq!(membership_steps(plan(&indexed, &written)), 1, "{shape}");
+        assert_eq!(membership_steps(plan(&per_row, &oracle)), 0, "{shape}");
+        let run = async |db: &HelixDB, written: &batch::WriteBatch, ids: &mut Vec<u64>| {
+            let result = write(db, || QueryRequest::write(written.clone())).await;
+            ids.extend(
+                docs.clone()
+                    .map(|doc| result[format!("d{doc}")][0]["$id"].as_u64().unwrap()),
+            );
+            ordinals(hits(&result, "result"), ids)
+        };
+        let before = resolved();
+        let found = run(&indexed, &written, &mut indexed_ids).await;
+        assert_eq!(
+            resolved(),
+            before + 1,
+            "{shape} in a write batch: membership reads its index set"
+        );
+        let expected = run(&per_row, &oracle, &mut per_row_ids).await;
+        assert!(
+            expected.iter().any(|(ordinal, _)| *ordinal >= 300),
+            "{shape} in a write batch keeps some of its own docs"
+        );
+        assert_eq!(found, expected, "{shape} in a write batch");
+    }
+    indexed.close().await.unwrap();
+    per_row.close().await.unwrap();
 }

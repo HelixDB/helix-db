@@ -155,12 +155,35 @@ pub(crate) struct TextSearchRequest<'a> {
     query: &'a str,
     k: usize,
     scope: TextSearchScope,
+    demand: SplitDemand,
 }
 
 impl<'a> TextSearchRequest<'a> {
     pub(crate) const fn new(query: &'a str, k: usize, scope: TextSearchScope) -> Self {
-        Self { query, k, scope }
+        Self {
+            query,
+            k,
+            scope,
+            demand: SplitDemand::Record,
+        }
     }
+
+    /// Sets whether this search counts toward disk-tier split admission.
+    pub(crate) const fn with_split_demand(mut self, demand: SplitDemand) -> Self {
+        self.demand = demand;
+        self
+    }
+}
+
+/// Whether a manifest search counts as a use of its splits for disk-tier
+/// admission, which admits a split on its second successful use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SplitDemand {
+    /// Records one successful use of every searched split.
+    Record,
+    /// Repeats a physical search of one logical search that already recorded
+    /// its use, such as a widened overlay search.
+    Skip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,7 +535,12 @@ async fn search_manifest_with_state_source(
 ) -> Result<Vec<TextSearchHit>, HelixDbError> {
     const SPLIT_READ_CONCURRENCY: usize = 8;
     const STATE_BATCH_SIZE: usize = 512;
-    let TextSearchRequest { query, k, scope } = request;
+    let TextSearchRequest {
+        query,
+        k,
+        scope,
+        demand,
+    } = request;
     if k == 0 || scope.is_empty_restricted() {
         return Ok(Vec::new());
     }
@@ -653,7 +681,9 @@ async fn search_manifest_with_state_source(
             }
         }
     }
-    if let Some(cache) = runtime.cache {
+    if demand == SplitDemand::Record
+        && let Some(cache) = runtime.cache
+    {
         futures::stream::iter(splits.iter().map(|split| split.split_ref.clone()))
             .for_each_concurrent(SPLIT_READ_CONCURRENCY, |split| async move {
                 cache.after_successful_search(split).await;
