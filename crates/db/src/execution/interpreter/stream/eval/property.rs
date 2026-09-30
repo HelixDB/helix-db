@@ -77,14 +77,25 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
     }
 
     /// All stored properties of the row element, read through the cache.
+    ///
+    /// The `last_use` of an element moves its record out of the cache instead
+    /// of copying it; a later use reads the record again.
     pub(in crate::execution::interpreter::stream) async fn row_properties(
         &mut self,
         row: &ExecutionRow,
+        last_use: bool,
     ) -> Result<Vec<Property>> {
         let Some(element) = row.current.as_ref() else {
             return Ok(Vec::new());
         };
-        Ok(self.element_properties(element).await?.to_vec())
+        if !last_use {
+            return Ok(self.element_properties(element).await?.to_vec());
+        }
+        let blob = match self.property_blobs.remove(element) {
+            Some(blob) => blob,
+            None => self.context.load_property_blob(element).await?,
+        };
+        Ok(blob.into_properties())
     }
 
     async fn element_properties(&mut self, element: &ElementRef) -> Result<&[Property]> {
@@ -357,6 +368,13 @@ impl CachedPropertyBlob {
     fn properties(&self) -> &[Property] {
         match self {
             Self::Missing => &[],
+            Self::Decoded(properties) => properties,
+        }
+    }
+
+    fn into_properties(self) -> Vec<Property> {
+        match self {
+            Self::Missing => Vec::new(),
             Self::Decoded(properties) => properties,
         }
     }

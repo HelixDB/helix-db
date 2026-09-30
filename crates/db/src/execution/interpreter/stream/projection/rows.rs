@@ -116,12 +116,13 @@ impl<'db> ExecutionContext<'db> {
                         .await?;
                 }
             }
-            for row in batch {
+            for (row, last_use) in batch.iter().zip(last_uses(batch)) {
                 self.check_execution_deadline()?;
                 let object = match selection {
                     ir::PropertySelection::All => {
-                        let mut object =
-                            helpers::properties_to_object(resolver.row_properties(row).await?);
+                        let mut object = helpers::properties_to_object(
+                            resolver.row_properties(row, last_use).await?,
+                        );
                         if let Some(element) = row.current.as_ref() {
                             object.insert(
                                 "$id".to_string(),
@@ -286,7 +287,7 @@ impl<'db> ExecutionContext<'db> {
                 }
             }
             resolver.prefetch(&present).await?;
-            for row in batch {
+            for (row, last_use) in batch.iter().zip(last_uses(batch)) {
                 self.check_execution_deadline()?;
                 let Some(ElementRef::Edge(edge_id)) = row.current.as_ref() else {
                     continue;
@@ -294,7 +295,8 @@ impl<'db> ExecutionContext<'db> {
                 let Some((from, to)) = resolver.edge_endpoints(*edge_id).await? else {
                     continue;
                 };
-                let mut object = helpers::properties_to_object(resolver.row_properties(row).await?);
+                let mut object =
+                    helpers::properties_to_object(resolver.row_properties(row, last_use).await?);
                 object.insert(
                     "$id".to_string(),
                     DbPropertyValue::I64((*edge_id).try_into().unwrap_or(i64::MAX)),
@@ -312,4 +314,21 @@ impl<'db> ExecutionContext<'db> {
         }
         Ok(ExecutionValue::Scalars(scalars))
     }
+}
+
+/// Whether each row of `rows` is the last to use its element, so its record
+/// can move out of a batch cache instead of being copied.
+fn last_uses(rows: &[ExecutionRow]) -> Vec<bool> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut last = rows
+        .iter()
+        .rev()
+        .map(|row| {
+            row.current
+                .as_ref()
+                .is_some_and(|element| seen.insert(element))
+        })
+        .collect::<Vec<_>>();
+    last.reverse();
+    last
 }
