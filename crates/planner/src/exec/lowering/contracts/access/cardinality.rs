@@ -6,11 +6,15 @@ pub(in crate::exec) fn node_access_hard_upper_bound(plan: &ir::NodeAccessPlan) -
     match plan {
         ir::NodeAccessPlan::Empty => Some(0),
         ir::NodeAccessPlan::PointIds { ids } => Some(ids.as_ref().len()),
-        ir::NodeAccessPlan::EqualityIndex { index, .. }
-            if matches!(index.uniqueness, catalog::IndexUniqueness::Unique) =>
-        {
-            Some(1)
-        }
+        ir::NodeAccessPlan::EqualityIndex {
+            index:
+                catalog::NodeEqualityIndexMeta {
+                    uniqueness: catalog::IndexUniqueness::Unique,
+                    ..
+                },
+            value,
+            ..
+        } => unique_equality_hard_upper_bound(value),
         ir::NodeAccessPlan::VectorSearch { k, .. } | ir::NodeAccessPlan::TextSearch { k, .. } => {
             search_limit_hard_upper_bound(k)
         }
@@ -69,11 +73,15 @@ pub(super) fn node_access_exact_cardinality(plan: &ir::NodeAccessPlan) -> Option
     match plan {
         ir::NodeAccessPlan::Empty => Some(0),
         ir::NodeAccessPlan::PointIds { ids } => Some(ids.as_ref().len()),
-        ir::NodeAccessPlan::EqualityIndex { index, .. }
-            if matches!(index.uniqueness, catalog::IndexUniqueness::Unique) =>
-        {
-            Some(1)
-        }
+        ir::NodeAccessPlan::EqualityIndex {
+            index:
+                catalog::NodeEqualityIndexMeta {
+                    uniqueness: catalog::IndexUniqueness::Unique,
+                    ..
+                },
+            value: ir::IndexValue::Literal(value),
+            ..
+        } if value.semantics() == ir::LiteralEqualityIndexValueSemantics::Indexed => Some(1),
         ir::NodeAccessPlan::FromParam { .. }
         | ir::NodeAccessPlan::FromVar { .. }
         | ir::NodeAccessPlan::AllScan
@@ -105,6 +113,35 @@ pub(super) fn edge_access_exact_cardinality(plan: &ir::EdgeAccessPlan) -> Option
         | ir::EdgeAccessPlan::Union(_)
         | ir::EdgeAccessPlan::ScanThenFilter { .. }
         | ir::EdgeAccessPlan::BranchResidualUnion(_) => None,
+    }
+}
+
+/// Rows a unique equality index read can return for `value`.
+///
+/// Each indexed literal has at most one owner and a non-reflexive literal
+/// none, so a literal or literal set is bounded by its indexed members. Null
+/// is not held by the unique lane: the read returns every label row whose
+/// property is null or missing, so a null literal, or a set holding one, has
+/// no bound. Neither does a runtime parameter or domain, which may bind null.
+///
+/// ```text
+/// email == "a"               -> Some(1)
+/// email IN ["a", "b", NaN]   -> Some(2)
+/// email IN ["a", null]       -> None
+/// email == $param            -> None
+/// ```
+fn unique_equality_hard_upper_bound(value: &ir::IndexValue) -> Option<usize> {
+    let indexed = |literal: &ir::SecondaryIndexLiteral| match literal.semantics() {
+        ir::LiteralEqualityIndexValueSemantics::Indexed => Some(1),
+        ir::LiteralEqualityIndexValueSemantics::NonReflexive => Some(0),
+        ir::LiteralEqualityIndexValueSemantics::AuthoritativeNull => None,
+    };
+    match value {
+        ir::IndexValue::Literal(literal) => indexed(literal),
+        ir::IndexValue::LiteralSet(literals) => literals.iter().try_fold(0usize, |sum, literal| {
+            Some(sum.saturating_add(indexed(literal)?))
+        }),
+        ir::IndexValue::Param(_) | ir::IndexValue::ParamSet(_) => None,
     }
 }
 

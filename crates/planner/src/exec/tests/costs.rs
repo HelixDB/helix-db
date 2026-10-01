@@ -58,6 +58,45 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
     ));
 
     assert_eq!(node_access_hard_upper_bound(&node_equality), Some(1));
+    // A unique read is bounded by its indexed literals; null, and runtime
+    // values that may bind null, read label rows and have no bound.
+    let literal =
+        |value: PropertyValue| ir::SecondaryIndexLiteral::new(value).expect("indexable literal");
+    let unique_read = |value| ir::NodeAccessPlan::EqualityIndex {
+        index: unique.clone(),
+        key: key.clone(),
+        value,
+    };
+    let literal_set = |values: Vec<PropertyValue>| {
+        unique_read(ir::IndexValue::LiteralSet(
+            ir::AtLeast::try_from_vec(values.into_iter().map(literal).collect()).unwrap(),
+        ))
+    };
+    assert_eq!(
+        node_access_hard_upper_bound(&literal_set(vec![
+            PropertyValue::from("a"),
+            PropertyValue::from("b"),
+            PropertyValue::F64(f64::NAN),
+        ])),
+        Some(2)
+    );
+    assert_eq!(
+        node_access_hard_upper_bound(&literal_set(vec![
+            PropertyValue::from("a"),
+            PropertyValue::Null,
+        ])),
+        None
+    );
+    assert_eq!(
+        node_access_hard_upper_bound(&unique_read(ir::IndexValue::Literal(literal(
+            PropertyValue::Null
+        )))),
+        None
+    );
+    assert_eq!(
+        node_access_hard_upper_bound(&unique_read(ir::IndexValue::Param(name("email")))),
+        None
+    );
     assert_eq!(node_access_hard_upper_bound(&node_search), Some(3));
     assert_eq!(node_access_hard_upper_bound(&filtered_node), Some(2));
     assert_eq!(node_access_hard_upper_bound(&union_node), Some(3));

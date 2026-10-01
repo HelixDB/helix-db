@@ -13,6 +13,8 @@ mod extract;
 mod truth;
 mod values;
 
+pub(super) use values::property_value_identity;
+
 use helix_ast::expr::Predicate;
 use helix_ast::value::PropertyValue;
 

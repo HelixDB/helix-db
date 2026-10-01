@@ -517,3 +517,50 @@ fn counts_over_saved_streams_read_the_index() {
         assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
     }
 }
+
+#[test]
+fn unique_reads_that_may_return_many_rows_keep_their_read_limit() {
+    // A unique lane holds one owner per indexed value, but a literal set
+    // returns one row per member, and null (bound statically or at run time)
+    // returns every label row without the property, so none of them may drop
+    // the limit as if one row came back.
+    let mut planner_ctx = ctx(IndexCatalogSnapshot::default());
+    planner_ctx.indexes.node_eq.insert(
+        ScopedPropertyKey::try_new("User", "email").unwrap(),
+        crate::catalog::NodeEqualityIndexMeta::try_new("user-email")
+            .unwrap()
+            .with_uniqueness(crate::catalog::IndexUniqueness::Unique),
+    );
+    let emails = (0..70).map(|n| format!("user-{n}")).collect::<Vec<_>>();
+    for predicate in [
+        Predicate::is_in("email", PropertyValue::StringArray(emails)),
+        Predicate::eq("email", PropertyValue::Null),
+        Predicate::is_in(
+            "email",
+            PropertyValue::Array(vec![PropertyValue::from("a"), PropertyValue::Null]),
+        ),
+        Predicate::eq_param("email", "email"),
+    ] {
+        let plan = executable_traversal(
+            g().n_with_label_where("User", predicate.clone())
+                .limit(5usize)
+                .values(vec!["email"]),
+            planner_ctx.clone(),
+        );
+        assert_eq!(
+            first_limited_access_limit(&plan),
+            Some(5),
+            "{predicate:?}: {:#?}",
+            plan.steps()
+        );
+    }
+
+    // One indexed literal has at most one owner, so its limit is covered.
+    let plan = executable_traversal(
+        g().n_with_label_where("User", Predicate::eq("email", "a"))
+            .limit(5usize)
+            .values(vec!["email"]),
+        planner_ctx,
+    );
+    assert_eq!(first_limited_access_limit(&plan), None);
+}
