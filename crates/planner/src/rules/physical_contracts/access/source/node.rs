@@ -26,7 +26,8 @@ pub(in crate::rules) fn node_access_contract(
         | ir::NodeAccessPlan::RangeIndex { .. }
         | ir::NodeAccessPlan::VectorSearch { .. }
         | ir::NodeAccessPlan::TextSearch { .. }
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => None,
     };
     match exact {
         Some(exact) => {
@@ -80,6 +81,17 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
                         catalog::IndexUniqueness::NonUnique => shared::EqualityIndexKind::NonUnique,
                     },
                     semantics: value.semantics(),
+                    indexed_values: match value {
+                        ir::IndexValue::LiteralSet(values) => values
+                            .iter()
+                            .filter(|value| {
+                                value.semantics() == ir::LiteralEqualityIndexValueSemantics::Indexed
+                            })
+                            .count(),
+                        ir::IndexValue::Literal(_)
+                        | ir::IndexValue::Param(_)
+                        | ir::IndexValue::ParamSet(_) => 1,
+                    },
                 }
             }
             ir::NodeAccessPlan::RangeIndex { key, iteration, .. } => {
@@ -103,6 +115,15 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
                     source: source.as_ref(),
                     residual,
                 }
+            }
+            ir::NodeAccessPlan::BranchResidualUnion(branches) => {
+                shared::AccessSourceParts::BranchResidualUnion(
+                    branches
+                        .as_ref()
+                        .iter()
+                        .map(|branch| (branch.source().as_ref(), branch.residual()))
+                        .collect(),
+                )
             }
         }
     }

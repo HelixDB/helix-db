@@ -101,11 +101,16 @@ pub enum RuleApplicability {
     /// `LogicalExpr::AccessPipeline`, `LogicalExpr::RootPipeline`, and the
     /// five root-stream terminal wrappers.
     StreamMembershipCandidate,
+    /// The rule can only match the stream expressions that may hold a leading
+    /// filter a property index serves: the same kinds as
+    /// [`RuleApplicability::StreamMembershipCandidate`].
+    StreamSourceIndexCandidate,
 }
 
-/// Expression kinds that may hold a node-stream filter index membership must
-/// replace, shared by applicability matching and schedule compilation.
-pub(crate) const STREAM_MEMBERSHIP_KINDS: [logical::LogicalExprKind; 8] = [
+/// Expression kinds that may hold a stream filter a required rewrite must
+/// replace (index membership or source index access), shared by
+/// applicability matching and schedule compilation.
+pub(crate) const REQUIRED_STREAM_FILTER_KINDS: [logical::LogicalExprKind; 8] = [
     logical::LogicalExprKind::AccessFilter,
     logical::LogicalExprKind::AccessPipeline,
     logical::LogicalExprKind::RootPipeline,
@@ -249,6 +254,12 @@ impl RuleApplicability {
         Self::StreamMembershipCandidate
     }
 
+    /// Match stream expressions that may hold a leading filter a property
+    /// index serves.
+    pub const fn stream_source_index_candidate() -> Self {
+        Self::StreamSourceIndexCandidate
+    }
+
     /// Whether this rule's rewrite is the only route to a physical
     /// alternative for the expressions it matches.
     ///
@@ -268,9 +279,11 @@ impl RuleApplicability {
     /// - locally simplifiable access pipelines (adjacent distincts, empty
     ///   source), simplified only by `AccessPipelineSimplificationRule`;
     /// - access filters over a direct empty access path, collapsed only by
-    ///   `AccessFilterSimplificationRule`; and
+    ///   `AccessFilterSimplificationRule`;
     /// - eligible node-stream filters, implemented only through
-    ///   `AccessPipelineMembershipFilterRule`.
+    ///   `AccessPipelineMembershipFilterRule`; and
+    /// - leading filters a property index serves, implemented only through
+    ///   `AccessSourceIndexFilterRule`.
     ///
     /// The match is exhaustive so adding an applicability variant forces an
     /// explicit decision about whether its implementation rule defers.
@@ -281,7 +294,8 @@ impl RuleApplicability {
             | Self::AccessDistinctNoopCandidate
             | Self::AccessPipelineLocalSimplification
             | Self::AccessFilterSimplificationCandidate
-            | Self::StreamMembershipCandidate => true,
+            | Self::StreamMembershipCandidate
+            | Self::StreamSourceIndexCandidate => true,
             Self::Any
             | Self::LogicalKinds(_)
             | Self::PureOpKinds(_)

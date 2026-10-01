@@ -43,7 +43,7 @@ fn collect_access_filter_index_atoms(
     }
 }
 
-fn access_filter_index_atom(
+pub(in crate::rules::access::filter) fn access_filter_index_atom(
     predicate: &helix_ast::expr::Predicate,
     planner_limits: &crate::context::PlannerLimits,
 ) -> Result<AccessFilterIndexAtom, AccessFilterIndexPlanRejection> {
@@ -60,10 +60,13 @@ fn access_filter_index_atom(
                 else {
                     return Err(AccessFilterIndexPlanRejection::BranchLimitDisabled);
                 };
+                // A list wider than one union still uses the index, as one
+                // batched literal-set source.
                 if values.len() > max_branches {
-                    return Err(AccessFilterIndexPlanRejection::BranchLimitExceeded);
+                    AccessEqualityDomain::Batch(values)
+                } else {
+                    AccessEqualityDomain::Many(values.map(ir::IndexValue::Literal))
                 }
-                AccessEqualityDomain::Many(values)
             }
             analysis::EqualityIndexDomain::RuntimeSet(param) => {
                 let Some(max_branches) = super::limits::max_index_union_branches(planner_limits)

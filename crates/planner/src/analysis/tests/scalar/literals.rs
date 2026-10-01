@@ -4,6 +4,37 @@ use helix_ast::value::PropertyValue;
 use crate::analysis::literal_in_values;
 
 #[test]
+fn literal_in_values_keeps_values_query_equality_tells_apart() {
+    // Serialized text writes every infinity as `null`; the allowed values
+    // must still tell `+inf` from `-inf`, alone and inside arrays.
+    let infinities = PropertyValue::array([
+        PropertyValue::F64(f64::INFINITY),
+        PropertyValue::F64(f64::NEG_INFINITY),
+        PropertyValue::F64(f64::INFINITY),
+        PropertyValue::F64Array(vec![f64::INFINITY]),
+        PropertyValue::F64Array(vec![f64::NEG_INFINITY]),
+        PropertyValue::F32Array(vec![f32::NEG_INFINITY]),
+        PropertyValue::F32Array(vec![f32::NEG_INFINITY]),
+        PropertyValue::from(1),
+        PropertyValue::from(1.0_f64),
+    ]);
+    assert_eq!(
+        literal_in_values(&Predicate::is_in("x", infinities)),
+        Some((
+            "x".to_owned(),
+            vec![
+                PropertyValue::F64(f64::INFINITY),
+                PropertyValue::F64(f64::NEG_INFINITY),
+                PropertyValue::F64Array(vec![f64::INFINITY]),
+                PropertyValue::F64Array(vec![f64::NEG_INFINITY]),
+                PropertyValue::F32Array(vec![f32::NEG_INFINITY]),
+                PropertyValue::from(1),
+            ]
+        ))
+    );
+}
+
+#[test]
 fn literal_in_values_dedupes_and_rejects_non_reflexive_collections() {
     assert_eq!(
         literal_in_values(&Predicate::is_in(

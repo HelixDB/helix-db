@@ -13,7 +13,9 @@ pub use self::{
 
 pub(crate) use self::access::{missing_index_candidates, CandidateIndexKind};
 
-use self::access::membership_rewrite;
+use self::access::required_filter_rewrite_pending;
+#[cfg(test)]
+use self::access::{membership_rewrite, source_index_rewrite};
 
 use self::physical_contracts::*;
 use crate::{ir, logical, optimizer, physical};

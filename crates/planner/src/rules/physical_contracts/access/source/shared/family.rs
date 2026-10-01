@@ -16,6 +16,9 @@ pub(in crate::rules) enum AccessSourceParts<'a, Plan> {
         key: &'a catalog::ScopedPropertyKey,
         kind: EqualityIndexKind,
         semantics: ir::EqualityIndexValueSemantics,
+        /// Indexed values the lookup reads: those of a literal set, and one
+        /// for any single value or runtime parameter.
+        indexed_values: usize,
     },
     RangeIndex {
         iteration: ir::RangeScanIteration,
@@ -33,6 +36,9 @@ pub(in crate::rules) enum AccessSourceParts<'a, Plan> {
         source: &'a Plan,
         residual: &'a ir::PredicatePlan,
     },
+    /// Index-only branch sets, each with the residual its own rows must
+    /// satisfy.
+    BranchResidualUnion(Vec<(&'a Plan, Option<&'a ir::PredicatePlan>)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

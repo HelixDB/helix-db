@@ -125,7 +125,8 @@ async fn unique_membership_reader_uses_batch_and_honors_cancellation() {
         .await
         .unwrap();
     let metrics = index_lifecycle::secondary::equality_read_metrics();
-    assert_eq!(metrics.multi_get_calls, 1);
+    // One multi-get reads the owners and one verifies their records.
+    assert_eq!(metrics.multi_get_calls, 2);
     assert_eq!(metrics.point_reads, 6);
     assert_eq!(metrics.graph_reads, 5);
     assert_eq!(metrics.scans, 0);
@@ -523,7 +524,9 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
                 let metrics = index_lifecycle::secondary::equality_read_metrics();
                 assert_eq!(metrics.scans, 0);
                 assert_eq!(metrics.graph_reads, 0);
-                assert_eq!(metrics.point_reads, 1);
+                // Each of the five indexed conjuncts reads its bitmap once;
+                // no record is read to decide an indexed conjunct.
+                assert_eq!(metrics.point_reads, 5);
                 let response = super::QueryResponse::from_execution_result(result).unwrap();
                 let expected = [0, 10, 20, 30]
                     .map(|ordinal| serde_json::json!({"ordinal": ordinal + scope_index * 100}));

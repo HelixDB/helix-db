@@ -27,6 +27,7 @@ pub use self::{
     rule::{OptimizerRule, RuleEffect, RuleInput, RuleResult},
 };
 
+#[cfg(test)]
 pub(crate) use ordering::cost_key;
 
 #[cfg(test)]

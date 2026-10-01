@@ -70,6 +70,16 @@ impl<'a> Cursor<'a> {
                     name: "union()",
                 })
             }
+            exec::ExecMergeMode::OrderedUnion => Ok(Self {
+                shape: Shape::Rows,
+                node: Node::OrderedUnion {
+                    inputs: Some(inputs),
+                    rows: Vec::new().into_iter(),
+                },
+                produced_rows: 0,
+                row_mode: false,
+                name: "ordered union()",
+            }),
             exec::ExecMergeMode::Intersect => {
                 if inputs.is_empty() {
                     return Self::materialized(ExecutionValue::Stream(Vec::new()));

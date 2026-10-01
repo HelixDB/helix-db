@@ -101,8 +101,9 @@ impl<'a> RuleSchedule<'a> {
                 rules::RuleApplicability::RootRepeatImplementationCandidate => {
                     self.root_repeat_implementation_candidates.push(rule_index);
                 }
-                rules::RuleApplicability::StreamMembershipCandidate => {
-                    for kind in rules::STREAM_MEMBERSHIP_KINDS {
+                rules::RuleApplicability::StreamMembershipCandidate
+                | rules::RuleApplicability::StreamSourceIndexCandidate => {
+                    for kind in rules::REQUIRED_STREAM_FILTER_KINDS {
                         self.candidates_by_kind.push(kind, rule_index);
                     }
                 }

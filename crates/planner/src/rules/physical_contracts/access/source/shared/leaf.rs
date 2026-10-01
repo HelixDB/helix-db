@@ -95,54 +95,94 @@ pub(super) struct EqualityIndexContractInput<'a> {
     pub(super) label_cardinality: Option<u64>,
     pub(super) kind: EqualityIndexKind,
     pub(super) semantics: ir::EqualityIndexValueSemantics,
+    pub(super) indexed_values: usize,
 }
 
+/// Contract of one equality lookup, or of a literal set read as one batch.
+///
+/// A literal set reads its indexed values in one batched lookup and, when it
+/// holds null, the label rows outside the lane concurrently; each value is
+/// estimated as one equality, bounded by the label.
 pub(super) fn equality_index_contract(
     input: EqualityIndexContractInput<'_>,
     storage: &cost::StorageCostProfile,
 ) -> AccessPhysicalContract {
+    let per_value = equality_rows(input.cardinality, input.kind, storage);
+    let label_rows = input
+        .label_cardinality
+        .map_or(storage.default_unknown_scan_rows, cost::EstimatedRows::rows);
+    // Several values together never exceed their label.
+    let times = |rows: cost::EstimatedRows, values: usize| match values {
+        0 | 1 => rows,
+        values => {
+            let rows = rows.as_rows().saturating_mul(values as u64);
+            cost::EstimatedRows::rows(
+                input
+                    .label_cardinality
+                    .map_or(rows, |label_rows| rows.min(label_rows)),
+            )
+        }
+    };
+    let null_branch =
+        usize::from(input.semantics == ir::EqualityIndexValueSemantics::AuthoritativeNull);
     let rows = match input.semantics {
         ir::EqualityIndexValueSemantics::NonReflexive => cost::EstimatedRows::ZERO,
         ir::EqualityIndexValueSemantics::Indexed
         | ir::EqualityIndexValueSemantics::AuthoritativeNull
         | ir::EqualityIndexValueSemantics::RuntimeDependent => {
-            equality_rows(input.cardinality, input.kind, storage)
+            times(per_value, input.indexed_values + null_branch)
         }
+    };
+    let indexed_cost = match (input.indexed_values, input.kind) {
+        (0, _) => cost::CostVector::ZERO,
+        (1, EqualityIndexKind::Unique) => storage.unique_equality_lookup(per_value),
+        (1, EqualityIndexKind::NonUnique) => storage.bitmap_equality_lookup(per_value),
+        (values, EqualityIndexKind::Unique) => storage.unique_equality_batch(
+            crate::properties::PositiveUsize::at_least_one(values),
+            times(per_value, values),
+        ),
+        (values, EqualityIndexKind::NonUnique) => storage.bitmap_equality_batch(
+            crate::properties::PositiveUsize::at_least_one(values),
+            times(per_value, values),
+        ),
     };
     let id_cost = match input.semantics {
         ir::EqualityIndexValueSemantics::NonReflexive => cost::CostVector::ZERO,
-        ir::EqualityIndexValueSemantics::AuthoritativeNull => storage.null_equality_scan(
-            input
-                .label_cardinality
-                .map_or(storage.default_unknown_scan_rows, cost::EstimatedRows::rows),
-        ),
-        ir::EqualityIndexValueSemantics::Indexed
-        | ir::EqualityIndexValueSemantics::RuntimeDependent => match input.kind {
-            EqualityIndexKind::Unique => storage.unique_equality_lookup(rows),
-            EqualityIndexKind::NonUnique => storage.bitmap_equality_lookup(rows),
-        },
-    };
-    let cardinality = match input.semantics {
-        ir::EqualityIndexValueSemantics::NonReflexive => properties::CardinalityBounds::exact(0),
-        ir::EqualityIndexValueSemantics::Indexed => equality_cardinality(input.kind),
-        ir::EqualityIndexValueSemantics::AuthoritativeNull
-        | ir::EqualityIndexValueSemantics::RuntimeDependent => {
-            properties::CardinalityBounds::unknown()
+        ir::EqualityIndexValueSemantics::AuthoritativeNull => {
+            storage.parallel_reads(&[storage.null_equality_scan(label_rows), indexed_cost])
         }
+        ir::EqualityIndexValueSemantics::Indexed
+        | ir::EqualityIndexValueSemantics::RuntimeDependent => indexed_cost,
+    };
+    let cardinality = match (input.semantics, input.kind) {
+        (ir::EqualityIndexValueSemantics::NonReflexive, _) => {
+            properties::CardinalityBounds::exact(0)
+        }
+        (ir::EqualityIndexValueSemantics::Indexed, EqualityIndexKind::Unique) => {
+            properties::CardinalityBounds::zero_to(Some(input.indexed_values))
+        }
+        (ir::EqualityIndexValueSemantics::Indexed, EqualityIndexKind::NonUnique)
+        | (
+            ir::EqualityIndexValueSemantics::AuthoritativeNull
+            | ir::EqualityIndexValueSemantics::RuntimeDependent,
+            _,
+        ) => properties::CardinalityBounds::unknown(),
     };
     let delivered = with_key_locality(
         access_delivered_with(input.element, cardinality),
         properties::KeyLocality::Close,
     );
-    if input.semantics == ir::EqualityIndexValueSemantics::Indexed {
-        AccessPhysicalContract::new_secondary(
-            input.access,
-            delivered,
-            id_cost,
-            storage.secondary_row_materialization(rows),
-            rows,
-        )
-        .with_batchable_equality(
+    let contract = AccessPhysicalContract::new_secondary(
+        input.access,
+        delivered,
+        id_cost,
+        storage.secondary_row_materialization(rows),
+        rows,
+    );
+    // Only a single indexed value joins a same-key union's batch; a literal
+    // set is already one.
+    if input.semantics == ir::EqualityIndexValueSemantics::Indexed && input.indexed_values == 1 {
+        contract.with_batchable_equality(
             input.index_id.clone(),
             input.key.clone(),
             match input.kind {
@@ -151,13 +191,7 @@ pub(super) fn equality_index_contract(
             },
         )
     } else {
-        AccessPhysicalContract::new_secondary(
-            input.access,
-            delivered,
-            id_cost,
-            storage.secondary_row_materialization(rows),
-            rows,
-        )
+        contract
     }
 }
 
@@ -169,13 +203,6 @@ fn equality_rows(
     match kind {
         EqualityIndexKind::Unique => unique_equality_rows(cardinality, storage),
         EqualityIndexKind::NonUnique => equality_index_rows(cardinality, storage),
-    }
-}
-
-const fn equality_cardinality(kind: EqualityIndexKind) -> properties::CardinalityBounds {
-    match kind {
-        EqualityIndexKind::Unique => properties::CardinalityBounds::zero_to(Some(1)),
-        EqualityIndexKind::NonUnique => properties::CardinalityBounds::unknown(),
     }
 }
 

@@ -108,24 +108,23 @@ impl StorageCostProfile {
         }
     }
 
-    /// Cost a label bitmap followed by graph-row reads and row construction.
+    /// Cost a label bitmap followed by row construction.
     ///
-    /// Label access uses the shared equality bitmap, then checks each graph
-    /// row before emitting it. Unlike managed equality access, these IDs do
-    /// not bypass graph-row reads. Charge the row read/decode budget even
-    /// when statistics are missing; residual predicates are charged separately.
+    /// Deletes remove label memberships in the same transaction, so the
+    /// executor trusts the bitmap like any index set and reads no graph row
+    /// to emit its IDs. Charge row construction even when statistics are
+    /// missing; residual predicates are charged separately.
     ///
     /// ```
     /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
     /// let profile = StorageCostProfile::default();
     /// let cost = profile.label_scan(EstimatedRows::rows(1000));
-    /// assert_eq!(cost.object_reads, 1001);
-    /// assert_eq!(cost.authoritative_graph_reads, 1000);
+    /// assert_eq!(cost.object_reads, 1);
+    /// assert_eq!(cost.authoritative_graph_reads, 0);
     /// assert_eq!(cost.range_nexts, 0);
     /// ```
     pub fn label_scan(&self, rows: EstimatedRows) -> CostVector {
         self.bitmap_equality_lookup(rows)
-            .serial(self.authoritative_verification(rows))
             .serial(self.secondary_row_materialization(rows))
     }
 
@@ -186,14 +185,31 @@ impl StorageCostProfile {
         }
     }
 
-    /// Cost one close-key `multi_get` and decode for batched V4 bitmaps.
+    /// Cost the close-key `multi_get`s and decode of batched V4 bitmaps.
+    ///
+    /// The executor reads the bitmaps in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, so every further batch pays
+    /// one more call setup.
+    ///
+    /// ```
+    /// use helix_planner::{cost, properties};
+    /// let profile = cost::StorageCostProfile::default();
+    /// let batch = |values| {
+    ///     profile.bitmap_equality_batch(
+    ///         properties::PositiveUsize::at_least_one(values),
+    ///         cost::EstimatedRows::rows(10),
+    ///     )
+    /// };
+    /// assert_eq!(batch(256).multi_get_calls, 1);
+    /// assert_eq!(batch(600).multi_get_calls, 3);
+    /// ```
     pub fn bitmap_equality_batch(
         &self,
         values: PositiveUsize,
         estimated_rows: EstimatedRows,
     ) -> CostVector {
         let rows = estimated_rows.as_rows();
-        self.multi_get(values, KeyLocality::Close)
+        self.record_batched_multi_get(values, KeyLocality::Close)
             .serial(CostVector {
                 latency: self.bitmap_decode_per_id.saturating_mul(rows),
                 cpu_units: rows,
@@ -209,7 +225,10 @@ impl StorageCostProfile {
             .serial(self.authoritative_verification(estimated_rows))
     }
 
-    /// Cost a unique owner multi-get and same-snapshot authoritative checks.
+    /// Cost unique owner multi-gets and same-snapshot authoritative checks.
+    ///
+    /// Owners are read in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, each paying its own setup.
     ///
     /// ```
     /// use helix_planner::{cost, properties};
@@ -219,21 +238,61 @@ impl StorageCostProfile {
     /// assert_eq!(batch.multi_get_calls, 1);
     /// assert_eq!(batch.authoritative_graph_reads, 5);
     /// assert_eq!(batch.object_reads, 10);
+    /// let wide = profile.unique_equality_batch(
+    ///     properties::PositiveUsize::at_least_one(10_000), cost::EstimatedRows::rows(5));
+    /// assert_eq!(wide.multi_get_calls, 40);
     /// ```
     pub fn unique_equality_batch(&self, values: PositiveUsize, rows: EstimatedRows) -> CostVector {
-        self.multi_get(values, KeyLocality::Close)
+        self.record_batched_multi_get(values, KeyLocality::Close)
             .serial(self.authoritative_verification(rows))
             .serial(self.secondary_set_operation(rows))
     }
 
-    /// Cost an authoritative graph scan used for null equality.
-    pub fn null_equality_scan(&self, scanned_rows: EstimatedRows) -> CostVector {
-        self.range_scan(scanned_rows)
-            .serial(self.predicate_eval(scanned_rows))
-            .serial(CostVector {
-                authoritative_graph_reads: scanned_rows.as_rows(),
-                ..CostVector::ZERO
-            })
+    /// Cost null equality over a label of `label_rows` rows.
+    ///
+    /// The executor reads the label bitmap, scans the equality lane (at most
+    /// one entry per label row), subtracts it, and verifies only the label
+    /// rows left outside the lane, which the default equality estimate bounds.
+    /// No row outside the label is ever read.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.null_equality_scan(EstimatedRows::rows(1_000_000));
+    /// assert_eq!(cost.range_seeks, 1);
+    /// assert_eq!(
+    ///     cost.authoritative_graph_reads,
+    ///     profile.default_equality_index_rows.as_rows()
+    /// );
+    /// let tiny = profile.null_equality_scan(EstimatedRows::rows(2));
+    /// assert_eq!(tiny.authoritative_graph_reads, 2);
+    /// ```
+    pub fn null_equality_scan(&self, label_rows: EstimatedRows) -> CostVector {
+        let candidates = EstimatedRows::rows(
+            label_rows
+                .as_rows()
+                .min(self.default_equality_index_rows.as_rows()),
+        );
+        self.bitmap_equality_lookup(label_rows)
+            .serial(self.range_scan(label_rows))
+            .serial(self.secondary_set_operation(label_rows))
+            .serial(self.authoritative_verification(candidates))
+    }
+
+    /// Cost `keys` read in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, as the executor reads
+    /// equality batches: one [`Self::multi_get`] whose setup is paid once per
+    /// call.
+    fn record_batched_multi_get(&self, keys: PositiveUsize, locality: KeyLocality) -> CostVector {
+        let calls = (keys.get() as u64).div_ceil(crate::cost::RECORD_BATCH_ROWS);
+        let read = self.multi_get(keys, locality);
+        CostVector {
+            latency: read
+                .latency
+                .saturating_add(self.multi_get_setup.saturating_mul(calls - 1)),
+            multi_get_calls: calls,
+            ..read
+        }
     }
 
     /// Cost a V2 range scan plus authoritative verification of every candidate.
@@ -467,6 +526,47 @@ impl StorageCostProfile {
             peak_memory,
             parallel_width,
             ..total
+        }
+    }
+
+    /// Cost reading the children of one secondary-set operation concurrently,
+    /// within `max_parallel_kv_reads`, the way the executor reads
+    /// intersection, union, and ordered-intersection filter children.
+    ///
+    /// Children that cost nothing, such as statically empty sets, read
+    /// nothing and schedule no task. No remaining child costs nothing and one
+    /// costs exactly itself, with no task overhead. Two or more pay their
+    /// critical path plus the task overhead of the parallel width, and every
+    /// read still counts.
+    ///
+    /// ```
+    /// use helix_planner::cost::{CostVector, LatencyEstimate, StorageCostProfile};
+    ///
+    /// let profile = StorageCostProfile::default();
+    /// let read = |micros| CostVector {
+    ///     latency: LatencyEstimate::micros(micros),
+    ///     object_reads: 1,
+    ///     ..CostVector::ZERO
+    /// };
+    ///
+    /// assert_eq!(profile.parallel_reads(&[]), CostVector::ZERO);
+    /// assert_eq!(profile.parallel_reads(&[read(40)]), read(40));
+    /// assert_eq!(profile.parallel_reads(&[read(40), CostVector::ZERO]), read(40));
+    /// let both = profile.parallel_reads(&[read(5_000), read(7_000)]);
+    /// assert_eq!(both.object_reads, 2);
+    /// assert_eq!(both.parallel_width, 2);
+    /// assert_eq!(both.latency.as_micros(), 7_000 + 2 * 25);
+    /// ```
+    pub fn parallel_reads(&self, children: &[CostVector]) -> CostVector {
+        let reads = children
+            .iter()
+            .copied()
+            .filter(|child| *child != CostVector::ZERO)
+            .collect::<Vec<_>>();
+        match reads.as_slice() {
+            [] => CostVector::ZERO,
+            [one] => *one,
+            _ => self.parallel(&reads, self.max_parallel_kv_reads),
         }
     }
 

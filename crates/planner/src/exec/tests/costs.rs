@@ -58,6 +58,45 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
     ));
 
     assert_eq!(node_access_hard_upper_bound(&node_equality), Some(1));
+    // A unique read is bounded by its indexed literals; null, and runtime
+    // values that may bind null, read label rows and have no bound.
+    let literal =
+        |value: PropertyValue| ir::SecondaryIndexLiteral::new(value).expect("indexable literal");
+    let unique_read = |value| ir::NodeAccessPlan::EqualityIndex {
+        index: unique.clone(),
+        key: key.clone(),
+        value,
+    };
+    let literal_set = |values: Vec<PropertyValue>| {
+        unique_read(ir::IndexValue::LiteralSet(
+            ir::AtLeast::try_from_vec(values.into_iter().map(literal).collect()).unwrap(),
+        ))
+    };
+    assert_eq!(
+        node_access_hard_upper_bound(&literal_set(vec![
+            PropertyValue::from("a"),
+            PropertyValue::from("b"),
+            PropertyValue::F64(f64::NAN),
+        ])),
+        Some(2)
+    );
+    assert_eq!(
+        node_access_hard_upper_bound(&literal_set(vec![
+            PropertyValue::from("a"),
+            PropertyValue::Null,
+        ])),
+        None
+    );
+    assert_eq!(
+        node_access_hard_upper_bound(&unique_read(ir::IndexValue::Literal(literal(
+            PropertyValue::Null
+        )))),
+        None
+    );
+    assert_eq!(
+        node_access_hard_upper_bound(&unique_read(ir::IndexValue::Param(name("email")))),
+        None
+    );
     assert_eq!(node_access_hard_upper_bound(&node_search), Some(3));
     assert_eq!(node_access_hard_upper_bound(&filtered_node), Some(2));
     assert_eq!(node_access_hard_upper_bound(&union_node), Some(3));
@@ -133,6 +172,44 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
     assert_eq!(edge_access_cost(&edge_search, &profile).range_nexts, 4);
     assert_eq!(edge_access_cost(&edge_range, &profile).range_nexts, 9);
     assert!(edge_access_cost(&filtered_edge, &profile).cpu_units >= 2);
+}
+
+#[test]
+fn intersections_price_null_equalities_after_their_other_children() {
+    // The executor verifies a null equality only against the rows the other
+    // children keep, so it reads them first and the null leaf after them:
+    // the slowest other child and the null scan add up.
+    let profile = cost::StorageCostProfile::default();
+    let equality = |property: &str, value: PropertyValue| {
+        node_source(ir::NodeAccessPlan::EqualityIndex {
+            index: catalog::NodeEqualityIndexMeta::try_new(property).unwrap(),
+            key: catalog::ScopedPropertyKey::try_new("User", property).unwrap(),
+            value: index_value(value),
+        })
+    };
+    let others = [
+        equality("status", PropertyValue::from("active")),
+        equality("tier", PropertyValue::from("gold")),
+    ];
+    let with_null = ir::NodeAccessPlan::Intersect(
+        ir::AtLeast::try_from_vec(
+            others
+                .iter()
+                .cloned()
+                .chain([equality("deleted_at", PropertyValue::Null)])
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let without_null =
+        ir::NodeAccessPlan::Intersect(ir::AtLeast::try_from_vec(others.to_vec()).unwrap());
+    let null_scan = profile.null_equality_scan(profile.default_unknown_scan_rows);
+    assert!(
+        node_access_cost(&with_null, &profile).latency
+            >= node_access_cost(&without_null, &profile)
+                .latency
+                .saturating_add(null_scan.latency),
+    );
 }
 
 #[test]

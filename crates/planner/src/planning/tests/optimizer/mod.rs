@@ -6,6 +6,7 @@ mod chosen_plans;
 mod control_flow;
 mod empty_sources;
 mod index_membership;
+mod index_served_sources;
 mod mutation_ddl;
 mod parameter_specialization;
 mod predicate_limits;

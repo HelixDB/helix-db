@@ -804,6 +804,16 @@ pub enum ExecCountCursorPlan {
         /// Authoritative verification.
         verification: ExecNodeAuthoritativeVerificationPlan,
     },
+    /// Verified unique node owners of several literals, read and verified
+    /// in batched multi-gets, as a row read of the same literal set is.
+    NodeUniqueBatch {
+        /// The required unique index lane.
+        index: ExecNodeUniqueEqualityIndex,
+        /// One label-scoped property shared by every value.
+        key: catalog::ScopedPropertyKey,
+        /// Finite indexed literals; duplicates have set semantics.
+        values: ir::AtLeast<ExecIndexedEqualityValue, 2>,
+    },
     /// Verified node range IDs.
     NodeRange(ExecNodeVerifiedRangeScanPlan),
     /// Verified edge range IDs.
@@ -1251,6 +1261,7 @@ fn validate_cursor(cursor: &ExecCountCursorPlan) -> Result<(), ExecCountValidati
         | ExecCountCursorPlan::NodeBitmap(_)
         | ExecCountCursorPlan::EdgeBitmap(_)
         | ExecCountCursorPlan::NodeUnique { .. }
+        | ExecCountCursorPlan::NodeUniqueBatch { .. }
         | ExecCountCursorPlan::NodeRange(_)
         | ExecCountCursorPlan::EdgeRange(_)
         | ExecCountCursorPlan::NodeAuthoritativeScan(_)
@@ -1314,6 +1325,7 @@ fn cursor_row_input_count(cursor: &ExecCountCursorPlan) -> Result<usize, ExecCou
         | ExecCountCursorPlan::NodeBitmap(_)
         | ExecCountCursorPlan::EdgeBitmap(_)
         | ExecCountCursorPlan::NodeUnique { .. }
+        | ExecCountCursorPlan::NodeUniqueBatch { .. }
         | ExecCountCursorPlan::NodeRange(_)
         | ExecCountCursorPlan::EdgeRange(_)
         | ExecCountCursorPlan::NodeAuthoritativeScan(_)
@@ -1475,6 +1487,15 @@ mod tests {
             ExecCountCursorPlan::InputRows,
             ExecCountCursorPlan::NodeBitmap(node_point("active")),
             ExecCountCursorPlan::EdgeBitmap(edge_point("active")),
+            ExecCountCursorPlan::NodeUniqueBatch {
+                index: lookup.index.clone(),
+                key: lookup.key.clone(),
+                values: ir::AtLeast::try_from_vec(vec![
+                    lookup.value.clone(),
+                    indexed("bob@example.test"),
+                ])
+                .unwrap(),
+            },
             ExecCountCursorPlan::NodeUnique {
                 lookup,
                 verification,

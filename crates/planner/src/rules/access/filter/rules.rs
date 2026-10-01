@@ -33,7 +33,12 @@ impl optimizer::OptimizerRule for AccessFilterSimplificationRule {
     }
 }
 
-/// Explore full index coverage and equality seeds with residual filters.
+/// Explore label-domain and index alternatives for access filters.
+///
+/// Property-index rewrites are required via `AccessSourceIndexFilterRule`,
+/// which produces the same index alternatives even after the exploration
+/// budget; the memo keeps one copy. Only the label-domain alternatives are
+/// optional.
 pub struct AccessFilterIndexRule {
     metadata: RuleMetadata,
 }
@@ -76,8 +81,8 @@ impl optimizer::OptimizerRule for AccessFilterIndexRule {
     }
 }
 
-/// Implement residual access filters when no exploration rule can eliminate or
-/// index the predicate.
+/// Implement residual access filters only when no required rewrite (index
+/// membership or source index access) applies.
 pub struct AccessFilterImplementationRule {
     metadata: RuleMetadata,
 }
@@ -102,9 +107,11 @@ impl optimizer::OptimizerRule for AccessFilterImplementationRule {
         let logical::LogicalExpr::AccessFilter(filter) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
-            .is_some()
-        {
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
             return optimizer::RuleResult::NotApplicable;
         }
         if access_path_is_direct_empty(filter.access()) {

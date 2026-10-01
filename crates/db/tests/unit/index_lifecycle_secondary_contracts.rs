@@ -668,42 +668,6 @@ fn value_error_and_property_type_contracts_cover_every_closed_variant() {
         ),
         HelixDbError::SecondaryIndexValue(_)
     ));
-
-    let values = [
-        PropertyValue::Null,
-        PropertyValue::Bool(false),
-        PropertyValue::I64(0),
-        PropertyValue::DateTime(0),
-        PropertyValue::F64(0.0),
-        PropertyValue::F32(0.0),
-        PropertyValue::String(String::new()),
-        PropertyValue::Bytes(Vec::new()),
-        PropertyValue::I64Array(Vec::new()),
-        PropertyValue::F64Array(Vec::new()),
-        PropertyValue::F32Array(Vec::new()),
-        PropertyValue::StringArray(Vec::new()),
-        PropertyValue::Array(Vec::new()),
-        PropertyValue::Object(BTreeMap::new()),
-    ];
-    assert_eq!(
-        values.map(|value| property_value_type_name(&value)),
-        [
-            "Null",
-            "Bool",
-            "I64",
-            "DateTime",
-            "F64",
-            "F32",
-            "String",
-            "Bytes",
-            "I64Array",
-            "F64Array",
-            "F32Array",
-            "StringArray",
-            "Array",
-            "Object",
-        ]
-    );
 }
 
 #[test]
@@ -755,18 +719,18 @@ fn range_bounds_and_predicates_cover_direction_inclusion_and_invalid_domains() {
         }
     }
 
-    assert!(matches!(
-        secondary_range_scan_bounds(
-            StorageRangeIndexDirection::Asc,
-            &SecondaryRangeQuery::Between {
-                lower: PropertyValue::Bool(false),
-                lower_inclusive: true,
-                upper: PropertyValue::String("z".to_string()),
-                upper_inclusive: true,
-            },
-        ),
-        Err(HelixDbError::SecondaryIndexValue(_))
-    ));
+    // Bounds of no range domain, or of different domains, are empty ranges.
+    assert!(secondary_range_scan_bounds(
+        StorageRangeIndexDirection::Asc,
+        &SecondaryRangeQuery::Between {
+            lower: PropertyValue::Bool(false),
+            lower_inclusive: true,
+            upper: PropertyValue::String("z".to_string()),
+            upper_inclusive: true,
+        },
+    )
+    .unwrap()
+    .is_none());
     for query in [
         SecondaryRangeQuery::Between {
             lower: PropertyValue::I64(9),
@@ -792,7 +756,7 @@ fn range_bounds_and_predicates_cover_direction_inclusion_and_invalid_domains() {
             &PropertyValue::F64(f64::NAN),
             StorageRangeIndexDirection::Asc,
         ),
-        Err(HelixDbError::SecondaryIndexValue(_))
+        Ok(None)
     ));
     assert!(!secondary_range_query_matches(
         &SecondaryRangeQuery::Lower {

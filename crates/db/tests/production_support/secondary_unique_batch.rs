@@ -16,7 +16,10 @@ enum ReadFault {
     None,
     MultiGet,
     ShortMultiGet,
-    Get,
+    /// Every multi-get after the first, which reads the owners' records,
+    /// fails or comes back short.
+    RecordMultiGet,
+    ShortRecordMultiGet,
 }
 
 #[derive(Default)]
@@ -35,11 +38,6 @@ impl DbReadOps for Reader {
         _: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<Bytes>, slatedb::Error> {
         self.gets.fetch_add(1, Ordering::Relaxed);
-        if matches!(self.fault, ReadFault::Get) {
-            return Err(slatedb::Error::unavailable(
-                "injected row read failure".into(),
-            ));
-        }
         Ok(self.rows.get(key.as_ref()).cloned())
     }
 
@@ -48,16 +46,22 @@ impl DbReadOps for Reader {
         keys: &[K],
         _: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Vec<Option<Bytes>>, slatedb::Error> {
-        self.batches.fetch_add(1, Ordering::Relaxed);
+        let records = self.batches.fetch_add(1, Ordering::Relaxed) > 0;
         match self.fault {
             ReadFault::MultiGet => Err(slatedb::Error::unavailable(
                 "injected owner read failure".into(),
             )),
+            ReadFault::RecordMultiGet if records => Err(slatedb::Error::unavailable(
+                "injected record read failure".into(),
+            )),
             ReadFault::ShortMultiGet => Ok(Vec::new()),
-            ReadFault::None | ReadFault::Get => Ok(keys
-                .iter()
-                .map(|key| self.rows.get(key.as_ref()).cloned())
-                .collect()),
+            ReadFault::ShortRecordMultiGet if records => Ok(Vec::new()),
+            ReadFault::None | ReadFault::RecordMultiGet | ReadFault::ShortRecordMultiGet => {
+                Ok(keys
+                    .iter()
+                    .map(|key| self.rows.get(key.as_ref()).cloned())
+                    .collect())
+            }
         }
     }
 
@@ -66,7 +70,7 @@ impl DbReadOps for Reader {
         _: K,
         _: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<slatedb::KeyValue>, slatedb::Error> {
-        panic!("unique batch must use the bounded multi-get and authoritative get paths")
+        panic!("unique batch must use bounded owner and record multi-gets")
     }
 
     async fn scan_with_options<T: slatedb::ByteRangeBounds + Send>(
@@ -249,23 +253,30 @@ pub(crate) async fn run() {
             .unwrap(),
             roaring::RoaringTreemap::from_iter([owner, owner + 1])
         );
-        assert_eq!(reader.batches.load(Ordering::Relaxed), 1);
+        // One multi-get reads the owners and one verifies their records;
+        // no owner is read on its own.
+        assert_eq!(reader.batches.load(Ordering::Relaxed), 2);
+        assert_eq!(reader.gets.load(Ordering::Relaxed), 0);
     }
 
     for fault in [
         ReadFault::MultiGet,
         ReadFault::ShortMultiGet,
-        ReadFault::Get,
+        ReadFault::RecordMultiGet,
+        ReadFault::ShortRecordMultiGet,
     ] {
         reader.fault = fault;
+        reader.batches.store(0, Ordering::Relaxed);
         let error = lookup_active_unique_equality_batch(&reader, &unique, &values)
             .await
             .unwrap_err();
         match fault {
-            ReadFault::ShortMultiGet => {
+            ReadFault::ShortMultiGet | ReadFault::ShortRecordMultiGet => {
                 assert!(matches!(error, HelixDbError::IndexCatalogCorruption(_)))
             }
-            ReadFault::MultiGet | ReadFault::Get => assert!(error.to_string().contains("injected")),
+            ReadFault::MultiGet | ReadFault::RecordMultiGet => {
+                assert!(error.to_string().contains("injected"))
+            }
             ReadFault::None => unreachable!("only injected faults are tested here"),
         }
     }

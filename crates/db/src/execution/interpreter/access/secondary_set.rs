@@ -33,11 +33,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::future::BoxFuture;
 use futures::{future, stream, FutureExt, Stream, StreamExt, TryStreamExt};
-use helix_planner::{exec, properties};
+use helix_planner::{catalog, exec, ir, properties};
 use roaring::RoaringTreemap;
 
 use super::super::ExecutionContext;
-use crate::encoding::v2::values::property::equality_index_value;
+use crate::encoding::v2::values::property::{equality_index_value, property_value::PropertyValue};
 use crate::error::Result;
 
 /// Concurrent child reads one secondary-index set keeps in flight.
@@ -63,7 +63,7 @@ impl Default for SharedIndexReads {
 
 impl SharedIndexReads {
     /// Take up to `wanted` extra reads, as many as are free now.
-    fn take(&self, wanted: usize) -> ExtraIndexReads<'_> {
+    pub(super) fn take(&self, wanted: usize) -> ExtraIndexReads<'_> {
         let (Ok(free) | Err(free)) =
             self.0
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |free| {
@@ -77,9 +77,10 @@ impl SharedIndexReads {
 }
 
 /// Extra reads one composite holds until its read ends.
-struct ExtraIndexReads<'a> {
+pub(super) struct ExtraIndexReads<'a> {
     pool: &'a SharedIndexReads,
-    taken: usize,
+    /// Reads taken, at most the number wanted.
+    pub(super) taken: usize,
 }
 
 impl Drop for ExtraIndexReads<'_> {
@@ -152,6 +153,22 @@ enum SecondaryIds {
     Ordered(Vec<u64>),
 }
 
+/// A set leaf whose rows are found by verifying the label's records outside
+/// the equality lane: null equality, and a runtime equality or domain that
+/// binds null or a value no lane can hold.
+///
+/// Such a leaf reads the label bitmap, scans the lane and reads records, so
+/// an intersection reads it after its other children and verifies only the
+/// rows they keep (see [`ExecutionContext::label_verified_intersection`]).
+pub(in crate::execution::interpreter) enum LabelVerifiedLeaf<'a> {
+    /// The property is null or missing.
+    Null(&'a catalog::ScopedPropertyKey),
+    /// The property equals a runtime value no lane holds.
+    Equality(&'a catalog::ScopedPropertyKey, PropertyValue),
+    /// The property is in a runtime domain with a member no lane holds.
+    Membership(&'a catalog::ScopedPropertyKey, &'a ir::RuntimeEqualitySet),
+}
+
 impl SecondaryIds {
     fn into_bitmap(self) -> RoaringTreemap {
         match self {
@@ -212,6 +229,132 @@ impl<'db> ExecutionContext<'db> {
                 child
             })
             .buffered(width)
+    }
+
+    /// The [`LabelVerifiedLeaf`] of a runtime equality on `key`, or `None`
+    /// when its parameter binds an indexed or non-reflexive value, or is not
+    /// bound (its own read then reports the error).
+    pub(in crate::execution::interpreter) fn label_verified_equality<'a>(
+        &self,
+        key: &'a catalog::ScopedPropertyKey,
+        param: &ir::NonEmptyString,
+    ) -> Option<LabelVerifiedLeaf<'a>> {
+        let value = self.param_value(param).ok()?;
+        match equality_index_value::project_equality_value(&value) {
+            equality_index_value::EqualityValueProjection::Indexed(_)
+            | equality_index_value::EqualityValueProjection::NonReflexive => None,
+            equality_index_value::EqualityValueProjection::AuthoritativeNull
+            | equality_index_value::EqualityValueProjection::Unsupported(_)
+            | equality_index_value::EqualityValueProjection::Oversized { .. } => {
+                Some(LabelVerifiedLeaf::Equality(key, value))
+            }
+        }
+    }
+
+    /// The [`LabelVerifiedLeaf`] of a runtime domain on `key`, or `None` when
+    /// every member is indexed or the parameter is not bound.
+    pub(in crate::execution::interpreter) fn label_verified_membership<'a>(
+        &self,
+        key: &'a catalog::ScopedPropertyKey,
+        values: &'a ir::RuntimeEqualitySet,
+    ) -> Option<LabelVerifiedLeaf<'a>> {
+        matches!(
+            self.runtime_equality_domain(values).ok()?,
+            super::membership::RuntimeEqualityDomain::WithUnindexed { .. }
+        )
+        .then_some(LabelVerifiedLeaf::Membership(key, values))
+    }
+
+    /// `ids` (every row when `None`) narrowed by each label-verified leaf in
+    /// turn: each leaf verifies only the rows still kept, and an empty set
+    /// ends the read.
+    ///
+    /// Every leaf's rows are a subset of the `within` it is given, so the
+    /// result is the intersection of `ids` and every leaf.
+    pub(in crate::execution::interpreter) async fn label_verified_intersection(
+        &self,
+        kind: crate::index_lifecycle::IndexElementKind,
+        leaves: Vec<LabelVerifiedLeaf<'_>>,
+        mut ids: Option<RoaringTreemap>,
+        reads: NonZeroUsize,
+    ) -> Result<RoaringTreemap> {
+        for leaf in leaves {
+            if ids.as_ref().is_some_and(RoaringTreemap::is_empty) {
+                break;
+            }
+            let within = ids.as_ref();
+            ids = Some(match leaf {
+                LabelVerifiedLeaf::Null(key) => self.null_equality_rows(kind, key, within).await?,
+                LabelVerifiedLeaf::Equality(key, value) => {
+                    self.unindexed_label_rows(
+                        kind,
+                        key,
+                        |stored| stored.unwrap_or(&PropertyValue::Null).eq_value(&value),
+                        within,
+                    )
+                    .await?
+                }
+                LabelVerifiedLeaf::Membership(key, values) => {
+                    self.dynamic_membership_ids(kind, key, values, reads, within)
+                        .await?
+                }
+            });
+        }
+        Ok(ids.unwrap_or_default())
+    }
+
+    fn node_label_verified_leaf<'a>(
+        &self,
+        set: &'a exec::ExecNodeSecondarySetPlan,
+    ) -> Option<LabelVerifiedLeaf<'a>> {
+        match set {
+            exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+            ) => Some(LabelVerifiedLeaf::Null(key)),
+            exec::ExecNodeSecondarySetPlan::DynamicEquality { key, param, .. } => {
+                self.label_verified_equality(key, param)
+            }
+            exec::ExecNodeSecondarySetPlan::DynamicMembership { key, values, .. } => {
+                self.label_verified_membership(key, values)
+            }
+            exec::ExecNodeSecondarySetPlan::Empty
+            | exec::ExecNodeSecondarySetPlan::Bitmap(_)
+            | exec::ExecNodeSecondarySetPlan::UniqueUnion { .. }
+            | exec::ExecNodeSecondarySetPlan::Unique { .. }
+            | exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                exec::ExecNodeAuthoritativeScanPredicate::Predicate(_),
+            )
+            | exec::ExecNodeSecondarySetPlan::Range(_)
+            | exec::ExecNodeSecondarySetPlan::Intersect { .. }
+            | exec::ExecNodeSecondarySetPlan::Union { .. }
+            | exec::ExecNodeSecondarySetPlan::OrderedIntersect { .. } => None,
+        }
+    }
+
+    fn edge_label_verified_leaf<'a>(
+        &self,
+        set: &'a exec::ExecEdgeSecondarySetPlan,
+    ) -> Option<LabelVerifiedLeaf<'a>> {
+        match set {
+            exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+            ) => Some(LabelVerifiedLeaf::Null(key)),
+            exec::ExecEdgeSecondarySetPlan::DynamicEquality { key, param, .. } => {
+                self.label_verified_equality(key, param)
+            }
+            exec::ExecEdgeSecondarySetPlan::DynamicMembership { key, values, .. } => {
+                self.label_verified_membership(key, values)
+            }
+            exec::ExecEdgeSecondarySetPlan::Empty
+            | exec::ExecEdgeSecondarySetPlan::Bitmap(_)
+            | exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_),
+            )
+            | exec::ExecEdgeSecondarySetPlan::Range(_)
+            | exec::ExecEdgeSecondarySetPlan::Intersect { .. }
+            | exec::ExecEdgeSecondarySetPlan::Union { .. }
+            | exec::ExecEdgeSecondarySetPlan::OrderedIntersect { .. } => None,
+        }
     }
 
     /// Resolve the filters of an ordered node intersection concurrently, in
@@ -278,9 +421,10 @@ impl<'db> ExecutionContext<'db> {
 
     /// Whether `set` resolves from index reads alone in this request.
     ///
-    /// Literal null equality, runtime parameters that bind null or values
-    /// without an exact index encoding, and runtime domains over their bound
-    /// all require an authoritative keyspace scan, so they return `false`.
+    /// Literal null equality, and runtime parameters or domains that bind null
+    /// or values without an exact index encoding, verify the label rows
+    /// outside the equality lane record by record, so they return `false`. A
+    /// runtime domain of indexed values is index-served at any size.
     /// Range scans verify every in-range record of the label with its own
     /// authoritative read, and runtime bounds may have no range encoding at
     /// all, so any set with a range scan returns `false` as well.
@@ -383,22 +527,22 @@ impl<'db> ExecutionContext<'db> {
                     let read = self.verified_node_unique_owner(lookup, verification);
                     Ok(SecondaryIds::Unordered(read.await?.into_iter().collect()))
                 }
-                exec::ExecNodeSecondarySetPlan::AuthoritativeScan(predicate) => {
+                exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                ) => self
+                    .null_equality_rows(crate::index_lifecycle::IndexElementKind::Node, key, None)
+                    .await
+                    .map(SecondaryIds::Unordered),
+                exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
                     let ids = read.await?;
                     let mut matches = RoaringTreemap::new();
                     for id in ids {
                         let row =
                             super::super::ExecutionRow::current(super::super::ElementRef::Node(id));
-                        let accepted = match predicate {
-                            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                                self.scoped_null_matches(&row, key).await?
-                            }
-                            exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                self.eval_predicate(&row, predicate.predicate()).await?
-                            }
-                        };
-                        if accepted {
+                        if self.eval_predicate(&row, predicate.predicate()).await? {
                             matches.insert(id);
                         }
                     }
@@ -422,6 +566,8 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
                         values,
+                        reads,
+                        None,
                     )
                     .await
                     .map(SecondaryIds::Unordered)
@@ -437,18 +583,36 @@ impl<'db> ExecutionContext<'db> {
                     )
                     .await
                     .map(SecondaryIds::Ordered),
-                exec::ExecNodeSecondarySetPlan::Intersect { driver, rest } => intersection(
-                    self.read_children(
-                        core::iter::once(driver.as_ref())
-                            .chain(rest.iter())
-                            .collect(),
+                exec::ExecNodeSecondarySetPlan::Intersect { driver, rest } => {
+                    // Leaves that verify label records read only the rows the
+                    // other children keep, so those children are read first.
+                    let (late, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                        .chain(rest.iter())
+                        .map(|child| (self.node_label_verified_leaf(child), child))
+                        .partition(|(leaf, _)| leaf.is_some());
+                    let ids = match others.is_empty() {
+                        true => None,
+                        false => Some(
+                            intersection(
+                                self.read_children(
+                                    others.into_iter().map(|(_, child)| child).collect(),
+                                    reads,
+                                    |child, reads| self.node_secondary_ids(child, None, reads),
+                                )
+                                .map_ok(SecondaryIds::into_bitmap),
+                            )
+                            .await?,
+                        ),
+                    };
+                    self.label_verified_intersection(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        late.into_iter().filter_map(|(leaf, _)| leaf).collect(),
+                        ids,
                         reads,
-                        |child, reads| self.node_secondary_ids(child, None, reads),
                     )
-                    .map_ok(SecondaryIds::into_bitmap),
-                )
-                .await
-                .map(SecondaryIds::Unordered),
+                    .await
+                    .map(SecondaryIds::Unordered)
+                }
                 exec::ExecNodeSecondarySetPlan::Union { driver, rest } => union(
                     self.read_children(
                         core::iter::once(driver.as_ref())
@@ -497,22 +661,22 @@ impl<'db> ExecutionContext<'db> {
                     .edge_bitmap(bitmap, reads)
                     .await
                     .map(SecondaryIds::Unordered),
-                exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(predicate) => {
+                exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                ) => self
+                    .null_equality_rows(crate::index_lifecycle::IndexElementKind::Edge, key, None)
+                    .await
+                    .map(SecondaryIds::Unordered),
+                exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
                     let ids = read.await?;
                     let mut matches = RoaringTreemap::new();
                     for id in ids {
                         let row =
                             super::super::ExecutionRow::current(super::super::ElementRef::Edge(id));
-                        let accepted = match predicate {
-                            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                                self.scoped_null_matches(&row, key).await?
-                            }
-                            exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                self.eval_predicate(&row, predicate.predicate()).await?
-                            }
-                        };
-                        if accepted {
+                        if self.eval_predicate(&row, predicate.predicate()).await? {
                             matches.insert(id);
                         }
                     }
@@ -536,6 +700,8 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
                         values,
+                        reads,
+                        None,
                     )
                     .await
                     .map(SecondaryIds::Unordered)
@@ -551,18 +717,36 @@ impl<'db> ExecutionContext<'db> {
                     )
                     .await
                     .map(SecondaryIds::Ordered),
-                exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest } => intersection(
-                    self.read_children(
-                        core::iter::once(driver.as_ref())
-                            .chain(rest.iter())
-                            .collect(),
+                exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest } => {
+                    // Leaves that verify label records read only the rows the
+                    // other children keep, so those children are read first.
+                    let (late, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                        .chain(rest.iter())
+                        .map(|child| (self.edge_label_verified_leaf(child), child))
+                        .partition(|(leaf, _)| leaf.is_some());
+                    let ids = match others.is_empty() {
+                        true => None,
+                        false => Some(
+                            intersection(
+                                self.read_children(
+                                    others.into_iter().map(|(_, child)| child).collect(),
+                                    reads,
+                                    |child, reads| self.edge_secondary_ids(child, None, reads),
+                                )
+                                .map_ok(SecondaryIds::into_bitmap),
+                            )
+                            .await?,
+                        ),
+                    };
+                    self.label_verified_intersection(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        late.into_iter().filter_map(|(leaf, _)| leaf).collect(),
+                        ids,
                         reads,
-                        |child, reads| self.edge_secondary_ids(child, None, reads),
                     )
-                    .map_ok(SecondaryIds::into_bitmap),
-                )
-                .await
-                .map(SecondaryIds::Unordered),
+                    .await
+                    .map(SecondaryIds::Unordered)
+                }
                 exec::ExecEdgeSecondarySetPlan::Union { driver, rest } => union(
                     self.read_children(
                         core::iter::once(driver.as_ref())

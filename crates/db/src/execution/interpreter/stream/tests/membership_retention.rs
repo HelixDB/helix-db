@@ -826,7 +826,8 @@ async fn composite_sets_contract() {
 }
 
 /// Runtime bindings that resolve per row or to an empty set, and runtime
-/// domains within and over their bound, stay exact across writes.
+/// domains within and over one index union (read as several unions) or
+/// holding null (per row), stay exact across writes.
 #[test]
 fn runtime_bindings_stay_exact_across_writes() {
     high_stack(runtime_bindings_contract);
@@ -852,7 +853,13 @@ async fn runtime_bindings_contract() {
         (&equality, "kind", PropertyValue::Null, 0),
         (&equality, "kind", PropertyValue::F64(f64::NAN), 1),
         (&domain, "kinds", strings(&["A", "B"]), 1),
-        (&domain, "kinds", strings(&["A", "B", "C"]), 0),
+        (&domain, "kinds", strings(&["A", "B", "C"]), 1),
+        (
+            &domain,
+            "kinds",
+            PropertyValue::Array(vec![PropertyValue::from("A"), PropertyValue::Null]),
+            0,
+        ),
     ] {
         let fixture = fixture("retention-write-runtime").await;
         let mut ctx = write_context(

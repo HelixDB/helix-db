@@ -31,9 +31,11 @@ impl optimizer::OptimizerRule for StreamCardinalityImplementationRule {
         let logical::LogicalExpr::StreamCardinality(cardinality) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
-            .is_some()
-        {
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
             return optimizer::RuleResult::NotApplicable;
         }
         let plans = match count_plans(cardinality.input(), &input) {
@@ -507,6 +509,33 @@ fn node_count_plans(
                 window,
             })
         }
+        // Each branch counts its own index set, filtered by its residual;
+        // the union counts a row several branches accept once.
+        ir::NodeAccessPlan::BranchResidualUnion(branches) => {
+            let mut cursors = branches
+                .as_ref()
+                .iter()
+                .map(|branch| {
+                    let cursor = node_cursor(branch.source().as_ref(), rule)?;
+                    Ok(match branch.residual() {
+                        Some(residual) => exec::ExecCountCursorPlan::Filter {
+                            input: Box::new(cursor),
+                            predicate: residual.clone(),
+                        },
+                        None => cursor,
+                    })
+                })
+                .collect::<Result<Vec<_>, RuleRejection>>()?;
+            let driver = cursors.remove(0);
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::Union {
+                    driver: Box::new(driver),
+                    rest: ir::AtLeast::<_, 1>::try_from_vec(cursors)
+                        .expect("a branch residual union has at least two branches"),
+                },
+                window,
+            })
+        }
     };
     Ok(vec![plan])
 }
@@ -596,6 +625,33 @@ fn edge_count_plans(
                 window,
             })
         }
+        // Each branch counts its own index set, filtered by its residual;
+        // the union counts a row several branches accept once.
+        ir::EdgeAccessPlan::BranchResidualUnion(branches) => {
+            let mut cursors = branches
+                .as_ref()
+                .iter()
+                .map(|branch| {
+                    let cursor = edge_cursor(branch.source().as_ref(), rule)?;
+                    Ok(match branch.residual() {
+                        Some(residual) => exec::ExecCountCursorPlan::Filter {
+                            input: Box::new(cursor),
+                            predicate: residual.clone(),
+                        },
+                        None => cursor,
+                    })
+                })
+                .collect::<Result<Vec<_>, RuleRejection>>()?;
+            let driver = cursors.remove(0);
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::Union {
+                    driver: Box::new(driver),
+                    rest: ir::AtLeast::<_, 1>::try_from_vec(cursors)
+                        .expect("a branch residual union has at least two branches"),
+                },
+                window,
+            })
+        }
     };
     Ok(vec![plan])
 }
@@ -606,6 +662,12 @@ enum EqualityValue {
     NonReflexive,
     Dynamic(ir::NonEmptyString),
     DynamicSet(ir::RuntimeEqualitySet),
+    /// A literal set: its indexed members, and whether it holds null.
+    /// Non-reflexive members match nothing and are dropped.
+    Set {
+        indexed: Vec<exec::ExecIndexedEqualityValue>,
+        null: bool,
+    },
 }
 
 fn classify_equality(
@@ -619,6 +681,23 @@ fn classify_equality(
         ir::IndexValue::Literal(literal) => literal.clone(),
         ir::IndexValue::ParamSet(values) => {
             return Ok(EqualityValue::DynamicSet(values.clone()));
+        }
+        ir::IndexValue::LiteralSet(values) => {
+            return Ok(EqualityValue::Set {
+                indexed: values
+                    .iter()
+                    .filter(|literal| {
+                        literal.semantics() == ir::LiteralEqualityIndexValueSemantics::Indexed
+                    })
+                    .map(|literal| {
+                        exec::ExecIndexedEqualityValue::try_from(literal.clone())
+                            .expect("indexed literal semantics satisfy the executable wrapper")
+                    })
+                    .collect(),
+                null: values.iter().any(|literal| {
+                    literal.semantics() == ir::LiteralEqualityIndexValueSemantics::AuthoritativeNull
+                }),
+            });
         }
         // A foreach frame expands object fields into the parameter namespace.
         // The AST exposes the container name but cannot enumerate every field
@@ -729,6 +808,83 @@ fn node_equality_count(
                 window,
             })
         }
+        EqualityValue::Set { indexed, null } => {
+            // Batched indexed members (bitmaps or unique owners), and the
+            // label rows outside the lane for null, counted as one union.
+            let mut cursors = match index.uniqueness {
+                catalog::IndexUniqueness::NonUnique => {
+                    let index = exec::ExecNodeNonUniqueEqualityIndex::try_from(index.clone())
+                        .expect("non-unique catalog metadata satisfies the bitmap wrapper");
+                    match <[_; 1]>::try_from(indexed) {
+                        Ok([value]) => vec![exec::ExecCountCursorPlan::NodeBitmap(
+                            exec::ExecNodeBitmapExpr::PointRead {
+                                index,
+                                key: key.clone(),
+                                value,
+                            },
+                        )],
+                        Err(indexed) => ir::AtLeast::try_from_vec(indexed)
+                            .map(|values| {
+                                exec::ExecCountCursorPlan::NodeBitmap(
+                                    exec::ExecNodeBitmapExpr::BatchedUnionRead {
+                                        index,
+                                        key: key.clone(),
+                                        values,
+                                    },
+                                )
+                            })
+                            .into_iter()
+                            .collect(),
+                    }
+                }
+                catalog::IndexUniqueness::Unique => {
+                    let index = exec::ExecNodeUniqueEqualityIndex::try_from(index.clone())
+                        .expect("unique catalog metadata satisfies the owner wrapper");
+                    match <[_; 1]>::try_from(indexed) {
+                        Ok([value]) => vec![exec::ExecCountCursorPlan::NodeUnique {
+                            lookup: exec::ExecNodeUniqueOwnerReadPlan {
+                                index,
+                                key: key.clone(),
+                                value: value.clone(),
+                            },
+                            verification: exec::ExecNodeAuthoritativeVerificationPlan {
+                                key: key.clone(),
+                                value,
+                            },
+                        }],
+                        Err(indexed) => ir::AtLeast::try_from_vec(indexed)
+                            .map(|values| exec::ExecCountCursorPlan::NodeUniqueBatch {
+                                index,
+                                key: key.clone(),
+                                values,
+                            })
+                            .into_iter()
+                            .collect(),
+                    }
+                }
+            };
+            if null {
+                cursors.push(exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key: key.clone() },
+                ));
+            }
+            match cursors.len() {
+                0 => exec::ExecCountPlan::Constant(0),
+                _ => {
+                    let driver = cursors.remove(0);
+                    exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                        cursor: match ir::AtLeast::<_, 1>::try_from_vec(cursors) {
+                            Some(rest) => exec::ExecCountCursorPlan::Union {
+                                driver: Box::new(driver),
+                                rest,
+                            },
+                            None => driver,
+                        },
+                        window,
+                    })
+                }
+            }
+        }
     })
 }
 
@@ -774,6 +930,53 @@ fn edge_equality_count(
                 values,
                 window,
             })
+        }
+        EqualityValue::Set { indexed, null } => {
+            // Batched indexed members and the label rows outside the lane for
+            // null, counted as one union.
+            let index = exec::ExecEdgeNonUniqueEqualityIndex::new(index.clone());
+            let mut cursors = match <[_; 1]>::try_from(indexed) {
+                Ok([value]) => vec![exec::ExecCountCursorPlan::EdgeBitmap(
+                    exec::ExecEdgeBitmapExpr::PointRead {
+                        index,
+                        key: key.clone(),
+                        value,
+                    },
+                )],
+                Err(indexed) => ir::AtLeast::try_from_vec(indexed)
+                    .map(|values| {
+                        exec::ExecCountCursorPlan::EdgeBitmap(
+                            exec::ExecEdgeBitmapExpr::BatchedUnionRead {
+                                index,
+                                key: key.clone(),
+                                values,
+                            },
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            };
+            if null {
+                cursors.push(exec::ExecCountCursorPlan::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key: key.clone() },
+                ));
+            }
+            match cursors.len() {
+                0 => exec::ExecCountPlan::Constant(0),
+                _ => {
+                    let driver = cursors.remove(0);
+                    exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                        cursor: match ir::AtLeast::<_, 1>::try_from_vec(cursors) {
+                            Some(rest) => exec::ExecCountCursorPlan::Union {
+                                driver: Box::new(driver),
+                                rest,
+                            },
+                            None => driver,
+                        },
+                        window,
+                    })
+                }
+            }
         }
     })
 }
@@ -1041,10 +1244,34 @@ fn node_bitmap_expr(
                     key: key.clone(),
                     value,
                 }),
+                EqualityValue::Set {
+                    indexed,
+                    null: false,
+                } => match <[_; 1]>::try_from(indexed) {
+                    Ok([value]) => Some(exec::ExecNodeBitmapExpr::PointRead {
+                        index: index
+                            .clone()
+                            .try_into()
+                            .expect("non-unique catalog metadata satisfies the bitmap wrapper"),
+                        key: key.clone(),
+                        value,
+                    }),
+                    Err(indexed) => ir::AtLeast::try_from_vec(indexed).map(|values| {
+                        exec::ExecNodeBitmapExpr::BatchedUnionRead {
+                            index: index
+                                .clone()
+                                .try_into()
+                                .expect("non-unique catalog metadata satisfies the bitmap wrapper"),
+                            key: key.clone(),
+                            values,
+                        }
+                    }),
+                },
                 EqualityValue::AuthoritativeNull
                 | EqualityValue::NonReflexive
                 | EqualityValue::Dynamic(_)
-                | EqualityValue::DynamicSet(_) => None,
+                | EqualityValue::DynamicSet(_)
+                | EqualityValue::Set { null: true, .. } => None,
             })
         }
         ir::NodeAccessPlan::Union(children) => node_bitmap_set(children, true, rule),
@@ -1059,7 +1286,8 @@ fn node_bitmap_expr(
         | ir::NodeAccessPlan::RangeIndex { .. }
         | ir::NodeAccessPlan::VectorSearch { .. }
         | ir::NodeAccessPlan::TextSearch { .. }
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => Ok(None),
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => Ok(None),
     }
 }
 
@@ -1075,10 +1303,28 @@ fn edge_bitmap_expr(
                     key: key.clone(),
                     value,
                 }),
+                EqualityValue::Set {
+                    indexed,
+                    null: false,
+                } => match <[_; 1]>::try_from(indexed) {
+                    Ok([value]) => Some(exec::ExecEdgeBitmapExpr::PointRead {
+                        index: exec::ExecEdgeNonUniqueEqualityIndex::new(index.clone()),
+                        key: key.clone(),
+                        value,
+                    }),
+                    Err(indexed) => ir::AtLeast::try_from_vec(indexed).map(|values| {
+                        exec::ExecEdgeBitmapExpr::BatchedUnionRead {
+                            index: exec::ExecEdgeNonUniqueEqualityIndex::new(index.clone()),
+                            key: key.clone(),
+                            values,
+                        }
+                    }),
+                },
                 EqualityValue::AuthoritativeNull
                 | EqualityValue::NonReflexive
                 | EqualityValue::Dynamic(_)
-                | EqualityValue::DynamicSet(_) => None,
+                | EqualityValue::DynamicSet(_)
+                | EqualityValue::Set { null: true, .. } => None,
             })
         }
         ir::EdgeAccessPlan::Union(children) => edge_bitmap_set(children, true, rule),
@@ -1092,7 +1338,8 @@ fn edge_bitmap_expr(
         | ir::EdgeAccessPlan::RangeIndex { .. }
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => Ok(None),
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => Ok(None),
     }
 }
 
@@ -1457,28 +1704,23 @@ fn node_bitmap_cost(
                 cost::EstimatedRows::rows(rows.as_rows().saturating_mul(values.len() as u64)),
             )
         }
-        exec::ExecNodeBitmapExpr::Union { driver, rest } => {
-            let mut rows = node_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(node_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = node_bitmap_rows(child, stats, storage);
-                    rows = cost::EstimatedRows::rows(
-                        rows.as_rows().saturating_add(child_rows.as_rows()),
-                    );
-                    cost.serial(node_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(rows))
-                })
-        }
-        exec::ExecNodeBitmapExpr::Intersect { driver, rest } => {
-            let mut rows = node_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(node_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = node_bitmap_rows(child, stats, storage);
-                    let operation_rows = rows;
-                    rows = cost::EstimatedRows::rows(rows.as_rows().min(child_rows.as_rows()));
-                    cost.serial(node_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(operation_rows))
-                })
+        // The count program reads set children concurrently, then combines
+        // every child's rows once.
+        exec::ExecNodeBitmapExpr::Union { driver, rest }
+        | exec::ExecNodeBitmapExpr::Intersect { driver, rest } => {
+            let children = core::iter::once(driver.as_ref())
+                .chain(rest.iter())
+                .collect::<Vec<_>>();
+            let costs = children
+                .iter()
+                .map(|child| node_bitmap_cost(child, stats, storage))
+                .collect::<Vec<_>>();
+            let input_rows = children.iter().fold(0_u64, |rows, child| {
+                rows.saturating_add(node_bitmap_rows(child, stats, storage).as_rows())
+            });
+            storage
+                .parallel_reads(&costs)
+                .serial(storage.secondary_set_operation(cost::EstimatedRows::rows(input_rows)))
         }
     }
 }
@@ -1505,28 +1747,23 @@ fn edge_bitmap_cost(
                 cost::EstimatedRows::rows(rows.as_rows().saturating_mul(values.len() as u64)),
             )
         }
-        exec::ExecEdgeBitmapExpr::Union { driver, rest } => {
-            let mut rows = edge_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(edge_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = edge_bitmap_rows(child, stats, storage);
-                    rows = cost::EstimatedRows::rows(
-                        rows.as_rows().saturating_add(child_rows.as_rows()),
-                    );
-                    cost.serial(edge_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(rows))
-                })
-        }
-        exec::ExecEdgeBitmapExpr::Intersect { driver, rest } => {
-            let mut rows = edge_bitmap_rows(driver, stats, storage);
-            rest.iter()
-                .fold(edge_bitmap_cost(driver, stats, storage), |cost, child| {
-                    let child_rows = edge_bitmap_rows(child, stats, storage);
-                    let operation_rows = rows;
-                    rows = cost::EstimatedRows::rows(rows.as_rows().min(child_rows.as_rows()));
-                    cost.serial(edge_bitmap_cost(child, stats, storage))
-                        .serial(storage.secondary_set_operation(operation_rows))
-                })
+        // The count program reads set children concurrently, then combines
+        // every child's rows once.
+        exec::ExecEdgeBitmapExpr::Union { driver, rest }
+        | exec::ExecEdgeBitmapExpr::Intersect { driver, rest } => {
+            let children = core::iter::once(driver.as_ref())
+                .chain(rest.iter())
+                .collect::<Vec<_>>();
+            let costs = children
+                .iter()
+                .map(|child| edge_bitmap_cost(child, stats, storage))
+                .collect::<Vec<_>>();
+            let input_rows = children.iter().fold(0_u64, |rows, child| {
+                rows.saturating_add(edge_bitmap_rows(child, stats, storage).as_rows())
+            });
+            storage
+                .parallel_reads(&costs)
+                .serial(storage.secondary_set_operation(cost::EstimatedRows::rows(input_rows)))
         }
     }
 }
@@ -1675,11 +1912,13 @@ fn verified_range_count_cost(
             .unwrap_or(u64::MAX)
             .min(driver_rows.as_rows())
     });
-    let mut total = filters
-        .iter()
-        .fold(cost::CostVector::ZERO, |total, (filter, _)| {
-            total.serial(*filter)
-        });
+    // Bitmap filters are read concurrently before the driver scan.
+    let mut total = storage.parallel_reads(
+        &filters
+            .iter()
+            .map(|(filter, _)| *filter)
+            .collect::<Vec<_>>(),
+    );
     if scanned_rows > 0 {
         total =
             total.serial(storage.secondary_range_lookup(cost::EstimatedRows::rows(scanned_rows)));
@@ -1729,6 +1968,10 @@ fn cursor_cost(
         exec::ExecCountCursorPlan::EdgeBitmap(bitmap) => edge_bitmap_cost(bitmap, stats, storage),
         exec::ExecCountCursorPlan::NodeUnique { lookup, .. } => storage.unique_equality_lookup(
             storage.unique_equality_rows(stats.node_eq_cardinality.get(&lookup.key).copied()),
+        ),
+        exec::ExecCountCursorPlan::NodeUniqueBatch { values, .. } => storage.unique_equality_batch(
+            properties::PositiveUsize::at_least_one(values.len()),
+            cost::EstimatedRows::rows(values.len() as u64),
         ),
         exec::ExecCountCursorPlan::NodeRange(plan) => storage.secondary_range_lookup(
             stats
@@ -1783,6 +2026,45 @@ fn cursor_cost(
         | exec::ExecCountCursorPlan::EdgeDynamicMembership { .. } => storage
             .bitmap_equality_lookup(storage.default_equality_index_rows)
             .serial(storage.null_equality_scan(storage.default_unknown_scan_rows)),
+        // The executor reads a set of ID leaves concurrently and combines
+        // their bitmaps; point IDs cost one batched existence read. An
+        // intersection reads its null equalities after the other children,
+        // one at a time, so they verify only the rows the others keep.
+        exec::ExecCountCursorPlan::Union { driver, rest }
+        | exec::ExecCountCursorPlan::Intersect { driver, rest }
+            if count_id_set(cursor) =>
+        {
+            let (nulls, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                .chain(rest.iter())
+                .partition(|child| {
+                    matches!(cursor, exec::ExecCountCursorPlan::Intersect { .. })
+                        && matches!(
+                            child,
+                            exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. }
+                            ) | exec::ExecCountCursorPlan::EdgeAuthoritativeScan(
+                                exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { .. }
+                            )
+                        )
+                });
+            let child_cost = |child: &exec::ExecCountCursorPlan| match child {
+                exec::ExecCountCursorPlan::NodePointReads(ids)
+                | exec::ExecCountCursorPlan::EdgePointReads(ids) => storage.multi_get(
+                    properties::PositiveUsize::at_least_one(ids.as_ref().len()),
+                    properties::KeyLocality::Sparse,
+                ),
+                child => cursor_cost(child, stats, storage),
+            };
+            storage
+                .parallel_reads(&others.into_iter().map(child_cost).collect::<Vec<_>>())
+                .serial(
+                    nulls
+                        .into_iter()
+                        .map(child_cost)
+                        .fold(cost::CostVector::ZERO, cost::CostVector::serial),
+                )
+                .serial(storage.secondary_set_operation(storage.default_unknown_scan_rows))
+        }
         exec::ExecCountCursorPlan::Union { driver, rest }
         | exec::ExecCountCursorPlan::Intersect { driver, rest } => {
             rest.iter()
@@ -1834,6 +2116,67 @@ fn cursor_cost(
         | exec::ExecCountCursorPlan::Distinct { input, .. } => cursor_cost(input, stats, storage)
             .serial(storage.stream_operator(storage.default_unknown_scan_rows)),
     }
+}
+
+/// Whether `cursor` is made only of ID leaves of one element kind (point
+/// reads, runtime inputs, text-search results, and index, range, label and
+/// null-equality sets), unions and intersections of them included. The
+/// executor counts such a cursor on ID bitmaps, never building a row.
+fn count_id_set(cursor: &exec::ExecCountCursorPlan) -> bool {
+    fn element(cursor: &exec::ExecCountCursorPlan) -> Option<properties::ElementKind> {
+        use exec::ExecCountCursorPlan as C;
+        match cursor {
+            C::Union { driver, rest } | C::Intersect { driver, rest } => {
+                let kind = element(driver)?;
+                rest.iter()
+                    .all(|child| element(child) == Some(kind))
+                    .then_some(kind)
+            }
+            C::NodeBitmap(_)
+            | C::NodeUnique { .. }
+            | C::NodeUniqueBatch { .. }
+            | C::NodeRange(_)
+            | C::NodeLabelBitmap(_)
+            | C::NodeDynamicEquality { .. }
+            | C::NodeDynamicMembership { .. }
+            | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                ..
+            })
+            | C::NodePointReads(_)
+            | C::NodeRuntimeInput(_)
+            | C::NodeTextSearch { .. } => Some(properties::ElementKind::Node),
+            C::EdgeBitmap(_)
+            | C::EdgeRange(_)
+            | C::EdgeLabelBitmap(_)
+            | C::EdgeDynamicEquality { .. }
+            | C::EdgeDynamicMembership { .. }
+            | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::NullEquality {
+                ..
+            })
+            | C::EdgePointReads(_)
+            | C::EdgeRuntimeInput(_)
+            | C::EdgeTextSearch { .. } => Some(properties::ElementKind::Edge),
+            C::EmptyRows
+            | C::InputRows
+            | C::RuntimeInput(_)
+            | C::NodeFullScan
+            | C::EdgeFullScan
+            | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(_))
+            | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_))
+            | C::Filter { .. }
+            | C::IndexMembership { .. }
+            | C::Window { .. }
+            | C::Order { .. }
+            | C::Expand { .. }
+            | C::NodeVectorSearch { .. }
+            | C::EdgeVectorSearch { .. }
+            | C::VectorSearch { .. }
+            | C::TextSearch { .. }
+            | C::Variable { .. }
+            | C::Distinct { .. } => None,
+        }
+    }
+    element(cursor).is_some()
 }
 
 fn node_scan_rows(
@@ -2639,7 +2982,7 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_intersection_alternatives_are_costed_in_planner_selected_order() {
+    fn bitmap_intersection_alternatives_read_every_child_concurrently() {
         let child = |index: &str, property: &str| {
             ir::NodeAccessSourcePlan::new(node_equality(
                 index,
@@ -2661,11 +3004,9 @@ mod tests {
         assert_eq!(alternatives.len(), 3);
 
         let storage = cost::StorageCostProfile::default();
-        for (wide, medium, narrow, expected) in [
-            (1, 10, 100, "wide"),
-            (100, 1, 10, "medium"),
-            (10, 100, 1, "narrow"),
-        ] {
+        // Every child bitmap is read concurrently, so no driver order is
+        // cheaper than another, whichever child is the most selective.
+        for (wide, medium, narrow) in [(1, 10, 100), (100, 1, 10), (10, 100, 1)] {
             let stats = context::StatsSnapshot::default()
                 .with_node_eq_cardinality(
                     catalog::ScopedPropertyKey::try_new("User", "wide").unwrap(),
@@ -2679,22 +3020,13 @@ mod tests {
                     catalog::ScopedPropertyKey::try_new("User", "narrow").unwrap(),
                     narrow,
                 );
-            let winner = alternatives
+            let costs = alternatives
                 .iter()
-                .min_by_key(|plan| count_cost(plan, &stats, &storage).latency)
-                .unwrap();
-            let exec::ExecCountPlan::NodeBitmap(exec::ExecNodeBitmapCountPlan {
-                bitmap: exec::ExecNodeBitmapExpr::Intersect { driver, .. },
-                ..
-            }) = winner
-            else {
-                panic!("expected a bitmap intersection alternative")
-            };
-            assert!(matches!(
-                driver.as_ref(),
-                exec::ExecNodeBitmapExpr::PointRead { key, .. }
-                    if key.property.as_ref() == expected
-            ));
+                .map(|plan| count_cost(plan, &stats, &storage))
+                .collect::<Vec<_>>();
+            assert!(costs.iter().all(|cost| *cost == costs[0]), "{costs:?}");
+            assert_eq!(costs[0].parallel_width, 3);
+            assert_eq!(costs[0].object_reads, 3);
         }
     }
 

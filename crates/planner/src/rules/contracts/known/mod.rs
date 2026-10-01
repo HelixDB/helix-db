@@ -53,7 +53,8 @@ pub enum KnownRuleId {
     SeedAccessWindow,
     /// Simplify residual filters over access.
     AccessFilterSimplification,
-    /// Explore catalog-backed indexes for access filters.
+    /// Explore label-domain and index alternatives for access filters;
+    /// property-index rewrites are required via `AccessSourceIndexFilter`.
     AccessFilterIndex,
     /// Implement residual access filters.
     SeedAccessFilter,
@@ -81,6 +82,9 @@ pub enum KnownRuleId {
     SeedAccessDistinct,
     /// Rewrite a leading access-pipeline filter.
     AccessPipelineFilter,
+    /// Rewrite a leading stream filter a property index serves into index
+    /// access.
+    AccessSourceIndexFilter,
     /// Rewrite a node-stream filter behind the source into index membership.
     AccessPipelineMembershipFilter,
     /// Rewrite or elide access-pipeline ordering.

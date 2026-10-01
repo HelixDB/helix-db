@@ -733,15 +733,14 @@ fn ambiguous_unscoped_labels_keep_the_filter_behind_point_sources() {
 }
 
 /// `large_ctx` with a second, broad `Group` equality index. `name = g3`
-/// still selects 5,000 of 5,000,000 groups while `region = west` selects
-/// 4,900,000, so reading the region bitmap costs far more than verifying
-/// the seed's candidates: the source keeps `name` as its only index seed
-/// and evaluates `region` as a per-row residual filter.
-fn seeded_ctx() -> PlannerContext {
-    let mut seeded =
+/// selects 5,000 of 5,000,000 groups while `region = west` selects
+/// 4,900,000. Both conjuncts are index-served, so the source intersects
+/// both sets rather than reading `name` and evaluating `region` per row.
+fn two_index_ctx() -> PlannerContext {
+    let mut planner_ctx =
         ctx(membership_indexes()
             .with_node_eq(ScopedPropertyKey::try_new("Group", "region").unwrap()));
-    seeded.stats = seeded
+    planner_ctx.stats = planner_ctx
         .stats
         .with_node_eq_cardinality(ScopedPropertyKey::try_new("Group", "name").unwrap(), 5_000)
         .with_node_eq_cardinality(
@@ -749,11 +748,11 @@ fn seeded_ctx() -> PlannerContext {
             4_900_000,
         )
         .with_node_label_cardinality(NonEmptyString::new("Group").unwrap(), 5_000_000);
-    seeded
+    planner_ctx
 }
 
 /// Attributes behind the groups named `g3` in region `west`.
-fn seeded_attributes_where(
+fn two_index_attributes_where(
     predicate: Predicate,
 ) -> Traversal<helix_ast::traversal::OnNodes, ReadOnly> {
     g().n_with_label_where(
@@ -768,22 +767,17 @@ fn seeded_attributes_where(
     .where_(predicate)
 }
 
-/// Assert the plan reads the `name` seed, keeps `region` as a per-row filter
-/// ahead of every expansion, and answers the post-expansion `predicate` with
-/// membership after the expansions, fusing its unindexed conjuncts as
-/// `residual`.
-fn assert_seed_residual_then_membership(
+/// Assert the source intersects the `name` and `region` sets with no
+/// per-row filter, and answers the post-expansion `predicate` with membership
+/// after the expansions, fusing its unindexed conjuncts as `residual`.
+fn assert_indexed_source_then_membership(
     plan: &ExecutablePlan,
     predicate: &Predicate,
     residual: Option<&Predicate>,
 ) {
-    assert!(
-        matches!(
-            unwrapped_first_exec_access(plan),
-            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap {
-                bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. },
-            }) if key.label == "Group" && key.property == "name"
-        ),
+    assert_eq!(
+        intersected_equality_properties(plan),
+        Some(vec!["name".to_string(), "region".to_string()]),
         "{:#?}",
         plan.steps()
     );
@@ -797,54 +791,42 @@ fn assert_seed_residual_then_membership(
             .map(|residual| residual.predicate()),
         residual
     );
+    assert!(filter_predicates(plan).is_empty(), "{:#?}", plan.steps());
     let position = |matches: &dyn Fn(&ExecOp) -> bool| {
         plan.steps()
             .iter()
             .position(|step| matches(&step.op))
             .unwrap_or_else(|| panic!("missing step: {:#?}", plan.steps()))
     };
-    // A seed keeps every other conjunct inside one residual conjunction.
-    let residual = position(&|op| {
-        matches!(op, ExecOp::Filter { predicate }
-            if predicate.predicate() == &Predicate::and(vec![Predicate::eq("region", "west")]))
-    });
     let expand = position(&|op| ExecOpFamily::Expand.matches(op));
     let membership = position(&|op| matches!(op, ExecOp::IndexMembership { .. }));
-    assert!(
-        residual < expand && expand < membership,
-        "{:#?}",
-        plan.steps()
-    );
+    assert!(expand < membership, "{:#?}", plan.steps());
 }
 
 #[test]
-fn equality_seed_residual_stays_a_filter_while_later_filters_use_membership() {
-    // Plain and projected streams reach the seed through the access-pipeline
-    // and root-stream filter rules. Either way the membership rule starts
-    // after the leading residual, so the `Group` region index is never read.
-    let residual = Predicate::and(vec![Predicate::eq("region", "west")]);
+fn indexed_source_intersection_precedes_membership() {
+    // Plain and projected streams reach the source through the access-pipeline
+    // and root-stream filter rules. Either way the source reads both indexes
+    // and the membership rule answers the post-expansion filter.
     let kind = Predicate::eq("kind", "B");
     for plan in [
-        executable_traversal(seeded_attributes_where(kind.clone()), seeded_ctx()),
+        executable_traversal(two_index_attributes_where(kind.clone()), two_index_ctx()),
         executable_traversal(
-            seeded_attributes_where(kind.clone()).values(vec!["kind"]),
-            seeded_ctx(),
+            two_index_attributes_where(kind.clone()).values(vec!["kind"]),
+            two_index_ctx(),
         ),
     ] {
-        assert_seed_residual_then_membership(&plan, &kind, None);
-        assert_eq!(filter_predicates(&plan), [&residual]);
+        assert_indexed_source_then_membership(&plan, &kind, None);
     }
 
-    // An unindexed post-expansion conjunct is the membership's fused
-    // residual, separate from the seed's residual filter.
+    // An unindexed post-expansion conjunct is the membership's fused residual.
     let title = Predicate::contains("title", "x");
     let predicate = Predicate::and(vec![kind, title.clone()]);
     let plan = executable_traversal(
-        seeded_attributes_where(predicate.clone()).values(vec!["kind"]),
-        seeded_ctx(),
+        two_index_attributes_where(predicate.clone()).values(vec!["kind"]),
+        two_index_ctx(),
     );
-    assert_seed_residual_then_membership(&plan, &predicate, Some(&title));
-    assert_eq!(filter_predicates(&plan), [&residual]);
+    assert_indexed_source_then_membership(&plan, &predicate, Some(&title));
 }
 
 #[test]
@@ -923,20 +905,20 @@ fn partial_conjunctions_behind_a_unique_source_use_membership() {
 }
 
 #[test]
-fn equality_seed_residual_stays_a_filter_under_a_count_with_membership() {
+fn indexed_source_intersection_precedes_membership_under_a_count() {
     for (counted, outside_label) in [
         (
-            seeded_attributes_where(Predicate::eq("kind", "B"))
+            two_index_attributes_where(Predicate::eq("kind", "B"))
                 .has_label("Attribute")
                 .count(),
             crate::ir::NodeMembershipOutsideLabel::Reject,
         ),
         (
-            seeded_attributes_where(Predicate::eq("kind", "B")).count(),
+            two_index_attributes_where(Predicate::eq("kind", "B")).count(),
             crate::ir::NodeMembershipOutsideLabel::Evaluate,
         ),
     ] {
-        let plan = executable_traversal(counted, seeded_ctx());
+        let plan = executable_traversal(counted, two_index_ctx());
         let counted = plan
             .steps()
             .iter()
@@ -963,15 +945,12 @@ fn equality_seed_residual_stays_a_filter_under_a_count_with_membership() {
                     crate::exec::ExecCountCursorPlan::IndexMembership { plan: membership, .. },
                     crate::exec::ExecCountCursorPlan::Expand { .. },
                     crate::exec::ExecCountCursorPlan::Expand { .. },
-                    crate::exec::ExecCountCursorPlan::Filter { predicate, .. },
                     crate::exec::ExecCountCursorPlan::NodeBitmap(
-                        crate::exec::ExecNodeBitmapExpr::PointRead { key, .. }
+                        crate::exec::ExecNodeBitmapExpr::Intersect { rest, .. }
                     ),
                 ] if membership.label().as_ref() == "Attribute"
                     && membership.outside_label() == outside_label
-                    && predicate.predicate()
-                        == &Predicate::and(vec![Predicate::eq("region", "west")])
-                    && key.property == "name"
+                    && rest.len() == 1
             ),
             "{counted:#?}"
         );

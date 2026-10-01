@@ -164,14 +164,73 @@ fn canonical_number(value: &PropertyValue) -> Option<CanonicalNumber> {
     }
 }
 
+/// `values` without repeats under [`property_values_equal`], in first-seen
+/// order, in linear time.
+///
+/// Repeats are found by [`property_value_identity`]. Values without an
+/// identity (NaN, heterogeneous arrays, objects) all stay, which a proof over
+/// the allowed values treats as one value anyway.
 fn dedup_property_values(values: Vec<PropertyValue>) -> Vec<PropertyValue> {
-    values.into_iter().fold(Vec::new(), |mut unique, value| {
-        if !unique
-            .iter()
-            .any(|existing| property_values_equal(existing, &value))
-        {
-            unique.push(value);
+    let mut seen = std::collections::HashSet::new();
+    let first_seen = values
+        .iter()
+        .map(|value| property_value_identity(value).is_none_or(|identity| seen.insert(identity)))
+        .collect::<Vec<_>>();
+    values
+        .into_iter()
+        .zip(first_seen)
+        .filter_map(|(value, first_seen)| first_seen.then_some(value))
+        .collect()
+}
+
+/// Hashable identity of a property value under [`property_values_equal`]:
+/// two values with the same identity are equal by query equality.
+///
+/// Numbers, alone or in a numeric array, are keyed by their
+/// [`CanonicalNumber`], so `1` and `1.0` share an identity while `+inf`,
+/// `-inf` and every finite value stay apart. Values whose equality is not
+/// reflexive (NaN anywhere), and heterogeneous arrays and objects, whose
+/// members compare structurally, have none (`None`); callers keep each such
+/// value, which only repeats it.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PropertyValueIdentity<'a> {
+    Null,
+    Bool(bool),
+    Number(CanonicalNumber),
+    DateTime(i64),
+    String(&'a str),
+    Bytes(&'a [u8]),
+    I64Array(&'a [i64]),
+    F64Array(Vec<CanonicalNumber>),
+    F32Array(Vec<CanonicalNumber>),
+    StringArray(&'a [String]),
+}
+
+/// The [`PropertyValueIdentity`] of `value`, or `None` when it has none.
+pub(crate) fn property_value_identity(value: &PropertyValue) -> Option<PropertyValueIdentity<'_>> {
+    Some(match value {
+        PropertyValue::Null => PropertyValueIdentity::Null,
+        PropertyValue::Bool(value) => PropertyValueIdentity::Bool(*value),
+        PropertyValue::I64(_) | PropertyValue::F64(_) | PropertyValue::F32(_) => {
+            PropertyValueIdentity::Number(canonical_number(value)?)
         }
-        unique
+        PropertyValue::DateTime(value) => PropertyValueIdentity::DateTime(*value),
+        PropertyValue::String(value) => PropertyValueIdentity::String(value),
+        PropertyValue::Bytes(value) => PropertyValueIdentity::Bytes(value),
+        PropertyValue::I64Array(values) => PropertyValueIdentity::I64Array(values),
+        PropertyValue::F64Array(values) => PropertyValueIdentity::F64Array(
+            values
+                .iter()
+                .map(|value| CanonicalNumber::from_f64(*value))
+                .collect::<Option<_>>()?,
+        ),
+        PropertyValue::F32Array(values) => PropertyValueIdentity::F32Array(
+            values
+                .iter()
+                .map(|value| CanonicalNumber::from_f32(*value))
+                .collect::<Option<_>>()?,
+        ),
+        PropertyValue::StringArray(values) => PropertyValueIdentity::StringArray(values),
+        PropertyValue::Array(_) | PropertyValue::Object(_) => return None,
     })
 }

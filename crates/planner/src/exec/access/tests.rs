@@ -268,22 +268,21 @@ fn same_index_equalities_encode_point_batch_and_ordered_union_exactly() {
         ])
         .unwrap(),
     );
+    // The indexed values share one batch in the place of the first; null
+    // stays its own ordered union child.
     let ExecNodeSecondarySetPlan::Union { driver, rest } = mixed else {
         panic!("different physical families must remain an explicit ordered union")
     };
     assert!(matches!(
         driver.as_ref(),
-        ExecNodeSecondarySetPlan::Bitmap(crate::exec::ExecNodeBitmapExpr::PointRead { .. })
+        ExecNodeSecondarySetPlan::Bitmap(crate::exec::ExecNodeBitmapExpr::BatchedUnionRead {
+            values,
+            ..
+        }) if values.len() == 2
     ));
     assert!(matches!(
-        rest.first(),
-        Some(ExecNodeSecondarySetPlan::AuthoritativeScan(_))
-    ));
-    assert!(matches!(
-        rest.get(1),
-        Some(ExecNodeSecondarySetPlan::Bitmap(
-            crate::exec::ExecNodeBitmapExpr::PointRead { .. }
-        ))
+        rest.as_ref(),
+        [ExecNodeSecondarySetPlan::AuthoritativeScan(_)]
     ));
 }
 
