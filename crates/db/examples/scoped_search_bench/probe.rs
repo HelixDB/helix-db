@@ -1,8 +1,10 @@
-//! Mixed-template probes against a running server, one JSON line per probe.
+//! Mixed-template probes against a server or an embedded database, one JSON
+//! line per probe.
 //!
 //! Each probe draws a template, a group, an item and a fresh query vector, so
 //! consecutive probes share no exact request, as a real evaluation varies its
 //! queries. `BENCH_CONCURRENCY` probes run at once (1 runs them one by one).
+//! Product probes only pick items a load at `BENCH_SCALE` created.
 //!
 //! Sequential runs can attribute server-side work to each probe:
 //! - `BENCH_CGROUP`: the server container's cgroup v2 directory, for CPU,
@@ -122,10 +124,11 @@ impl Probe {
 }
 
 /// Draws `count` probes, cycling through the templates in a shuffled order.
-fn probes(count: usize, dimension: usize, seed: u64) -> Vec<Probe> {
+/// Product probes pick one of the first `items` items, the ones the fixture
+/// loaded.
+fn probes(count: usize, dimension: usize, seed: u64, items: usize) -> Vec<Probe> {
     let vectors = fixture::query_vectors_seeded(count, dimension, seed);
     let mut rng = Rng(seed);
-    let items = TOTAL_ITEMS as usize;
     vectors
         .into_iter()
         .enumerate()
@@ -234,13 +237,34 @@ fn count_files(directory: &Path) -> u64 {
         .sum()
 }
 
+/// Latency summary of one template; a template with no successful probe
+/// reports only its zero count.
+fn summary(template: &str, latencies: &[f64]) -> serde_json::Value {
+    let mut sorted = latencies.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let Some(last) = sorted.len().checked_sub(1) else {
+        return json!({ "summary": template, "count": 0 });
+    };
+    let at = |fraction: f64| sorted[(last as f64 * fraction).round() as usize];
+    json!({
+        "summary": template,
+        "count": sorted.len(),
+        "p50_ms": at(0.5),
+        "p95_ms": at(0.95),
+        "max_ms": at(1.0),
+        "mean_ms": sorted.iter().sum::<f64>() / sorted.len() as f64,
+    })
+}
+
 /// Runs the probes and prints one JSON line each, then a per-template summary.
 pub async fn run(backend: &Backend) {
     let count = env_or("BENCH_PROBES", 75usize);
     let concurrency = env_or("BENCH_CONCURRENCY", 1usize).max(1);
     let seed = env_or("BENCH_SEED", 1u64);
     let filter = std::env::var("BENCH_TEMPLATES").ok();
-    let drawn = probes(count, env_or("BENCH_DIM", 768), seed)
+    // A scaled load names only its first `round(TOTAL_ITEMS * scale)` items.
+    let items = ((TOTAL_ITEMS * env_or("BENCH_SCALE", 1.0)).round() as usize).max(1);
+    let drawn = probes(count, env_or("BENCH_DIM", 768), seed, items)
         .into_iter()
         .filter(|probe| {
             filter
@@ -291,20 +315,7 @@ pub async fn run(backend: &Backend) {
         .map(|(_, latency, _)| *latency)
         .collect::<Vec<_>>();
     for (template, latencies) in by_template.iter().chain([(&"all", &all)]) {
-        let mut sorted = latencies.clone();
-        sorted.sort_by(f64::total_cmp);
-        let at = |fraction: f64| sorted[((sorted.len() - 1) as f64 * fraction).round() as usize];
-        println!(
-            "{}",
-            json!({
-                "summary": template,
-                "count": sorted.len(),
-                "p50_ms": at(0.5),
-                "p95_ms": at(0.95),
-                "max_ms": at(1.0),
-                "mean_ms": sorted.iter().sum::<f64>() / sorted.len() as f64,
-            })
-        );
+        println!("{}", summary(template, latencies));
     }
     println!(
         "{}",
@@ -315,4 +326,40 @@ pub async fn run(backend: &Backend) {
             "wall_ms": wall_ms,
         })
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Product probes only name items a scaled fixture loaded, and every
+    /// template is drawn.
+    #[test]
+    fn probes_stay_within_the_loaded_items() {
+        let drawn = probes(400, 8, 3, 82);
+        assert!(drawn.iter().all(|probe| probe.item < 82));
+        assert!(Template::ALL
+            .iter()
+            .all(|template| drawn.iter().any(|probe| probe.template == *template)));
+        assert!(probes(16, 8, 3, 1).iter().all(|probe| probe.item == 0));
+    }
+
+    /// A template with no successful probe, or a run where every probe failed,
+    /// reports a zero count instead of panicking; otherwise percentiles come
+    /// from the sorted latencies.
+    #[test]
+    fn summaries_report_zero_counts_and_sorted_percentiles() {
+        assert_eq!(summary("all", &[]), json!({ "summary": "all", "count": 0 }));
+        assert_eq!(
+            summary("global_vector_top50", &[30.0, 10.0, 20.0]),
+            json!({
+                "summary": "global_vector_top50",
+                "count": 3,
+                "p50_ms": 20.0,
+                "p95_ms": 30.0,
+                "max_ms": 30.0,
+                "mean_ms": 20.0,
+            })
+        );
+    }
 }
