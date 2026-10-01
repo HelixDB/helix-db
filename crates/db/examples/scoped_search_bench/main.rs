@@ -11,7 +11,7 @@
 //! Modes: `load` (graph + indexes; `BENCH_VECTOR=before|after|skip`), `index`
 //! (build the vector index by backfill), `index-product` (an equality index on
 //! `Item.owner`, so product-scoped probes start from an index), `probe`
-//! (mixed-template probes against a server, see `probe.rs`), `query`
+//! (mixed-template probes, see `probe.rs`), `query`
 //! (default), and the batch-write benchmark's `batch-load` and `batch-run`
 //! (see [`batch`]).
 //!
@@ -295,9 +295,18 @@ async fn main() {
         db: writer,
         store: Arc::clone(&store),
     };
-    if matches!(mode.as_str(), "load" | "index" | "batch-load" | "batch-run") {
+    if matches!(
+        mode.as_str(),
+        "load" | "index" | "index-product" | "probe" | "batch-load" | "batch-run"
+    ) {
         match mode.as_str() {
             "load" => fixture::load(&backend, load_options()).await,
+            "index-product" => {
+                fixture::create_indexes(&backend, &["item_owner"], 0, index_deadline()).await
+            }
+            // Embedded probes start right after open, as a server's first
+            // requests do.
+            "probe" => probe::run(&backend).await,
             "batch-load" => batch::load(&backend, &batch::Options::from_env()).await,
             "batch-run" => batch::run(&backend, &batch::Options::from_env()).await,
             _ => {
