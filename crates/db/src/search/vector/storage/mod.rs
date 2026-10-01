@@ -24,9 +24,9 @@ use crate::encoding::keys::{scope::DataScope, DataKey, DataKeyKind};
 use crate::encoding::v2::keys::indexes::vector::{
     VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorEntryCandidatePrefixKey,
     VectorIndexMetadataKey, VectorItemKey, VectorItemPrefixKey, VectorKey,
-    VectorLayer0NeighborsKey, VectorReverseEdgeKey, VectorReverseEdgePrefixKey,
-    VectorSimHashDirectoryKey, VectorSimHashDirectoryPrefixKey, VectorSimHashKey,
-    VectorStorageLane, VectorUpperNeighborsKey, VectorUpperVectorKey,
+    VectorLayer0NeighborsKey, VectorMemoryPrefixKey, VectorReverseEdgeKey,
+    VectorReverseEdgePrefixKey, VectorSimHashDirectoryKey, VectorSimHashDirectoryPrefixKey,
+    VectorSimHashKey, VectorStorageLane, VectorUpperNeighborsKey, VectorUpperVectorKey,
 };
 use crate::encoding::v2::legacy::vector::{
     metadata::decode_legacy_metadata, transaction_guard::decode_active_txn_guard,
@@ -69,8 +69,10 @@ pub(crate) enum VectorBatchReads {
     Concurrent,
 }
 
-/// How far one [`VectorRows::warm_object_store_parts`] pass read, in key and
-/// value bytes.
+/// Bytes one [`VectorRows::warm_object_store_parts`] pass charged: each
+/// range's key and value bytes rounded up to whole object-store parts, the
+/// least the tier stores for it. Shadowed versions a scan skips are not
+/// charged; the tier's own eviction still bounds its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PartWarm {
     /// Every range was read.
@@ -79,24 +81,49 @@ pub(crate) enum PartWarm {
     BudgetExhausted(u64),
 }
 
-/// Reads `rows` to the end, adding their key and value bytes to `read`, and
-/// stops before the row that would take the total past `budget`.
+/// A warm pass that failed after charging `charged` bytes, as [`PartWarm`]
+/// counts them.
+#[derive(Debug)]
+pub(crate) struct PartWarmFailure {
+    pub(crate) charged: u64,
+    pub(crate) error: HelixDbError,
+}
+
+/// How one range scan of a warm pass ended.
+enum RangeEnd {
+    Complete,
+    BudgetExhausted,
+    Failed(HelixDbError),
+}
+
+/// Reads the rows of one opened range scan to the end and returns their key
+/// and value bytes, stopping before the row that would take `charged` plus
+/// those bytes past `budget`.
 async fn drain_rows(
-    mut rows: slatedb::DbIterator,
-    mut read: u64,
+    rows: Result<slatedb::DbIterator, slatedb::Error>,
+    charged: u64,
     budget: u64,
-) -> Result<PartWarm, HelixDbError> {
-    while let Some(row) = rows.next().await? {
+) -> (u64, RangeEnd) {
+    let mut rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => return (0, RangeEnd::Failed(error.into())),
+    };
+    let mut read = 0u64;
+    loop {
+        let row = match rows.next().await {
+            Ok(Some(row)) => row,
+            Ok(None) => return (read, RangeEnd::Complete),
+            Err(error) => return (read, RangeEnd::Failed(error.into())),
+        };
         let Some(total) = u64::try_from(row.key.len() + row.value.len())
             .ok()
             .and_then(|row_bytes| read.checked_add(row_bytes))
-            .filter(|total| *total <= budget)
+            .filter(|total| charged.saturating_add(*total) <= budget)
         else {
-            return Ok(PartWarm::BudgetExhausted(read));
+            return (read, RangeEnd::BudgetExhausted);
         };
         read = total;
     }
-    Ok(PartWarm::Complete(read))
 }
 
 /// Bound physical namespace for every current-format row of one vector index.
@@ -818,68 +845,53 @@ where
     }
 
     /// Streams the rows a search reads at random once, so SlateDB's
-    /// object-store tier holds their parts before any search needs them:
-    /// layer-0 neighbour rows, payloads, and the SimHash directory when
-    /// `directory` is set, in that order.
+    /// object-store tier holds their parts before any search needs them: the
+    /// hot lane (upper-layer rows, SimHashes and layer-0 neighbour rows, which
+    /// vector memory may hold only in part), payloads, and the SimHash
+    /// directory when `directory` is set, in that order.
     ///
     /// Rows are discarded and never enter the block cache; SlateDB reads
     /// `read_ahead` bytes, one object-store part, ahead of the scan. Reading
-    /// stops before the row that would take the running total of key and
-    /// value bytes past `budget`.
+    /// stops before the row that would take the charged bytes (see
+    /// [`PartWarm`]) past `budget`. A failed scan reports what it charged
+    /// before failing.
     pub(crate) async fn warm_object_store_parts(
         &self,
         directory: bool,
         read_ahead: usize,
         budget: u64,
-    ) -> Result<PartWarm, HelixDbError> {
+    ) -> Result<PartWarm, PartWarmFailure> {
         let index_id = self.keyspace.index_id();
         let options = ScanOptions::default()
             .with_cache_blocks(false)
             .with_read_ahead_bytes(read_ahead)
             .with_max_fetch_tasks(1);
+        let part = u64::try_from(read_ahead.max(1)).unwrap_or(u64::MAX);
+        let prefixes = [
+            Some(VectorKey::MemoryPrefix(VectorMemoryPrefixKey::new(
+                index_id,
+            ))),
+            Some(VectorKey::VectorPrefix(VectorItemPrefixKey::new(index_id))),
+            directory.then(|| {
+                VectorKey::SimHashDirectoryPrefix(VectorSimHashDirectoryPrefixKey::new(index_id))
+            }),
+        ];
+        let mut charged = 0u64;
         // One range at a time, so one iterator pins storage state at once.
-        let layer0 = self
-            .read
-            .scan_with_options(
-                self.keyspace
-                    .key(VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(
-                        index_id,
-                        NodeId::MIN,
-                    )))
-                    ..=self.keyspace.key(VectorKey::Layer0Neighbors(
-                        VectorLayer0NeighborsKey::new(index_id, NodeId::MAX),
-                    )),
-                &options,
-            )
-            .await?;
-        let warmed = drain_rows(layer0, 0, budget).await?;
-        let PartWarm::Complete(bytes) = warmed else {
-            return Ok(warmed);
-        };
-        let payloads = self
-            .read
-            .scan_prefix_with_options(
-                self.keyspace
-                    .key(VectorKey::VectorPrefix(VectorItemPrefixKey::new(index_id))),
-                ..,
-                &options,
-            )
-            .await?;
-        let warmed = drain_rows(payloads, bytes, budget).await?;
-        let (PartWarm::Complete(bytes), true) = (warmed, directory) else {
-            return Ok(warmed);
-        };
-        let entries = self
-            .read
-            .scan_prefix_with_options(
-                self.keyspace.key(VectorKey::SimHashDirectoryPrefix(
-                    VectorSimHashDirectoryPrefixKey::new(index_id),
-                )),
-                ..,
-                &options,
-            )
-            .await?;
-        drain_rows(entries, bytes, budget).await
+        for prefix in prefixes.into_iter().flatten() {
+            let rows = self
+                .read
+                .scan_prefix_with_options(self.keyspace.key(prefix), .., &options)
+                .await;
+            let (read, end) = drain_rows(rows, charged, budget).await;
+            charged = charged.saturating_add(read.next_multiple_of(part));
+            match end {
+                RangeEnd::Complete => {}
+                RangeEnd::BudgetExhausted => return Ok(PartWarm::BudgetExhausted(charged)),
+                RangeEnd::Failed(error) => return Err(PartWarmFailure { charged, error }),
+            }
+        }
+        Ok(PartWarm::Complete(charged))
     }
 
     /// Reads one legacy payload and accounts every typed point-read byte.

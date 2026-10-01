@@ -15,7 +15,7 @@
 
 use slatedb::DbReadOps;
 
-use crate::search::vector::storage::{PartWarm, VectorRowKeyspace, VectorRows};
+use crate::search::vector::storage::{PartWarm, PartWarmFailure, VectorRowKeyspace, VectorRows};
 use crate::search::vector::ValidatedVectorGenerationHandle;
 
 /// What one warm pass read.
@@ -25,16 +25,17 @@ pub(crate) struct VectorPartWarmSummary {
     pub(crate) warmed_targets: usize,
     /// Targets whose rows could not be read; each was logged and skipped.
     pub(crate) failed_targets: usize,
-    /// How far the pass read, in key and value bytes over every target.
+    /// Bytes charged over every target, failed ones included (see
+    /// [`PartWarm`]), and whether the budget ran out.
     pub(crate) read: PartWarm,
 }
 
 /// Streams the search rows of every target through `read`, in target order,
-/// until they are all read or `budget` key and value bytes have been.
+/// until they are all read or `budget` bytes have been charged.
 ///
-/// Best effort: a target that fails is logged and skipped, and the pass goes
-/// on with the next one. SlateDB reads `read_ahead` bytes, one object-store
-/// part, ahead of each scan.
+/// Best effort: a target that fails is logged, charged what it read, and
+/// skipped, and the pass goes on with the next one. SlateDB reads
+/// `read_ahead` bytes, one object-store part, ahead of each scan.
 pub(crate) async fn warm_object_store_parts<R>(
     read: &R,
     targets: &[ValidatedVectorGenerationHandle],
@@ -50,7 +51,7 @@ where
         read: PartWarm::Complete(0),
     };
     for target in targets {
-        let PartWarm::Complete(bytes) = summary.read else {
+        let PartWarm::Complete(charged) = summary.read else {
             break;
         };
         let keyspace = VectorRowKeyspace::from_allocated(
@@ -62,27 +63,35 @@ where
             .warm_object_store_parts(
                 target.has_simhash_directory(),
                 read_ahead,
-                budget.saturating_sub(bytes),
+                budget.saturating_sub(charged),
             )
             .await;
-        match warmed {
-            Ok(PartWarm::Complete(target_bytes)) => {
+        summary.read = match warmed {
+            Ok(PartWarm::Complete(target_charged)) => {
                 summary.warmed_targets += 1;
-                summary.read = PartWarm::Complete(bytes.saturating_add(target_bytes));
+                PartWarm::Complete(charged.saturating_add(target_charged))
             }
-            Ok(PartWarm::BudgetExhausted(target_bytes)) => {
+            Ok(PartWarm::BudgetExhausted(target_charged)) => {
                 summary.warmed_targets += 1;
-                summary.read = PartWarm::BudgetExhausted(bytes.saturating_add(target_bytes));
+                PartWarm::BudgetExhausted(charged.saturating_add(target_charged))
             }
-            Err(error) => {
+            Err(PartWarmFailure {
+                charged: target_charged,
+                error,
+            }) => {
                 tracing::warn!(
                     physical_index_id = target.physical_index_id(),
                     %error,
                     "skipping a vector index the object-store warm could not read"
                 );
                 summary.failed_targets += 1;
+                let charged = charged.saturating_add(target_charged);
+                match charged < budget {
+                    true => PartWarm::Complete(charged),
+                    false => PartWarm::BudgetExhausted(charged),
+                }
             }
-        }
+        };
     }
     summary
 }

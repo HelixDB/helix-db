@@ -11709,22 +11709,26 @@ mod vector_object_store_warm {
                 .as_str()
                 .expect("a queued index reports its operation")
                 .to_string();
-            let status = loop {
-                let status = db
-                    .query(QueryRequest::read(
-                        read_batch()
-                            .var_as("op", g().get_index_operation(operation.clone()))
-                            .returning(["op"]),
-                    ))
-                    .await
-                    .expect("index operation is readable");
-                match status["op"]["status"].as_str() {
-                    Some("queued" | "running") => {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+            let status = tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    let status = db
+                        .query(QueryRequest::read(
+                            read_batch()
+                                .var_as("op", g().get_index_operation(operation.clone()))
+                                .returning(["op"]),
+                        ))
+                        .await
+                        .expect("index operation is readable");
+                    match status["op"]["status"].as_str() {
+                        Some("queued" | "running") => {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        other => break other.map(str::to_owned),
                     }
-                    other => break other.map(str::to_owned),
                 }
-            };
+            })
+            .await
+            .expect("the vector index build finishes");
             assert_eq!(status.as_deref(), Some("succeeded"));
         }
         for chunk in (0..400).collect::<Vec<_>>().chunks(50) {

@@ -15,6 +15,10 @@
 //! `BENCH_INDEX_TIMEOUT_SECS` (default 14,400) bounds each wait for index
 //! builds; a reference-scale backfill needs a long deadline.
 //!
+//! Embedded `query` waits for every startup cache warm before its first query,
+//! including the object-store warm of vector rows when `BENCH_CACHE_DIR` is
+//! set, so `first=` measures the first query after that warm.
+//!
 //! ```text
 //! BENCH_DIR=/tmp/bench BENCH_SCALE=0.02 cargo run --release -p db --example scoped_search_bench -- load
 //! BENCH_DIR=/tmp/bench cargo run --release -p db --example scoped_search_bench -- query
