@@ -22,21 +22,48 @@ use serde_json::json;
 
 use crate::fixture::{self, env_or, Backend, Rng, GROUPS, TOTAL_ITEMS};
 
-/// Templates in the order the reference evaluation reported them.
-const TEMPLATES: [&str; 8] = [
-    "global_vector_top50",
-    "global_bm25_top50",
-    "family_vector_k5",
-    "family_bm25_top50",
-    "feature_vector_top50",
-    "family_feature_vector_top50",
-    "product_vector_k5",
-    "product_bm25_top50",
-];
+/// Query templates, in the order the reference evaluation reported them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Template {
+    GlobalVector,
+    GlobalBm25,
+    FamilyVector,
+    FamilyBm25,
+    FeatureVector,
+    FamilyFeatureVector,
+    ProductVector,
+    ProductBm25,
+}
+
+impl Template {
+    const ALL: [Self; 8] = [
+        Self::GlobalVector,
+        Self::GlobalBm25,
+        Self::FamilyVector,
+        Self::FamilyBm25,
+        Self::FeatureVector,
+        Self::FamilyFeatureVector,
+        Self::ProductVector,
+        Self::ProductBm25,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::GlobalVector => "global_vector_top50",
+            Self::GlobalBm25 => "global_bm25_top50",
+            Self::FamilyVector => "family_vector_k5",
+            Self::FamilyBm25 => "family_bm25_top50",
+            Self::FeatureVector => "feature_vector_top50",
+            Self::FamilyFeatureVector => "family_feature_vector_top50",
+            Self::ProductVector => "product_vector_k5",
+            Self::ProductBm25 => "product_bm25_top50",
+        }
+    }
+}
 
 /// One drawn probe: everything needed to rebuild and label its request.
 struct Probe {
-    template: &'static str,
+    template: Template,
     group: usize,
     item: usize,
     vector: Vec<f32>,
@@ -65,32 +92,31 @@ impl Probe {
         let terms = self.terms.as_str();
         let (distance, score) = (fixture::distance_projection(), fixture::score_projection());
         fixture::read(match self.template {
-            "global_vector_top50" => g()
+            Template::GlobalVector => g()
                 .vector_search_nodes("Attribute", "embedding", vector, 50, None)
                 .project(distance),
-            "global_bm25_top50" => g()
+            Template::GlobalBm25 => g()
                 .text_search_nodes("Attribute", "text", terms, 50, None)
                 .project(score),
-            "family_vector_k5" => family()
+            Template::FamilyVector => family()
                 .vector_search("Attribute", "embedding", vector, 5, None)
                 .project(distance),
-            "family_bm25_top50" => family()
+            Template::FamilyBm25 => family()
                 .text_search("Attribute", "text", terms, 50, None)
                 .project(score),
-            "feature_vector_top50" => feature()
+            Template::FeatureVector => feature()
                 .vector_search("Attribute", "embedding", vector, 50, None)
                 .project(distance),
-            "family_feature_vector_top50" => family()
+            Template::FamilyFeatureVector => family()
                 .where_(Predicate::eq("kind", "B"))
                 .vector_search("Attribute", "embedding", vector, 50, None)
                 .project(distance),
-            "product_vector_k5" => product()
+            Template::ProductVector => product()
                 .vector_search("Attribute", "embedding", vector, 5, None)
                 .project(distance),
-            "product_bm25_top50" => product()
+            Template::ProductBm25 => product()
                 .text_search("Attribute", "text", terms, 50, None)
                 .project(score),
-            other => unreachable!("unknown template {other}"),
         })
     }
 }
@@ -104,10 +130,10 @@ fn probes(count: usize, dimension: usize, seed: u64) -> Vec<Probe> {
         .into_iter()
         .enumerate()
         .map(|(index, vector)| {
-            let round = index / TEMPLATES.len();
-            let slot = (index + round * 3 + rng.below(TEMPLATES.len())) % TEMPLATES.len();
+            let round = index / Template::ALL.len();
+            let slot = (index + round * 3 + rng.below(Template::ALL.len())) % Template::ALL.len();
             Probe {
-                template: TEMPLATES[slot],
+                template: Template::ALL[slot],
                 group: rng.below(GROUPS),
                 item: rng.below(items),
                 vector,
@@ -219,7 +245,7 @@ pub async fn run(backend: &Backend) {
         .filter(|probe| {
             filter
                 .as_deref()
-                .is_none_or(|filter| filter.split(',').any(|name| probe.template == name))
+                .is_none_or(|filter| filter.split(',').any(|name| probe.template.name() == name))
         })
         .collect::<Vec<_>>();
     let started = Instant::now();
@@ -232,7 +258,7 @@ pub async fn run(backend: &Backend) {
             let latency_ms = request_started.elapsed().as_secs_f64() * 1_000.0;
             let mut line = json!({
                 "index": index,
-                "template": probe.template,
+                "template": probe.template.name(),
                 "group": probe.group,
                 "item": probe.item,
                 "started_ms": queued_ms,
@@ -246,7 +272,7 @@ pub async fn run(backend: &Backend) {
                 line["server"] = json!(Counters::sample().since(&before));
             }
             println!("{line}");
-            (probe.template, latency_ms, response.is_ok())
+            (probe.template.name(), latency_ms, response.is_ok())
         })
         .buffer_unordered(concurrency)
         .collect::<Vec<_>>()
