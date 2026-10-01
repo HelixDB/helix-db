@@ -58,6 +58,10 @@ with `docker volume rm` (or `podman volume rm`) once migrated, because
 `helix prune` also deletes the new SeaweedFS volume. See the
 [local workflow guide](https://docs.helix-db.com/cli/workflows/local#migrate-minio-disk-data)
 to copy that data.
+
+Disk mode and S3 storage mount a `helix-<project>-<instance>-cache` volume at
+`/var/cache/helix` for the server's disk cache, with a 64 MiB budget in disk
+mode and 1 GiB for a bucket. `stop` keeps it; `prune` removes it.
 `helix restart dev` restarts the existing container with its existing image and
 settings and checks readiness on the container's published port. It fails if no container exists. Use `helix start dev` to apply new
 image or configuration settings. Restarting in-memory storage clears its data.

@@ -261,14 +261,18 @@ native directory persistence, set `HELIX_DATA_DIR` and mount the directory there
 
 ## Add a local disk cache
 
-By default the server caches data in memory only, so cold reads go to the object
-store. Set `HELIX_DISK_CACHE_DIR` to keep recently read data on local disk, ideally NVMe.
-The cache survives restarts. It requires `S3_BUCKET` or `HELIX_DATA_DIR`; memory
-storage rejects it.
+With `S3_BUCKET`, the server always keeps recently read data on local disk, ideally
+NVMe, in `/var/cache/helix` unless `HELIX_DISK_CACHE_DIR` names another directory.
+Vector indexes on S3 need it: once an index outgrows the memory cache, every graph
+hop that misses it would otherwise wait on its own S3 request. Mount a volume at
+`/var/cache/helix` so the cache survives restarts; without one, each new container
+starts with an empty cache. With `HELIX_DATA_DIR`, set `HELIX_DISK_CACHE_DIR` to add
+the disk cache. Memory storage rejects the cache variables.
 
 <Note>
-The disk cache needs v0.0.7 or later. The v0.0.6 image and earlier ignore the
-`HELIX_DISK_CACHE_*` variables and keep memory-only caches.
+The disk cache needs v0.0.7 or later, and the v0.0.6 image and earlier ignore the
+`HELIX_DISK_CACHE_*` variables. v0.0.7 and v0.0.8 cache S3 on disk only when
+`HELIX_DISK_CACHE_DIR` is set, so the example below sets it to the default.
 </Note>
 
 ```bash
@@ -284,16 +288,18 @@ docker run --rm --name helixdb \
   ghcr.io/helixdb/helixdb:v0.0.8
 ```
 
-In Compose, add the same variables and a volume to the `helix` service. A new
-named volume mounted at `/var/cache/helix` is already writable; a bind mount must be
-owned by `65532:65532`. Use one cache directory per running server and per
-database; changing `DB_PATH` on the same directory leaves the old database's
-full-text cache behind.
+In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
+named volume mounted there is already writable; a bind mount must be owned by
+`65532:65532`. When running as another user or outside the image, set
+`HELIX_DISK_CACHE_DIR` to a directory that user can write. With a read-only root
+filesystem, mount a writable volume (for example a tmpfs or `emptyDir`) at the cache
+directory. Use one cache directory per running server and per database; changing
+`DB_PATH` on the same directory leaves the old database's full-text cache behind.
 
 | Variable | Purpose |
 | --- | --- |
-| `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it if needed; unset keeps memory-only caches |
-| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 32 GiB |
+| `HELIX_DISK_CACHE_DIR` | Disk cache directory, created if needed. Defaults to `/var/cache/helix` with `S3_BUCKET`; with `HELIX_DATA_DIR`, setting it enables the disk cache |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
 
 Half of the disk budget caches object-store files, 3/8 caches database blocks,
@@ -314,12 +320,15 @@ checksums the whole split, up to 64 MiB, before it answers. Budget at least twic
 the data the server reads often: the object-store cache fetches whole file parts
 (4 MiB, or smaller under a 2 GiB budget), so once that data outgrows half the
 budget, cold reads fetch more than memory-only caches would. The budget must also
-fit on the cache's filesystem; the server logs a warning at startup when it exceeds
-the free space there plus what the cache already uses.
+fit on the cache's filesystem: its free space plus what the cache already uses.
+When `HELIX_DISK_CACHE_BYTES` is unset and the 8 GiB default does not fit, startup
+fails naming the variable; without a volume the cache would otherwise share, and
+could fill, the filesystem of the container runtime. A budget you set that does not
+fit only logs a warning at startup.
 
 The block cache also indexes its disk share in memory, outside
 `HELIX_DISK_CACHE_MEMORY_BYTES`. Once full, the index takes roughly 2–9 MiB of RAM
-per GiB of `HELIX_DISK_CACHE_BYTES` (about 70–280 MiB at the default, 2–9 GiB at
+per GiB of `HELIX_DISK_CACHE_BYTES` (about 20–70 MiB at the default, 2–9 GiB at
 1 TiB), and a restart briefly needs about twice that while it rebuilds the index.
 Size the container's memory limit for this index as well as the memory tier.
 
@@ -328,14 +337,26 @@ open files in the worst case (26,600 at the default budget), plus one per open
 full-text split. It raises its soft open-file limit to the hard limit at startup.
 If the container's hard limit is below that minimum, startup fails naming
 `HELIX_DISK_CACHE_BYTES`; raise the hard limit with `--ulimit nofile=65536:65536`.
-Lowering the budget is not a reliable fix. Run natively on macOS, the limit is also
-capped by `sysctl kern.maxfilesperproc`.
+Lowering the budget is not a reliable fix above about 3 GiB, where the file count
+does not fall steadily with it; budgets of 1 GiB or less need about 8,200 or fewer.
+Run natively on macOS, the limit is also capped by `sysctl kern.maxfilesperproc`.
 
 Startup also fails with a message naming the variable when a size is invalid or
-out of range, a size is set without `HELIX_DISK_CACHE_DIR`, the cache directory is
-not writable or cannot be locked (some network and FUSE filesystems do not support
-locks), or another running server already uses it. Stop the old container before
-starting its replacement on the same cache directory.
+out of range, a size is set with `HELIX_DATA_DIR` but without `HELIX_DISK_CACHE_DIR`,
+the default budget does not fit, the cache directory is not writable or cannot be
+locked (some network and FUSE filesystems do not support locks), or another running
+server already uses it. Stop the old container before starting its replacement on
+the same cache directory.
+
+<Warning>
+An S3 container that ran v0.0.8 or earlier used no local disk, so it can fail or
+use more resources after upgrading: it needs a hard open-file limit of at least
+26,600 at the default budget (about 8,200 or fewer at 1 GiB or less), about 20–70
+MiB more RAM at the default budget, a writable cache directory (mount a volume with
+a read-only root filesystem, and set `HELIX_DISK_CACHE_DIR` when running as a user
+other than `65532`), and room for the 8 GiB default unless `HELIX_DISK_CACHE_BYTES`
+is set.
+</Warning>
 
 ## Stop or inspect
 

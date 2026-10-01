@@ -266,7 +266,8 @@ fn error_report_prints_every_cause_once() {
     assert_eq!(
         error_report(&error),
         "Error: server failed to start\n\
-         caused by: HELIX_DISK_CACHE_DIR: `/cache` is not a writable directory\n\
+         caused by: HELIX_DISK_CACHE_DIR: `/cache` is not a writable directory; mount a \
+         writable volume there or set HELIX_DISK_CACHE_DIR to a writable directory\n\
          caused by: disk on fire"
     );
 }

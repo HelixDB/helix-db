@@ -30,7 +30,7 @@ helix delete <INSTANCE> [OPTIONS]
 
 ## Behavior
 
-- For local instances, Helix-owned containers, networks, disk-mode volumes, and the per-instance directory under `.helix/` are deleted.
+- For local instances, Helix-owned containers, networks, disk-mode and disk-cache volumes, and the per-instance directory under `.helix/` are deleted.
 - For Helix Cloud instances, only the `[enterprise.<name>]` block in `helix.toml` is removed — the database itself is untouched.
 - Remote S3 object-store data is not deleted.
 - The CLI refuses to delete the last instance in `helix.toml`; add a replacement first.
