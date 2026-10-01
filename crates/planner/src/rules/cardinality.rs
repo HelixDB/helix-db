@@ -809,7 +809,7 @@ fn node_equality_count(
             })
         }
         EqualityValue::Set { indexed, null } => {
-            // Batched indexed members, unique owners one leaf each, and the
+            // Batched indexed members (bitmaps or unique owners), and the
             // label rows outside the lane for null, counted as one union.
             let mut cursors = match index.uniqueness {
                 catalog::IndexUniqueness::NonUnique => {
@@ -840,11 +840,10 @@ fn node_equality_count(
                 catalog::IndexUniqueness::Unique => {
                     let index = exec::ExecNodeUniqueEqualityIndex::try_from(index.clone())
                         .expect("unique catalog metadata satisfies the owner wrapper");
-                    indexed
-                        .into_iter()
-                        .map(|value| exec::ExecCountCursorPlan::NodeUnique {
+                    match <[_; 1]>::try_from(indexed) {
+                        Ok([value]) => vec![exec::ExecCountCursorPlan::NodeUnique {
                             lookup: exec::ExecNodeUniqueOwnerReadPlan {
-                                index: index.clone(),
+                                index,
                                 key: key.clone(),
                                 value: value.clone(),
                             },
@@ -852,8 +851,16 @@ fn node_equality_count(
                                 key: key.clone(),
                                 value,
                             },
-                        })
-                        .collect()
+                        }],
+                        Err(indexed) => ir::AtLeast::try_from_vec(indexed)
+                            .map(|values| exec::ExecCountCursorPlan::NodeUniqueBatch {
+                                index,
+                                key: key.clone(),
+                                values,
+                            })
+                            .into_iter()
+                            .collect(),
+                    }
                 }
             };
             if null {
@@ -1962,6 +1969,10 @@ fn cursor_cost(
         exec::ExecCountCursorPlan::NodeUnique { lookup, .. } => storage.unique_equality_lookup(
             storage.unique_equality_rows(stats.node_eq_cardinality.get(&lookup.key).copied()),
         ),
+        exec::ExecCountCursorPlan::NodeUniqueBatch { values, .. } => storage.unique_equality_batch(
+            properties::PositiveUsize::at_least_one(values.len()),
+            cost::EstimatedRows::rows(values.len() as u64),
+        ),
         exec::ExecCountCursorPlan::NodeRange(plan) => storage.secondary_range_lookup(
             stats
                 .node_range_cardinality
@@ -2016,24 +2027,41 @@ fn cursor_cost(
             .bitmap_equality_lookup(storage.default_equality_index_rows)
             .serial(storage.null_equality_scan(storage.default_unknown_scan_rows)),
         // The executor reads a set of ID leaves concurrently and combines
-        // their bitmaps; point IDs cost one batched existence read.
+        // their bitmaps; point IDs cost one batched existence read. An
+        // intersection reads its null equalities after the other children,
+        // one at a time, so they verify only the rows the others keep.
         exec::ExecCountCursorPlan::Union { driver, rest }
         | exec::ExecCountCursorPlan::Intersect { driver, rest }
             if count_id_set(cursor) =>
         {
+            let (nulls, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                .chain(rest.iter())
+                .partition(|child| {
+                    matches!(cursor, exec::ExecCountCursorPlan::Intersect { .. })
+                        && matches!(
+                            child,
+                            exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. }
+                            ) | exec::ExecCountCursorPlan::EdgeAuthoritativeScan(
+                                exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { .. }
+                            )
+                        )
+                });
+            let child_cost = |child: &exec::ExecCountCursorPlan| match child {
+                exec::ExecCountCursorPlan::NodePointReads(ids)
+                | exec::ExecCountCursorPlan::EdgePointReads(ids) => storage.multi_get(
+                    properties::PositiveUsize::at_least_one(ids.as_ref().len()),
+                    properties::KeyLocality::Sparse,
+                ),
+                child => cursor_cost(child, stats, storage),
+            };
             storage
-                .parallel_reads(
-                    &core::iter::once(driver.as_ref())
-                        .chain(rest.iter())
-                        .map(|child| match child {
-                            exec::ExecCountCursorPlan::NodePointReads(ids)
-                            | exec::ExecCountCursorPlan::EdgePointReads(ids) => storage.multi_get(
-                                properties::PositiveUsize::at_least_one(ids.as_ref().len()),
-                                properties::KeyLocality::Sparse,
-                            ),
-                            child => cursor_cost(child, stats, storage),
-                        })
-                        .collect::<Vec<_>>(),
+                .parallel_reads(&others.into_iter().map(child_cost).collect::<Vec<_>>())
+                .serial(
+                    nulls
+                        .into_iter()
+                        .map(child_cost)
+                        .fold(cost::CostVector::ZERO, cost::CostVector::serial),
                 )
                 .serial(storage.secondary_set_operation(storage.default_unknown_scan_rows))
         }
@@ -2091,7 +2119,7 @@ fn cursor_cost(
 }
 
 /// Whether `cursor` is made only of ID leaves of one element kind (point
-/// reads, runtime inputs, search results, and index, range, label and
+/// reads, runtime inputs, text-search results, and index, range, label and
 /// null-equality sets), unions and intersections of them included. The
 /// executor counts such a cursor on ID bitmaps, never building a row.
 fn count_id_set(cursor: &exec::ExecCountCursorPlan) -> bool {
@@ -2106,6 +2134,7 @@ fn count_id_set(cursor: &exec::ExecCountCursorPlan) -> bool {
             }
             C::NodeBitmap(_)
             | C::NodeUnique { .. }
+            | C::NodeUniqueBatch { .. }
             | C::NodeRange(_)
             | C::NodeLabelBitmap(_)
             | C::NodeDynamicEquality { .. }
@@ -2115,7 +2144,6 @@ fn count_id_set(cursor: &exec::ExecCountCursorPlan) -> bool {
             })
             | C::NodePointReads(_)
             | C::NodeRuntimeInput(_)
-            | C::NodeVectorSearch { .. }
             | C::NodeTextSearch { .. } => Some(properties::ElementKind::Node),
             C::EdgeBitmap(_)
             | C::EdgeRange(_)
@@ -2127,7 +2155,6 @@ fn count_id_set(cursor: &exec::ExecCountCursorPlan) -> bool {
             })
             | C::EdgePointReads(_)
             | C::EdgeRuntimeInput(_)
-            | C::EdgeVectorSearch { .. }
             | C::EdgeTextSearch { .. } => Some(properties::ElementKind::Edge),
             C::EmptyRows
             | C::InputRows
@@ -2141,6 +2168,8 @@ fn count_id_set(cursor: &exec::ExecCountCursorPlan) -> bool {
             | C::Window { .. }
             | C::Order { .. }
             | C::Expand { .. }
+            | C::NodeVectorSearch { .. }
+            | C::EdgeVectorSearch { .. }
             | C::VectorSearch { .. }
             | C::TextSearch { .. }
             | C::Variable { .. }

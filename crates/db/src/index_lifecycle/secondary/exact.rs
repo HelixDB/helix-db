@@ -1119,44 +1119,73 @@ mod tests {
             property: "email",
         };
 
-        reset_equality_read_metrics();
-        assert_eq!(
-            unindexed_label_rows(
-                &db,
-                label,
-                Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
-                None,
-            )
-            .await
-            .unwrap(),
-            roaring::RoaringTreemap::from_iter([4, 5])
-        );
-        // The V4 bitmaps and the V3 entries are one scan each.
-        assert_eq!(equality_read_metrics().scans, 2);
+        for reads in [LabelLaneReads::Concurrent, LabelLaneReads::Sequential] {
+            reset_equality_read_metrics();
+            assert_eq!(
+                unindexed_label_rows(
+                    &db,
+                    label,
+                    Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                    None,
+                    reads,
+                )
+                .await
+                .unwrap(),
+                roaring::RoaringTreemap::from_iter([4, 5])
+            );
+            // The V4 bitmaps and the V3 entries are one scan each.
+            assert_eq!(equality_read_metrics().scans, 2);
+        }
         assert_eq!(
             unindexed_label_rows(
                 &db,
                 label,
                 Some((&handle, ReaderStorageCompatibility::Current)),
                 None,
+                LabelLaneReads::Concurrent,
             )
             .await
             .unwrap(),
             roaring::RoaringTreemap::from_iter([1, 2, 4, 5])
         );
+        // A wide `within` narrows the label rows outside the lane.
+        let wide = roaring::RoaringTreemap::from_iter(2..=DIRECT_UNINDEXED_VERIFICATION_ROWS + 2);
         assert_eq!(
             unindexed_label_rows(
                 &db,
                 label,
                 Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
-                Some(&roaring::RoaringTreemap::from_iter([2, 4])),
+                Some(&wide),
+                LabelLaneReads::Concurrent,
             )
             .await
             .unwrap(),
-            roaring::RoaringTreemap::from_iter([4])
+            roaring::RoaringTreemap::from_iter([4, 5])
+        );
+        // A small `within` is every candidate as it is: neither the label
+        // nor the lane is read, and verification drops what does not match.
+        reset_equality_read_metrics();
+        let small = roaring::RoaringTreemap::from_iter([2, 4, 9]);
+        assert_eq!(
+            unindexed_label_rows(
+                &db,
+                label,
+                Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                Some(&small),
+                LabelLaneReads::Concurrent,
+            )
+            .await
+            .unwrap(),
+            small
         );
         assert_eq!(
-            unindexed_label_rows(&db, label, None, None).await.unwrap(),
+            equality_read_metrics(),
+            SecondaryEqualityReadMetrics::default()
+        );
+        assert_eq!(
+            unindexed_label_rows(&db, label, None, None, LabelLaneReads::Concurrent)
+                .await
+                .unwrap(),
             roaring::RoaringTreemap::from_iter(1..=5)
         );
         db.close().await.unwrap();

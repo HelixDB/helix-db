@@ -125,7 +125,8 @@ async fn unique_membership_reader_uses_batch_and_honors_cancellation() {
         .await
         .unwrap();
     let metrics = index_lifecycle::secondary::equality_read_metrics();
-    assert_eq!(metrics.multi_get_calls, 1);
+    // One multi-get reads the owners and one verifies their records.
+    assert_eq!(metrics.multi_get_calls, 2);
     assert_eq!(metrics.point_reads, 6);
     assert_eq!(metrics.graph_reads, 5);
     assert_eq!(metrics.scans, 0);

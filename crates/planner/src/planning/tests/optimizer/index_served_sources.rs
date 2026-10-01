@@ -563,6 +563,45 @@ fn partly_indexed_ors_read_their_residual_free_branches_as_one_set() {
 }
 
 #[test]
+fn counts_over_unique_literal_sets_read_one_batch() {
+    // A count over a unique literal set wider than one index union is one
+    // batched owner read, not one leaf per value.
+    let mut planner_ctx = ctx(IndexCatalogSnapshot::default());
+    planner_ctx.indexes.node_eq.insert(
+        ScopedPropertyKey::try_new("User", "email").unwrap(),
+        crate::catalog::NodeEqualityIndexMeta::try_new("user-email")
+            .unwrap()
+            .with_uniqueness(crate::catalog::IndexUniqueness::Unique),
+    );
+    for count in [100, 10_000] {
+        let emails = (0..count).map(|n| format!("user-{n}")).collect::<Vec<_>>();
+        let plan = executable_traversal(
+            g().n_with_label_where(
+                "User",
+                Predicate::is_in("email", PropertyValue::StringArray(emails)),
+            )
+            .count(),
+            planner_ctx.clone(),
+        );
+        let json = semantic(&plan);
+        let (mut batches, mut singles) = (Vec::new(), 0);
+        visit(&json, &mut |value| {
+            if let Some(values) = value
+                .get("node_unique_batch")
+                .and_then(|batch| batch["values"].as_array())
+            {
+                batches.push(values.len());
+            }
+            if value.get("node_unique").is_some() {
+                singles += 1;
+            }
+        });
+        assert_eq!(batches, [count], "{json:#}");
+        assert_eq!(singles, 0, "{json:#}");
+    }
+}
+
+#[test]
 fn unique_reads_that_may_return_many_rows_keep_their_read_limit() {
     // A unique lane holds one owner per indexed value, but a literal set
     // returns one row per member, and null (bound statically or at run time)

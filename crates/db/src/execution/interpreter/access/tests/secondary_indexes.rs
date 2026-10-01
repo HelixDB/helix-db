@@ -912,9 +912,31 @@ async fn unique_union_batches_owners_and_rejects_stale_graph_rows() {
         ExecutionValue::Scalars(ids.into_iter().map(ExecutionScalar::NodeId).collect())
     );
     let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
-    assert_eq!(metrics.multi_get_calls, 1);
+    // One multi-get reads the owners and one verifies their records, never
+    // one get per owner.
+    assert_eq!(metrics.multi_get_calls, 2);
     assert_eq!(metrics.scans, 0);
     assert_eq!(metrics.graph_reads, 3);
+    // Six hundred values are three owner batches; only the two holding an
+    // owner need a verification batch.
+    let wide = core::iter::once("first".to_string())
+        .chain((0..598).map(|n| format!("missing-{n}")))
+        .chain(core::iter::once("second".to_string()))
+        .collect::<Vec<_>>();
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    let mut ids = vec![first, second];
+    ids.sort_unstable();
+    assert_eq!(
+        run_node_access(
+            &db,
+            plan(&wide.iter().map(String::as_str).collect::<Vec<_>>())
+        )
+        .await,
+        ExecutionValue::Scalars(ids.into_iter().map(ExecutionScalar::NodeId).collect())
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.multi_get_calls, 3 + 2);
+    assert_eq!(metrics.graph_reads, 2);
     assert_eq!(
         run_node_access(&db, plan(&["missing", "absent"])).await,
         ExecutionValue::Scalars(Vec::new())
@@ -4363,4 +4385,222 @@ async fn range_bounds_without_an_encoding_are_empty() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn intersections_verify_label_rows_only_against_their_other_children() {
+    // Null equality, and runtime equality or domains binding null, verify
+    // label records. Inside an intersection they read only the rows the
+    // other children keep: no label bitmap, no lane scan, and one record per
+    // kept row, however many label rows have the property null.
+    let db = test_support::open_db("access-null-intersections-verify-within").await;
+    let mut active = Vec::new();
+    for deleted_at in [
+        Some(PropertyValue::Null),
+        None,
+        Some(PropertyValue::from("2024")),
+        Some(PropertyValue::from("2025")),
+    ] {
+        active.push(
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                core::iter::once(("status", PropertyValue::from("active")))
+                    .chain(deleted_at.map(|value| ("deleted_at", value)))
+                    .collect(),
+            )
+            .await,
+        );
+    }
+    let mut paused = Vec::new();
+    for _ in 0..30 {
+        paused.push(
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::from("paused"))],
+            )
+            .await,
+        );
+    }
+    let status_rows = active
+        .iter()
+        .map(|id| ("active", *id))
+        .chain(paused.iter().map(|id| ("paused", *id)))
+        .collect::<Vec<_>>();
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        80,
+        &status_rows,
+    )
+    .await;
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "deleted_at").unwrap(),
+        81,
+        &[("2024", active[2]), ("2025", active[3])],
+    )
+    .await;
+
+    let index = |property: &str| {
+        catalog::NodeEqualityIndexMeta::new(test_support::name(&format!("node_eq:User:{property}")))
+    };
+    let key = |property: &str| catalog::ScopedPropertyKey::try_new("User", property).unwrap();
+    let active_status = || exec::ExecNodeBitmapExpr::PointRead {
+        index: exec::ExecNodeNonUniqueEqualityIndex::try_from(index("status")).unwrap(),
+        key: key("status"),
+        value: exec::ExecIndexedEqualityValue::try_from(
+            ir::SecondaryIndexLiteral::new(PropertyValue::from("active")).unwrap(),
+        )
+        .unwrap(),
+    };
+    let param = test_support::name("deleted_at");
+    let values =
+        ir::RuntimeEqualitySet::new(param.clone(), std::num::NonZeroUsize::new(2).unwrap());
+    let null_param =
+        || context::ParamBindings::default().with_value(param.clone(), PropertyValue::Null);
+    let null_list = || {
+        context::ParamBindings::default().with_value(
+            param.clone(),
+            PropertyValue::Array(vec![PropertyValue::Null, PropertyValue::from("1999")]),
+        )
+    };
+    let mut expected = [active[0], active[1]];
+    expected.sort_unstable();
+
+    let row_cases = [
+        (
+            exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                    key: key("deleted_at"),
+                },
+            ),
+            context::ParamBindings::default(),
+        ),
+        (
+            exec::ExecNodeSecondarySetPlan::DynamicEquality {
+                index: index("deleted_at"),
+                key: key("deleted_at"),
+                param: param.clone(),
+            },
+            null_param(),
+        ),
+        (
+            exec::ExecNodeSecondarySetPlan::DynamicMembership {
+                index: index("deleted_at"),
+                key: key("deleted_at"),
+                values: values.clone(),
+            },
+            null_list(),
+        ),
+    ];
+    for (late, params) in row_cases {
+        crate::index_lifecycle::secondary::reset_equality_read_metrics();
+        assert_eq!(
+            run_node_access_with_params(
+                &db,
+                exec::ExecNodeAccessPlan::SecondarySet {
+                    // The late leaf comes first; it is still read last.
+                    set: exec::ExecNodeSecondarySetPlan::Intersect {
+                        driver: Box::new(late),
+                        rest: ir::AtLeast::from_one(exec::ExecNodeSecondarySetPlan::Bitmap(
+                            active_status(),
+                        )),
+                    },
+                },
+                params,
+            )
+            .await,
+            ExecutionValue::Scalars(
+                expected
+                    .iter()
+                    .copied()
+                    .map(ExecutionScalar::NodeId)
+                    .collect()
+            )
+        );
+        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+        assert_eq!(metrics.scans, 0);
+        assert_eq!(metrics.graph_reads, active.len() as u64);
+    }
+
+    let count_cases = [
+        (
+            exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                    key: key("deleted_at"),
+                },
+            ),
+            context::ParamBindings::default(),
+        ),
+        (
+            exec::ExecCountCursorPlan::NodeDynamicEquality {
+                index: index("deleted_at"),
+                key: key("deleted_at"),
+                param: param.clone(),
+            },
+            null_param(),
+        ),
+        (
+            exec::ExecCountCursorPlan::NodeDynamicMembership {
+                index: index("deleted_at"),
+                key: key("deleted_at"),
+                values,
+            },
+            null_list(),
+        ),
+    ];
+    for (late, params) in count_cases {
+        let mut execution = ExecutionContext::new(&db, params);
+        execution.enable_request_read_view().await.unwrap();
+        crate::index_lifecycle::secondary::reset_equality_read_metrics();
+        assert_eq!(
+            execution
+                .pull_count_cardinality(
+                    &exec::ExecCountCursorPlan::Intersect {
+                        driver: Box::new(late),
+                        rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeBitmap(
+                            active_status(),
+                        )),
+                    },
+                    &mut None,
+                    0,
+                    None,
+                )
+                .await
+                .unwrap(),
+            expected.len()
+        );
+        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+        assert_eq!(metrics.scans, 0);
+        assert_eq!(metrics.graph_reads, active.len() as u64);
+        execution.close_request_read_view().unwrap();
+    }
+
+    // Alone, a null runtime equality still reads the label rows outside the
+    // lane: one lane scan, every row without the property verified.
+    crate::index_lifecycle::secondary::reset_equality_read_metrics();
+    let mut alone = expected
+        .iter()
+        .copied()
+        .chain(paused.iter().copied())
+        .collect::<Vec<_>>();
+    alone.sort_unstable();
+    assert_eq!(
+        run_node_access_with_params(
+            &db,
+            exec::ExecNodeAccessPlan::DynamicEquality {
+                index: index("deleted_at"),
+                key: key("deleted_at"),
+                param: param.clone(),
+            },
+            null_param(),
+        )
+        .await,
+        ExecutionValue::Scalars(alone.into_iter().map(ExecutionScalar::NodeId).collect())
+    );
+    let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+    assert_eq!(metrics.scans, 1);
+    assert_eq!(metrics.graph_reads, 2 + paused.len() as u64);
 }

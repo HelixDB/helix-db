@@ -33,6 +33,11 @@ enum CountCursorLeaf<'a> {
         lookup: &'a exec::ExecNodeUniqueOwnerReadPlan,
         verification: &'a exec::ExecNodeAuthoritativeVerificationPlan,
     },
+    NodeUniqueBatch {
+        index: &'a exec::ExecNodeUniqueEqualityIndex,
+        key: &'a helix_planner::catalog::ScopedPropertyKey,
+        values: &'a ir::AtLeast<exec::ExecIndexedEqualityValue, 2>,
+    },
     NodeRange(&'a exec::ExecNodeVerifiedRangeScanPlan),
     EdgeRange(&'a exec::ExecEdgeVerifiedRangeScanPlan),
     NodeAuthoritativeScan(&'a exec::ExecNodeAuthoritativeScanPredicate),
@@ -427,6 +432,7 @@ impl<'db> ExecutionContext<'db> {
                         &plan.key,
                         &plan.values,
                         access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?;
                 window.apply(ids.len() as usize)
@@ -440,6 +446,7 @@ impl<'db> ExecutionContext<'db> {
                         &plan.key,
                         &plan.values,
                         access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?;
                 window.apply(ids.len() as usize)
@@ -925,6 +932,10 @@ impl<'db> ExecutionContext<'db> {
                         .await?
                         .is_some(),
                 ),
+                exec::ExecCountCursorPlan::NodeUniqueBatch { index, key, values } => {
+                    let read = self.node_unique_batch_ids(index, key, values);
+                    read.await?.len() as usize
+                }
                 exec::ExecCountCursorPlan::NodeRange(plan) => {
                     validate_range_index("node_range:", &plan.index.index_id, &plan.key)?;
                     self.node_range_index_count_with_membership(
@@ -1156,6 +1167,7 @@ impl<'db> ExecutionContext<'db> {
                         key,
                         values,
                         access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?
                     .len() as usize
@@ -1167,6 +1179,7 @@ impl<'db> ExecutionContext<'db> {
                         key,
                         values,
                         access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?
                     .len() as usize
@@ -1220,6 +1233,11 @@ impl<'db> ExecutionContext<'db> {
                 },
                 dependency,
             ),
+            exec::ExecCountCursorPlan::NodeUniqueBatch { index, key, values } => self
+                .count_cursor_leaf(
+                    CountCursorLeaf::NodeUniqueBatch { index, key, values },
+                    dependency,
+                ),
             exec::ExecCountCursorPlan::NodeRange(plan) => {
                 self.count_cursor_leaf(CountCursorLeaf::NodeRange(plan), dependency)
             }
@@ -1392,6 +1410,14 @@ impl<'db> ExecutionContext<'db> {
                     let read = self.verified_node_unique_owner(lookup, verification);
                     let id = read.await?;
                     Ok(id
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                        .collect())
+                }
+                CountCursorLeaf::NodeUniqueBatch { index, key, values } => {
+                    let read = self.node_unique_batch_ids(index, key, values);
+                    let ids = read.await?;
+                    Ok(ids
                         .into_iter()
                         .map(|id| ExecutionRow::current(ElementRef::Node(id)))
                         .collect())
@@ -1643,6 +1669,7 @@ impl<'db> ExecutionContext<'db> {
                             key,
                             values,
                             access::PARALLEL_INDEX_READS,
+                            None,
                         )
                         .await?;
                     Ok(ids
@@ -1658,6 +1685,7 @@ impl<'db> ExecutionContext<'db> {
                             key,
                             values,
                             access::PARALLEL_INDEX_READS,
+                            None,
                         )
                         .await?;
                     Ok(ids
@@ -1722,16 +1750,50 @@ impl<'db> ExecutionContext<'db> {
                     .await;
                 }
                 C::Intersect { driver, rest } => {
-                    return CountIds::intersection(
-                        self.read_children(
-                            core::iter::once(driver.as_ref())
-                                .chain(rest.iter())
-                                .collect(),
+                    // Leaves that verify label records read only the IDs the
+                    // other children keep, so those children are read first.
+                    let (late, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                        .chain(rest.iter())
+                        .map(|child| (self.count_label_verified_leaf(child), child))
+                        .partition(|(leaf, _)| leaf.is_some());
+                    let others = others
+                        .into_iter()
+                        .map(|(_, child)| child)
+                        .collect::<Vec<_>>();
+                    let Some((kind, _)) = late.first().and_then(|(leaf, _)| leaf.as_ref()) else {
+                        return CountIds::intersection(self.read_children(
+                            others,
                             reads,
                             |child, reads| self.count_cursor_ids(child, reads),
-                        ),
-                    )
-                    .await;
+                        ))
+                        .await;
+                    };
+                    let kind = *kind;
+                    let within = match others.is_empty() {
+                        true => None,
+                        false => {
+                            let ids = CountIds::intersection(self.read_children(
+                                others,
+                                reads,
+                                |child, reads| self.count_cursor_ids(child, reads),
+                            ))
+                            .await?;
+                            Some(ids.proven | ids.unproven)
+                        }
+                    };
+                    // Every remaining ID is in a label-verified leaf, which
+                    // read its record, so all of them are proven.
+                    let ids = self
+                        .label_verified_intersection(
+                            kind,
+                            late.into_iter()
+                                .filter_map(|(leaf, _)| leaf.map(|(_, leaf)| leaf))
+                                .collect(),
+                            within,
+                            reads,
+                        )
+                        .await?;
+                    return Ok(CountIds::leaf(ids, Existence::Proven));
                 }
                 C::NodeBitmap(bitmap) => {
                     (self.node_bitmap(bitmap, reads).await?, Existence::Proven)
@@ -1747,6 +1809,10 @@ impl<'db> ExecutionContext<'db> {
                         .await?
                         .into_iter()
                         .collect(),
+                    Existence::Proven,
+                ),
+                C::NodeUniqueBatch { index, key, values } => (
+                    self.node_unique_batch_ids(index, key, values).await?,
                     Existence::Proven,
                 ),
                 C::NodeRange(range) => (
@@ -1809,6 +1875,7 @@ impl<'db> ExecutionContext<'db> {
                             key,
                             values,
                             reads,
+                            None,
                         )
                         .await?,
                         Existence::Proven,
@@ -1822,6 +1889,7 @@ impl<'db> ExecutionContext<'db> {
                             key,
                             values,
                             reads,
+                            None,
                         )
                         .await?,
                         Existence::Proven,
@@ -1854,52 +1922,6 @@ impl<'db> ExecutionContext<'db> {
                 }
                 C::NodeRuntimeInput(input) | C::EdgeRuntimeInput(input) => (
                     self.runtime_ids(input)?.into_iter().collect(),
-                    Existence::Unproven,
-                ),
-                C::NodeVectorSearch {
-                    key,
-                    index,
-                    query_vector,
-                    k,
-                } => (
-                    self.vector_search_results(
-                        VectorElementType::Node,
-                        &key.label,
-                        &key.property,
-                        index,
-                        query_vector,
-                        search(k),
-                    )
-                    .await?
-                    .into_iter()
-                    .filter_map(|result| match result.entity_id() {
-                        crate::search::vector::VectorEntityId::Node(id) => Some(id),
-                        crate::search::vector::VectorEntityId::Edge(_) => None,
-                    })
-                    .collect(),
-                    Existence::Unproven,
-                ),
-                C::EdgeVectorSearch {
-                    key,
-                    index,
-                    query_vector,
-                    k,
-                } => (
-                    self.vector_search_results(
-                        VectorElementType::Edge,
-                        &key.label,
-                        &key.property,
-                        index,
-                        query_vector,
-                        search(k),
-                    )
-                    .await?
-                    .into_iter()
-                    .filter_map(|result| match result.entity_id() {
-                        crate::search::vector::VectorEntityId::Edge(id) => Some(id),
-                        crate::search::vector::VectorEntityId::Node(_) => None,
-                    })
-                    .collect(),
                     Existence::Unproven,
                 ),
                 C::NodeTextSearch {
@@ -1960,6 +1982,8 @@ impl<'db> ExecutionContext<'db> {
                 | C::Expand { .. }
                 | C::VectorSearch { .. }
                 | C::TextSearch { .. }
+                | C::NodeVectorSearch { .. }
+                | C::EdgeVectorSearch { .. }
                 | C::Variable { .. }
                 | C::Distinct { .. } => {
                     return Err(HelixDbError::InvariantViolation(
@@ -1970,6 +1994,95 @@ impl<'db> ExecutionContext<'db> {
             Ok(CountIds::leaf(ids, existence))
         }
         .boxed()
+    }
+
+    /// Verified owners of `values` in a unique node equality index, read and
+    /// verified in batched multi-gets, as a row read of the same set is.
+    async fn node_unique_batch_ids(
+        &self,
+        index: &exec::ExecNodeUniqueEqualityIndex,
+        key: &helix_planner::catalog::ScopedPropertyKey,
+        values: &ir::AtLeast<exec::ExecIndexedEqualityValue, 2>,
+    ) -> Result<roaring::RoaringTreemap> {
+        validate_node_equality_index(&index.metadata().index_id, key)?;
+        let values = values.iter().map(indexed_value).collect::<Vec<_>>();
+        let ids = self
+            .lookup_managed_equality_batch(
+                crate::index_lifecycle::IndexElementKind::Node,
+                key,
+                &values,
+                true,
+            )
+            .await?;
+        self.check_execution_deadline()?;
+        Ok(ids)
+    }
+
+    /// The label-verified leaf a count ID leaf reads, with its element kind,
+    /// or `None` for a leaf answered by index reads alone.
+    fn count_label_verified_leaf<'a>(
+        &self,
+        cursor: &'a exec::ExecCountCursorPlan,
+    ) -> Option<(
+        crate::index_lifecycle::IndexElementKind,
+        access::LabelVerifiedLeaf<'a>,
+    )> {
+        use crate::index_lifecycle::IndexElementKind as K;
+        use exec::ExecCountCursorPlan as C;
+        match cursor {
+            C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                key,
+            }) => Some((K::Node, access::LabelVerifiedLeaf::Null(key))),
+            C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::NullEquality {
+                key,
+            }) => Some((K::Edge, access::LabelVerifiedLeaf::Null(key))),
+            C::NodeDynamicEquality { key, param, .. } => self
+                .label_verified_equality(key, param)
+                .map(|leaf| (K::Node, leaf)),
+            C::EdgeDynamicEquality { key, param, .. } => self
+                .label_verified_equality(key, param)
+                .map(|leaf| (K::Edge, leaf)),
+            C::NodeDynamicMembership { key, values, .. } => self
+                .label_verified_membership(key, values)
+                .map(|leaf| (K::Node, leaf)),
+            C::EdgeDynamicMembership { key, values, .. } => self
+                .label_verified_membership(key, values)
+                .map(|leaf| (K::Edge, leaf)),
+            C::EmptyRows
+            | C::InputRows
+            | C::NodeBitmap(_)
+            | C::EdgeBitmap(_)
+            | C::NodeUnique { .. }
+            | C::NodeUniqueBatch { .. }
+            | C::NodeRange(_)
+            | C::EdgeRange(_)
+            | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(_))
+            | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_))
+            | C::NodePointReads(_)
+            | C::EdgePointReads(_)
+            | C::NodeRuntimeInput(_)
+            | C::EdgeRuntimeInput(_)
+            | C::RuntimeInput(_)
+            | C::NodeFullScan
+            | C::EdgeFullScan
+            | C::NodeLabelBitmap(_)
+            | C::EdgeLabelBitmap(_)
+            | C::NodeVectorSearch { .. }
+            | C::EdgeVectorSearch { .. }
+            | C::NodeTextSearch { .. }
+            | C::EdgeTextSearch { .. }
+            | C::Union { .. }
+            | C::Intersect { .. }
+            | C::Filter { .. }
+            | C::IndexMembership { .. }
+            | C::Window { .. }
+            | C::Order { .. }
+            | C::Expand { .. }
+            | C::VectorSearch { .. }
+            | C::TextSearch { .. }
+            | C::Variable { .. }
+            | C::Distinct { .. } => None,
+        }
     }
 
     /// The elements of `ids` that exist, read in multi-gets of at most
@@ -2082,7 +2195,10 @@ impl CountIds {
                     proven |= &child.proven;
                     let ids = child.proven | child.unproven;
                     futures::future::ready(Ok((
-                        Some(all.map_or(ids.clone(), |all| all & ids)),
+                        Some(match all {
+                            None => ids,
+                            Some(all) => all & ids,
+                        }),
                         proven,
                     )))
                 },
@@ -2107,7 +2223,7 @@ impl CountIds {
 }
 
 /// Element keyspace of a count cursor made only of ID leaves of one element
-/// kind (point reads, runtime inputs, search results, and index, range,
+/// kind (point reads, runtime inputs, text-search results, and index, range,
 /// label and null-equality sets), unions and intersections of them included;
 /// `None` for any other cursor. Such a cursor is counted on ID bitmaps.
 pub(in crate::execution::interpreter) fn id_set_keyspace(
@@ -2123,6 +2239,7 @@ pub(in crate::execution::interpreter) fn id_set_keyspace(
         }
         C::NodeBitmap(_)
         | C::NodeUnique { .. }
+        | C::NodeUniqueBatch { .. }
         | C::NodeRange(_)
         | C::NodeLabelBitmap(_)
         | C::NodeDynamicEquality { .. }
@@ -2132,7 +2249,6 @@ pub(in crate::execution::interpreter) fn id_set_keyspace(
         })
         | C::NodePointReads(_)
         | C::NodeRuntimeInput(_)
-        | C::NodeVectorSearch { .. }
         | C::NodeTextSearch { .. } => Some(exec::ElementKeyspace::NodeProperty),
         C::EdgeBitmap(_)
         | C::EdgeRange(_)
@@ -2144,7 +2260,6 @@ pub(in crate::execution::interpreter) fn id_set_keyspace(
         })
         | C::EdgePointReads(_)
         | C::EdgeRuntimeInput(_)
-        | C::EdgeVectorSearch { .. }
         | C::EdgeTextSearch { .. } => Some(exec::ElementKeyspace::EdgeEndpoints),
         C::EmptyRows
         | C::InputRows
@@ -2158,6 +2273,8 @@ pub(in crate::execution::interpreter) fn id_set_keyspace(
         | C::Window { .. }
         | C::Order { .. }
         | C::Expand { .. }
+        | C::NodeVectorSearch { .. }
+        | C::EdgeVectorSearch { .. }
         | C::VectorSearch { .. }
         | C::TextSearch { .. }
         | C::Variable { .. }

@@ -5,8 +5,14 @@ use access::kv;
 use bytes::Bytes;
 use helix_planner::properties;
 
-/// Unverified IDs checked for existence per `multi_get`.
+/// Most unverified IDs checked for existence per `multi_get`.
 const RECORD_BATCH_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
+
+/// Factor by which each existence check of a source with no access-local
+/// limit reads more IDs than the last, from one up to [`RECORD_BATCH_ROWS`]:
+/// a consumer that stops after a few rows reads a few records, and a long
+/// read still reaches full batches after three checks (1, 8, 64, 256).
+const EXISTENCE_BATCH_GROWTH: usize = 8;
 
 pub(super) enum Plan<'a> {
     Prepared,
@@ -40,12 +46,15 @@ enum State {
     Unopened,
     /// IDs to emit. Unverified IDs are checked for existence in batches of
     /// at most [`RECORD_BATCH_ROWS`]; `pending` holds the rest of the last
-    /// batch in order, each with whether its element exists.
+    /// batch in order, each with whether its element exists. Without an
+    /// access-local limit, `batch` IDs are checked next, a number that grows
+    /// by [`EXISTENCE_BATCH_GROWTH`] with every check.
     Ids {
         ids: Ids,
         keyspace: exec::ElementKeyspace,
         verified: bool,
         pending: std::collections::VecDeque<(u64, bool)>,
+        batch: usize,
     },
     Scan {
         iter: slatedb::DbIterator,
@@ -73,6 +82,7 @@ impl<'a> Source<'a> {
                 keyspace,
                 verified,
                 pending: std::collections::VecDeque::new(),
+                batch: 1,
             },
             remaining: Demand::All,
         }
@@ -86,6 +96,7 @@ impl<'a> Source<'a> {
                 keyspace,
                 verified,
                 pending: std::collections::VecDeque::new(),
+                batch: 1,
             },
             remaining: Demand::All,
         }
@@ -274,6 +285,7 @@ impl<'a> Source<'a> {
                         key,
                         values,
                         access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?,
                     K::NodeProperty,
@@ -288,6 +300,7 @@ impl<'a> Source<'a> {
                         key,
                         values,
                         access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?,
                     K::EdgeEndpoints,
@@ -510,6 +523,7 @@ impl<'a> Source<'a> {
                     keyspace,
                     verified,
                     pending,
+                    batch,
                 } => {
                     let (id, exists) = match (*verified, pending.pop_front()) {
                         (true, _) => {
@@ -522,10 +536,17 @@ impl<'a> Source<'a> {
                         (false, Some(checked)) => checked,
                         (false, None) => {
                             // Check the next batch, no longer than the
-                            // access-local limit still allows.
+                            // access-local limit still allows, or growing
+                            // from one ID when the demand is unknown.
                             let wanted = match self.remaining {
                                 Demand::Take(remaining) => remaining.get().min(RECORD_BATCH_ROWS),
-                                Demand::All | Demand::Done => RECORD_BATCH_ROWS,
+                                Demand::All | Demand::Done => {
+                                    let wanted = *batch;
+                                    *batch = wanted
+                                        .saturating_mul(EXISTENCE_BATCH_GROWTH)
+                                        .min(RECORD_BATCH_ROWS);
+                                    wanted
+                                }
                             };
                             let batch = ids.by_ref().take(wanted).collect::<Vec<_>>();
                             if batch.is_empty() {
@@ -710,6 +731,17 @@ mod tests {
         assert_eq!(work.raw_gets, 0);
         assert_eq!(work.multi_get_keys, ids.len());
         assert_eq!(work.source_visits, ids.len());
+
+        // With unknown demand the checks grow from one ID: a consumer that
+        // stops after one row reads one record, after two rows nine.
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        let mut source = Source::ids(ids.clone(), exec::ElementKeyspace::NodeProperty, false);
+        assert!(source.next(&mut ctx).await.unwrap().is_some());
+        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 1);
+        // The second ID is missing; the third exists.
+        assert!(source.next(&mut ctx).await.unwrap().is_some());
+        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 1 + 8);
 
         // An access-local limit still applies at the ID boundary: the first
         // three IDs are read, one of them missing, and nothing more.

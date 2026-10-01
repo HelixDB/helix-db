@@ -2888,8 +2888,16 @@ async fn lookup_active_equality_generation_with_compatibility(
                 label: definition.label().as_str(),
                 property: definition.property().as_str(),
             };
-            let candidates =
-                unindexed_label_rows(reader, label, Some((handle, compatibility)), None).await?;
+            // Callers without a request's read budget keep one read in
+            // flight.
+            let candidates = unindexed_label_rows(
+                reader,
+                label,
+                Some((handle, compatibility)),
+                None,
+                LabelLaneReads::Sequential,
+            )
+            .await?;
             return verified_unindexed_rows(reader, label, candidates, |stored| {
                 stored.unwrap_or(&PropertyValue::Null).eq_value(value)
             })
@@ -2928,9 +2936,10 @@ async fn lookup_active_equality_generation_with_compatibility(
 }
 
 /// Read unique owner keys in `multi_get`s of at most
-/// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, then verify their
-/// authoritative rows using the same request reader. This does not change
-/// keys, values, or writes.
+/// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, then verify each batch's
+/// owners against their authoritative rows with one more `multi_get` from the
+/// same request reader, so a list of any length costs two reads per batch,
+/// never one per owner. This does not change keys, values, or writes.
 pub(crate) async fn lookup_active_unique_equality_batch(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -2995,20 +3004,56 @@ pub(crate) async fn lookup_active_unique_equality_batch(
                 "unique equality multi-get returned the wrong number of entries",
             ));
         }
-        for (entry, value) in entries.into_iter().zip(values) {
-            let Some(bytes) = entry else {
-                continue;
-            };
-            let owner = decode_secondary_entry_value(
-                handle.index_id(),
-                handle.generation(),
-                definition_lane(definition),
-                &bytes,
-            )?;
-            record_equality_graph_read();
-            if !authoritative_equality_matches(reader, handle.scope(), definition, owner, value)
-                .await?
-            {
+        let found = entries
+            .into_iter()
+            .zip(values)
+            .filter_map(|(entry, value)| entry.map(|bytes| (bytes, value)))
+            .map(|(bytes, value)| {
+                decode_secondary_entry_value(
+                    handle.index_id(),
+                    handle.generation(),
+                    definition_lane(definition),
+                    &bytes,
+                )
+                .map(|owner| (owner, value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if found.is_empty() {
+            continue;
+        }
+        found.iter().for_each(|_| record_equality_graph_read());
+        let records = found
+            .iter()
+            .map(|(owner, _)| {
+                authoritative_property_key(
+                    handle.scope(),
+                    IndexEntity {
+                        kind: definition.element_kind(),
+                        id: *owner,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "production-coverage"))]
+        BENCHMARK_MULTI_GETS.fetch_add(1, AtomicOrdering::Relaxed);
+        let records = reader.multi_get(&records).await?;
+        if records.len() != found.len() {
+            return Err(corruption(
+                "unique equality verification multi-get returned the wrong number of records",
+            ));
+        }
+        for ((owner, value), record) in found.into_iter().zip(records) {
+            let matches = record
+                .map(|bytes| decode_properties(&bytes))
+                .transpose()?
+                .is_some_and(|properties| {
+                    properties_match_definition(definition, &properties)
+                        && properties
+                            .iter()
+                            .find(|property| property.name == definition.property().as_str())
+                            .is_some_and(|property| property.value.eq_value(value))
+                });
+            if !matches {
                 return Err(corruption(
                     "unique equality owner disagrees with its authoritative node",
                 ));
@@ -3126,21 +3171,51 @@ pub(crate) struct UnindexedLabel<'a> {
     pub(crate) property: &'a str,
 }
 
-/// Rows of `label` that no entry of the Active equality generation `lane`
-/// holds, narrowed to `within` when it is given.
+/// A `within` set at most this large is verified directly: reading its
+/// records costs at most this many rows in four `multi_get`s, while the label
+/// bitmap and the lane scan grow with the label.
+pub(crate) const DIRECT_UNINDEXED_VERIFICATION_ROWS: u64 =
+    4 * helix_planner::cost::RECORD_BATCH_ROWS;
+
+/// Whether [`unindexed_label_rows`] may read the label bitmap and scan the
+/// equality lane at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelLaneReads {
+    /// Both reads are in flight together.
+    Concurrent,
+    /// The label bitmap is read first, then the lane: a caller with no free
+    /// read in its request's budget keeps one read in flight.
+    Sequential,
+}
+
+/// Candidate rows of `label` that no entry of the Active equality generation
+/// `lane` holds, narrowed to `within` when it is given.
 ///
-/// Writes reject values a lane cannot encode, so these are exactly the label
-/// rows whose property is missing, null or NaN (and label-bitmap IDs whose
-/// record no longer carries the label); callers verify them with
-/// [`verified_unindexed_rows`]. With no Active generation (`lane` is `None`)
-/// every label row is a candidate. The label bitmap and the lane are read
-/// concurrently, and no row outside the label is ever read.
+/// Writes reject values a lane cannot encode, so the rows outside the lane
+/// are exactly the label rows whose property is missing, null or NaN (and
+/// label-bitmap IDs whose record no longer carries the label). With no Active
+/// generation (`lane` is `None`) every label row is a candidate. No row
+/// outside the label is ever read.
+///
+/// A `within` of at most [`DIRECT_UNINDEXED_VERIFICATION_ROWS`] IDs is
+/// returned as it is, without reading the label bitmap or scanning the lane,
+/// so a selective intersection never pays for the whole label. It may then
+/// hold rows of other labels or rows the lane holds: callers verify every
+/// candidate with [`verified_unindexed_rows`], which drops rows outside the
+/// label, and whose `accept` rejects every value a lane holds (null, or a
+/// value no lane can encode) unless the caller unites the result with the
+/// lane's own rows for those values anyway.
 pub(crate) async fn unindexed_label_rows(
     reader: &(impl DbReadOps + Send + Sync),
     label: UnindexedLabel<'_>,
     lane: Option<(&ActiveIndexHandle, ReaderStorageCompatibility)>,
     within: Option<&roaring::RoaringTreemap>,
+    reads: LabelLaneReads,
 ) -> Result<roaring::RoaringTreemap> {
+    if let Some(within) = within.filter(|within| within.len() <= DIRECT_UNINDEXED_VERIFICATION_ROWS)
+    {
+        return Ok(within.clone());
+    }
     let rows = async {
         record_equality_point_read();
         match label.kind {
@@ -3169,7 +3244,10 @@ pub(crate) async fn unindexed_label_rows(
         };
         equality_lane_rows(reader, handle, compatibility).await
     };
-    let (mut candidates, held) = futures::try_join!(rows, held)?;
+    let (mut candidates, held) = match reads {
+        LabelLaneReads::Concurrent => futures::try_join!(rows, held)?,
+        LabelLaneReads::Sequential => (rows.await?, held.await?),
+    };
     candidates -= held;
     if let Some(within) = within {
         candidates &= within;

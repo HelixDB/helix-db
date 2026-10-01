@@ -24,53 +24,67 @@ pub(in crate::execution::interpreter) enum RuntimeEqualityDomain {
     },
 }
 
+/// One read of a runtime domain.
+enum DomainRead<'a> {
+    /// One index union of indexed members.
+    Indexed(&'a [PropertyValue]),
+    /// The verified label rows outside the lane, for the whole domain.
+    Unindexed(&'a PropertyValue),
+}
+
 impl<'db> ExecutionContext<'db> {
-    /// Rows of `key` whose property equals a member of the runtime domain.
+    /// Rows of `key` whose property equals a member of the runtime domain,
+    /// narrowed to `within` when it is given.
     ///
     /// Indexed members are read in index unions of at most
-    /// `plan.max_values()` values each. The unions are read concurrently
-    /// within `reads`, in plan order, so memory stays bounded by one union's
-    /// keys per read in flight plus the result. Members no lane can hold are
-    /// answered by the verified label rows outside the lane. The keyspace is
-    /// never scanned, whatever the domain's size.
+    /// `plan.max_values()` values each. Members no lane can hold are answered
+    /// by the verified label rows outside the lane, which `within` bounds.
+    /// The unions and the label read are read concurrently within `reads`, in
+    /// plan order, as children of one budgeted read, so memory stays bounded
+    /// by one union's keys per read in flight plus the result. The keyspace
+    /// is never scanned, whatever the domain's size.
     pub(in crate::execution::interpreter) async fn dynamic_membership_ids(
         &self,
         kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyKey,
         plan: &ir::RuntimeEqualitySet,
         reads: NonZeroUsize,
+        within: Option<&roaring::RoaringTreemap>,
     ) -> Result<roaring::RoaringTreemap> {
         let (indexed, unindexed) = match self.runtime_equality_domain(plan)? {
             RuntimeEqualityDomain::Indexed(indexed) => (indexed, None),
             RuntimeEqualityDomain::WithUnindexed { indexed, domain } => (indexed, Some(domain)),
         };
-        let indexed_ids = super::union(self.read_children(
-            indexed.chunks(plan.max_values().get()).collect(),
-            reads,
-            |values: &[PropertyValue], _| {
-                self.lookup_managed_equality_union(kind, key, values)
-                    .boxed()
-            },
-        ));
-        let unindexed_ids = async {
-            let Some(domain) = &unindexed else {
-                return Ok(roaring::RoaringTreemap::new());
-            };
-            self.unindexed_label_rows(
-                kind,
-                key,
-                |value| {
-                    super::super::stream::property_value_is_in(
-                        value.unwrap_or(&PropertyValue::Null),
-                        domain,
+        let parts = indexed
+            .chunks(plan.max_values().get())
+            .map(DomainRead::Indexed)
+            .chain(unindexed.as_ref().map(DomainRead::Unindexed))
+            .collect::<Vec<_>>();
+        let ids = super::union(
+            self.read_children(parts.iter().collect(), reads, |part, _| match part {
+                DomainRead::Indexed(values) => self
+                    .lookup_managed_equality_union(kind, key, values)
+                    .boxed(),
+                DomainRead::Unindexed(domain) => self
+                    .unindexed_label_rows(
+                        kind,
+                        key,
+                        |value| {
+                            super::super::stream::property_value_is_in(
+                                value.unwrap_or(&PropertyValue::Null),
+                                domain,
+                            )
+                        },
+                        within,
                     )
-                },
-                None,
-            )
-            .await
-        };
-        let (indexed_ids, unindexed_ids) = futures::try_join!(indexed_ids, unindexed_ids)?;
-        Ok(indexed_ids | unindexed_ids)
+                    .boxed(),
+            }),
+        )
+        .await?;
+        Ok(match within {
+            Some(within) => ids & within,
+            None => ids,
+        })
     }
 
     pub(in crate::execution::interpreter) fn runtime_equality_domain(

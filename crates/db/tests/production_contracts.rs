@@ -10282,6 +10282,41 @@ async fn public_query_boundary_serves_source_filters_and_counts_from_indexes_con
                 ]))
                 .values(vec!["uid"]),
             ),
+            // Counts over unique literal sets read one batch of owners:
+            // alone, with null, and intersected with another index.
+            read(
+                items(Predicate::is_in(
+                    "uid",
+                    vec![
+                        "i1".to_owned(),
+                        "i2".to_owned(),
+                        "i5".to_owned(),
+                        "absent".to_owned(),
+                    ],
+                ))
+                .count(),
+            ),
+            read(
+                items(Predicate::is_in(
+                    "uid",
+                    PropertyValue::Array(vec![
+                        PropertyValue::from("i1"),
+                        PropertyValue::from("i2"),
+                        PropertyValue::Null,
+                    ]),
+                ))
+                .count(),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in(
+                        "uid",
+                        vec!["i1".to_owned(), "i2".to_owned(), "i5".to_owned()],
+                    ),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+            ),
             read(
                 items(Predicate::or(vec![
                     Predicate::eq("kind", PropertyInput::param("kind")),
@@ -10438,6 +10473,40 @@ async fn public_query_boundary_serves_source_filters_and_counts_from_indexes_con
             ),
             (
                 items(Predicate::eq_param("kind", "kind")).count(),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            // Runtime values no lane holds, inside intersections, verify only
+            // the rows the other index keeps.
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 3),
+                ]))
+                .values(vec!["weight"]),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
                 bind(&[("kind", PropertyValue::Null)]),
             ),
             (

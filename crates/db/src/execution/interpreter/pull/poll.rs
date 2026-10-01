@@ -160,6 +160,7 @@ impl<'a> Cursor<'a> {
                             | exec::ExecCountCursorPlan::NodeBitmap(_)
                             | exec::ExecCountCursorPlan::EdgeBitmap(_)
                             | exec::ExecCountCursorPlan::NodeUnique { .. }
+                            | exec::ExecCountCursorPlan::NodeUniqueBatch { .. }
                             | exec::ExecCountCursorPlan::NodeRange(_)
                             | exec::ExecCountCursorPlan::EdgeRange(_)
                             | exec::ExecCountCursorPlan::NodeAuthoritativeScan(_)

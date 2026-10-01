@@ -69,6 +69,15 @@ impl<'a> Program<'a> {
                     param: param.clone(),
                 },
             )),
+            C::NodeUniqueBatch { index, key, values } => source(exec::ExecAccessPlan::Node(
+                exec::ExecNodeAccessPlan::SecondarySet {
+                    set: exec::ExecNodeSecondarySetPlan::UniqueUnion {
+                        index: index.clone(),
+                        key: key.clone(),
+                        values: values.clone(),
+                    },
+                },
+            )),
             C::NodeDynamicMembership { index, key, values } => source(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::DynamicMembership {
                     index: index.clone(),

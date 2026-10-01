@@ -85,45 +85,87 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 
+    /// Rows of `key` whose property equals any of `values`.
+    ///
+    /// Indexed values read the Active lane. Null and values no lane can hold
+    /// are answered by [`Self::unindexed_label_rows`], under the request's
+    /// read budget, and united with them.
     pub(in crate::execution::interpreter) async fn lookup_managed_equality_union(
         &self,
         element_kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyKey,
         values: &[DbPropertyValue],
     ) -> Result<roaring::RoaringTreemap> {
-        if values.is_empty() {
-            return Ok(roaring::RoaringTreemap::new());
+        use crate::encoding::v2::values::property::equality_index_value as projection;
+        let (indexed, unindexed): (Vec<_>, Vec<_>) = values.iter().partition(|value| {
+            matches!(
+                projection::project_equality_value(value),
+                projection::EqualityValueProjection::Indexed(_)
+                    | projection::EqualityValueProjection::NonReflexive
+            )
+        });
+        let unindexed_ids = match unindexed.as_slice() {
+            [] => roaring::RoaringTreemap::new(),
+            unindexed => {
+                self.unindexed_label_rows(
+                    element_kind,
+                    key,
+                    |stored| {
+                        let stored = stored.unwrap_or(&DbPropertyValue::Null);
+                        unindexed.iter().any(|value| stored.eq_value(value))
+                    },
+                    None,
+                )
+                .await?
+            }
+        };
+        if indexed.is_empty() {
+            return Ok(unindexed_ids);
         }
+        // Only a list holding unindexed values is copied.
+        let indexed_values;
+        let values = if unindexed.is_empty() {
+            values
+        } else {
+            indexed_values = indexed.into_iter().cloned().collect::<Vec<_>>();
+            &indexed_values
+        };
         let identity = secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,
             key.label.as_ref(),
             key.property.as_ref(),
         )?;
-        if let Some(active) = self.active_write_tx() {
-            return lookup_managed_equalities_in_view(self, &active.txn, &identity, values).await;
-        }
-        if let Some(view) = self.request_read_view() {
-            return lookup_managed_equalities_in_view(self, view, &identity, values).await;
-        }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    lookup_managed_equalities_in_view(self, reader.as_ref(), &identity, values)
-                        .await
-                }
-                HelixStorage::Writer(writer) => {
-                    lookup_managed_equalities_in_view(self, writer.db(), &identity, values).await
+        let indexed_ids = async {
+            if let Some(active) = self.active_write_tx() {
+                return lookup_managed_equalities_in_view(self, &active.txn, &identity, values)
+                    .await;
+            }
+            if let Some(view) = self.request_read_view() {
+                return lookup_managed_equalities_in_view(self, view, &identity, values).await;
+            }
+            #[cfg(test)]
+            {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        lookup_managed_equalities_in_view(self, reader.as_ref(), &identity, values)
+                            .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        lookup_managed_equalities_in_view(self, writer.db(), &identity, values)
+                            .await
+                    }
                 }
             }
+            #[cfg(not(test))]
+            {
+                Err(HelixDbError::InvariantViolation(
+                    "secondary equality batch escaped its request read view".to_string(),
+                ))
+            }
         }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
-                "secondary equality batch escaped its request read view".to_string(),
-            ))
-        }
+        .await?;
+        Ok(indexed_ids | unindexed_ids)
     }
 
     /// Rows of `key.label` whose `key.property` no Active equality entry holds
@@ -131,10 +173,17 @@ impl<'db> ExecutionContext<'db> {
     /// `within` when it is given.
     ///
     /// This serves null equality and query values no lane can encode. It reads
-    /// the label bitmap and the Active lane concurrently, then verifies only
-    /// the label rows outside the lane, in record batches, so it never reads a
-    /// row of another label. A property with no Active equality generation
-    /// verifies every label row.
+    /// the label bitmap and the Active lane, then verifies only the label rows
+    /// outside the lane, in record batches, so it never reads a row of another
+    /// label. A property with no Active equality generation verifies every
+    /// label row. A small `within` is verified directly, without reading the
+    /// label or the lane; `accept` must then reject every value a lane holds,
+    /// or the caller must unite the result with the lane's rows for the values
+    /// it accepts.
+    ///
+    /// The label and the lane are read concurrently only when the request's
+    /// [`super::SharedIndexReads`] have a read free, which this read holds
+    /// until it ends; otherwise they are read one after the other.
     pub(in crate::execution::interpreter) async fn unindexed_label_rows(
         &self,
         element_kind: crate::index_lifecycle::IndexElementKind,
@@ -232,7 +281,7 @@ impl<'db> ExecutionContext<'db> {
             .await
     }
 
-    pub(super) async fn lookup_managed_equality_batch(
+    pub(in crate::execution::interpreter) async fn lookup_managed_equality_batch(
         &self,
         element_kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyKey,
@@ -831,13 +880,19 @@ async fn unindexed_label_rows_in_view(
         });
         loaded.as_ref()
     };
+    let extra = context.shared_index_reads.take(1);
     let candidates = crate::index_lifecycle::secondary::unindexed_label_rows(
         reader,
         label,
         handle.map(|handle| (handle, compatibility)),
         within,
+        match extra.taken {
+            0 => crate::index_lifecycle::secondary::LabelLaneReads::Sequential,
+            _ => crate::index_lifecycle::secondary::LabelLaneReads::Concurrent,
+        },
     )
     .await?;
+    drop(extra);
     context.check_execution_deadline()?;
     crate::index_lifecycle::secondary::verified_unindexed_rows(reader, label, candidates, accept)
         .await
