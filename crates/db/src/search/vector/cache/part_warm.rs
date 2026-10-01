@@ -9,9 +9,10 @@
 //! object-store tier fills, and later searches read the parts locally.
 //!
 //! Known limits: node and edge records (read to check hits and to project
-//! them) are not warmed; generations that become Active after the warm are not
-//! warmed; and parts replaced by a later compaction are cold again unless the
-//! writer caches the SSTs it writes.
+//! them) are not warmed; neither are entry-candidate rows, which a search
+//! reads only to recover from a deleted entry point; generations that become
+//! Active after the warm are not warmed; and parts replaced by a later
+//! compaction are cold again unless the writer caches the SSTs it writes.
 
 use slatedb::DbReadOps;
 

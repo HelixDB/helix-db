@@ -1557,6 +1557,28 @@ async fn run_part_warm_contracts() {
     assert_eq!(summary.read, PartWarm::Complete(3 * 4096));
     assert_eq!(*recorder.scans.lock().unwrap(), vec![(false, 4096, 1); 3]);
 
+    // A range is admitted only when its whole parts fit, so the charge never
+    // passes the budget: each of the three ranges here fits in one part.
+    for (budget, warmed) in [
+        (0, PartWarm::BudgetExhausted(0)),
+        (4095, PartWarm::BudgetExhausted(0)),
+        (4096, PartWarm::BudgetExhausted(4096)),
+        (4096 + 2048, PartWarm::BudgetExhausted(4096)),
+        (2 * 4096 - 1, PartWarm::BudgetExhausted(4096)),
+        (2 * 4096, PartWarm::BudgetExhausted(2 * 4096)),
+        (3 * 4096 - 1, PartWarm::BudgetExhausted(2 * 4096)),
+        (3 * 4096, PartWarm::Complete(3 * 4096)),
+    ] {
+        let summary = crate::search::vector::warm_object_store_parts(
+            &db,
+            std::slice::from_ref(&first),
+            4096,
+            budget,
+        )
+        .await;
+        assert_eq!(summary.read, warmed, "budget {budget}");
+    }
+
     // A budget stops before the row that would pass it, never after.
     for budget in [0, 1, first_bytes / 2, first_bytes - 1] {
         let summary = warm(vec![first.clone()], budget).await;

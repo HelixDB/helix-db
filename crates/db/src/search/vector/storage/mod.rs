@@ -98,10 +98,12 @@ enum RangeEnd {
 
 /// Reads the rows of one opened range scan to the end and returns their key
 /// and value bytes, stopping before the row that would take `charged` plus
-/// those bytes past `budget`.
+/// those bytes, rounded up to whole `part`s as the range is charged, past
+/// `budget`. A range's charge therefore never takes the total past `budget`.
 async fn drain_rows(
     rows: Result<slatedb::DbIterator, slatedb::Error>,
     charged: u64,
+    part: u64,
     budget: u64,
 ) -> (u64, RangeEnd) {
     let mut rows = match rows {
@@ -118,7 +120,12 @@ async fn drain_rows(
         let Some(total) = u64::try_from(row.key.len() + row.value.len())
             .ok()
             .and_then(|row_bytes| read.checked_add(row_bytes))
-            .filter(|total| charged.saturating_add(*total) <= budget)
+            .filter(|total| {
+                total
+                    .checked_next_multiple_of(part)
+                    .and_then(|whole_parts| charged.checked_add(whole_parts))
+                    .is_some_and(|charge| charge <= budget)
+            })
         else {
             return (read, RangeEnd::BudgetExhausted);
         };
@@ -883,8 +890,12 @@ where
                 .read
                 .scan_prefix_with_options(self.keyspace.key(prefix), .., &options)
                 .await;
-            let (read, end) = drain_rows(rows, charged, budget).await;
+            let (read, end) = drain_rows(rows, charged, part, budget).await;
             charged = charged.saturating_add(read.next_multiple_of(part));
+            debug_assert!(
+                charged <= budget,
+                "a range is admitted only while its whole parts fit the budget"
+            );
             match end {
                 RangeEnd::Complete => {}
                 RangeEnd::BudgetExhausted => return Ok(PartWarm::BudgetExhausted(charged)),
