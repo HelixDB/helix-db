@@ -318,27 +318,45 @@ fn node_secondary_set_cost(
             )
         }
         exec::ExecNodeSecondarySetPlan::Intersect { driver, rest } => {
-            let children = core::iter::once(driver.as_ref())
+            // The executor reads null equalities after the other children,
+            // one at a time, so they verify only the rows the others keep.
+            let (nulls, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
                 .chain(rest.iter())
-                .map(|child| node_secondary_set_cost(child, profile))
-                .collect::<Vec<_>>();
-            let rows = children
-                .iter()
+                .map(|child| {
+                    (
+                        matches!(
+                            child,
+                            exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. }
+                            )
+                        ),
+                        node_secondary_set_cost(child, profile),
+                    )
+                })
+                .partition(|(null, _)| *null);
+            let children = || others.iter().chain(&nulls).map(|(_, child)| child);
+            let rows = children()
                 .map(|(_, rows)| *rows)
                 .min()
                 .expect("secondary intersection has children");
             let input_rows = cost::EstimatedRows::rows(
-                children
-                    .iter()
+                children()
                     .map(|(_, rows)| rows.as_rows())
                     .fold(0_u64, u64::saturating_add),
             );
-            let costs = children
-                .into_iter()
-                .map(|(cost, _)| cost)
-                .collect::<Vec<_>>();
             let cost = profile
-                .parallel_reads(&costs)
+                .parallel_reads(
+                    &others
+                        .iter()
+                        .map(|(_, (cost, _))| *cost)
+                        .collect::<Vec<_>>(),
+                )
+                .serial(
+                    nulls
+                        .iter()
+                        .map(|(_, (cost, _))| *cost)
+                        .fold(cost::CostVector::ZERO, cost::CostVector::serial),
+                )
                 .serial(profile.secondary_set_operation(input_rows));
             (cost, rows)
         }
@@ -424,27 +442,45 @@ fn edge_secondary_set_cost(
             )
         }
         exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest } => {
-            let children = core::iter::once(driver.as_ref())
+            // The executor reads null equalities after the other children,
+            // one at a time, so they verify only the rows the others keep.
+            let (nulls, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
                 .chain(rest.iter())
-                .map(|child| edge_secondary_set_cost(child, profile))
-                .collect::<Vec<_>>();
-            let rows = children
-                .iter()
+                .map(|child| {
+                    (
+                        matches!(
+                            child,
+                            exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                                exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { .. }
+                            )
+                        ),
+                        edge_secondary_set_cost(child, profile),
+                    )
+                })
+                .partition(|(null, _)| *null);
+            let children = || others.iter().chain(&nulls).map(|(_, child)| child);
+            let rows = children()
                 .map(|(_, rows)| *rows)
                 .min()
                 .expect("secondary intersection has children");
             let input_rows = cost::EstimatedRows::rows(
-                children
-                    .iter()
+                children()
                     .map(|(_, rows)| rows.as_rows())
                     .fold(0_u64, u64::saturating_add),
             );
-            let costs = children
-                .into_iter()
-                .map(|(cost, _)| cost)
-                .collect::<Vec<_>>();
             let cost = profile
-                .parallel_reads(&costs)
+                .parallel_reads(
+                    &others
+                        .iter()
+                        .map(|(_, (cost, _))| *cost)
+                        .collect::<Vec<_>>(),
+                )
+                .serial(
+                    nulls
+                        .iter()
+                        .map(|(_, (cost, _))| *cost)
+                        .fold(cost::CostVector::ZERO, cost::CostVector::serial),
+                )
                 .serial(profile.secondary_set_operation(input_rows));
             (cost, rows)
         }

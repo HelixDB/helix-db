@@ -185,14 +185,31 @@ impl StorageCostProfile {
         }
     }
 
-    /// Cost one close-key `multi_get` and decode for batched V4 bitmaps.
+    /// Cost the close-key `multi_get`s and decode of batched V4 bitmaps.
+    ///
+    /// The executor reads the bitmaps in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, so every further batch pays
+    /// one more call setup.
+    ///
+    /// ```
+    /// use helix_planner::{cost, properties};
+    /// let profile = cost::StorageCostProfile::default();
+    /// let batch = |values| {
+    ///     profile.bitmap_equality_batch(
+    ///         properties::PositiveUsize::at_least_one(values),
+    ///         cost::EstimatedRows::rows(10),
+    ///     )
+    /// };
+    /// assert_eq!(batch(256).multi_get_calls, 1);
+    /// assert_eq!(batch(600).multi_get_calls, 3);
+    /// ```
     pub fn bitmap_equality_batch(
         &self,
         values: PositiveUsize,
         estimated_rows: EstimatedRows,
     ) -> CostVector {
         let rows = estimated_rows.as_rows();
-        self.multi_get(values, KeyLocality::Close)
+        self.record_batched_multi_get(values, KeyLocality::Close)
             .serial(CostVector {
                 latency: self.bitmap_decode_per_id.saturating_mul(rows),
                 cpu_units: rows,
@@ -208,7 +225,10 @@ impl StorageCostProfile {
             .serial(self.authoritative_verification(estimated_rows))
     }
 
-    /// Cost a unique owner multi-get and same-snapshot authoritative checks.
+    /// Cost unique owner multi-gets and same-snapshot authoritative checks.
+    ///
+    /// Owners are read in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, each paying its own setup.
     ///
     /// ```
     /// use helix_planner::{cost, properties};
@@ -218,9 +238,12 @@ impl StorageCostProfile {
     /// assert_eq!(batch.multi_get_calls, 1);
     /// assert_eq!(batch.authoritative_graph_reads, 5);
     /// assert_eq!(batch.object_reads, 10);
+    /// let wide = profile.unique_equality_batch(
+    ///     properties::PositiveUsize::at_least_one(10_000), cost::EstimatedRows::rows(5));
+    /// assert_eq!(wide.multi_get_calls, 40);
     /// ```
     pub fn unique_equality_batch(&self, values: PositiveUsize, rows: EstimatedRows) -> CostVector {
-        self.multi_get(values, KeyLocality::Close)
+        self.record_batched_multi_get(values, KeyLocality::Close)
             .serial(self.authoritative_verification(rows))
             .serial(self.secondary_set_operation(rows))
     }
@@ -254,6 +277,22 @@ impl StorageCostProfile {
             .serial(self.range_scan(label_rows))
             .serial(self.secondary_set_operation(label_rows))
             .serial(self.authoritative_verification(candidates))
+    }
+
+    /// Cost `keys` read in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, as the executor reads
+    /// equality batches: one [`Self::multi_get`] whose setup is paid once per
+    /// call.
+    fn record_batched_multi_get(&self, keys: PositiveUsize, locality: KeyLocality) -> CostVector {
+        let calls = (keys.get() as u64).div_ceil(crate::cost::RECORD_BATCH_ROWS);
+        let read = self.multi_get(keys, locality);
+        CostVector {
+            latency: read
+                .latency
+                .saturating_add(self.multi_get_setup.saturating_mul(calls - 1)),
+            multi_get_calls: calls,
+            ..read
+        }
     }
 
     /// Cost a V2 range scan plus authoritative verification of every candidate.

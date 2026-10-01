@@ -228,7 +228,8 @@ fn dedup<S: PartialEq>(branches: Vec<IndexBranch<S>>) -> Vec<IndexBranch<S>> {
 ///
 /// One branch narrows the source to its index sets with its residual as a
 /// filter. Several residual-free branches are one union. Several branches
-/// with residuals become a branch-residual union over a broad source; a
+/// with residuals become a branch-residual union over a broad source, whose
+/// residual-free branches are folded into one union branch; a
 /// narrow source (point IDs, a parameter, a search) is already bounded, so
 /// its filter stays per row. Any branch no index narrows leaves the filter
 /// per row.
@@ -276,16 +277,30 @@ where
         many if many.iter().all(|branch| branch.residual.is_empty()) => {
             narrowed(union_of_branches::<F>(many), Vec::new())
         }
-        many if F::is_broad_source(source) => F::branch_residual_union(
-            many.iter()
+        // Residual-free branches need no per-branch filter, so they are one
+        // union source (whose same-property literals become one batched
+        // read); only branches with residuals stay separate.
+        many if F::is_broad_source(source) => F::branch_residual_union({
+            let (exact, residual): (Vec<_>, Vec<_>) = many
+                .iter()
+                .cloned()
+                .partition(|branch| branch.residual.is_empty());
+            let exact = match exact.as_slice() {
+                [] => None,
+                [one] => Some(branch_source::<F>(one)),
+                exact => Some(union_of_branches::<F>(exact)),
+            };
+            residual
+                .iter()
                 .map(|branch| {
                     (
                         branch_source::<F>(branch),
                         shared::conjunction_plan(branch.residual.clone()),
                     )
                 })
-                .collect(),
-        )
+                .chain(exact.map(|source| (source, None)))
+                .collect()
+        })
         .map_or(
             PartialIndexFilterApplication::NotApplicable(
                 PartialIndexFilterRejection::ResidualBranchesUnrepresentable,

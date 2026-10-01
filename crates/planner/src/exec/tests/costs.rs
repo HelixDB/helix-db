@@ -175,6 +175,44 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
 }
 
 #[test]
+fn intersections_price_null_equalities_after_their_other_children() {
+    // The executor verifies a null equality only against the rows the other
+    // children keep, so it reads them first and the null leaf after them:
+    // the slowest other child and the null scan add up.
+    let profile = cost::StorageCostProfile::default();
+    let equality = |property: &str, value: PropertyValue| {
+        node_source(ir::NodeAccessPlan::EqualityIndex {
+            index: catalog::NodeEqualityIndexMeta::try_new(property).unwrap(),
+            key: catalog::ScopedPropertyKey::try_new("User", property).unwrap(),
+            value: index_value(value),
+        })
+    };
+    let others = [
+        equality("status", PropertyValue::from("active")),
+        equality("tier", PropertyValue::from("gold")),
+    ];
+    let with_null = ir::NodeAccessPlan::Intersect(
+        ir::AtLeast::try_from_vec(
+            others
+                .iter()
+                .cloned()
+                .chain([equality("deleted_at", PropertyValue::Null)])
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let without_null =
+        ir::NodeAccessPlan::Intersect(ir::AtLeast::try_from_vec(others.to_vec()).unwrap());
+    let null_scan = profile.null_equality_scan(profile.default_unknown_scan_rows);
+    assert!(
+        node_access_cost(&with_null, &profile).latency
+            >= node_access_cost(&without_null, &profile)
+                .latency
+                .saturating_add(null_scan.latency),
+    );
+}
+
+#[test]
 fn stream_delivered_properties_preserve_literal_window_lower_bounds() {
     let delivered = properties::DeliveredProperties {
         cardinality: properties::CardinalityBounds::new(3, Some(10)).unwrap(),

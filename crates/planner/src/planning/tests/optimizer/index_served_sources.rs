@@ -519,6 +519,50 @@ fn counts_over_saved_streams_read_the_index() {
 }
 
 #[test]
+fn partly_indexed_ors_read_their_residual_free_branches_as_one_set() {
+    // A thousand residual-free branches on one property and one branch with
+    // a residual: the thousand are one batched read, not a thousand steps.
+    let predicate = Predicate::or(
+        (0..1_000)
+            .map(|value| Predicate::eq("p1", value))
+            .chain([Predicate::and(vec![
+                Predicate::eq("p0", 0),
+                Predicate::gte("rank", 3),
+            ])])
+            .collect(),
+    );
+    let plan = executable_traversal(
+        g().n_with_label_where("Item", predicate).values(vec!["p0"]),
+        ctx(indexes()),
+    );
+    let accesses = plan
+        .steps()
+        .iter()
+        .filter(|step| matches!(step.op, ExecOp::Access { .. }))
+        .count();
+    assert_eq!(accesses, 2, "{:#?}", plan.steps());
+    let json = semantic(&plan);
+    let mut batches = Vec::new();
+    visit(&json, &mut |value| {
+        if let Some(values) = value
+            .get("batched_union_read")
+            .and_then(|read| read["values"].as_array())
+        {
+            batches.push(values.len());
+        }
+    });
+    assert_eq!(batches, [1_000], "{json:#}");
+    let filtered = filter_strings(&json);
+    assert!(filtered.contains(&"rank".to_string()), "{json:#}");
+    assert!(
+        filtered
+            .iter()
+            .all(|text| !PROPERTIES.contains(&text.as_str())),
+        "{json:#}"
+    );
+}
+
+#[test]
 fn unique_reads_that_may_return_many_rows_keep_their_read_limit() {
     // A unique lane holds one owner per indexed value, but a literal set
     // returns one row per member, and null (bound statically or at run time)
