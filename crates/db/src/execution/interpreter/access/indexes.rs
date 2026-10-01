@@ -785,6 +785,7 @@ async fn lookup_managed_equalities_in_view(
             });
         };
         return lookup_managed_active_equalities_in_view(
+            context,
             reader,
             active,
             values,
@@ -801,6 +802,7 @@ async fn lookup_managed_equalities_in_view(
             });
         };
         return lookup_managed_active_equalities_in_view(
+            context,
             reader,
             active,
             values,
@@ -834,6 +836,7 @@ async fn lookup_managed_equalities_in_view(
         });
     };
     lookup_managed_active_equalities_in_view(
+        context,
         reader,
         &active,
         values,
@@ -880,6 +883,7 @@ async fn unindexed_label_rows_in_view(
         });
         loaded.as_ref()
     };
+    let deadline = || context.check_execution_deadline();
     let extra = context.shared_index_reads.take(1);
     let candidates = crate::index_lifecycle::secondary::unindexed_label_rows(
         reader,
@@ -890,15 +894,18 @@ async fn unindexed_label_rows_in_view(
             0 => crate::index_lifecycle::secondary::LabelLaneReads::Sequential,
             _ => crate::index_lifecycle::secondary::LabelLaneReads::Concurrent,
         },
+        &deadline,
     )
     .await?;
     drop(extra);
-    context.check_execution_deadline()?;
-    crate::index_lifecycle::secondary::verified_unindexed_rows(reader, label, candidates, accept)
-        .await
+    crate::index_lifecycle::secondary::verified_unindexed_rows(
+        reader, label, candidates, accept, &deadline,
+    )
+    .await
 }
 
 async fn lookup_managed_active_equalities_in_view(
+    context: &ExecutionContext<'_>,
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
@@ -917,6 +924,7 @@ async fn lookup_managed_active_equalities_in_view(
         active,
         values,
         compatibility,
+        &|| context.check_execution_deadline(),
     )
     .await
 }

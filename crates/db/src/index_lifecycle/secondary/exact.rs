@@ -1128,6 +1128,7 @@ mod tests {
                     Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
                     None,
                     reads,
+                    &|| Ok(()),
                 )
                 .await
                 .unwrap(),
@@ -1143,6 +1144,7 @@ mod tests {
                 Some((&handle, ReaderStorageCompatibility::Current)),
                 None,
                 LabelLaneReads::Concurrent,
+                &|| Ok(()),
             )
             .await
             .unwrap(),
@@ -1157,6 +1159,7 @@ mod tests {
                 Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
                 Some(&wide),
                 LabelLaneReads::Concurrent,
+                &|| Ok(()),
             )
             .await
             .unwrap(),
@@ -1173,6 +1176,7 @@ mod tests {
                 Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
                 Some(&small),
                 LabelLaneReads::Concurrent,
+                &|| Ok(()),
             )
             .await
             .unwrap(),
@@ -1183,10 +1187,44 @@ mod tests {
             SecondaryEqualityReadMetrics::default()
         );
         assert_eq!(
-            unindexed_label_rows(&db, label, None, None, LabelLaneReads::Concurrent)
-                .await
-                .unwrap(),
+            unindexed_label_rows(&db, label, None, None, LabelLaneReads::Concurrent, &|| Ok(
+                ()
+            ),)
+            .await
+            .unwrap(),
             roaring::RoaringTreemap::from_iter(1..=5)
+        );
+
+        // An expired request stops the lane scan before its first row, and
+        // verification before its next record batch.
+        let expired = || Err(crate::HelixDbError::QueryDeadlineExceeded);
+        assert!(matches!(
+            unindexed_label_rows(
+                &db,
+                label,
+                Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                None,
+                LabelLaneReads::Sequential,
+                &expired,
+            )
+            .await,
+            Err(crate::HelixDbError::QueryDeadlineExceeded)
+        ));
+        let checks = core::sync::atomic::AtomicUsize::new(0);
+        let one_batch = || match checks.fetch_add(1, core::sync::atomic::Ordering::Relaxed) {
+            0 => Ok(()),
+            _ => Err(crate::HelixDbError::QueryDeadlineExceeded),
+        };
+        reset_equality_read_metrics();
+        let three_batches =
+            roaring::RoaringTreemap::from_iter(1..=2 * helix_planner::cost::RECORD_BATCH_ROWS + 1);
+        assert!(matches!(
+            verified_unindexed_rows(&db, label, three_batches, |_| true, &one_batch).await,
+            Err(crate::HelixDbError::QueryDeadlineExceeded)
+        ));
+        assert_eq!(
+            equality_read_metrics().graph_reads,
+            helix_planner::cost::RECORD_BATCH_ROWS
         );
         db.close().await.unwrap();
     }

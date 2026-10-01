@@ -1486,6 +1486,56 @@ async fn unsupported_and_oversized_equality_values_return_verified_label_rows() 
 }
 
 #[tokio::test]
+async fn label_rows_outside_the_lane_stop_at_the_request_deadline() {
+    let db = test_support::open_db("access-null-equality-deadline").await;
+    let mut active = Vec::new();
+    for _ in 0..3 {
+        active.push(
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::from("active"))],
+            )
+            .await,
+        );
+    }
+    // More null rows than one record batch holds: verification reads two.
+    let mut nulls = Vec::new();
+    for _ in 0..helix_planner::cost::RECORD_BATCH_ROWS + 1 {
+        nulls.push(test_support::add_node_with_properties(&db, "User", Vec::new()).await);
+    }
+    let rows = active.iter().map(|id| ("active", *id)).collect::<Vec<_>>();
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        74,
+        &rows,
+    )
+    .await;
+    let key = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+    let mut expired = 0;
+    for checks in 0.. {
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.fail_deadline_after(checks);
+        match ctx
+            .null_equality_rows(IndexElementKind::Node, &key, None)
+            .await
+        {
+            Err(HelixDbError::QueryDeadlineExceeded) => expired += 1,
+            Err(error) => panic!("unexpected error {error:?}"),
+            Ok(rows) => {
+                assert_eq!(rows, roaring::RoaringTreemap::from_iter(nulls));
+                break;
+            }
+        }
+    }
+    // The request deadline is checked before every lane row (the one `active`
+    // bitmap, then the end of the lane) and before every record batch (two,
+    // then the end of the candidates), so an expired request stops at each.
+    assert_eq!(expired, 5);
+}
+
+#[tokio::test]
 async fn runtime_lists_over_the_bound_use_chunked_multi_gets() {
     let db = test_support::open_db("access-runtime-lists-over-the-bound").await;
     let mut matching = Vec::new();

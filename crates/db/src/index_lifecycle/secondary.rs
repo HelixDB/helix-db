@@ -2832,8 +2832,8 @@ fn mutation_value_error(
 ///
 /// The caller must run this function inside the request lease batch associated
 /// with `handle`. Unique entries and V4 non-unique bitmaps each use one point
-/// read. Authoritative-null lookup remains a graph scan because nulls are not
-/// physically indexed.
+/// read. Null and values no lane can encode are answered by the verified
+/// label rows outside the lane (see [`unindexed_label_rows`]).
 #[cfg(any(
     test,
     feature = "production-coverage",
@@ -2849,15 +2849,19 @@ pub(crate) async fn lookup_active_equality_generation(
         handle,
         value,
         ReaderStorageCompatibility::Current,
+        &|| Ok(()),
     )
     .await
 }
 
+/// `deadline` fails once the caller's request may no longer read; it is
+/// checked between the reads of a value's label rows outside the lane.
 async fn lookup_active_equality_generation_with_compatibility(
     reader: &(impl DbReadOps + Send + Sync),
     handle: &ActiveIndexHandle,
     value: &PropertyValue,
     compatibility: ReaderStorageCompatibility,
+    deadline: &(impl Fn() -> Result<()> + Sync),
 ) -> Result<roaring::RoaringTreemap> {
     let Some(definition) = handle.secondary_definition() else {
         return Err(corruption(
@@ -2896,11 +2900,16 @@ async fn lookup_active_equality_generation_with_compatibility(
                 Some((handle, compatibility)),
                 None,
                 LabelLaneReads::Sequential,
+                deadline,
             )
             .await?;
-            return verified_unindexed_rows(reader, label, candidates, |stored| {
-                stored.unwrap_or(&PropertyValue::Null).eq_value(value)
-            })
+            return verified_unindexed_rows(
+                reader,
+                label,
+                candidates,
+                |stored| stored.unwrap_or(&PropertyValue::Null).eq_value(value),
+                deadline,
+            )
             .await;
         }
     };
@@ -3070,12 +3079,14 @@ pub(crate) async fn lookup_active_unique_equality_batch(
 /// most [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, and unique indexed
 /// values their owners in verified batches of the same size. Null,
 /// non-reflexive and unencodable values, and every value of a reader that
-/// still unions deployed V3 entries, keep the single-value path.
+/// still unions deployed V3 entries, keep the single-value path, which
+/// checks `deadline` between its reads of label rows outside the lane.
 pub(crate) async fn lookup_active_equality_generations_with_compatibility(
     reader: &(impl DbReadOps + Send + Sync),
     handle: &ActiveIndexHandle,
     values: &[PropertyValue],
     compatibility: ReaderStorageCompatibility,
+    deadline: &(impl Fn() -> Result<()> + Sync),
 ) -> Result<roaring::RoaringTreemap> {
     const BATCH: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
     let Some(definition) = handle.secondary_definition() else {
@@ -3102,6 +3113,7 @@ pub(crate) async fn lookup_active_equality_generations_with_compatibility(
                     handle,
                     value,
                     compatibility,
+                    deadline,
                 )
                 .await?;
             }
@@ -3116,6 +3128,7 @@ pub(crate) async fn lookup_active_equality_generations_with_compatibility(
                         handle,
                         value,
                         compatibility,
+                        deadline,
                     )
                     .await?
                 }
@@ -3205,12 +3218,16 @@ pub(crate) enum LabelLaneReads {
 /// label, and whose `accept` rejects every value a lane holds (null, or a
 /// value no lane can encode) unless the caller unites the result with the
 /// lane's own rows for those values anyway.
+///
+/// The lane scan checks `deadline` before every row it reads, so an expired
+/// request stops scanning a large lane.
 pub(crate) async fn unindexed_label_rows(
     reader: &(impl DbReadOps + Send + Sync),
     label: UnindexedLabel<'_>,
     lane: Option<(&ActiveIndexHandle, ReaderStorageCompatibility)>,
     within: Option<&roaring::RoaringTreemap>,
     reads: LabelLaneReads,
+    deadline: &(impl Fn() -> Result<()> + Sync),
 ) -> Result<roaring::RoaringTreemap> {
     if let Some(within) = within.filter(|within| within.len() <= DIRECT_UNINDEXED_VERIFICATION_ROWS)
     {
@@ -3242,7 +3259,7 @@ pub(crate) async fn unindexed_label_rows(
         let Some((handle, compatibility)) = lane else {
             return Ok(roaring::RoaringTreemap::new());
         };
-        equality_lane_rows(reader, handle, compatibility).await
+        equality_lane_rows(reader, handle, compatibility, deadline).await
     };
     let (mut candidates, held) = match reads {
         LabelLaneReads::Concurrent => futures::try_join!(rows, held)?,
@@ -3256,11 +3273,13 @@ pub(crate) async fn unindexed_label_rows(
 }
 
 /// Every entity one Active equality generation holds, from one scan of its
-/// lane (two for a reader that still unions deployed V3 entries).
+/// lane (two for a reader that still unions deployed V3 entries), checking
+/// `deadline` before every row.
 async fn equality_lane_rows(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     compatibility: ReaderStorageCompatibility,
+    deadline: &(impl Fn() -> Result<()> + Sync),
 ) -> Result<roaring::RoaringTreemap> {
     let Some(
         definition @ (ValidatedSecondaryIndexDefinition::NodeEquality { .. }
@@ -3285,7 +3304,11 @@ async fn equality_lane_rows(
             ),
         );
         let mut rows = reader.scan_prefix(&prefix, ..).await?;
-        while let Some(row) = rows.next().await? {
+        loop {
+            deadline()?;
+            let Some(row) = rows.next().await? else {
+                break;
+            };
             let IndexKey::Data {
                 kind: ScopedKey::SecondaryEqualityBitmap(key),
                 ..
@@ -3316,7 +3339,11 @@ async fn equality_lane_rows(
         ScopedKey::secondary_lane_prefix(handle.index_id(), handle.generation(), lane),
     );
     let mut rows = reader.scan_prefix(&prefix, ..).await?;
-    while let Some(row) = rows.next().await? {
+    loop {
+        deadline()?;
+        let Some(row) = rows.next().await? else {
+            break;
+        };
         let IndexKey::Data {
             kind: ScopedKey::SecondaryEntry(entry),
             ..
@@ -3344,17 +3371,20 @@ async fn equality_lane_rows(
 ///
 /// Records are read in multi-gets of
 /// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, so memory stays bounded
-/// by one batch of records plus the result.
+/// by one batch of records plus the result. `deadline` is checked before
+/// every batch, so an expired request stops reading records.
 pub(crate) async fn verified_unindexed_rows(
     reader: &(impl DbReadOps + Sync),
     label: UnindexedLabel<'_>,
     candidates: roaring::RoaringTreemap,
     accept: impl Fn(Option<&PropertyValue>) -> bool,
+    deadline: &(impl Fn() -> Result<()> + Sync),
 ) -> Result<roaring::RoaringTreemap> {
     const BATCH: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
     let mut ids = candidates.into_iter();
     let mut verified = roaring::RoaringTreemap::new();
     loop {
+        deadline()?;
         let batch = ids.by_ref().take(BATCH).collect::<Vec<_>>();
         if batch.is_empty() {
             return Ok(verified);
