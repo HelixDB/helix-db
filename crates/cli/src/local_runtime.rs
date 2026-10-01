@@ -1854,7 +1854,7 @@ mod tests {
     fn memory_helix_args_match_existing_run_shape() {
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             9090,
             true,
             None,
@@ -1875,7 +1875,7 @@ mod tests {
                 "9090:8080",
                 "--label",
                 "helixdb.identity=4:demo/dev",
-                "ghcr.io/helixdb/helixdb:v0.0.7",
+                "ghcr.io/helixdb/helixdb:v0.0.8",
             ]
             .into_iter()
             .map(String::from)
@@ -1888,7 +1888,7 @@ mod tests {
         let resources = disk_resources();
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             8080,
             true,
             Some(&resources.network),
@@ -1921,7 +1921,7 @@ mod tests {
         );
         let args = helix_run_args(
             "helix-my-helix-project-production",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             8080,
             true,
             Some(&resources.network),
@@ -1967,7 +1967,7 @@ mod tests {
         let env = s3_env(&config).unwrap();
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             8080,
             true,
             None,

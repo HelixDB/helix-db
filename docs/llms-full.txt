@@ -261,7 +261,7 @@ TypeScript, and Python ship embedded runtimes; the Go SDK is currently HTTP-only
 
 Page type: Guide
 
-The `ghcr.io/helixdb/helixdb:v0.0.7` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.8` image runs the standalone HelixDB server.
 It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
@@ -300,7 +300,7 @@ helix start dev             # add --disk to persist this instance
 
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
-For an existing project, set `tag = "v0.0.7"` in its `[local.dev]` block in
+For an existing project, set `tag = "v0.0.8"` in its `[local.dev]` block in
 `helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
 
 ```bash
@@ -347,7 +347,7 @@ Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 ```bash
 docker run --rm --name helixdb \
   -p 6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.7
+  ghcr.io/helixdb/helixdb:v0.0.8
 ```
 
 The standalone server exposes liveness and readiness checks:
@@ -371,7 +371,7 @@ docker run --rm --name helixdb \
   -p 6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
-  ghcr.io/helixdb/helixdb:v0.0.7
+  ghcr.io/helixdb/helixdb:v0.0.8
 ```
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
@@ -430,7 +430,7 @@ services:
       retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.7
+    image: ghcr.io/helixdb/helixdb:v0.0.8
     restart: unless-stopped
     depends_on:
       seaweedfs:
@@ -515,7 +515,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.7
+  ghcr.io/helixdb/helixdb:v0.0.8
 ```
 
 In Compose, add the same variables and a volume to the `helix` service. A new
@@ -1256,6 +1256,11 @@ Have a feature request? [Let us know on Discord](https://discord.com/invite/2stg
 # Release notes
 
 Page type: Reference
+
+- **Filters after a traversal always use indexes.** A `.where(...)` on indexed properties after `.out()`, `.in()` or another expansion is answered from the index, including in counts, limits, `exists` checks and branch or union bodies, instead of reading records one by one. A filter that combines several indexes with AND or OR reads them concurrently, and label-only filters use label bitmaps. On 312k nodes, an indexed count after an expansion went from 41 ms to 33 ms (13 ms to 3 ms on 31k nodes), and the first cold query from about 280 ms to 33 ms.
+- **Known limitation** — inside `ForEach` bodies (`forEachParam` / `for_each_param`), and after a write in the same request, index sets are re-read once per iteration or write. An improvement is in progress.
+- **Upgrading** — the stored data format is unchanged. Databases written by v0.0.7 open directly with v0.0.8.
+- **CLI 3.4.1** defaults to image v0.0.8.
 
 - **Traversal-scoped search** is much faster. A `.where(...)` after a traversal is answered from equality-index bitmaps instead of reading every record. Scopes of up to 8,192 candidates (at 768 dimensions) are scored exactly, and larger scopes use a bounded graph walk. On 312k 768-d nodes in S3 with a warm disk cache, scoped vector queries that took 2–6 s, and a combined filter and scope that did not finish in 30 s, now return in about 60–110 ms. See [prefiltering](/database/helix-db/query-guides/prefiltering).
 - **[Local disk cache](/database/helix-db/start-here/local-development/local-server#add-a-local-disk-cache)** — set `HELIX_DISK_CACHE_DIR` to keep recently read data on local disk, ideally NVMe, across restarts.
@@ -6506,7 +6511,7 @@ When a command cannot choose a resource on its own, pass it by ID, slug, or name
 
 Page type: Guide
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.7` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.8` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -8104,7 +8109,7 @@ helix start [INSTANCE] [OPTIONS]
 
 ## Behavior
 
-- Defaults to `ghcr.io/helixdb/helixdb:v0.0.7`. Flags override the image tag and pull policy set in `[local.<instance>]`.
+- Defaults to `ghcr.io/helixdb/helixdb:v0.0.8`. Flags override the image tag and pull policy set in `[local.<instance>]`.
 - `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
 - All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
@@ -8144,7 +8149,7 @@ helix start dev --disk
 helix start dev --image-version latest
 
 # Save a specific image version
-helix start dev --image-version v0.0.7 --persist
+helix start dev --image-version v0.0.8 --persist
 
 # Start using cached images only
 helix start dev --pull never
