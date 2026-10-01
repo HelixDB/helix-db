@@ -8,7 +8,9 @@
 //! the conjuncts no index answers stay behind as a residual filter over that
 //! narrowed source. A filter the source already answers exactly is dropped.
 //! Root wrappers inline their streams, so the rule also rewrites the leading
-//! filters inside them.
+//! filters inside them. A source that may repeat elements (parameter or
+//! variable IDs) is left alone: an intersection would emit each element
+//! once, so index membership decides its node filters instead.
 //!
 //! The rewrite is required, not an alternative. The implementation rules of
 //! every kind it matches refuse any expression [`source_index_rewrite`]

@@ -230,7 +230,7 @@ fn dedup<S: PartialEq>(branches: Vec<IndexBranch<S>>) -> Vec<IndexBranch<S>> {
 /// filter. Several residual-free branches are one union. Several branches
 /// with residuals become a branch-residual union over a broad source, whose
 /// residual-free branches are folded into one union branch; a
-/// narrow source (point IDs, a parameter, a search) is already bounded, so
+/// narrow source (point IDs, a search) is already bounded, so
 /// its filter stays per row. Any branch no index narrows leaves the filter
 /// per row.
 pub(super) fn translated_index_filter<F>(

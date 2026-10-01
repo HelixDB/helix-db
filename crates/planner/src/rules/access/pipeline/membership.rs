@@ -6,10 +6,11 @@
 //! serves with one [`logical::StreamPipelineOp::IndexMembership`] step, whose
 //! fused residual keeps the conjuncts the set cannot decide. Streams of
 //! unknown element kind qualify too, because the operator evaluates edge and
-//! element-free rows exactly like the filter. A leading filter over a
-//! label-less node source (point IDs, a parameter, a variable, or an all-node
-//! scan) whose predicate names no label qualifies as well, because the
-//! source-index rule declines it for want of a label; so does the same filter
+//! element-free rows exactly like the filter. A leading filter the
+//! source-index rule declines qualifies as well: over a label-less node
+//! source (point IDs, a parameter, a variable, or an all-node scan) whose
+//! predicate names no label, or over a parameter or variable source, whose
+//! repeated IDs an index intersection would collapse. So does the same filter
 //! as a lone [`logical::AccessFilter`]. Root wrappers inline their streams, so
 //! the rule also rewrites the pipelines inside them.
 //!
@@ -82,10 +83,11 @@ struct Rewrite<'a> {
 }
 
 impl super::StreamFilterRewrite for Rewrite<'_> {
-    /// A lone filter over a label-less node source, which the source-index
-    /// rule declines, becomes a membership pipeline over the same source.
+    /// A lone filter the source-index rule declines (over a node source that
+    /// may repeat elements, or a label-less one with an unscoped predicate)
+    /// becomes a membership pipeline over the same source.
     fn access_filter(&self, filter: &logical::AccessFilter) -> Option<logical::AccessStream> {
-        if !label_less_node_filter(filter.access(), filter.predicate()) {
+        if !declined_leading_node_filter(filter.access(), filter.predicate()) {
             return None;
         }
         let plan = index_membership_filter(filter.predicate(), self.indexes, self.planner_limits)?;
@@ -98,13 +100,12 @@ impl super::StreamFilterRewrite for Rewrite<'_> {
         .map(logical::AccessStream::Pipeline)
     }
 
-    /// A leading filter over a labeled source belongs to the source-index
-    /// rule, so candidates start after it. Over a label-less node source that
-    /// rule declines an unscoped leading filter, so it is a candidate too.
+    /// A leading filter belongs to the source-index rule, so candidates start
+    /// after it, unless that rule declines it (see the lone filter above).
     fn access_pipeline(&self, pipeline: &logical::AccessPipeline) -> Option<logical::AccessStream> {
         let first_candidate = match pipeline.ops() {
             [logical::StreamPipelineOp::Filter { predicate }, ..]
-                if label_less_node_filter(pipeline.access(), predicate) =>
+                if declined_leading_node_filter(pipeline.access(), predicate) =>
             {
                 0
             }
@@ -175,22 +176,27 @@ impl Rewrite<'_> {
     }
 }
 
-/// Whether `access` is a non-empty node source without a common label and
-/// `predicate` names no label: exactly the leading filters the source-index
-/// rule declines for want of a label.
-fn label_less_node_filter(
+/// Whether a leading `predicate` filter over the non-empty node source
+/// `access` is one the source-index rule declines: the source may repeat
+/// elements, which an index intersection would collapse, or it has no common
+/// label and `predicate` names none.
+fn declined_leading_node_filter(
     access: &logical::AccessPath,
     predicate: &crate::ir::PredicatePlan,
 ) -> bool {
-    matches!(access, logical::AccessPath::Node(path) if path.common_label().is_none())
-        && !access.is_direct_empty()
-        && matches!(
-            analysis::prune_statically_impossible_branches(predicate.as_ref()),
-            Ok(analysis::PrunedPredicate::Feasible {
-                label: analysis::FeasibleLabelScope::Unscoped,
-                ..
-            })
-        )
+    let logical::AccessPath::Node(path) = access else {
+        return false;
+    };
+    !access.is_direct_empty()
+        && (access.may_repeat_elements()
+            || (path.common_label().is_none()
+                && matches!(
+                    analysis::prune_statically_impossible_branches(predicate.as_ref()),
+                    Ok(analysis::PrunedPredicate::Feasible {
+                        label: analysis::FeasibleLabelScope::Unscoped,
+                        ..
+                    })
+                )))
 }
 
 /// Element family known to flow out of a root stream, if any.

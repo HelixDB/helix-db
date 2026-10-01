@@ -24,12 +24,20 @@ pub(in crate::rules) use membership::index_membership_filter;
 
 /// Every index rewrite of a source filter: [`required_index_access_filter`],
 /// or else the `$label` bitmaps of a finite label domain.
+///
+/// Both intersect the source with index sets, which emits each element
+/// once, so neither rewrites a source that may repeat elements (see
+/// [`logical::AccessPath::may_repeat_elements`]): its filter stays
+/// row-preserving.
 pub(in crate::rules) fn index_access_filter(
     filter: &logical::AccessFilter,
     indexes: &catalog::IndexCatalogSnapshot,
     planner_limits: &context::PlannerLimits,
 ) -> AccessFilterRewrite {
     required_index_access_filter(filter, indexes, planner_limits).or_else(|| {
+        if filter.access().may_repeat_elements() {
+            return AccessFilterRewrite::NotApplicable;
+        }
         let Ok(analysis::PrunedPredicate::Feasible { predicate, .. }) =
             analysis::prune_statically_impossible_branches(filter.predicate().as_ref())
         else {
@@ -54,11 +62,18 @@ pub(in crate::rules) fn index_access_filter(
 /// The rewrite is idempotent: its residual holds only conjuncts no index
 /// answers, so rewriting the output again yields
 /// [`AccessFilterRewrite::NotApplicable`].
+///
+/// A source that may repeat elements is never rewritten, since intersecting
+/// it with an index set would collapse its repeats. Index membership decides
+/// such node filters instead, row by row from the set, keeping every repeat.
 pub(in crate::rules) fn required_index_access_filter(
     filter: &logical::AccessFilter,
     indexes: &catalog::IndexCatalogSnapshot,
     planner_limits: &context::PlannerLimits,
 ) -> AccessFilterRewrite {
+    if filter.access().may_repeat_elements() {
+        return AccessFilterRewrite::NotApplicable;
+    }
     let pruned = match analysis::prune_statically_impossible_branches(filter.predicate().as_ref()) {
         Ok(predicate) => predicate,
         Err(_) => return AccessFilterRewrite::NotApplicable,
