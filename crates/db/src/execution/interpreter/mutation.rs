@@ -3,6 +3,7 @@
 mod adjacency;
 mod contracts;
 mod edge;
+mod footprint;
 mod index_context;
 mod node;
 mod ops;
@@ -13,6 +14,7 @@ pub(super) mod visibility;
 
 use super::*;
 
+pub(super) use footprint::{LabelWrites, NodeIndexWrites};
 pub(super) use index_context::MutationIndexContext;
 
 #[cfg(test)]

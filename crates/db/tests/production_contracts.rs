@@ -7628,6 +7628,464 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
     db.close().await.unwrap();
 }
 
+#[test]
+fn public_write_batches_keep_index_memberships_exact_across_frames_and_writes() {
+    run_high_stack_contract(
+        "public-membership-retention",
+        public_write_batches_keep_index_memberships_exact_across_frames_and_writes_contract,
+    );
+}
+
+/// Index membership sets that a request keeps across `ForEach` frames and
+/// writes answer exactly like the per-row filter.
+///
+/// Every request runs on a database with equality indexes on `Attribute`
+/// kind and status, a unique index on code, and a range index on rank, and on
+/// one without indexes, which keeps every per-row filter; both must answer
+/// alike. Frames bind the parameters of runtime equality and IN sets, unions,
+/// intersections, and residuals, including a null binding, next to literal IN
+/// and unique sets, and between reads they create, link, relabel, update,
+/// strip, and drop nodes and edges. A failing batch leaves both databases
+/// unchanged.
+async fn public_write_batches_keep_index_memberships_exact_across_frames_and_writes_contract() {
+    let open = |database: &'static str| async move {
+        HelixDB::open(HelixDbSource::InMemory {
+            database: database.to_owned(),
+        })
+        .await
+        .expect("membership retention fixture opens")
+    };
+    let indexed = open("production-membership-retention-indexed").await;
+    let unindexed = open("production-membership-retention-unindexed").await;
+    for spec in [
+        index::IndexSpec::node_equality("Attribute", "kind"),
+        index::IndexSpec::node_equality("Attribute", "status"),
+        index::IndexSpec::node_unique_equality("Attribute", "code"),
+        index::IndexSpec::node_range("Attribute", "rank"),
+    ] {
+        let receipt = indexed
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["operation"]),
+            ))
+            .await
+            .unwrap();
+        let operation_id = receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted retention index operation has an ID");
+        await_index_operation_success(&indexed, operation_id, "retention index").await;
+    }
+    let answer = |request: QueryRequest| {
+        let (indexed, unindexed) = (&indexed, &unindexed);
+        async move {
+            match (
+                indexed.query(request.clone()).await,
+                unindexed.query(request).await,
+            ) {
+                (Ok(indexed), Ok(unindexed)) => {
+                    assert_eq!(indexed, unindexed);
+                    Ok(indexed)
+                }
+                (Err(indexed), Err(unindexed)) => {
+                    assert_eq!(indexed.to_string(), unindexed.to_string());
+                    Err(indexed)
+                }
+                (indexed, unindexed) => panic!("{indexed:?} differs from {unindexed:?}"),
+            }
+        }
+    };
+
+    let node = |label: &str,
+                uid: &str,
+                kind: Option<&str>,
+                status: Option<&str>,
+                rank: i64,
+                title: &str| {
+        let mut properties = vec![
+            ("uid", PropertyInput::from(uid)),
+            ("rank", PropertyInput::from(rank)),
+            ("title", PropertyInput::from(title)),
+        ];
+        properties.extend(kind.map(|kind| ("kind", PropertyInput::from(kind))));
+        properties.extend(status.map(|status| ("status", PropertyInput::from(status))));
+        // Only seeded attributes carry a unique code: nodes the frames create
+        // or relabel have none.
+        properties.extend(
+            (label == "Attribute").then(|| ("code", PropertyInput::from(format!("c{uid}")))),
+        );
+        traversal::g().add_n(label, properties)
+    };
+    let edge = |from: &str, label: &str, to: &str| {
+        traversal::g().n(NodeRef::var(from)).add_e(
+            label,
+            NodeRef::var(to),
+            Vec::<(&str, PropertyInput)>::new(),
+        )
+    };
+    let seed = [
+        ("g", node("Group", "g", None, None, 0, "g")),
+        ("i1", node("Item", "i1", None, None, 0, "i1")),
+        ("i2", node("Item", "i2", None, None, 0, "i2")),
+        (
+            "a1",
+            node("Attribute", "a1", Some("B"), Some("on"), 1, "xa1"),
+        ),
+        (
+            "a2",
+            node("Attribute", "a2", Some("A"), Some("off"), 5, "xa2"),
+        ),
+        ("a3", node("Attribute", "a3", None, None, 9, "a3")),
+        (
+            "a4",
+            node("Attribute", "a4", Some("B"), Some("off"), 7, "a4"),
+        ),
+        ("n1", node("Note", "n1", Some("B"), None, 1, "xn1")),
+        ("n2", node("Note", "n2", Some("A"), None, 5, "n2")),
+        ("i1_g", edge("i1", "IN_GROUP", "g")),
+        ("i2_g", edge("i2", "IN_GROUP", "g")),
+        ("i1_a1", edge("i1", "HAS", "a1")),
+        ("i1_a2", edge("i1", "HAS", "a2")),
+        ("i1_n1", edge("i1", "HAS", "n1")),
+        ("i2_a1", edge("i2", "HAS", "a1")),
+        ("i2_a3", edge("i2", "HAS", "a3")),
+        ("i2_a4", edge("i2", "HAS", "a4")),
+        ("i2_n2", edge("i2", "HAS", "n2")),
+    ]
+    .into_iter()
+    .fold(batch::write_batch(), |write, (name, entry)| {
+        write.var_as(name, entry)
+    })
+    .returning(Vec::<String>::new());
+    answer(QueryRequest::write(seed))
+        .await
+        .expect("retention graph seeds");
+
+    // Post-expansion filters of every set shape: runtime equality and IN
+    // sets, a union and an intersection with a runtime leaf, a literal IN
+    // set, unique equality and IN sets, a `$label` set, a range filter that
+    // stays per-row, and a residual with its own parameter.
+    let shapes = [
+        ("equality", Predicate::eq_param("kind", "kind")),
+        ("domain", Predicate::is_in_param("kind", "kinds")),
+        (
+            "union",
+            Predicate::or(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::eq_param("kind", "kind"),
+            ]),
+        ),
+        (
+            "intersect",
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::eq_param("status", "status"),
+            ]),
+        ),
+        (
+            "literal_in",
+            Predicate::is_in(
+                "kind",
+                PropertyValue::StringArray(vec!["A".to_owned(), "C".to_owned()]),
+            ),
+        ),
+        ("unique", Predicate::eq("code", "ca4")),
+        (
+            "unique_in",
+            Predicate::is_in(
+                "code",
+                PropertyValue::StringArray(vec!["ca1".to_owned(), "ca2".to_owned()]),
+            ),
+        ),
+        ("labels", Predicate::eq("$label", "Attribute")),
+        ("range", Predicate::gt("rank", 3_i64)),
+        (
+            "residual",
+            Predicate::and(vec![
+                Predicate::eq("$label", "Attribute"),
+                Predicate::eq("kind", "B"),
+                Predicate::contains_param("title", "needle"),
+            ]),
+        ),
+    ];
+    let reached = |predicate: &Predicate| {
+        traversal::g()
+            .n_with_label_where("Group", Predicate::eq("uid", "g"))
+            .in_(Some("IN_GROUP"))
+            .out(Some("HAS"))
+            .where_(predicate.clone())
+    };
+    let by_uid = |label: &str, param: &str| {
+        traversal::g().n_with_label_where(label, Predicate::is_in_param("uid", param))
+    };
+    // Each frame tags what every shape keeps, writes the graph, and tags
+    // again: new items and attributes join the group, attributes change an
+    // indexed or unindexed property, lose one, change label, or are dropped
+    // with their edges, and items lose their links.
+    let tags = |body: batch::WriteBatch, phase: &str| {
+        shapes.iter().fold(body, |body, (shape, predicate)| {
+            body.var_as(
+                &format!("{phase}_{shape}"),
+                reached(predicate)
+                    .set_property(format!("{phase}_{shape}"), PropertyInput::param("uid")),
+            )
+        })
+    };
+    let writes = tags(batch::write_batch(), "before")
+        .var_as(
+            "group",
+            traversal::g().n_with_label_where("Group", Predicate::eq("uid", "g")),
+        )
+        .var_as(
+            "item",
+            traversal::g().add_n("Item", vec![("uid", PropertyInput::param("uid"))]),
+        )
+        .var_as(
+            "attribute",
+            traversal::g().add_n(
+                "Attribute",
+                vec![
+                    ("uid", PropertyInput::param("uid")),
+                    ("kind", PropertyInput::param("new_kind")),
+                    ("status", PropertyInput::from("on")),
+                    ("rank", PropertyInput::from(4_i64)),
+                    ("title", PropertyInput::from("x")),
+                ],
+            ),
+        )
+        .var_as("item_group", edge("item", "IN_GROUP", "group"))
+        .var_as("item_attribute", edge("item", "HAS", "attribute"))
+        .var_as(
+            "flip",
+            by_uid("Attribute", "flips").set_property("kind", PropertyInput::param("kind_to")),
+        )
+        .var_as(
+            "restatus",
+            by_uid("Attribute", "restatus")
+                .set_property("status", PropertyInput::param("status_to")),
+        )
+        .var_as(
+            "retitle",
+            traversal::g()
+                .n_with_label("Attribute")
+                .set_property("title", PropertyInput::param("title_to")),
+        )
+        .var_as(
+            "strip",
+            by_uid("Attribute", "strips").remove_property("status"),
+        )
+        .var_as(
+            "relabel",
+            by_uid("Note", "relabels").set_property("$label", "Attribute"),
+        )
+        .var_as("drop", by_uid("Attribute", "drops").drop())
+        .var_as(
+            "unlink",
+            by_uid("Item", "unlinks").out_e(Some("HAS")).drop(),
+        );
+    let body = tags(writes, "after");
+    let finals = shapes
+        .iter()
+        .map(|(shape, _)| format!("final_{shape}"))
+        .chain(["nodes".to_owned()])
+        .collect::<Vec<_>>();
+    let request = |frames: Vec<BTreeMap<&str, QueryValue>>| {
+        let batch = shapes.iter().fold(
+            batch::write_batch().for_each_param("rows", body.clone()),
+            |batch, (shape, predicate)| {
+                batch.var_as(
+                    &format!("final_{shape}"),
+                    reached(predicate).values(vec!["uid"]),
+                )
+            },
+        );
+        let batch = batch
+            .var_as(
+                "nodes",
+                traversal::g().n(NodeRef::all()).values(vec![
+                    "uid",
+                    "kind",
+                    "status",
+                    "title",
+                    "before_equality",
+                    "before_domain",
+                    "before_union",
+                    "before_intersect",
+                    "before_literal_in",
+                    "before_unique",
+                    "before_unique_in",
+                    "before_labels",
+                    "before_range",
+                    "before_residual",
+                    "after_equality",
+                    "after_domain",
+                    "after_union",
+                    "after_intersect",
+                    "after_literal_in",
+                    "after_unique",
+                    "after_unique_in",
+                    "after_labels",
+                    "after_range",
+                    "after_residual",
+                ]),
+            )
+            .returning(finals.clone());
+        let rows = QueryValue::Array(
+            frames
+                .into_iter()
+                .map(|frame| {
+                    QueryValue::Object(
+                        frame
+                            .into_iter()
+                            .map(|(name, value)| (name.to_owned(), value))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
+        [
+            ("kind", QueryValue::String("B".to_owned())),
+            (
+                "kinds",
+                QueryValue::Array(vec![QueryValue::String("A".to_owned())]),
+            ),
+            ("status", QueryValue::String("on".to_owned())),
+            ("needle", QueryValue::String("x".to_owned())),
+        ]
+        .into_iter()
+        .fold(
+            QueryRequest::write(batch).with_parameter_value("rows", rows),
+            |request, (name, value)| request.with_parameter_value(name, value),
+        )
+    };
+    let text = |value: &str| QueryValue::String(value.to_owned());
+    let texts =
+        |values: &[&str]| QueryValue::Array(values.iter().map(|value| text(value)).collect());
+    let frame = |uid: &str,
+                 kind: QueryValue,
+                 kinds: &[&str],
+                 status: &str,
+                 needle: &str,
+                 new_kind: QueryValue,
+                 writes: [(&'static str, QueryValue); 8]| {
+        BTreeMap::from_iter(
+            [
+                ("uid", text(uid)),
+                ("kind", kind),
+                ("kinds", texts(kinds)),
+                ("status", text(status)),
+                ("needle", text(needle)),
+                ("new_kind", new_kind),
+            ]
+            .into_iter()
+            .chain(writes),
+        )
+    };
+    let frame_writes = |flips: &[&str],
+                        kind_to: &str,
+                        restatus: &[&str],
+                        status_to: &str,
+                        title_to: &str,
+                        strips: &[&str],
+                        relabels: &[&str],
+                        drops: &[&str]| {
+        [
+            ("flips", texts(flips)),
+            ("kind_to", text(kind_to)),
+            ("restatus", texts(restatus)),
+            ("status_to", text(status_to)),
+            ("title_to", text(title_to)),
+            ("strips", texts(strips)),
+            ("relabels", texts(relabels)),
+            ("drops", texts(drops)),
+        ]
+    };
+    let unlinks = |uids: &[&str]| ("unlinks", texts(uids));
+    let frames = vec![
+        // Unrelated writes: new nodes of other labels and an unindexed title.
+        frame(
+            "x1",
+            text("B"),
+            &["A", "B"],
+            "on",
+            "x",
+            text("B"),
+            frame_writes(&[], "B", &[], "on", "xt", &[], &[], &[]),
+        ),
+        // Indexed updates, a relabel, and a stripped status.
+        frame(
+            "x2",
+            text("A"),
+            &["A", "B", "C"],
+            "off",
+            "a",
+            QueryValue::Null,
+            frame_writes(
+                &["a2", "a3"],
+                "B",
+                &["a4"],
+                "on",
+                "q",
+                &["a1"],
+                &["n1"],
+                &[],
+            ),
+        ),
+        // A null binding, two attributes dropped with their edges, and an
+        // item's links dropped.
+        frame(
+            "x3",
+            QueryValue::Null,
+            &["B"],
+            "on",
+            "",
+            text("A"),
+            frame_writes(&[], "A", &[], "off", "xx", &[], &[], &["x1", "a3"]),
+        ),
+    ];
+    let with_unlinks = |mut frames: Vec<BTreeMap<&'static str, QueryValue>>| {
+        for (frame, uids) in frames.iter_mut().zip([&[][..], &["x1"], &["i2"]]) {
+            let (name, value) = unlinks(uids);
+            frame.insert(name, value);
+        }
+        frames
+    };
+    let response = answer(request(with_unlinks(frames.clone())))
+        .await
+        .expect("retention batch executes");
+    assert!(
+        finals.iter().any(|name| response[name]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())),
+        "{response}"
+    );
+
+    // A batch whose last frame binds no `uid` fails, and both databases keep
+    // their committed state.
+    let committed = || {
+        answer(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "nodes",
+                    traversal::g()
+                        .n(NodeRef::all())
+                        .values(vec!["uid", "kind", "status", "title"]),
+                )
+                .returning(["nodes"]),
+        ))
+    };
+    let before = committed().await.expect("committed state reads");
+    let mut failing = with_unlinks(frames);
+    failing[2].remove("uid");
+    answer(request(failing))
+        .await
+        .expect_err("a frame without its uid fails");
+    assert_eq!(committed().await.expect("committed state reads"), before);
+
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn public_query_boundary_covers_dynamic_bounds_and_parameter_errors() {
     let db = HelixDB::open(HelixDbSource::InMemory {

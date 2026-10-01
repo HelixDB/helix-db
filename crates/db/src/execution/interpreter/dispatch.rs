@@ -135,7 +135,11 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecOp::Noop | exec::ExecOp::Barrier { .. } => Ok(input),
             exec::ExecOp::Reserved { op } => self.reserved(input, op).await,
             exec::ExecOp::ForEach { param, body } => self.execute_foreach(param, body).await,
-        }?;
+        };
+        // A failed operation may have staged writes it never reported to the
+        // membership cache, or, when a deadline dropped a body, left
+        // `ForEach` bindings mid-frame.
+        let value = value.inspect_err(|_| self.prepared_memberships.clear())?;
         self.enforce_row_mode_cap(row_mode::op_name(op), &value)?;
         Ok(value)
     }

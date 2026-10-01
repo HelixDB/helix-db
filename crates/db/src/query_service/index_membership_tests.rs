@@ -69,7 +69,7 @@ async fn create_index(db: &HelixDB, scope: DataScope, spec: index::IndexSpec) {
     .unwrap();
 }
 
-fn node(
+pub(super) fn node(
     label: &str,
     uid: &str,
     kind: Option<&str>,
@@ -87,7 +87,7 @@ fn node(
     traversal::g().add_n(label, properties)
 }
 
-fn edge(
+pub(super) fn edge(
     from: &str,
     label: &str,
     to: &str,
@@ -145,7 +145,7 @@ fn seed() -> batch::WriteBatch {
 }
 
 /// `uid`s behind group `g3`'s items: a handful of node rows.
-fn narrow(predicate: expr::Predicate) -> traversal::Traversal<traversal::Terminal> {
+pub(super) fn narrow(predicate: expr::Predicate) -> traversal::Traversal<traversal::Terminal> {
     traversal::g()
         .n_with_label_where("Group", expr::Predicate::eq("uid", "g3"))
         .in_(Some("IN_GROUP"))
@@ -173,7 +173,7 @@ fn read_result(result: traversal::Traversal<traversal::Terminal>) -> batch::Read
 }
 
 /// `predicate` with its conjuncts scoped to the `Attribute` label.
-fn attribute(predicate: expr::Predicate) -> expr::Predicate {
+pub(super) fn attribute(predicate: expr::Predicate) -> expr::Predicate {
     // A nested conjunction would hide its conjuncts from the index split.
     let conjuncts = if let expr::Predicate::And { predicates } = &predicate {
         predicates.clone()
@@ -211,13 +211,13 @@ fn repeated(uids: &[&'static str], times: usize) -> Vec<&'static str> {
 
 /// Membership sets `db` resolved from secondary indexes. The per-row
 /// fallback keeps the same rows, so only this count shows a set was read.
-fn resolved(db: &HelixDB) -> usize {
+pub(super) fn resolved(db: &HelixDB) -> usize {
     db.inner
         .resolved_index_memberships
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-async fn seeded(name: &str, scope: DataScope, indexed: bool) -> HelixDB {
+pub(super) async fn seeded(name: &str, scope: DataScope, indexed: bool) -> HelixDB {
     let db = open(name).await;
     if indexed {
         create_index(

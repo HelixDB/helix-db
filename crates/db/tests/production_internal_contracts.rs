@@ -406,6 +406,12 @@ async fn interpreter_request_modes_preserve_isolated_mutation_ownership() {
     db::production_coverage::interpreter_request_mode_and_isolated_mutation_contracts().await;
 }
 
+/// Proves membership footprints and range-set retention the planner cannot reach.
+#[tokio::test]
+async fn interpreter_membership_retention_follows_write_footprints() {
+    db::production_coverage::interpreter_membership_retention_contracts().await;
+}
+
 /// Proves GetOperation does not commit or disable an open graph write.
 #[tokio::test]
 async fn interpreter_get_operation_keeps_open_graph_write() {

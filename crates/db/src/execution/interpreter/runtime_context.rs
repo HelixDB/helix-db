@@ -283,7 +283,9 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) row_mode_max_rows: row_mode::RowModeMaxRowsSetting,
     pub(in crate::execution::interpreter) execution_control:
         crate::execution_control::ExecutionControl,
-    /// Index memberships resolved in the current request state.
+    /// Index memberships resolved in this step context, kept while nothing
+    /// they depend on changes. Parallel step contexts start empty and never
+    /// resolve one.
     pub(in crate::execution::interpreter) prepared_memberships: super::stream::PreparedMemberships,
     /// Concurrent secondary-set child reads shared by every step context of
     /// the request.
