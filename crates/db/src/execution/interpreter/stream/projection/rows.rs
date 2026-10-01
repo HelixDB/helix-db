@@ -79,13 +79,16 @@ impl<'db> ExecutionContext<'db> {
         names: &[ir::NonEmptyString],
     ) -> Result<eval::RowValueResolver<'ctx, 'db>> {
         let mut resolver = eval::RowValueResolver::new(self);
-        resolver
-            .prefetch(
+        // Boxed: projections run inside recursive evaluation, and the batch
+        // read's state would otherwise sit inline in every nested projection.
+        Box::pin(
+            resolver.prefetch(
                 batch
                     .iter()
                     .filter_map(|row| names.iter().find_map(|name| eval::record_read(row, name))),
-            )
-            .await?;
+            ),
+        )
+        .await?;
         Ok(resolver)
     }
 
