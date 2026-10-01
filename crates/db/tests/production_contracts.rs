@@ -10817,3 +10817,286 @@ async fn public_query_boundary_serves_source_filters_and_counts_from_indexes_con
         db.close().await.unwrap();
     }
 }
+
+#[test]
+fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served_filters() {
+    run_high_stack_contract(
+        "public-index-served-order-and-repeats",
+        public_query_boundary_keeps_scan_order_and_repeats_through_index_served_filters_contract,
+    );
+}
+
+/// Index-served source filters return the rows per-row evaluation returns,
+/// in the same order and with the same repeats.
+///
+/// Two databases hold the same `Item` nodes and `Link` edges; only one has
+/// the indexes, and every response must equal the unindexed one unsorted.
+/// Partly indexed ORs over a node and an edge label, one of whose branches
+/// is a range scan delivering the reverse of ID order, keep the label scan's
+/// ID order, also under a limit. Parameter and variable IDs that repeat keep
+/// every repeat through a filter naming a label and an indexed property, as
+/// rows and as counts.
+async fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served_filters_contract()
+{
+    const ITEMS: i64 = 30;
+    let kind = |n: i64| ["A", "B", "C"][(n % 3) as usize];
+    let note = |n: i64| if n % 2 == 0 { "x" } else { "y" };
+    // Ranks and weights fall as IDs rise, so a range scan delivers the
+    // reverse of ID order.
+    let seed = (0..ITEMS).fold(batch::write_batch(), |write, n| {
+        write.var_as(
+            &format!("i{n}"),
+            traversal::g().add_n(
+                "Item",
+                vec![
+                    ("uid", PropertyInput::from(format!("i{n}"))),
+                    ("rank", PropertyInput::from(100 - n)),
+                    ("kind", PropertyInput::from(kind(n))),
+                    ("note", PropertyInput::from(note(n))),
+                ],
+            ),
+        )
+    });
+    let seed = (0..ITEMS).fold(seed, |write, n| {
+        write.var_as(
+            &format!("l{n}"),
+            traversal::g().n(NodeRef::var(format!("i{n}"))).add_e(
+                "Link",
+                NodeRef::var(format!("i{}", (n + 1) % ITEMS)),
+                vec![
+                    ("uid", PropertyInput::from(format!("l{n}"))),
+                    ("weight", PropertyInput::from(100 - n)),
+                    ("kind", PropertyInput::from(kind(n))),
+                    ("note", PropertyInput::from(note(n))),
+                ],
+            ),
+        )
+    });
+    let mut databases = Vec::new();
+    for (name, indexed) in [
+        ("production-index-served-order-indexed", true),
+        ("production-index-served-order-unindexed", false),
+    ] {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: name.to_owned(),
+        })
+        .await
+        .expect("index-served order fixture opens");
+        let specs = [
+            index::IndexSpec::node_equality("Item", "kind"),
+            index::IndexSpec::node_equality("Item", "uid"),
+            index::IndexSpec::node_range("Item", "rank"),
+            index::IndexSpec::edge_equality("Link", "kind"),
+            index::IndexSpec::edge_equality("Link", "uid"),
+            index::IndexSpec::edge_range("Link", "weight"),
+        ];
+        for spec in specs.into_iter().filter(|_| indexed) {
+            let receipt = db
+                .query(QueryRequest::write(
+                    batch::write_batch()
+                        .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                        .returning(["operation"]),
+                ))
+                .await
+                .unwrap();
+            let operation_id = receipt["operation"]["operation_id"]
+                .as_str()
+                .expect("accepted order index operation has an ID");
+            await_index_operation_success(&db, operation_id, "order index").await;
+        }
+        db.query(QueryRequest::write(
+            seed.clone().returning(Vec::<String>::new()),
+        ))
+        .await
+        .expect("index-served order fixture seeds");
+        databases.push(db);
+    }
+
+    // Repeating ID lists, read back per database so they name the same rows
+    // in both: `i1`/`l1` and `i4`/`l4` have kind `B`, `i0`/`l0` kind `A`.
+    let mut id_lists = Vec::new();
+    for db in &databases {
+        let ids = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "items",
+                        traversal::g()
+                            .n_with_label("Item")
+                            .values(vec!["$id", "uid"]),
+                    )
+                    .var_as(
+                        "links",
+                        traversal::g()
+                            .e_with_label("Link")
+                            .values(vec!["$id", "uid"]),
+                    )
+                    .returning(["items", "links"]),
+            ))
+            .await
+            .unwrap();
+        let repeats = |rows: &serde_json::Value, prefix: &str| {
+            let by_uid = rows
+                .as_array()
+                .expect("ID rows are an array")
+                .iter()
+                .map(|row| {
+                    (
+                        row["uid"].as_str().expect("uid is a string").to_owned(),
+                        row["$id"].as_i64().expect("ID is an integer"),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            QueryValue::Array(
+                [1, 1, 4, 0, 4]
+                    .map(|n| QueryValue::I64(by_uid[&format!("{prefix}{n}")]))
+                    .into(),
+            )
+        };
+        id_lists.push((repeats(&ids["items"], "i"), repeats(&ids["links"], "l")));
+    }
+
+    let partial = |range: &str| {
+        Predicate::or(vec![
+            Predicate::and(vec![Predicate::gte(range, 80), Predicate::eq("note", "x")]),
+            Predicate::eq("kind", "B"),
+        ])
+    };
+    let kind_b = |label: &str| {
+        Predicate::and(vec![
+            Predicate::eq("$label", label),
+            Predicate::eq("kind", "B"),
+        ])
+    };
+    let read = |result: traversal::Traversal<traversal::Terminal>| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as("result", result)
+                .returning(["result"]),
+        )
+    };
+    let requests = |(nodes, edges): &(QueryValue, QueryValue)| {
+        vec![
+            read(
+                traversal::g()
+                    .n_with_label_where("Item", partial("rank"))
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .n_with_label_where("Item", partial("rank"))
+                    .limit(4usize)
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .e_with_label_where("Link", partial("weight"))
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .e_with_label_where("Link", partial("weight"))
+                    .limit(4usize)
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(kind_b("Item"))
+                    .values(vec!["uid"]),
+            )
+            .with_parameter_value("ids", nodes.clone()),
+            read(
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(kind_b("Item"))
+                    .count(),
+            )
+            .with_parameter_value("ids", nodes.clone()),
+            read(
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(kind_b("Link"))
+                    .values(vec!["uid"]),
+            )
+            .with_parameter_value("ids", edges.clone()),
+            read(
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(kind_b("Link"))
+                    .count(),
+            )
+            .with_parameter_value("ids", edges.clone()),
+            QueryRequest::read(
+                batch::read_batch()
+                    .var_as("saved", traversal::g().n(NodeRef::param("ids")))
+                    .var_as(
+                        "result",
+                        traversal::g()
+                            .n(NodeRef::var("saved"))
+                            .where_(kind_b("Item"))
+                            .values(vec!["uid"]),
+                    )
+                    .var_as(
+                        "counted",
+                        traversal::g()
+                            .n(NodeRef::var("saved"))
+                            .where_(kind_b("Item"))
+                            .count(),
+                    )
+                    .returning(["result", "counted"]),
+            )
+            .with_parameter_value("ids", nodes.clone()),
+            QueryRequest::read(
+                batch::read_batch()
+                    .var_as("saved", traversal::g().e(EdgeRef::param("ids")))
+                    .var_as(
+                        "result",
+                        traversal::g()
+                            .e(EdgeRef::var("saved"))
+                            .where_(kind_b("Link"))
+                            .values(vec!["uid"]),
+                    )
+                    .var_as(
+                        "counted",
+                        traversal::g()
+                            .e(EdgeRef::var("saved"))
+                            .where_(kind_b("Link"))
+                            .count(),
+                    )
+                    .returning(["result", "counted"]),
+            )
+            .with_parameter_value("ids", edges.clone()),
+        ]
+    };
+    let uids = |prefix: &str, ordinals: &[i64]| {
+        serde_json::Value::Array(
+            ordinals
+                .iter()
+                .map(|n| serde_json::json!({ "uid": format!("{prefix}{n}") }))
+                .collect(),
+        )
+    };
+    let mut expected_responses = Vec::new();
+    for (request, (indexed, unindexed)) in requests(&id_lists[0])
+        .into_iter()
+        .zip(requests(&id_lists[1]))
+        .enumerate()
+    {
+        let expected = databases[1].query(unindexed).await.unwrap();
+        let actual = databases[0].query(indexed).await.unwrap();
+        assert_eq!(actual, expected, "request {request}");
+        expected_responses.push(expected);
+    }
+    // The unindexed oracle is the label scan's ID order and keeps repeats.
+    assert_eq!(expected_responses[1]["result"], uids("i", &[0, 1, 2, 4]));
+    assert_eq!(expected_responses[3]["result"], uids("l", &[0, 1, 2, 4]));
+    assert_eq!(expected_responses[4]["result"], uids("i", &[1, 1, 4, 4]));
+    assert_eq!(expected_responses[5]["result"], serde_json::json!(4));
+    assert_eq!(expected_responses[6]["result"], uids("l", &[1, 1, 4, 4]));
+    assert_eq!(expected_responses[8]["counted"], serde_json::json!(4));
+    assert_eq!(expected_responses[9]["result"], uids("l", &[1, 1, 4, 4]));
+    for db in databases {
+        db.close().await.unwrap();
+    }
+}

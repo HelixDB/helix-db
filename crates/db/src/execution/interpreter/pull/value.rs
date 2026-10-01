@@ -229,6 +229,7 @@ mod tests {
         for mode in [
             exec::ExecMergeMode::Concat,
             exec::ExecMergeMode::Union,
+            exec::ExecMergeMode::OrderedUnion,
             exec::ExecMergeMode::Intersect,
         ] {
             for value in [

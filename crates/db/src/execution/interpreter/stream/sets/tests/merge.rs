@@ -39,6 +39,16 @@ fn merge_concat_and_union_are_deterministic() {
         )),
         vec![2, 1, 3]
     );
+    // An ordered union emits each element once, in ascending order, however
+    // its inputs are ordered.
+    assert_eq!(
+        row_ids(set_merge::merge_streams(
+            vec![rows(&[9, 4, 7]), rows(&[1, 7]), Vec::new(), rows(&[4, 2])],
+            exec::ExecMergeMode::OrderedUnion,
+        )),
+        vec![1, 2, 4, 7, 9]
+    );
+    assert!(set_merge::merge_streams(Vec::new(), exec::ExecMergeMode::OrderedUnion).is_empty());
 }
 
 #[test]

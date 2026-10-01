@@ -142,8 +142,10 @@ impl ExecutableDagBuilder<'_> {
                 })
             }
             // Each branch reads its index set, and a residual branch filters
-            // exactly its own rows, as `ScanThenFilter` does. The union merge
-            // deduplicates rows several branches accept.
+            // exactly its own rows, as `ScanThenFilter` does. The ordered
+            // union deduplicates rows several branches accept and emits them
+            // in ID order, as a scan of the label would, whatever order a
+            // branch (a range scan, say) delivers.
             ir::EdgeAccessPlan::BranchResidualUnion(branches) => {
                 let mut branch_ids = Vec::with_capacity(branches.as_ref().len());
                 for branch in branches.as_ref() {
@@ -180,7 +182,7 @@ impl ExecutableDagBuilder<'_> {
                 let delivered = edge_access_delivered_properties(plan);
                 let root = self.push_native_merge(
                     branch_ids,
-                    exec::ExecMergeMode::Union,
+                    exec::ExecMergeMode::OrderedUnion,
                     super::compound_access_output(read_limit, &output),
                     condition.clone(),
                     delivered.clone(),

@@ -1035,6 +1035,7 @@ async fn bounded_membership_injection_and_merges_preserve_duplicates_and_order()
     for mode in [
         exec::ExecMergeMode::Concat,
         exec::ExecMergeMode::Union,
+        exec::ExecMergeMode::OrderedUnion,
         exec::ExecMergeMode::Intersect,
     ] {
         for take in [0, 1, 4, 10] {

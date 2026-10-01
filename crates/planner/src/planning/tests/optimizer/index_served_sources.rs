@@ -647,3 +647,102 @@ fn unique_reads_that_may_return_many_rows_keep_their_read_limit() {
     );
     assert_eq!(first_limited_access_limit(&plan), None);
 }
+
+/// Whether `plan` holds `name` as a key or a string anywhere.
+fn mentions(plan: &serde_json::Value, name: &str) -> bool {
+    let mut found = false;
+    visit(plan, &mut |value| match value {
+        serde_json::Value::Object(fields) => found |= fields.contains_key(name),
+        serde_json::Value::String(text) => found |= text == name,
+        _ => {}
+    });
+    found
+}
+
+#[test]
+fn filters_over_parameter_and_variable_ids_keep_every_repeat() {
+    // IDs from a parameter or a saved stream may repeat, and a filter keeps
+    // every repeated row it accepts. An index intersection would emit each
+    // element once, so node filters decide rows by index membership, and
+    // edge filters, which have no membership yet, evaluate per row: neither
+    // intersects the source with an index set.
+    let scoped =
+        |label: &str| Predicate::and(vec![Predicate::eq("$label", label), Predicate::eq("p0", 1)]);
+    for (context_name, planner_ctx) in contexts() {
+        for shape in [
+            g().n(NodeRef::param("ids"))
+                .where_(scoped("Item"))
+                .values(vec!["p0"]),
+            g().n(NodeRef::param("ids")).where_(scoped("Item")).count(),
+            g().n(NodeRef::var("saved"))
+                .where_(scoped("Item"))
+                .values(vec!["p0"]),
+            g().n(NodeRef::var("saved")).where_(scoped("Item")).count(),
+            g().n(NodeRef::param("ids"))
+                .where_(Predicate::eq("p0", 1))
+                .values(vec!["p0"]),
+        ] {
+            let json = semantic(&executable_traversal(shape.clone(), planner_ctx.clone()));
+            assert!(
+                !mentions(&json, "intersect"),
+                "{context_name} {shape:?}: {json:#}"
+            );
+            assert!(
+                mentions(&json, "index_membership"),
+                "{context_name} {shape:?}: {json:#}"
+            );
+            assert!(filter_strings(&json).is_empty(), "{context_name} {json:#}");
+        }
+        for shape in [
+            g().e(EdgeRef::param("ids"))
+                .where_(scoped("Link"))
+                .values(vec!["p0"]),
+            g().e(EdgeRef::var("saved")).where_(scoped("Link")).count(),
+        ] {
+            let json = semantic(&executable_traversal(shape.clone(), planner_ctx.clone()));
+            assert!(
+                !mentions(&json, "intersect"),
+                "{context_name} {shape:?}: {json:#}"
+            );
+            assert!(
+                filter_strings(&json).contains(&"p0".to_string()),
+                "{context_name} {shape:?}: {json:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn partly_indexed_ors_merge_their_branches_in_id_order() {
+    // Branch sets each filtered by their own residual are merged in element
+    // order, as the label scan they replace would deliver, never in branch
+    // order.
+    let partial = || {
+        Predicate::or(vec![
+            Predicate::and(vec![Predicate::eq("p0", 0), Predicate::gte("rank", 3)]),
+            Predicate::eq("p1", 0),
+        ])
+    };
+    for shape in [
+        g().n_with_label_where("Item", partial())
+            .limit(3usize)
+            .values(vec!["p0"]),
+        g().e_with_label_where("Link", partial()).values(vec!["p0"]),
+    ] {
+        let plan = executable_traversal(shape.clone(), ctx(indexes()));
+        let merges = plan
+            .steps()
+            .iter()
+            .filter_map(|step| match &step.op {
+                ExecOp::Merge { mode } => Some(*mode),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            merges,
+            [ExecMergeMode::OrderedUnion],
+            "{shape:?}: {:#?}",
+            plan.steps()
+        );
+    }
+}

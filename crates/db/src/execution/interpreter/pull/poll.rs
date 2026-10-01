@@ -293,6 +293,21 @@ impl<'a> Cursor<'a> {
                         }
                         *current = None;
                     },
+                    Node::OrderedUnion { inputs, rows } => {
+                        if let Some(inputs) = inputs.take() {
+                            let mut values = Vec::with_capacity(inputs.len());
+                            for mut input in inputs {
+                                values.push(input.drain(ctx).await?);
+                            }
+                            let merged =
+                                ctx.merge_values(values, exec::ExecMergeMode::OrderedUnion)?;
+                            *rows = ctx.stream_rows(merged, "ordered union")?.into_iter();
+                        }
+                        let Some(row) = rows.next() else {
+                            return Ok(None);
+                        };
+                        Some(ExecutionValue::Stream(vec![row]))
+                    }
                     Node::Intersect {
                         driver,
                         rest,
