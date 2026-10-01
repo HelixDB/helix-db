@@ -10,6 +10,19 @@ pageType: "Reference"
 <Update
   label="September 2026"
   rss={{
+    title: "Docker v0.0.8 and CLI 3.4.1: indexed filters after traversals",
+    description: "Filters after an expansion always use their indexes, and multi-index filters read them concurrently"
+  }}
+>
+- **Filters after a traversal always use indexes.** A `.where(...)` on indexed properties after `.out()`, `.in()` or another expansion is answered from the index, including in counts, limits, `exists` checks and branch or union bodies, instead of reading records one by one. A filter that combines several indexes with AND or OR reads them concurrently, and label-only filters use label bitmaps. On 312k nodes, an indexed count after an expansion went from 41 ms to 33 ms (13 ms to 3 ms on 31k nodes), and the first cold query from about 280 ms to 33 ms.
+- **Known limitation** — inside `ForEach` bodies (`forEachParam` / `for_each_param`), and after a write in the same request, index sets are re-read once per iteration or write. An improvement is in progress.
+- **Upgrading** — the stored data format is unchanged. Databases written by v0.0.7 open directly with v0.0.8.
+- **CLI 3.4.1** defaults to image v0.0.8.
+</Update>
+
+<Update
+  label="September 2026"
+  rss={{
     title: "Docker v0.0.7 and CLI 3.4.0: fast traversal-scoped search and a local disk cache",
     description: "Scoped vector search in tens of milliseconds, an opt-in disk cache, and SeaweedFS for local disk mode"
   }}

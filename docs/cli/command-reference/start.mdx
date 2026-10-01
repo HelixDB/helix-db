@@ -43,7 +43,7 @@ helix start [INSTANCE] [OPTIONS]
 
 ## Behavior
 
-- Defaults to `ghcr.io/helixdb/helixdb:v0.0.7`. Flags override the image tag and pull policy set in `[local.<instance>]`.
+- Defaults to `ghcr.io/helixdb/helixdb:v0.0.8`. Flags override the image tag and pull policy set in `[local.<instance>]`.
 - `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
 - All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
@@ -85,7 +85,7 @@ helix start dev --disk
 helix start dev --image-version latest
 
 # Save a specific image version
-helix start dev --image-version v0.0.7 --persist
+helix start dev --image-version v0.0.8 --persist
 
 # Start using cached images only
 helix start dev --pull never

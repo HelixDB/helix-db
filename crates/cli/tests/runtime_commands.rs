@@ -902,7 +902,7 @@ async fn configured_policy_applies_to_foreground_and_dependency_failures_preserv
                 result.failure();
             }
             let log = fixture.runtime_log();
-            assert!(log.contains("pull ghcr.io/helixdb/helixdb:v0.0.7"));
+            assert!(log.contains("pull ghcr.io/helixdb/helixdb:v0.0.8"));
             assert!(log.contains(&format!("pull {SEAWEEDFS_IMAGE}")));
             if !failed_image.is_empty() {
                 assert!(
