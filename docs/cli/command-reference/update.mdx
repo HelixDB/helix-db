@@ -29,6 +29,7 @@ helix update [OPTIONS]
 - If the [Helix agent skills](/cli/command-reference/skills) are installed, `helix update` also refreshes them to the latest version, even when the CLI is already up to date. A failure here degrades to a warning and never fails the CLI update.
 - Separately, when skills are installed the CLI checks once every 24 hours whether they are out of date and prints a notice pointing you at `helix skills update`.
 - Set `HELIX_NO_UPDATE_CHECK=1` to opt out of both the CLI and skills checks. `HELIX_DISABLE_UPDATE_CHECK` works the same way.
+- With `--json`, prints `{"version":"<version>","updated":true|false}`.
 
 ## Examples
 

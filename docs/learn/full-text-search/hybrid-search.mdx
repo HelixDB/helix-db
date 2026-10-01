@@ -1,24 +1,26 @@
 ---
 title: "What is hybrid search?"
-description: "Hybrid search runs keyword (BM25) and vector search for the same query and fuses the ranked results, so it matches both exact terms and meaning."
+description: "Hybrid search runs a keyword search and a vector search for the same query, then merges the results so it finds both exact terms and similar meaning."
 sidebarTitle: "Hybrid search"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-Hybrid search is a retrieval approach that runs a keyword search, typically BM25, and a
-vector search for the same query, then merges the two ranked lists into one. Keyword
-search catches exact names, IDs, and error codes; vector search catches paraphrases
-and related concepts. Fusing them, often with reciprocal rank fusion, gives results
-that hold up for both kinds of query.
+Hybrid search runs a keyword search and a meaning-based search (vector search) for the
+same query, then merges the two result lists into one. Think of it as asking two
+librarians at once: one finds every book that uses your exact words, the other finds
+books about the same idea in different words, and you combine their shortlists. Keyword
+search catches exact names, IDs, and error codes, while vector search catches
+paraphrases. Together they hold up whether a shopper types a model number or
+"comfortable shoes for standing all day."
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Explain why BM25 and vector search fail in complementary ways
-    - Describe the hybrid pipeline: retrieve from both indexes, fuse, optionally rerank
+    - Explain why keyword search and vector search fail in complementary ways
+    - Describe the hybrid pipeline: search both indexes, merge the lists, optionally rerank
     - Calculate reciprocal rank fusion scores and compare them with weighted blending
     - Recognize when hybrid search is worth its extra cost
   </Card>
@@ -26,15 +28,16 @@ that hold up for both kinds of query.
 
 ## How do keyword search and vector search differ?
 
-Keyword search matches the words in the query, while vector search matches meaning, so
-each one succeeds where the other fails. That complementary failure is the whole case
-for combining them.
+[Keyword search](/learn/full-text-search/what-is-full-text-search) matches the words
+you typed, usually ranked with [BM25](/learn/full-text-search/what-is-bm25).
+[Vector search](/learn/vector-search/what-is-vector-search) matches what you meant.
+Each succeeds where the other fails, and that is the whole case for combining them.
 
 | | Keyword search (BM25) | Vector (semantic) search |
 | --- | --- | --- |
 | Matches on | The analyzed terms in the query | Meaning, via [embeddings](/learn/vector-search/what-are-vector-embeddings) |
-| Index | Inverted index | Approximate nearest neighbor index, such as [HNSW](/learn/vector-search/what-is-hnsw) or IVF |
-| Handles well | "error E1042 on export," product SKUs, names | "why can't I sign in," paraphrases |
+| Index | Inverted index (word to documents) | Approximate nearest neighbor index, such as [HNSW](/learn/vector-search/what-is-hnsw) or IVF (inverted file) |
+| Handles well | "error E1042 on export," product codes, names | "why can't I sign in," paraphrases |
 | Struggles with | Synonyms and different wording | Exact identifiers, rare tokens, new jargon |
 | Needs a model | No | Yes, to embed documents and queries |
 | Score | Relevance score with no fixed range | Distance or similarity between vectors |
@@ -42,15 +45,12 @@ for combining them.
 A support-ticket search shows the gap. A user typing "E1042" needs the tickets that
 contain that exact code, which an embedding may blur into generic "error" text. A user
 typing "I can't log in after resetting my password" needs tickets about authentication
-failures, even when they share few words with the query. For each method on its own,
-see [What is BM25?](/learn/full-text-search/what-is-bm25) and
-[What is vector search?](/learn/vector-search/what-is-vector-search)
+failures, even when they share few words with the query.
 
 ## How does hybrid search work?
 
-Hybrid search sends one query to both a BM25 index and a vector index, fuses the two
-ranked candidate lists into a single ranking, and optionally reranks the top of that
-list before returning results.
+Hybrid search asks both indexes the same question, merges the two ranked lists, and
+optionally re-scores the top of the merged list before returning results.
 
 ```mermaid
 flowchart LR
@@ -79,22 +79,30 @@ flowchart LR
   </Step>
 </Steps>
 
-Apply the same filters, such as tenant or access control, to both searches, ideally
-before ranking. Filtering after ranking can leave a list with fewer than k results, or
-none, which skews fusion toward the other list. Skipping the filter on either list can
-return records the user should not see. See
-[What is filtered vector search?](/learn/vector-search/filtered-vector-search)
+Apply the same filters, such as tenant (one customer's data in a shared system) or
+access control, to both searches, ideally before ranking. Filtering after ranking can
+leave a list with fewer than k results, or none, which skews fusion toward the other
+list. Skipping the filter on either list can return records the user should not see.
+[Filtered vector search](/learn/vector-search/filtered-vector-search) covers why.
+
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Run prefiltered vector search and BM25 search over the same graph records, in one
+    transaction, with open-source HelixDB.
+  </Card>
+</div>
 
 ## How do you combine BM25 and vector search results?
 
-Most systems use rank-based fusion, usually reciprocal rank fusion (RRF), or blend
-normalized scores with a weight. Either can be followed by a reranker that rescores
-the fused top candidates.
+Put simply, you either merge by each document's position in each list, usually with
+reciprocal rank fusion (RRF), or rescale both sets of scores and blend them with a
+weight. Either can be followed by a reranker that rescores the fused top candidates.
 
 ### Reciprocal rank fusion
 
 Reciprocal rank fusion ignores raw scores and uses only each document's rank in each
-list:
+list. A document earns credit for sitting near the top of any list, and more credit for
+appearing in several:
 
 ```text
 RRF(d) = sum over each result list L that contains d of
@@ -130,46 +138,50 @@ The other common approach normalizes each list's scores and blends them:
 hybrid(d) = w * norm(bm25(d)) + (1 - w) * norm(similarity(d))
 ```
 
-A document that appears in only one list has no score in the other. Its missing
-normalized score is typically treated as 0 or as that list's lowest normalized score.
+A document found by only one search has no score in the other list, so that missing
+score is typically set to 0 or to the list's lowest normalized score.
 
 Raw scores cannot be added directly because they are not on the same scale:
 
 - BM25 scores have no fixed range and shift with the query's terms and the
   collection's statistics.
-- Vector scores depend on the embedding model and the metric. Some are distances,
+- Vector scores depend on the embedding model and the
+  [distance metric](/learn/vector-search/vector-distance-metrics). Some are distances,
   where lower is better, and some are similarities, where higher is better.
 - Both distributions change from query to query, so a fixed threshold on either is
   unreliable.
 
-Min-max or z-score normalization per query puts the scores on a common scale, and the
-weight `w` is then tuned on labeled queries. This can beat RRF when tuned well, but it
-is sensitive to outliers and to how many candidates each search returns.
+Min-max or z-score normalization per query puts the scores on a common scale, and
+the weight `w` is then tuned on labeled queries (test searches with known right
+answers). This can beat RRF when tuned well, but it is sensitive to outliers and to how
+many candidates each search returns.
 
 ### Reranking
 
-A reranker, often a cross-encoder model or an LLM, reads the query and each candidate
-together and produces a new relevance score. It is usually more accurate than either
-first-stage search but far more expensive per document, so it runs only on the fused
-top candidates.
+A reranker, often a cross-encoder model (one that reads the query and a document
+together) or a large language model (LLM), produces a new relevance score for each
+candidate. It is usually more accurate than either first-stage search but far more
+expensive per document, so it runs only on the fused top candidates.
 
 ## Why does hybrid search matter for RAG?
 
-Hybrid search matters for retrieval-augmented generation (RAG) because many questions
-mix a concept with an identifier, and vector retrieval alone can miss the one chunk
-that names it; adding BM25 reduces that risk. In "what changed in the refund policy
-for plan B-7," BM25 finds the chunks that contain "B-7" even when their embeddings are
-not the closest to the question, and a RAG answer is only as good as the context it
-retrieves. For the rest of the pipeline, see
-[What is RAG?](/learn/ai-memory/what-is-rag), and for following relationships from
-retrieved hits, see [GraphRAG](/learn/ai-memory/what-is-graphrag).
+A chatbot that answers from documents is only as good as the passages it retrieves.
+In [retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag), many
+questions mix a concept with an identifier, and vector retrieval alone can miss the
+one chunk that names it. Adding BM25 reduces that risk.
+
+For example, in "what changed in the refund policy for plan B-7," BM25 finds the
+chunks that contain "B-7" even when their embeddings are not the closest to the
+question. For following relationships from retrieved hits, see
+[GraphRAG](/learn/ai-memory/what-is-graphrag).
 
 ## When is hybrid search worth it?
 
 Hybrid search pays off when queries mix natural language with exact terms: support
-tickets, product catalogs, code and logs, legal and policy documents, and agent memory.
-It adds less when every query is conversational and the corpus has no identifiers, or
-when every lookup is an exact key.
+tickets, product catalogs, code and logs, legal and policy documents, and
+[AI agent memory](/learn/ai-memory/what-is-ai-agent-memory). It adds less when every
+query is conversational and the corpus has no identifiers, or when every lookup is an
+exact key.
 
 The cost is a second index to build and keep current, a query embedding per request,
 and a fusion step to tune. Measure whether it pays for itself: compare BM25 alone,
@@ -179,12 +191,14 @@ documents.
 ## How does HelixDB support hybrid search?
 
 In HelixDB, vector and BM25 text indexes are optional access paths over a label and a
-top-level property, on nodes or edges. When you define both on the same label, both
-searches rank records of that label:
+top-level property, on nodes or edges of its
+[property graph](/learn/graph-databases/what-is-a-property-graph). When you define both
+on the same label, both searches rank records of that label:
 
 - One request is one ACID transaction over a committed snapshot. A single request can
-  build a candidate set with a graph traversal, then run a prefiltered vector search
-  and a prefiltered BM25 search over that same candidate set.
+  build a candidate set with a
+  [graph traversal](/learn/graph-databases/what-is-a-graph-database), then run a
+  prefiltered vector search and a prefiltered BM25 search over that same candidate set.
 - Prefiltering guarantees that neither search returns a result outside the candidate
   set, such as documents the current user cannot read. Each prefiltered search
   returns at most 800 results. Prefiltered BM25 takes its term statistics from the
@@ -223,10 +237,12 @@ latency budget, so tune it along with the fusion method.
 
 ### Does hybrid search need two databases?
 
-No. It needs a keyword index and a vector index over the same content. When both live
-in one database, the two searches can read the same snapshot of the data and apply the
-same filters, for example within one transaction. See
-[Do you need separate graph, vector, and text databases?](/learn/database-architecture/one-database-for-graph-vector-and-text).
+No. It needs a keyword index and a vector index over the same content, not necessarily
+a search engine plus a separate
+[vector database](/learn/vector-search/what-is-a-vector-database). When both indexes
+live in one database, the two searches can read the same snapshot of the data and
+apply the same filters, for example within one transaction. See
+[Do you need separate graph, vector, and text databases?](/learn/database-architecture/one-database-for-graph-vector-and-text)
 
 ## Related topics
 

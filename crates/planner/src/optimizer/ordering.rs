@@ -2,7 +2,7 @@
 
 use crate::{cost, physical};
 
-type CostOrderingKey = (u64, u64, u64, u64, u64, u64, u64, u64, usize);
+pub(crate) type CostOrderingKey = (u64, u64, u64, u64, u64, u64, u64, u64, usize);
 pub(super) type AlternativeOrderingKey = (CostOrderingKey, u64);
 
 pub(super) fn alternative_key_for_cost(
@@ -12,7 +12,7 @@ pub(super) fn alternative_key_for_cost(
     (cost_key(cost), alternative.digest.get())
 }
 
-fn cost_key(cost: cost::CostVector) -> CostOrderingKey {
+pub(crate) fn cost_key(cost: cost::CostVector) -> CostOrderingKey {
     (
         cost.latency.as_micros(),
         cost.object_reads,

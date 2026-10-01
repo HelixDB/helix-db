@@ -3,9 +3,10 @@
 //! container runtime is available.
 
 use crate::config::ContainerRuntime;
+use crate::errors::CliError;
 use crate::external_tools::{self, ExternalTool};
 use crate::local_runtime::LocalRuntime;
-use crate::output::{Step, Verbosity};
+use crate::output::{self, Step, Verbosity};
 use crate::utils::command_exists;
 use eyre::{eyre, Result};
 use std::path::Path;
@@ -136,28 +137,10 @@ pub(crate) fn run_external_command(
         "npx" => ExternalTool::Npx,
         _ => return Err(eyre!("unsupported external setup command: {program}")),
     };
-    let mut step = Step::with_messages(description, description);
-    step.start();
-
-    if quiet {
-        let output = external_tools::command(tool)
-            .args(args)
-            .current_dir(project_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
-        if !output.status.success() {
-            step.fail();
-            if !output.stdout.is_empty() {
-                eprintln!("{}", String::from_utf8_lossy(&output.stdout));
-            }
-            if !output.stderr.is_empty() {
-                eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-            }
-            return Err(eyre!("{description} failed with status {}", output.status));
-        }
-    } else {
+    if !quiet {
+        // The tool owns the terminal (it may prompt), so no spinner may draw
+        // over it: announce the step, then report how it ended.
+        output::info(&format!("{description}…"));
         let status = external_tools::command(tool)
             .args(args)
             .current_dir(project_dir)
@@ -166,11 +149,37 @@ pub(crate) fn run_external_command(
             .stderr(Stdio::inherit())
             .status()?;
         if !status.success() {
-            step.fail();
             return Err(eyre!("{description} failed with status {status}"));
         }
+        output::step(description);
+        return Ok(());
     }
 
+    let mut step = Step::with_messages(description, description);
+    step.start();
+    let output = external_tools::command(tool)
+        .args(args)
+        .current_dir(project_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !output.status.success() {
+        step.fail();
+        return Err(CliError::new(format!(
+            "{description} failed with status {}",
+            output.status
+        ))
+        .with_caused_by(
+            [output.stdout, output.stderr]
+                .iter()
+                .map(|stream| String::from_utf8_lossy(stream).trim().to_owned())
+                .filter(|stream| !stream.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .into());
+    }
     step.done();
     Ok(())
 }

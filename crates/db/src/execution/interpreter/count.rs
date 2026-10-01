@@ -6,7 +6,7 @@
 //! windows across cursor operators.
 
 use futures::future::BoxFuture;
-use futures::FutureExt;
+use futures::{FutureExt, TryStreamExt};
 use helix_ast::query::QueryValue;
 use helix_ast::value::PropertyValue as AstPropertyValue;
 use helix_planner::{exec, ir, properties};
@@ -155,11 +155,13 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecCountPlan::Constant(count) => *count,
             exec::ExecCountPlan::NodeBitmap(plan) => {
                 let window = evaluated_window.expect("bitmap counts carry a window");
-                window.apply(self.node_bitmap(&plan.bitmap).await?.len() as usize)
+                let read = self.node_bitmap(&plan.bitmap, access::PARALLEL_INDEX_READS);
+                window.apply(read.await?.len() as usize)
             }
             exec::ExecCountPlan::EdgeBitmap(plan) => {
                 let window = evaluated_window.expect("bitmap counts carry a window");
-                window.apply(self.edge_bitmap(&plan.bitmap).await?.len() as usize)
+                let read = self.edge_bitmap(&plan.bitmap, access::PARALLEL_INDEX_READS);
+                window.apply(read.await?.len() as usize)
             }
             exec::ExecCountPlan::NodeUnique(plan) => {
                 let window = evaluated_window.expect("unique counts carry a window");
@@ -172,11 +174,13 @@ impl<'db> ExecutionContext<'db> {
                 let filters = match &plan.membership {
                     exec::ExecNodeRangeMembershipPlan::All => Vec::new(),
                     exec::ExecNodeRangeMembershipPlan::BitmapFilters(filters) => {
-                        let mut bitmaps = Vec::with_capacity(filters.as_ref().len());
-                        for filter in filters {
-                            bitmaps.push(self.node_bitmap(filter).await?);
-                        }
-                        bitmaps
+                        self.read_children(
+                            filters.iter().collect(),
+                            access::PARALLEL_INDEX_READS,
+                            |filter, reads| self.node_bitmap(filter, reads),
+                        )
+                        .try_collect::<Vec<_>>()
+                        .await?
                     }
                 };
                 let read = self.node_range_index_count_with_membership(
@@ -194,11 +198,13 @@ impl<'db> ExecutionContext<'db> {
                 let filters = match &plan.membership {
                     exec::ExecEdgeRangeMembershipPlan::All => Vec::new(),
                     exec::ExecEdgeRangeMembershipPlan::BitmapFilters(filters) => {
-                        let mut bitmaps = Vec::with_capacity(filters.as_ref().len());
-                        for filter in filters {
-                            bitmaps.push(self.edge_bitmap(filter).await?);
-                        }
-                        bitmaps
+                        self.read_children(
+                            filters.iter().collect(),
+                            access::PARALLEL_INDEX_READS,
+                            |filter, reads| self.edge_bitmap(filter, reads),
+                        )
+                        .try_collect::<Vec<_>>()
+                        .await?
                     }
                 };
                 let read = self.edge_range_index_count_with_membership(
@@ -736,9 +742,12 @@ impl<'db> ExecutionContext<'db> {
         Ok(Some(id))
     }
 
+    /// Resolve a bitmap program, reading the children of each `Union` and
+    /// `Intersect` concurrently in plan order within `reads` leaf reads.
     pub(in crate::execution::interpreter) fn node_bitmap<'a>(
         &'a self,
         expression: &'a exec::ExecNodeBitmapExpr,
+        reads: core::num::NonZeroUsize,
     ) -> BoxFuture<'a, Result<roaring::RoaringTreemap>> {
         async move {
             self.check_execution_deadline()?;
@@ -764,37 +773,40 @@ impl<'db> ExecutionContext<'db> {
                     .await
                 }
                 exec::ExecNodeBitmapExpr::Union { driver, rest } => {
-                    let mut result = self.node_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.node_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result |= child;
-                    }
-                    Ok(result)
+                    access::union(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.node_bitmap(child, reads),
+                        ),
+                    )
+                    .await
                 }
                 exec::ExecNodeBitmapExpr::Intersect { driver, rest } => {
-                    let mut result = self.node_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.node_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result &= child;
-                    }
-                    Ok(result)
+                    access::intersection(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.node_bitmap(child, reads),
+                        ),
+                    )
+                    .await
                 }
             }
         }
         .boxed()
     }
 
+    /// Resolve a bitmap program, reading the children of each `Union` and
+    /// `Intersect` concurrently in plan order within `reads` leaf reads.
     pub(in crate::execution::interpreter) fn edge_bitmap<'a>(
         &'a self,
         expression: &'a exec::ExecEdgeBitmapExpr,
+        reads: core::num::NonZeroUsize,
     ) -> BoxFuture<'a, Result<roaring::RoaringTreemap>> {
         async move {
             self.check_execution_deadline()?;
@@ -820,28 +832,28 @@ impl<'db> ExecutionContext<'db> {
                     .await
                 }
                 exec::ExecEdgeBitmapExpr::Union { driver, rest } => {
-                    let mut result = self.edge_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.edge_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result |= child;
-                    }
-                    Ok(result)
+                    access::union(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.edge_bitmap(child, reads),
+                        ),
+                    )
+                    .await
                 }
                 exec::ExecEdgeBitmapExpr::Intersect { driver, rest } => {
-                    let mut result = self.edge_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.edge_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result &= child;
-                    }
-                    Ok(result)
+                    access::intersection(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.edge_bitmap(child, reads),
+                        ),
+                    )
+                    .await
                 }
             }
         }
@@ -874,10 +886,12 @@ impl<'db> ExecutionContext<'db> {
                     }
                 },
                 exec::ExecCountCursorPlan::NodeBitmap(bitmap) => {
-                    self.node_bitmap(bitmap).await?.len() as usize
+                    let read = self.node_bitmap(bitmap, access::PARALLEL_INDEX_READS);
+                    read.await?.len() as usize
                 }
                 exec::ExecCountCursorPlan::EdgeBitmap(bitmap) => {
-                    self.edge_bitmap(bitmap).await?.len() as usize
+                    let read = self.edge_bitmap(bitmap, access::PARALLEL_INDEX_READS);
+                    read.await?.len() as usize
                 }
                 exec::ExecCountCursorPlan::NodeUnique {
                     lookup,
@@ -1308,7 +1322,7 @@ impl<'db> ExecutionContext<'db> {
                     )),
                 },
                 CountCursorLeaf::NodeBitmap(bitmap) => {
-                    let read = self.node_bitmap(bitmap);
+                    let read = self.node_bitmap(bitmap, access::PARALLEL_INDEX_READS);
                     let ids = read.await?;
                     Ok(ids
                         .into_iter()
@@ -1316,7 +1330,7 @@ impl<'db> ExecutionContext<'db> {
                         .collect())
                 }
                 CountCursorLeaf::EdgeBitmap(bitmap) => {
-                    let read = self.edge_bitmap(bitmap);
+                    let read = self.edge_bitmap(bitmap, access::PARALLEL_INDEX_READS);
                     let ids = read.await?;
                     Ok(ids
                         .into_iter()
@@ -4179,11 +4193,17 @@ mod tests {
             crate::execution_control::ExecutionControl::from_timeout(std::time::Duration::ZERO),
         );
         assert!(expired
-            .node_bitmap(&node_point("User", "status", "active"))
+            .node_bitmap(
+                &node_point("User", "status", "active"),
+                access::PARALLEL_INDEX_READS,
+            )
             .await
             .is_err());
         assert!(expired
-            .edge_bitmap(&edge_point("FOLLOWS", "status", "active"))
+            .edge_bitmap(
+                &edge_point("FOLLOWS", "status", "active"),
+                access::PARALLEL_INDEX_READS,
+            )
             .await
             .is_err());
         let mut dependency = Some(ExecutionValue::Stream(Vec::new()));
@@ -4296,6 +4316,84 @@ mod tests {
         );
     }
 
+    #[cfg(test)]
+    #[tokio::test]
+    async fn range_count_bitmap_filters_are_read_concurrently() {
+        let db = test_support::open_db_with_config(
+            test_support::in_memory_config("count-range-concurrent-filters")
+                .with_equality_index("User", "status")
+                .with_equality_index("User", "role")
+                .with_range_index("User", "rank"),
+        )
+        .await;
+        for (status, role, rank) in [
+            ("active", "admin", "a"),
+            ("active", "member", "b"),
+            ("paused", "admin", "c"),
+        ] {
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![
+                    ("status", PropertyValue::from(status)),
+                    ("role", PropertyValue::from(role)),
+                    ("rank", PropertyValue::from(rank)),
+                ],
+            )
+            .await;
+        }
+        let range = |membership| {
+            exec::ExecCountPlan::NodeRange(exec::ExecNodeRangeCountPlan {
+                driver: exec::ExecNodeVerifiedRangeScanPlan {
+                    index: catalog::NodeRangeIndexMeta::new(test_support::name(
+                        "node_range:User:rank:Asc",
+                    )),
+                    key: catalog::ScopedPropertyDirectionKey::try_new(
+                        "User",
+                        "rank",
+                        RangeIndexDirection::Asc,
+                    )
+                    .unwrap(),
+                    range: ir::IndexRange::All,
+                },
+                membership,
+                window: exec::ExecCountWindowPlan::identity(),
+            })
+        };
+
+        // One pre-intersected filter is the sequential oracle.
+        let intersected = execute_direct_count(
+            &db,
+            range(exec::ExecNodeRangeMembershipPlan::BitmapFilters(
+                ir::AtLeast::from_one(exec::ExecNodeBitmapExpr::Intersect {
+                    driver: Box::new(node_point("User", "status", "active")),
+                    rest: ir::AtLeast::from_one(node_point("User", "role", "admin")),
+                }),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(intersected, ExecutionValue::Count(1));
+        let peak = &db.inner.peak_index_child_reads;
+        peak.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute_direct_count(
+                &db,
+                range(exec::ExecNodeRangeMembershipPlan::BitmapFilters(
+                    ir::AtLeast::try_from_vec(vec![
+                        node_point("User", "status", "active"),
+                        node_point("User", "role", "admin"),
+                    ])
+                    .unwrap(),
+                )),
+            )
+            .await
+            .unwrap(),
+            intersected
+        );
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[cfg_attr(test, tokio::test)]
     async fn bitmap_validation_and_recursive_error_paths_cover_every_exact_variant() {
         let db = test_support::open_db_with_config(
@@ -4331,7 +4429,14 @@ mod tests {
             values: ir::AtLeast::from_pair(indexed("active"), indexed("paused")),
         };
         let valid_node = node_point("User", "status", "active");
-        assert_eq!(execution.node_bitmap(&valid_node).await.unwrap().len(), 1);
+        assert_eq!(
+            execution
+                .node_bitmap(&valid_node, access::PARALLEL_INDEX_READS)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         for expression in [
             invalid_node_point(),
             invalid_node_batch,
@@ -4352,7 +4457,10 @@ mod tests {
                 rest: ir::AtLeast::from_one(invalid_node_point()),
             },
         ] {
-            assert!(execution.node_bitmap(&expression).await.is_err());
+            assert!(execution
+                .node_bitmap(&expression, access::PARALLEL_INDEX_READS)
+                .await
+                .is_err());
         }
 
         let invalid_edge_point = || exec::ExecEdgeBitmapExpr::PointRead {
@@ -4366,7 +4474,14 @@ mod tests {
             values: ir::AtLeast::from_pair(indexed("active"), indexed("paused")),
         };
         let valid_edge = edge_point("FOLLOWS", "status", "active");
-        assert_eq!(execution.edge_bitmap(&valid_edge).await.unwrap().len(), 1);
+        assert_eq!(
+            execution
+                .edge_bitmap(&valid_edge, access::PARALLEL_INDEX_READS)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         for expression in [
             invalid_edge_point(),
             invalid_edge_batch,
@@ -4387,7 +4502,10 @@ mod tests {
                 rest: ir::AtLeast::from_one(invalid_edge_point()),
             },
         ] {
-            assert!(execution.edge_bitmap(&expression).await.is_err());
+            assert!(execution
+                .edge_bitmap(&expression, access::PARALLEL_INDEX_READS)
+                .await
+                .is_err());
         }
     }
 

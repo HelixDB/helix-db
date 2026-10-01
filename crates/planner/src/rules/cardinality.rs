@@ -31,6 +31,11 @@ impl optimizer::OptimizerRule for StreamCardinalityImplementationRule {
         let logical::LogicalExpr::StreamCardinality(cardinality) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
+            .is_some()
+        {
+            return optimizer::RuleResult::NotApplicable;
+        }
         let plans = match count_plans(cardinality.input(), &input) {
             Ok(plans) => plans,
             Err(rejection) => return optimizer::RuleResult::Rejected(rejection),
@@ -1794,14 +1799,37 @@ fn cursor_cost(
         }
         exec::ExecCountCursorPlan::Filter { input, .. } => cursor_cost(input, stats, storage)
             .serial(storage.stored_predicate_filter(storage.default_unknown_scan_rows)),
-        exec::ExecCountCursorPlan::IndexMembership { input, plan } => cursor_cost(
-            input, stats, storage,
-        )
-        .serial(storage.index_membership_filter(
-            storage.bitmap_equality_lookup(storage.default_equality_index_rows),
-            super::membership_label_domain_cost(plan.outside_label, &plan.label, stats, storage),
-            storage.default_unknown_scan_rows,
-        )),
+        exec::ExecCountCursorPlan::IndexMembership { input, plan } => {
+            // A count cursor proves no bound on its input and prices every
+            // operator at the unknown-input default; an index set holds the
+            // default equality rows.
+            let (set, label_domain, matches) = match &plan.set {
+                exec::ExecNodeMembershipSet::Index {
+                    label,
+                    outside_label,
+                    ..
+                } => (
+                    storage.bitmap_equality_lookup(storage.default_equality_index_rows),
+                    super::membership_label_domain_cost(*outside_label, label, stats, storage),
+                    storage.default_equality_index_rows,
+                ),
+                exec::ExecNodeMembershipSet::Labels(labels) => {
+                    let (set, matches) = super::membership_labels_cost(labels, stats, storage);
+                    (set, None, matches)
+                }
+            };
+            cursor_cost(input, stats, storage).serial(storage.index_membership_filter(
+                set,
+                label_domain.map(|(read, label_rows)| cost::MembershipLabelDomain {
+                    read,
+                    label_rows,
+                    predicate: plan.predicate.predicate(),
+                }),
+                plan.residual.as_ref().map(AsRef::as_ref),
+                storage.default_unknown_scan_rows,
+                matches,
+            ))
+        }
         exec::ExecCountCursorPlan::Window { input, .. } => cursor_cost(input, stats, storage),
         exec::ExecCountCursorPlan::Order { input, .. } => cursor_cost(input, stats, storage)
             .serial(storage.explicit_sort(storage.default_unknown_scan_rows)),
@@ -4230,5 +4258,85 @@ mod tests {
             window: exec::ExecCountWindowPlan::identity(),
         })
         .is_err());
+    }
+
+    #[test]
+    fn membership_count_cursor_prices_set_reads_not_records() {
+        let storage = cost::StorageCostProfile::default();
+        let input = || Box::new(exec::ExecCountCursorPlan::NodeLabelBitmap(name("Group")));
+        let membership = |predicate: Predicate| exec::ExecCountCursorPlan::IndexMembership {
+            input: input(),
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                &ir::NodeIndexMembershipPlan::new(
+                    ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                        index: catalog::NodeEqualityIndexMeta::new(name("node_eq:Attribute:kind")),
+                        key: catalog::ScopedPropertyKey::try_new("Attribute", "kind").unwrap(),
+                        value: literal(PropertyValue::from("B")),
+                    })
+                    .unwrap(),
+                    ir::PredicatePlan::new(predicate).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )),
+        };
+        let evaluate = membership(Predicate::eq("kind", "B"));
+        let reject = membership(Predicate::and(vec![
+            Predicate::eq("$label", "Attribute"),
+            Predicate::eq("kind", "B"),
+        ]));
+        let filter = exec::ExecCountCursorPlan::Filter {
+            input: input(),
+            predicate: ir::PredicatePlan::new(Predicate::eq("kind", "B")).unwrap(),
+        };
+        let stats = context::StatsSnapshot::default();
+        let per_row = cursor_cost(&filter, &stats, &storage);
+
+        for (membership, outside_label) in [
+            (&evaluate, ir::NodeMembershipOutsideLabel::Evaluate),
+            (&reject, ir::NodeMembershipOutsideLabel::Reject),
+        ] {
+            let exec::ExecCountCursorPlan::IndexMembership { plan, .. } = membership else {
+                panic!("expected an index membership cursor");
+            };
+            assert!(matches!(
+                &plan.set,
+                exec::ExecNodeMembershipSet::Index { outside_label: policy, .. }
+                    if *policy == outside_label
+            ));
+            assert!(cursor_cost(membership, &stats, &storage).latency < per_row.latency);
+        }
+
+        // A `$label` set rejects every node outside its labels without a
+        // label-domain read, so it also beats the filter.
+        let labels = exec::ExecCountCursorPlan::IndexMembership {
+            input: input(),
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                &ir::NodeIndexMembershipPlan::labels(
+                    ir::PredicatePlan::new(Predicate::eq("$label", "Attribute")).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )),
+        };
+        assert!(cursor_cost(&labels, &stats, &storage).latency < per_row.latency);
+
+        // No membership reads a record, and a huge label bitmap only raises
+        // the unscoped membership's latency.
+        let source = cursor_cost(&input(), &stats, &storage);
+        for membership in [&evaluate, &reject, &labels] {
+            assert_eq!(
+                cursor_cost(membership, &stats, &storage).authoritative_graph_reads,
+                source.authoritative_graph_reads
+            );
+        }
+        let huge_label = context::StatsSnapshot::default()
+            .with_node_label_cardinality(name("Attribute"), 10_000_000);
+        let huge = cursor_cost(&evaluate, &huge_label, &storage);
+        assert!(huge.latency > cursor_cost(&evaluate, &stats, &storage).latency);
+        assert_eq!(
+            huge.authoritative_graph_reads,
+            source.authoritative_graph_reads
+        );
     }
 }

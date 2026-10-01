@@ -63,9 +63,9 @@ database = "tenant:tenant-1"
         fixture
             .command()
             .current_dir(&project)
-            .args(["query", "--json"])
+            .args(["query", "--body"])
             .arg(request.to_string())
-            .arg("--compact")
+            .arg("--json")
             .assert()
             .success(),
     );
@@ -77,17 +77,9 @@ async fn cloud_query_accepts_an_explicit_typed_database_target() {
     let server = MockServer::start().await;
     let fixture = CliFixture::new().with_http_base(server.uri());
     fixture.write_credentials("user@example.com", "session-access");
-    let project = fixture.root().join("explicit-cloud-query");
+    // A typed database target needs no helix.toml at all.
+    let project = fixture.root().join("no-project-here");
     fs::create_dir_all(&project).unwrap();
-    fs::write(
-        project.join("helix.toml"),
-        r#"[project]
-name = "explicit-cloud-query"
-
-[local.dev]
-"#,
-    )
-    .unwrap();
     let request = serde_json::json!({
         "request_type":"read",
         "query":{"queries":[],"returns":[]}
@@ -113,9 +105,9 @@ name = "explicit-cloud-query"
         fixture
             .command()
             .current_dir(&project)
-            .args(["query", "tenant:tenant-2", "--json"])
+            .args(["query", "tenant:tenant-2", "--body"])
             .arg(request.to_string())
-            .arg("--compact")
+            .arg("--json")
             .assert()
             .success(),
     );
@@ -146,14 +138,16 @@ database = "tenant:tenant-1"
             .current_dir(project)
             .args([
                 "query",
-                "--json",
+                "--body",
                 r#"{"request_type":"read","query":{"queries":[],"returns":[]}}"#,
             ])
             .assert()
             .failure(),
     );
-    assert!(error.contains("Cannot derive an unambiguous query target"));
-    assert!(error.contains("preview, production"));
+    assert!(error.contains("no default query target"), "{error}");
+    assert!(error.contains("candidates:"), "{error}");
+    assert!(error.contains("preview"), "{error}");
+    assert!(error.contains("production"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -196,11 +190,18 @@ async fn only_typed_pre_dispatch_rejection_refreshes_and_retries() {
 
     fixture
         .command()
-        .args(["workspace", "list", "--format", "json"])
+        .args(["workspace", "list", "--json"])
         .assert()
         .success();
 
     server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/projects/project-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id":"project-1","workspaceId":"ws-1"
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/v1/tenants"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
@@ -212,18 +213,8 @@ async fn only_typed_pre_dispatch_rejection_refreshes_and_retries() {
     let error = stderr(
         fixture
             .command()
-            .args([
-                "database",
-                "create",
-                "--project",
-                "project-1",
-                "--name",
-                "db",
-                "--slug",
-                "db",
-                "--plan",
-                "starter",
-            ])
+            .args(["database", "create", "db", "--project", "project-1"])
+            .args(["--plan", "starter"])
             .assert()
             .failure(),
     );
@@ -247,12 +238,12 @@ async fn workspace_and_query_error_paths_use_bearer_session() {
     let output = stdout(
         fixture
             .command()
-            .args(["workspace", "list", "--format", "json"])
+            .args(["workspace", "list", "--json"])
             .assert()
             .success(),
     );
     let value: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(value["workspaces"][0]["id"], "ws-1");
+    assert_eq!(value[0]["id"], "ws-1");
 
     let project = fixture.root().join("cloud-logs");
     fs::create_dir_all(&project).unwrap();
@@ -283,7 +274,6 @@ database = "cluster:cluster-1"
             .args([
                 "logs",
                 "production",
-                "--range",
                 "--start",
                 "2026-01-01T00:00:00Z",
                 "--end",
@@ -292,7 +282,14 @@ database = "cluster:cluster-1"
             .assert()
             .success(),
     );
-    assert!(logs.contains("read: failed"));
+    let row = logs
+        .lines()
+        .find(|line| line.contains("read"))
+        .unwrap_or_default();
+    assert!(
+        row.contains("2026-01-01T00:30:00Z") && row.contains("failed"),
+        "{logs}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -327,14 +324,14 @@ async fn query_command_preserves_the_shared_transport_corpus() {
             fixture
                 .command()
                 .current_dir(&project)
-                .args(["query", "dev", "--json"])
+                .args(["query", "dev", "--body"])
                 .arg(serde_json::to_string(&request).unwrap())
                 .args([
                     "--host",
                     &server.address().ip().to_string(),
                     "--port",
                     &server.address().port().to_string(),
-                    "--compact",
+                    "--json",
                 ])
                 .assert()
                 .success(),

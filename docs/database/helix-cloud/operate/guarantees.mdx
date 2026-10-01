@@ -56,8 +56,9 @@ temporarily lag.
 
 Use a writer-only server request when a separate request requires read-after-write:
 
-Set `writerOnly()` / `writer_only(true)` / the equivalent Go request option before
-sending the read.
+Call `writerOnly()` on the TypeScript request builder, `writer_only()` on the Python
+`QueryBuilder` (or pass `writer_only=True` to `Client.execute`), or pass
+`helix.WriterOnly()` to Go `Client.Exec` before sending the read.
 
 Embedded writer handles execute against their local writer. Embedded reader handles
 are read-only and refresh according to the underlying reader lifecycle.

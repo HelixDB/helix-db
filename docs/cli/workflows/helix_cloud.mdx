@@ -17,18 +17,14 @@ queries against it. You need a Helix Cloud account and at least one database; se
     helix auth status
     ```
   </Step>
-  <Step title="Discover a target">
+  <Step title="Link a project and database">
     ```bash
-    helix workspace list
-    helix project list --workspace-id <workspace-id>
-    helix database list --project <project-id>
+    helix init cloud
     ```
-  </Step>
-  <Step title="Link the current project and database">
-    ```bash
-    helix project link <project-id>
-    helix add cloud --name production --database tenant:<tenant-id>
-    ```
+
+    The CLI picks your workspace, project, and database: it uses the only one of each or
+    asks you to choose. It writes the project and a `production` database link to
+    `helix.toml`. To link another database later, run `helix add cloud --name <name>`.
   </Step>
   <Step title="Run a query through the broker">
     ```bash
@@ -36,7 +32,22 @@ queries against it. You need a Helix Cloud account and at least one database; se
     helix shell production
     ```
   </Step>
+  <Step title="Inspect the linked resources">
+    ```bash
+    helix status
+    helix database
+    helix logs production
+    ```
+
+    Inside a linked project, Cloud commands default to its project and databases, so
+    they need no IDs.
+  </Step>
 </Steps>
+
+Pass a resource by ID, slug, or name when you want a different one, for example
+`helix database list --project <project>` or `helix query tenant:<id> --file request.json`. In
+scripts, add `--json` for machine-readable output; commands then never prompt. See
+[Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
 ## How Cloud queries are authorized
 

@@ -11,8 +11,8 @@ use super::super::super::ExecutionContext;
 use super::super::filter::RECORD_BATCH_ROWS;
 use super::support::*;
 
-/// Repetitions of [`traversal_pattern`], whose eight node rows per copy then
-/// exceed one record batch, so membership resolves its set.
+/// Repetitions of [`traversal_pattern`] that make [`traversal_rows`] span
+/// [`TRAVERSAL_BATCHES`] record batches for the read-count assertions.
 const TRAVERSAL_REPEATS: usize = RECORD_BATCH_ROWS / 8 + 1;
 
 /// Stored-record batches spanned by [`traversal_rows`]; each batch reads a
@@ -21,10 +21,14 @@ const TRAVERSAL_BATCHES: usize = 2;
 
 struct Fixture {
     db: crate::HelixDB,
-    /// `Attribute` nodes with kind `B`, `A`, and no kind.
+    /// `Attribute` nodes with kind `B`, `A`, and no kind. Titles contain `x`
+    /// on every node except `attribute_b_plain` and `note_b`.
     attribute_b: u64,
     attribute_a: u64,
     attribute_none: u64,
+    /// `Attribute` node with kind `B` whose title has no `x`. Only
+    /// [`fused_residual_reads_each_record_once`] streams it.
+    attribute_b_plain: u64,
     /// Nodes of other labels with kind `B` and `A`.
     note_b: u64,
     note_a: u64,
@@ -41,20 +45,24 @@ async fn fixture(name: &str) -> Fixture {
             .with_range_index("Attribute", "rank"),
     )
     .await;
-    let node = |label: &'static str, kind: Option<&'static str>, rank: i64| {
+    let node = |label: &'static str, kind: Option<&'static str>, rank: i64, title: &'static str| {
         let db = &db;
         async move {
-            let mut properties = vec![("rank", PropertyValue::I64(rank))];
+            let mut properties = vec![
+                ("rank", PropertyValue::I64(rank)),
+                ("title", PropertyValue::from(title)),
+            ];
             properties.extend(kind.map(|kind| ("kind", PropertyValue::from(kind))));
             test_support::add_node_with_properties(db, label, properties).await
         }
     };
-    let attribute_b = node("Attribute", Some("B"), 1).await;
-    let attribute_a = node("Attribute", Some("A"), 5).await;
-    let attribute_none = node("Attribute", None, 9).await;
-    let note_b = node("Note", Some("B"), 1).await;
-    let note_a = node("Note", Some("A"), 5).await;
-    let group = node("Group", None, 0).await;
+    let attribute_b = node("Attribute", Some("B"), 1, "xb").await;
+    let attribute_a = node("Attribute", Some("A"), 5, "xa").await;
+    let attribute_none = node("Attribute", None, 9, "x").await;
+    let attribute_b_plain = node("Attribute", Some("B"), 2, "plain").await;
+    let note_b = node("Note", Some("B"), 1, "note").await;
+    let note_a = node("Note", Some("A"), 5, "xn").await;
+    let group = node("Group", None, 0, "xg").await;
     let edge_b = test_support::add_edge_with_properties(
         &db,
         group,
@@ -76,6 +84,7 @@ async fn fixture(name: &str) -> Fixture {
         attribute_b,
         attribute_a,
         attribute_none,
+        attribute_b_plain,
         note_b,
         note_a,
         group,
@@ -104,8 +113,39 @@ fn literal(value: impl Into<helix_ast::value::PropertyValue>) -> ir::IndexValue 
 fn membership(set: ir::NodeAccessSourcePlan, predicate: Predicate) -> exec::ExecOp {
     exec::ExecOp::IndexMembership {
         plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
-            &ir::NodeIndexMembershipPlan::new(set, ir::PredicatePlan::new(predicate).unwrap())
-                .unwrap(),
+            &ir::NodeIndexMembershipPlan::new(
+                set,
+                ir::PredicatePlan::new(predicate).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )),
+    }
+}
+
+/// Membership of the whole `predicate` whose set matches evaluate `residual`.
+fn fused(set: ir::NodeAccessSourcePlan, predicate: Predicate, residual: Predicate) -> exec::ExecOp {
+    exec::ExecOp::IndexMembership {
+        plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+            &ir::NodeIndexMembershipPlan::new(
+                set,
+                ir::PredicatePlan::new(predicate).unwrap(),
+                Some(ir::PredicatePlan::new(residual).unwrap()),
+            )
+            .unwrap(),
+        )),
+    }
+}
+
+/// Membership decided by the `$label` bitmaps of `predicate`'s label domain.
+fn label_membership(predicate: Predicate, residual: Option<Predicate>) -> exec::ExecOp {
+    exec::ExecOp::IndexMembership {
+        plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+            &ir::NodeIndexMembershipPlan::labels(
+                ir::PredicatePlan::new(predicate).unwrap(),
+                residual.map(|residual| ir::PredicatePlan::new(residual).unwrap()),
+            )
+            .unwrap(),
         )),
     }
 }
@@ -117,8 +157,7 @@ fn filter(predicate: Predicate) -> exec::ExecOp {
 }
 
 /// Rows behind a traversal: every node row carries a path through `group`, a
-/// binding, and a sack, and the stream repeats elements. Its eight node rows
-/// stay within one record batch, so membership evaluates every row.
+/// binding, and a sack, and the stream repeats elements.
 fn traversal_pattern(fixture: &Fixture) -> Vec<ExecutionRow> {
     let node = |id| {
         let mut row = ExecutionRow::current(ElementRef::Node(fixture.group));
@@ -143,9 +182,14 @@ fn traversal_pattern(fixture: &Fixture) -> Vec<ExecutionRow> {
     ]
 }
 
-/// [`traversal_pattern`] repeated past one record batch of node rows.
+/// [`traversal_pattern`] repeated across [`TRAVERSAL_BATCHES`] record batches.
 fn traversal_rows(fixture: &Fixture) -> Vec<ExecutionRow> {
-    let pattern = traversal_pattern(fixture);
+    repeated(traversal_pattern(fixture))
+}
+
+/// `pattern` repeated [`TRAVERSAL_REPEATS`] times, spanning
+/// [`TRAVERSAL_BATCHES`] record batches.
+fn repeated(pattern: Vec<ExecutionRow>) -> Vec<ExecutionRow> {
     let rows = pattern
         .iter()
         .cycle()
@@ -315,18 +359,21 @@ async fn range_sets_evaluate_rows_without_scanning_the_range() {
     .unwrap();
     let range = |range: ir::IndexRange, predicate: Predicate| exec::ExecOp::IndexMembership {
         plan: Box::new(exec::ExecNodeIndexMembershipPlan {
-            set: exec::ExecNodeSecondarySetPlan::Range(exec::ExecNodeSecondaryRangePlan {
-                index: catalog::IndexCatalogSnapshot::default()
-                    .with_node_range(key.clone())
-                    .node_range[&key]
-                    .clone(),
-                key: key.clone(),
-                range,
-                iteration: ir::RangeScanIteration::Forward,
-            }),
-            label: name("Attribute"),
+            set: exec::ExecNodeMembershipSet::Index {
+                set: exec::ExecNodeSecondarySetPlan::Range(exec::ExecNodeSecondaryRangePlan {
+                    index: catalog::IndexCatalogSnapshot::default()
+                        .with_node_range(key.clone())
+                        .node_range[&key]
+                        .clone(),
+                    key: key.clone(),
+                    range,
+                    iteration: ir::RangeScanIteration::Forward,
+                }),
+                label: name("Attribute"),
+                outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+            },
             predicate: ir::PredicatePlan::new(predicate).unwrap(),
-            outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+            residual: None,
         }),
     };
     let lower = |value: ir::RangeIndexValue| ir::IndexRange::Lower {
@@ -545,12 +592,12 @@ async fn runtime_parameters_needing_authoritative_scans_fall_back_to_rows() {
 #[tokio::test]
 async fn unbound_parameters_fail_only_when_a_row_reads_them() {
     let fixture = fixture("membership-unbound-params").await;
-    // Past one record batch of node rows, none of them `Attribute`: the
-    // per-row filter rejects every row on `$label` and never reads `$kind`.
+    // Node rows, none of them `Attribute`: the per-row filter rejects every
+    // row on `$label` and never reads `$kind`.
     let rows = [fixture.note_b, fixture.note_a, fixture.group]
         .into_iter()
         .cycle()
-        .take(RECORD_BATCH_ROWS + 1)
+        .take(3)
         .map(|id| ExecutionRow::current(ElementRef::Node(id)))
         .collect::<Vec<_>>();
     let scoped = |predicate: Predicate| {
@@ -628,22 +675,14 @@ async fn unavailable_indexes_fall_back_and_corrupt_identities_fail_closed() {
         Err(crate::error::HelixDbError::IndexCatalogCorruption(_))
     ));
 
-    // Streams without node rows, or with at most one record batch of them,
-    // never resolve the (corrupt) set and evaluate every row instead.
-    let narrow = traversal_pattern(&fixture)
-        .into_iter()
-        .cycle()
-        .filter(|row| matches!(row.current, Some(ElementRef::Node(_))))
-        .take(RECORD_BATCH_ROWS)
-        .collect::<Vec<_>>();
+    // Streams without node rows never resolve the (corrupt) set and evaluate
+    // every row instead.
     for input in [
         Vec::new(),
         vec![
             ExecutionRow::current(ElementRef::Edge(fixture.edge_b)),
             ExecutionRow::empty(),
         ],
-        traversal_pattern(&fixture),
-        narrow.clone(),
     ] {
         let (expected, _) = run(
             &fixture,
@@ -655,29 +694,24 @@ async fn unavailable_indexes_fall_back_and_corrupt_identities_fail_closed() {
         let (result, _) = run(&fixture, &corrupt, input, context::ParamBindings::default()).await;
         assert_eq!(result.unwrap(), expected.unwrap());
     }
-    // One more node row resolves the set.
-    let (error, _) = run(
-        &fixture,
-        &corrupt,
-        narrow
-            .into_iter()
-            .chain([ExecutionRow::current(ElementRef::Node(fixture.note_a))])
-            .collect(),
-        context::ParamBindings::default(),
-    )
-    .await;
-    assert!(matches!(
-        error,
-        Err(crate::error::HelixDbError::IndexCatalogCorruption(_))
-    ));
+    // Any node row resolves the set, so the corrupt identity fails closed.
+    for input in [
+        traversal_pattern(&fixture),
+        vec![ExecutionRow::current(ElementRef::Node(fixture.note_a))],
+    ] {
+        let (error, _) = run(&fixture, &corrupt, input, context::ParamBindings::default()).await;
+        assert!(matches!(
+            error,
+            Err(crate::error::HelixDbError::IndexCatalogCorruption(_))
+        ));
+    }
 }
 
 #[tokio::test]
 async fn pull_regions_and_count_cursors_share_membership_semantics() {
     let fixture = fixture("membership-pull-count").await;
-    // Three of every five node rows match. Sixty copies span 300 node rows,
-    // so a pull past the first record batch resolves the set and decides
-    // the remaining rows from it.
+    // Three of every five node rows match. Every pull resolves the set on
+    // its first node row and decides the remaining rows from it.
     let pattern = [
         fixture.attribute_a,
         fixture.note_b,
@@ -706,9 +740,8 @@ async fn pull_regions_and_count_cursors_share_membership_semantics() {
         count: ir::StreamBoundPlan::Literal(count),
     };
     for (terminal, expected, resolves) in [
-        // Two matches stop within the first batch and never read the set.
-        (limit(2), matching(2), 0),
-        // 170 matches take 283 node rows, 27 of them decided by the set.
+        // Two matches stop after four node rows, all decided by the set.
+        (limit(2), matching(2), 1),
         (limit(170), matching(170), 1),
         (
             exec::ExecOp::Count {
@@ -765,16 +798,13 @@ async fn pull_regions_and_count_cursors_share_membership_semantics() {
 }
 
 #[tokio::test]
-async fn pull_cursors_resolve_membership_after_one_record_batch_of_node_rows() {
-    let fixture = fixture("membership-pull-batch").await;
-    // Two of every three node rows match, so 170 matches take 254 node rows
-    // and 200 matches take 299.
+async fn pull_cursors_resolve_membership_on_their_first_node_row() {
+    let fixture = fixture("membership-pull-first-node").await;
     let ids = [fixture.attribute_b, fixture.note_b, fixture.attribute_a]
         .into_iter()
         .cycle()
         .take(3 * RECORD_BATCH_ROWS)
         .collect::<Vec<_>>();
-    let params = context::ParamBindings::default().with_value(name("ids"), ids_value(&ids));
     let corrupt = membership(
         ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
             index: catalog::NodeEqualityIndexMeta::try_new("not-a-planner-identity").unwrap(),
@@ -802,28 +832,35 @@ async fn pull_cursors_resolve_membership_after_one_record_batch_of_node_rows() {
         )
     };
 
-    // The cursor stops within one batch of node rows and never reads the set.
+    // Even the shortest pull resolves the set on its first node row, so the
+    // corrupt identity fails closed.
+    for count in [1, 170] {
+        let error = fixture
+            .db
+            .execute(
+                &limited(count),
+                context::ParamBindings::default().with_value(name("ids"), ids_value(&ids)),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::error::HelixDbError::IndexCatalogCorruption(_)),
+            "{error:?}"
+        );
+    }
+
+    // A cursor without node rows never resolves it.
+    let before = resolved(&fixture.db);
     let result = fixture
         .db
-        .execute(&limited(170), params.clone())
+        .execute(
+            &limited(1),
+            context::ParamBindings::default().with_value(name("ids"), ids_value(&[])),
+        )
         .await
         .unwrap();
-    assert_eq!(
-        result.last,
-        Some(ExecutionValue::Stream(
-            ids.iter()
-                .filter(|id| **id != fixture.attribute_a)
-                .take(170)
-                .map(|id| ExecutionRow::current(ElementRef::Node(*id)))
-                .collect()
-        ))
-    );
-    // A longer pull resolves the set, and the corrupt identity fails closed.
-    let error = fixture.db.execute(&limited(200), params).await.unwrap_err();
-    assert!(
-        matches!(error, crate::error::HelixDbError::IndexCatalogCorruption(_)),
-        "{error:?}"
-    );
+    assert_eq!(result.last, Some(ExecutionValue::Stream(Vec::new())));
+    assert_eq!(resolved(&fixture.db), before);
 }
 
 #[tokio::test]
@@ -875,6 +912,45 @@ async fn resolved_memberships_are_reused_across_executions_of_one_plan() {
         &ctx.cached_index_membership(plan).await.unwrap()
     ));
     assert_eq!(resolved(&fixture.db), 3);
+    ctx.close_request_read_view().unwrap();
+}
+
+/// Every `ForEach` frame clears the cache, so a body that decides a node row
+/// resolves its membership set once per frame, however few rows it streams.
+/// This pins the known per-frame cost until the cache survives frames whose
+/// parameters the plan does not read.
+#[tokio::test]
+async fn foreach_frames_resolve_membership_once_each() {
+    let fixture = fixture("membership-foreach-frames").await;
+    let item = name("item");
+    let items = name("items");
+    let body = test_support::subplan(
+        vec![
+            node_access_step(1, item.clone()),
+            test_support::step(
+                2,
+                vec![exec::ExecStepId::new(1).unwrap()],
+                membership(kind_equality(literal("B")), Predicate::eq("kind", "B")),
+            ),
+        ],
+        2,
+    );
+    let frames = [fixture.attribute_b, fixture.note_b, fixture.attribute_a];
+    let mut ctx = ExecutionContext::new(
+        &fixture.db,
+        context::ParamBindings::default().with_value(
+            items.clone(),
+            PropertyValue::array(frames.map(|id| {
+                PropertyValue::object([(item.to_string(), PropertyValue::I64(id as i64))])
+            })),
+        ),
+    );
+    ctx.enable_request_read_view().await.unwrap();
+    let last = ctx.execute_foreach(&items, &body).await.unwrap();
+    // The last frame's `attribute_a` has kind `A`.
+    assert_eq!(last, ExecutionValue::Stream(Vec::new()));
+    assert_eq!(resolved(&fixture.db), frames.len());
+    assert_eq!(ctx.prepared_memberships.len(), 0);
     ctx.close_request_read_view().unwrap();
 }
 
@@ -958,4 +1034,344 @@ async fn filter_batches_record_reads_once_per_distinct_element() {
     assert_eq!(ctx.projection_read_snapshot().property_gets, 1);
     assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 0);
     ctx.close_request_read_view().unwrap();
+}
+
+/// Run `plan` in one request and return its root value and stored-record
+/// reads.
+async fn run_plan(
+    fixture: &Fixture,
+    plan: &exec::ExecutablePlan,
+    params: context::ParamBindings,
+) -> (ExecutionValue, usize) {
+    let mut ctx = ExecutionContext::new(&fixture.db, params);
+    ctx.enable_request_read_view().await.unwrap();
+    ctx.execute_steps(
+        plan.steps(),
+        plan.execution_order(),
+        plan.root(),
+        plan.execution_program(),
+    )
+    .await
+    .unwrap();
+    let reads = ctx.projection_read_snapshot().property_gets;
+    let value = ctx
+        .finish(plan.root(), &exec::ExecutableReturns::None)
+        .unwrap()
+        .last
+        .expect("root result");
+    ctx.close_request_read_view().unwrap();
+    (value, reads)
+}
+
+/// `ids` behind a param node access, then `op`, then `terminal`.
+fn pull_plan(op: exec::ExecOp, terminal: exec::ExecOp) -> exec::ExecutablePlan {
+    test_support::executable(
+        ir::PlanKind::Read,
+        vec![
+            node_access_step(1, name("ids")),
+            test_support::step(2, vec![exec::ExecStepId::new(1).unwrap()], op),
+            test_support::step(3, vec![exec::ExecStepId::new(2).unwrap()], terminal),
+        ],
+        3,
+    )
+}
+
+#[tokio::test]
+async fn narrow_streams_resolve_the_set_and_read_no_label_records() {
+    let fixture = fixture("membership-narrow").await;
+    let predicate = Predicate::eq("kind", "B");
+    let op = membership(kind_equality(literal("B")), predicate.clone());
+    for ids in [
+        vec![fixture.attribute_b],
+        vec![
+            fixture.attribute_b,
+            fixture.attribute_a,
+            fixture.attribute_none,
+        ],
+    ] {
+        let before = resolved(&fixture.db);
+        let (rows, reads) = assert_matches_filter(
+            &fixture,
+            &op,
+            predicate.clone(),
+            ids.iter()
+                .map(|id| ExecutionRow::current(ElementRef::Node(*id)))
+                .collect(),
+            context::ParamBindings::default(),
+        )
+        .await;
+        assert_eq!(
+            current_ids(&rows),
+            [Some(ElementRef::Node(fixture.attribute_b))]
+        );
+        assert_eq!(reads, 0);
+        assert_eq!(resolved(&fixture.db) - before, 1);
+    }
+}
+
+#[tokio::test]
+async fn streams_without_node_rows_never_resolve() {
+    let fixture = fixture("membership-node-free").await;
+    let predicate = Predicate::eq("kind", "B");
+    let corrupt = membership(
+        ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+            index: catalog::NodeEqualityIndexMeta::try_new("not-a-planner-identity").unwrap(),
+            key: catalog::ScopedPropertyKey::try_new("Attribute", "kind").unwrap(),
+            value: literal("B"),
+        })
+        .unwrap(),
+        predicate.clone(),
+    );
+    for op in [
+        membership(kind_equality(literal("B")), predicate.clone()),
+        corrupt,
+        label_membership(Predicate::eq("$label", "Attribute"), None),
+    ] {
+        for input in [
+            Vec::new(),
+            vec![
+                ExecutionRow::current(ElementRef::Edge(fixture.edge_b)),
+                ExecutionRow::current(ElementRef::Edge(fixture.edge_a)),
+            ],
+            vec![ExecutionRow::empty(), ExecutionRow::empty()],
+        ] {
+            let before = resolved(&fixture.db);
+            let exec::ExecOp::IndexMembership { plan } = &op else {
+                unreachable!("the helpers build membership");
+            };
+            assert_matches_filter(
+                &fixture,
+                &op,
+                plan.predicate.predicate().clone(),
+                input,
+                context::ParamBindings::default(),
+            )
+            .await;
+            assert_eq!(resolved(&fixture.db), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn fused_residual_reads_each_record_once() {
+    let fixture = fixture("membership-fused-residual").await;
+    let title = Predicate::contains("title", "x");
+    let predicate = Predicate::and(vec![Predicate::eq("kind", "B"), title.clone()]);
+    let op = fused(kind_equality(literal("B")), predicate.clone(), title);
+    let mut pattern = traversal_pattern(&fixture);
+    pattern.push(ExecutionRow::current(ElementRef::Node(
+        fixture.attribute_b_plain,
+    )));
+    let before = resolved(&fixture.db);
+    let (rows, reads) = assert_matches_filter(
+        &fixture,
+        &op,
+        predicate,
+        repeated(pattern),
+        context::ParamBindings::default(),
+    )
+    .await;
+    assert_eq!(resolved(&fixture.db) - before, 1);
+    // Per pattern: both `attribute_b` rows pass their residual, and
+    // `attribute_b_plain` fails it; `note_b` fails its title and every other
+    // row its kind.
+    assert_eq!(rows.len(), 2 * TRAVERSAL_REPEATS);
+    // Each batch reads the two set matches for their residual and the notes,
+    // group, and edges for the whole predicate, once each. `attribute_a` and
+    // `attribute_none` are dropped unread.
+    assert_eq!(reads, 7 * TRAVERSAL_BATCHES);
+
+    // A pull cursor reads each evaluated row's record at most once and never
+    // reads a label node outside the set.
+    let ids = [
+        fixture.attribute_b,
+        fixture.attribute_a,
+        fixture.note_b,
+        fixture.attribute_b_plain,
+        fixture.attribute_none,
+        fixture.note_a,
+    ]
+    .repeat(3);
+    let evaluated = ids
+        .iter()
+        .filter(|id| ![fixture.attribute_a, fixture.attribute_none].contains(*id))
+        .count();
+    let (value, reads) = run_plan(
+        &fixture,
+        &pull_plan(
+            op,
+            exec::ExecOp::Limit {
+                count: ir::StreamBoundPlan::Literal(ids.len()),
+            },
+        ),
+        context::ParamBindings::default().with_value(name("ids"), ids_value(&ids)),
+    )
+    .await;
+    assert_eq!(
+        value,
+        ExecutionValue::Stream(
+            [fixture.attribute_b; 3]
+                .into_iter()
+                .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                .collect()
+        )
+    );
+    assert!(reads <= evaluated, "{reads} reads for {evaluated} rows");
+}
+
+#[tokio::test]
+async fn label_set_membership_decides_nodes_from_label_bitmaps() {
+    let fixture = fixture("membership-label-set").await;
+    let attribute = Predicate::eq("$label", "Attribute");
+    let before = resolved(&fixture.db);
+    let (rows, reads) = assert_matches_filter(
+        &fixture,
+        &label_membership(attribute.clone(), None),
+        attribute.clone(),
+        traversal_rows(&fixture),
+        context::ParamBindings::default(),
+    )
+    .await;
+    assert_eq!(rows.len(), 4 * TRAVERSAL_REPEATS);
+    // Only the two edges read their records.
+    assert_eq!(reads, 2 * TRAVERSAL_BATCHES);
+    assert_eq!(resolved(&fixture.db) - before, 1);
+
+    let either = Predicate::is_in(
+        "$label",
+        PropertyValue::StringArray(vec!["Attribute".to_owned(), "Note".to_owned()]),
+    );
+    let (rows, reads) = assert_matches_filter(
+        &fixture,
+        &label_membership(either.clone(), None),
+        either,
+        traversal_rows(&fixture),
+        context::ParamBindings::default(),
+    )
+    .await;
+    assert_eq!(rows.len(), 7 * TRAVERSAL_REPEATS);
+    assert_eq!(reads, 2 * TRAVERSAL_BATCHES);
+
+    // Attribute nodes evaluate their residual and edges the whole predicate;
+    // every other node is dropped unread.
+    let kind = Predicate::eq("kind", "B");
+    let predicate = Predicate::and(vec![attribute, kind.clone()]);
+    let (rows, reads) = assert_matches_filter(
+        &fixture,
+        &label_membership(predicate.clone(), Some(kind)),
+        predicate,
+        traversal_rows(&fixture),
+        context::ParamBindings::default(),
+    )
+    .await;
+    assert_eq!(rows.len(), 2 * TRAVERSAL_REPEATS);
+    assert_eq!(reads, (3 + 2) * TRAVERSAL_BATCHES);
+}
+
+#[tokio::test]
+async fn counts_over_fully_indexed_memberships_read_no_records() {
+    let fixture = fixture("membership-count-reads").await;
+    let count = |predicate: Predicate| exec::ExecOp::Count {
+        plan: Box::new(exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+            cursor: exec::ExecCountCursorPlan::IndexMembership {
+                input: Box::new(exec::ExecCountCursorPlan::NodeRuntimeInput(
+                    exec::ExecRuntimeInputPlan::Param(name("ids")),
+                )),
+                plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                    &ir::NodeIndexMembershipPlan::new(
+                        kind_equality(literal("B")),
+                        ir::PredicatePlan::new(predicate).unwrap(),
+                        None,
+                    )
+                    .unwrap(),
+                )),
+            },
+            window: exec::ExecCountWindowPlan::identity(),
+        })),
+    };
+    let execute = |op: exec::ExecOp, ids: Vec<u64>| {
+        let db = &fixture.db;
+        async move {
+            let mut ctx = ExecutionContext::new(
+                db,
+                context::ParamBindings::default().with_value(name("ids"), ids_value(&ids)),
+            );
+            ctx.enable_request_read_view().await.unwrap();
+            let before = resolved(db);
+            let value = ctx
+                .execute_op(&op, ExecutionValue::Stream(Vec::new()))
+                .await
+                .unwrap();
+            let reads = ctx.projection_read_snapshot().property_gets;
+            ctx.close_request_read_view().unwrap();
+            (value, reads, resolved(db) - before)
+        }
+    };
+
+    let attributes = [
+        fixture.attribute_b,
+        fixture.attribute_a,
+        fixture.attribute_none,
+    ]
+    .repeat(200);
+    let reject = Predicate::and(vec![
+        Predicate::eq("$label", "Attribute"),
+        Predicate::eq("kind", "B"),
+    ]);
+    assert_eq!(
+        execute(count(reject), attributes).await,
+        (ExecutionValue::Count(200), 0, 1)
+    );
+
+    // Under the Evaluate policy only the other-label nodes read records.
+    let mixed = [
+        fixture.attribute_b,
+        fixture.note_b,
+        fixture.attribute_a,
+        fixture.note_a,
+    ]
+    .repeat(50);
+    assert_eq!(
+        execute(count(Predicate::eq("kind", "B")), mixed).await,
+        (ExecutionValue::Count(100), 100, 1)
+    );
+}
+
+#[tokio::test]
+async fn pull_limit_and_exists_resolve_the_set() {
+    let fixture = fixture("membership-pull-short").await;
+    let op = membership(kind_equality(literal("B")), Predicate::eq("kind", "B"));
+    let ids = [
+        fixture.attribute_a,
+        fixture.attribute_b,
+        fixture.attribute_none,
+    ]
+    .repeat(100);
+    for (terminal, expected) in [
+        (
+            exec::ExecOp::Limit {
+                count: ir::StreamBoundPlan::Literal(1),
+            },
+            ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(
+                fixture.attribute_b,
+            ))]),
+        ),
+        (
+            exec::ExecOp::Project {
+                projection: ir::ProjectionPlan::Exists,
+            },
+            ExecutionValue::Bool(true),
+        ),
+    ] {
+        let before = resolved(&fixture.db);
+        let (value, reads) = run_plan(
+            &fixture,
+            &pull_plan(op.clone(), terminal),
+            context::ParamBindings::default().with_value(name("ids"), ids_value(&ids)),
+        )
+        .await;
+        assert_eq!(value, expected);
+        assert_eq!(reads, 0);
+        assert_eq!(resolved(&fixture.db) - before, 1);
+    }
 }

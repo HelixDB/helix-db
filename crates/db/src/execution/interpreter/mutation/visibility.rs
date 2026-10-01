@@ -281,6 +281,7 @@ mod tests {
             .unwrap(),
             helix_planner::ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B"))
                 .unwrap(),
+            None,
         )
         .unwrap();
         let required = required_for(&exec::ExecOp::IndexMembership {

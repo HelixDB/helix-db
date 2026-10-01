@@ -4,7 +4,7 @@ This directory owns the build and test surface for the standalone HelixDB image.
 
 The canonical image repository is `ghcr.io/helixdb/helixdb`. The scripts require an explicit platform and image tag so local and CI runs exercise the same artifact.
 
-The published release is `ghcr.io/helixdb/helixdb:v0.0.5`, available for Linux amd64
+The published release is `ghcr.io/helixdb/helixdb:v0.0.8`, available for Linux amd64
 and arm64. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
 for release-image commands. The `local-amd64` and `local-arm64` tags below refer
 to images built from your checkout.
@@ -82,8 +82,7 @@ must be writable by the container's `65532:65532` user and group.
 By default the server caches SlateDB blocks and full-text splits in memory only,
 so every cold read goes to the object store. Set `HELIX_DISK_CACHE_DIR` with S3 or
 `HELIX_DATA_DIR` storage to add memory-plus-disk caches on local disk, ideally
-NVMe. Published images up to and including v0.0.6 predate this and ignore these
-variables; use an image built from this checkout or a later release.
+NVMe. It needs v0.0.7 or later; v0.0.6 and earlier ignore these variables.
 
 ```bash
 sudo mkdir -p /data/helix-cache
@@ -214,6 +213,26 @@ python3 -m unittest discover -s docker-image/tests -p 'test_*.py'
 
 Pull requests and main-branch pushes build and run this suite natively for both amd64 and arm64. Automatic CI runs do not log in to GHCR or publish an image.
 
+
+## Indexed equality benchmark
+
+Build and load the baseline and candidate images, then compare them locally:
+
+```bash
+python3 docker-image/tests/indexed_equality_benchmark.py \
+  --baseline-image helixdb:baseline \
+  --candidate-image helixdb:candidate \
+  --rows 50000 --samples 30 --output /absolute/path/results.json
+```
+
+This Linux arm64 benchmark tests 1–5 equalities on sparse, skewed, broad, and
+small synthetic fixtures. Each response must match an independent source-data
+oracle. It also checks bound parameters, nested conjunctions, reordered terms,
+unindexed residuals, missing values, and reopened durable data. The JSON records
+paired HTTP p50/p95 measurements, raw samples, result hashes, and image IDs.
+HTTP timings include planning, execution, and serialization. Reopened reads
+have cold process caches, not cold host disks. Disposable loopback containers
+and volumes are removed on exit; images remain available to the caller.
 
 ## Release
 

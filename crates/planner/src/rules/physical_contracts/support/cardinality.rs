@@ -46,9 +46,7 @@ pub(in crate::rules) fn estimated_pipeline_rows(
 /// An index membership keeps at most as many rows as its set is estimated to
 /// hold. Every other operator, including an expansion, keeps its input
 /// estimate unless it proves a tighter bound. An expansion's fan-out is
-/// unknown without statistics, and an unknown fan-out alone must never make
-/// the label-sized reads of an index membership look cheaper than the
-/// per-row filter they replace.
+/// unknown without statistics, so no operator is priced on a guessed fan-out.
 pub(in crate::rules) fn estimated_rows_after_op(
     op: &logical::StreamPipelineOp,
     delivered: &properties::DeliveredProperties,
@@ -58,7 +56,8 @@ pub(in crate::rules) fn estimated_rows_after_op(
 ) -> cost::EstimatedRows {
     let fallback = match op {
         logical::StreamPipelineOp::IndexMembership { plan } => {
-            rows.min(super::pipeline::membership_set_contract(plan, storage, stats).estimated_rows)
+            let (_, _, matches) = super::pipeline::membership_set_cost(plan, storage, stats);
+            rows.min(matches)
         }
         logical::StreamPipelineOp::Expand { .. }
         | logical::StreamPipelineOp::Filter { .. }

@@ -7,16 +7,16 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-Send an authenticated request to any `/v1/...` path of the Helix Cloud API (called WFE in CLI help)
-using your WorkOS session, and print the JSON response. Cloud only. Use a resource-specific command
+Send an authenticated request to any `/v1/...` path of the Helix Cloud API using your WorkOS
+session, and print the JSON response. Cloud only. Use a resource-specific command
 when one exists.
 
 ## Usage
 
 ```bash
 helix api get <path>
-helix api post <path> [--json '<body>']
-helix api patch <path> [--json '<body>']
+helix api post <path> [--body '<json>']
+helix api patch <path> [--body '<json>']
 helix api delete <path>
 ```
 
@@ -39,12 +39,13 @@ helix api delete <path>
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--json <BODY>` | Request body for `post` and `patch`. Must be valid JSON. | `{}` |
+| `--body <JSON>` | Request body for `post` and `patch`. Must be valid JSON. | `{}` |
+| `--json` | Print the response as compact JSON. | Off (highlighted, pretty-printed) |
 
 ## Behavior
 
 - Only absolute `/v1/...` paths are accepted. Absolute URLs and direct gateway paths (the database endpoint used with application keys) are rejected.
-- The response is printed as pretty-printed JSON.
+- The response is printed on stdout as syntax-highlighted, pretty-printed JSON, or as compact JSON with `--json`.
 - The command uses the same rotating WorkOS session as all other Cloud commands.
 - If the API rejects an expired token before handling the request, the CLI refreshes the session and retries once. No other failure is retried.
 
@@ -52,8 +53,8 @@ helix api delete <path>
 
 ```bash
 helix api get /v1/workspaces
-helix api post /v1/example --json '{"value":"example"}'
-helix api patch /v1/example --json '{"value":"updated"}'
+helix api post /v1/example --body '{"value":"example"}'
+helix api patch /v1/example --body '{"value":"updated"}'
 helix api delete /v1/example
 ```
 

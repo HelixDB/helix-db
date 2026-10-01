@@ -19,7 +19,13 @@ helix restart [INSTANCE]
 
 | Argument | Description |
 | --- | --- |
-| `INSTANCE` | Local instance to restart. If omitted in a TTY with multiple instances, the CLI prompts. Defaults to `dev` when present, otherwise the only local instance. |
+| `INSTANCE` | Local instance to restart. Defaults to `dev`, then the only local instance, then a picker in a terminal; otherwise the command fails and lists the local instances. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print `instance` as JSON on stdout, and never prompt. | Off |
 
 ## Behavior
 
@@ -35,7 +41,7 @@ helix restart [INSTANCE]
 # Restart the default 'dev' instance
 helix restart dev
 
-# Restart with interactive picker
+# Restart 'dev' or the only local instance, or pick one
 helix restart
 ```
 

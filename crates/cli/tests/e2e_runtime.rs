@@ -63,6 +63,10 @@ fn stdout(assert: Assert) -> String {
     String::from_utf8(assert.get_output().stdout.clone()).expect("stdout should be utf8")
 }
 
+fn stderr(assert: Assert) -> String {
+    String::from_utf8(assert.get_output().stderr.clone()).expect("stderr should be utf8")
+}
+
 struct RuntimeCleanup<'a> {
     fixture: &'a CliFixture,
     project: PathBuf,
@@ -118,7 +122,7 @@ fn assert_e2e_count_is_one(output: &str) {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.6"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.8"]
 fn local_runtime_lifecycle_and_query_smoke() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -158,20 +162,18 @@ fn local_runtime_lifecycle_and_query_smoke() {
             .assert()
             .success(),
     );
-    assert!(status.contains("dev (local)"));
+    let dev = status
+        .lines()
+        .find(|line| line.starts_with("dev "))
+        .unwrap_or_default();
+    assert!(dev.contains("local"), "{status}");
     assert!(status.contains(&format!("localhost:{port}")));
 
     let initial_query = stdout(
         fixture
             .command()
             .current_dir(&project)
-            .args([
-                "query",
-                "dev",
-                "--file",
-                "examples/request.json",
-                "--compact",
-            ])
+            .args(["query", "dev", "--file", "examples/request.json", "--json"])
             .assert()
             .success(),
     );
@@ -185,7 +187,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
         .current_dir(&project)
         .args(["query", "dev", "--file"])
         .arg(&write_request)
-        .arg("--compact")
+        .arg("--json")
         .assert()
         .success();
 
@@ -198,7 +200,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
             .current_dir(&project)
             .args(["query", "dev", "--file"])
             .arg(&read_request)
-            .arg("--compact")
+            .arg("--json")
             .assert()
             .success(),
     );
@@ -241,7 +243,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.6 plus SeaweedFS"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.8 plus SeaweedFS"]
 fn disk_runtime_persists_data_across_stop_and_start() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -283,7 +285,7 @@ fn disk_runtime_persists_data_across_stop_and_start() {
         .current_dir(&project)
         .args(["query", "dev", "--file"])
         .arg(&write_request)
-        .arg("--compact")
+        .arg("--json")
         .assert()
         .success();
     // A restart must retain the image even when project settings now name an
@@ -305,7 +307,7 @@ fn disk_runtime_persists_data_across_stop_and_start() {
             .current_dir(&project)
             .args(["query", "dev", "--file"])
             .arg(&read_request)
-            .arg("--compact")
+            .arg("--json")
             .assert()
             .success(),
     );
@@ -331,7 +333,7 @@ fn disk_runtime_persists_data_across_stop_and_start() {
             .current_dir(&project)
             .args(["query", "dev", "--file"])
             .arg(&read_request)
-            .arg("--compact")
+            .arg("--json")
             .assert()
             .success(),
     );
@@ -356,7 +358,7 @@ fn docker(args: &[&str]) -> std::process::Output {
 /// instance network and its data volume behind. Start must detach the old
 /// sidecar so stop can still remove the network, and prune must delete both.
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.6 plus SeaweedFS"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.8 plus SeaweedFS"]
 fn disk_runtime_replaces_a_legacy_minio_sidecar() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -395,7 +397,7 @@ fn disk_runtime_replaces_a_legacy_minio_sidecar() {
         assert!(output.status.success(), "{args:?}: {output:?}");
     }
 
-    let started = stdout(
+    let started = stderr(
         fixture
             .command()
             .current_dir(&project)

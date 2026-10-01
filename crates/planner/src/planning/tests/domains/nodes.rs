@@ -130,7 +130,9 @@ fn node_order_uses_cascades_range_direction_without_explicit_sort() {
 }
 
 #[test]
-fn unscoped_node_source_predicates_remain_residual_filters_after_cascades() {
+fn unscoped_node_source_predicates_use_index_membership_after_cascades() {
+    // An all-node scan has no label for an index access, but the one label
+    // whose index answers the predicate still decides it by membership.
     let plan = executable_traversal(
         g().n_where(Predicate::eq("username", "alice")),
         ctx(builtin_label_indexes()
@@ -147,5 +149,9 @@ fn unscoped_node_source_predicates_remain_residual_filters_after_cascades() {
     assert!(plan
         .steps()
         .iter()
-        .any(|step| matches!(&step.op, ExecOp::Filter { .. })));
+        .any(|step| matches!(&step.op, ExecOp::IndexMembership { .. })));
+    assert!(plan
+        .steps()
+        .iter()
+        .all(|step| !matches!(&step.op, ExecOp::Filter { .. })));
 }

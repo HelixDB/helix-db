@@ -18,27 +18,29 @@ pub(super) fn optimize_many(
         ExplorationSeed::Finished(result) => return Ok(result),
     };
 
-    // The wall-clock budget bounds optional exploration only. Once it expires
-    // no further optional logical alternatives are explored, but required
-    // rewrites and implementation rules still run for every expression already
-    // queued so each memo group keeps the physical alternatives selection
-    // needs. A required rewrite is one whose paired implementation rule
-    // rejects the shapes the rewrite matches (see
+    // The exploration budget bounds optional exploration only. It counts rule
+    // fires, never elapsed time, so where it stops depends only on the query
+    // and limits and the same input always yields the same plan. Once it is
+    // reached no further optional logical alternatives are explored, but
+    // required rewrites and implementation rules still run for every
+    // expression already queued so each memo group keeps the physical
+    // alternatives selection needs. A required rewrite is one whose paired
+    // implementation rule rejects the shapes the rewrite matches (see
     // `RuleApplicability::is_required_rewrite`), so it is the only route to a
     // physical alternative; skipping it, or stopping outright, could leave a
     // root group with no physical alternative and fail an otherwise plannable
     // request. Rewritten expressions are re-queued into the same group and the
     // loop keeps draining, so multi-step simplifications such as collapsing
     // several adjacent distinct operators still reach an implementable form.
-    let mut time_guardrail = None;
+    let mut exploration_guardrail = None;
     while let Some(task) = run.pop_task() {
-        if time_guardrail.is_none() {
-            time_guardrail = run.time_guardrail(config);
+        if exploration_guardrail.is_none() {
+            exploration_guardrail = run.exploration_budget_guardrail(config);
         }
 
         for optimizer_rule in optimizer.rules.rules_for_expr(&task.expr) {
             let metadata = optimizer_rule.metadata();
-            if time_guardrail.is_some()
+            if exploration_guardrail.is_some()
                 && metadata.kind != rules::RuleKind::Implementation
                 && !metadata.applicability.is_required_rewrite()
             {
@@ -84,5 +86,5 @@ pub(super) fn optimize_many(
         }
     }
 
-    Ok(run.finish(time_guardrail))
+    Ok(run.finish(exploration_guardrail))
 }

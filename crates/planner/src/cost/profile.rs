@@ -9,6 +9,7 @@ mod defaults;
 mod formulas;
 mod overrides;
 mod parallel;
+mod residual;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,7 @@ use super::{
     vector::CostVector,
 };
 
+pub use formulas::MembershipLabelDomain;
 pub use overrides::StorageCostProfileOverrides;
 
 /// Tunable object-storage-backed LSM cost profile.

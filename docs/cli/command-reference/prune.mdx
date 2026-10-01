@@ -41,13 +41,14 @@ It never runs a broad `docker system prune` or `podman system prune`, and it nev
 object-store data.
 
 - `helix prune <instance>` removes resources without confirmation, including persisted disk-mode data.
-- `helix prune --all` prints a warning and asks for confirmation in a TTY. In non-TTY environments, it refuses to run without `--yes`:
+- `helix prune --all` prints a warning and asks for confirmation in a TTY. Without a TTY, or with `--json`, it refuses to run without `--yes`:
 
   ```text
-  Refusing to prune all instances non-interactively. Re-run with --yes to confirm.
+  refusing to prune every local instance without confirmation
   ```
 
-- If nothing was found to prune for an instance, the CLI prints `No local runtime resources found for '<instance>'` and exits successfully.
+- If nothing was found to prune for an instance, the CLI prints `No local runtime resources found for <instance>` and exits successfully.
+- With `--json`, prints one object for the whole run: `{"pruned":[{"instance":"dev","removed":true}]}`.
 
 ## Examples
 

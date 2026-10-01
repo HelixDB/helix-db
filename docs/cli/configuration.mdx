@@ -30,9 +30,11 @@ Cloud `database` accepts only `tenant:<id>` or `cluster:<id>`. A physical shared
 database target. Unknown Cloud fields are rejected. In particular, gateway URLs, query auth headers,
 query auth environment variables, source snapshots, sync metadata, and query bundles are invalid.
 
-Target resolution uses an explicit flag first, then an explicit database reference, the linked
-database, or the linked project only when exactly one database is eligible. Ambiguous commands print
-candidates and require `--workspace`, `--project`, `cluster:<id>`, or `tenant:<id>`.
+`helix init cloud`, `helix add cloud`, and `helix project link` write `[project] id` and
+`workspace_id`. Cloud commands run in the project then default to that project and its linked
+databases. An explicit argument (ID, slug, or name) always wins; without a link, a command uses the
+only candidate, prompts in a terminal, or fails and lists the candidates. See
+[Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
 The strict credential file stores only `access_token`, rotating `refresh_token`, `expires_at`, and
 `email`. It is written atomically with mode `0600`. Do not edit it or put application keys or service

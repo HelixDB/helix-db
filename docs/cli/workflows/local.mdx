@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.6` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.8` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ Use the manual flow below when you want to scaffold and run each step yourself.
     helix query dev --file examples/request.json
     ```
 
-    The example counts `User` nodes. Try `--compact` to print on one line, or
+    The example counts `User` nodes. Try `--json` to print compact JSON only, or
     `--warm` to populate the standalone process caches while returning the normal
     response.
   </Step>
@@ -136,7 +136,7 @@ helix logs dev --follow
 helix restart dev
 ```
 
-`helix restart` falls back to a fresh `helix start` if the container has been removed.
+`helix restart` fails if the container has been removed; run `helix start` to create it again.
 
 ## Multiple local instances
 
@@ -161,7 +161,7 @@ helix logs dev               # one-shot dump from docker/podman logs
 helix logs dev --follow      # stream
 ```
 
-`--range`, `--start`, and `--end` are Helix Cloud-only and rejected for local instances.
+`--start`, `--end`, and `--json` are Helix Cloud-only and rejected for local instances.
 
 ## Cleaning up
 

@@ -19,7 +19,13 @@ helix stop [INSTANCE]
 
 | Argument | Description |
 | --- | --- |
-| `INSTANCE` | Local instance to stop. If omitted in a TTY with multiple instances, the CLI prompts. Defaults to `dev` when present, otherwise the only local instance. |
+| `INSTANCE` | Local instance to stop. Defaults to `dev`, then the only local instance, then a picker in a terminal; otherwise the command fails and lists the local instances. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print `instance` and `wasRunning` as JSON on stdout, and never prompt. | Off |
 
 ## Behavior
 
@@ -34,7 +40,7 @@ helix stop [INSTANCE]
 # Stop the default 'dev' instance
 helix stop dev
 
-# Stop with interactive picker
+# Stop 'dev' or the only local instance, or pick one
 helix stop
 
 # Safe to call in scripts even if the instance is already stopped

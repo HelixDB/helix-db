@@ -72,17 +72,7 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
             RuleApplicability::access_pipeline_head_only(logical::StreamPipelineOpKind::Filter)
         }
         KnownRuleId::AccessPipelineMembershipFilter => {
-            RuleApplicability::any_of(ir::AtLeast::<_, 1>::from_one_and_rest(
-                Kind::AccessPipeline,
-                vec![
-                    Kind::RootPipeline,
-                    Kind::StreamReserved,
-                    Kind::StreamCardinality,
-                    Kind::StreamProject,
-                    Kind::StreamAggregate,
-                    Kind::StreamVariableWrite,
-                ],
-            ))
+            RuleApplicability::stream_membership_candidate()
         }
         KnownRuleId::AccessPipelineOrder => {
             RuleApplicability::access_pipeline_head_any_of(ir::AtLeast::<_, 1>::from_one_and_rest(
@@ -134,7 +124,7 @@ mod tests {
     fn required_rewrites_match_implementation_rule_deferrals() {
         // Each required rewrite is paired with an implementation rule that
         // returns `NotApplicable` for the shapes the rewrite matches, so the
-        // rewrite must keep running after the time budget expires. Pinning
+        // rewrite must keep running after the exploration budget. Pinning
         // the set makes a new implementation-rule deferral update it
         // deliberately.
         let required = KnownRuleId::ALL
@@ -149,6 +139,7 @@ mod tests {
                 KnownRuleId::AccessWindow,
                 KnownRuleId::AccessFilterSimplification,
                 KnownRuleId::AccessDistinct,
+                KnownRuleId::AccessPipelineMembershipFilter,
                 KnownRuleId::AccessPipelineSimplification,
                 KnownRuleId::RootControlFlowEmpty,
             ]

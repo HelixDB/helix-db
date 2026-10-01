@@ -1575,7 +1575,7 @@ async fn step_build<D: Distance>(
                 )
                 .map_err(|error| corruption(error.to_string()))?;
                 let legacy = VectorIndex::<D>::for_legacy_migration(source.physical_name(), scope);
-                #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+                #[cfg(feature = "production-coverage")]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationBefore,
                 )?;
@@ -1591,11 +1591,11 @@ async fn step_build<D: Distance>(
                         "legacy vector activation did not transcode exactly one metadata row",
                     ));
                 }
-                #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+                #[cfg(feature = "production-coverage")]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationAfter,
                 )?;
-                #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+                #[cfg(feature = "production-coverage")]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorReservationTransitionBefore,
                 )?;
@@ -1608,16 +1608,16 @@ async fn step_build<D: Distance>(
                         active_reservation,
                     )),
                 )?;
-                #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+                #[cfg(feature = "production-coverage")]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorReservationTransitionAfter,
                 )?;
-                #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+                #[cfg(feature = "production-coverage")]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyDefinitionRetirementBefore,
                 )?;
                 transaction.delete(source.storage_key())?;
-                #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+                #[cfg(feature = "production-coverage")]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyDefinitionRetirementAfter,
                 )?;
@@ -1737,7 +1737,7 @@ async fn adopt_legacy<D: Distance>(
     };
     let started = std::time::Instant::now();
     let legacy = VectorIndex::<D>::for_legacy_migration(legacy_name, scope);
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     crate::migrations::trip_migration_failpoint(
         crate::migrations::MigrationFailpoint::LegacyVectorValidationCheckpointBefore,
     )?;
@@ -1801,7 +1801,7 @@ async fn adopt_legacy<D: Distance>(
             vector::LegacyVectorValidationOutcome::Valid { .. } => unreachable!(),
         }
     };
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     crate::migrations::trip_migration_failpoint(
         crate::migrations::MigrationFailpoint::LegacyVectorValidationCheckpointAfter,
     )?;

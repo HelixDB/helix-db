@@ -1,20 +1,12 @@
 //! Bounded finite label-domain access.
 
-use helix_ast::expr::{CompareOp, Expr, Predicate};
-use helix_ast::value::PropertyValue;
+use helix_ast::expr::Predicate;
 
 use super::super::AccessFilterRewrite;
-use crate::{context, ir, logical};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FiniteLabelDomain {
-    Empty,
-    One(ir::NonEmptyString),
-    Many(ir::AtLeast<ir::NonEmptyString, 2>),
-}
+use crate::{analysis, context, ir, logical};
 
 pub(in crate::rules) fn has_candidate(predicate: &Predicate) -> bool {
-    conjunctive_label_domain(predicate).is_some()
+    analysis::conjunctive_label_domain(predicate).is_some()
 }
 
 pub(super) fn rewrite(
@@ -22,10 +14,10 @@ pub(super) fn rewrite(
     predicate: &Predicate,
     planner_limits: &context::PlannerLimits,
 ) -> AccessFilterRewrite {
-    let Some((domain, residual)) = conjunctive_label_domain(predicate) else {
+    let Some((domain, residual)) = analysis::conjunctive_label_domain(predicate) else {
         return AccessFilterRewrite::NotApplicable;
     };
-    if let FiniteLabelDomain::Many(labels) = &domain {
+    if let analysis::FiniteLabelDomain::Many(labels) = &domain {
         let context::IndexUnionBranchLimit::Limited(limit) =
             planner_limits.max_index_union_branches
         else {
@@ -65,10 +57,10 @@ pub(super) fn rewrite(
 
 fn node_source(
     existing: &ir::NodeAccessSourcePlan,
-    domain: &FiniteLabelDomain,
+    domain: &analysis::FiniteLabelDomain,
 ) -> ir::NodeAccessSourcePlan {
     if let Some(label) = existing.common_label() {
-        return if domain_contains(domain, label) {
+        return if analysis::domain_contains(domain, label) {
             existing.clone()
         } else {
             ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::Empty)
@@ -89,10 +81,10 @@ fn node_source(
 
 fn edge_source(
     existing: &ir::EdgeAccessSourcePlan,
-    domain: &FiniteLabelDomain,
+    domain: &analysis::FiniteLabelDomain,
 ) -> ir::EdgeAccessSourcePlan {
     if let Some(label) = existing.common_label() {
-        return if domain_contains(domain, label) {
+        return if analysis::domain_contains(domain, label) {
             existing.clone()
         } else {
             ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::Empty)
@@ -111,17 +103,17 @@ fn edge_source(
     }
 }
 
-fn node_domain_source(domain: &FiniteLabelDomain) -> ir::NodeAccessSourcePlan {
+fn node_domain_source(domain: &analysis::FiniteLabelDomain) -> ir::NodeAccessSourcePlan {
     match domain {
-        FiniteLabelDomain::Empty => {
+        analysis::FiniteLabelDomain::Empty => {
             ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::Empty)
         }
-        FiniteLabelDomain::One(label) => {
+        analysis::FiniteLabelDomain::One(label) => {
             ir::NodeAccessSourcePlan::from_unfiltered(ir::NodeAccessPlan::LabelScan {
                 label: label.clone(),
             })
         }
-        FiniteLabelDomain::Many(labels) => ir::NodeAccessSourcePlan::from_unfiltered(
+        analysis::FiniteLabelDomain::Many(labels) => ir::NodeAccessSourcePlan::from_unfiltered(
             super::super::super::sources::node_union_from_sources(
                 labels
                     .iter()
@@ -136,17 +128,17 @@ fn node_domain_source(domain: &FiniteLabelDomain) -> ir::NodeAccessSourcePlan {
     }
 }
 
-fn edge_domain_source(domain: &FiniteLabelDomain) -> ir::EdgeAccessSourcePlan {
+fn edge_domain_source(domain: &analysis::FiniteLabelDomain) -> ir::EdgeAccessSourcePlan {
     match domain {
-        FiniteLabelDomain::Empty => {
+        analysis::FiniteLabelDomain::Empty => {
             ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::Empty)
         }
-        FiniteLabelDomain::One(label) => {
+        analysis::FiniteLabelDomain::One(label) => {
             ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::LabelScan {
                 label: label.clone(),
             })
         }
-        FiniteLabelDomain::Many(labels) => ir::EdgeAccessSourcePlan::from_unfiltered(
+        analysis::FiniteLabelDomain::Many(labels) => ir::EdgeAccessSourcePlan::from_unfiltered(
             super::super::super::sources::edge_union_from_sources(
                 labels
                     .iter()
@@ -158,221 +150,5 @@ fn edge_domain_source(domain: &FiniteLabelDomain) -> ir::EdgeAccessSourcePlan {
                     .collect(),
             ),
         ),
-    }
-}
-
-fn conjunctive_label_domain(
-    predicate: &Predicate,
-) -> Option<(FiniteLabelDomain, Option<Predicate>)> {
-    let Predicate::And { predicates } = predicate else {
-        return pure_label_domain(predicate).map(|domain| (domain, None));
-    };
-    let mut domain = None;
-    let mut residual = Vec::new();
-    for predicate in predicates {
-        match pure_label_domain(predicate) {
-            Some(next) => {
-                domain = Some(match domain {
-                    Some(domain) => intersect_domains(domain, next),
-                    None => next,
-                });
-            }
-            None => residual.push(predicate.clone()),
-        }
-    }
-    let domain = domain?;
-    let residual = match residual.len() {
-        0 => None,
-        1 => residual.pop(),
-        _ => Some(Predicate::and(residual)),
-    };
-    Some((domain, residual))
-}
-
-fn pure_label_domain(predicate: &Predicate) -> Option<FiniteLabelDomain> {
-    match predicate {
-        Predicate::Eq { left, right }
-        | Predicate::Compare {
-            left,
-            op: CompareOp::Eq,
-            right,
-        } => label_equality(left, right),
-        Predicate::IsIn { value, values } => label_membership(value, values),
-        Predicate::And { predicates } => predicates
-            .iter()
-            .map(pure_label_domain)
-            .try_fold(None, |domain, next| {
-                Some(Some(match domain {
-                    Some(domain) => intersect_domains(domain, next?),
-                    None => next?,
-                }))
-            })
-            .flatten(),
-        Predicate::Or { predicates } => predicates
-            .iter()
-            .map(pure_label_domain)
-            .try_fold(None, |domain, next| {
-                Some(Some(match domain {
-                    Some(domain) => union_domains(domain, next?),
-                    None => next?,
-                }))
-            })
-            .flatten(),
-        Predicate::Neq { .. }
-        | Predicate::Gt { .. }
-        | Predicate::Gte { .. }
-        | Predicate::Lt { .. }
-        | Predicate::Lte { .. }
-        | Predicate::Between { .. }
-        | Predicate::HasKey { .. }
-        | Predicate::IsNull { .. }
-        | Predicate::IsNotNull { .. }
-        | Predicate::StartsWith { .. }
-        | Predicate::EndsWith { .. }
-        | Predicate::Contains { .. }
-        | Predicate::Not { .. }
-        | Predicate::Compare {
-            op: CompareOp::Neq | CompareOp::Gt | CompareOp::Gte | CompareOp::Lt | CompareOp::Lte,
-            ..
-        } => None,
-    }
-}
-
-fn label_equality(left: &Expr, right: &Expr) -> Option<FiniteLabelDomain> {
-    match (left, right) {
-        (Expr::Property(property), Expr::Constant(PropertyValue::String(label)))
-        | (Expr::Constant(PropertyValue::String(label)), Expr::Property(property))
-            if property == "$label" =>
-        {
-            Some(domain_from_labels([label.clone()]))
-        }
-        _ => None,
-    }
-}
-
-fn label_membership(value: &Expr, values: &Expr) -> Option<FiniteLabelDomain> {
-    let (Expr::Property(property), Expr::Constant(values)) = (value, values) else {
-        return None;
-    };
-    if property != "$label" {
-        return None;
-    }
-    let labels = match values {
-        PropertyValue::String(label) => vec![label.clone()],
-        PropertyValue::StringArray(labels) => labels.clone(),
-        PropertyValue::Array(values) => values
-            .iter()
-            .filter_map(|value| match value {
-                PropertyValue::String(label) => Some(label.clone()),
-                _ => None,
-            })
-            .collect(),
-        PropertyValue::Null
-        | PropertyValue::Bool(_)
-        | PropertyValue::I64(_)
-        | PropertyValue::DateTime(_)
-        | PropertyValue::F64(_)
-        | PropertyValue::F32(_)
-        | PropertyValue::Bytes(_)
-        | PropertyValue::I64Array(_)
-        | PropertyValue::F64Array(_)
-        | PropertyValue::F32Array(_)
-        | PropertyValue::Object(_) => Vec::new(),
-    };
-    Some(domain_from_labels(labels))
-}
-
-fn domain_from_labels(labels: impl IntoIterator<Item = String>) -> FiniteLabelDomain {
-    let mut labels = labels.into_iter().fold(Vec::new(), |mut unique, label| {
-        let Some(label) = ir::NonEmptyString::new(label) else {
-            return unique;
-        };
-        if !unique.contains(&label) {
-            unique.push(label);
-        }
-        unique
-    });
-    match labels.len() {
-        0 => FiniteLabelDomain::Empty,
-        1 => FiniteLabelDomain::One(
-            labels
-                .pop()
-                .expect("one-label domain contains exactly one label"),
-        ),
-        _ => FiniteLabelDomain::Many(
-            ir::AtLeast::try_from_vec(labels)
-                .expect("multi-label domain contains at least two labels"),
-        ),
-    }
-}
-
-fn intersect_domains(left: FiniteLabelDomain, right: FiniteLabelDomain) -> FiniteLabelDomain {
-    domain_from_labels(
-        domain_labels(left)
-            .into_iter()
-            .filter(|label| domain_contains(&right, label))
-            .map(ir::NonEmptyString::into_string),
-    )
-}
-
-fn union_domains(left: FiniteLabelDomain, right: FiniteLabelDomain) -> FiniteLabelDomain {
-    domain_from_labels(
-        domain_labels(left)
-            .into_iter()
-            .chain(domain_labels(right))
-            .map(ir::NonEmptyString::into_string),
-    )
-}
-
-fn domain_labels(domain: FiniteLabelDomain) -> Vec<ir::NonEmptyString> {
-    match domain {
-        FiniteLabelDomain::Empty => Vec::new(),
-        FiniteLabelDomain::One(label) => vec![label],
-        FiniteLabelDomain::Many(labels) => labels.into_iter().collect(),
-    }
-}
-
-fn domain_contains(domain: &FiniteLabelDomain, label: &ir::NonEmptyString) -> bool {
-    match domain {
-        FiniteLabelDomain::Empty => false,
-        FiniteLabelDomain::One(candidate) => candidate == label,
-        FiniteLabelDomain::Many(labels) => labels.contains(label),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pure_label_domains_normalize_intersections_unions_and_non_strings() {
-        let predicate = Predicate::and(vec![
-            Predicate::is_in(
-                "$label",
-                PropertyValue::StringArray(vec!["Person".to_owned(), "Organization".to_owned()]),
-            ),
-            Predicate::or(vec![
-                Predicate::eq("$label", "Person"),
-                Predicate::is_in(
-                    "$label",
-                    PropertyValue::array(["Team", "Organization", "Organization"]),
-                ),
-            ]),
-        ]);
-
-        assert_eq!(
-            pure_label_domain(&predicate),
-            Some(domain_from_labels([
-                "Person".to_owned(),
-                "Organization".to_owned()
-            ]))
-        );
-        assert_eq!(
-            pure_label_domain(&Predicate::is_in(
-                "$label",
-                PropertyValue::I64Array(vec![1, 2]),
-            )),
-            Some(FiniteLabelDomain::Empty)
-        );
     }
 }

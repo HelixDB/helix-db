@@ -391,3 +391,77 @@ fn graph_scans_charge_rows_at_empty_small_and_saturating_estimates() {
         assert!(elements.latency >= profile.range_scan(rows).latency);
     }
 }
+
+#[test]
+fn membership_price_reads_its_set_probes_rows_and_residual_matches_only() {
+    let profiles = [
+        StorageCostProfile::default(),
+        StorageCostProfile {
+            authoritative_verify_per_id: LatencyEstimate::ZERO,
+            cpu_predicate_eval: LatencyEstimate::ZERO,
+            ..StorageCostProfile::default()
+        },
+        StorageCostProfile {
+            object_get_latency: LatencyEstimate::ZERO,
+            ..StorageCostProfile::default()
+        },
+        StorageCostProfile {
+            object_get_latency: LatencyEstimate::micros(50_000),
+            ..StorageCostProfile::default()
+        },
+    ];
+    let residual = helix_ast::expr::Predicate::contains("title", "x");
+    let kind = helix_ast::expr::Predicate::eq("kind", "B");
+    let matches = EstimatedRows::rows(10);
+    let label_rows = 1_000;
+    for profile in &profiles {
+        let set = profile.bitmap_equality_lookup(matches);
+        let label = crate::cost::MembershipLabelDomain {
+            read: profile.bitmap_equality_lookup(EstimatedRows::rows(label_rows)),
+            label_rows: EstimatedRows::rows(label_rows),
+            predicate: &kind,
+        };
+        for label_domain in [None, Some(label)] {
+            // Under a label domain, stream rows beyond the label's nodes carry
+            // another label and read their records for the whole predicate.
+            let outside = |rows: u64| {
+                label_domain.map_or(0, |domain| rows.saturating_sub(domain.label_rows.as_rows()))
+            };
+            let price = |residual, rows| {
+                profile.index_membership_filter(
+                    set,
+                    label_domain,
+                    residual,
+                    EstimatedRows::rows(rows),
+                    matches,
+                )
+            };
+            // Read alongside the set, the label domain adds the slower read's
+            // latency, not both.
+            let sequential = label_domain.map_or(set.latency, |label| {
+                set.latency.saturating_add(label.read.latency)
+            });
+            assert!(
+                price(None, 0).latency <= sequential,
+                "{profile:?} {label_domain:?}"
+            );
+            let mut previous = None;
+            for rows in [0, 1, 10, 256, 257, 1_000, 1_000_000] {
+                // Without a residual only other-label rows read records.
+                assert_eq!(price(None, rows).authoritative_graph_reads, outside(rows));
+                // A residual reads only the records of set matches.
+                let fused = price(Some(&residual), rows);
+                assert_eq!(
+                    fused.authoritative_graph_reads,
+                    rows.min(matches.as_rows()) + outside(rows)
+                );
+                let key = crate::optimizer::cost_key(fused);
+                assert!(
+                    previous.is_none_or(|previous| key >= previous),
+                    "{profile:?} rows {rows}"
+                );
+                previous = Some(key);
+            }
+        }
+    }
+}

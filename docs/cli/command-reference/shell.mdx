@@ -13,27 +13,28 @@ Helix Cloud database. Local and Cloud.
 ## Usage
 
 ```bash
-helix shell [INSTANCE] [--compact]
+helix shell [INSTANCE]
 ```
 
 ## Arguments
 
 | Argument | Description |
 | --- | --- |
-| `INSTANCE` | Instance name from `helix.toml`, or an explicit `tenant:<id>` / `cluster:<id>` reference. Defaults to `dev` or the sole linked instance. |
+| `INSTANCE` | Instance name from `helix.toml`, or an explicit `tenant:<id>` / `cluster:<id>` reference. Defaults like [`helix query`](/cli/command-reference/query#target-resolution): `dev`, then the only instance, then a picker in a terminal. |
 
 ## Options
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--compact` | Print compact single-line JSON responses. | Off (pretty-printed) |
+| `--json` | Print each response as compact single-line JSON, with no footer. | Off (highlighted, pretty-printed) |
 
 ## Behavior
 
 - Enter one complete v3 query request per line at the `helix>` prompt. The request's `request_type` selects read or write execution.
 - Use `:quit` or `:exit` (or `quit`, `exit`, or end of input) to stop.
 - Blank lines are ignored. Invalid JSON and query errors are printed, and the shell keeps running.
-- With no target, the CLI uses the `dev` instance (local or Cloud) or the sole linked instance; ambiguous projects must specify an instance or an explicit `tenant:<id>` / `cluster:<id>` reference.
+- Responses go to stdout exactly as with `helix query`; the prompt, status footer, and errors go to stderr.
+- A typed `tenant:<id>` / `cluster:<id>` target works without a `helix.toml`.
 - Local instances use the existing auth-disabled local endpoint.
 - Cloud requests use the backend query broker (the Helix Cloud service that forwards CLI queries) and the current WorkOS session; the CLI never contacts the Cloud gateway (the database endpoint that applications use) directly.
 
@@ -43,8 +44,8 @@ helix shell [INSTANCE] [--compact]
 # Open a shell against the local 'dev' instance
 helix shell dev
 
-# Run newline-delimited requests from a file
-helix shell dev --compact < requests.jsonl
+# Run newline-delimited requests from a file, one JSON response per line
+helix shell dev --json < requests.jsonl
 ```
 
 ## Related

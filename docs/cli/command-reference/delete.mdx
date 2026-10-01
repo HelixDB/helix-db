@@ -34,10 +34,10 @@ helix delete <INSTANCE> [OPTIONS]
 - For Helix Cloud instances, only the `[enterprise.<name>]` block in `helix.toml` is removed — the database itself is untouched.
 - Remote S3 object-store data is not deleted.
 - The CLI refuses to delete the last instance in `helix.toml`; add a replacement first.
-- In a TTY, `helix delete` prints a warning and asks for confirmation. In non-TTY environments it refuses to run without `--yes`:
+- In a TTY, `helix delete` prints a warning and asks for confirmation. Without a TTY, or with `--json`, it refuses to run without `--yes`:
 
   ```text
-  Refusing to delete '<instance>' non-interactively. Re-run with --yes to confirm.
+  refusing to delete '<instance>' without confirmation
   ```
 
 ## Examples

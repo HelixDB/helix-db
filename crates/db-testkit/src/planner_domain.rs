@@ -200,7 +200,7 @@ impl OptimizerLimitClass {
                     memo_expressions: one,
                     rule_fires: one,
                     alternatives_per_group: one,
-                    optimization_micros: one,
+                    exploration_rule_fires: one,
                 };
             }
             Self::Default => {}
@@ -210,7 +210,7 @@ impl OptimizerLimitClass {
                     memo_expressions: properties::PositiveUsize::at_least_one(1_000_000),
                     rule_fires: properties::PositiveUsize::at_least_one(2_500_000),
                     alternatives_per_group: properties::PositiveUsize::at_least_one(128),
-                    optimization_micros: properties::PositiveUsize::at_least_one(2_000_000),
+                    exploration_rule_fires: properties::PositiveUsize::at_least_one(500_000),
                 };
             }
         }

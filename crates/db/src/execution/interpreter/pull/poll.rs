@@ -464,8 +464,8 @@ impl<'a> Cursor<'a> {
                         let keep = match membership.decide(ctx, plan, row).await? {
                             stream::RowDecision::Keep => true,
                             stream::RowDecision::Drop => false,
-                            stream::RowDecision::Evaluate => {
-                                ctx.eval_predicate(row, plan.predicate.predicate()).await?
+                            stream::RowDecision::Evaluate(predicate) => {
+                                ctx.eval_predicate(row, predicate).await?
                             }
                         };
                         if !keep {

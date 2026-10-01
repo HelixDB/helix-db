@@ -1,62 +1,66 @@
 ---
 title: "What is full-text search?"
-description: "Full-text search finds and ranks documents by the words they contain, using text analysis, an inverted index, and relevance scoring such as BM25."
+description: "Full-text search finds documents by the words inside them and lists the best matches first, using an inverted index and a relevance score such as BM25."
 sidebarTitle: "Full-text search"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-Full-text search is a way of finding documents by the words they contain and ranking
-them by how well they match a query. A search engine breaks each document into
-normalized terms, records which documents contain each term in an inverted index, and
-at query time looks up the query's terms and scores the matching documents with a
-relevance function such as BM25. The result is a ranked list, not a yes-or-no filter.
+Full-text search is a way to find documents by the words inside them and list the best
+matches first. Think of it as the index at the back of a book: instead of reading every
+page, you look up a word and jump straight to the pages that mention it. That is how a
+support team can type "login error" and get the most relevant tickets back without
+scanning every ticket. The same idea sits behind the search box of an online store, a
+company wiki, and many chatbots that answer questions from documents.
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Explain how full-text search analyzes, indexes, queries, and ranks documents
-    - Describe how an inverted index and an analyzer decide which documents match
-    - Compare full-text search with SQL `LIKE` pattern matching
-    - Choose when full-text search fits a query and when vector search or another index fits better
+    - Explain how a search engine turns text into ranked results
+    - Describe an inverted index and how cleanup steps such as stemming change matches
+    - Explain why full-text search beats a SQL `LIKE` query for free-form searches
+    - Decide when full-text search fits and when vector search fits better
   </Card>
 </div>
 
 ## How does full-text search work?
 
-Full-text search works in four stages: it analyzes text into terms, indexes those
-terms, looks up the query's terms, and ranks the matching documents. Most systems follow
-these stages whether they index support tickets, product descriptions, or chat
-transcripts.
+Full-text search does much of its work ahead of time. When a document is saved, the
+engine records which documents contain each word. When someone searches, it looks up
+only the search words in that record, instead of scanning every document, and ranks
+what it finds.
+
+Under the hood, most systems follow the same four stages:
 
 <Steps>
   <Step title="Analyze">
-    An analyzer turns raw text into a list of terms: it splits the text into tokens,
-    then normalizes them, for example by lowercasing or stemming.
+    An analyzer, the component that cleans up text, splits raw text into tokens
+    (usually individual words) and then normalizes them, for example by lowercasing or
+    stemming.
   </Step>
   <Step title="Index">
-    Each term is added to an inverted index that maps the term to the documents that
-    contain it.
+    Each resulting term is added to an inverted index that maps the term to the
+    documents that contain it.
   </Step>
   <Step title="Query">
-    The query string goes through the same analyzer, and the engine looks up each
+    The search string goes through the same analyzer, and the engine looks up each
     resulting term in the index to collect candidate documents.
   </Step>
   <Step title="Rank">
-    A scoring function assigns every candidate a relevance score, and the engine
-    returns the top results.
+    A scoring function gives every candidate a relevance score, and the engine returns
+    the top results.
   </Step>
 </Steps>
 
-Much of the work happens at write time. At query time the engine reads only the
-postings lists for the query's terms instead of scanning every document.
-
 ## What is an inverted index?
 
-An inverted index is a map from each term to the list of documents that contain it.
-That list is called a postings list. Take three short support tickets:
+An inverted index is a lookup table from each word to the documents that contain it,
+like a book index that maps a word to page numbers. The list of documents stored for
+each word is called a postings list.
+
+For example, take three short support tickets:
 
 - Ticket 1: "Reset your password from the login page"
 - Ticket 2: "The login page shows an error"
@@ -74,17 +78,20 @@ reset       1
 accounts    3
 ```
 
-A query for "login error" reads two postings lists, `login -> 1, 2` and
-`error -> 2`. The union tells the engine that only tickets 1 and 2 contain any query
-term, and only ticket 2 contains both, so ranking can place it first. Postings
-typically also store how often the term appears in each document, which ranking
-needs. Many systems can store term positions too, which make phrase queries such as
-`"login page"` and proximity scoring possible.
+A search for "login error" reads just two postings lists, `login -> 1, 2` and
+`error -> 2`. Together they tell the engine that only tickets 1 and 2 contain any of
+the words, and only ticket 2 contains both, so ranking can put it first.
+
+Postings typically also store how often each word appears in each document, which
+ranking needs. Many systems can store term positions (where each word sits in the
+document) as well, which make phrase searches such as `"login page"` and proximity
+scoring possible.
 
 ## How do tokenization, stemming, and stop words affect matches?
 
-Tokenization, stemming, and stop-word removal decide which terms are indexed and looked
-up, so they decide which documents match a query and how precise the matches are.
+These cleanup steps decide what counts as "the same word," and therefore which
+documents match. They are why a search for "connecting" can find a ticket that says
+"connected."
 
 | Step | What it does | Example |
 | --- | --- | --- |
@@ -93,11 +100,14 @@ up, so they decide which documents match a query and how precise the matches are
 | Stemming | Strips suffixes so word forms share one term | `connecting`, `connected`, `connects` become `connect` |
 | Stop words | Removes very common words that carry little meaning | `the`, `a`, `of` are dropped |
 
-Normalization and stemming usually raise recall at some cost to precision. Stemming
+Put simply, normalization and stemming usually raise recall (finding more of the
+relevant documents) at some cost to precision (keeping irrelevant ones out). Stemming
 lets "connected" match "connection issues," but an aggressive stemmer can also merge
-unrelated words. Removing stop words shrinks the index but can break phrase queries
-where those words matter, so many modern systems keep stop words and let ranking give
-them little weight.
+unrelated words.
+
+Removing stop words shrinks the index but can break phrase searches where those words
+matter. That is why many modern systems keep stop words and let ranking give them
+little weight.
 
 <Warning>
 Documents and queries must be analyzed compatibly, which usually means using the same
@@ -105,11 +115,20 @@ analyzer. If documents are stemmed and queries are not, a search for "connecting
 up a term that was never indexed.
 </Warning>
 
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Run BM25 full-text search and graph traversals in the same transaction with
+    open-source HelixDB.
+  </Card>
+</div>
+
 ## How is full-text search different from a SQL LIKE query?
 
-A SQL `LIKE '%password%'` predicate scans rows for a raw substring and returns unranked
-matches, while full-text search looks up analyzed terms in an inverted index and ranks
-results by relevance.
+A SQL `LIKE '%password%'` condition scans rows for a raw substring (any run of
+characters) and returns matches in no particular order. Full-text search looks up whole,
+cleaned-up words in an inverted index and ranks the results by relevance. In other
+words, `LIKE` asks "does this text contain these characters?" while full-text search
+asks "which documents are most about these words?"
 
 | | `LIKE` pattern matching | Full-text search |
 | --- | --- | --- |
@@ -117,48 +136,57 @@ results by relevance.
 | Matching | Raw substrings, so `'%pass%'` matches `compass` | Whole analyzed terms |
 | Word forms | `'%connected%'` does not match `connecting` | Stemming can match both |
 | Ranking | None; a row matches or it does not | Rows are ordered by relevance score |
-| Multiple words | Needs one predicate per word to match words in any order | Scores all query terms together |
+| Multiple words | Needs one condition per word to match words in any order | Scores all query terms together |
 
-`LIKE` is fine for small tables, prefix lookups, and structured codes. Once users type
-free-form queries over a large collection, you need both an index and a ranking.
+`LIKE` is fine for small tables, prefix lookups, and structured codes in a
+[relational database](/learn/graph-databases/graph-vs-relational-database). Once people
+type free-form searches over a large collection, you need both an index and a ranking.
 
 ## How are full-text results ranked?
 
-Full-text results are ranked by a relevance function that scores each candidate,
-typically from term frequency and inverse document frequency, with BM25 a widely used
-choice. Term frequency (TF) says a document that mentions a term more often is
-probably more about it. Inverse document frequency (IDF) says a term that appears in
-few documents, like "timeout," is more informative than one that appears everywhere,
-like "issue." TF-IDF multiplies the two.
+Documents typically rank higher when they contain more of your search words, use them
+more often, and especially when they contain the rare ones. A relevance function turns
+those signals into one score per document.
 
-BM25 refines TF-IDF: repeated occurrences of a term give diminishing returns, and long
-documents do not win just by containing more words. BM25 is the default ranking
-function in many full-text engines. See
-[What is BM25?](/learn/full-text-search/what-is-bm25) for the formula and a worked
-example.
+Under the hood, the two classic signals are:
+
+- **Term frequency (TF):** a document that mentions a word more often is probably more
+  about it.
+- **Inverse document frequency (IDF):** a word that appears in few documents, like
+  "timeout," tells you more than one that appears everywhere, like "issue."
+
+TF-IDF multiplies the two. [BM25](/learn/full-text-search/what-is-bm25), the default
+ranking function in many full-text engines, refines TF-IDF: repeating a word gives
+diminishing returns, and long documents do not win just by containing more words. The
+BM25 article walks through the formula and a worked example.
 
 ## When should you use full-text search?
 
-Full-text search is the right tool when the words themselves matter:
+Use full-text search when the exact words matter. For example:
 
-- Exact names, product codes, error messages, and IDs.
-- Rare or domain-specific terms that an
+- A support agent looking up an exact error message or order ID, or a shopper typing a
+  part number.
+- Rare or in-house terms, such as project names on a company wiki, that an
   [embedding model](/learn/vector-search/what-are-vector-embeddings) may not represent
   well.
-- Queries where users expect the results to contain what they typed.
+- An AI agent recalling an exact name or ID from its
+  [memory](/learn/ai-memory/what-is-ai-agent-memory).
 - Results that need to be explainable ("this matched because it contains `timeout`").
 
-It is weaker when the query and the document use different words for the same idea,
+It is weaker when the search and the document use different words for the same idea,
 such as "can't sign in" versus "authentication failure." That is where
-[vector search](/learn/vector-search/what-is-vector-search) helps, and many
-applications combine the two with
-[hybrid search](/learn/full-text-search/hybrid-search).
-For structured conditions such as `status = "open"`, use an equality or range index
-instead of text search.
+[vector search](/learn/vector-search/what-is-vector-search), which matches by meaning,
+helps. Many applications combine the two with
+[hybrid search](/learn/full-text-search/hybrid-search), including chatbots that use
+[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag) to answer from
+documents. For structured conditions such as `status = "open"`, use an equality or
+range index instead of text search.
 
 ## How does HelixDB do full-text search?
 
-HelixDB provides full-text search through text indexes on its property graph:
+HelixDB provides full-text search through text indexes on its
+[property graph](/learn/graph-databases/what-is-a-property-graph), where data lives as
+nodes (entities) and edges (relationships):
 
 - A text index provides BM25-ranked search over a top-level string or string-array
   property of a node label or an edge label. Results are ordered by BM25 score, then ID.
@@ -166,12 +194,13 @@ HelixDB provides full-text search through text indexes on its property graph:
   `whitespace_lowercase`. Term positions are optional.
 - Text indexes can be partitioned by tenant, which keeps a separate index per tenant
   value.
-- Prefiltered search ranks only the nodes or edges a graph traversal reaches, such as
-  "documents this user can read." A result outside that candidate set is never
+- [Prefiltered search](/learn/vector-search/filtered-vector-search) ranks only the nodes
+  or edges a [graph traversal](/learn/graph-databases/what-is-a-graph-database) reaches,
+  such as "documents this user can read." A result outside that candidate set is never
   returned, and BM25 statistics still come from the full tenant partition.
-- Within one request, text search runs in the same ACID transaction as graph
-  traversals, vector search, and index lookups. There is no built-in rank fusion, so
-  the application combines BM25 and vector results.
+- Within one request, text search runs in the same ACID transaction (an all-or-nothing,
+  isolated unit of work) as graph traversals, vector search, and index lookups. There
+  is no built-in rank fusion, so the application combines BM25 and vector results.
 
 To create and query a text index, see
 [Text indexes](/database/helix-db/query-guides/text-indexes) and
@@ -189,7 +218,8 @@ indexed, rather than only a title or a set of tags.
 
 Not by default. It matches analyzed terms, so "car" does not match "automobile" unless
 you configure a synonym list or expand the query. Vector search captures this kind of
-similarity without a hand-built list, which is one reason to use hybrid search.
+similarity without a hand-built list, which is one reason to use
+[hybrid search](/learn/full-text-search/hybrid-search).
 
 ### What is the difference between stemming and lemmatization?
 

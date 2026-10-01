@@ -1,80 +1,92 @@
 ---
 title: "What is filtered vector search?"
-description: "Filtered vector search returns the k nearest items that pass a condition, such as a tenant or permission, and filtering before ranking keeps results complete."
+description: "Filtered vector search finds the most similar items among only those that pass a rule, such as a tenant, a date range, or a permission check."
 sidebarTitle: "Filtered vector search"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-Filtered vector search is nearest neighbor search restricted to the items that satisfy a
-condition, such as a tenant ID, a date range, or "documents this user can read." The
-correct answer is the `k` closest items among those that pass the filter. Systems apply
-the filter after ranking (post-filtering), before ranking (pre-filtering), or during
-search, and that choice decides whether a query returns the true top k, fewer than
-k results, or nothing at all.
+Filtered [vector search](/learn/vector-search/what-is-vector-search) finds the items most
+similar to a query among only those that pass a rule, such as "documents this user can
+read." It works like the filters in an online store: you want the closest match to "red
+running shoes," but only in your size and in stock. Filter at the wrong moment, and a
+search that should return ten results can return three, or none. Let one wrong item
+through, and a chatbot can quote a document the user was never allowed to see.
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Explain why ANN indexes make filtering hard and why selectivity matters
-    - Compare post-filtering, pre-filtering, and filtering during search
-    - Diagnose why a filtered vector search returns fewer than k results
-    - Distinguish ranking approximation from membership errors in permission filters
+    - Explain why filters are hard for vector indexes
+    - Compare filtering after, before, and during the search
+    - Diagnose why a filtered search returns fewer results than requested
+    - Tell a slightly-off ranking apart from a permission leak
   </Card>
 </div>
 
 ## Why is filtering hard for vector indexes?
 
-Filtering is hard because an approximate nearest neighbor (ANN) index is organized by
-vector proximity, not by metadata, so eligible items are scattered through it and no
-single structure both knows which items pass and ranks them by distance. A secondary
-index can list every document in a tenant, but it cannot rank them by distance; a vector
-index can rank by distance, but it does not know which items pass. Filtered search has
-to combine the two.
+A vector index is organized by similarity, not by the fields you filter on, so the
+items that pass a filter are scattered throughout it. An approximate nearest neighbor
+(ANN) index, such as [HNSW](/learn/vector-search/what-is-hnsw), finds close matches
+without checking every item. It ranks by
+[distance](/learn/vector-search/vector-distance-metrics), but it does not know which
+items pass. A secondary index, a lookup structure on a field such as tenant ID, can list
+every document in a tenant, but it cannot rank them by distance. Filtered search has to
+combine the two to find the right answer: the `k` closest items among those that pass.
 
 The key quantity is **selectivity**: the fraction of the collection that passes the
-filter. Naive approaches work when most items pass and break down when few do, which
-is often the case for per-user permissions.
+filter. A filter that passes very few items is highly selective. Naive approaches
+work when most items pass and break down when few do, which is often the case for
+per-user permissions.
 
 ## What is post-filtering?
 
-Post-filtering runs an ordinary top-k vector search over the whole index, then removes
-results that fail the filter. It is simple and works with any vector store.
+Post-filtering searches first and filters second. It runs an ordinary top-k vector
+search over the whole index, then removes results that fail the filter. It is simple
+and works with any [vector database](/learn/vector-search/what-is-a-vector-database).
 
 The flaw is that the filter runs after `k` is spent. Removed results are not replaced,
 so a query that asks for 10 can return 3, or 0. If eligibility is unrelated to distance
-from the query and the filter passes 2% of the collection, on average only 2% of the top
-k survive. Requesting a much larger k, called overfetching, only partly helps, as the
-worked example below shows.
+from the query and the filter passes 2% of the collection, on average only 2% of the
+top k survive. Requesting a much larger k, called overfetching, only partly helps, as
+the worked example below shows.
 
 ## What is pre-filtering?
 
-Pre-filtering first computes the set of eligible items, from a metadata index, an
-access control list, or a graph traversal, and then ranks only that set. It returns k
-results whenever at least k items qualify, and every result passes the filter.
+Pre-filtering filters first and ranks second. It computes the set of eligible items,
+from a metadata index, an access control list (a record of who may read what), or a
+[graph traversal](/learn/graph-databases/what-is-a-graph-database) that follows
+relationships, and then ranks only that set. It returns k results whenever at least k
+items qualify, and every result passes the filter.
 
 The cost moves to the candidate set: small sets can be ranked exactly and cheaply,
 while large sets typically need index-assisted ranking.
 
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Run vector and BM25 search inside an exact, traversal-defined candidate set with
+    open-source HelixDB, and never get a result from outside that set.
+  </Card>
+</div>
+
 ## What is filtering during search?
 
-Filtering during search, sometimes called in-filtering, applies the filter while walking
-the index. In a graph-based index such as [HNSW](/learn/vector-search/what-is-hnsw), the
-search may pass through non-matching nodes to navigate but only collects matching ones,
-and keeps searching until its list of best matches stops improving or it exhausts its
-search budget.
+Filtering during search, sometimes called in-filtering, checks the filter while walking
+the index. In a graph-based index such as HNSW, the search may pass through
+non-matching nodes to navigate but only collects matching ones. It keeps going until its
+list of best matches stops improving or it runs out of search budget.
 
-This works well at moderate selectivity. When very few items pass, matching items can
-be far apart in the graph, the search must visit many nodes, and recall can drop. Many
-implementations detect highly selective filters and fall back to exact search over the
-filtered set.
+This works well at moderate selectivity. When very few items pass, matching items can be
+far apart in the graph, so the search must visit many nodes and recall, the share of
+the true top k it finds, can drop. Many implementations detect highly selective filters
+and fall back to exact search over the filtered set.
 
 ## How do post-filtering, pre-filtering, and filtering during search compare?
 
-Post-filtering is simplest but can return fewer than k results, pre-filtering returns the
-top k among eligible items at the cost of building the candidate set, and filtering
+Post-filtering is simplest but can return fewer than k results. Pre-filtering returns
+the top k among eligible items at the cost of building the candidate set. Filtering
 during search usually returns k but degrades on very selective filters.
 
 ```mermaid
@@ -110,15 +122,14 @@ flowchart LR
 ## What happens when a user can read only 20 of 1,000 documents?
 
 Post-filtering with k = 10 returns 0.2 readable documents on average and usually none,
-while pre-filtering returns the 10 closest readable documents every time. In this
-example, a knowledge base holds 1,000 documents, a user can read 20 of them, and the
-application wants the 10 closest readable documents (k = 10).
+while pre-filtering returns the 10 closest readable documents every time. Picture a
+company knowledge base with 1,000 documents, a user who can read 20 of them, and an
+application that wants the 10 closest readable documents (k = 10).
 
 **Post-filtering** retrieves the 10 nearest of all 1,000. If readable documents are no
 more likely than others to be near the query, each result has a 2% chance of being
-readable, so the query returns 0.2 readable documents on average, and most queries
-return none. The user's relevant documents are outranked by documents they cannot
-open.
+readable. The query returns 0.2 readable documents on average, and most queries return
+none: the user's relevant documents are outranked by documents they cannot open.
 
 **Pre-filtering** builds the set of 20 readable documents, ranks those 20, and returns
 the closest 10. Every query returns 10 results, all readable, and they are the true top
@@ -135,8 +146,8 @@ To expect 10 survivors, post-filtering has to fetch half the collection.
 
 ## Why does my filtered vector search return fewer than k results?
 
-The most common cause is a filter that runs after ranking and removes results that are
-never replaced. The full list of causes:
+Usually because the filter runs after ranking and removes results that are never
+replaced. The full list:
 
 1. **The filter runs after ranking.** Ineligible items consumed the top k. Filter
    before or during the search instead.
@@ -145,13 +156,13 @@ never replaced. The full list of causes:
    the search budget or rank the filtered set exactly.
 4. **A cap or threshold applied.** Many systems limit the maximum k or drop results
    below a similarity threshold.
-5. **Some items have no vector yet.** Records that were never embedded, or not yet
-   indexed, cannot be returned.
+5. **Some items have no vector yet.** Records that were never turned into
+   [embeddings](/learn/vector-search/what-are-vector-embeddings), or not yet indexed,
+   cannot be returned.
 
 ## Which errors can filtered vector search tolerate?
 
-Filtered vector search can tolerate approximate ranking but not membership errors: a
-slightly less relevant result is acceptable, a result that fails the filter is not.
+A slightly less relevant result is acceptable. A result that fails the filter is not.
 
 - **Ranking approximation.** An ANN index can miss one of the true k nearest eligible
   items and return a slightly farther eligible item in its place. The cost is slightly
@@ -163,19 +174,27 @@ The rule is approximate ranking, exact membership.
 
 ## How does filtered vector search enforce permissions in RAG?
 
-Filtered vector search enforces permissions by restricting retrieval to documents the
-user can read, before ranking and before generation. In
-[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag), anything the
-retriever returns can end up in the model's answer, and a language model cannot be
-relied on to withhold it.
+It restricts retrieval to documents the user can read, before ranking and before
+generation. In [retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag), a
+chatbot answers from the documents it retrieves, so anything the retriever returns can
+end up in the answer, and a language model cannot be relied on to withhold it. The same
+applies to [GraphRAG](/learn/ai-memory/what-is-graphrag), which retrieves through a
+knowledge graph, and when an
+[AI agent recalls memories](/learn/ai-memory/what-is-ai-agent-memory) for one of many
+users.
 
 - **Enforce permissions in the retrieval query**, not in prompt instructions.
 - **Filter before ranking**, so authorized users still get complete results.
 - **Evaluate permissions against current data.** Copying access lists into vector
-  metadata creates a second copy that can lag behind revocations.
+  metadata creates a second copy that can lag behind revocations. Keeping access rules
+  and vectors in
+  [one database](/learn/database-architecture/one-database-for-graph-vector-and-text)
+  can avoid that copy.
 - **Keep permissions in their natural shape.** "User is a member of a group that can
-  read a folder that contains a document" is a chain of relationships. Flattening it
-  onto every vector means rewriting many vectors when one membership changes.
+  read a folder that contains a document" is a chain of relationships, which a
+  [property graph](/learn/graph-databases/what-is-a-property-graph) stores as edges.
+  Flattening it onto every vector means rewriting many vectors when one membership
+  changes.
 
 ## How does HelixDB filter vector search?
 
@@ -186,12 +205,13 @@ sharing edges, and vector search ranks only that set.
 - Every prefiltered search runs in the same order: graph traversal, exact candidate
   membership, ranking, top k.
 - A result outside the candidate set is never returned.
-- Each request is one ACID transaction over a committed snapshot, and the graph
-  traversal and the vector search run in that same transaction.
-- BM25 full-text search supports the same prefiltering, with BM25 statistics taken from
-  the full tenant partition.
-- Vector and text indexes can be partitioned by tenant, with a separate index per tenant
-  value.
+- Each request is one ACID transaction, an all-or-nothing unit of work, over a
+  committed snapshot. The traversal and the vector search run in that same transaction.
+- [BM25](/learn/full-text-search/what-is-bm25) full-text search supports the same
+  prefiltering, with BM25 statistics taken from the full tenant partition. Both halves
+  of a [hybrid search](/learn/full-text-search/hybrid-search) can share one candidate
+  set, and your application fuses the results.
+- Vector and text indexes can be partitioned by tenant.
 - A search accepts up to 1,000,000 unique candidates and returns at most 800 results.
 
 See [prefiltered search](/database/helix-db/query-guides/prefiltering) for working
@@ -206,7 +226,7 @@ tenant-partitioned indexes.
 It can. Recall for a filtered query is measured against the true top k among eligible
 items, not among all items. Pre-filtering with exact ranking over the candidate set
 finds that top k exactly, while filtering during search typically loses recall as
-filters become more selective, so recall measured on unfiltered queries can overstate
+filters become more selective. So recall measured on unfiltered queries can overstate
 filtered quality.
 
 ### Is pre-filtering slower than post-filtering?
@@ -217,7 +237,7 @@ computed.
 
 ### Should I use a separate index per tenant?
 
-Often, yes, for the tenant boundary: partitioning enforces it structurally because a
+Often, yes, for the tenant boundary. Partitioning enforces it structurally, because a
 search only reads that tenant's partition. It does not handle finer rules inside a
 tenant, such as per-user sharing, which still need a filter or a traversal.
 

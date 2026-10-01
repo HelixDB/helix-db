@@ -1,9 +1,10 @@
 //! End-to-end post-expansion index membership through `HelixDB::query`.
 //!
 //! Every query compares the membership plan with the same data served by a
-//! database without the index, which keeps the per-row filter plan. A narrow
-//! traversal stays within one record batch of node rows, so its membership
-//! evaluates every row; a wide one exceeds it and resolves the index set.
+//! database without the index, which keeps the per-row filter, or decides a
+//! label-scoped filter from the `$label` bitmap and evaluates the rest per
+//! row. Narrow and wide traversals alike resolve the set on their first node
+//! row.
 
 use helix_ast::{batch, expr, graph, index, query, traversal, value};
 use helix_planner::{context, exec, planning};
@@ -143,7 +144,7 @@ fn seed() -> batch::WriteBatch {
     })
 }
 
-/// `uid`s behind group `g3`'s items: at most one record batch of node rows.
+/// `uid`s behind group `g3`'s items: a handful of node rows.
 fn narrow(predicate: expr::Predicate) -> traversal::Traversal<traversal::Terminal> {
     traversal::g()
         .n_with_label_where("Group", expr::Predicate::eq("uid", "g3"))
@@ -248,6 +249,21 @@ fn membership_steps(plan: &exec::ExecutablePlan) -> usize {
         .count()
 }
 
+/// Membership steps whose set `plan` reads from secondary indexes rather than
+/// `$label` bitmaps.
+fn index_set_memberships(plan: &exec::ExecutablePlan) -> usize {
+    plan.steps()
+        .iter()
+        .filter(|step| {
+            matches!(
+                &step.op,
+                exec::ExecOp::IndexMembership { plan }
+                    if matches!(plan.set, exec::ExecNodeMembershipSet::Index { .. })
+            )
+        })
+        .count()
+}
+
 #[tokio::test]
 async fn post_expansion_membership_matches_the_per_row_filter_end_to_end() {
     let scope = DataScope::LegacyUnscoped;
@@ -278,15 +294,16 @@ async fn post_expansion_membership_matches_the_per_row_filter_end_to_end() {
             vec!["nw3", "nw9", "nw15"],
             true,
         ),
-        // A range set would verify the label's whole range, so ranges keep
-        // the per-row filter.
+        // A range set would verify the label's whole range, so a range is
+        // never read from its index.
         (
             expr::Predicate::gte("uid", "a2"),
             vec!["a2", "a3", "n1", "n2"],
             WIDE.to_vec(),
             false,
         ),
-        // A missing property equals null, so null keeps the per-row filter.
+        // A missing property equals null, so null is never read from an
+        // index either.
         (
             expr::Predicate::eq("kind", value::PropertyValue::Null),
             vec!["a3"],
@@ -294,36 +311,39 @@ async fn post_expansion_membership_matches_the_per_row_filter_end_to_end() {
             false,
         ),
     ] {
-        // Without statistics an unscoped predicate cannot prove which label
-        // the expansion reaches, so it keeps the per-row filter; scoped to
-        // `Attribute` it plans membership whenever an index answers it.
+        // Unscoped, the predicate plans membership whenever an index answers
+        // it, and `Note` rows still evaluate it per row. Scoped to
+        // `Attribute`, it always plans membership: a predicate no index
+        // answers reads the `Attribute` label bitmap and evaluates only its
+        // nodes, with or without a catalog index.
         let attributes = |uids: &[&'static str]| {
             uids.iter()
                 .copied()
                 .filter(|uid| uid.starts_with('a'))
                 .collect::<Vec<_>>()
         };
-        for (predicate, narrow_uids, wide_uids, planned) in [
+        for (predicate, narrow_uids, wide_uids, planned, label_set) in [
             (
                 unscoped.clone(),
                 narrow_uids.clone(),
                 wide_uids.clone(),
+                answered,
                 false,
             ),
             (
                 attribute(unscoped),
                 attributes(&narrow_uids),
                 attributes(&wide_uids),
-                answered,
+                true,
+                true,
             ),
         ] {
-            // Only the wide stream reads the set its membership plans.
-            for (read, expected, resolves) in [
-                (read_result(narrow(predicate.clone())), narrow_uids, 0),
+            // Both streams read the set their membership plans.
+            for (read, expected) in [
+                (read_result(narrow(predicate.clone())), narrow_uids),
                 (
                     read_result(wide(predicate.clone())),
                     repeated(&wide_uids, WIDE.len()),
-                    usize::from(planned),
                 ),
             ] {
                 let before = resolved(&indexed);
@@ -331,11 +351,21 @@ async fn post_expansion_membership_matches_the_per_row_filter_end_to_end() {
                     .query(query::QueryRequest::read(read.clone()))
                     .await
                     .unwrap();
-                assert_eq!(resolved(&indexed) - before, resolves, "{predicate:?}");
+                assert_eq!(
+                    resolved(&indexed) - before,
+                    usize::from(planned),
+                    "{predicate:?}"
+                );
+                let before = resolved(&unindexed);
                 let per_row = unindexed
                     .query(query::QueryRequest::read(read.clone()))
                     .await
                     .unwrap();
+                assert_eq!(
+                    resolved(&unindexed) - before,
+                    usize::from(label_set),
+                    "{predicate:?}"
+                );
                 assert_eq!(uids(&membership["result"]), expected, "{predicate:?}");
                 assert_eq!(uids(&per_row["result"]), expected, "{predicate:?}");
                 assert_eq!(
@@ -343,11 +373,351 @@ async fn post_expansion_membership_matches_the_per_row_filter_end_to_end() {
                     usize::from(planned),
                     "{predicate:?}"
                 );
-                assert_eq!(membership_steps(&plan(&unindexed, &read, scope).await), 0);
+                let unindexed_plan = plan(&unindexed, &read, scope).await;
+                assert_eq!(
+                    membership_steps(&unindexed_plan),
+                    usize::from(label_set),
+                    "{predicate:?}"
+                );
+                assert_eq!(index_set_memberships(&unindexed_plan), 0);
             }
         }
     }
-    assert_eq!(resolved(&unindexed), 0);
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
+}
+
+#[test]
+fn equality_seed_residual_with_post_expansion_membership_matches_the_per_row_filter() {
+    // Directly executed plans and public queries in one future exceed the
+    // default test stack in debug builds, so run on a dedicated stack.
+    std::thread::Builder::new()
+        .name("membership-e2e-seed".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("membership seed test runtime builds")
+                .block_on(
+                    equality_seed_residual_with_post_expansion_membership_matches_the_per_row_filter_contract(),
+                );
+        })
+        .expect("membership seed test thread starts")
+        .join()
+        .expect("membership seed test thread completes");
+}
+
+/// An `Item` conjunction seeded by one equality index keeps the other as a
+/// per-row residual ahead of the expansions, and the post-expansion filter
+/// planned as index membership returns the per-row filter's rows.
+async fn equality_seed_residual_with_post_expansion_membership_matches_the_per_row_filter_contract()
+{
+    let scope = DataScope::LegacyUnscoped;
+    let indexed = seeded("membership-e2e-seed-indexed", scope, true).await;
+    for property in ["uid", "kind"] {
+        create_index(
+            &indexed,
+            scope,
+            index::IndexSpec::node_equality("Item", property),
+        )
+        .await;
+    }
+    let unindexed = seeded("membership-e2e-seed-unindexed", scope, false).await;
+    // `iw` and `ih` are both `hub` items, and `ih` links two B-valued
+    // attributes. Whichever `Item` equality seeds the source, its residual
+    // must drop the other hub.
+    for db in [&indexed, &unindexed] {
+        db.query_scoped(
+            query::QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "iw",
+                        traversal::g()
+                            .n_with_label_where("Item", expr::Predicate::eq("uid", "iw"))
+                            .set_property("kind", "hub"),
+                    )
+                    .var_as("ih", node("Item", "ih", Some("hub")))
+                    .var_as(
+                        "a1",
+                        traversal::g()
+                            .n_with_label_where("Attribute", expr::Predicate::eq("uid", "a1")),
+                    )
+                    .var_as(
+                        "a4",
+                        traversal::g()
+                            .n_with_label_where("Attribute", expr::Predicate::eq("uid", "a4")),
+                    )
+                    .var_as("ih_a1", edge("ih", "HAS_ATTRIBUTE", "a1"))
+                    .var_as("ih_a4", edge("ih", "HAS_ATTRIBUTE", "a4")),
+            ),
+            scope,
+        )
+        .await
+        .unwrap();
+    }
+    let hub = |item: &str, kind: &str| {
+        traversal::g()
+            .n_with_label_where(
+                "Item",
+                expr::Predicate::and(vec![
+                    expr::Predicate::eq("uid", item),
+                    expr::Predicate::eq("kind", kind),
+                ]),
+            )
+            .out(Some("HAS_ATTRIBUTE"))
+            .in_(Some("HAS_ATTRIBUTE"))
+            .out(Some("HAS_ATTRIBUTE"))
+            .where_(attribute(expr::Predicate::eq("kind", "B")))
+    };
+    // The post-expansion filter plans membership with or without statistics,
+    // and reads its set on the stream's first node row. Statistics that make
+    // `uid` a selective seed over millions of `hub` items only change the
+    // source.
+    let item_statistics = {
+        let prepared = indexed
+            .planner_context_scoped_prepared(context::ParamBindings::default(), scope)
+            .await
+            .unwrap();
+        let mut planner_context = prepared.context().clone();
+        planner_context.stats = [("uid", 5_000), ("kind", 4_900_000)]
+            .into_iter()
+            .fold(planner_context.stats, |stats, (property, rows)| {
+                stats.with_node_eq_cardinality(
+                    helix_planner::catalog::ScopedPropertyKey::try_new("Item", property).unwrap(),
+                    rows,
+                )
+            })
+            .with_node_label_cardinality(
+                helix_planner::ir::NonEmptyString::new("Item").unwrap(),
+                5_000_000,
+            );
+        planner_context
+    };
+    let execute = |plan: exec::ExecutablePlan| {
+        let indexed = &indexed;
+        async move {
+            let result = indexed
+                .execute_scoped(&plan, context::ParamBindings::default(), scope)
+                .await
+                .unwrap();
+            super::QueryResponse::from_execution_result(result)
+                .unwrap()
+                .returns()["result"]
+                .clone()
+        }
+    };
+    // `ih` reaches `a1` through `i1`, `i2`, and itself twice, and `a4`
+    // through `i3` and itself twice. Both hubs resolve the set on their first
+    // node row; the `leaf` seed residual leaves no node rows to decide.
+    for (item, kind, expected, resolves) in [
+        (
+            "iw",
+            "hub",
+            repeated(&["aw0", "aw6", "aw12"], WIDE.len()),
+            1,
+        ),
+        (
+            "ih",
+            "hub",
+            vec!["a1", "a1", "a1", "a1", "a4", "a4", "a4"],
+            1,
+        ),
+        ("iw", "leaf", Vec::new(), 0),
+    ] {
+        let values = read_result(hub(item, kind).values(vec!["uid"]));
+        let count = read_result(hub(item, kind).count());
+        // Without the index the scoped filter reads the `Attribute` label
+        // bitmap instead, on the same node rows.
+        let unindexed_plan = plan(&unindexed, &values, scope).await;
+        assert_eq!(membership_steps(&unindexed_plan), 1);
+        assert_eq!(index_set_memberships(&unindexed_plan), 0);
+        assert_eq!(
+            index_set_memberships(&plan(&indexed, &values, scope).await),
+            1
+        );
+        for db in [&indexed, &unindexed] {
+            let db_resolves = resolves;
+            let before = resolved(db);
+            let rows = db
+                .query(query::QueryRequest::read(values.clone()))
+                .await
+                .unwrap();
+            assert_eq!(resolved(db) - before, db_resolves, "{item} {kind}");
+            assert_eq!(uids(&rows["result"]), expected, "{item} {kind}");
+            let before = resolved(db);
+            let counted = db
+                .query(query::QueryRequest::read(count.clone()))
+                .await
+                .unwrap();
+            assert_eq!(resolved(db) - before, db_resolves, "{item} {kind}");
+            assert_eq!(counted["result"], serde_json::json!(expected.len()));
+        }
+
+        let seeded = planning::plan_read_batch(&values, &item_statistics).unwrap();
+        assert!(
+            seeded.steps().iter().any(|step| matches!(
+                &step.op,
+                exec::ExecOp::Access { plan } if matches!(
+                    plan.as_ref(),
+                    exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Bitmap {
+                        bitmap: exec::ExecNodeBitmapExpr::PointRead { key, .. },
+                    }) if key.property.as_ref() == "uid"
+                )
+            )),
+            "{:#?}",
+            seeded.steps()
+        );
+        // A seed keeps every other conjunct inside one residual conjunction.
+        let residual = expr::Predicate::and(vec![expr::Predicate::eq("kind", kind)]);
+        let position = |matches: &dyn Fn(&exec::ExecOp) -> bool| {
+            seeded
+                .steps()
+                .iter()
+                .position(|step| matches(&step.op))
+                .unwrap_or_else(|| panic!("missing step: {:#?}", seeded.steps()))
+        };
+        let residual_position = position(
+            &|op| matches!(op, exec::ExecOp::Filter { predicate } if predicate.predicate() == &residual),
+        );
+        let membership_position =
+            position(&|op| matches!(op, exec::ExecOp::IndexMembership { .. }));
+        assert!(residual_position < membership_position);
+        assert_eq!(membership_steps(&seeded), 1);
+
+        let before = resolved(&indexed);
+        let rows = execute(seeded).await;
+        assert_eq!(resolved(&indexed) - before, resolves, "{item} {kind}");
+        assert_eq!(uids(&rows), expected, "{item} {kind}");
+        let counted = execute(planning::plan_read_batch(&count, &item_statistics).unwrap()).await;
+        assert_eq!(counted, serde_json::json!(expected.len()));
+    }
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
+}
+
+#[test]
+fn point_source_membership_matches_the_per_row_filter() {
+    // Pull-cursor counts need more stack than a default test thread in
+    // debug builds.
+    std::thread::Builder::new()
+        .name("point-source-membership".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("point source membership runtime builds")
+                .block_on(point_source_membership_matches_the_per_row_filter_contract());
+        })
+        .expect("point source membership thread starts")
+        .join()
+        .expect("point source membership thread completes");
+}
+
+async fn point_source_membership_matches_the_per_row_filter_contract() {
+    let scope = DataScope::LegacyUnscoped;
+    let indexed = seeded("membership-point-indexed", scope, true).await;
+    // Indexed `uid`s make both sources point reads, as in the benchmark.
+    for label in ["Group", "Item"] {
+        create_index(
+            &indexed,
+            scope,
+            index::IndexSpec::node_equality(label, "uid"),
+        )
+        .await;
+    }
+    let unindexed = seeded("membership-point-unindexed", scope, false).await;
+    // `iw`'s targets, bounced out, in, and out again.
+    let hub_targets = || {
+        traversal::g()
+            .n_with_label_where("Item", expr::Predicate::eq("uid", "iw"))
+            .out(Some("HAS_ATTRIBUTE"))
+            .in_(Some("HAS_ATTRIBUTE"))
+            .out(Some("HAS_ATTRIBUTE"))
+    };
+    let kind_b = expr::Predicate::eq("kind", "B");
+    for (predicate, narrow_uids, wide_uids) in [
+        (
+            kind_b.clone(),
+            vec!["a1", "a1", "n1"],
+            vec!["aw0", "nw3", "aw6", "nw9", "aw12", "nw15"],
+        ),
+        (
+            attribute(kind_b),
+            vec!["a1", "a1"],
+            vec!["aw0", "aw6", "aw12"],
+        ),
+    ] {
+        let wide_rows = repeated(&wide_uids, WIDE.len());
+        // Both streams plan membership and read the set.
+        for (read, expected, resolves) in [
+            (read_result(narrow(predicate.clone())), narrow_uids, 1),
+            (read_result(wide(predicate.clone())), wide_rows.clone(), 1),
+        ] {
+            assert_eq!(
+                membership_steps(&plan(&indexed, &read, scope).await),
+                1,
+                "{predicate:?}"
+            );
+            let before = resolved(&indexed);
+            let membership = indexed
+                .query(query::QueryRequest::read(read.clone()))
+                .await
+                .unwrap();
+            assert_eq!(resolved(&indexed) - before, resolves, "{predicate:?}");
+            let per_row = unindexed
+                .query(query::QueryRequest::read(read.clone()))
+                .await
+                .unwrap();
+            assert_eq!(uids(&membership["result"]), expected, "{predicate:?}");
+            assert_eq!(uids(&per_row["result"]), expected, "{predicate:?}");
+        }
+
+        // The count cursor reads the set on its first node row.
+        let count = read_result(hub_targets().where_(predicate.clone()).count());
+        let before = resolved(&indexed);
+        let membership = indexed
+            .query(query::QueryRequest::read(count.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resolved(&indexed) - before, 1, "{predicate:?}");
+        let per_row = unindexed
+            .query(query::QueryRequest::read(count))
+            .await
+            .unwrap();
+        assert_eq!(membership["result"], per_row["result"], "{predicate:?}");
+        assert_eq!(
+            membership["result"].as_u64(),
+            u64::try_from(wide_rows.len()).ok(),
+            "{predicate:?}"
+        );
+
+        // A limit before the filter bounds the stream, which still reads the
+        // set instead of any record.
+        let limited = read_result(
+            hub_targets()
+                .limit(2_usize)
+                .where_(predicate.clone())
+                .values(vec!["uid"]),
+        );
+        assert_eq!(membership_steps(&plan(&indexed, &limited, scope).await), 1);
+        let before = resolved(&indexed);
+        let membership = indexed
+            .query(query::QueryRequest::read(limited.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resolved(&indexed) - before, 1, "{predicate:?}");
+        let per_row = unindexed
+            .query(query::QueryRequest::read(limited))
+            .await
+            .unwrap();
+        assert_eq!(
+            uids(&membership["result"]),
+            uids(&per_row["result"]),
+            "{predicate:?}"
+        );
+    }
     indexed.close().await.unwrap();
     unindexed.close().await.unwrap();
 }
@@ -400,9 +770,10 @@ async fn post_expansion_membership_sees_same_request_writes() {
     drop(prepared);
 
     // The pending inserts, edges, and label-scoped index moves are visible to
-    // both memberships before the request commits. `iw` now has 18 targets,
-    // so only the wide membership reads the set, which must already hold
-    // the moves.
+    // both memberships before the request commits. The narrow membership
+    // reads the set, which must already hold the moves, and the wide one
+    // reuses it: both plan the same membership and no write runs between
+    // them.
     let expected_wide = repeated(&["aw6", "aw12", "aw-fresh"], WIDE.len() + 1);
     let before = resolved(&db);
     let response = db.query(query::QueryRequest::write(write)).await.unwrap();
@@ -458,8 +829,9 @@ async fn post_expansion_membership_uses_each_tenant_catalog() {
     let narrow_read = read_result(narrow(kind_b.clone()));
     let wide_read = read_result(wide(kind_b));
     // The indexed tenant decides its wide rows from its own set alone, so a
-    // set read from another tenant's keys would drop them.
-    for (scope, planned, wide_uids) in [
+    // set read from another tenant's keys would drop them. The unindexed
+    // tenant reads its own `Attribute` label bitmap instead.
+    for (scope, index_sets, wide_uids) in [
         (indexed, 1, repeated(&["aw0", "aw6", "aw12"], WIDE.len())),
         (
             unindexed,
@@ -467,19 +839,154 @@ async fn post_expansion_membership_uses_each_tenant_catalog() {
             repeated(&["aw0", "aw6", "aw12", "only-unindexed"], WIDE.len() + 1),
         ),
     ] {
-        for (read, expected, resolves) in [
-            (&narrow_read, vec!["a1", "a1"], 0),
-            (&wide_read, wide_uids, planned),
-        ] {
-            assert_eq!(membership_steps(&plan(&db, read, scope).await), planned);
+        for (read, expected) in [(&narrow_read, vec!["a1", "a1"]), (&wide_read, wide_uids)] {
+            let planned = plan(&db, read, scope).await;
+            assert_eq!(membership_steps(&planned), 1);
+            assert_eq!(index_set_memberships(&planned), index_sets);
             let before = resolved(&db);
             let response = db
                 .query_scoped(query::QueryRequest::read(read.clone()), scope)
                 .await
                 .unwrap();
-            assert_eq!(resolved(&db) - before, resolves);
+            assert_eq!(resolved(&db) - before, 1);
             assert_eq!(uids(&response["result"]), expected);
         }
     }
     db.close().await.unwrap();
+}
+
+/// Memberships inside the optional branch bodies of `plan`.
+fn optional_body_memberships(plan: &exec::ExecutablePlan) -> usize {
+    plan.steps()
+        .iter()
+        .filter_map(|step| {
+            let exec::ExecOp::Branch {
+                plan: exec::ExecBranchPlan::Optional(body),
+            } = &step.op
+            else {
+                return None;
+            };
+            Some(body.steps())
+        })
+        .flatten()
+        .filter(|step| matches!(step.op, exec::ExecOp::IndexMembership { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn branch_bodies_reuse_one_resolved_membership() {
+    let scope = DataScope::LegacyUnscoped;
+    let indexed = seeded("membership-branch-indexed", scope, true).await;
+    let unindexed = seeded("membership-branch-unindexed", scope, false).await;
+    // Every item runs the optional body, and every body decides its
+    // post-expansion filter from the one set the request resolves.
+    let read = read_result(
+        traversal::g()
+            .n_with_label("Item")
+            .optional(
+                traversal::sub()
+                    .out(Some("HAS_ATTRIBUTE"))
+                    .where_(expr::Predicate::eq("kind", "B")),
+            )
+            .values(vec!["uid"]),
+    );
+    let indexed_plan = plan(&indexed, &read, scope).await;
+    assert_eq!(optional_body_memberships(&indexed_plan), 1);
+    assert_eq!(membership_steps(&indexed_plan), 0);
+    assert_eq!(
+        optional_body_memberships(&plan(&unindexed, &read, scope).await),
+        0
+    );
+
+    let before = resolved(&indexed);
+    let membership = indexed
+        .query(query::QueryRequest::read(read.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resolved(&indexed) - before, 1);
+    let per_row = unindexed
+        .query(query::QueryRequest::read(read))
+        .await
+        .unwrap();
+    assert_eq!(uids(&membership["result"]), uids(&per_row["result"]));
+    assert_eq!(
+        uids(&membership["result"]),
+        ["a1", "a1", "a4", "aw0", "aw12", "aw6", "n1", "nw15", "nw3", "nw9",].map(str::to_owned)
+    );
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn label_less_sources_and_label_filters_match_the_per_row_filter() {
+    let scope = DataScope::LegacyUnscoped;
+    let indexed = seeded("membership-label-less-indexed", scope, true).await;
+    let unindexed = seeded("membership-label-less-unindexed", scope, false).await;
+    let kind_b = expr::Predicate::eq("kind", "B");
+
+    // A variable source has no label for an index access, so its leading
+    // filter is decided by membership.
+    let variable = batch::read_batch()
+        .var_as(
+            "targets",
+            traversal::g()
+                .n_with_label_where("Group", expr::Predicate::eq("uid", "g3"))
+                .in_(Some("IN_GROUP"))
+                .out(Some("HAS_ATTRIBUTE")),
+        )
+        .var_as(
+            "result",
+            traversal::g()
+                .n(graph::NodeRef::var("targets"))
+                .where_(kind_b.clone())
+                .values(vec!["uid"]),
+        )
+        .returning(["result"]);
+    assert_eq!(
+        index_set_memberships(&plan(&indexed, &variable, scope).await),
+        1
+    );
+    assert_eq!(
+        membership_steps(&plan(&unindexed, &variable, scope).await),
+        0
+    );
+
+    // Label filters read the `$label` bitmap on both databases; a label no
+    // node carries drops every row without reading a record.
+    let labeled = |label: &str| read_result(narrow_label(label));
+    let reads = [
+        (variable, vec!["a1", "a1", "n1"]),
+        (labeled("Note"), vec!["n1", "n2"]),
+        (labeled("Missing"), Vec::new()),
+    ];
+    for (read, expected) in reads {
+        for db in [&indexed, &unindexed] {
+            let before = resolved(db);
+            let response = db
+                .query(query::QueryRequest::read(read.clone()))
+                .await
+                .unwrap();
+            assert_eq!(uids(&response["result"]), expected);
+            assert!(resolved(db) - before <= 1);
+        }
+    }
+    for db in [&indexed, &unindexed] {
+        for label in ["Note", "Missing"] {
+            let planned = plan(db, &labeled(label), scope).await;
+            assert_eq!(membership_steps(&planned), 1, "{label}");
+            assert_eq!(index_set_memberships(&planned), 0, "{label}");
+        }
+    }
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
+}
+
+/// `uid`s behind group `g3`'s items that carry `label`.
+fn narrow_label(label: &str) -> traversal::Traversal<traversal::Terminal> {
+    traversal::g()
+        .n_with_label_where("Group", expr::Predicate::eq("uid", "g3"))
+        .in_(Some("IN_GROUP"))
+        .out(Some("HAS_ATTRIBUTE"))
+        .has_label(label)
+        .values(vec!["uid"])
 }

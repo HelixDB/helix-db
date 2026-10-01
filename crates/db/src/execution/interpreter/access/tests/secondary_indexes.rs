@@ -3494,3 +3494,404 @@ async fn reader_range_access_covers_node_and_edge_bound_shapes() {
         ExecutionValue::Scalars(vec![ExecutionScalar::EdgeId(light)])
     );
 }
+
+/// Users with Active `status`, `role` and `tier` equality indexes and a `rank`
+/// range index: `[active admin gold, active member gold, paused admin silver]`.
+async fn concurrent_set_fixture(name: &str) -> (HelixDB, [u64; 3]) {
+    let db = test_support::open_db(name).await;
+    let mut users = [0; 3];
+    for (user, (status, role, tier, rank)) in users.iter_mut().zip([
+        ("active", "admin", "gold", "a"),
+        ("active", "member", "gold", "b"),
+        ("paused", "admin", "silver", "c"),
+    ]) {
+        *user = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![
+                ("status", PropertyValue::from(status)),
+                ("role", PropertyValue::from(role)),
+                ("tier", PropertyValue::from(tier)),
+                ("rank", PropertyValue::from(rank)),
+            ],
+        )
+        .await;
+    }
+    let [active_admin, active_member, paused_admin] = users;
+    for (definition, index_id, rows) in [
+        (
+            SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+            54,
+            [
+                ("active", active_admin),
+                ("active", active_member),
+                ("paused", paused_admin),
+            ],
+        ),
+        (
+            SecondaryIndexDefinition::node_equality("User", "role").unwrap(),
+            55,
+            [
+                ("admin", active_admin),
+                ("member", active_member),
+                ("admin", paused_admin),
+            ],
+        ),
+        (
+            SecondaryIndexDefinition::node_equality("User", "tier").unwrap(),
+            56,
+            [
+                ("gold", active_admin),
+                ("gold", active_member),
+                ("silver", paused_admin),
+            ],
+        ),
+        (
+            SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
+            58,
+            [
+                ("a", active_admin),
+                ("b", active_member),
+                ("c", paused_admin),
+            ],
+        ),
+    ] {
+        seed_active_secondary_generation(&db, definition, index_id, &rows).await;
+    }
+    (db, users)
+}
+
+/// One exact equality leaf over `User.property` resolved through `index`.
+fn user_equality(index: &str, property: &str, value: &str) -> exec::ExecNodeSecondarySetPlan {
+    node_set_equalities! {
+        index: catalog::NodeEqualityIndexMeta::new(test_support::name(index)),
+        key: catalog::ScopedPropertyKey::try_new("User", property).unwrap(),
+        values: ir::AtLeast::from_one(ir::IndexValue::Literal(
+            ir::SecondaryIndexLiteral::new(PropertyValue::from(value)).unwrap(),
+        )),
+    }
+}
+
+#[tokio::test]
+async fn set_children_are_read_concurrently_up_to_the_bound() {
+    use std::sync::atomic::Ordering;
+
+    let (db, [active_admin, _, _]) =
+        concurrent_set_fixture("access-concurrent-secondary-children").await;
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    context.enable_request_read_view().await.unwrap();
+    let peak = &db.inner.peak_index_child_reads;
+
+    peak.store(0, Ordering::SeqCst);
+    let ids = context
+        .node_secondary_set_bitmap(&exec::ExecNodeSecondarySetPlan::Intersect {
+            driver: Box::new(user_equality("node_eq:User:status", "status", "active")),
+            rest: ir::AtLeast::try_from_vec(vec![
+                user_equality("node_eq:User:role", "role", "admin"),
+                user_equality("node_eq:User:tier", "tier", "gold"),
+            ])
+            .unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![active_admin]);
+    assert_eq!(peak.load(Ordering::SeqCst), 3);
+
+    let point = |property: &str, value: &str| exec::ExecNodeBitmapExpr::PointRead {
+        index: exec::ExecNodeNonUniqueEqualityIndex::try_from(catalog::NodeEqualityIndexMeta::new(
+            test_support::name(&format!("node_eq:User:{property}")),
+        ))
+        .unwrap(),
+        key: catalog::ScopedPropertyKey::try_new("User", property).unwrap(),
+        value: exec::ExecIndexedEqualityValue::try_from(
+            ir::SecondaryIndexLiteral::new(PropertyValue::from(value)).unwrap(),
+        )
+        .unwrap(),
+    };
+    peak.store(0, Ordering::SeqCst);
+    let ids = context
+        .node_bitmap(
+            &exec::ExecNodeBitmapExpr::Intersect {
+                driver: Box::new(point("status", "active")),
+                rest: ir::AtLeast::try_from_vec(vec![
+                    point("role", "admin"),
+                    point("tier", "gold"),
+                ])
+                .unwrap(),
+            },
+            crate::execution::interpreter::access::PARALLEL_INDEX_READS,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![active_admin]);
+    assert_eq!(peak.load(Ordering::SeqCst), 3);
+    context.close_request_read_view().unwrap();
+
+    peak.store(0, Ordering::SeqCst);
+    assert_eq!(
+        run_limited_node_access(
+            &db,
+            exec::ExecNodeAccessPlan::SecondarySet {
+                set: exec::ExecNodeSecondarySetPlan::OrderedIntersect {
+                    driver: exec::ExecNodeSecondaryRangePlan {
+                        iteration: helix_planner::ir::RangeScanIteration::Forward,
+                        index: catalog::NodeRangeIndexMeta::new(test_support::name(
+                            "node_range:User:rank:asc",
+                        )),
+                        key: catalog::ScopedPropertyDirectionKey::try_new(
+                            "User",
+                            "rank",
+                            helix_ast::index::RangeIndexDirection::Asc,
+                        )
+                        .unwrap(),
+                        range: ir::IndexRange::All,
+                    },
+                    filters: ir::AtLeast::<_, 1>::try_from_vec(vec![
+                        user_equality("node_eq:User:status", "status", "active"),
+                        user_equality("node_eq:User:role", "role", "admin"),
+                    ])
+                    .unwrap(),
+                },
+            },
+            1,
+        )
+        .await,
+        ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(active_admin)])
+    );
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn disjoint_ordered_filters_skip_the_range_driver() {
+    use std::sync::atomic::Ordering;
+
+    let (db, _) = concurrent_set_fixture("access-ordered-disjoint-filters").await;
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    context.enable_request_read_view().await.unwrap();
+    let ordered = |filters: Vec<exec::ExecNodeSecondarySetPlan>| {
+        exec::ExecNodeSecondarySetPlan::OrderedIntersect {
+            driver: exec::ExecNodeSecondaryRangePlan {
+                iteration: helix_planner::ir::RangeScanIteration::Forward,
+                index: catalog::NodeRangeIndexMeta::new(test_support::name(
+                    "node_range:User:rank:asc",
+                )),
+                key: catalog::ScopedPropertyDirectionKey::try_new(
+                    "User",
+                    "rank",
+                    helix_ast::index::RangeIndexDirection::Asc,
+                )
+                .unwrap(),
+                range: ir::IndexRange::All,
+            },
+            filters: ir::AtLeast::<_, 1>::try_from_vec(filters).unwrap(),
+        }
+    };
+
+    // `paused` and `gold` each match a user, but never the same one.
+    let disjoint = ordered(vec![
+        user_equality("node_eq:User:status", "status", "paused"),
+        user_equality("node_eq:User:tier", "tier", "gold"),
+    ]);
+    assert_eq!(
+        context
+            .node_secondary_set_ids(&disjoint, None)
+            .await
+            .unwrap(),
+        Vec::<u64>::new()
+    );
+    assert_eq!(context.range_reads.entries.load(Ordering::Relaxed), 0);
+
+    // Overlapping filters still drive the range in order.
+    let overlapping = ordered(vec![
+        user_equality("node_eq:User:status", "status", "active"),
+        user_equality("node_eq:User:tier", "tier", "gold"),
+    ]);
+    assert_eq!(
+        context
+            .node_secondary_set_ids(&overlapping, None)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(context.range_reads.entries.load(Ordering::Relaxed) > 0);
+    context.close_request_read_view().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn read_children_yields_results_and_the_first_error_in_plan_order() {
+    use futures::{FutureExt, TryStreamExt};
+
+    let db = test_support::open_db("access-read-children-plan-order").await;
+    let context = ExecutionContext::new(&db, context::ParamBindings::default());
+    let read = |children: &'static [(u64, Result<u64, &'static str>)]| {
+        context
+            .read_children(
+                children.iter().collect(),
+                crate::execution::interpreter::access::PARALLEL_INDEX_READS,
+                |(delay, result), _| {
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
+                        result.map_err(|message| HelixDbError::Query(message.to_string()))
+                    }
+                    .boxed()
+                },
+            )
+            .try_collect::<Vec<_>>()
+    };
+
+    let error = read(&[(10, Err("a")), (1, Err("b"))]).await.unwrap_err();
+    assert!(
+        matches!(&error, HelixDbError::Query(message) if message == "a"),
+        "{error:?}"
+    );
+    let error = read(&[(10, Ok(1)), (1, Err("b"))]).await.unwrap_err();
+    assert!(
+        matches!(&error, HelixDbError::Query(message) if message == "b"),
+        "{error:?}"
+    );
+    assert_eq!(
+        read(&[(10, Ok(1)), (1, Ok(2)), (5, Ok(3))]).await.unwrap(),
+        vec![1, 2, 3]
+    );
+}
+
+/// A synthetic set whose leaves each sleep one millisecond while counted live.
+enum ReadTree {
+    Leaf,
+    Set(Vec<ReadTree>),
+}
+
+/// Leaf reads live now, and the most seen live at once.
+#[derive(Default)]
+struct LiveLeaves {
+    live: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+/// Read `tree` the way a nested secondary set reads its children.
+fn read_tree<'a>(
+    context: &'a ExecutionContext<'_>,
+    tree: &'a ReadTree,
+    reads: core::num::NonZeroUsize,
+    leaves: &'a LiveLeaves,
+) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+    use futures::{FutureExt, TryStreamExt};
+    use std::sync::atomic::Ordering;
+
+    async move {
+        match tree {
+            ReadTree::Leaf => {
+                let live = leaves.live.fetch_add(1, Ordering::SeqCst) + 1;
+                leaves.peak.fetch_max(live, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                leaves.live.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            }
+            ReadTree::Set(children) => context
+                .read_children(children.iter().collect(), reads, |child, reads| {
+                    read_tree(context, child, reads, leaves)
+                })
+                .try_collect::<Vec<()>>()
+                .await
+                .map(drop),
+        }
+    }
+    .boxed()
+}
+
+#[tokio::test(start_paused = true)]
+async fn nested_sets_never_exceed_the_read_budget() {
+    let db = test_support::open_db("access-read-children-budget").await;
+    let context = ExecutionContext::new(&db, context::ParamBindings::default());
+    let leaves = |count| ReadTree::Set((0..count).map(|_| ReadTree::Leaf).collect());
+    let nested = || ReadTree::Set(vec![leaves(12), leaves(12)]);
+    for (tree, reads, expected) in [
+        (nested(), 16, 16),
+        (leaves(20), 16, 16),
+        (leaves(3), 16, 3),
+        (nested(), 1, 1),
+    ] {
+        let live = LiveLeaves::default();
+        let reads = core::num::NonZeroUsize::new(reads).unwrap();
+        read_tree(&context, &tree, reads, &live).await.unwrap();
+        assert_eq!(
+            live.peak.load(std::sync::atomic::Ordering::SeqCst),
+            expected,
+            "reads={reads}"
+        );
+    }
+}
+
+/// Sets resolved at once, by one step or by parallel steps sharing the
+/// request's pool, add at most `PARALLEL_INDEX_READS - 1` reads beyond one
+/// each, and the pool refills when they finish.
+#[tokio::test(start_paused = true)]
+async fn concurrent_sets_share_one_request_read_budget() {
+    let db = test_support::open_db("access-read-children-request-budget").await;
+    let context = ExecutionContext::new(&db, context::ParamBindings::default());
+    let wide = ReadTree::Set((0..20).map(|_| ReadTree::Leaf).collect());
+    let reads = crate::execution::interpreter::access::PARALLEL_INDEX_READS;
+    let live = LiveLeaves::default();
+    futures::try_join!(
+        read_tree(&context, &wide, reads, &live),
+        read_tree(&context, &wide, reads, &live),
+        read_tree(&context, &wide, reads, &live),
+    )
+    .unwrap();
+    assert_eq!(
+        live.peak.load(std::sync::atomic::Ordering::SeqCst),
+        reads.get() + 2
+    );
+
+    let live = LiveLeaves::default();
+    read_tree(&context, &wide, reads, &live).await.unwrap();
+    assert_eq!(
+        live.peak.load(std::sync::atomic::Ordering::SeqCst),
+        reads.get()
+    );
+}
+
+#[tokio::test]
+async fn set_errors_surface_in_plan_order_and_empty_children_do_not_short_circuit() {
+    let (db, _) = concurrent_set_fixture("access-concurrent-secondary-errors").await;
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    context.enable_request_read_view().await.unwrap();
+    let corrupt = || user_equality("not-a-planner-identity", "status", "active");
+    let unavailable = || user_equality("node_eq:User:color", "color", "red");
+    let intersect = |driver, rest| exec::ExecNodeSecondarySetPlan::Intersect {
+        driver: Box::new(driver),
+        rest: ir::AtLeast::from_one(rest),
+    };
+
+    let error = context
+        .node_secondary_set_bitmap(&intersect(corrupt(), unavailable()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, HelixDbError::IndexCatalogCorruption(_)),
+        "{error:?}"
+    );
+    let error = context
+        .node_secondary_set_bitmap(&intersect(unavailable(), corrupt()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, HelixDbError::IndexLifecycleUnavailable { .. }),
+        "{error:?}"
+    );
+    for set in [
+        intersect(exec::ExecNodeSecondarySetPlan::Empty, corrupt()),
+        exec::ExecNodeSecondarySetPlan::Union {
+            driver: Box::new(exec::ExecNodeSecondarySetPlan::Empty),
+            rest: ir::AtLeast::from_one(corrupt()),
+        },
+    ] {
+        let error = context.node_secondary_set_bitmap(&set).await.unwrap_err();
+        assert!(
+            matches!(error, HelixDbError::IndexCatalogCorruption(_)),
+            "{error:?}"
+        );
+    }
+    context.close_request_read_view().unwrap();
+}

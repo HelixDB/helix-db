@@ -1,8 +1,5 @@
-use crate::errors::CliError;
-use color_eyre::owo_colors::OwoColorize;
 use eyre::Result;
 use std::ffi::OsString;
-use std::io::IsTerminal;
 use std::path::Path;
 
 pub fn command_exists(command: &str) -> bool {
@@ -73,71 +70,6 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
     path.is_file()
-}
-
-pub fn print_newline() {
-    println!();
-}
-
-pub fn print_lines(lines: &[&str]) {
-    for line in lines {
-        println!("  {line}");
-    }
-}
-
-pub fn print_instructions(title: &str, steps: &[&str]) {
-    if !crate::output::Verbosity::current().show_normal() {
-        return;
-    }
-    print_newline();
-    println!("{}", title.bold());
-    for (i, step) in steps.iter().enumerate() {
-        println!("  {}. {step}", (i + 1).to_string().bright_white().bold());
-    }
-}
-
-pub fn print_header(title: &str) {
-    println!("{}", title.bold().underline());
-}
-
-pub fn print_field(key: &str, value: &str) {
-    println!("  {}: {value}", key.bright_white().bold());
-}
-
-pub fn print_error(message: &str) {
-    let error = CliError::new(message);
-    eprint!("{}", error.render());
-}
-
-pub fn print_error_with_hint(message: &str, hint: &str) {
-    let error = CliError::new(message).with_hint(hint);
-    eprint!("{}", error.render());
-}
-
-pub fn print_warning(message: &str) {
-    let warning = CliError::warning(message);
-    eprint!("{}", warning.render());
-}
-
-pub fn print_confirm(message: &str) -> Result<bool> {
-    print_confirm_for_terminal(message, std::io::stdin().is_terminal())
-}
-
-fn print_confirm_for_terminal(message: &str, is_terminal: bool) -> Result<bool> {
-    if !is_terminal {
-        return Ok(false);
-    }
-
-    crate::prompts::confirm(message)
-}
-
-pub fn print_prompt(message: &str) -> std::io::Result<String> {
-    use std::io::{self, Write};
-    print!("{} ", message.yellow().bold());
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input)
 }
 
 pub fn add_env_var_to_file(path: &std::path::Path, key: &str, value: &str) -> Result<()> {
@@ -254,26 +186,5 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "OTHER=value\nEXAMPLE_TOKEN=second\nTAIL=value\n"
         );
-    }
-
-    #[test]
-    fn noninteractive_confirmation_and_printing_helpers_are_safe() {
-        let _lock = crate::output::VERBOSITY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::output::Verbosity::set(crate::output::Verbosity::Normal);
-        print_newline();
-        print_lines(&["one", "two"]);
-        print_instructions("Next", &["first", "second"]);
-        print_header("Header");
-        print_field("Key", "Value");
-        print_error("failure");
-        print_error_with_hint("failure", "retry");
-        print_warning("careful");
-        assert!(!print_confirm_for_terminal("continue?", false).unwrap());
-
-        crate::output::Verbosity::set(crate::output::Verbosity::Silent);
-        print_instructions("Hidden", &["step"]);
-        crate::output::Verbosity::set(crate::output::Verbosity::Normal);
     }
 }

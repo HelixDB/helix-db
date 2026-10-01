@@ -1,18 +1,34 @@
-//! Row-preserving index membership for filters after the pipeline source.
+//! Row-preserving index membership for node-stream filters.
 //!
-//! A leading filter is rewritten into an index access path by
-//! [`super::AccessPipelineFilterRule`]. A filter behind an expansion cannot
-//! change the access path, so this rule replaces it with an
-//! [`logical::StreamPipelineOp::IndexMembership`] step plus a residual filter
-//! for unindexed conjuncts. Root wrappers inline their streams, so the rule
-//! also rewrites the pipeline inside them. Costing decides whether the
-//! membership alternative beats the per-row filter.
+//! An indexed filter must never be decided by reading records row by row. A
+//! filter behind an expansion cannot change the access path, so this rule
+//! replaces every such node-stream filter that [`index_membership_filter`]
+//! serves with one [`logical::StreamPipelineOp::IndexMembership`] step, whose
+//! fused residual keeps the conjuncts the set cannot decide. Streams of
+//! unknown element kind qualify too, because the operator evaluates edge and
+//! element-free rows exactly like the filter. A leading filter over a
+//! label-less node source (point IDs, a parameter, a variable, or an all-node
+//! scan) whose predicate names no label qualifies as well, because the
+//! source-index rule declines it for want of a label; so does the same filter
+//! as a lone [`logical::AccessFilter`]. Root wrappers inline their streams, so
+//! the rule also rewrites the pipelines inside them.
+//!
+//! The rewrite is required, not an alternative. The implementation rules for
+//! every expression kind it matches refuse any expression
+//! [`membership_rewrite`] would change (see
+//! `RuleApplicability::StreamMembershipCandidate`), so a per-row filter over
+//! an eligible predicate never reaches a physical plan, whatever its cost or
+//! the exploration budget. Normalising once before exploration would not be
+//! enough: exploration keeps creating pipelines (partial index rewrites,
+//! root-stream merges, order rewrites), and each needs the same guarantee.
+//! The rewrite replaces every eligible filter at once, so its output has none
+//! left and is implemented directly, which keeps a physical alternative in
+//! every memo group.
 
-use super::super::filter::{index_membership_filter, MembershipFilterRewrite};
-use crate::{catalog, context, logical, optimizer, properties, rules};
+use super::super::filter::index_membership_filter;
+use crate::{analysis, catalog, context, logical, optimizer, properties, rules};
 
-/// Rewrite a node-stream filter behind the pipeline source into index
-/// membership.
+/// Rewrite every eligible node-stream filter into index membership.
 pub struct AccessPipelineMembershipFilterRule {
     metadata: rules::RuleMetadata,
 }
@@ -34,15 +50,28 @@ impl optimizer::OptimizerRule for AccessPipelineMembershipFilterRule {
     }
 
     fn apply(&self, input: optimizer::RuleInput<'_>) -> optimizer::RuleResult {
-        let rewrite = Rewrite {
-            indexes: input.indexes,
-            planner_limits: input.planner_limits,
-        };
-        rewrite
-            .expr(input.expr)
+        membership_rewrite(input.expr, input.indexes, input.planner_limits)
             .map(rules::logical_result)
             .unwrap_or(optimizer::RuleResult::NotApplicable)
     }
+}
+
+/// `expr` with every eligible node-stream filter replaced by index
+/// membership, or `None` when it has none.
+///
+/// The implementation rules of the matched expression kinds call this to
+/// defer to the rewrite, so the refusal and the rewrite never disagree. The
+/// rewrite is idempotent: it returns `None` for its own output.
+pub(in crate::rules) fn membership_rewrite(
+    expr: &logical::LogicalExpr,
+    indexes: &catalog::IndexCatalogSnapshot,
+    planner_limits: &context::PlannerLimits,
+) -> Option<logical::LogicalExpr> {
+    Rewrite {
+        indexes,
+        planner_limits,
+    }
+    .expr(expr)
 }
 
 struct Rewrite<'a> {
@@ -53,6 +82,9 @@ struct Rewrite<'a> {
 impl Rewrite<'_> {
     fn expr(&self, expr: &logical::LogicalExpr) -> Option<logical::LogicalExpr> {
         match expr {
+            logical::LogicalExpr::AccessFilter(filter) => self
+                .access_filter(filter)
+                .map(logical::LogicalExpr::AccessPipeline),
             logical::LogicalExpr::AccessPipeline(pipeline) => self
                 .access_pipeline(pipeline)
                 .map(logical::LogicalExpr::AccessPipeline),
@@ -107,6 +139,11 @@ impl Rewrite<'_> {
 
     fn root_stream(&self, stream: &logical::RootStream) -> Option<logical::RootStream> {
         match stream {
+            logical::RootStream::Access(logical::AccessStream::Filter(filter)) => {
+                self.access_filter(filter).map(|pipeline| {
+                    logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline))
+                })
+            }
             logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline)) => {
                 self.access_pipeline(pipeline).map(|pipeline| {
                     logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline))
@@ -119,38 +156,71 @@ impl Rewrite<'_> {
         }
     }
 
-    /// The leading filter belongs to the source-index rule, so candidates
-    /// start after the first operator.
+    /// A lone filter over a label-less node source, which the source-index
+    /// rule declines, becomes a membership pipeline over the same source.
+    fn access_filter(&self, filter: &logical::AccessFilter) -> Option<logical::AccessPipeline> {
+        if !label_less_node_filter(filter.access(), filter.predicate()) {
+            return None;
+        }
+        let plan = index_membership_filter(filter.predicate(), self.indexes, self.planner_limits)?;
+        logical::AccessPipeline::new(
+            filter.access().clone(),
+            crate::ir::AtLeast::from_one(logical::StreamPipelineOp::IndexMembership {
+                plan: Box::new(plan),
+            }),
+        )
+    }
+
+    /// A leading filter over a labeled source belongs to the source-index
+    /// rule, so candidates start after it. Over a label-less node source that
+    /// rule declines an unscoped leading filter, so it is a candidate too.
     fn access_pipeline(
         &self,
         pipeline: &logical::AccessPipeline,
     ) -> Option<logical::AccessPipeline> {
-        let ops = self.ops(Some(pipeline.access().element()), pipeline.ops(), 1)?;
+        let first_candidate = match pipeline.ops() {
+            [logical::StreamPipelineOp::Filter { predicate }, ..]
+                if label_less_node_filter(pipeline.access(), predicate) =>
+            {
+                0
+            }
+            _ => 1,
+        };
+        let ops = self.ops(
+            Some(pipeline.access().element()),
+            pipeline.ops(),
+            first_candidate,
+        )?;
         logical::AccessPipeline::new(pipeline.access().clone(), ops)
     }
 
     /// A root pipeline follows a complete root stream, so its first filter is
-    /// already behind that stream's source. Its own operators are tried
-    /// before the input stream.
+    /// already behind that stream's source. Its own operators and its input
+    /// stream are rewritten together.
     fn root_pipeline(&self, pipeline: &logical::RootPipeline) -> Option<logical::RootPipeline> {
-        match self.ops(root_stream_element(pipeline.input()), pipeline.ops(), 0) {
-            Some(ops) => logical::RootPipeline::new(pipeline.input().clone(), ops),
-            None => logical::RootPipeline::new(
-                self.root_stream(pipeline.input())?,
-                pipeline.ops_at_least().clone(),
+        match (
+            self.ops(root_stream_element(pipeline.input()), pipeline.ops(), 0),
+            self.root_stream(pipeline.input()),
+        ) {
+            (None, None) => None,
+            (ops, input) => logical::RootPipeline::new(
+                input.unwrap_or_else(|| pipeline.input().clone()),
+                ops.unwrap_or_else(|| pipeline.ops_at_least().clone()),
             ),
         }
     }
 
-    /// Replace the first rewritable node-stream filter at or after
-    /// `first_candidate`, keeping every other operator in place.
+    /// Replace every eligible filter at or after `first_candidate`, keeping
+    /// every other operator in place. A filter is eligible when its rows are
+    /// not known to be edges and [`index_membership_filter`] serves its
+    /// predicate. `None` when no filter is eligible.
     fn ops(
         &self,
         element: Option<properties::ElementKind>,
         ops: &[logical::StreamPipelineOp],
         first_candidate: usize,
     ) -> Option<crate::ir::AtLeast<logical::StreamPipelineOp, 1>> {
-        let (position, rewrite) = ops
+        let replacements = ops
             .iter()
             .scan(element, |element, op| {
                 let input = *element;
@@ -158,32 +228,49 @@ impl Rewrite<'_> {
                 Some((op, input))
             })
             .enumerate()
-            .skip(first_candidate)
-            .find_map(|(position, (op, input))| match (op, input) {
+            .map(|(position, (op, input))| match (op, input) {
                 (
                     logical::StreamPipelineOp::Filter { predicate },
-                    Some(properties::ElementKind::Node),
-                ) => index_membership_filter(predicate, self.indexes, self.planner_limits)
-                    .map(|rewrite| (position, rewrite)),
+                    None | Some(properties::ElementKind::Node),
+                ) if position >= first_candidate => {
+                    index_membership_filter(predicate, self.indexes, self.planner_limits).map(
+                        |plan| logical::StreamPipelineOp::IndexMembership {
+                            plan: Box::new(plan),
+                        },
+                    )
+                }
                 _ => None,
-            })?;
-        let MembershipFilterRewrite {
-            membership,
-            residual,
-        } = rewrite;
-        let rewritten = ops[..position]
-            .iter()
-            .cloned()
-            .chain(core::iter::once(
-                logical::StreamPipelineOp::IndexMembership {
-                    plan: Box::new(membership),
-                },
-            ))
-            .chain(residual.map(|predicate| logical::StreamPipelineOp::Filter { predicate }))
-            .chain(ops[position + 1..].iter().cloned())
-            .collect();
-        crate::ir::AtLeast::try_from_vec(rewritten)
+            })
+            .collect::<Vec<_>>();
+        if replacements.iter().all(Option::is_none) {
+            return None;
+        }
+        crate::ir::AtLeast::try_from_vec(
+            replacements
+                .into_iter()
+                .zip(ops)
+                .map(|(replacement, op)| replacement.unwrap_or_else(|| op.clone()))
+                .collect(),
+        )
     }
+}
+
+/// Whether `access` is a non-empty node source without a common label and
+/// `predicate` names no label: exactly the leading filters the source-index
+/// rule declines for want of a label.
+fn label_less_node_filter(
+    access: &logical::AccessPath,
+    predicate: &crate::ir::PredicatePlan,
+) -> bool {
+    matches!(access, logical::AccessPath::Node(path) if path.common_label().is_none())
+        && !access.is_direct_empty()
+        && matches!(
+            analysis::prune_statically_impossible_branches(predicate.as_ref()),
+            Ok(analysis::PrunedPredicate::Feasible {
+                label: analysis::FeasibleLabelScope::Unscoped,
+                ..
+            })
+        )
 }
 
 /// Element family known to flow out of a root stream, if any.

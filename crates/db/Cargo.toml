@@ -71,7 +71,6 @@ reqwest = "0.13.3"
 
 [features]
 default = []
-migration-parity = []
 index-lifecycle-testing = []
 test-util = ["tokio/test-util"]
 future-vector-codecs = []
@@ -139,7 +138,6 @@ required-features = ["production-coverage"]
 name = "production_migration_contracts"
 required-features = [
     "production-coverage",
-    "migration-parity",
     "index-lifecycle-testing",
 ]
 
@@ -151,7 +149,6 @@ required-features = ["production-coverage"]
 name = "production_text_correctness_regressions"
 required-features = [
     "production-coverage",
-    "migration-parity",
     "index-lifecycle-testing",
 ]
 

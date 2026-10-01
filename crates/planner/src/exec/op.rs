@@ -15,7 +15,7 @@ mod variable;
 
 pub use condition::ExecCondition;
 pub use control_flow::{ExecBranchPlan, ExecRepeatPlan};
-pub use membership::ExecNodeIndexMembershipPlan;
+pub use membership::{ExecNodeIndexMembershipPlan, ExecNodeMembershipSet};
 pub use merge::ExecMergeMode;
 pub use mutation::ExecMutationPlan;
 pub use operation::ExecOp;

@@ -13,10 +13,10 @@ response. Local and Cloud.
 ## Usage
 
 ```bash
-helix query [INSTANCE] --file <request.json> [--compact]
-helix query [INSTANCE] --json '<v3-json>' [--compact]
-helix query [INSTANCE] -e '<typescript-expression>' [--compact]
-helix query [INSTANCE] --ts-file <query.ts> [--compact]
+helix query [INSTANCE] --file <request.json>
+helix query [INSTANCE] --body '<v3-json>'
+helix query [INSTANCE] -e '<typescript-expression>'
+helix query [INSTANCE] --ts-file <query.ts>
 ```
 
 Exactly one input is required. The envelope must include lowercase `request_type` (`read` or `write`)
@@ -26,7 +26,7 @@ and `query`. Query bundles are not supported.
 
 | Argument | Description |
 | --- | --- |
-| `INSTANCE` | Instance name from `helix.toml`, or an explicit `tenant:<id>` / `cluster:<id>` Cloud database. Defaults to `dev` or the sole linked instance. |
+| `INSTANCE` | Instance name from `helix.toml`, or an explicit `tenant:<id>` / `cluster:<id>` Cloud database. See [Target resolution](#target-resolution) for the default. |
 
 ## Options
 
@@ -35,7 +35,7 @@ and `query`. Query bundles are not supported.
 | Flag | Description | Default |
 | --- | --- | --- |
 | `-f`, `--file <REQUEST.json>` | Read the request from a JSON file. | — |
-| `--json <JSON>` | Read the request from an inline JSON string. | — |
+| `--body <JSON>` | Read the request from an inline JSON string. | — |
 | `-e`, `--ts <TS>` | Build the request from a TypeScript DSL expression, like `mysql -e`. | — |
 | `--ts-file <QUERY.ts>` | Build the request from a TypeScript DSL file. | — |
 
@@ -45,20 +45,21 @@ and `query`. Query bundles are not supported.
 | --- | --- | --- |
 | `--host <HOST>` | Override the host. | `localhost` |
 | `--port <PORT>` | Override the port. | The instance's port in `helix.toml` |
+| `--warm` | `read` requests only: pre-warm caches with the `X-Helix-Warm` header. | Off |
 
 ### Output
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--warm` | Local `read` requests only: pre-warm caches with the `X-Helix-Warm` header. | Off |
-| `--compact` | Print compact single-line JSON. | Off (pretty-printed) |
+| `--json` | Print the response as compact JSON only, with no footer. | Off (highlighted, pretty-printed) |
 
 ## Behavior
 
 ### Target resolution
 
-- With no target, the CLI uses the `dev` instance (local or Cloud) or the sole linked instance.
-- Ambiguous projects must specify an instance or an explicit `tenant:<id>` / `cluster:<id>`.
+- A typed `tenant:<id>` / `cluster:<id>` target works without a `helix.toml`.
+- With no target, the CLI uses the `dev` instance (local or Cloud), then the only instance, then a picker in a terminal.
+- Otherwise it fails and lists the instances you can pass.
 
 ### Local queries
 
@@ -86,7 +87,8 @@ endpoint that applications reach with an application key) directly.
 
 ### Output
 
-- The response is pretty-printed JSON unless you pass `--compact`.
+- The response goes to stdout as syntax-highlighted, pretty-printed JSON. A dim footer with the HTTP status, latency, and target (for example `200 OK · 12ms · dev`) goes to stderr, so stdout stays pipeable.
+- `--json` prints only the compact JSON response. `--quiet` still prints the response but drops the footer.
 - An empty response prints nothing. A non-2xx response fails with the HTTP status and body.
 
 ## Examples
@@ -96,13 +98,13 @@ endpoint that applications reach with an application key) directly.
 helix query --file examples/request.json
 
 # Target a named local instance and print one line of JSON
-helix query dev --file examples/request.json --compact
+helix query dev --file examples/request.json --json
 
 # Build the request from a TypeScript DSL expression
 helix query -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 
-# Query an explicit Cloud database
-helix query tenant:<id> --file examples/request.json
+# Query an explicit Cloud database, no helix.toml needed
+helix query tenant:<id> --file request.json
 ```
 
 ## Related

@@ -13,43 +13,43 @@ read-only.
 ## Usage
 
 ```bash
-helix workspace list [--format human|json]
-helix workspace get <workspace-id> [--format human|json]
+helix workspace [list]
+helix workspace get [WORKSPACE]
 ```
 
 ## Subcommands
 
 | Subcommand | Description |
 | --- | --- |
-| `list` | List every workspace you are a member of. |
-| `get` | Show one workspace by ID. |
+| `list` | List every workspace you are a member of. The default when no subcommand is given. |
+| `get` | Show one workspace. |
 
 ## Arguments
 
 | Argument | Description |
 | --- | --- |
-| `WORKSPACE_ID` | Workspace to show with `get`. Required. |
+| `WORKSPACE` | `get`: workspace ID, slug, or name. Defaults to the linked workspace, then the only workspace. |
 
 ## Options
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--format <FORMAT>` | Output format: `human` or `json`. | `human` |
+| `--json` | Print the result as JSON on stdout and never prompt. | Off |
 
 ## Behavior
 
-- The WorkOS session hydrates all current memberships.
+- The WorkOS session hydrates all current memberships. `list` marks the workspace linked in `helix.toml`.
 - There is no `workspace switch` command and no persisted active workspace.
-- Pass `--workspace` or `--workspace-id` to a command that cannot derive an unambiguous workspace from its linked project/database.
+- Commands that need a workspace take `--workspace <id|slug|name>`, or resolve one as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
 ## Examples
 
 ```bash
 # List your workspaces
-helix workspace list
+helix workspace
 
 # Show one workspace as JSON
-helix workspace get <workspace-id> --format json
+helix workspace get <workspace> --json
 ```
 
 ## Related

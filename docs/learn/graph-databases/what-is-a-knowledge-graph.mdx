@@ -1,36 +1,37 @@
 ---
 title: "What is a knowledge graph?"
-description: "A knowledge graph stores facts about entities and the typed relationships between them, organized by a schema or ontology so software can query them."
+description: "A knowledge graph is a connected collection of facts about things and how they relate, organized by a schema so software can query and cite it."
 sidebarTitle: "Knowledge graphs"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-A knowledge graph is a structured collection of facts about entities, such as people,
-products, documents, and concepts, and the typed relationships between them, typically
-organized by a schema or ontology. Facts link entities to each other or to attribute
-values, and each fact can record where it came from, so software can answer questions by
-following connections and cite its sources. Knowledge graphs are commonly stored in
-graph databases and used to ground search, recommendations, and large language model
-(LLM) applications in connected, verifiable facts.
+A knowledge graph is a collection of facts about things and how they relate, typically
+organized by a schema, a shared list of allowed types. Think of it as a company's
+memory drawn as a map: customers, products, and support tickets are the points, and
+facts such as "this ticket is about the export feature" are the lines between them.
+Because each fact can also record where it came from, software can answer questions by
+following connections and point to its sources. That is why knowledge graphs are used
+to ground search, recommendations, and large language model (LLM) applications, such as
+chatbots, in connected, checkable facts.
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Describe the parts of a knowledge graph, from entities to provenance
-    - Compare a knowledge graph with a graph database
-    - Explain how a knowledge graph is built, including extraction and entity resolution
-    - Describe how a knowledge graph is kept current as sources change
+    - Describe what a knowledge graph contains, from entities to sources
+    - Explain how a knowledge graph differs from a graph database
+    - Outline how to build one, including extraction and entity resolution
+    - Describe how to keep a knowledge graph current as sources change
   </Card>
 </div>
 
 ## What is in a knowledge graph?
 
-A knowledge graph contains entities, the typed relationships between them, attributes
-that describe both, and provenance for each fact, usually organized by an ontology or
-schema that defines the allowed types.
+A knowledge graph holds things (entities), the named connections between them
+(relationships), details about both (attributes), and a record of where each fact came
+from (provenance). A schema or ontology sets the rules for which types are allowed.
 
 | Part | What it is | Example |
 | --- | --- | --- |
@@ -39,6 +40,9 @@ schema that defines the allowed types.
 | Attribute | A value that describes an entity or relationship | A product's `releaseStage`, a relationship's `confidence` |
 | Ontology or schema | The allowed entity types, relationship types, and attributes | "A `Ticket` can be `ABOUT` a `Feature`, not a `Customer`" |
 | Provenance | Where each fact came from and when | The document chunk a relationship was extracted from |
+
+For example, a support team's knowledge graph might connect a customer, the ticket they
+opened, the feature it is about, and the guide that documents that feature:
 
 ```mermaid
 flowchart LR
@@ -52,30 +56,40 @@ flowchart LR
 A schema or ontology is usually what separates a knowledge graph from an arbitrary set
 of links. It fixes what kinds of things exist and how they may relate, so facts from
 different sources land in the same shape and queries mean the same thing everywhere. An
-ontology usually goes further than a schema: it can also define class hierarchies,
-constraints, and inference rules.
+ontology usually goes further than a schema: it can also define class hierarchies (a
+`Laptop` is a kind of `Product`), constraints, and inference rules that derive new
+facts.
 
 ## What is the difference between a knowledge graph and a graph database?
 
-A knowledge graph is data with agreed meaning. A graph database is software that stores
-and queries graph-shaped data. The two are often used together but are not the same.
+A knowledge graph is the data; a
+[graph database](/learn/graph-databases/what-is-a-graph-database) is software that can
+store and query it. It is like the difference between a city map and the app you
+view it in. The two are often used together, but they are not the same thing.
 
 | | Knowledge graph | Graph database |
 | --- | --- | --- |
 | What it is | A body of facts organized by an ontology | A storage and query engine |
 | Main concern | Meaning, consistency, and provenance of facts | Storage, indexing, transactions, and traversal |
-| Can exist without the other? | Yes, for example as RDF files or relational tables | Yes, for example holding a network topology or social graph |
+| Can exist without the other? | Yes, for example as RDF files or [relational tables](/learn/graph-databases/graph-vs-relational-database) | Yes, for example holding a network topology or social graph |
 
 A knowledge graph can be stored as a
-[property graph](/learn/graph-databases/what-is-a-property-graph) or as RDF triples. See
-[property graph vs RDF](/learn/graph-databases/property-graph-vs-rdf) for how the two
-models differ.
+[property graph](/learn/graph-databases/what-is-a-property-graph), where nodes and
+edges carry their own properties, or as RDF triples, three-part subject-predicate-object
+statements. See [property graph vs RDF](/learn/graph-databases/property-graph-vs-rdf)
+for how the two models differ.
+
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Store entities, relationships, provenance, embeddings, and text in one open-source graph database.
+  </Card>
+</div>
 
 ## How do you build a knowledge graph?
 
-You build a knowledge graph by defining an ontology, extracting entities and
-relationships from your sources, resolving duplicate entities, recording provenance, and
-loading the result into a database.
+Decide which types of things and connections matter, pull facts out of your sources,
+merge duplicates, record where each fact came from, and load the result into a
+database.
 
 <Steps>
   <Step title="Define the ontology">
@@ -83,26 +97,27 @@ loading the result into a database.
     need. Start small; a focused schema is easier to extract into and to query.
   </Step>
   <Step title="Collect sources">
-    Structured records such as account and product tables map to entities almost
-    directly. Unstructured sources such as documents, tickets, and conversations need
+    Structured records, such as account and product tables, map to entities almost
+    directly. Unstructured sources, such as documents, tickets, and conversations, need
     extraction.
   </Step>
   <Step title="Extract entities and relationships">
-    For unstructured text, the application runs an extraction pipeline: split each
-    document into chunks, ask an LLM or another extraction model to return the entities
-    and relationships it finds in a fixed format that matches the ontology, and reject
-    output that does not validate against the schema.
+    For unstructured text, the application runs an extraction pipeline. It splits each
+    document into chunks, asks an LLM or another extraction model to return the
+    entities and relationships it finds in a fixed format that matches the ontology,
+    and rejects output that does not validate against the schema.
   </Step>
   <Step title="Resolve entities">
-    Decide when two mentions refer to the same thing. One ticket says "the billing
-    page" and another says "the invoices screen"; both may mean one feature. Typical
-    techniques combine exact identifiers, normalized names, embedding similarity to find
-    candidates, and rules or review to confirm a merge.
+    Entity resolution decides when two mentions refer to the same thing. One ticket
+    says "the billing page" and another says "the invoices screen"; both may mean one
+    feature. Typical techniques combine exact identifiers, normalized names,
+    [embedding](/learn/vector-search/what-are-vector-embeddings) similarity to find
+    candidates, and rules or human review to confirm a merge.
   </Step>
   <Step title="Record provenance">
-    Link each extracted fact to the chunk and document it came from, with the extraction
-    time and a confidence value. Provenance supports citations, audits, and later
-    corrections.
+    Link each extracted fact to the chunk and document it came from, with the
+    extraction time and a confidence value. Provenance supports citations, audits, and
+    later corrections.
   </Step>
   <Step title="Load, index, and query">
     Write entities, relationships, and provenance together, and add indexes for the
@@ -112,9 +127,9 @@ loading the result into a database.
 
 ## How do you keep a knowledge graph fresh?
 
-You keep a knowledge graph fresh with a maintenance loop rather than a one-time load:
-ingest changes incrementally, supersede outdated facts, retract facts by source, and
-re-run entity resolution.
+Treat it as an ongoing maintenance loop, not a one-time load. For example, when someone
+edits a page on the company wiki, you re-extract that page rather than reloading the
+whole wiki.
 
 - **Ingest incrementally.** Track which facts came from which source, and re-extract
   only the documents that changed.
@@ -126,18 +141,28 @@ re-run entity resolution.
 - **Re-run entity resolution.** New mentions can reveal that two existing entities are
   the same, or that one entity should be split.
 
+The same patterns apply to
+[long-term memory for AI agents](/learn/ai-memory/long-term-memory-for-ai-agents),
+where an agent's facts about a user change over time.
+
 ## How do knowledge graphs help LLMs and RAG?
 
-A knowledge graph lets RAG retrieve connected, typed facts rather than only passages
-similar to the question, so it can answer multi-hop questions and cite sources.
-[Retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag) supplies an LLM
-with retrieved context before it answers, and retrieval based only on vector similarity
-struggles with questions such as "which customers reported problems with features in
-the Reports product?", where the answer is spread across entities and relationships
-rather than contained in one passage. Following explicit facts across the graph is an
-approach often called [GraphRAG](/learn/ai-memory/what-is-graphrag). LLM-extracted
-facts can be wrong, so keep confidence values and provenance, and let downstream prompts
-treat low-confidence facts accordingly.
+A knowledge graph lets an AI application retrieve connected facts, not just passages
+that sound like the question. That helps it answer questions that span several facts
+and cite its sources.
+
+[Retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag) gives an LLM
+retrieved context before it answers. Retrieval based only on
+[vector similarity](/learn/vector-search/what-is-vector-search), which finds text with
+similar meaning, struggles with a question such as "which customers reported problems
+with features in the Reports product?" The answer is spread across entities and
+relationships rather than contained in one passage.
+
+Following explicit facts across the graph to answer it is an approach often called
+[GraphRAG](/learn/ai-memory/what-is-graphrag). Vector or keyword search, or a
+[hybrid](/learn/full-text-search/hybrid-search) of both, typically finds the starting
+entities. LLM-extracted facts can be wrong, so keep confidence values and provenance,
+and let downstream prompts treat low-confidence facts accordingly.
 
 ## How does HelixDB store a knowledge graph?
 
@@ -151,8 +176,9 @@ graph:
 - **Embeddings and text on the same nodes.** Store an embedding and a text field on an
   entity or chunk node, then add a
   [vector index](/database/helix-db/query-guides/vector-indexes) and a
-  [text index](/database/helix-db/query-guides/text-indexes) for similarity and BM25
-  search. The application computes the embeddings; HelixDB stores and indexes them.
+  [text index](/database/helix-db/query-guides/text-indexes) for similarity and
+  [BM25](/learn/full-text-search/what-is-bm25) search. The application computes the
+  embeddings; HelixDB stores and indexes them.
 - **Provenance edges.** Connect entities, or facts modeled as their own nodes, to their
   source chunks and documents with edges that carry properties such as confidence or
   extraction time. For a fact stored as a relationship edge, record provenance as
@@ -163,7 +189,8 @@ graph:
   make queries that filter to current facts efficient.
 - **Scoped retrieval.** Vector and BM25 search can be
   [prefiltered](/database/helix-db/query-guides/prefiltering) to a traversal-defined
-  candidate set, such as documents a user can read.
+  candidate set, such as documents a user can read. See
+  [filtered vector search](/learn/vector-search/filtered-vector-search).
 
 All entries in a write batch commit or roll back together, so an entity, its
 relationships, and their provenance can be written as one unit when they are sent in
@@ -184,8 +211,7 @@ describe many knowledge graphs.
 
 No. RDF is one standard way to represent a knowledge graph, and it suits publishing and
 integrating data across organizations. A labeled property graph works as well and is
-common for application-facing knowledge graphs. See
-[property graph vs RDF](/learn/graph-databases/property-graph-vs-rdf).
+common for application-facing knowledge graphs.
 
 ### Can an LLM build a knowledge graph automatically?
 
@@ -195,10 +221,10 @@ extraction as one stage of a pipeline the application controls.
 
 ### How is a knowledge graph different from a vector database?
 
-A vector database retrieves items by similarity of embeddings. A knowledge graph
-represents explicit, typed facts and how they connect. Many AI applications use both:
-vectors to find relevant starting points, and the graph to follow facts from there. See
-[What is a vector database?](/learn/vector-search/what-is-a-vector-database).
+A [vector database](/learn/vector-search/what-is-a-vector-database) retrieves items by
+how similar their embeddings are. A knowledge graph represents explicit, typed facts and
+how they connect. Many AI applications use both: vectors to find relevant starting
+points, and the graph to follow facts from there.
 
 ## Related topics
 

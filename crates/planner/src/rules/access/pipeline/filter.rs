@@ -1,8 +1,7 @@
 //! Leading-filter rewrites for access-rooted pipelines.
 
-use super::super::filter::{index_access_filter, simplify_access_filter, AccessFilterRewrite};
-use super::support;
-use crate::{logical, optimizer, rules};
+use super::super::filter::access_filter_alternatives;
+use crate::{ir, logical, optimizer, rules};
 
 /// Rewrite a leading access-pipeline filter into a simpler or indexed access
 /// path while preserving the remaining pipeline suffix.
@@ -34,18 +33,20 @@ impl optimizer::OptimizerRule for AccessPipelineFilterRule {
             return optimizer::RuleResult::NotApplicable;
         };
         let filter = logical::AccessFilter::new(pipeline.access().clone(), predicate.clone());
-        match simplify_access_filter(&filter)
-            .or_else(|| index_access_filter(&filter, input.indexes, input.planner_limits))
-        {
-            AccessFilterRewrite::Rewritten(access) => {
-                support::access_pipeline_result(access, rest.to_vec())
-            }
-            AccessFilterRewrite::RewrittenPipeline(pipeline) => {
-                let mut ops = pipeline.ops().to_vec();
-                ops.extend_from_slice(rest);
-                support::access_pipeline_result(pipeline.access().clone(), ops)
-            }
-            AccessFilterRewrite::NotApplicable => optimizer::RuleResult::NotApplicable,
-        }
+        let alternatives = access_filter_alternatives(&filter, &input, rest)
+            .into_iter()
+            .map(|stream| match stream {
+                logical::AccessStream::Path(path) => logical::LogicalExpr::AccessPath(path),
+                logical::AccessStream::Pipeline(pipeline) => {
+                    logical::LogicalExpr::AccessPipeline(pipeline)
+                }
+                _ => unreachable!("filter rewrites produce access paths or pipelines"),
+            })
+            .collect();
+        ir::AtLeast::<_, 1>::try_from_vec(alternatives)
+            .map(|alternatives| {
+                optimizer::RuleResult::Applied(optimizer::RuleEffect::Logical(alternatives))
+            })
+            .unwrap_or(optimizer::RuleResult::NotApplicable)
     }
 }

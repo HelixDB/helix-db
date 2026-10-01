@@ -25,15 +25,21 @@ helix metrics <SUBCOMMAND>
 | `off` | Disable all metrics collection. |
 | `status` | Show current metrics configuration and when it was last updated. |
 
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the result as JSON on stdout. `status` prints `level`, `userId`, and `lastUpdated` (Unix seconds); the others print `level`. | Off |
+
 ## Behavior
 
 - The setting is saved in `~/.helix/metrics.toml` (or `$HELIX_HOME/metrics.toml`).
-- `full` asks for an email address and repeats the prompt until the address is valid.
+- `full` asks for an email address in a terminal and validates it before saving. Without a terminal, or with `--json`, it reads the address from stdin, one line at a time, until a valid one arrives.
 - Local instances started by the CLI receive the same telemetry level.
 
 ### `helix metrics status` output
 
-`status` prints the metrics level, your user ID (if logged in), and a relative `Last updated` time:
+`status` prints `Level` (`full`, `basic`, or `off`), `User ID` (if set), and a relative `Last updated` time:
 
 | Age | Format |
 | --- | --- |

@@ -1,32 +1,83 @@
 ---
 title: "What is BM25?"
-description: "BM25 is a ranking function that scores documents for a keyword query using term frequency, inverse document frequency, and document length."
+description: "BM25 is a scoring formula that ranks documents for a keyword search by how rare each word is, how often it appears, and how long the document is."
 sidebarTitle: "BM25"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-BM25 (also called Okapi BM25) is a ranking function that scores how relevant a
-document is to a keyword query. For each query term found in a document, it adds a
-score that rewards terms that are rare across the collection, gives diminishing credit
-for repeated occurrences, and adjusts for document length. It is the default relevance
-function in many full-text search engines.
+BM25 ("best matching," version 25) is a scoring formula that search engines use to rank
+documents by how well they match a keyword search. It works like a sensible librarian:
+a book that mentions your unusual word gets more credit than one with only common
+words, saying a word ten times is not ten times better, and a long book does not win
+just for being long. BM25 is the default ranking in many
+[full-text search](/learn/full-text-search/what-is-full-text-search) engines. It needs
+no training data or machine-learning model, and you can see exactly how much each word
+added to a score.
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Explain what BM25 scores and why many search engines default to it
-    - Describe how IDF, saturation (`k1`), and length normalization (`b`) shape a score
-    - Work through a BM25 calculation and explain why the documents rank as they do
-    - Compare BM25 with TF-IDF and recognize when it fits better than vector search
+    - Explain what BM25 scores and why many search engines use it by default
+    - Describe how rare words, repetition (`k1`), and length (`b`) shape a score
+    - Work through a BM25 calculation and explain the resulting ranking
+    - Compare BM25 with TF-IDF and tell when it fits better than vector search
   </Card>
 </div>
 
+## How does BM25 score a document?
+
+BM25 gives a document points for each search word it contains and adds them up. Each
+word's points depend on how rare it is, how often the document uses it, and how long
+the document is.
+
+### Rare words count more (inverse document frequency)
+
+Inverse document frequency (IDF) measures how much a word tells you. In a support
+ticket system, a word like "issue" appears in almost every ticket, so its IDF is near
+zero. A word like "timeout" appears in a handful of tickets, so its IDF is high. All
+else being equal, a document that matches the rare words in a query tends to rank
+above one that matches only the common ones.
+
+### Repetition has diminishing returns (the k1 parameter)
+
+Mentioning a word more often makes a document more relevant, but only up to a point.
+Under the hood, BM25's term-frequency factor rises quickly and then flattens toward
+`k1 + 1`, where `k1` is a tuning parameter. With `k1 = 1.2`, for a document of
+average length:
+
+| Occurrences of the term | 1 | 2 | 3 | 5 | 10 | Limit |
+| --- | --- | --- | --- | --- | --- | --- |
+| Term-frequency factor | 1.00 | 1.38 | 1.57 | 1.77 | 1.96 | 2.20 |
+
+A low `k1` saturates almost immediately, so the first occurrence is nearly all that
+counts. A high `k1` keeps rewarding repetition for longer. Either way, no number of
+repetitions can push a term's factor past `k1 + 1`. Put simply, saturation limits how
+much a document can gain from keyword stuffing, such as a product listing that repeats
+"waterproof" twenty times.
+
+### Long documents do not win by length (the b parameter)
+
+A long document contains more words, so it matches more terms by chance. The `b`
+parameter controls how much BM25 corrects for that. With `b = 0` length is ignored.
+With `b = 1` term frequency is fully scaled by `|D| / avgdl`, the document's length
+divided by the average length. With `k1 = 1.2` and `b = 0.75`, one occurrence of a term
+contributes a factor of about 1.26 in a document half the average length, 1.00 at
+average length, and 0.71 at twice the average length.
+
+### Common parameter values
+
+Commonly cited defaults are `k1` between about 1.2 and 2.0 and `b` around 0.75. These
+are conventions from the research literature and from many search engines, not
+universal rules. Change them only when you can measure the effect on labeled queries,
+a set of test searches whose relevant results you already know.
+
 ## What is the BM25 formula?
 
-For a query `Q` and a document `D`, a widely used form of the BM25 score is:
+The formula turns the three ideas above into one number per document. Under the hood,
+for a query `Q` and a document `D`, a widely used form of the BM25 score is:
 
 ```text
 score(D, Q) = sum over each query term q of
@@ -42,63 +93,19 @@ IDF(q) = ln( 1 + (N - n(q) + 0.5) / (n(q) + 0.5) )
   across the collection.
 - `N` is the number of documents in the collection, and `n(q)` is the number of
   documents that contain `q`.
-- `k1` and `b` are tuning parameters for saturation and length normalization.
+- `k1` and `b` are the tuning parameters for saturation and length normalization.
 
 The IDF shown adds 1 inside the logarithm, a widely used variant that keeps every
 weight positive. The classic form omits it and can assign negative weights to terms
 that appear in more than half of the documents. Variants differ in small details, but
-all share the three ideas below.
-
-## How does BM25 score a document?
-
-BM25 adds up a score for each query term the document contains. Each term's score is
-its IDF weight times a term frequency that saturates and is adjusted for document
-length. Three ideas drive the result.
-
-### Inverse document frequency: rare terms count more
-
-IDF measures how much a term tells you. A term that appears in almost every document,
-such as "issue" in a ticket system, has an IDF near zero. A term that appears in a
-handful of documents, such as "timeout," has a high IDF. All else being equal, a
-document that matches the rare terms in a query tends to rank above one that matches
-only the common ones.
-
-### Term-frequency saturation: the k1 parameter
-
-Mentioning a term more often makes a document more relevant, but only up to a point.
-The term-frequency part of the formula rises quickly and then flattens toward
-`k1 + 1`. With `k1 = 1.2`, for a document of average length:
-
-| Occurrences of the term | 1 | 2 | 3 | 5 | 10 | Limit |
-| --- | --- | --- | --- | --- | --- | --- |
-| Term-frequency factor | 1.00 | 1.38 | 1.57 | 1.77 | 1.96 | 2.20 |
-
-A low `k1` saturates almost immediately, so the first occurrence is nearly all that
-counts. A high `k1` keeps rewarding repetition for longer. Saturation limits how much
-a document can gain by repeating a keyword: no number of repetitions can push a term's
-factor past `k1 + 1`.
-
-### Length normalization: the b parameter
-
-A long document contains more words, so it matches more terms by chance. The `b`
-parameter controls how much BM25 corrects for that. With `b = 0` length is ignored.
-With `b = 1` term frequency is fully scaled by `|D| / avgdl`. With `k1 = 1.2` and
-`b = 0.75`, one occurrence of a term contributes a factor of about 1.26 in a document
-half the average length, 1.00 at average length, and 0.71 at twice the average length.
-
-### Common parameter values
-
-Commonly cited defaults are `k1` between about 1.2 and 2.0 and `b` around 0.75. These
-are conventions from the research literature and from many search engines, not
-universal rules. Change them only when you can measure the effect on a set of labeled
-queries.
+all share the same three ideas.
 
 ## How do you calculate a BM25 score?
 
-Compute each query term's IDF, compute its term-frequency factor in each document,
-multiply the two, and sum over the query terms. For example, take three short
-documents and the query "export timeout," with `k1 = 1.2`, `b = 0.75`, and no
-stemming or stop words:
+Score each query term separately, as its IDF times its term-frequency factor, then
+add the term scores up. For example, imagine a support team searching three short
+tickets for "export timeout," with `k1 = 1.2`, `b = 0.75`, and no
+[stemming or stop words](/learn/full-text-search/what-is-full-text-search):
 
 ```text
 D1: "export fails with timeout"            4 terms
@@ -129,66 +136,83 @@ with the rare term "timeout." D3 mentions "export" twice, but saturation and its
 above-average length mean it barely edges out D2. And because "export" is in every
 document, it contributes little to any score.
 
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Build BM25 text indexes over graph nodes and edges, and rank only the records a
+    traversal reaches, with open-source HelixDB.
+  </Card>
+</div>
+
 ## How is BM25 different from TF-IDF?
 
-BM25 differs from classic TF-IDF in three main ways: term frequency saturates instead
-of growing without limit, document length normalization is explicit and tunable, and
-its IDF is a smoothed, probabilistic form. It also has two tuning parameters, `k1` and
-`b`, where classic TF-IDF usually has none.
+Think of BM25 as a refined TF-IDF, the classic recipe that multiplies term frequency
+by inverse document frequency. Both reward words that appear often in a document and
+rarely across the collection. BM25 adds limits and two tuning parameters, `k1` and
+`b`, where classic TF-IDF usually has none. The other differences:
+
+- **Term frequency.** Classic TF-IDF lets it grow without limit, sometimes dampened
+  with a logarithm. BM25 saturates it toward `k1 + 1`.
+- **Document length.** TF-IDF typically handles length by normalizing document
+  vectors. BM25 makes it explicit and tunable with `b`.
+- **IDF.** TF-IDF usually uses `log(N / n)`. BM25 uses a smoothed, probabilistic form.
 
 BM25 comes from the probabilistic relevance framework rather than the vector space
-model, but it uses the same two signals as TF-IDF, term frequency and inverse document
-frequency, and is often used in its place.
-
-| | Classic TF-IDF | BM25 |
-| --- | --- | --- |
-| Term frequency | Grows without limit, sometimes dampened with a logarithm | Saturates toward `k1 + 1` |
-| Document length | Typically handled by normalizing document vectors | Explicit and tunable with `b` |
-| IDF | Usually `log(N / n)` | Smoothed, probabilistic form |
-| Tuning parameters | Usually none | `k1` and `b` |
-
-In practice BM25 is often found to produce better rankings than classic TF-IDF out of
-the box, which is one reason many engines use it as their default.
+model, but it uses the same two signals and is often used in place of TF-IDF. In
+practice BM25 is often found to produce better rankings than classic TF-IDF out of the
+box, which is one reason many engines use it as their default.
 
 ## When is BM25 a better fit than vector search?
 
-BM25 fits best when the query contains exact terms that must match, such as names, IDs,
-error codes, and rare tokens; it needs no embedding model, and each term's contribution
-to a score is visible. [Vector search](/learn/vector-search/what-is-vector-search) is
-the reverse: it matches meaning through
-[embeddings](/learn/vector-search/what-are-vector-embeddings), so it handles paraphrases
-and synonyms but can miss exact identifiers. Because the two fail in different places,
-[hybrid search](/learn/full-text-search/hybrid-search) runs both and fuses the results.
+Reach for BM25 when the exact words in a query must appear in the results: names, IDs,
+error codes, and rare tokens. Think of a support agent pasting error code "E1042," a
+shopper typing a part number, or a bank analyst looking up a transaction reference.
+BM25 needs no embedding model, and each term's contribution to a score is visible.
+
+[Vector search](/learn/vector-search/what-is-vector-search) is the reverse. It
+compares [embeddings](/learn/vector-search/what-are-vector-embeddings), lists of numbers
+that capture meaning, using a
+[distance metric](/learn/vector-search/vector-distance-metrics). That handles
+paraphrases and synonyms but can miss exact identifiers. Because the two fail in
+different places, [hybrid search](/learn/full-text-search/hybrid-search) runs both and
+fuses the results. Many [RAG](/learn/ai-memory/what-is-rag) pipelines and
+[AI agent memory](/learn/ai-memory/what-is-ai-agent-memory) systems use both for this
+reason.
 
 ## How does HelixDB use BM25?
 
 HelixDB text indexes are BM25-ranked. Each index covers a string or string-array
-property of a node or edge label and uses one of three analyzers: `standard`,
-`standard_stem_en`, or `whitespace_lowercase`. An index can optionally store term
-positions. Search results come back best match first, ordered by BM25 score and then by
-ID, so ties are broken deterministically.
+property of a node or edge label in its
+[property graph](/learn/graph-databases/what-is-a-property-graph) and uses one of three
+analyzers: `standard`, `standard_stem_en`, or `whitespace_lowercase`. An index can
+optionally store term positions. Search results come back best match first, ordered by
+BM25 score and then by ID, so ties are broken deterministically.
 
 In [prefiltered search](/database/helix-db/query-guides/prefiltering), where BM25 ranks
-only the nodes or edges a traversal reaches, the BM25 statistics come from the full
-tenant partition rather than only from the candidates. A document's score therefore
-does not depend on which records are in the candidate set. HelixDB does not fuse BM25
-and vector results itself; the application combines them. See
-[Text indexes](/database/helix-db/query-guides/text-indexes) to create an index and
-run a search.
+only the nodes or edges a
+[graph traversal](/learn/graph-databases/what-is-a-graph-database) reaches, the BM25
+statistics come from the full tenant partition rather than only from the candidates.
+A document's score therefore does not depend on which records are in the candidate
+set. Ranking only within a candidate set is the same idea as
+[filtered vector search](/learn/vector-search/filtered-vector-search), applied to
+keywords. HelixDB does not fuse BM25 and vector results itself; the application
+combines them. See [Text indexes](/database/helix-db/query-guides/text-indexes) to
+create an index and run a search.
 
 ## Frequently asked questions
 
 ### What does the 25 in BM25 mean?
 
-BM stands for "best matching." The number identifies one variant in a numbered series
-of weighting functions developed during research on the Okapi retrieval system. BM25
-is the variant that became the standard.
+BM stands for "best matching," and the full name is Okapi BM25. The number identifies
+one variant in a numbered series of weighting functions developed during research on
+the Okapi retrieval system. BM25 is the variant that became the standard.
 
 ### Are BM25 scores comparable across queries?
 
 No. A BM25 score has no fixed upper bound and depends on the query's terms and the
 collection's statistics. Use scores to order results for one query, not as an absolute
-relevance threshold across queries.
+relevance threshold across queries. This is also why
+[hybrid search](/learn/full-text-search/hybrid-search) usually combines ranks or
+normalized scores rather than raw BM25 scores.
 
 ### Does BM25 consider word order?
 

@@ -6,6 +6,8 @@ The v3 CLI manages local Helix instances and WorkOS-session-authenticated Helix 
 - Cloud discovery/resources: `workspace`, `project`, `cluster`, `database`, `service-credential`, `api`.
 - Cloud queries: `query` and `shell` execute through the backend query broker.
 - Authentication: `auth login|status|logout` stores only a rotating WorkOS session.
+- Output: results go to stdout and progress to stderr; the global `--json` flag prints the result as JSON and never prompts.
+- Cloud arguments accept an ID, slug, or name and default to the project and databases linked in `helix.toml`.
 
 The Cloud CLI accepts no API-key login, service-credential login, direct gateway path, or custom
 query authorization. Tenant creation returns a default read-write application key once for direct
@@ -20,7 +22,7 @@ The CLI defaults to its tested image version. `latest` is opt-in:
 
 ```bash
 helix start dev --image-version latest
-helix start dev --image-version v0.0.6 --persist
+helix start dev --image-version v0.0.8 --persist
 helix start dev --pull never
 ```
 
@@ -32,7 +34,7 @@ apply only to that invocation.
 ```toml
 [local.dev]
 image = "ghcr.io/helixdb/helixdb"
-tag = "v0.0.6"
+tag = "v0.0.8"
 pull = "missing"
 ```
 

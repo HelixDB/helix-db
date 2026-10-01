@@ -40,8 +40,8 @@ Use the pinned Rust toolchain with `CARGO_INCREMENTAL=0`,
 - `cargo clippy --locked --workspace --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
 - `python3 scripts/validate-cargo-target-references.py`
-- `cargo test --locked -p db --features production-coverage,migration-parity,index-lifecycle-testing --test production_internal_contracts index_driver_failure_classification_preserves_retry_boundaries -- --exact`
-- `cargo test --locked -p db --features production-coverage,migration-parity,index-lifecycle-testing --test production_migration_contracts -- --test-threads=1`
+- `cargo test --locked -p db --features production-coverage,index-lifecycle-testing --test production_internal_contracts index_driver_failure_classification_preserves_retry_boundaries -- --exact`
+- `cargo test --locked -p db --features production-coverage,index-lifecycle-testing --test production_migration_contracts -- --test-threads=1`
 - `cargo llvm-cov --locked -p db --lib --json --output-path coverage.json -- index_lifecycle::`
 - `docker build --platform linux/arm64 -t helixdb:index-failure-fixes-local .`
 - `docker-image/test.sh --platform linux/arm64 --image helixdb:index-failure-fixes-local`

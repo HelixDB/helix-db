@@ -14,31 +14,31 @@ Local and Cloud.
 
 ```bash
 helix logs [INSTANCE] [--follow]
-helix logs [CLOUD_INSTANCE] [--range [--start <RFC3339>] [--end <RFC3339>]]
+helix logs [CLOUD_INSTANCE] [--start <RFC3339>] [--end <RFC3339>]
 ```
 
 ## Arguments
 
 | Argument | Description |
 | --- | --- |
-| `INSTANCE` | Instance name from `helix.toml`. If omitted, the CLI prompts in a TTY when there are several instances; otherwise it uses `dev` or the only instance. |
+| `INSTANCE` | Instance name from `helix.toml`. If omitted, the CLI uses `dev`, then the only instance, then a picker in a terminal; otherwise it fails and lists the instances. |
 
 ## Options
 
 | Flag | Description | Default |
 | --- | --- | --- |
 | `-f`, `--follow` | Local only: keep streaming new log lines. | Off |
-| `-r`, `--range` | Cloud only: enable `--start` and `--end`. | Off |
-| `--start <TIME>` | Cloud only: start of the range, as an RFC 3339 timestamp. Requires `--range`. | One hour before `--end` |
-| `--end <TIME>` | Cloud only: end of the range, as an RFC 3339 timestamp. Requires `--range`. | Now |
+| `--start <TIME>` | Cloud only: start of the window, as an RFC 3339 timestamp. | One hour before `--end` |
+| `--end <TIME>` | Cloud only: end of the window, as an RFC 3339 timestamp. | Now |
+| `--json` | Cloud only: print the query errors as a JSON array. | Off |
 
 ## Behavior
 
-- Local logs use Docker/Podman and may follow. `--range`, `--start`, and `--end` are rejected for local instances.
+- Local logs are plain text from Docker/Podman and may follow. `--start`, `--end`, and `--json` are rejected for local instances.
 - Cloud logs use the WorkOS session and the linked database's recent query-error endpoint on the Helix Cloud API; they never contact the database gateway that applications use.
-- Each Cloud error prints as one line: timestamp, query name, and error output.
+- Cloud errors print as a table with `TIME`, `QUERY`, and `ERROR` columns. An empty window prints a message naming the instance and time range.
+- `--start` must be before `--end`. Without either, the window is the last hour.
 - Cloud follow is not supported.
-- Without explicit times, the Cloud range is the last hour.
 
 ## Examples
 
@@ -52,8 +52,8 @@ helix logs dev --follow
 # Recent query errors for a Cloud instance (last hour)
 helix logs production
 
-# Query errors in an explicit window
-helix logs production --range --start 2026-01-01T00:00:00Z --end 2026-01-01T06:00:00Z
+# Query errors in an explicit window, as JSON
+helix logs production --start 2026-01-01T00:00:00Z --end 2026-01-01T06:00:00Z --json
 ```
 
 ## Related

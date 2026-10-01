@@ -1,80 +1,96 @@
 ---
 title: "What is a vector database?"
-description: "A vector database stores embeddings with IDs and metadata and indexes them for nearest neighbor search, the retrieval step behind semantic search and RAG."
+description: "A vector database stores embeddings, lists of numbers that capture what content means, and quickly finds the ones most similar to a query."
 sidebarTitle: "Vector databases"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-A vector database is a database that stores embeddings, the numeric vectors produced by
-machine learning models, together with IDs and metadata, and indexes them so it can
-quickly return the vectors closest to a query vector. It supplies what nearest neighbor
-search needs in production: durable storage, an approximate nearest neighbor index,
-updates and deletes, and filtering. The term covers both dedicated systems built only
-for vectors and general-purpose databases that support vector indexes.
+A vector database stores [embeddings](/learn/vector-search/what-are-vector-embeddings),
+lists of numbers that capture what content means, and quickly finds the ones most
+similar to a query. Think of it as a library catalog sorted by subject, not by title:
+ask for "more like this one" and it takes you straight to the right shelf. It
+keeps those vectors searchable as data changes, with the fast index, durable storage,
+updates, deletes, and filters a real application needs. That makes it a common retrieval
+layer behind search by meaning and chatbots that
+[answer from your own documents](/learn/ai-memory/what-is-rag).
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
     - Describe what a vector database stores and what it adds beyond a vector index
-    - Decide when an application needs a vector database and where it should live
-    - Explain where vector-only storage falls short for relationships and permissions
+    - Decide when an app needs a vector database, and where the vectors should live
+    - Explain where storing only vectors falls short for relationships and permissions
     - Compare vector databases with graph databases and full-text search engines
   </Card>
 </div>
 
 ## What does a vector database store?
 
-Each record typically combines an ID, a vector, metadata, and optionally the original
-content.
+Put simply, each record typically holds a vector plus enough context to use it. For
+example, one chunk of a company wiki page might be stored as:
 
-| Part | Example | Purpose |
-| --- | --- | --- |
-| ID | `doc-4821#chunk-3` | Links the vector back to its source |
-| Vector | An array of hundreds to thousands of floats | Similarity search |
-| Metadata | Tenant, document type, created date | Filtering and display |
-| Content (optional) | The chunk's text | Returned to the application or a language model |
+- **An ID**, such as `doc-4821#chunk-3`, which links the vector back to its source.
+- **A vector**, an array of hundreds to thousands of numbers, used for similarity
+  search.
+- **Metadata**, such as the tenant (the customer or workspace that owns the data), the
+  document type, and the created date, used for filtering and display.
+- **Content (optional)**, such as the chunk's text, returned to the application or a
+  language model.
 
 The vector comes from an embedding model, typically run by the application before
-writing the record; some systems can call the model themselves.
-See [What are vector embeddings?](/learn/vector-search/what-are-vector-embeddings) for
-how those vectors are produced.
+writing the record; some systems can call the model themselves. The
+[embeddings explainer](/learn/vector-search/what-are-vector-embeddings) covers how those
+vectors are produced.
 
 ## What does a vector database do?
 
-It keeps vectors searchable as data changes: it writes and indexes vectors, answers
-top-k similarity queries, filters results, and stores data durably.
+It keeps vectors searchable while the data underneath keeps changing. Picture an online
+store adding products, editing descriptions, and retiring old items all day: each change
+has to show up in search.
 
 - **Writes.** Inserts, updates, and deletes vectors while keeping the index current.
-- **Indexing.** Builds an approximate nearest neighbor index, such as
+- **Indexing.** Builds an approximate nearest neighbor (ANN) index, such as
   [HNSW](/learn/vector-search/what-is-hnsw) or IVF, so a query does not compare against
-  every vector.
-  See [What is vector search?](/learn/vector-search/what-is-vector-search).
+  every vector. See [What is vector search?](/learn/vector-search/what-is-vector-search)
 - **Similarity queries.** Takes a query vector and a number `k` and returns the `k`
   closest records it finds (approximately, when an ANN index is used), with their
   distances or scores.
-- **Filtering.** Restricts results by metadata, such as a tenant or a date range.
-- **Durability and scale.** Persists data, recovers from failures, and serves
-  concurrent queries.
+- **Filtering.** Restricts results by metadata, such as a tenant or a date range, as
+  covered in [filtered vector search](/learn/vector-search/filtered-vector-search).
+- **Durability and scale.** Persists data, recovers from failures, and serves many
+  queries at once.
+
+The term covers both dedicated systems built only for vectors and general-purpose
+databases that support vector indexes.
 
 ## Do I need a vector database?
 
-Not always. The answer depends on collection size, how often data changes, and where
-the source data already lives.
+Not always. The answer depends on collection size, how often data changes, and where the
+source data already lives.
 
-- **Probably not** for a small, static collection. A few thousand vectors held in
-  memory can be searched exhaustively, and a prototype rarely needs more.
+- **Probably not** for a small, static collection, such as a chatbot over one product
+  manual. A few thousand vectors held in memory can be searched exhaustively, and a
+  prototype rarely needs more.
 - **Probably yes** when exhaustive search no longer meets your latency budget, when
   vectors change often, or when you need filters, durability, and concurrent access.
 - **Maybe not a separate one** if your existing database supports vector indexes. The
   next section compares the two options.
 
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Keep embeddings on the graph nodes and edges they describe, and search them in the
+    same transaction as your traversals, with open-source HelixDB.
+  </Card>
+</div>
+
 ## Should vectors live in a dedicated store or inside a general database?
 
-It depends on how much retrieval relies on data that lives elsewhere. The two options
-differ mainly in where vectors sit relative to their source records.
+It depends on how much retrieval relies on data that lives elsewhere. In other words, if
+search has to respect permissions, relationships, or live records, keeping vectors next
+to that data saves you from copying it around.
 
 | | Dedicated vector store | Vectors inside a general database |
 | --- | --- | --- |
@@ -84,21 +100,23 @@ differ mainly in where vectors sit relative to their source records.
 | Operations | One more system to run and secure | One system |
 | Typical fit | Search isolated from other application data | Retrieval that depends on relationships, permissions, or transactional data |
 
-A separate store needs a pipeline that detects each change in the source data and
-copies the new vector or updated metadata into the store. Until the pipeline catches
-up, search can match stale content, return chunks of deleted documents, or honor
-revoked permissions. See
-[this comparison](/learn/database-architecture/one-database-for-graph-vector-and-text)
+A separate store needs a pipeline that detects each change in the source data and copies
+the new vector or updated metadata into the store. Until the pipeline catches up, search
+can match stale content, return chunks of deleted documents, or honor revoked
+permissions. For example, someone removed from a project could keep seeing its documents
+in search results until the next sync. See
+[Do you need separate graph, vector, and text databases?](/learn/database-architecture/one-database-for-graph-vector-and-text)
 for these costs in more detail.
 
 ## Where does vector-only storage fall short?
 
-A vector captures what a piece of content is about. It does not capture:
+A vector captures what a piece of content is about, not how it connects to everything
+else. It does not capture:
 
-- **Relationships.** Which chunk came from which document, which ticket belongs to
-  which customer, which document cites which.
-- **Ownership and permissions.** Who may see a record, often derived from team or
-  group membership.
+- **Relationships.** Which chunk came from which document, which ticket belongs to which
+  customer, which document cites which.
+- **Ownership and permissions.** Who may see a record, often derived from team or group
+  membership.
 - **Recency and lifecycle.** Which version is current, and what was superseded or
   deleted.
 - **Provenance.** Where a fact came from and which source to cite.
@@ -106,13 +124,18 @@ A vector captures what a piece of content is about. It does not capture:
 Vector stores usually approximate these by copying fields into each vector's metadata.
 That works for flat, stable attributes such as a tenant ID or a document type. It works
 poorly for facts derived from relationships that change, such as group membership,
-sharing, or version history: one change can require rewriting metadata on many
-vectors.
+sharing, or version history: one change can require rewriting metadata on many vectors.
+For example, when someone joins a team, the vector for every document that team can see
+may need its access list updated. A
+[property graph](/learn/graph-databases/what-is-a-property-graph) models connections
+like these directly, as nodes and edges.
 
 ## How does a vector database differ from a graph database or a search engine?
 
-The three answer different questions, and many systems now combine two or more of
-them.
+They answer different questions. A vector database finds what is similar, a
+[graph database](/learn/graph-databases/what-is-a-graph-database) finds what is
+connected, and a [full-text search](/learn/full-text-search/what-is-full-text-search)
+engine finds what contains your words. Many systems now combine two or more of them.
 
 | | Vector database | Graph database | Full-text search engine |
 | --- | --- | --- | --- |
@@ -121,19 +144,21 @@ them.
 | How results are selected | Ranked by distance between vectors | Matched by traversal or pattern; typically unranked or ordered by properties | Ranked by term statistics such as BM25 |
 | Weak at | Exact terms, relationships | Fuzzy meaning, unless it supports vectors | Paraphrase and synonyms |
 
-See [What is a graph database?](/learn/graph-databases/what-is-a-graph-database) and
-[What is full-text search?](/learn/full-text-search/what-is-full-text-search) for the
-other two.
-
 ## How are vector databases used in RAG?
 
 In [retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag), a retriever
 finds passages to include in a language model's prompt, and vector search over a vector
-database is the usual retriever. Anything retrieved can appear in the answer, so the
-gaps described above, especially permissions, freshness, and provenance, matter more in
-RAG than in a search box. A production retriever also typically needs:
+database is the usual retriever. For example, a support chatbot embeds a customer's
+question, retrieves the closest help-center passages, and hands them to the model to
+write an answer.
+
+Anything retrieved can appear in the answer, so the gaps described above, especially
+permissions, freshness, and provenance, matter more in RAG than in a search box. The
+same goes for [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory), where an
+agent retrieves its own past notes. A production retriever also typically needs:
 
 - **Exact term matching** for names and IDs, often through
+  [BM25](/learn/full-text-search/what-is-bm25) keyword ranking combined with vectors in
   [hybrid search](/learn/full-text-search/hybrid-search).
 - **Related context**, such as expanding a chunk to its document, author, or linked
   entities, as in [GraphRAG](/learn/ai-memory/what-is-graphrag).
@@ -144,15 +169,15 @@ HelixDB is an open-source graph database with native vector search and BM25 full
 search. Vectors are stored as properties in the graph rather than in a separate store.
 
 - An embedding is a property on a node or an edge, next to that entity's other
-  properties and relationships. The application computes embeddings; HelixDB stores
-  and indexes them.
-- A vector index covers one label and one top-level property, with a fixed dimension
-  and a cosine, Euclidean, or Manhattan
-  [distance metric](/learn/vector-search/vector-distance-metrics). Vector indexes
-  can be partitioned by tenant.
-- Each request is one ACID transaction. A write batch that creates a document, its
-  embedding, and its edges commits or rolls back as a unit, and vector search runs in
-  the same transaction as graph traversals.
+  properties and relationships. The application computes embeddings; HelixDB stores and
+  indexes them.
+- A vector index covers one label and one top-level property, with a fixed dimension and
+  a cosine, Euclidean, or Manhattan
+  [distance metric](/learn/vector-search/vector-distance-metrics). Vector indexes can be
+  partitioned by tenant.
+- Each request is one ACID transaction, an all-or-nothing unit of work. A write batch
+  that creates a document, its embedding, and its edges commits or rolls back as a unit,
+  and vector search runs in the same transaction as graph traversals.
 - Relationships such as ownership and provenance can be modeled as edges, so a vector
   search can be restricted to an exact candidate set defined by a traversal.
 
@@ -173,22 +198,22 @@ filtering, durability, and a query interface.
 Per-record permissions usually come from filters, though many systems can also isolate
 data in separate collections or tenant partitions. Filters typically check metadata
 copied onto each vector, such as a tenant or group ID, so that copy has to change
-whenever access changes. The filter must also apply before or during ranking;
-filtering after ranking can return fewer than `k` results. See
+whenever access changes. The filter must also apply before or during ranking; filtering
+after ranking can return fewer than `k` results. See
 [filtered vector search](/learn/vector-search/filtered-vector-search).
 
 ### Does a vector database store the original text?
 
-It can, but it does not have to. Storing the chunk text with the vector lets results
-go straight to the application or a language model. Storing only an ID keeps a single
-copy of the text in the source system, at the cost of an extra lookup per result.
+It can, but it does not have to. Storing the chunk text with the vector lets results go
+straight to the application or a language model. Storing only an ID keeps a single copy
+of the text in the source system, at the cost of an extra lookup per result.
 
 ### What happens when the embedding model changes?
 
 Vectors from different models, or different versions of one model, are not comparable.
 Every stored vector has to be recomputed with the new model, the index rebuilt, and
 queries embedded with the same model. See
-[What are vector embeddings?](/learn/vector-search/what-are-vector-embeddings).
+[What are vector embeddings?](/learn/vector-search/what-are-vector-embeddings)
 
 ## Related topics
 

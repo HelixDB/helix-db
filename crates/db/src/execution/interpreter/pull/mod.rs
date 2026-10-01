@@ -115,8 +115,8 @@ enum Node<'a> {
     IndexMembership {
         plan: &'a exec::ExecNodeIndexMembershipPlan,
         input: Box<Cursor<'a>>,
-        /// Resolved after one record batch of node rows, so short pulls and
-        /// node-free streams never read the set.
+        /// Resolved on the first node row the cursor decides; edge and
+        /// element-free rows never resolve it.
         membership: stream::MembershipCursor,
     },
     Full {

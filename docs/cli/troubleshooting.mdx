@@ -19,8 +19,16 @@ cannot be used to log the CLI in.
 
 ## Ambiguous Cloud target
 
-Pass `--workspace`, `--project`, `cluster:<id>`, or `tenant:<id>`. Alternatively use
-`helix project link` and `helix add cloud` to persist stable project/database linkage in `helix.toml`.
+Without a terminal, or with `--json`, the CLI cannot prompt, so it fails and lists the candidates.
+Pass one by ID, slug, or name, for example `--workspace <workspace>`, `--project <project>`, or a
+database as `tenant:<id>`. If a name matches several resources, use the ID or slug instead.
+Alternatively run `helix project link` and `helix add cloud` to persist stable project/database
+linkage in `helix.toml`.
+
+## Confirmation required
+
+Destructive Cloud commands fail with `this action needs confirmation` when they cannot prompt. Re-run
+with `--yes` after checking the target.
 
 ## Query permission denied
 

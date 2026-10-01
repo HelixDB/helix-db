@@ -4,7 +4,7 @@
 //! through stable contract functions while the analysis internals live in
 //! focused modules:
 //!
-//! - `labels`: label-scope proofs.
+//! - `labels`: label-scope proofs and finite label domains.
 //! - `prune`: static branch pruning.
 //! - `scalar`: scalar tautology/contradiction and finite literal-set proofs.
 //! - `index_atoms`: equality and range atoms suitable for secondary indexes.
@@ -20,7 +20,10 @@ mod tests;
 pub(crate) use self::index_atoms::{
     equality_atom, range_atom, EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,
 };
-pub(crate) use self::labels::{label_equality_atom, label_scope, FeasibleLabelScope, LabelScope};
+pub(crate) use self::labels::{
+    conjunctive_label_domain, domain_contains, domain_labels, label_equality_atom, label_scope,
+    FeasibleLabelScope, FiniteLabelDomain, LabelScope,
+};
 pub(crate) use self::prune::{prune_statically_impossible_branches, PrunedPredicate};
 pub(crate) use self::scalar::{
     literal_in_values, predicate_is_statically_tautological,

@@ -6931,37 +6931,42 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
             false,
         ),
     ] {
-        // Production planning has no statistics, and an unscoped predicate
-        // cannot prove which label its stream reaches, so it keeps the
-        // per-row filter. Scoped to `Attribute`, the same predicate plans
-        // membership whenever an index answers one of its conjuncts.
+        // An unscoped predicate plans membership, evaluating rows of other
+        // labels, whenever an index answers one of its conjuncts. Scoped to
+        // `Attribute` it always plans membership and rejects other labels:
+        // a predicate no index answers reads the `Attribute` label bitmap
+        // and evaluates only that label's nodes.
         // A nested conjunction would hide its conjuncts from the index split.
         let conjuncts = if let Predicate::And { predicates } = &unscoped {
             predicates.clone()
         } else {
             vec![unscoped.clone()]
         };
-        let scoped = Predicate::and(
-            core::iter::once(Predicate::eq("$label", "Attribute"))
-                .chain(conjuncts)
-                .collect(),
-        );
+        let scoped = |label: Predicate| {
+            Predicate::and(core::iter::once(label).chain(conjuncts.clone()).collect())
+        };
+        // The per-row oracle states the label test as a negated inequality,
+        // which is not a finite `$label` domain, so without the catalog it
+        // plans a true per-row filter instead of a `$label` membership.
+        let scoped_per_row = scoped(Predicate::not(Predicate::neq("$label", "Attribute")));
+        let scoped = scoped(Predicate::eq("$label", "Attribute"));
         let attributes = expected
             .iter()
             .copied()
             .filter(|uid| uid.starts_with('a'))
             .collect::<Vec<_>>();
-        for (predicate, expected, planned) in
-            [(unscoped, expected, false), (scoped, attributes, indexed)]
-        {
-            let filtered = |group: &str| {
+        for (predicate, oracle, expected, planned) in [
+            (unscoped.clone(), unscoped, expected, indexed),
+            (scoped, scoped_per_row, attributes, true),
+        ] {
+            let filtered = |group: &str, predicate: &Predicate| {
                 traversal::g()
                     .n_with_label_where("Group", Predicate::eq("uid", group))
                     .in_(Some("IN_GROUP"))
                     .out(Some("HAS"))
                     .where_(predicate.clone())
             };
-            let wide = || {
+            let wide = |predicate: &Predicate| {
                 traversal::g()
                     .n_with_label_where("Group", Predicate::eq("uid", "wide"))
                     .out(Some("HAS"))
@@ -6969,27 +6974,40 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
                     .out(Some("HAS"))
                     .where_(predicate.clone())
             };
-            for (shape, checked) in [
-                (filtered("g").values(vec!["uid"]), true),
-                (filtered("g").limit(2_usize).values(vec!["uid"]), false),
-                (filtered("g").count(), false),
-                (filtered("empty").values(vec!["uid"]), false),
-                (filtered("empty").limit(2_usize).values(vec!["uid"]), false),
-                (wide().values(vec!["uid"]), false),
-                (wide().count(), false),
-            ] {
+            let shapes = |predicate: &Predicate| {
+                [
+                    filtered("g", predicate).values(vec!["uid"]),
+                    filtered("g", predicate).limit(2_usize).values(vec!["uid"]),
+                    filtered("g", predicate).count(),
+                    filtered("empty", predicate).values(vec!["uid"]),
+                    filtered("empty", predicate)
+                        .limit(2_usize)
+                        .values(vec!["uid"]),
+                    wide(predicate).values(vec!["uid"]),
+                    wide(predicate).count(),
+                ]
+            };
+            for (index, (shape, oracle_shape)) in shapes(&predicate)
+                .into_iter()
+                .zip(shapes(&oracle))
+                .enumerate()
+            {
+                let checked = index == 0;
                 let read = batch::read_batch()
                     .var_as("result", shape)
+                    .returning(["result"]);
+                let oracle_read = batch::read_batch()
+                    .var_as("result", oracle_shape)
                     .returning(["result"]);
                 let membership =
                     planning::plan_read_batch(&read, &with_catalog).unwrap_or_else(|error| {
                         panic!("{predicate:?} plans with the catalog: {error}")
                     });
-                let per_row =
-                    planning::plan_read_batch(&read, &without_catalog).unwrap_or_else(|error| {
-                        panic!("{predicate:?} plans without the catalog: {error}")
+                let per_row = planning::plan_read_batch(&oracle_read, &without_catalog)
+                    .unwrap_or_else(|error| {
+                        panic!("{oracle:?} plans without the catalog: {error}")
                     });
-                assert!(!per_row.steps().iter().any(is_membership));
+                assert!(!per_row.steps().iter().any(is_membership), "{oracle:?}");
                 let membership_rows = db
                     .execute(&membership, params.clone())
                     .await
@@ -7193,6 +7211,7 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
                     ir::NodeAccessSourcePlan::new(set).expect("membership set is a node source"),
                     ir::PredicatePlan::new(predicate.clone())
                         .expect("membership predicate validates"),
+                    None,
                 )
                 .expect("membership plan validates"),
             )),
@@ -7242,25 +7261,38 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
     else {
         unreachable!("the membership helper builds membership");
     };
+    let exec::ExecNodeMembershipSet::Index {
+        set: kind_a_set,
+        label: kind_a_label,
+        outside_label: kind_a_outside,
+    } = &kind_a.set
+    else {
+        unreachable!("an equality membership has an index set");
+    };
     let union = exec::ExecOp::IndexMembership {
         plan: Box::new(exec::ExecNodeIndexMembershipPlan {
-            set: exec::ExecNodeSecondarySetPlan::Union {
-                driver: Box::new(kind_a.set.clone()),
-                rest: ir::AtLeast::<_, 1>::from_one(exec::ExecNodeSecondarySetPlan::Range(
-                    exec::ExecNodeSecondaryRangePlan {
-                        index: with_catalog.indexes.node_range[&rank_key].clone(),
-                        key: rank_key,
-                        range: ir::IndexRange::Lower {
-                            lower: ir::IndexBound::Inclusive(
-                                ir::RangeIndexValue::literal(9_i64.into())
-                                    .expect("range literal validates"),
-                            ),
+            set: exec::ExecNodeMembershipSet::Index {
+                set: exec::ExecNodeSecondarySetPlan::Union {
+                    driver: Box::new(kind_a_set.clone()),
+                    rest: ir::AtLeast::<_, 1>::from_one(exec::ExecNodeSecondarySetPlan::Range(
+                        exec::ExecNodeSecondaryRangePlan {
+                            index: with_catalog.indexes.node_range[&rank_key].clone(),
+                            key: rank_key,
+                            range: ir::IndexRange::Lower {
+                                lower: ir::IndexBound::Inclusive(
+                                    ir::RangeIndexValue::literal(9_i64.into())
+                                        .expect("range literal validates"),
+                                ),
+                            },
+                            iteration: ir::RangeScanIteration::Forward,
                         },
-                        iteration: ir::RangeScanIteration::Forward,
-                    },
-                )),
+                    )),
+                },
+                label: kind_a_label.clone(),
+                outside_label: *kind_a_outside,
             },
-            ..*kind_a
+            predicate: kind_a.predicate.clone(),
+            residual: None,
         }),
     };
     // Validated plans never carry an authoritative-scan set, but the
@@ -7269,12 +7301,15 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
     let null_kind = Predicate::eq("kind", PropertyValue::Null);
     let authoritative = exec::ExecOp::IndexMembership {
         plan: Box::new(exec::ExecNodeIndexMembershipPlan {
-            set: exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
-                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key: kind_key },
-            ),
-            label: ir::NonEmptyString::new("Attribute").expect("label is non-empty"),
+            set: exec::ExecNodeMembershipSet::Index {
+                set: exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key: kind_key },
+                ),
+                label: ir::NonEmptyString::new("Attribute").expect("label is non-empty"),
+                outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+            },
             predicate: ir::PredicatePlan::new(null_kind.clone()).expect("null predicate validates"),
-            outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+            residual: None,
         }),
     };
     let kind_b = Predicate::eq("kind", "B");
@@ -7291,9 +7326,9 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
         )),
         &kind_b_and_uid_a1,
     );
-    // Membership resolves its set only for more node rows than one 256-row
-    // record batch, so the hand-built node rows repeat the six traversal rows
-    // 50 times. A window of 200 still pulls every node row for each shape.
+    // The hand-built node rows repeat the six traversal rows 50 times, so
+    // every shape decides rows across several record batches. A window of
+    // 200 still pulls every node row for each shape.
     let with_nodes = |nodes: &PropertyValue, repeats: usize| {
         let PropertyValue::I64Array(nodes) = nodes else {
             panic!("element reads return an ID array");
@@ -7344,14 +7379,6 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
                 &edge_rows,
                 1,
             ),
-            // Six node rows stay within one record batch and never resolve
-            // the corrupt identity.
-            (
-                membership(equality(corrupt.clone(), "kind", "B"), &kind_b),
-                kind_b.clone(),
-                &narrow_rows,
-                4,
-            ),
             (
                 union.clone(),
                 kind_a_or_rank_9.clone(),
@@ -7389,22 +7416,24 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
                 "{predicate:?}, window {window}"
             );
         }
-        // More node rows than one record batch force the corrupt identity to
-        // resolve, which fails closed.
-        let error = db
-            .execute(
-                &mixed(
-                    membership(equality(corrupt.clone(), "kind", "B"), &kind_b),
-                    window,
-                ),
-                mixed_rows.clone(),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, db::error::HelixDbError::IndexCatalogCorruption(_)),
-            "{error:?}"
-        );
+        // Any node row resolves the set, so the corrupt identity fails
+        // closed however few node rows the stream has.
+        for rows in [&narrow_rows, &mixed_rows] {
+            let error = db
+                .execute(
+                    &mixed(
+                        membership(equality(corrupt.clone(), "kind", "B"), &kind_b),
+                        window,
+                    ),
+                    rows.clone(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, db::error::HelixDbError::IndexCatalogCorruption(_)),
+                "{error:?}"
+            );
+        }
     }
 
     // Membership in a write request flushes the request's pending secondary
@@ -7458,8 +7487,8 @@ async fn public_query_boundary_answers_post_expansion_filters_with_index_members
     written.sort();
     assert_eq!(written, ["a5"]);
 
-    // Past one record batch of node rows the membership resolves its set,
-    // which must already hold the request's pending index move and new node.
+    // A wide stream of several hundred node rows resolves the same set, which
+    // must already hold the request's pending index move and new node.
     let wide_write = batch::write_batch()
         .var_as(
             "hub",

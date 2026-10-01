@@ -10,6 +10,35 @@ pageType: "Reference"
 <Update
   label="September 2026"
   rss={{
+    title: "Docker v0.0.8 and CLI 3.4.1: indexed filters after traversals",
+    description: "Filters after an expansion always use their indexes, and multi-index filters read them concurrently"
+  }}
+>
+- **Filters after a traversal always use indexes.** A `.where(...)` on indexed properties after `.out()`, `.in()` or another expansion is answered from the index, including in counts, limits, `exists` checks and branch or union bodies, instead of reading records one by one. A filter that combines several indexes with AND or OR reads them concurrently, and label-only filters use label bitmaps. On 312k nodes, an indexed count after an expansion went from 41 ms to 33 ms (13 ms to 3 ms on 31k nodes), and the first cold query from about 280 ms to 33 ms.
+- **Known limitation** — inside `ForEach` bodies (`forEachParam` / `for_each_param`), and after a write in the same request, index sets are re-read once per iteration or write. An improvement is in progress.
+- **Upgrading** — the stored data format is unchanged. Databases written by v0.0.7 open directly with v0.0.8.
+- **CLI 3.4.1** defaults to image v0.0.8.
+</Update>
+
+<Update
+  label="September 2026"
+  rss={{
+    title: "Docker v0.0.7 and CLI 3.4.0: fast traversal-scoped search and a local disk cache",
+    description: "Scoped vector search in tens of milliseconds, an opt-in disk cache, and SeaweedFS for local disk mode"
+  }}
+>
+- **Traversal-scoped search** is much faster. A `.where(...)` after a traversal is answered from equality-index bitmaps instead of reading every record. Scopes of up to 8,192 candidates (at 768 dimensions) are scored exactly, and larger scopes use a bounded graph walk. On 312k 768-d nodes in S3 with a warm disk cache, scoped vector queries that took 2–6 s, and a combined filter and scope that did not finish in 30 s, now return in about 60–110 ms. See [prefiltering](/database/helix-db/query-guides/prefiltering).
+- **[Local disk cache](/database/helix-db/start-here/local-development/local-server#add-a-local-disk-cache)** — set `HELIX_DISK_CACHE_DIR` to keep recently read data on local disk, ideally NVMe, across restarts.
+- **Planner** — a conjunction of four or more indexed equalities no longer falls back to a full label scan.
+- **Vector index builds** keep their planning cache across backfill steps, so large backfills run several times faster.
+- **Upgrading** — the stored data format is unchanged. Databases written by v0.0.6 open directly with v0.0.7.
+- **CLI 3.4.0** defaults to image v0.0.7. Cloud commands resolve workspaces, projects and databases without IDs, and a global `--json` flag gives machine-readable output. `helix --quiet query` now prints the result.
+- **Local `--disk` mode now uses SeaweedFS**, because MinIO withdrew its community images. Existing MinIO disk data is not moved automatically; see [Migrate MinIO disk data](/cli/workflows/local#migrate-minio-disk-data).
+</Update>
+
+<Update
+  label="September 2026"
+  rss={{
     title: "TypeScript SDK 3.1.0: structured transaction errors",
     description: "Stable error codes and HTTP status metadata in the npm package"
   }}

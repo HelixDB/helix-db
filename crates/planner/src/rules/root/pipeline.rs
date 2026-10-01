@@ -29,6 +29,11 @@ impl optimizer::OptimizerRule for RootPipelineImplementationRule {
         let logical::LogicalExpr::RootPipeline(pipeline) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
+            .is_some()
+        {
+            return optimizer::RuleResult::NotApplicable;
+        }
         let (pipeline, delivered, cost) =
             root_pipeline_physical_contract(pipeline, input.storage, input.stats);
         physical_result(physical::PhysicalAlternative::new(

@@ -861,7 +861,7 @@ pub(crate) async fn observe_operation_pointer(
         return Ok(OperationPointerObservation::StalePointerRemoved);
     };
     let operation = decode_operation_record(&operation_value)?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     crate::migrations::observe_legacy_text_migration_operation(&operation)?;
     let index_key = scoped_index_key_for_identity(pointer.scope, operation.identity());
     let Some(index_value) = transaction.get(index_key).await? else {
@@ -1511,7 +1511,6 @@ pub(crate) async fn read_operation(
 #[cfg(any(
     test,
     feature = "production-coverage",
-    feature = "migration-parity",
     feature = "index-lifecycle-testing"
 ))]
 pub(crate) async fn retry_operation(
@@ -1562,7 +1561,6 @@ pub(crate) async fn retry_operation_with_control(
 #[cfg(any(
     test,
     feature = "production-coverage",
-    feature = "migration-parity",
     feature = "index-lifecycle-testing"
 ))]
 pub(crate) async fn abort_operation(

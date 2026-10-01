@@ -57,10 +57,11 @@ cluster-mode gateway URLs require the API key but reject both database and
 tenant selection headers. Use the endpoint mode shown in the dashboard; do not
 copy headers between the two modes.
 
-The current public SDK request builders set bearer authentication and execution
-headers but do not expose the GA database-selection header. Use them with a
-database-specific cluster gateway URL, or use direct HTTP for a GA shared
-gateway.
+The TypeScript SDK (`@helix-db/helix-db` 3.2.0 and later) sends
+`X-Helix-Database-Id` after `client.withDatabaseId("<database-id>")`. The
+published Python, Rust, and Go SDKs do not expose the GA database-selection
+header; use them with a database-specific cluster gateway URL, or use direct
+HTTP for a GA shared gateway.
 
 Create or rotate the cluster key in the Helix Cloud dashboard. Do not put keys
 in source control, agent instructions, `llms.txt`, or catalog manifests.

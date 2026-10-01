@@ -13,9 +13,11 @@ mod sources;
 mod window;
 
 pub(in crate::rules) use self::filter::{
-    index_access_filter, label_domain_has_candidate, simplify_access_filter, AccessFilterRewrite,
+    access_filter_alternatives, index_access_filter, label_domain_has_candidate,
+    AccessFilterRewrite,
 };
 pub(crate) use self::filter::{missing_index_candidates, CandidateIndexKind};
+pub(in crate::rules) use self::pipeline::membership_rewrite;
 pub(in crate::rules) use self::sets::{
     access_path_has_contradiction_candidate as access_path_has_contradiction_proof_candidate,
     access_path_has_equality_range_intersection_candidate as access_path_has_equality_range_intersection_proof_candidate,

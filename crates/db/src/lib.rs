@@ -18,7 +18,7 @@ pub mod index_lifecycle;
 #[cfg(feature = "index-lifecycle-testing")]
 pub mod index_lifecycle_testing;
 mod merge_operator;
-#[cfg(feature = "migration-parity")]
+#[cfg(feature = "production-coverage")]
 pub mod migration_parity;
 pub mod migrations;
 pub mod query_service;
@@ -811,6 +811,15 @@ struct HelixDBInner {
     /// tells tests that a request really read a set.
     #[cfg(test)]
     resolved_index_memberships: std::sync::atomic::AtomicUsize,
+    /// Secondary-set children that any concurrent set read has created and
+    /// not yet finished. A child counts from the moment the bounded stream
+    /// creates its read, before the read is first polled.
+    #[cfg(test)]
+    index_child_reads_in_flight: std::sync::atomic::AtomicUsize,
+    /// The highest `index_child_reads_in_flight` seen. Tests reset it with
+    /// `store(0)` before the read they measure.
+    #[cfg(test)]
+    peak_index_child_reads: std::sync::atomic::AtomicUsize,
 }
 
 /// Non-forgeable evidence that planning observed one exact runtime catalog.
@@ -942,7 +951,7 @@ impl HelixDB {
     }
 
     /// Opens one parity-harness process over a caller-provided store.
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     pub async fn open_with_object_store_for_migration_parity(
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
@@ -1605,6 +1614,10 @@ impl HelixDB {
                 close_state: Mutex::new(CloseState::Open),
                 #[cfg(test)]
                 resolved_index_memberships: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                index_child_reads_in_flight: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                peak_index_child_reads: std::sync::atomic::AtomicUsize::new(0),
                 config,
             }),
         }
@@ -2948,7 +2961,7 @@ impl HelixDB {
             .ok_or(HelixDbError::DatabaseClosed)
     }
 
-    #[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(any(test, feature = "production-coverage"))]
     /// Advances at most one immediately eligible background migration step.
     ///
     /// This writer-only surface is available only when the migration worker is
@@ -4283,7 +4296,7 @@ mod tests {
         writer.close().await.expect("winning writer closes");
     }
 
-    #[cfg(feature = "migration-parity")]
+    #[cfg(feature = "production-coverage")]
     #[tokio::test]
     async fn old_storage_reader_stays_available_until_managed_writer_migrates() {
         let token =

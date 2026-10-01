@@ -264,6 +264,9 @@ for (const slug of navigable) {
     if (!body.includes('<div className="learn-objectives">')) {
       errors.push(`${slug}: Learn page is missing the learning-objectives block`);
     }
+    if (!body.includes('<div className="learn-cta">')) {
+      errors.push(`${slug}: Learn page is missing the call-to-action block`);
+    }
     for (const section of ["Frequently asked questions", "Related topics"]) {
       if (!body.includes(`\n## ${section}\n`)) {
         errors.push(`${slug}: Learn page is missing ## ${section}`);

@@ -1,79 +1,83 @@
 ---
 title: "What is the difference between a property graph and RDF?"
-description: "A property graph stores labeled nodes and edges with properties; RDF stores subject-predicate-object triples named by global IRIs."
+description: "A property graph stores nodes and edges that carry their own properties; RDF stores every fact as a three-part triple named by global IDs."
 sidebarTitle: "Property graph vs RDF"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-A labeled property graph stores data as nodes and directed edges that carry labels (in
-many systems a node can have several, while an edge typically has one) and key-value
-properties, while RDF (Resource Description Framework) stores every fact as a
-subject-predicate-object triple and names resources with globally unique IRIs. A key
-practical difference is data about a relationship: a property graph puts it on the edge,
-while RDF needs an intermediate resource or a statement-level mechanism such as
-reification or RDF-star. Property graphs typically fit application workloads built on
-traversal, and RDF typically fits linked data, shared vocabularies, and merging data from
-many sources.
+A [property graph](/learn/graph-databases/what-is-a-property-graph) stores things and
+connections that carry their own details, while RDF (Resource Description Framework)
+stores every fact as a three-part statement. Think of a property graph as a whiteboard
+of boxes and arrows with notes pinned to both, and RDF as a long list of short
+sentences, such as "customer A bought lamp A," that anyone can merge with their own
+list. A key practical difference is where details about a relationship go: a
+property graph puts them on the edge, while RDF needs extra statements or an extension
+such as RDF-star. Property graphs typically fit applications built on traversal, and
+RDF typically fits linked data, shared vocabularies, and merging data from many
+sources.
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Describe the RDF building blocks: triples, IRIs, literals, and `rdf:type`
-    - Compare property graphs and RDF on identity, typing, schema, and query languages
-    - Explain how each model stores data about a relationship, including RDF-star
-    - Choose a model for a workload and map data from one model to the other
+    - Describe RDF's building blocks: triples, IRIs, literals, and `rdf:type`
+    - Compare property graphs and RDF on identity, types, schema, and query languages
+    - Explain how each model stores details about a relationship, including RDF-star
+    - Choose a model for a workload and convert data from one model to the other
   </Card>
 </div>
 
 ## What are the building blocks of RDF?
 
 RDF has one building block, the triple: a statement with a subject, a predicate, and an
-object.
+object, much like a simple sentence with a subject, a verb, and an object.
 
 - **Subject:** the resource the statement is about, an IRI or a blank node.
 - **Predicate:** the relationship or attribute, always an IRI.
 - **Object:** the value, which is an IRI, a blank node, or a literal.
 
 An IRI (Internationalized Resource Identifier) is a web-style global identifier such as
-`https://example.com/customerA`, usually abbreviated with a prefix as `ex:customerA`. A
+`https://example.com/customerA`, usually shortened with a prefix to `ex:customerA`. A
 blank node is a resource with no global name, local to the data that contains it. A
-literal is a value with a datatype, such as `xsd:integer` or `xsd:dateTime`, and a string
-literal can also carry a language tag, such as `"lamp"@en`.
+literal is a plain value with a datatype, such as `xsd:integer` or `xsd:dateTime`, and a
+string literal can also carry a language tag, such as `"lamp"@en`.
 
-Types are ordinary triples too: `rdf:type`, written `a` in Turtle, links a resource to a
-class, and one resource can have several types. A set of triples forms a graph: subjects
-and objects are the nodes, and predicates are the edges. Because an RDF graph is a set,
-each distinct triple appears once.
+Types are ordinary triples too: `rdf:type`, written `a` in Turtle (a common text format
+for RDF), links a resource to a class, and one resource can have several types. A set of
+triples forms a graph: subjects and objects are the nodes, and predicates are the edges.
+Because an RDF graph is a set, each distinct triple appears once.
 
 ## How do property graphs and RDF compare?
 
-Both models are directed graphs, but they differ in identity, typing, attributes, schema,
-and query language.
+Both models are directed graphs, and both can hold a
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph). They differ in how
+they identify things, attach types and attributes, define a schema, and run queries.
 
-| | Labeled property graph | RDF |
+| | [Labeled property graph](/learn/graph-databases/what-is-a-property-graph) | RDF |
 | --- | --- | --- |
 | Basic unit | Nodes and edges, each with properties | Triples: subject, predicate, object |
 | Identity | IDs typically assigned by the database | Global IRIs; blank nodes for local resources |
-| Types | Labels on nodes and edges | `rdf:type` triples, several per resource |
+| Types | Labels on nodes and edges (in many systems a node can have several; an edge typically has one) | `rdf:type` triples, several per resource |
 | Attributes | Key-value properties on nodes and edges | Triples whose object is a literal |
 | Multiple values | An array property | Several triples with the same subject and predicate |
 | Schema | Often optional or system-specific constraints | RDFS and OWL for inference; SHACL for validation |
 | Query language | GQL (ISO/IEC 39075:2024), openCypher, Gremlin, SQL/PGQ | SPARQL (SPARQL 1.1 is a W3C Recommendation) |
 
-The schema row hides a difference in meaning. RDFS and OWL follow an open-world
-assumption: a missing statement is unknown rather than false. Declaring that the domain
-of `ex:email` is `ex:Customer` makes a reasoner infer that anything with an email is a
-customer; it does not reject data. SHACL adds closed-world validation, closer to how
-property graph constraints typically reject writes.
+The schema row hides a difference in meaning. RDFS and OWL, the W3C schema and ontology
+languages, follow an open-world assumption: a missing statement is unknown rather than
+false. For example, declaring that the domain of `ex:email` is `ex:Customer` makes a
+reasoner, software that derives new facts from rules, infer that anything with an email
+is a customer. It does not reject data. SHACL adds closed-world validation, closer to
+how property graph constraints typically reject writes.
 
 ## How does the same fact look in each model?
 
-A property graph stores a purchase with its own data as one edge with properties; RDF
-turns the purchase into its own resource with several triples. For example, a customer
-bought a lamp through the web store with a gift note. As a property graph:
+A property graph stores a purchase and its details as one edge with properties. RDF
+turns the purchase into its own resource described by several triples. For example, an
+online store records that a customer bought a lamp through the web store with a gift
+note. As a property graph:
 
 ```text
 (:Customer {email: "buyer@example.com"})
@@ -125,14 +129,20 @@ SELECT ?sku WHERE {
 }
 ```
 
-The property graph keeps the relationship compact and makes traversal the natural
-operation. RDF names resources with global IRIs, so datasets that share IRIs merge by
-combining their triples (blank nodes are kept distinct during a merge).
+In other words, the property graph keeps the relationship compact and makes traversal
+the natural operation. RDF names resources with global IRIs, so datasets that share IRIs
+merge by combining their triples (blank nodes are kept distinct during a merge).
+
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Store relationships as edges with their own typed properties in open-source HelixDB, a labeled property graph database.
+  </Card>
+</div>
 
 ## How do you store data about a relationship?
 
-In a property graph, data about a relationship goes on the edge, and each repeated
-relationship is its own edge. RDF has no edge properties. A plain triple such as
+In a property graph, you put it on the edge, and each repeated relationship is its own
+edge. RDF has no edge properties, so it needs a workaround. A plain triple such as
 `ex:customerA ex:purchased ex:productA` records only that the relationship exists, and a
 second identical purchase adds nothing. RDF has four common ways to say more:
 
@@ -156,9 +166,10 @@ ex:statementA  a  rdf:Statement ;
     ex:channel     "web" .
 ```
 
-RDF-star is being standardized as triple terms in RDF 1.2, which is not yet a W3C
-Recommendation. The draft Turtle 1.2 syntax adds an annotation block that asserts the
-triple and describes it in one statement:
+RDF-star is being standardized as triple terms in RDF 1.2, which was a W3C Candidate
+Recommendation as of April 2026, not yet a final Recommendation. The draft Turtle 1.2
+syntax adds an annotation block that asserts the triple and describes it in one
+statement:
 
 ```text
 ex:customerA  ex:purchased  ex:productA  {| ex:channel "web" |} .
@@ -170,15 +181,20 @@ separate.
 
 ## When should you use a property graph or RDF?
 
-A labeled property graph usually fits when:
+Put simply, use a property graph for an application's own data and RDF for data you
+share and merge with others. A labeled property graph usually fits when:
 
-- The graph backs an application, and developers query it directly.
-- Relationships carry data, repeat, or change often.
-- Queries are traversal-heavy: paths, neighborhoods, and multi-hop filters.
+- The graph backs an application, such as an online store's recommendations, and
+  developers query it directly.
+- Relationships carry data, repeat, or change often, as in a purchase history or an
+  [AI agent's memory](/learn/ai-memory/what-is-ai-agent-memory).
+- Queries are traversal-heavy: paths, neighborhoods, and multi-hop filters, as in
+  [GraphRAG](/learn/ai-memory/what-is-graphrag) retrieval.
 
 RDF usually fits when:
 
-- You publish or consume linked data that other organizations reference.
+- You publish or consume linked data that other organizations reference, such as a
+  shared catalog across a group of libraries.
 - Data from many independent sources must merge on shared global identifiers.
 - You rely on standard vocabularies, formal ontologies, or OWL-based inference.
 
@@ -211,8 +227,12 @@ nowhere to go.
 
 ## How does HelixDB model graph data?
 
-HelixDB stores all data as one labeled property graph. To load RDF data, an application
-converts it with the rules above:
+HelixDB stores all data as one labeled property graph, with native
+[vector search](/learn/vector-search/what-is-vector-search) and
+[BM25](/learn/full-text-search/what-is-bm25) full-text search in the same database, and
+a traversal can
+[narrow a search to the records it reaches](/learn/vector-search/filtered-vector-search).
+To load RDF data, an application converts it with the rules above:
 
 - **Exactly one label** on every node and edge, so extra `rdf:type` values become a
   property or edges to category nodes.
@@ -227,7 +247,8 @@ converts it with the rules above:
   indexed.
 
 See the [data model](/database/helix-db/core-concepts/data-model) and
-[traversals](/database/helix-db/query-guides/traversals) guides.
+[traversals](/database/helix-db/query-guides/traversals) guides, or
+[why graph, vector, and text belong in one database](/learn/database-architecture/one-database-for-graph-vector-and-text).
 
 ## Frequently asked questions
 
@@ -235,17 +256,22 @@ See the [data model](/database/helix-db/core-concepts/data-model) and
 
 No. RDF is a data model with W3C-standardized formats such as Turtle, N-Triples, and
 JSON-LD. Databases that store RDF natively are usually called triple stores or RDF stores
-and are queried with SPARQL.
+and are queried with SPARQL. Databases built on property graphs are often called
+property graph databases, or simply
+[graph databases](/learn/graph-databases/what-is-a-graph-database).
 
 ### Is a property graph faster than RDF?
 
 Not inherently. Speed depends on the storage engine, indexes, and query planner more
 than on the data model. Property graph systems commonly optimize multi-hop edge
-traversal, and RDF stores commonly optimize joins across many triple patterns.
+traversal, and RDF stores commonly optimize joins across many triple patterns. See
+[graph vs relational databases](/learn/graph-databases/graph-vs-relational-database) for
+how traversals and joins differ.
 
 ### Can a property graph use an ontology?
 
-Yes. Labels, properties, and constraints can encode an ontology's classes and
+Yes. Labels, properties, and constraints can encode an
+[ontology's](/learn/graph-databases/what-is-a-knowledge-graph) classes and
 relationships, or classes can be nodes linked by edges. The property graph model has no
 standard reasoning language like OWL, so inference typically runs in the application or
 in separate tooling.

@@ -1,75 +1,45 @@
-use color_eyre::owo_colors::OwoColorize;
+use crate::output::HelixTheme;
+use cliclack::Theme as _;
+use console::style;
+use serde::Serialize;
 use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
-pub enum CliErrorSeverity {
-    Error,
-    Warning,
-    Info,
-}
-
-impl CliErrorSeverity {
-    pub fn label(&self) -> &'static str {
-        match self {
-            CliErrorSeverity::Error => "error",
-            CliErrorSeverity::Warning => "warning",
-            CliErrorSeverity::Info => "info",
-        }
-    }
-
-    pub fn color_code<T: AsRef<str>>(&self, text: T) -> String {
-        match self {
-            CliErrorSeverity::Error => text.as_ref().red().bold().to_string(),
-            CliErrorSeverity::Warning => text.as_ref().yellow().bold().to_string(),
-            CliErrorSeverity::Info => text.as_ref().blue().bold().to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+/// A user-facing error: what failed, why, and what to do next.
+///
+/// Rendered as a cliclack-style block on stderr in human mode and serialized
+/// as `{"error": {...}}` in `--json` mode (see [`crate::output::report_error`]).
+#[derive(Debug, Clone, Serialize)]
 pub struct CliError {
-    pub severity: CliErrorSeverity,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
-    pub hint: Option<String>,
-    pub file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// Resources the user could have meant, e.g. when a name is ambiguous or
+    /// a selection is required but no prompt is possible.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<Candidate>,
+}
+
+/// One resource listed in an error so the user (or agent) can pick it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Candidate {
+    pub id: String,
+    pub name: String,
 }
 
 impl CliError {
     pub fn new<S: Into<String>>(message: S) -> Self {
         Self {
-            severity: CliErrorSeverity::Error,
             message: message.into(),
             context: None,
-            hint: None,
-            file_path: None,
             caused_by: None,
-        }
-    }
-
-    pub fn warning<S: Into<String>>(message: S) -> Self {
-        Self {
-            severity: CliErrorSeverity::Warning,
-            message: message.into(),
-            context: None,
             hint: None,
-            file_path: None,
-            caused_by: None,
-        }
-    }
-
-    #[allow(unused)]
-    pub fn info<S: Into<String>>(message: S) -> Self {
-        Self {
-            severity: CliErrorSeverity::Info,
-            message: message.into(),
-            context: None,
-            hint: None,
-            file_path: None,
-            caused_by: None,
+            candidates: Vec::new(),
         }
     }
 
@@ -83,68 +53,122 @@ impl CliError {
         self
     }
 
-    #[allow(unused)]
-    pub fn with_file_path<S: Into<String>>(mut self, file_path: S) -> Self {
-        self.file_path = Some(file_path.into());
-        self
-    }
-
     pub fn with_caused_by<S: Into<String>>(mut self, caused_by: S) -> Self {
         self.caused_by = Some(caused_by.into());
         self
     }
 
+    pub fn with_candidates(mut self, candidates: Vec<Candidate>) -> Self {
+        self.candidates = candidates;
+        self
+    }
+
+    /// The most specific user-facing error in `report`: a typed CLI error if
+    /// one is in the chain, otherwise the top message with its causes.
+    pub fn from_report(report: &eyre::Report) -> Self {
+        report
+            .downcast_ref::<CliError>()
+            .cloned()
+            .or_else(|| {
+                report
+                    .downcast_ref::<ConfigError>()
+                    .map(ConfigError::to_cli_error)
+            })
+            .or_else(|| {
+                report
+                    .downcast_ref::<ProjectError>()
+                    .map(ProjectError::to_cli_error)
+            })
+            .or_else(|| {
+                report
+                    .downcast_ref::<PortError>()
+                    .map(PortError::to_cli_error)
+            })
+            .unwrap_or_else(|| {
+                let mut chain = report.chain().map(ToString::to_string);
+                let message = chain.next().unwrap_or_default();
+                let causes: Vec<String> = chain.collect();
+                let error = CliError::new(message);
+                if causes.is_empty() {
+                    error
+                } else {
+                    error.with_caused_by(causes.join(": "))
+                }
+            })
+    }
+
+    /// The cliclack-style block written to stderr:
+    ///
+    /// ```text
+    /// ■  message
+    /// │  context
+    /// │  caused by: …
+    /// │  hint: …
+    /// │  candidates:
+    /// │    name  id
+    /// ```
     pub fn render(&self) -> String {
-        let mut output = String::new();
-
-        // Error header: "error[C001]: message" or "error: message"
-        let header = format!("{}: {}", self.severity.label(), self.message);
-        output.push_str(&self.severity.color_code(header));
-        output.push('\n');
-
-        // File path if available
-        if let Some(file_path) = &self.file_path {
-            output.push_str(&format!("  {} {}\n", "-->".blue().bold(), file_path.bold()));
-        }
-
-        // Context if available
-        if let Some(context) = &self.context {
-            output.push('\n');
-            // Add indented context with box drawing
-            for line in context.lines() {
-                output.push_str(&format!("   {} {}\n", "│".blue().bold(), line));
-            }
-        }
-
-        // Caused by if available
-        if let Some(caused_by) = &self.caused_by {
-            output.push('\n');
-            output.push_str(&format!(
-                "   {} {}: {}\n",
-                "│".blue().bold(),
-                "caused by".bold(),
-                caused_by
-            ));
-        }
-
-        // Hint if available
-        if let Some(hint) = &self.hint {
-            output.push('\n');
-            output.push_str(&format!(
-                "   {} {}: {}\n",
-                "=".blue().bold(),
-                "help".bold(),
-                hint
-            ));
-        }
-
-        output
+        let bar = style("│").dim().for_stderr();
+        let header = format!(
+            "{}  {}",
+            HelixTheme.error_symbol(),
+            style(&self.message).red().bold().for_stderr()
+        );
+        let context = self
+            .context
+            .iter()
+            .flat_map(|context| context.lines())
+            .map(str::to_owned);
+        let caused_by = self.caused_by.iter().flat_map(|cause| {
+            cause.lines().enumerate().map(|(index, line)| match index {
+                0 => format!("{} {line}", style("caused by:").dim().for_stderr()),
+                _ => format!("  {line}"),
+            })
+        });
+        let hint = self
+            .hint
+            .iter()
+            .map(|hint| format!("{} {hint}", style("hint:").cyan().for_stderr()));
+        let name_width = self
+            .candidates
+            .iter()
+            .map(|candidate| console::measure_text_width(&candidate.name))
+            .max()
+            .unwrap_or(0);
+        let candidates = (!self.candidates.is_empty())
+            .then(|| "candidates:".to_owned())
+            .into_iter()
+            .chain(self.candidates.iter().map(|candidate| {
+                if candidate.name == candidate.id {
+                    format!("  {}", candidate.id)
+                } else {
+                    format!(
+                        "  {:<name_width$}  {}",
+                        candidate.name,
+                        style(&candidate.id).dim().for_stderr()
+                    )
+                }
+            }));
+        std::iter::once(header)
+            .chain(
+                context
+                    .chain(caused_by)
+                    .chain(hint)
+                    .chain(candidates)
+                    .map(|line| format!("{bar}  {line}")),
+            )
+            .map(|line| line + "\n")
+            .collect()
     }
 }
 
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.render())
+        write!(f, "{}", self.message)?;
+        let Some(caused_by) = &self.caused_by else {
+            return Ok(());
+        };
+        write!(f, ": {caused_by}")
     }
 }
 
@@ -275,7 +299,7 @@ impl ConfigError {
                 "at least one instance must be defined in {}",
                 path.display()
             ))
-            .with_hint("add one with `helix add local --name dev` (or `helix add enterprise`)"),
+            .with_hint("add one with `helix add local --name dev` (or `helix add cloud`)"),
             ConfigError::EmptyInstanceName { path } => CliError::new(format!(
                 "instance name cannot be empty in {}",
                 path.display()
@@ -349,14 +373,12 @@ impl ProjectError {
                 CliError::new("failed to determine current directory")
                     .with_caused_by(source.to_string())
             }
-            ProjectError::ConfigNotFound { start } => {
-                config_error("project configuration not found")
-                    .with_file_path(start.display().to_string())
-                    .with_context(format!(
-                        "searched from {} up to filesystem root",
-                        start.display()
-                    ))
-            }
+            ProjectError::ConfigNotFound { start } => CliError::new("no helix.toml found")
+                .with_context(format!(
+                    "searched from {} up to the filesystem root",
+                    start.display()
+                ))
+                .with_hint("run `helix init` to create a project here"),
             ProjectError::CreateDir { path, source } => {
                 CliError::new(format!("failed to create directory at {}", path.display()))
                     .with_caused_by(source.to_string())
@@ -413,40 +435,6 @@ impl From<serde_json::Error> for CliError {
     }
 }
 
-#[allow(unused)]
-pub type CliResult<T> = Result<T, CliError>;
-
-// Convenience functions for common error patterns with error codes
-#[allow(unused)]
-pub fn config_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message).with_hint("run `helix init` if you need to create a new project")
-}
-
-#[allow(unused)]
-pub fn file_error<S: Into<String>>(message: S, file_path: S) -> CliError {
-    CliError::new(message).with_file_path(file_path)
-}
-
-#[allow(unused)]
-pub fn docker_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message).with_hint("ensure Docker is running and accessible")
-}
-
-#[allow(unused)]
-pub fn network_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message).with_hint("check your internet connection and try again")
-}
-
-#[allow(unused)]
-pub fn project_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message).with_hint("ensure you're in a valid helix project directory")
-}
-
-#[allow(unused)]
-pub fn cloud_error<S: Into<String>>(message: S) -> CliError {
-    CliError::new(message).with_hint("run `helix auth login` to authenticate with Helix Cloud")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,24 +444,74 @@ mod tests {
     }
 
     #[test]
-    fn cli_error_render_includes_every_optional_section_and_severity() {
-        let rendered = CliError::warning("careful")
-            .with_file_path("helix.toml")
+    fn render_includes_every_optional_section() {
+        let rendered = CliError::new("careful")
             .with_context("first line\nsecond line")
-            .with_caused_by("invalid value")
+            .with_caused_by("invalid value\nmore detail")
             .with_hint("fix the value")
+            .with_candidates(vec![
+                Candidate {
+                    id: "ws-1".into(),
+                    name: "Acme".into(),
+                },
+                Candidate {
+                    id: "dev".into(),
+                    name: "dev".into(),
+                },
+            ])
             .render();
-        assert!(rendered.contains("warning: careful"));
-        assert!(rendered.contains("helix.toml"));
-        assert!(rendered.contains("first line"));
-        assert!(rendered.contains("second line"));
-        assert!(rendered.contains("caused by"));
-        assert!(rendered.contains("help"));
-        assert_eq!(CliErrorSeverity::Error.label(), "error");
-        assert_eq!(CliErrorSeverity::Info.label(), "info");
-        assert!(CliError::info("notice")
-            .to_string()
-            .contains("info: notice"));
+        let plain = console::strip_ansi_codes(&rendered);
+        assert_eq!(
+            plain,
+            "■  careful\n│  first line\n│  second line\n│  caused by: invalid value\n│    more detail\n│  hint: fix the value\n│  candidates:\n│    Acme  ws-1\n│    dev\n"
+        );
+    }
+
+    #[test]
+    fn json_omits_absent_sections() {
+        assert_eq!(
+            serde_json::to_value(CliError::new("boom")).unwrap(),
+            serde_json::json!({"message": "boom"})
+        );
+        let full = serde_json::to_value(CliError::new("boom").with_hint("retry").with_candidates(
+            vec![Candidate {
+                id: "p-1".into(),
+                name: "api".into(),
+            }],
+        ))
+        .unwrap();
+        assert_eq!(full["hint"], "retry");
+        assert_eq!(full["candidates"][0]["id"], "p-1");
+    }
+
+    #[test]
+    fn from_report_prefers_typed_errors_and_keeps_generic_causes() {
+        let typed = eyre::Report::new(CliError::new("typed").with_hint("hint"));
+        assert_eq!(CliError::from_report(&typed).hint.as_deref(), Some("hint"));
+
+        let config = eyre::Report::new(ConfigError::InstanceNotFound { name: "qa".into() });
+        assert!(CliError::from_report(&config).message.contains("'qa'"));
+
+        let project = eyre::Report::new(ProjectError::ConfigNotFound {
+            start: PathBuf::from("/tmp"),
+        });
+        assert_eq!(
+            CliError::from_report(&project).message,
+            "no helix.toml found"
+        );
+
+        let port = eyre::Report::new(PortError::NoAvailablePort { start: 1, end: 2 });
+        assert!(CliError::from_report(&port).message.contains("1-2"));
+
+        use eyre::WrapErr as _;
+        let generic = Err::<(), _>(std::io::Error::other("disk full"))
+            .wrap_err("write helix.toml")
+            .unwrap_err();
+        let error = CliError::from_report(&generic);
+        assert_eq!(error.message, "write helix.toml");
+        assert_eq!(error.caused_by.as_deref(), Some("disk full"));
+        assert_eq!(error.to_string(), "write helix.toml: disk full");
+        assert_eq!(CliError::from_report(&eyre::eyre!("plain")).caused_by, None);
     }
 
     #[test]
@@ -533,8 +571,7 @@ mod tests {
 
         for error in errors {
             let rendered = error.to_cli_error().render();
-            assert!(rendered.contains("error:"), "{rendered}");
-            assert!(!rendered.trim().is_empty());
+            assert!(rendered.contains("■"), "{rendered}");
         }
     }
 
@@ -555,7 +592,7 @@ mod tests {
             ProjectError::from(ConfigError::MissingInstances { path: path.clone() }),
         ];
         for error in project_errors {
-            assert!(error.to_cli_error().render().contains("error:"));
+            assert!(!error.to_cli_error().message.is_empty());
         }
 
         let port = PortError::NoAvailablePort {

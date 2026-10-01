@@ -23,15 +23,21 @@ helix auth logout
 | Subcommand | Description |
 | --- | --- |
 | `login` | Sign in through WorkOS in your browser and store the session. |
-| `status` | Verify the session and show the signed-in user and workspace membership count. |
+| `status` | Verify the session and show the signed-in email and your workspaces by name. |
 | `logout` | Revoke the session when possible and delete the local credential file. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the result as JSON on stdout and never prompt. `status` prints `{"email":"...","workspaces":[{"id":"...","name":"..."}]}`. | Off |
 
 ## Behavior
 
 ### Login
 
-- `login` requires an interactive terminal.
-- It starts WorkOS PKCE in a browser (and prints the URL in case the browser does not open), then receives the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
+- `login` requires an interactive terminal, so it fails with `--json`.
+- It starts WorkOS PKCE in a browser (and prints the URL in case the browser does not open), then shows a spinner while it waits for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
 - If WorkOS requires email verification, the CLI prompts for the code.
 - It hydrates all current workspace memberships and stores only the rotating WorkOS session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`).
 
@@ -43,7 +49,7 @@ helix auth logout
 
 ### Status and logout
 
-- `status` verifies the session with the Helix Cloud API and reports the signed-in email and membership count.
+- `status` verifies the session by listing your workspaces through the Helix Cloud API, then prints `Email` and `Workspaces` (by name).
 - `logout` asks the Helix Cloud API to revoke the session when possible and always deletes the local file.
 
 ## Examples

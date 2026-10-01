@@ -26,8 +26,8 @@ pub(in crate::rules) use self::{
         stream_variable_write_delivered_properties,
     },
     pipeline::{
-        access_pipeline_op, membership_label_domain_cost, physical_pipeline_from_first_and_rest,
-        physical_pipeline_from_prefix_and_required_suffix,
+        access_pipeline_op, membership_label_domain_cost, membership_labels_cost,
+        physical_pipeline_from_first_and_rest, physical_pipeline_from_prefix_and_required_suffix,
         physical_pipeline_from_prefix_and_required_tail, stream_pipeline_op_contract,
     },
     window::access_window_stream_contract,

@@ -7,61 +7,69 @@ The Helix CLI — binary `helix`, crate `helix-cli` (v3.0.1). It is a **runtime 
 This CLI has **no `helix compile` and no `helix check`**, and there is **no `.hx` query workflow** in it. (Older notes/memory that mention those commands describe the v2 CLI and are stale.) In v3:
 
 - **Queries are JSON requests** sent to a *running* instance via `POST /v2/query` (`helix query`). Validation happens server-side, in the instance.
-- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.6`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (SeaweedFS-backed) with `--disk`.
+- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.8`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (SeaweedFS-backed) with `--disk`.
 - **Cloud instances are linked resources.** The CLI authenticates only with a rotating WorkOS session and sends Cloud queries through WFE's backend broker. It does not deploy query bundles or call Cloud gateways directly.
 
 The Rust DSL builder lives in `sdks/rust/` (a client library), not in this CLI.
 
 ## Entry point & dispatch
 
-`src/main.rs` defines the clap `Cli` struct with two **global flags** — `--quiet` (errors + final result only) and `-v/--verbose` (timing detail) — wired into `output::Verbosity`. The `Commands` enum lists every subcommand; `main()` matches each to `commands::<name>::run(...)`. With no subcommand it prints the welcome banner (`display_welcome`). Errors are downcast to `CliError`/`ConfigError`/`ProjectError`/`PortError` for pretty rendering before `exit(1)`. Metrics are bootstrapped (`MetricsSender::new`) and an update check runs on every invocation.
+`src/main.rs` defines the clap `Cli` struct with three **global flags** — `--json` (machine output, never prompts), `--quiet` (errors + final result only), and `-v/--verbose` (timing detail) — mapped onto `output::OutputMode` (`Human(Verbosity)` | `Json`; `--json` conflicts with the other two). The `Commands` enum lists every subcommand; `main()` matches each to `commands::<name>::run(...)`. With no subcommand it prints the welcome banner (`display_welcome`). A failed command goes through `output::report_error` (cliclack-styled block, or `{"error":{…}}` under `--json`) before `exit(1)`; clap usage errors under `--json` become the same JSON with exit 2. Metrics are bootstrapped (`MetricsSender::new`) and an update check runs on every non-JSON invocation.
+
+## Output contract
+
+- **stdout** carries only a command's result: tables (`output::table::Table`), detail views (`table::key_values`), query results (`output::json::pretty`, syntax-highlighted), one-time tokens, or the `--json` payload. Everything goes through `output::emit(&value, |value| human render)`.
+- **stderr** carries all chrome in the cliclack style (`HelixTheme`): `intro`/`outro` sessions, `step`/`success`/`info`/`warning`/`remark`, `note`/`next_steps`, `Step` spinners, and errors.
+- `--json` prints no chrome, never prompts (`prompts::is_interactive()` is false), and emits compact JSON. Prompts need an interactive stdin **and stderr**.
+- Colours come from `console` (honours `NO_COLOR`/`CLICOLOR`, per stream); never use owo directly.
 
 ## Module map (`src/`)
 
 - `commands/` — one module per subcommand (the handlers below).
-- `lib.rs` — the public crate root; defines the subcommand enums (`InitTarget`, `AddTarget`, `AuthAction`, `MetricsAction`, `Workspace/Project/ClusterConfigAction`, `ConfigOutputFormat`) and re-exports modules.
-- `cloud.rs` — strict WorkOS session loading, locked refresh rotation, and WFE requests.
+- `lib.rs` — the public crate root; defines the subcommand enums (`InitTarget`, `AddTarget`, `AuthAction`, `MetricsAction`, `WorkspaceAction`, `ProjectAction`, `ClusterAction`, `DatabaseAction`, `ServiceCredentialAction`, `CloudApiAction`), the shared `ScopeArgs` (`--workspace`/`--project`), and re-exports modules.
+- `cloud/` — `client.rs` (strict WorkOS session loading, locked refresh rotation, WFE requests, typed `fetch`, paginated `list`), `model.rs` (typed `Workspace`/`Project`/`Cluster`/`Tenant`/`Database`/`DatabaseKey`/`ServiceCredential`, unknown fields kept in `extra`), and `resolve.rs` (`Scope`: resolves optional ID/slug/name arguments via explicit arg → helix.toml `Link` → sole candidate → cliclack picker → error listing candidates).
 - `config.rs` — `helix.toml` (`HelixConfig`) load/save/validation; stable project and typed database linkage only.
-- `project.rs` — `ProjectContext::find_and_load()` walks up the tree to find `helix.toml`; resolves `.helix/<instance>` state dirs. `get_helix_cache_dir()` honors `HELIX_CACHE_DIR`.
+- `project.rs` — `ProjectContext::find_and_load()` walks up the tree to find `helix.toml`; resolves `.helix/<instance>` state dirs; `resolve_local_instance` picks the instance for start/stop/restart. `get_helix_cache_dir()` honors `HELIX_CACHE_DIR`.
 - `local_runtime.rs` — `LocalRuntime`: Docker/Podman container lifecycle (`check_available`, `container_name` = `helix-<project>-<instance>`, pull/run/stop/restart/status/prune). Disk mode also spins up a SeaweedFS S3 container + volume + network (and removes MinIO sidecars left by older releases); memory mode is the Helix container alone. Health-checks via TCP probe.
 - `service_endpoints.rs` — resolves the WFE base URL from `CLOUD_AUTHORITY` or the production default.
 - `metrics_sender.rs` — `MetricsSender` + `MetricsConfig` (level Full/Basic/Off, user_id, email). Async event sender to the logs endpoint; created in `main`, `shutdown()` on exit.
 - `port.rs` — `is_port_available`, `find_available_port`, `ensure_port_available` (scans up to 100 ports).
 - `update.rs` — `check_for_updates` (cached 24h in `~/.helix/`), `current_version`; `commands::update` does the actual `self_update` binary swap.
-- `output.rs` — terminal helpers. `Verbosity` (Silent/Quiet/Normal/Verbose, global atomic), `Operation`, `Step` (spinner: `start`/`done`/`fail`, plus `println`/`set_message`/`set_completion`), `LiveSpinner` (wraps indicatif).
+- `output/` — the output contract above: `OutputMode`/`Verbosity` (global atomic), `emit`, chrome helpers, `Operation` (an intro/outro session), `Step` (live spinner on a TTY, plain lines off one, hidden when quiet/JSON; `println`/`set_message`/`set_completion`), `report_error`/`print_error`, `table` (tables, key/values, state colouring), `json::pretty`, and `HelixTheme`.
 - `prompts.rs` — `is_interactive()` and cliclack prompts (`confirm`, `input_instance_name`, `input_port`, `select_local_disk_mode`, …).
-- `utils.rs` — `command_exists` (via `which`), print helpers, `add_env_var_to_file`.
-- `errors.rs` — `CliError` (severity/message/context/hint/file_path/caused_by) with boxed colored `render()`; typed `ConfigError`/`ProjectError`/`PortError` that convert into it.
+- `utils.rs` — `command_exists` (via `which`), `add_env_var_to_file`.
+- `errors.rs` — `CliError` (message/context/caused_by/hint/candidates; `Serialize`) with cliclack-style `render()` and `from_report`; typed `ConfigError`/`ProjectError`/`PortError` that convert into it.
 
 ## Command reference
 
-All instance args default to `dev` (or prompt interactively when ambiguous). Enterprise/cloud commands call `require_auth()` (credentials from `helix auth login`).
+Instance args default to `dev`, else the only instance, else a prompt (TTY), else an error listing candidates. Cloud commands build a `Scope` (which calls `require_auth()`); every Cloud resource argument is optional and accepts an ID, slug, or name. A Cloud group with no subcommand lists it.
 
 **Project setup**
-- `init [--path <dir>] (local|cloud)` — scaffold a project. Cloud uses `--database cluster:<id>|tenant:<id>` plus owner IDs when they cannot be derived; it stores no gateway URL or query credential.
+- `init [--path <dir>] (local|cloud)` — scaffold a project. Cloud resolves `[--database] [--project] [--workspace]` through `Scope` (no flags needed) and writes the typed database plus the `[project] id/workspace_id` link; it stores no gateway URL or query credential.
 - `chef` (alias `cook`) — interactive one-shot bootstrapper that hands off to an AI agent. **See dedicated section below.**
-- `add [--path <dir>] (local|cloud)` — add an instance to an existing `helix.toml` without clobbering others. Cloud resolves and stores a typed database link.
+- `add [--path <dir>] (local|cloud)` — add an instance to an existing `helix.toml` without clobbering others. Cloud defaults to the linked project (never an already-added database) and refuses a database from another project.
 
 **Local lifecycle**
 - `start [instance] [--foreground] [--port <p>] [--disk] [--persist]` (alias `run`) — start a local container (background by default; `--detach` is a hidden alias). `--disk` forces on-disk/SeaweedFS storage for this run; `--persist` writes the resolved port/storage back to `helix.toml`. The in-memory data-loss warning is shown only once per instance (tracked by a `.warned-memory` marker in the instance workspace).
 - `stop [instance]` / `restart [instance]` — stop/restart a background container.
-- `status [instance]` — project + per-instance details (URL, cluster id, storage mode, container state). Omit instance for all.
-- `logs [instance] [-f] [-r --start <iso> --end <iso>]` — local: Docker/Podman logs (`-f` follows). Enterprise: time-range fetch from cloud (`-r`, ISO-8601, defaults to last hour).
+- `status [instance]` — project header plus an INSTANCE/KIND/STATUS/ENDPOINT table; an unreachable Cloud database is an `unreachable` row plus a warning, not a failure. Omit instance for all.
+- `logs [instance] [-f] [--start <rfc3339>] [--end <rfc3339>]` — local: Docker/Podman logs (`-f` follows; no `--json`). Cloud: query errors as a table (default last hour, explicit empty state).
 - `prune [instance] [-a/--all] [-y/--yes]` — delete local containers + `.helix/workspace/` dirs. Non-interactive needs an instance or `--all`.
 - `delete <instance> [-y/--yes]` — remove instance from `helix.toml` **and** its local runtime state (instance arg required).
 
 **Queries**
-- `query [instance|cluster:<id>|tenant:<id>] (--file <req.json> | --json '<body>' | -e/--ts '<ts>' | --ts-file <query.ts>) [--warm] [--host <h>] [--port <p>] [--compact]` — local targets send to `POST /v2/query` with auth disabled. Cloud targets use the active WorkOS session and WFE's separate read/write broker endpoints. They never load an application key. The four input flags are mutually exclusive and exactly one is required. TypeScript input is evaluated through the cached `@helix-db/helix-db` SDK.
+- `query [instance|cluster:<id>|tenant:<id>] (--file <req.json> | --body '<json>' | -e/--ts '<ts>' | --ts-file <query.ts>) [--warm] [--host <h>] [--port <p>]` — local targets send to `POST /v2/query` with auth disabled. Cloud targets use the active WorkOS session and WFE's separate read/write broker endpoints; a typed target needs no helix.toml. They never load an application key. The four input flags are mutually exclusive and exactly one is required. TypeScript input is evaluated through the cached `@helix-db/helix-db` SDK. Results print as highlighted JSON with a `status · latency · target` footer on stderr, or compact JSON under `--json`.
 
 **Cloud**
 - `auth (login|status|logout)` — WorkOS PKCE login and rotating session credentials. Refresh is serialized and persisted atomically. There is no API-key or service-credential login.
 - `workspace (list|get)` — discover workspaces without global selection state.
-- `project (list|get|create|delete|link)` — discover/manage projects and link only the current `helix.toml`.
+- `project (list|get|create <name>|delete|link)` — discover/manage projects; `link` (picker when no argument) writes only this `helix.toml` and keeps the local project name.
 - `cluster (list|get|indexes)` — discover and inspect existing clusters.
-- `database (list|get|create|delete|indexes|key)` — manage tenant databases. Creation returns a default read-write application key once; the CLI displays but never stores it.
-- `service-credential (create|list|get|update|revoke)` — manage workspace-owned headless automation credentials through the user session. These credentials cannot log the CLI in.
-- `api (get|post|patch|delete)` — call WFE with the active WorkOS session.
-- `push`, `sync`, `workspace switch`, `project switch`, and `auth create-key` do not exist.
+- `database (list|get|create <name>|delete|indexes|key)` — manage tenant databases. Creation returns a default read-write application key once (stdout); the CLI displays but never stores it. `key create|list|revoke <key>` take `--database`.
+- `service-credential (create|list|get|update|revoke)` — manage workspace-owned headless automation credentials through the user session (`--workspace` optional). These credentials cannot log the CLI in.
+- `api (get|post|patch|delete) <path> [--body <json>]` — call WFE with the active WorkOS session.
+- Destructive commands need `-y` when no prompt is possible and check that before any request.
+- `push`, `sync`, `config`, `workspace switch`, `project switch`, and `auth create-key` do not exist; nor do `--format`, `--compact`, `--workspace-id`, `--project-id`, or `--cluster-id`.
 
 **Misc**
 - `metrics (full|basic|off|status)` — manage telemetry level (`~/.helix/metrics.toml`); `full` prompts for email.
@@ -117,16 +125,16 @@ stdout is piped and parsed line-by-line as NDJSON into `ClaudeEvent` (System / A
 
 `chef` emits `started` and `completed` metrics with run metadata, setup mode, agent, duration, and outcome. It does not require Cloud authentication or upload prompts, transcripts, source code, or project snapshots.
 
-### Output helpers (`src/output.rs`)
+### Output helpers (`src/output/`)
 
-`Step` (spinner with `start`/`done`/`fail`) gained `println` (print above the spinner), `set_message` (rewrite the spinner line in place), and `set_completion` (override the ✓ line after the fact). `LiveSpinner` wraps indicatif's `ProgressBar`.
+Chef is framed as one `intro`/`outro` session. `Step` provides `println` (print above the spinner), `set_message` (rewrite the spinner line in place), and `set_completion` (override the completion line after the fact). Chef wraps `init`/`start`/`query` in `OutputMode::Human(Verbosity::Silent)` so only its own steps show.
 
 ## Config & state
 
 **Project config — `helix.toml`** (`HelixConfig` in `config.rs`, found via `ProjectContext::find_and_load`):
 
 - `[project]` — `name` (required), optional `id` / `workspace_id`, `queries` (default `db/`), `container_runtime` (`docker` | `podman`, default docker).
-- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.6`), `storage` (`memory` | `disk`, default memory).
+- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.8`), `storage` (`memory` | `disk`, default memory).
 - `[enterprise.<name>]` — typed `database = "cluster:<id>"|"tenant:<id>"`, plus optional stable `workspace_id` and `project_id` linkage. Gateway URLs, query keys, query bundles, and sync snapshots are rejected as obsolete.
 
 `HelixConfig::validate` requires a non-empty project name, at least one instance, non-empty instance names, and a valid typed database for each Cloud instance. `default_config()` seeds a single in-memory `local.dev`.
@@ -135,8 +143,8 @@ stdout is piped and parsed line-by-line as NDJSON into `ClaudeEvent` (System / A
 
 ## Testing
 
-`cargo fmt -p helix-cli && cargo test -p helix-cli` — ~66 lib + ~21 binary tests. clap parsing tests live in `src/main.rs` `#[cfg(test)]` (every command/flag combo). Config (de)serialization + backward-compat defaults are tested in `src/config.rs`.
+`cargo fmt -p helix-cli && cargo test -p helix-cli`. clap parsing tests live in `src/main.rs` `#[cfg(test)]` (every command/flag combo). Config (de)serialization is tested in `src/config.rs`. Cloud resolution (ID/slug/name, links, sole candidate, candidates on error, pagination, `--json` purity, init/add cloud linking) is covered end to end with wiremock in `tests/cloud_resolution.rs`; command contracts in `tests/configuration_commands.rs`. `tests/typescript_runtime.rs` needs `npm ci` in `sdks/typescript`; `tests/e2e_runtime.rs` is `#[ignore]`d and needs Docker.
 
 Chef tests cover: prompt rendering (intent substitution, CRM fallback, Next.js stack keywords, summary sections, browser-open commands, dev-server persistence), agent-priority order, `build_agent_argv` per (agent, permission) combo, install-arg construction, tool-use formatting, and stream-json event parsing. The actual agent spawn / browser open are not unit-tested (require external processes) — verify those manually with `cargo run -p helix-cli -- chef`.
 
-Doc-tests in `output.rs` run as part of `cargo test -p helix-cli --doc`.
+Doc-tests in `output/`, `cloud/`, and `errors.rs` run as part of `cargo test -p helix-cli --doc`.

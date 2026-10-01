@@ -166,6 +166,30 @@ impl<'de, const MAX: u64> Deserialize<'de> for EstimatedRowsAtMost<MAX> {
 /// Estimated row count for unique equality lookups.
 pub type UniqueEqualityRows = EstimatedRowsAtMost<1>;
 
+/// Stored records the interpreter reads per multi-get batch when a filter or
+/// membership residual evaluates rows. The interpreter takes its batch size
+/// from here, so the planner and execution share one value.
+pub const RECORD_BATCH_ROWS: u64 = 256;
+
+/// Default concurrent key-value reads one operator keeps in flight.
+///
+/// [`StorageCostProfile::max_parallel_kv_reads`] defaults to this value, and
+/// the interpreter bounds the concurrent child reads of one secondary-index set
+/// by it. A profile override tunes pricing only: executable plans carry no
+/// concurrency for index sets, so execution always uses this default.
+///
+/// [`StorageCostProfile::max_parallel_kv_reads`]: crate::cost::StorageCostProfile::max_parallel_kv_reads
+///
+/// ```
+/// use helix_planner::cost::{StorageCostProfile, MAX_PARALLEL_KV_READS};
+/// assert_eq!(
+///     StorageCostProfile::default().max_parallel_kv_reads.get(),
+///     MAX_PARALLEL_KV_READS.get()
+/// );
+/// ```
+pub const MAX_PARALLEL_KV_READS: core::num::NonZeroUsize =
+    core::num::NonZeroUsize::new(16).expect("16 is positive");
+
 /// Selectivity represented as parts per million.
 ///
 /// ```

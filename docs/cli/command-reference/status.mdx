@@ -20,13 +20,21 @@ helix status [INSTANCE]
 
 | Argument | Description |
 | --- | --- |
-| `INSTANCE` | Instance to show. If omitted, the CLI prompts in a TTY when there are several instances (with an "All instances" option); otherwise it shows all instances. |
+| `INSTANCE` | Instance to show. If omitted, every instance is shown. The command never prompts. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the report as JSON on stdout. | Off |
 
 ## Behavior
 
-- Prints the project name and root directory, then one line per instance.
+- Prints a `Project` / `Root` header, then a table with `INSTANCE`, `KIND`, `STATUS`, and `ENDPOINT` columns.
 - Local status comes from the configured Docker/Podman runtime: URL, container state (`not created` if there is no container), and storage mode.
 - Cloud status uses the WorkOS session and fetches the linked tenant or dedicated cluster; cluster status also includes current topology.
+- A Cloud database that cannot be reached shows as `unreachable` (or `unknown` when you are not logged in) with a warning on stderr. The command still reports every other instance.
+- `--json` prints an object with `project`, `root`, and an `instances` array. Local entries have `kind: "local"`, `name`, `state`, `url`, and `storage`. Cloud entries have `kind: "cloud"`, `name`, `state`, `database`, and, when present, `label` and `error`.
 
 ## Examples
 
@@ -36,6 +44,9 @@ helix status
 
 # Show one instance
 helix status dev
+
+# Machine-readable status
+helix status --json
 ```
 
 ## Related

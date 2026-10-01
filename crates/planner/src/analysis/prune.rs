@@ -31,6 +31,14 @@ fn prune_statically_impossible_branches_inner(
                 match prune_statically_impossible_branches_inner(predicate)? {
                     PrunedPredicate::Impossible => return Ok(PrunedPredicate::Impossible),
                     PrunedPredicate::Tautology => {}
+                    // A child that prunes to a conjunction (a nested `And`, or
+                    // an `Or` left with one conjunctive branch) joins this
+                    // conjunction, so every top-level conjunct stays visible
+                    // to conjunct splits.
+                    PrunedPredicate::Feasible {
+                        predicate: Predicate::And { predicates },
+                        ..
+                    } => pruned.extend(predicates),
                     PrunedPredicate::Feasible { predicate, .. } => pruned.push(predicate),
                 }
             }

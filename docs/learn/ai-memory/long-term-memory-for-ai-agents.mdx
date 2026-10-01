@@ -1,39 +1,44 @@
 ---
 title: "How do you build long-term memory for AI agents?"
-description: "Build agent long-term memory with a scoped, versioned data model, a write path that deduplicates and forgets, and a read path that searches and expands."
+description: "Build agent long-term memory from versioned, user-scoped facts: catch duplicates and forget on write, then search and expand on read."
 sidebarTitle: "Building long-term memory"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-Long-term memory for an AI agent is the part of
-[agent memory](/learn/ai-memory/what-is-ai-agent-memory) that persists across sessions:
-a store of facts, preferences, and past events the agent can recall after a conversation
-ends. To build it, store extracted facts as versioned, user-scoped records linked to
-their sources, entities, and earlier versions, and index them for semantic and exact
-recall. Writes catch duplicates and updates; reads search only current memories the user
-may see, expand through relationships, and assemble a compact context for the model.
+Long-term memory is the part of [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory)
+that lasts across sessions: the facts, preferences, and past events an agent can recall
+later. Think of it like a well-kept customer file, where each fact is written once, dated,
+tied to where it came from, and crossed out rather than erased when it changes. Built well,
+it lets a support assistant remember that a customer moved to annual billing, forget what
+it is asked to forget, and keep every customer's memories separate. The recipe: store each
+fact as a versioned, user-scoped record linked to its source, then search only the current
+memories that user may see.
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Describe the components of an agent memory system and where each runs
-    - Design a scoped, versioned memory data model
-    - Explain how the write path deduplicates, updates, and forgets memories
-    - Describe the read path from scoping to context assembly
+    - Name the parts of an agent memory system and where each one runs
+    - Design a memory data model that is scoped to users and keeps versions
+    - Explain how new memories are deduplicated, updated, and forgotten
+    - Describe how an agent recalls memories, from scoping to building the prompt
   </Card>
 </div>
 
 ## What are the parts of an agent memory architecture?
 
-A memory system splits into application workers that interpret content and a database
-that stores, relates, and retrieves it.
+A memory system has two halves: application code that interprets content, usually with AI
+models, and a database that stores, links, and searches it.
+
+For example, a support assistant's extractor might pull "the customer's plan renews in
+March" from a chat, and the retrieval service finds that fact the next time the customer
+writes in.
 
 | Component | Runs in | Responsibility |
 | --- | --- | --- |
-| Extractor | Application | Turns conversations and documents into candidate facts, usually with an LLM call |
+| Extractor | Application | Turns conversations and documents into candidate facts, usually with a model call |
 | Embedder | Application | Computes [vector embeddings](/learn/vector-search/what-are-vector-embeddings) for memories and document chunks |
 | Adjudicator | Application | Decides whether a candidate is new, a duplicate, an update, or an extension |
 | Summarizer | Application | Maintains each user's profile of stable facts and current focus |
@@ -43,9 +48,11 @@ that stores, relates, and retrieves it.
 
 ## What data model does agent memory need?
 
-Agent memory needs atomic, user-scoped memory records with lifecycle fields, linked by
-edges to their owner, sources, entities, categories, and the versions they replace.
-Adapt the generic names below to your domain.
+Store each memory as one small, self-contained fact with a clear owner, fields that say
+whether it is still current, and links to where it came from. The records are
+nodes and the links are edges, as in any
+[property graph](/learn/graph-databases/what-is-a-property-graph). Adapt the generic names
+below to your domain.
 
 ```mermaid
 flowchart LR
@@ -62,24 +69,36 @@ flowchart LR
     doc["Source document"] -->|HAS_CHUNK| chunk
 ```
 
-- **User** owns memories; in multi-tenant products every record also has a tenant key.
-- **Memory** is one atomic fact: its text, embedding, kind (fact, preference, episode,
-  or procedure), salience, confidence, and lifecycle fields such as `createdAt`,
-  `isLatest`, `validFrom`, `validTo`, `expiresAt`, and `deletedAt`.
-- **Source document** and **chunk** hold raw context for citations and document search.
+- **User** owns memories; in multi-tenant products, where many customers share one system,
+  every record also has a tenant key.
+- **Memory** is one atomic fact: its text, embedding, kind (fact, preference, episode, or
+  procedure), salience (how important it is), confidence, and lifecycle fields such as
+  `createdAt`, `isLatest`, `validFrom`, `validTo`, `expiresAt`, and `deletedAt`.
+- **Source document** and **chunk** hold raw context for citations and document search,
+  as in [RAG](/learn/ai-memory/what-is-rag).
 - **Profile** is the summarizer's output, loaded as always-on context.
 
-Edges carry ownership, provenance, versions (`UPDATES`, plus `EXTENDS` for enrichment),
-and associations. Every memory, current or superseded, has its own provenance and
-association edges; the diagram draws them once. Here `validFrom` and `validTo` record
-when a memory was current in the store (system time, not the valid time of bitemporal
-databases). Keep real-world dates, such as a trip date, in a property like `eventAt`.
+Edges carry ownership, provenance (where a memory came from), versions (`UPDATES`, plus
+`EXTENDS` for added detail), and associations with entities and categories, much like a
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph). Every memory, current
+or superseded, has its own provenance and association edges; the diagram draws them once.
+
+Here, `validFrom` and `validTo` record when a memory was current in the store
+(system time), not when the fact was true in the world (the valid time that bitemporal
+databases track). Keep real-world dates, such as a trip date, in a property like `eventAt`.
+
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Keep memories, their sources, and their versions in one open-source graph database, and
+    run traversals, vector search, and BM25 search in the same transaction.
+  </Card>
+</div>
 
 ## How does the memory write path work?
 
-The write path extracts candidate facts in context, finds similar existing memories,
-classifies each candidate as new, duplicate, update, or extension, and writes the result
-atomically.
+When the agent learns something, it pulls out the fact, checks for similar memories,
+decides whether the fact is new, a repeat, a correction, or added detail, and saves the
+result in one step.
 
 <Steps>
   <Step title="Extract with context">
@@ -91,20 +110,24 @@ atomically.
   <Step title="Find deduplication candidates">
     Search the user's current memories with vector search for similar facts and keyword
     search for shared names. Check for an exact content match inside the write
-    transaction, or use a scoped content hash as an idempotency key, so retried writes
-    are idempotent.
+    transaction, or use a scoped content hash as an idempotency key, so a retried write
+    never stores the same fact twice.
   </Step>
   <Step title="Classify the relationship">
     A similarity threshold alone cannot tell a restatement from a correction, so
-    adjudicate with rules or an LLM.
+    adjudicate with rules or a model.
   </Step>
   <Step title="Write atomically">
     Write the new memory, its ownership and provenance edges, its entity and category
     links, and any invalidation of an older version together, so recall never sees a
     half-applied change. An update writes a new memory with its own embedding and never
-    edits an existing memory's text.
+    edits an existing memory's text. This is harder when records and indexes live in
+    separate systems; see
+    [one database for graph, vector, and text](/learn/database-architecture/one-database-for-graph-vector-and-text).
   </Step>
 </Steps>
+
+For example, a user corrects a fact:
 
 ```text
 Existing memory: The user's team deploys the billing service on Fridays.
@@ -123,13 +146,13 @@ Decision:        update; the new memory UPDATES the Friday memory
 
 ## How do you implement forgetting in agent memory?
 
-Forgetting is a set of explicit writes plus filters on every read, not something that
-happens on its own.
+Agents do not forget on their own. Forgetting is explicit writes when a fact changes or is
+removed, plus filters on every read that hide anything no longer current.
 
 - **Supersession.** An updated fact gets `isLatest` false and a `validTo` time but stays
   available for audits and "what changed" questions.
-- **Soft deletion.** Set `deletedAt` when a user removes a memory. Recall excludes it,
-  and the change is reversible.
+- **Soft deletion.** Set `deletedAt` when a user removes a memory. Recall excludes it, and
+  the change is reversible.
 - **Expiry.** Time-bound facts, such as "the user is traveling this week", get an
   `expiresAt` time. A sweeper hides or removes them once it passes.
 - **Decay.** A sweeper can hide episodic memories that are old, low in salience, and
@@ -141,8 +164,8 @@ happens on its own.
 
 ## How does the memory read path work?
 
-The read path filters to the user's current memories, runs vector and keyword recall
-inside that set, expands through graph edges, fuses the results, and assembles context.
+To recall, the agent narrows to current memories this user may see, searches only inside
+that set, follows links to related facts, and packs the best results into the prompt.
 
 ```mermaid
 flowchart TD
@@ -160,15 +183,16 @@ flowchart TD
    boundary that decides visibility.
 2. **Filter lifecycle.** Keep memories where `deletedAt` is empty, `isLatest` is true,
    `validTo` is empty, and `expiresAt` is empty or in the future.
-3. **Recall inside the candidate set.** Run vector search for paraphrases and
+3. **Recall inside the candidate set.** Run
+   [vector search](/learn/vector-search/what-is-vector-search) for paraphrases and
    [BM25](/learn/full-text-search/what-is-bm25) keyword search for names, IDs, and error
    codes over only the scoped, current memories. Filtering after a global top-k search
    can return too few results or leak data; see
    [filtered vector search](/learn/vector-search/filtered-vector-search).
 4. **Expand.** From the top hits, follow edges to entities, related memories, and source
-   chunks. Apply the same tenant, user, and lifecycle filters to every memory reached,
-   include earlier versions only when the question asks for history, and keep traversal
-   depth bounded.
+   chunks, as in [GraphRAG](/learn/ai-memory/what-is-graphrag). Apply the same tenant,
+   user, and lifecycle filters to every memory reached, include earlier versions only when
+   the question asks for history, and keep traversal depth bounded.
 5. **Fuse and rerank.** Merge the vector and keyword lists, for example with reciprocal
    rank fusion as in [hybrid search](/learn/full-text-search/hybrid-search), then adjust
    by salience, recency, and relationship type.
@@ -180,33 +204,33 @@ flowchart TD
 Common pitfalls are relying on vector search alone, leaving out tenancy scope or
 provenance, and overwriting memories in place.
 
-- **Vector-only memory.** Similarity search can miss or misrank exact identifiers such
-  as IDs and error codes, can return a fact next to its correction, and has no concept
-  of ownership or recency.
+- **Vector-only memory.** Similarity search can miss or misrank exact identifiers such as
+  IDs and error codes, can return a fact next to its correction, and has no concept of
+  ownership or recency.
 - **No tenancy scope.** Recall not bounded by tenant and user can return another user's
   memories. Mark shared memories explicitly instead of treating a missing user ID as
   shared.
 - **No provenance.** Without links to sources, the agent cannot cite, you cannot debug a
   wrong memory, and deleting a source document leaves its derived facts behind.
-- **Overwriting in place.** Editing a memory's text destroys the history needed to
-  explain a change and, without re-embedding, leaves the vector describing the old fact.
+- **Overwriting in place.** Editing a memory's text destroys the history needed to explain
+  a change and, without re-embedding, leaves the vector describing the old fact.
 
 ## How does HelixDB fit into this architecture?
 
 HelixDB can serve as the memory store in this design, holding these nodes and directed
 edges in one [labeled property graph](/database/helix-db/core-concepts/data-model).
 
-- Tenant scope, identity, and lifecycle fields are top-level properties with equality
-  and range [secondary indexes](/database/helix-db/query-guides/secondary-indexes),
-  because nested properties cannot be indexed.
-- [Vector indexes](/database/helix-db/query-guides/vector-indexes) on the memory and
-  chunk embedding properties, one per label, serve deduplication and paraphrase recall.
+- Tenant scope, identity, and lifecycle fields are top-level properties with equality and
+  range [secondary indexes](/database/helix-db/query-guides/secondary-indexes), because
+  nested properties cannot be indexed.
+- [Vector indexes](/database/helix-db/query-guides/vector-indexes) on the memory and chunk
+  embedding properties, one per label, serve deduplication and paraphrase recall.
   [Text indexes](/database/helix-db/query-guides/text-indexes) on their text properties
   rank exact names, IDs, and rare tokens with BM25. Both can be partitioned by tenant.
 - [Prefiltered search](/database/helix-db/query-guides/prefiltering) ranks only the
-  candidate set a traversal builds, so scope and lifecycle rules apply before ranking
-  and no search result falls outside the set. Graph expansion after the search needs
-  the same filters.
+  candidate set a traversal builds, so scope and lifecycle rules apply before ranking and
+  no search result falls outside the set. Graph expansion after the search needs the same
+  filters.
 - All entries in a write batch commit or roll back together, keeping a new version, its
   edges, and the old version's invalidation consistent. See
   [guarantees](/database/helix-cloud/operate/guarantees).
@@ -219,8 +243,9 @@ fusion.
 ### What happens when you change the embedding model?
 
 Vectors from different models are not comparable, so re-embed every memory and chunk,
-embed queries with the new model, and retune deduplication thresholds, which depend on
-the model. See [vector embeddings](/learn/vector-search/what-are-vector-embeddings).
+embed queries with the new model, and retune deduplication thresholds, which depend on the
+model and the [distance metric](/learn/vector-search/vector-distance-metrics). See
+[vector embeddings](/learn/vector-search/what-are-vector-embeddings).
 
 ### How do you handle shared memory for teams?
 

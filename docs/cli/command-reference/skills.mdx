@@ -36,6 +36,7 @@ helix skills <SUBCOMMAND> [--project]
 
 - Skills are installed with the [`skills`](https://github.com/vercel-labs/skills) CLI under the hood (`npx skills add HelixDB/skills`), so this command requires **Node.js/npm** (`npx`) on your PATH.
 - Skills install **globally** by default (`~/.agents/skills`, shared across projects); `--project` works relative to the current directory.
+- `install` and `list` hand the terminal to the `skills` CLI, so they refuse `--json`. `update --json` prints `{"updated":true}`.
 
 <Note>
 `helix skills update` re-fetches the skills from source and **overwrites** their files,

@@ -274,7 +274,11 @@ impl LocalRuntime {
         } else {
             None
         };
-        crate::output::info(&format!("Image: {reference} ({id})"));
+        // A short digest identifies the image without flooding the line.
+        let short_id = id
+            .get(..id.find(':').map_or(12, |colon| colon + 13))
+            .unwrap_or(&id);
+        crate::output::info(&format!("Image: {reference} ({short_id})"));
         Ok(PreparedStart {
             config: config.clone(),
             image: id,
@@ -292,7 +296,7 @@ impl LocalRuntime {
                 Err(_) => {}
             }
         }
-        Step::verbose_substep(&format!("Pulling {image}"));
+        crate::output::verbose(&format!("Pulling {image}"));
         let output = self
             .runtime_command()
             .args(["pull", image])
@@ -1850,7 +1854,7 @@ mod tests {
     fn memory_helix_args_match_existing_run_shape() {
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.6",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             9090,
             true,
             None,
@@ -1871,7 +1875,7 @@ mod tests {
                 "9090:8080",
                 "--label",
                 "helixdb.identity=4:demo/dev",
-                "ghcr.io/helixdb/helixdb:v0.0.6",
+                "ghcr.io/helixdb/helixdb:v0.0.8",
             ]
             .into_iter()
             .map(String::from)
@@ -1884,7 +1888,7 @@ mod tests {
         let resources = disk_resources();
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.6",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             8080,
             true,
             Some(&resources.network),
@@ -1917,7 +1921,7 @@ mod tests {
         );
         let args = helix_run_args(
             "helix-my-helix-project-production",
-            "ghcr.io/helixdb/helixdb:v0.0.6",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             8080,
             true,
             Some(&resources.network),
@@ -1963,7 +1967,7 @@ mod tests {
         let env = s3_env(&config).unwrap();
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.6",
+            "ghcr.io/helixdb/helixdb:v0.0.8",
             8080,
             true,
             None,

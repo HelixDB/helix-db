@@ -1,35 +1,41 @@
 ---
 title: "What is HNSW?"
-description: "HNSW is a graph-based approximate nearest neighbor index that finds similar vectors by searching a layered proximity graph."
+description: "HNSW is a vector search index that links each vector to its nearest neighbors in layers, so a search can hop quickly to similar items."
 sidebarTitle: "HNSW"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-HNSW (Hierarchical Navigable Small World) is a graph-based approximate nearest neighbor
-(ANN) index for vector search. It links each vector to a few of its nearest neighbors
-and stacks those links in layers: sparse upper layers with long-range links, and a
-bottom layer that holds every vector. A search jumps across the collection on the upper
-layers and then refines locally, which gives high recall at low latency in exchange for
-extra memory and more complex deletes.
+HNSW (Hierarchical Navigable Small World) is an index that finds similar
+[vectors](/learn/vector-search/what-are-vector-embeddings), lists of numbers that capture
+meaning, by hopping between linked neighbors. Think of it as finding an address in a new
+city: take the highway to the right district, then walk the side streets. That shortcut
+lets a music app or an online store find similar items among millions without checking
+every one. The price is extra memory, results that are close but not guaranteed, and
+harder deletes.
 
 <div className="learn-objectives">
   <Card title="Learning objectives" icon="graduation-cap">
     After reading this article you will be able to:
 
-    - Explain how HNSW organizes vectors into a layered graph and searches it
+    - Explain how HNSW layers vectors and searches them
     - Describe what `M`, `efConstruction`, and `efSearch` control
-    - Estimate HNSW memory use and recognize the cost of deletes
-    - Compare HNSW with IVF and flat search and choose between them
+    - Estimate HNSW memory use and the cost of deletes
+    - Choose between HNSW, IVF, and flat search
   </Card>
 </div>
 
 ## How is an HNSW graph structured?
 
-An HNSW index is a proximity graph: each vector is a node, and edges connect it to some
-of its nearest neighbors. The graph is split into layers, an idea similar to a skip
-list.
+An HNSW index is a graph: each vector is a node linked to a few of its closest
+neighbors, like the nodes and edges in a
+[graph database](/learn/graph-databases/what-is-a-graph-database). Closeness comes from
+a [distance metric](/learn/vector-search/vector-distance-metrics). HNSW is widely used
+in [vector databases](/learn/vector-search/what-is-a-vector-database).
+
+The links are stacked in layers like a road map: a sparse highway on top, and a street
+grid at the bottom, layer 0, that holds every vector.
 
 ```text
 Layer 2   A ------------------------- F                  sparse, long-range links
@@ -39,77 +45,92 @@ Layer 1   A --------- C ------------- F --------- H
 Layer 0   A --- B --- C --- D --- E - F --- G --- H      every vector
 ```
 
-Every vector appears on layer 0. When a vector is added, its highest layer is drawn at
-random from an exponentially decaying distribution, and it also appears on every layer
-below that one. With the common normalization of `1 / ln(M)`, about one vector in `M`
-reaches layer 1, one in `M²` reaches layer 2, and so on. The top layers therefore hold a
-few nodes that are far apart, which lets a search cover long distances in a few hops.
-
-## How does HNSW insert a vector?
-
-Inserting a vector is a search followed by linking:
-
-1. Draw the new vector's top layer at random.
-2. Starting from the entry point on the highest layer, walk greedily toward the new
-   vector on each layer above its top layer.
-3. On each layer from its top layer down to layer 0, search for the `efConstruction`
-   closest candidates.
-4. Choose up to `M` of them as neighbors and add links in both directions.
-5. If a neighbor now has too many links, prune its list back to the limit.
-
-The link limit is `M` on the upper layers and typically `2M` on layer 0, where a denser
-graph improves recall. Neighbor selection usually uses a heuristic that prefers
-candidates closer to the new vector than to any neighbor already chosen. That spreads
-links in different directions and keeps separate clusters connected.
+Under the hood, the layering works like a skip list, a linked list with express lanes.
+Each new vector's highest layer is drawn at random from an exponentially decaying
+distribution, and the vector also appears on every layer below it. With the common
+normalization of `1 / ln(M)`, where `M` is the link limit, about one vector in `M`
+reaches layer 1, one in `M²` reaches layer 2, and so on. The few far-apart nodes on top
+let a search cover long distances in a few hops.
 
 ## How does an HNSW search work?
 
-A search walks greedily down the upper layers to a good starting node, then runs a
-best-first search on layer 0 and returns the `k` closest vectors it found:
+A search takes big jumps on the upper layers, then searches carefully on layer 0 and
+returns the `k` closest vectors it found, the top k. For example, a new support ticket
+leads the search to similar past tickets.
 
-1. Enter the graph at the entry point on the top layer.
-2. On each upper layer, move greedily to whichever neighbor is closest to the query
-   until no neighbor is closer, then drop down one layer from that node.
+Under the hood:
+
+1. Enter at the top layer's entry point.
+2. On each upper layer, move greedily, always stepping to the neighbor closest to the
+   query, until no neighbor is closer. Then drop down a layer.
 3. On layer 0, run a best-first search that keeps a list of the `efSearch` closest
    candidates found so far. It expands the nearest unexpanded candidate and stops when
-   none of the remaining candidates can improve the list.
+   no remaining candidate can improve the list.
 4. Return the `k` closest vectors from that list.
 
-Because the result comes from the candidate list, `efSearch` must be at least `k`. The
-search is approximate: a true neighbor that no explored path reaches is missed. See
-[what is vector search?](/learn/vector-search/what-is-vector-search) for exact versus
-approximate search and how recall is measured.
+So `efSearch` must be at least `k`. The search is approximate: a true neighbor that no
+explored path reaches is missed.
+[What is vector search?](/learn/vector-search/what-is-vector-search) explains exact
+versus approximate search and how recall is measured.
 
-Restrictive filters strain this walk. When few vectors qualify, the matches can be far
-apart in the graph, so a filtered search visits many nodes and recall can drop;
-[filtered vector search](/learn/vector-search/filtered-vector-search) covers the
-alternatives.
+Restrictive filters strain this walk. If a reader may open only a few pages in a
+company wiki, those matches can be far apart in the graph, so the search visits many
+nodes and recall can drop.
+[Filtered vector search](/learn/vector-search/filtered-vector-search) covers the
+alternatives. Exact words, such as a product code, are better served by
+[full-text search](/learn/full-text-search/what-is-full-text-search) with
+[BM25](/learn/full-text-search/what-is-bm25) or by
+[hybrid search](/learn/full-text-search/hybrid-search).
 
-## How do M, efConstruction, and efSearch affect recall and latency?
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Store embeddings on graph nodes and edges, and run vector search inside an exact,
+    traversal-defined candidate set with open-source HelixDB.
+  </Card>
+</div>
 
-Raising any of the three generally raises recall: `M` costs memory and insert time,
-`efConstruction` costs build time, and `efSearch` costs query latency.
+## How does HNSW add a new vector?
 
-| Parameter | Set at | Controls | Raising it |
-| --- | --- | --- | --- |
-| `M` | Build time | Maximum links per node on upper layers (typically `2M` on layer 0) | Higher recall, more memory, slower inserts |
-| `efConstruction` | Build time | Candidate list size when choosing neighbors | Better graph quality, slower builds |
-| `efSearch` | Query time | Candidate list size during search | Higher recall, higher latency |
+Adding a vector is a search followed by linking:
+
+1. Draw the new vector's top layer at random.
+2. From the entry point on the highest layer, walk greedily toward the new vector on
+   each layer above its top layer.
+3. On each layer from its top layer down to layer 0, find the `efConstruction` closest
+   candidates.
+4. Choose up to `M` of them as neighbors and link them in both directions.
+5. If a neighbor now has too many links, prune its list back to the limit.
+
+The limit is `M` on the upper layers and typically `2M` on layer 0, where a denser
+graph improves recall. Neighbor selection usually uses a heuristic, or rule of thumb,
+that prefers candidates closer to the new vector than to any neighbor already chosen.
+That spreads links in different directions and keeps separate clusters connected.
+
+## How do M, efConstruction, and efSearch change speed and accuracy?
+
+Raising any of the three generally improves recall, the share of the true nearest
+neighbors a search returns. Each has a cost:
+
+- **`M`** (build time): maximum links per node on the upper layers. Costs memory and
+  insert time.
+- **`efConstruction`** (build time): candidate list size when choosing neighbors.
+  Costs build time.
+- **`efSearch`** (query time, typically set per query): candidate list size during
+  search. Costs latency, the time each query takes.
 
 `efSearch` is the usual tuning knob. Recall rises quickly at small values and then
-flattens, so each additional point of recall near the top costs more latency than the
-last. Many systems tune it by running a sample of real queries with both exact search
-and HNSW, then picking the smallest value that meets a recall target. `M` and
-`efConstruction` limit what `efSearch` can achieve: a poorly connected graph needs a
-much larger `efSearch` to reach the same recall, and recall can plateau below the
-target.
+flattens, so each extra point near the top costs more latency than the last.
+
+`M` and `efConstruction` limit what `efSearch` can achieve: a poorly connected graph
+needs a much larger `efSearch` for the same recall, and recall can plateau below the
+target. Changing either one typically means rebuilding the index.
 
 ## How much memory does an HNSW index use?
 
-An HNSW index uses roughly the size of the vectors plus about `2 × M × 4` bytes of
-layer-0 links per vector, so at typical dimensions the vectors dominate. With 32-bit
-floats and 32-bit node IDs, a rough estimate for one million 768-dimension vectors
-with `M = 16` is:
+About the size of the vectors plus a little for the links, so at typical dimensions the
+vectors dominate. Each vector adds about `2 × M × 4` bytes of layer-0 links. With
+32-bit floats and 32-bit node IDs, one million 768-dimension vectors with `M = 16`
+need roughly:
 
 | Component | Per vector | One million vectors |
 | --- | --- | --- |
@@ -118,43 +139,44 @@ with `M = 16` is:
 | Total, before upper layers and overhead | 3,200 bytes | 3.2 GB |
 
 Upper layers add only a few megabytes, since about one vector in 16 appears above layer
-0. Search makes many small, random reads as it hops between nodes, so HNSW indexes are
-typically kept in memory.
+0. Search makes many small, random reads as it hops, so HNSW indexes are typically kept
+in memory.
 
-Quantization reduces the vector cost. Scalar quantization stores each dimension in
-fewer bits, for example 1 byte instead of 4, while product quantization splits each
-vector into subvectors and replaces each with a short code from a learned codebook.
-Distances on compressed vectors are approximate, so systems often re-score the best
+Quantization cuts the vector cost by compressing vectors. Scalar quantization stores
+each dimension in fewer bits, such as 1 byte instead of 4. Product quantization splits
+each vector into subvectors and replaces each with a short code from a learned
+codebook. Compressed distances are approximate, so systems often re-score the best
 candidates with full-precision vectors.
 
 ## How does HNSW handle updates and deletes?
 
-Most implementations mark a deleted vector as a tombstone instead of removing it, and
-handle a vector update as a delete followed by an insert. Removing a node outright can
-break paths that other searches rely on, so the tombstone stays in the graph: it still
-helps navigation but is never returned. Tombstones consume memory and search work, and
-when many nodes in a region are deleted, that part of the graph becomes poorly
-connected and recall can fall. Implementations typically handle this by repairing the
-neighbors' links, reusing deleted slots for new vectors, or rebuilding the index
-periodically.
+Deletes are the awkward part. Most implementations mark a deleted vector as a
+tombstone, a hidden placeholder, and treat an update as a delete plus an insert.
+Removing a node outright can break paths that other searches rely on, so the tombstone
+stays: it still helps navigation but is never returned.
 
-An update moves the vector, so its correct neighbors change. Updates to metadata that
-is not part of the vector leave the graph unchanged.
+Tombstones consume memory and search work. When many nodes in one region are deleted,
+say when an online store drops a product line, that part of the graph becomes poorly
+connected and recall can fall. Implementations typically repair the neighbors' links,
+reuse deleted slots, or rebuild the index periodically.
+
+Changing a vector moves it, so its correct neighbors change. Changing metadata outside
+the vector, such as a price, leaves the graph unchanged.
 
 ## How does HNSW compare with IVF and flat search?
 
-Flat search is exact but scans everything, IVF scans a few k-means partitions, and
-HNSW walks a layered graph, which typically gives the lowest latency at high recall but
-uses the most memory beyond the vectors.
+Flat search checks every vector, IVF checks a few groups, and HNSW walks a layered
+graph. HNSW typically gives the lowest latency at high recall, but uses the most memory
+beyond the vectors.
 
-**Flat search** compares the query with every vector. It needs no index and always
-returns the true top k, but its cost grows linearly with the collection.
+**Flat search**, or brute force, is exact, but its cost grows linearly with the
+collection.
 
-**IVF** (inverted file) partitions the collection instead of linking it. A k-means step
-chooses a set of centroids, and each vector is filed in the list of its nearest
-centroid. A query is compared with the centroids, and only the lists of the closest
-few, a number often called `nprobe`, are scanned. Raising `nprobe` trades latency for
-recall, as `efSearch` does for HNSW.
+**IVF** (inverted file) groups vectors instead of linking them. A k-means clustering
+step chooses centroids, or cluster centers, and files each vector under its nearest
+one. A query is compared with the centroids, and only the lists of the closest few, a
+number often called `nprobe`, are scanned. Raising `nprobe` trades latency for recall,
+as `efSearch` does for HNSW.
 
 | | Flat | IVF | HNSW |
 | --- | --- | --- | --- |
@@ -168,27 +190,32 @@ recall, as `efSearch` does for HNSW.
 
 In practice:
 
-- **Flat** fits small collections and small candidate sets, such as one user's
-  documents.
+- **Flat** fits small collections and small candidate sets, such as one user's files in a
+  [retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag) chatbot.
 - **HNSW** fits when the index fits in memory, data arrives incrementally, and low
-  latency at high recall matters.
-- **IVF** fits very large collections where memory is the main constraint, often
-  combined with product quantization. It needs training data, and centroids can need
-  retraining as the data shifts.
+  latency at high recall matters, as with
+  [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory) that grows with each
+  conversation.
+- **IVF** fits very large collections where memory is the main constraint, often with
+  product quantization. It needs training data, and centroids can need retraining as
+  the data shifts.
 
 ## How does HelixDB support vector search?
 
 HelixDB stores application-computed embeddings in vector indexes and runs approximate
-nearest neighbor search over them, optionally inside a traversal-defined candidate set.
+nearest neighbor search over them, optionally inside a candidate set defined by a graph
+traversal in the
+[same database](/learn/database-architecture/one-database-for-graph-vector-and-text).
 This page describes HNSW in general, not HelixDB's implementation.
 
-- A vector index covers one label and one top-level property on nodes or edges, with a
-  fixed dimension and one distance metric: cosine, Euclidean, or Manhattan.
-- Search is approximate nearest neighbor search, and the documentation states over 90%
-  recall. Results are ordered by distance, closest first, then by ID.
-- Vector indexes can be partitioned by tenant, with a separate index per tenant value.
-- Creating an index backfills existing data asynchronously. The index becomes visible
-  only after validation and atomic activation.
+- A vector index covers one label and one top-level property on nodes or edges of a
+  [property graph](/learn/graph-databases/what-is-a-property-graph), with a fixed
+  dimension and one distance metric: cosine, Euclidean, or Manhattan.
+- The documentation states over 90% recall. Results are ordered by distance, closest
+  first, then by ID.
+- Vector indexes can be partitioned by tenant.
+- Index creation backfills existing data asynchronously, and the index activates
+  atomically after validation.
 - A result outside the traversal-defined candidate set is never returned.
 
 See [vector indexes](/database/helix-db/query-guides/vector-indexes) and
@@ -198,30 +225,23 @@ See [vector indexes](/database/helix-db/query-guides/vector-indexes) and
 
 ### What does Hierarchical Navigable Small World mean?
 
-A navigable small world is a graph in which a greedy walk, always stepping to the
-neighbor closest to the target, reaches any node in a small number of hops.
-"Hierarchical" refers to the layers, which let the walk start with long jumps and
-narrow down. The method was first described in a 2016 research paper.
+A navigable small world is a graph in which a greedy walk, always stepping toward the
+target, reaches any node in a few hops. "Hierarchical" refers to the layers, which let
+the walk start with long jumps and narrow down. The method was first described in a
+2016 research paper.
 
 ### What are reasonable starting values for M and efSearch?
 
-Many implementations default `M` to between 16 and 32 and `efConstruction` to
-somewhere between about 40 and 200.
+Many implementations default `M` to 16 to 32 and `efConstruction` to about 40 to 200.
 Start `efSearch` at or above `k`, then raise it while measuring recall against exact
-search on real queries. High-dimensional or hard-to-separate data often benefits from a
-larger `M`.
-
-### Can I change HNSW parameters after building the index?
-
-`efSearch` is typically a per-query setting, so it can change at any time. `M` and
-`efConstruction` determine how the graph was built, so changing them typically
-requires rebuilding the index.
+search on real queries, and keep the smallest value that meets your recall target.
+High-dimensional or hard-to-separate data often benefits from a larger `M`.
 
 ### Does HNSW return the same results every time?
 
-For a fixed index and the same settings, a query typically returns the same results.
-Two builds over the same data can differ, though, because layer assignment is random
-and insertion order affects which links are formed.
+For a fixed index and the same settings, typically yes. Two builds over the same data
+can differ because layer assignment is random and insertion order affects
+which links form.
 
 ## Related topics
 

@@ -466,3 +466,14 @@ body:has(.learn-tiles, .learn-objectives) #navigation-items ul:has(> li > a.nav-
 body:has(.learn-tiles) #content-container {
     max-width: none;
 }
+
+/* Learn: mid-article call to action. */
+.learn-cta .card {
+    border: 1px solid rgba(242, 100, 25, 0.45);
+    background-color: rgba(242, 100, 25, 0.06);
+}
+
+.learn-cta .card span {
+    text-transform: none;
+    font-family: inherit;
+}

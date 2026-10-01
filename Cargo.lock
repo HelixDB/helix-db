@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "helix-cli"
-version = "3.3.0"
+version = "3.4.1"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -2078,6 +2078,7 @@ dependencies = [
  "clap",
  "cliclack",
  "color-eyre",
+ "console 0.15.11",
  "dirs",
  "dotenvy",
  "dunce",

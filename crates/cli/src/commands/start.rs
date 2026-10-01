@@ -1,8 +1,8 @@
 use crate::config::{InstanceInfo, LocalInstanceConfig, LocalStorageMode, S3StorageConfig};
+use crate::errors::CliError;
 use crate::local_runtime::LocalRuntime;
-use crate::output::{Operation, Verbosity};
+use crate::output::{self, Operation};
 use crate::project::ProjectContext;
-use crate::prompts;
 use eyre::{eyre, Result};
 
 pub async fn run(
@@ -14,11 +14,18 @@ pub async fn run(
     image: crate::image::ImageArgs,
     persist: bool,
 ) -> Result<()> {
+    if foreground && output::OutputMode::current().is_json() {
+        return Err(
+            CliError::new("--foreground streams container logs, so it has no JSON result")
+                .with_hint("drop --foreground to start in the background and get a JSON result")
+                .into(),
+        );
+    }
     let mut project = ProjectContext::find_and_load(None)?;
     let _ = dotenvy::from_path(project.root.join(".env"));
-    let instance = resolve_local_instance(&project, instance)?;
+    let instance = project.resolve_local_instance(instance, "Start which local instance?")?;
     let InstanceInfo::Local(config) = project.config.get_instance(&instance)? else {
-        return Err(eyre!("'{instance}' is not a local v2 instance"));
+        unreachable!("resolve_local_instance only returns local instances");
     };
     let mut config = config.clone();
     if let Some(port) = port {
@@ -47,24 +54,28 @@ pub async fn run(
         project
             .config
             .save_to_file(&project.root.join("helix.toml"))?;
-        crate::output::info("Saved port, storage, and image settings to helix.toml.");
+        output::info("Saved port, storage, and image settings to helix.toml.");
     }
 
     warn_about_storage(&project, &instance, &config);
 
     if foreground {
-        crate::output::info("Running in foreground. Press Ctrl-C to stop.");
+        output::info("Running in foreground. Press Ctrl-C to stop.");
         runtime.run_foreground(&instance, prepared).await?;
         op.success();
     } else {
         runtime.run_detached(&instance, prepared)?;
+        let url = format!("http://localhost:{}", config.port);
+        let container = runtime.container_name(&instance);
+        output::note(
+            &instance,
+            &output::table::key_values(&[("URL", url.clone()), ("Container", container.clone())]),
+        );
         op.success();
-        if Verbosity::current().show_normal() {
-            Operation::print_details(&[
-                ("URL", &format!("http://localhost:{}", config.port)),
-                ("Container", &runtime.container_name(&instance)),
-            ]);
-        }
+        output::emit(
+            &serde_json::json!({"instance": instance, "url": url, "container": container}),
+            |_| Ok(()),
+        )?;
     }
 
     Ok(())
@@ -107,13 +118,13 @@ fn apply_s3_overrides(config: &mut LocalInstanceConfig, s3: &crate::S3StorageArg
 /// the instance workspace) so repeat runs stay quiet.
 fn warn_about_storage(project: &ProjectContext, instance: &str, config: &LocalInstanceConfig) {
     if config.storage.is_disk() {
-        crate::output::info(
+        output::info(
             "Local HelixDB is using on-disk storage. 'helix stop' preserves data; 'helix prune' deletes it.",
         );
         return;
     }
     if config.storage.is_s3() {
-        crate::output::info(
+        output::info(
             "Local HelixDB is using remote S3 storage. 'helix stop', 'helix restart', and 'helix prune' do not delete remote data.",
         );
         return;
@@ -123,35 +134,8 @@ fn warn_about_storage(project: &ProjectContext, instance: &str, config: &LocalIn
     if marker.exists() {
         return;
     }
-    crate::output::warning(
+    output::warning(
         "Local HelixDB uses in-memory storage. Stopping or restarting wipes local data.",
     );
     let _ = std::fs::write(&marker, b"");
-}
-
-fn resolve_local_instance(project: &ProjectContext, instance: Option<String>) -> Result<String> {
-    if let Some(instance) = instance {
-        return Ok(instance);
-    }
-    if prompts::is_interactive() && project.config.local.len() > 1 {
-        return prompts::select_instance(&local_instances(project), "Run which local instance?");
-    }
-    if project.config.local.contains_key("dev") {
-        return Ok("dev".to_string());
-    }
-    if project.config.local.len() == 1 {
-        return Ok(project.config.local.keys().next().unwrap().clone());
-    }
-    Err(eyre!("No local instance specified"))
-}
-
-fn local_instances(project: &ProjectContext) -> Vec<(String, String)> {
-    let mut instances: Vec<(String, String)> = project
-        .config
-        .local
-        .iter()
-        .map(|(name, config)| (name.clone(), format!("http://localhost:{}", config.port)))
-        .collect();
-    instances.sort_by(|a, b| a.0.cmp(&b.0));
-    instances
 }

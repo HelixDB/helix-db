@@ -63,6 +63,14 @@ structure is fixed:
   "Learning objectives").
 - Phrase every `##` section as a question, with the answer directly below it. The right-hand
   "On this page" list then reads as the questions the page answers.
+- Write for a newcomer: open with a plain definition of 25 words or fewer, then an
+  everyday comparison. Gloss jargon on first use, lead each section with the simple answer,
+  and put formulas and parameters after it. Use generic real-world scenarios, not real
+  company names.
+- Link each concept another Learn page covers on its first mention, aiming for at least
+  eight Learn links per 1,000 words.
+- Add one call-to-action block (`<div className="learn-cta">` wrapping a `Card` titled
+  "Try HelixDB") after the second or third section.
 - Teach the concept vendor-neutrally. Do not name or characterize other vendors.
 - Keep HelixDB to one `## How does HelixDB ...?` section near the end, stating only facts the
   product docs already support, and link to the guides.

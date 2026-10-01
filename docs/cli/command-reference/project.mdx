@@ -13,18 +13,18 @@ Cloud only.
 ## Usage
 
 ```bash
-helix project list [--workspace-id <id>] [--format human|json]
-helix project get [<project-id>] [--format human|json]
-helix project create --workspace <id> --slug <slug> --name <name>
-helix project delete [<project-id>] [--yes]
-helix project link <project-id> [--workspace <id>]
+helix project [list] [--workspace <workspace>]
+helix project get [PROJECT] [--workspace <workspace>]
+helix project create <NAME> [--slug <slug>] [--workspace <workspace>] [--link]
+helix project delete [PROJECT] [--workspace <workspace>] [--yes]
+helix project link [PROJECT] [--workspace <workspace>]
 ```
 
 ## Subcommands
 
 | Subcommand | Description |
 | --- | --- |
-| `list` | List projects in a workspace. |
+| `list` | List projects in a workspace. The default when no subcommand is given. |
 | `get` | Show one project. |
 | `create` | Create a project in a workspace. |
 | `delete` | Delete a project. |
@@ -34,41 +34,45 @@ helix project link <project-id> [--workspace <id>]
 
 | Argument | Description |
 | --- | --- |
-| `PROJECT_ID` | Project to act on. Required for `link`; `get` and `delete` default to the project linked in `helix.toml`. |
+| `PROJECT` | Project ID, slug, or name. `get` and `delete` default to the project linked in `helix.toml`; `link` prompts when omitted. |
+| `NAME` | `create`: project display name. Required. |
 
 ## Options
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--workspace-id <ID>` | `list`: workspace whose projects to list. | Workspace linked in `helix.toml` |
-| `--workspace <ID>` | `create`: owning workspace (required). `link`: fail unless the project belongs to this workspace. | — |
-| `--slug <SLUG>` | `create`: project slug. Required. | — |
-| `--name <NAME>` | `create`: project display name. Required. | — |
-| `-y`, `--yes` | `delete`: skip the confirmation prompt. Required in non-interactive shells. | Off |
-| `--format <FORMAT>` | `list`, `get`, `create`: `human` or `json`. | `human` |
+| `--workspace <WORKSPACE>` | Workspace ID, slug, or name to list, search, or create in. | Linked workspace, then the only workspace |
+| `--slug <SLUG>` | `create`: URL-safe project slug. | Derived from `NAME` |
+| `--link` | `create`: also link this directory's `helix.toml` to the new project. | Off |
+| `-y`, `--yes` | `delete`: skip the confirmation prompt. Required without a terminal or with `--json`. | Off |
+| `--json` | Print the result as JSON on stdout and never prompt. | Off |
 
 ## Behavior
 
-- `link` persists the stable project/workspace IDs only in the current project's `helix.toml`, and sets `[project] name` to the Cloud project's display name.
-- `link` does not create global selection state.
-- `delete` asks for confirmation in a terminal.
+- Arguments and defaults resolve as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution). A project slug or name without `--workspace` is searched for in every workspace you can access.
+- `list` marks the project linked in `helix.toml`.
+- `link` writes `[project] id` and `workspace_id` to the current project's `helix.toml`. It keeps the local `[project] name`, which names local containers, and creates no global selection state. It ignores an existing link, so it can relink a directory.
+- `delete` asks for confirmation in a terminal. Without one, or with `--json`, it fails before any request unless you pass `--yes`. It deletes the named or linked project only; it never picks a workspace's only project on its own. With `--json` it prints `{"deleted":{"kind":"project","id":"..."}}`.
 - `project update` is not supported.
 
 ## Examples
 
 ```bash
-# List projects in a workspace
-helix project list --workspace-id <id>
+# List projects in the linked or only workspace
+helix project
 
-# Create a project and print it as JSON
-helix project create --workspace <id> --slug demo --name "Demo" --format json
+# Create a project and link this directory to it
+helix project create "Demo App" --link
 
-# Link this directory's helix.toml to an existing project
-helix project link <project-id>
+# Link this directory's helix.toml to an existing project by slug
+helix project link demo-app
+
+# Delete a project without a prompt
+helix project delete demo-app --yes
 ```
 
 ## Related
 
-- [`helix workspace`](/cli/command-reference/workspace) — find workspace IDs.
+- [`helix workspace`](/cli/command-reference/workspace) — list your workspaces.
 - [`helix database`](/cli/command-reference/database) — manage the project's databases.
 - [CLI configuration](/cli/configuration) — how the link is stored in `helix.toml`.
