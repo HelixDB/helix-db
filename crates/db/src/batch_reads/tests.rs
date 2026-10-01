@@ -182,14 +182,16 @@ async fn concurrent_runs_match_one_call_in_caller_order() {
         assert_eq!(single.calls().len(), 1, "single {len}");
 
         let concurrent = Recording::new(&db, Fault::None);
+        let extra_runs = Semaphore::new(PROCESS_EXTRA_RUNS);
         assert_eq!(
             BatchReads::Concurrent
-                .multi_get(&concurrent, &keys)
+                .multi_get_within(&concurrent, &keys, &extra_runs)
                 .await
                 .unwrap(),
             expected,
             "concurrent {len}"
         );
+        assert_eq!(extra_runs.available_permits(), PROCESS_EXTRA_RUNS);
         let run_keys = BatchReads::Concurrent.run_keys(keys.len());
         let calls = concurrent.calls();
         assert_eq!(
@@ -287,5 +289,34 @@ async fn a_short_read_fails_closed() {
             matches!(error, HelixDbError::InvariantViolation(ref message) if message.starts_with("multi_get returned")),
             "{batch_reads:?}: {error}"
         );
+    }
+}
+
+/// Runs beyond the first come only from the free allowance: a batch never
+/// waits for it, reads its runs one at a time when none is free, and returns
+/// what it took.
+#[tokio::test]
+async fn extra_runs_come_only_from_the_free_allowance() {
+    let db = database(1..=64).await;
+    let keys = (1..=64).map(key).collect::<Vec<_>>();
+    let expected = BatchReads::Single.multi_get(&db, &keys).await.unwrap();
+    for (free, peak) in [(0, 1), (3, 4), (15, 16), (40, 16)] {
+        let extra_runs = Semaphore::new(free);
+        let read = Recording::new(&db, Fault::None);
+        assert_eq!(
+            BatchReads::Concurrent
+                .multi_get_within(&read, &keys, &extra_runs)
+                .await
+                .unwrap(),
+            expected,
+            "{free} free"
+        );
+        assert_eq!(read.calls().len(), 16, "{free} free");
+        assert_eq!(
+            read.peak_in_flight.load(Ordering::SeqCst),
+            peak,
+            "{free} free"
+        );
+        assert_eq!(extra_runs.available_permits(), free, "{free} free");
     }
 }

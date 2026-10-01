@@ -512,7 +512,8 @@ mod tests {
             .await,
             Err(HelixDbError::InvariantViolation(_))
         ));
-        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 0);
+        let work = ctx.pull_work.snapshot();
+        assert_eq!((work.raw_gets, work.multi_get_keys), (0, 0));
     }
 
     /// Every materializer checks the deadline per item before reading, and

@@ -82,14 +82,11 @@ impl<'db> ExecutionContext<'db> {
         ) {
             (Some(active), _, _) => batch_reads.multi_get(&active.txn, keys).await,
             (None, Some(view), _) => batch_reads.multi_get(view, keys).await,
+            // Live handles are not one view, so tests read them with one call.
             #[cfg(test)]
-            (None, None, HelixStorage::Reader(reader)) => {
-                batch_reads.multi_get(reader.as_ref(), keys).await
-            }
+            (None, None, HelixStorage::Reader(reader)) => Ok(reader.multi_get(keys).await?),
             #[cfg(test)]
-            (None, None, HelixStorage::Writer(writer)) => {
-                batch_reads.multi_get(writer.db(), keys).await
-            }
+            (None, None, HelixStorage::Writer(writer)) => Ok(writer.multi_get(keys).await?),
             #[cfg(not(test))]
             (None, None, _) => Err(HelixDbError::InvariantViolation(
                 "storage multi-get escaped its request read view".to_string(),

@@ -9,12 +9,18 @@
 //! and resolves the runs concurrently, so a cold batch waits for about one
 //! run's worth of fetches instead.
 //!
-//! Every run reads the same view: transactions and snapshots bound each call
-//! by their start sequence, so a batch returns exactly what one call would.
+//! Every run must read the same view, so a batch returns exactly what one
+//! call would: callers pass a transaction, snapshot or request read view,
+//! which bound each call by their start sequence, never a live database
+//! handle.
+//!
+//! Runs beyond the first draw from one process-wide allowance, so a burst of
+//! cold requests cannot multiply its object-store downloads without bound.
 
 use bytes::Bytes;
 use futures::StreamExt as _;
 use slatedb::DbReadOps;
+use tokio::sync::Semaphore;
 
 use crate::error::{HelixDbError, Result};
 
@@ -28,6 +34,14 @@ const MAX_RUN_KEYS: usize = 32;
 /// Runs in flight per batch. With [`MAX_RUN_KEYS`] this bounds one batch to
 /// 16 outstanding block fetches, the same as the vector chunking it replaces.
 const MAX_RUNS_IN_FLIGHT: usize = 16;
+/// Runs beyond each batch's first that every batch in the process may have in
+/// flight together. A cold run holds up to one object-store part (4 MiB)
+/// while it downloads, so this bounds a burst of concurrent cold requests to
+/// about 256 MiB of part buffers and as many connections.
+const PROCESS_EXTRA_RUNS: usize = 64;
+
+/// The process-wide allowance of [`PROCESS_EXTRA_RUNS`].
+static EXTRA_RUNS: Semaphore = Semaphore::const_new(PROCESS_EXTRA_RUNS);
 
 /// How a database resolves one batch of point reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,11 +88,31 @@ impl BatchReads {
     /// Reads `keys` through `read`, one value or absence per key, in caller
     /// order.
     ///
-    /// Duplicate keys are allowed and read the same value. The first failed
-    /// run fails the batch and cancels the others, so no partial result
-    /// escapes. A backend that returns the wrong number of rows fails closed
-    /// with [`HelixDbError::InvariantViolation`].
+    /// `read` must be one consistent view (a transaction, snapshot or request
+    /// read view): each run is its own call, and only a view bound to a start
+    /// sequence makes the runs agree. Duplicate keys then read the same value.
+    /// The first failed run fails the batch and cancels the others, so no
+    /// partial result escapes. A backend that returns the wrong number of
+    /// rows fails closed with [`HelixDbError::InvariantViolation`].
     pub(crate) async fn multi_get<R, K>(self, read: &R, keys: &[K]) -> Result<Vec<Option<Bytes>>>
+    where
+        R: DbReadOps + Sync + ?Sized,
+        K: AsRef<[u8]> + Send + Sync,
+    {
+        self.multi_get_within(read, keys, &EXTRA_RUNS).await
+    }
+
+    /// [`Self::multi_get`], drawing runs beyond the first from `extra_runs`.
+    ///
+    /// The batch takes the extra runs that are free when it starts, never
+    /// waiting for one, and returns them when it ends: with none free it
+    /// still reads its runs one at a time.
+    async fn multi_get_within<R, K>(
+        self,
+        read: &R,
+        keys: &[K],
+        extra_runs: &Semaphore,
+    ) -> Result<Vec<Option<Bytes>>>
     where
         R: DbReadOps + Sync + ?Sized,
         K: AsRef<[u8]> + Send + Sync,
@@ -87,6 +121,12 @@ impl BatchReads {
         if keys.len() <= run_keys {
             return one_row_per_key(keys.len(), read.multi_get(keys).await?);
         }
+        let wanted = keys.len().div_ceil(run_keys).min(MAX_RUNS_IN_FLIGHT) - 1;
+        let extra = (1..=wanted)
+            .rev()
+            .find_map(|runs| extra_runs.try_acquire_many(runs as u32).ok());
+        // `extra` holds its permits until the batch ends.
+        let width = 1 + extra.as_ref().map_or(0, |permits| permits.num_permits());
         // Contiguous runs of sorted keys keep keys that share an SST, a block
         // or an object-store part in one call, whatever order the caller used.
         let mut order = (0..keys.len()).collect::<Vec<_>>();
@@ -105,7 +145,7 @@ impl BatchReads {
                 .zip(sorted.chunks(run_keys));
             let mut in_flight = futures::stream::FuturesUnordered::new();
             loop {
-                while in_flight.len() < MAX_RUNS_IN_FLIGHT {
+                while in_flight.len() < width {
                     let Some((slots, run)) = runs.next() else {
                         break;
                     };
