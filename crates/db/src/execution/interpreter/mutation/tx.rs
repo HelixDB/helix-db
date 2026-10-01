@@ -4,6 +4,11 @@
 //! transaction without its catalog snapshot and transaction-local vector-cache
 //! writes. Canonical V2 generations remain in the transaction-owned family
 //! mutation sets.
+//!
+//! Membership sets resolved in the request transaction stay cached across its
+//! writes: each operation forgets only the sets whose node index footprint
+//! its writes reached. Opening, committing, or aborting the transaction, and
+//! isolated mutation scopes, forget every set.
 
 use slatedb::{DbTransaction, IsolationLevel};
 
@@ -38,6 +43,8 @@ impl<'db> ExecutionContext<'db> {
             "a request write scope can only be enabled once"
         );
         let (txn, index_context) = self.begin_write_tx().await?;
+        // Sets read before the transaction came from another snapshot.
+        self.prepared_memberships.clear();
         self.request_write_scope =
             RequestWriteScopeState::Active(Box::new(ActiveWriteTx { txn, index_context }));
         Ok(())
@@ -45,6 +52,7 @@ impl<'db> ExecutionContext<'db> {
 
     /// Drops any active transaction to abort the write request.
     pub(in crate::execution::interpreter) fn abort_request_write_scope(&mut self) {
+        self.prepared_memberships.clear();
         self.request_write_scope = RequestWriteScopeState::Disabled;
     }
 
@@ -52,6 +60,8 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) async fn commit_request_write_scope(
         &mut self,
     ) -> Result<()> {
+        // Later reads use another snapshot.
+        self.prepared_memberships.clear();
         let state = std::mem::replace(
             &mut self.request_write_scope,
             RequestWriteScopeState::Disabled,
@@ -124,9 +134,6 @@ impl<'db> ExecutionContext<'db> {
     /// Direct focused mutation calls that did not enable a request scope open an
     /// isolated transaction. Request execution already owns its transaction.
     pub(super) async fn take_or_begin_write_scope(&mut self) -> Result<MutationWriteScope> {
-        // Every mutation enters here, and any of them can change a resolved
-        // membership set.
-        self.prepared_memberships.clear();
         let state = std::mem::replace(
             &mut self.request_write_scope,
             RequestWriteScopeState::Disabled,
@@ -149,12 +156,21 @@ impl<'db> ExecutionContext<'db> {
     }
 
     /// Returns request state to the ADT or commits an isolated mutation scope.
-    pub(super) async fn finish_write_scope(&mut self, scope: MutationWriteScope) -> Result<()> {
+    ///
+    /// Membership sets read in the request transaction stay exact unless this
+    /// operation's writes reached their footprint, so only those are
+    /// forgotten. An isolated scope read and committed its own snapshot,
+    /// which may be newer than the view the cached sets came from, so it
+    /// forgets every set. Only direct operation calls reach it: request
+    /// execution opens its write scope first.
+    pub(super) async fn finish_write_scope(&mut self, mut scope: MutationWriteScope) -> Result<()> {
         if scope.request_scoped {
             assert!(
                 matches!(self.request_write_scope, RequestWriteScopeState::Disabled),
                 "taken request write state must remain empty until returned"
             );
+            self.prepared_memberships
+                .forget_writes(&scope.index_context.take_node_index_writes());
             self.request_write_scope = RequestWriteScopeState::Active(Box::new(ActiveWriteTx {
                 txn: scope.txn,
                 index_context: scope.index_context,
@@ -162,6 +178,7 @@ impl<'db> ExecutionContext<'db> {
             return Ok(());
         }
 
+        self.prepared_memberships.clear();
         self.commit_write_tx(ActiveWriteTx {
             txn: scope.txn,
             index_context: scope.index_context,

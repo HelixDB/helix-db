@@ -6,6 +6,7 @@ mod aggregate;
 mod bounds;
 mod eval;
 mod filter;
+mod membership_cache;
 mod order;
 mod projection;
 mod sets;
@@ -15,7 +16,8 @@ mod values;
 mod tests;
 
 pub(super) use self::eval::property_value_is_in;
-pub(super) use self::filter::{MembershipCursor, PreparedMemberships, RowDecision};
+pub(super) use self::filter::{MembershipCursor, RowDecision};
+pub(super) use self::membership_cache::PreparedMemberships;
 pub(super) use self::values::ast_to_db_value;
 
 impl<'db> ExecutionContext<'db> {
