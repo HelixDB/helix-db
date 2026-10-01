@@ -3205,8 +3205,8 @@ mod tests {
                 .unwrap();
             });
 
-        // (batch length, concurrent calls): 4-key runs up to 64 keys, then
-        // runs that spread the batch over 16, capped at 32 keys.
+        // (batch length, most concurrent calls): 4-key runs up to 64 keys,
+        // then runs that spread the batch over 16, capped at 32 keys.
         for (batch_len, concurrent_calls) in [(3, 1), (20, 5), (32, 8), (1_031, 33)] {
             // Descending order is the opposite of physical key order.
             let node_ids = (1..=batch_len).rev().collect::<Vec<NodeId>>();
@@ -3231,10 +3231,13 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(rows, expected, "{batch_reads:?} {batch_len}");
-                assert_eq!(
-                    read.multi_gets.load(std::sync::atomic::Ordering::Relaxed),
-                    multi_gets,
-                    "{batch_reads:?} {batch_len}"
+                // Concurrent runs are sized to the share of the process-wide
+                // allowance free at the time, so tests running alongside can
+                // only lower the count.
+                let calls = read.multi_gets.load(std::sync::atomic::Ordering::Relaxed);
+                assert!(
+                    (1..=multi_gets).contains(&calls),
+                    "{batch_reads:?} {batch_len}: {calls} calls"
                 );
             }
         }

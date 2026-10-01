@@ -251,9 +251,10 @@ async fn every_run_reads_the_transaction_view() {
     assert_eq!(expected[3], Some(Bytes::from(key(4))));
 
     let read = Recording::new(&txn, Fault::None);
+    let extra_runs = Semaphore::new(PROCESS_EXTRA_RUNS);
     assert_eq!(
         BatchReads::Concurrent
-            .multi_get(&read, &keys)
+            .multi_get_within(&read, &keys, &extra_runs)
             .await
             .unwrap(),
         expected
@@ -269,7 +270,11 @@ async fn a_failed_run_fails_the_batch() {
     let keys = (1..=33).map(key).collect::<Vec<_>>();
     for (batch_reads, failing_call) in [(BatchReads::Single, 1), (BatchReads::Concurrent, 5)] {
         let read = Recording::new(&db, Fault::FailCall(failing_call));
-        let error = batch_reads.multi_get(&read, &keys).await.unwrap_err();
+        let extra_runs = Semaphore::new(PROCESS_EXTRA_RUNS);
+        let error = batch_reads
+            .multi_get_within(&read, &keys, &extra_runs)
+            .await
+            .unwrap_err();
         assert!(
             matches!(error, HelixDbError::Storage(_)),
             "{batch_reads:?}: {error}"
@@ -284,7 +289,11 @@ async fn a_short_read_fails_closed() {
     let keys = (1..=33).map(key).collect::<Vec<_>>();
     for batch_reads in [BatchReads::Single, BatchReads::Concurrent] {
         let read = Recording::new(&db, Fault::ShortRead);
-        let error = batch_reads.multi_get(&read, &keys).await.unwrap_err();
+        let extra_runs = Semaphore::new(PROCESS_EXTRA_RUNS);
+        let error = batch_reads
+            .multi_get_within(&read, &keys, &extra_runs)
+            .await
+            .unwrap_err();
         assert!(
             matches!(error, HelixDbError::InvariantViolation(ref message) if message.starts_with("multi_get returned")),
             "{batch_reads:?}: {error}"
@@ -293,14 +302,15 @@ async fn a_short_read_fails_closed() {
 }
 
 /// Runs beyond the first come only from the free allowance: a batch never
-/// waits for it, reads its runs one at a time when none is free, and returns
-/// what it took.
+/// waits for it, sizes its runs to the overlap it was granted (one call when
+/// none is free), and returns what it took.
 #[tokio::test]
 async fn extra_runs_come_only_from_the_free_allowance() {
     let db = database(1..=64).await;
     let keys = (1..=64).map(key).collect::<Vec<_>>();
     let expected = BatchReads::Single.multi_get(&db, &keys).await.unwrap();
-    for (free, peak) in [(0, 1), (3, 4), (15, 16), (40, 16)] {
+    // (free extra runs, calls, peak in flight) for 64 keys in 4-key runs.
+    for (free, calls, peak) in [(0, 1, 1), (3, 4, 4), (7, 8, 8), (15, 16, 16), (40, 16, 16)] {
         let extra_runs = Semaphore::new(free);
         let read = Recording::new(&db, Fault::None);
         assert_eq!(
@@ -311,7 +321,7 @@ async fn extra_runs_come_only_from_the_free_allowance() {
             expected,
             "{free} free"
         );
-        assert_eq!(read.calls().len(), 16, "{free} free");
+        assert_eq!(read.calls().len(), calls, "{free} free");
         assert_eq!(
             read.peak_in_flight.load(Ordering::SeqCst),
             peak,

@@ -105,8 +105,10 @@ impl BatchReads {
     /// [`Self::multi_get`], drawing runs beyond the first from `extra_runs`.
     ///
     /// The batch takes the extra runs that are free when it starts, never
-    /// waiting for one, and returns them when it ends: with none free it
-    /// still reads its runs one at a time.
+    /// waiting for one, and returns them when it ends. Its runs are sized to
+    /// the overlap it was granted: with none free it reads with one call, as
+    /// [`BatchReads::Single`] does, rather than paying for runs that would
+    /// only follow one another.
     async fn multi_get_within<R, K>(
         self,
         read: &R,
@@ -122,11 +124,15 @@ impl BatchReads {
             return one_row_per_key(keys.len(), read.multi_get(keys).await?);
         }
         let wanted = keys.len().div_ceil(run_keys).min(MAX_RUNS_IN_FLIGHT) - 1;
-        let extra = (1..=wanted)
+        let Some(extra) = (1..=wanted)
             .rev()
-            .find_map(|runs| extra_runs.try_acquire_many(runs as u32).ok());
+            .find_map(|runs| extra_runs.try_acquire_many(runs as u32).ok())
+        else {
+            return one_row_per_key(keys.len(), read.multi_get(keys).await?);
+        };
         // `extra` holds its permits until the batch ends.
-        let width = 1 + extra.as_ref().map_or(0, |permits| permits.num_permits());
+        let width = 1 + extra.num_permits();
+        let run_keys = keys.len().div_ceil(width).clamp(run_keys, MAX_RUN_KEYS);
         // Contiguous runs of sorted keys keep keys that share an SST, a block
         // or an object-store part in one call, whatever order the caller used.
         let mut order = (0..keys.len()).collect::<Vec<_>>();
