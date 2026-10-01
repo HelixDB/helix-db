@@ -15,7 +15,7 @@ pub use crate::query::{QueryError, QueryParamType, QueryRequest, QueryRequestTyp
 pub use crate::traversal::{
     g, sub, AggregateFunction, AstNode, EmitBehavior, Empty, OnEdges, OnNodes, Order, ReadOnly,
     RepeatConfig, ShortestPathDirection, SubTraversal, Terminal, Traversal, TraversalState,
-    WriteEnabled,
+    WriteEnabled, MAX_FUZZY_DISTANCE,
 };
 pub use crate::value::{
     DateTime, ParamObject, ParamValue, PropertyInput, PropertyMap, PropertyValue,

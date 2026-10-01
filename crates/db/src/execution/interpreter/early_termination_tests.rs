@@ -1527,6 +1527,7 @@ async fn full_input_adapters_reject_invalid_shapes_under_zero_demand() {
                 index,
                 k,
                 query_text: ir::TextQueryInputPlan::Text(test_support::name("text")),
+                fuzzy_distance: 0,
             }),
         },
         exec::ExecOp::Reserved {

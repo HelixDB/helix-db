@@ -1,7 +1,7 @@
 //! Planner-selected access dispatch. Incremental sources share the pull reader;
 //! ranking and unordered set preparation retain their existing native primitives.
 use super::super::{ExecutionContext, ExecutionValue};
-use super::search::SearchReadLimit;
+use super::search::{SearchReadLimit, TextSearchAccess};
 use crate::config::{TextElementType, VectorElementType};
 use crate::error::{HelixDbError, Result};
 use helix_planner::{exec, properties};
@@ -49,14 +49,18 @@ impl ExecutionContext<'_> {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             }) => {
                 let results = self
                     .text_search_hits(
-                        TextElementType::Node,
-                        &key.label,
-                        &key.property,
-                        index,
-                        query_text,
+                        TextSearchAccess::new(
+                            TextElementType::Node,
+                            &key.label,
+                            &key.property,
+                            index,
+                            query_text,
+                            *fuzzy_distance,
+                        ),
                         SearchReadLimit::new(k, limit),
                     )
                     .await?;
@@ -89,13 +93,17 @@ impl ExecutionContext<'_> {
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             }) => {
                 let read = self.text_search_hits(
-                    TextElementType::Edge,
-                    &key.label,
-                    &key.property,
-                    index,
-                    query_text,
+                    TextSearchAccess::new(
+                        TextElementType::Edge,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_text,
+                        *fuzzy_distance,
+                    ),
                     SearchReadLimit::new(k, limit),
                 );
                 let results = read.await?;
@@ -944,6 +952,7 @@ pub(super) mod tests {
                 index: search.clone(),
                 query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
                 k: search_limit.clone(),
+                fuzzy_distance: 0,
             },
         ];
         for plan in node_plans {
@@ -986,6 +995,7 @@ pub(super) mod tests {
                 index: search,
                 query_text: ir::TextQueryInputPlan::Text(test_support::name("rust")),
                 k: search_limit,
+                fuzzy_distance: 0,
             },
         ];
         for plan in edge_plans {

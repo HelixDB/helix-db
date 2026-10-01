@@ -60,6 +60,7 @@ fn search_access_builders_validate_all_element_and_search_families() {
         None,
         &PropertyInput::from("needle"),
         &StreamBound::Literal(4),
+        0,
     )
     .unwrap();
     assert!(matches!(
@@ -93,6 +94,7 @@ fn search_access_builders_validate_all_element_and_search_families() {
         Some(&PropertyInput::from("tenant-a")),
         &PropertyInput::from("needle"),
         &StreamBound::Literal(3),
+        0,
     )
     .unwrap();
     match edge_text.plan {
@@ -116,6 +118,7 @@ fn search_access_builders_report_catalog_and_name_errors() {
         None,
         &PropertyInput::from("needle"),
         &StreamBound::Literal(3),
+        0,
     )
     .unwrap_err();
     assert!(matches!(

@@ -108,6 +108,7 @@ impl<'a> NativeSourceAst<'a> {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             } => stream::NativeAccessStream::new(access::NativeAccessPath::node_plan(
                 planning::search::node_text_search(
                     &ctx.indexes,
@@ -116,6 +117,7 @@ impl<'a> NativeSourceAst<'a> {
                     tenant_value,
                     query_text,
                     k,
+                    fuzzy_distance,
                 )?
                 .plan,
             )),
@@ -142,6 +144,7 @@ impl<'a> NativeSourceAst<'a> {
                 tenant_value,
                 query_text,
                 k,
+                fuzzy_distance,
             } => stream::NativeAccessStream::new(access::NativeAccessPath::edge_plan(
                 planning::search::edge_text_search(
                     &ctx.indexes,
@@ -150,6 +153,7 @@ impl<'a> NativeSourceAst<'a> {
                     tenant_value,
                     query_text,
                     k,
+                    fuzzy_distance,
                 )?
                 .plan,
             )),

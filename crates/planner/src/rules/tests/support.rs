@@ -489,6 +489,7 @@ pub(in crate::rules::tests) fn edge_text_search(k: ir::SearchLimitPlan) -> ir::E
         ))
         .unwrap(),
         k,
+        fuzzy_distance: 0,
     }
 }
 

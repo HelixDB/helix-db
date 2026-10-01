@@ -522,6 +522,7 @@ fn text_search_plan_with_tenant(
                                 std::num::NonZeroUsize::new(10)
                                     .expect("fixture text result limit is positive"),
                             ),
+                            fuzzy_distance: 0,
                         },
                     )),
                 },

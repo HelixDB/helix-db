@@ -46,6 +46,7 @@ fn access_window_rule_tightens_zero_based_literal_search_windows() {
                 path.source().as_ref(),
                 ir::EdgeAccessPlan::TextSearch {
                     k: ir::SearchLimitPlan::Literal(k),
+                    fuzzy_distance: 0,
                     ..
                 } if k.get() == 2
             )
@@ -136,6 +137,7 @@ fn access_window_rule_tightens_edge_text_prefix() {
                 path.source().as_ref(),
                 ir::EdgeAccessPlan::TextSearch {
                     k: ir::SearchLimitPlan::Literal(k),
+                    fuzzy_distance: 0,
                     ..
                 } if k.get() == 4
             )

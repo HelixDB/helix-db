@@ -124,9 +124,18 @@ impl OpenedTextSplit {
         &self,
         analyzer: TextAnalyzerKind,
         query: &str,
-    ) -> Result<(), HelixDbError> {
+        fuzzy_distance: u8,
+    ) -> Result<Option<super::FuzzyClauses>, HelixDbError> {
         register_analyzers(&self.index, analyzer);
-        warm_searcher(&self.reader, self.fields, analyzer, query).await
+        warm_searcher(&self.reader, self.fields, analyzer, query, fuzzy_distance).await
+    }
+
+    pub(crate) const fn fields(&self) -> TextSchemaFields {
+        self.fields
+    }
+
+    pub(crate) const fn reader(&self) -> &IndexReader {
+        &self.reader
     }
 
     pub(crate) fn total_docs(&self) -> usize {
@@ -140,6 +149,7 @@ impl OpenedTextSplit {
         limit: usize,
         statistics: Option<&crate::index_lifecycle::text::statistics::TextBm25Statistics>,
         scope: &super::TextSearchScope,
+        fuzzy: Option<&super::FuzzyClauses>,
     ) -> Result<Vec<TextSearchCandidate>, HelixDbError> {
         register_analyzers(&self.index, analyzer);
         search_reader_candidates_with_statistics(
@@ -150,6 +160,7 @@ impl OpenedTextSplit {
             limit,
             statistics,
             scope,
+            fuzzy,
         )
     }
 }

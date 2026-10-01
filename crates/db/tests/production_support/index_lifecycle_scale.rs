@@ -361,6 +361,7 @@ fn text_search_plan(query: &str) -> exec::ExecutablePlan {
                             k: ir::SearchLimitPlan::Literal(
                                 NonZeroUsize::new(10).expect("scale text limit is positive"),
                             ),
+                            fuzzy_distance: 0,
                         },
                     )),
                 },

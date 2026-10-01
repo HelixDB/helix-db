@@ -19,6 +19,8 @@ pub enum RestrictedTextSearchPlan {
         query_text: ir::TextQueryInputPlan,
         /// Result count.
         k: ir::SearchLimitPlan,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        fuzzy_distance: u8,
     },
     /// Current rows and the selected index both contain edges.
     Edges {
@@ -30,6 +32,8 @@ pub enum RestrictedTextSearchPlan {
         query_text: ir::TextQueryInputPlan,
         /// Result count.
         k: ir::SearchLimitPlan,
+        /// Maximum edit distance for keyword matching. Zero is exact.
+        fuzzy_distance: u8,
     },
 }
 

@@ -322,6 +322,7 @@ mod tests {
                 ))
                 .unwrap(),
                 k: ir::SearchLimitPlan::Literal(std::num::NonZeroUsize::MIN),
+                fuzzy_distance: 0,
             }),
         }
     }

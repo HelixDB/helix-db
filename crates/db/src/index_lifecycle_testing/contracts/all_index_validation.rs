@@ -1155,6 +1155,7 @@ fn search_plan(
                         k: ir::SearchLimitPlan::Literal(
                             NonZeroUsize::new(10).expect("text validation limit is positive"),
                         ),
+                        fuzzy_distance: 0,
                     })
                 }
                 IndexElementKind::Edge => {
@@ -1170,6 +1171,7 @@ fn search_plan(
                         k: ir::SearchLimitPlan::Literal(
                             NonZeroUsize::new(10).expect("text validation limit is positive"),
                         ),
+                        fuzzy_distance: 0,
                     })
                 }
             }

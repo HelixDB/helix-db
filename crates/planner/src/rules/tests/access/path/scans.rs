@@ -34,6 +34,7 @@ fn access_path_rule_covers_scan_runtime_search_and_filtered_costs() {
         ))
         .unwrap(),
         k: ir::SearchLimitPlan::Literal(std::num::NonZeroUsize::new(2).unwrap()),
+        fuzzy_distance: 0,
     });
     let runtime = edge_access_expr(ir::EdgeAccessPlan::FromParam {
         param: name("edge_ids"),

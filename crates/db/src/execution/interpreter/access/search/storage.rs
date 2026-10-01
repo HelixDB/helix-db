@@ -252,23 +252,58 @@ impl<'db> ExecutionContext<'db> {
         query: &str,
         k: usize,
         scope: search::text::TextSearchScope,
+        fuzzy_distance: u8,
     ) -> Result<Vec<search::text::TextSearchHit>> {
         if let Some(active) = self.active_write_tx() {
-            return search_text_manifest_in_view(self, &active.txn, manifest, query, k, scope)
-                .await;
+            return search_text_manifest_in_view(
+                self,
+                &active.txn,
+                manifest,
+                query,
+                k,
+                scope,
+                fuzzy_distance,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
-            return search_text_manifest_in_view(self, view, manifest, query, k, scope).await;
+            return search_text_manifest_in_view(
+                self,
+                view,
+                manifest,
+                query,
+                k,
+                scope,
+                fuzzy_distance,
+            )
+            .await;
         }
         #[cfg(test)]
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    search_text_manifest_in_view(self, reader.as_ref(), manifest, query, k, scope)
-                        .await
+                    search_text_manifest_in_view(
+                        self,
+                        reader.as_ref(),
+                        manifest,
+                        query,
+                        k,
+                        scope,
+                        fuzzy_distance,
+                    )
+                    .await
                 }
                 HelixStorage::Writer(writer) => {
-                    search_text_manifest_in_view(self, writer.db(), manifest, query, k, scope).await
+                    search_text_manifest_in_view(
+                        self,
+                        writer.db(),
+                        manifest,
+                        query,
+                        k,
+                        scope,
+                        fuzzy_distance,
+                    )
+                    .await
                 }
             }
         }
@@ -301,6 +336,7 @@ async fn search_text_manifest_in_view(
     query: &str,
     k: usize,
     scope: search::text::TextSearchScope,
+    fuzzy_distance: u8,
 ) -> Result<Vec<search::text::TextSearchHit>> {
     let generation = manifest.generation;
     let root = &manifest.root;
@@ -363,10 +399,16 @@ async fn search_text_manifest_in_view(
         ));
     }
     let query_terms = search::text::analyze_text(definition.analyzer(), query).unique_terms;
+    // A split summary is a bloom over the exact bytes of the terms it holds, so
+    // a near neighbour of the query term hashes nowhere near it. Once the query
+    // has edit latitude the summary is answering a different question than the
+    // one being asked, and trusting it drops the splits that hold the hits. It
+    // still prunes every exact query, which is all of them by default.
+    let prune_by_summary = fuzzy_distance == 0;
     let splits = loaded_pages
         .into_iter()
         .flatten()
-        .filter(|split| split.pruning().may_match_any(query_terms.iter()))
+        .filter(|split| !prune_by_summary || split.pruning().may_match_any(query_terms.iter()))
         .map(|split| search::text::TextSplitRef {
             blob: search::text::TextBlobRef {
                 sha256: *split.blob().hash(),
@@ -403,7 +445,7 @@ async fn search_text_manifest_in_view(
         root,
         &generation_manifest,
         &statistics,
-        search::text::TextSearchRequest::new(query, k, scope),
+        search::text::TextSearchRequest::new(query, k, scope).with_fuzzy_distance(fuzzy_distance),
     )
     .await
 }
@@ -754,6 +796,7 @@ mod tests {
                 "storage",
                 1,
                 search::text::TextSearchScope::Unrestricted,
+                0,
             )
             .await
             .unwrap();
@@ -772,6 +815,7 @@ mod tests {
                 "planner",
                 1,
                 search::text::TextSearchScope::Unrestricted,
+                0,
             )
             .await
             .unwrap();
@@ -811,6 +855,7 @@ mod tests {
                 "planner",
                 1,
                 search::text::TextSearchScope::Unrestricted,
+                0,
             )
             .await
             .unwrap();
@@ -870,6 +915,7 @@ mod tests {
                 "storage",
                 1,
                 search::text::TextSearchScope::Unrestricted,
+                0,
             )
             .await
             .unwrap()
@@ -932,6 +978,7 @@ mod tests {
                     "storage",
                     1,
                     search::text::TextSearchScope::Unrestricted,
+                    0,
                 )
                 .await,
             Err(HelixDbError::IndexCatalogCorruption(message))

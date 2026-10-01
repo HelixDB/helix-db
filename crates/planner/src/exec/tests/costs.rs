@@ -104,6 +104,7 @@ fn access_costs_and_hard_bounds_cover_access_shapes() {
         index: search_index_plan(),
         query_text: ir::TextQueryInputPlan::Text(name("hello")),
         k: literal_search_limit(4),
+        fuzzy_distance: 0,
     };
     let filtered_edge = ir::EdgeAccessPlan::ScanThenFilter {
         source: edge_source(ir::EdgeAccessPlan::PointIds {

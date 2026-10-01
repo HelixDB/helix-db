@@ -136,6 +136,7 @@ fn access_window_rule_elides_prefix_windows_covering_known_cardinality_bounds() 
                 path.source().as_ref(),
                 ir::EdgeAccessPlan::TextSearch {
                     k: ir::SearchLimitPlan::Literal(k),
+                    fuzzy_distance: 0,
                     ..
                 } if k.get() == 3
             )

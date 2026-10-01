@@ -17,6 +17,7 @@ pub(super) fn pipeline_op_from_ast<'a>(
             tenant_value,
             query_text,
             k,
+            fuzzy_distance,
         } => {
             let search = planning::search::node_text_search(
                 &ctx.indexes,
@@ -25,12 +26,14 @@ pub(super) fn pipeline_op_from_ast<'a>(
                 tenant_value.as_ref(),
                 query_text,
                 k,
+                *fuzzy_distance,
             )?;
             let ir::NodeAccessPlan::TextSearch {
                 key,
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } = search.plan
             else {
                 unreachable!("node text-search builder returned another access family")
@@ -43,6 +46,7 @@ pub(super) fn pipeline_op_from_ast<'a>(
                         index,
                         query_text,
                         k,
+                        fuzzy_distance,
                     }),
                 },
             ))
@@ -54,6 +58,7 @@ pub(super) fn pipeline_op_from_ast<'a>(
             tenant_value,
             query_text,
             k,
+            fuzzy_distance,
         } => {
             let search = planning::search::edge_text_search(
                 &ctx.indexes,
@@ -62,12 +67,14 @@ pub(super) fn pipeline_op_from_ast<'a>(
                 tenant_value.as_ref(),
                 query_text,
                 k,
+                *fuzzy_distance,
             )?;
             let ir::EdgeAccessPlan::TextSearch {
                 key,
                 index,
                 query_text,
                 k,
+                fuzzy_distance,
             } = search.plan
             else {
                 unreachable!("edge text-search builder returned another access family")
@@ -80,6 +87,7 @@ pub(super) fn pipeline_op_from_ast<'a>(
                         index,
                         query_text,
                         k,
+                        fuzzy_distance,
                     }),
                 },
             ))

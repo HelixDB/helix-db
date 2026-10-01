@@ -96,6 +96,7 @@ pub(super) fn node_text_search() -> AstNode {
         tenant_value: None,
         query_text: PropertyInput::from("planner"),
         k: StreamBound::Literal(4),
+        fuzzy_distance: 0,
     }
 }
 
@@ -116,6 +117,7 @@ pub(super) fn edge_text_search() -> AstNode {
         tenant_value: None,
         query_text: PropertyInput::from("cascades"),
         k: StreamBound::Literal(6),
+        fuzzy_distance: 0,
     }
 }
 
@@ -136,6 +138,7 @@ pub(super) fn tenant_node_text_search() -> AstNode {
         tenant_value: Some(PropertyInput::from(Expr::param("tenant"))),
         query_text: PropertyInput::from(Expr::param("query")),
         k: StreamBound::Literal(4),
+        fuzzy_distance: 0,
     }
 }
 
@@ -156,6 +159,7 @@ pub(super) fn tenant_edge_text_search() -> AstNode {
         tenant_value: Some(PropertyInput::from(Expr::param("tenant"))),
         query_text: PropertyInput::from("cascades"),
         k: StreamBound::expr(Expr::param("k")),
+        fuzzy_distance: 0,
     }
 }
 
