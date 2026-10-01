@@ -4,12 +4,18 @@ use std::collections::{btree_map::Entry, BTreeMap};
 
 use super::*;
 
-/// Lazy stored-value resolver owned by one input row's evaluation.
+/// Lazy stored-value resolver owned by one input row's evaluation, or by one
+/// record batch of rows whose records it prefetched.
 ///
 /// Cache absence means an element has not been visited. [`CachedPropertyBlob::Missing`]
 /// records a completed negative lookup, so repeated missing fields remain lazy without
-/// repeating storage I/O. Resolved values are deliberately not cached because virtual
-/// properties belong to the row or binding that requested them.
+/// repeating storage I/O. The cache is keyed by element, never by row, so rows sharing
+/// one resolver read each record once and resolve the same values they would alone.
+/// Resolved values are deliberately not cached because virtual properties belong to
+/// the row or binding that requested them.
+///
+/// A batch owner that prefetches decodes every prefetched record first, so a read or
+/// decode error anywhere in the batch is returned before an earlier row's own error.
 pub(in crate::execution::interpreter::stream) struct RowValueResolver<'ctx, 'db> {
     context: &'ctx ExecutionContext<'db>,
     property_blobs: BTreeMap<ElementRef, CachedPropertyBlob>,

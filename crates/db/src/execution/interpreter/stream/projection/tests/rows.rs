@@ -1118,21 +1118,48 @@ async fn projections_prefetch_each_record_batch_with_one_multi_get() {
     // the batch boundary.
     assert!((users.len() + 1..=users.len() + 2).contains(&work.multi_get_keys));
 
-    let values = ctx
-        .project(
-            ExecutionValue::Stream(rows.clone()),
-            &ir::ProjectionPlan::Values(property_names(vec!["name"])),
-        )
-        .await
-        .unwrap();
-    let ExecutionValue::Scalars(values) = values else {
-        panic!("values projection returns scalars");
+    // Values drops rows with no value; a selected value map keeps them.
+    let names = |row: &ExecutionRow| {
+        let Some(ElementRef::Node(id)) = row.current else {
+            unreachable!("every row is a node row");
+        };
+        username(id).map(|name| BTreeMap::from([("name".to_string(), name)]))
     };
-    assert_eq!(
-        values.len(),
-        rows.len() - 1,
-        "the missing node has no values"
-    );
+    for (plan, keeps_empty) in [
+        (
+            ir::ProjectionPlan::Values(property_names(vec!["name"])),
+            false,
+        ),
+        (
+            ir::ProjectionPlan::ValueMap(ir::PropertySelection::Selected(property_names(vec![
+                "name",
+            ]))),
+            true,
+        ),
+    ] {
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let expected = rows
+            .iter()
+            .filter_map(|row| match (names(row), keeps_empty) {
+                (Some(object), _) => Some(ExecutionScalar::Object(object)),
+                (None, true) => Some(ExecutionScalar::Object(BTreeMap::new())),
+                (None, false) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ctx.project(ExecutionValue::Stream(rows.clone()), &plan)
+                .await
+                .unwrap(),
+            ExecutionValue::Scalars(expected),
+            "{plan:?}"
+        );
+        let work = ctx.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0, "{plan:?}");
+        assert!(
+            (users.len() + 1..=users.len() + 2).contains(&work.multi_get_keys),
+            "{plan:?}"
+        );
+    }
 
     let before = ctx.pull_work.snapshot();
     ctx.project(
@@ -1204,5 +1231,43 @@ async fn record_read_matches_the_current_record_row_property_reads() {
             usize::from(reads_current || endpoint_record),
             "{property:?}"
         );
+    }
+}
+
+/// Batched projections check the deadline before their prefetch and again for
+/// every row, so an expired deadline fails them at the first check whether
+/// that is the prefetch or a later row.
+#[tokio::test]
+async fn batched_projections_respect_the_deadline() {
+    let db = test_support::open_db("projection-batch-deadline").await;
+    let ada = test_support::add_user(&db, "ada").await;
+    let bob = test_support::add_user(&db, "bob").await;
+    let rows = vec![
+        ExecutionRow::current(ElementRef::Node(ada)),
+        ExecutionRow::current(ElementRef::Node(bob)),
+    ];
+    let plans = [
+        ir::ProjectionPlan::Values(property_names(vec!["name"])),
+        ir::ProjectionPlan::ValueMap(ir::PropertySelection::Selected(property_names(vec![
+            "name",
+        ]))),
+        ir::ProjectionPlan::Project(projection_items(vec![ir::ProjectionItem::Property {
+            source: name("name"),
+            alias: name("name"),
+        }])),
+    ];
+    for plan in &plans {
+        for successful_checks in [0, 1, 2, 3] {
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.fail_deadline_after(successful_checks);
+            assert!(
+                matches!(
+                    ctx.project(ExecutionValue::Stream(rows.clone()), plan)
+                        .await,
+                    Err(crate::error::HelixDbError::QueryDeadlineExceeded)
+                ),
+                "{plan:?} after {successful_checks} checks"
+            );
+        }
     }
 }

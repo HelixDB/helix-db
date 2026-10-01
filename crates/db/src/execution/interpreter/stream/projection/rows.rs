@@ -68,6 +68,11 @@ impl<'db> ExecutionContext<'db> {
     /// A resolver shared by one record batch of rows, with the records that
     /// resolving `names` on each row will read already loaded through one
     /// overlapped multi-get instead of one read per row.
+    ///
+    /// Only records per-row resolution would read are loaded (see
+    /// [`eval::record_read`]). Their read and decode errors therefore surface
+    /// per batch: one from any row of the batch wins over an earlier row's
+    /// expression error, as in a filter's batches.
     async fn prefetched_resolver<'ctx>(
         &'ctx self,
         batch: &[ExecutionRow],

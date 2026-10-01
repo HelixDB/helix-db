@@ -151,6 +151,8 @@ mod whole_value {
     #[tokio::test]
     async fn expansion_matches_the_serial_walk() {
         let (db, rows) = fixture("access-expand-serial-oracle").await;
+        // More parents than one expansion window holds.
+        let rows = rows.iter().cycle().take(300).cloned().collect::<Vec<_>>();
         for direction in [
             ir::ExpandDirection::Out,
             ir::ExpandDirection::In,
