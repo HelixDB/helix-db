@@ -8,6 +8,27 @@ pageType: "Reference"
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
 <Update
+  label="October 2026"
+  rss={{
+    title: "Docker v0.0.9 and CLI 3.4.2: an always-on S3 disk cache and faster cold vector search",
+    description: "S3 storage always caches on local disk, first vector searches after a restart are much faster, and source filters and counts always use indexes"
+  }}
+>
+- **Upgrading S3 deployments** — S3 storage now always writes a local disk cache, so an S3 container that ran v0.0.8 or earlier can fail or use more resources after the upgrade:
+  - The cache directory, `/var/cache/helix` unless `HELIX_DISK_CACHE_DIR` names another, must be writable. Mount a volume there (required with a read-only root filesystem), and set `HELIX_DISK_CACHE_DIR` when running as a user other than `65532`.
+  - The hard open-file limit must be at least 26,600 at the default budget (about 8,200 or fewer at 1 GiB or less). Raise it with `--ulimit nofile=65536:65536`.
+  - RSS grows by the block cache's index, about 20–70 MiB at the default budget and twice that briefly after a restart.
+  - Without `HELIX_DISK_CACHE_BYTES`, the 8 GiB default budget must fit the cache's filesystem, or startup fails.
+- **[S3 always uses a local disk cache](/database/helix-db/start-here/local-development/local-server#add-a-local-disk-cache)** in `/var/cache/helix` by default, with an 8 GiB default budget. Memory-only S3 is gone: once a vector index outgrew the memory cache, every graph hop waited on its own S3 request. `HELIX_DATA_DIR` and in-memory storage are unchanged.
+- **Faster first vector searches on S3.** Cold batch reads overlap their block fetches, expansions read parents concurrently, and projections prefetch the records they need. After open, the server also warms vector search rows into the disk cache in the background; readiness never waits for it. `HELIX_DISK_CACHE_WARM=off` (default `on`) turns startup warming off. On 2 CPUs, 4 GiB of memory and an 8 GiB cache over S3, the first global vector top-50 after open went from 30.8 s on v0.0.7 to 714 ms once the ~26 s warm finished.
+- **Index sets are kept across `ForEach` iterations and unrelated writes** in the same request, which removes the v0.0.8 known limitation. A set is read again only when an iteration binds a parameter it depends on, or a write creates, deletes or changes indexed properties of nodes with its label. A batch that expands, filters on an index and adds an edge per iteration runs about twice as fast.
+- **Source filters and counts always use indexes.** `N<L>.where(...)`, `E<L>.where(...)` and counts on indexed properties no longer scan the label, including partly indexed ORs, long `IN` lists, parameter lists, `== null`, and counts over `.as()` / `.store()`. A label scan only happens when no condition has an index. On 50k rows, counts after `.as()` went from up to 1.1 s to under 5 ms, and 200-value `IN` lists from up to 1.5 s to about 0.2 s.
+- **Upgrading** — the stored data format is unchanged. Databases written by v0.0.8 open directly with v0.0.9.
+- **Known issue** — updating a node's vector (re-embedding it) and later deleting that node can leave vector index (HNSW) links pointing at the deleted node, and searches that reach them fail with `missing simhash`. Earlier releases are affected too, and a fix is in progress. To repair an affected index, drop and recreate the vector index.
+- **CLI 3.4.2** defaults to image v0.0.9. With `--disk` or S3 storage, `helix start` mounts a per-instance `helix-<project>-<instance>-cache` volume at `/var/cache/helix` for the disk cache, with a 64 MiB budget in disk mode and 1 GiB for an S3 bucket. `helix stop` keeps it and `helix prune` removes it.
+</Update>
+
+<Update
   label="September 2026"
   rss={{
     title: "Docker v0.0.8 and CLI 3.4.1: indexed filters after traversals",
