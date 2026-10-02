@@ -1730,16 +1730,20 @@ mod tests {
                 ),
             ]);
             values.extend(warm.map(|value| ("HELIX_DISK_CACHE_WARM", OsString::from(value))));
-            let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
-            let db::config::CacheMode::Hybrid {
-                object_store,
-                slate_warm,
-                ..
-            } = config.db_config().cache().mode().clone()
-            else {
-                panic!("a disk cache builds hybrid tiers");
-            };
-            (slate_warm, object_store.vector_part_warm())
+            let config = ServerConfig::from_lookup(|name| values.get(name).cloned())
+                .unwrap()
+                .db_config();
+            let cache = config.cache();
+            (
+                cache
+                    .slate_warm()
+                    .cloned()
+                    .expect("a disk cache has a SlateDB warm policy"),
+                cache
+                    .object_store_cache()
+                    .expect("a disk cache has an object-store tier")
+                    .vector_part_warm(),
+            )
         };
         let s3 = ("S3_BUCKET", "bucket");
         let disk = ("HELIX_DATA_DIR", "/var/lib/helix");
