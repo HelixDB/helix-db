@@ -14,12 +14,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use db::config::{
     DbConfig, IndexOperationQueueTuning, IndexOperationQueueTuningError, QueueLayout,
-    TextIndexDefinition, VectorIndexDefinition,
+    SearchIndexBackfillLimits, SearchIndexBatchLimits, TextIndexDefinition, VectorIndexDefinition,
 };
 use db::encoding::v2::keys::scope::DataScope;
 use db::error::{HelixDbError, IndexBackpressureResource, IndexOperationBatchResource};
 use db::index_lifecycle::{
-    IndexDdlReceipt, IndexOperationId, IndexOperationStatus, ValidatedDynamicIndexDefinition,
+    IndexDdlReceipt, IndexOperationBlockerCode, IndexOperationId, IndexOperationStatus,
+    ValidatedDynamicIndexDefinition,
 };
 use db::index_lifecycle_testing::{
     LifecycleTestController, LifecycleTestScheduling, LifecycleWorkTarget,
@@ -604,6 +605,440 @@ async fn writes_to_a_hidden_build_wait_for_activation() {
         2
     );
     assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
+    db.close().await.expect("fixture closes");
+}
+
+/// Nothing publishes a hidden build's queue before activation. While the
+/// build can still run, its saturation is retryable backpressure; once it
+/// blocks, a write that would saturate it fails with the non-retryable
+/// `index_build_blocked` error naming the operation, except a lone repair of
+/// the blocker's entity: its first queued write, or its removal from the
+/// index. Writes to pending entities add no member, so they stay admitted
+/// above the member limit, before and after the retry. After a retry
+/// activates the build, publication drains the queue.
+#[tokio::test]
+async fn a_blocked_build_admits_only_its_repair_beyond_the_limits() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open(
+        "queue-blocked-build",
+        &store,
+        IndexOperationQueueTuning::default().with_max_members(nonzero(2)),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await;
+    let invalid = created_id(
+        db.query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(LABEL, vec![(BODY, PropertyInput::from(7_i64))]),
+                )
+                .returning(["created"]),
+        ))
+        .await
+        .expect("a non-text body commits before the index exists"),
+    );
+    let receipt = LifecycleTestController::new()
+        .create_index(
+            &db,
+            DataScope::LegacyUnscoped,
+            text_definition(),
+            ir::IndexCreateMode::ErrorIfExists,
+        )
+        .await
+        .expect("create is accepted");
+    let IndexDdlReceipt::Accepted { operation_id, .. } = receipt else {
+        panic!("a new definition starts a build: {receipt:?}");
+    };
+    db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
+        .await
+        .expect("the hidden build is routed");
+    let resident = created_id(
+        db.query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g()
+                        .add_n(LABEL, vec![(BODY, PropertyInput::from("one".to_string()))]),
+                )
+                .returning(["created"]),
+        ))
+        .await
+        .expect("first member"),
+    );
+    db.query(text_write(&["two"]))
+        .await
+        .expect("the limit itself is admitted");
+    let error = db
+        .query(text_write(&["three"]))
+        .await
+        .expect_err("a build that can still run is saturated");
+    assert!(error.is_index_backpressure(), "{error}");
+    assert_eq!(error.error_code(), QueryErrorCode::IndexBackpressure);
+
+    assert!(
+        matches!(
+            drive(&db, operation_id).await,
+            IndexOperationStatus::Blocked { .. }
+        ),
+        "the invalid row blocks the build"
+    );
+    let refused = |result: Result<serde_json::Value, HelixDbError>, write: &str| {
+        let error = result.expect_err(write);
+        assert!(
+            matches!(
+                error,
+                HelixDbError::IndexBuildBlocked {
+                    resource: IndexBackpressureResource::PendingMembers,
+                    limit: 2,
+                    ..
+                }
+            ),
+            "{write}: {error}"
+        );
+        assert!(!error.is_index_backpressure(), "{write}: {error}");
+        assert_eq!(error.error_code(), QueryErrorCode::IndexBuildBlocked);
+        assert_eq!(error.index_error_code(), Some("index_build_blocked"));
+        assert!(
+            error
+                .to_string()
+                .contains(&operation_id.as_uuid().to_string()),
+            "{write}: {error}"
+        );
+    };
+    let set_body = |id: u64, body: &str| {
+        QueryRequest::write(
+            batch::write_batch().var_as(
+                "updated",
+                traversal::g()
+                    .n(NodeRef::from(id))
+                    .set_property(BODY, body.to_string()),
+            ),
+        )
+    };
+    refused(
+        db.query(text_write(&["three"])).await,
+        "an unrelated insert",
+    );
+    db.query(set_body(invalid, "repaired words"))
+        .await
+        .expect("the blocker's first repair is admitted beyond the limit");
+    for (id, body, write) in [
+        (invalid, "again", "a second write of the repaired entity"),
+        (resident, "one updated", "a resident's update"),
+    ] {
+        db.query(set_body(id, body))
+            .await
+            .unwrap_or_else(|error| panic!("{write} adds no member: {error}"));
+    }
+    db.query(QueryRequest::write(batch::write_batch().var_as(
+        "dropped",
+        traversal::g().n(NodeRef::from(invalid)).drop(),
+    )))
+    .await
+    .expect("removing the repaired entity adds no member");
+    refused(db.query(text_write(&["three"])).await, "a later insert");
+    let stats = db.index_operation_queue_stats();
+    assert_eq!((stats.pending_members, stats.pending_operations), (3, 6));
+
+    db.retry_index_operation(DataScope::LegacyUnscoped, operation_id)
+        .await
+        .expect("the blocked build retries");
+    assert!(
+        matches!(
+            drive(&db, operation_id).await,
+            IndexOperationStatus::Succeeded { .. }
+        ),
+        "the build activates without the deleted row"
+    );
+    let error = db
+        .query(text_write(&["three"]))
+        .await
+        .expect_err("a new member is above the limit until publication drains");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::PendingMembers,
+                requested: 4,
+                limit: 2,
+                ..
+            }
+        ),
+        "a runnable build's saturation is retryable: {error}"
+    );
+    db.query(set_body(resident, "one again"))
+        .await
+        .expect("after the retry a resident's update still adds no member");
+    let stats = db.index_operation_queue_stats();
+    assert_eq!((stats.pending_members, stats.pending_operations), (3, 7));
+    assert_eq!(
+        db.publish_index_queues_for_lifecycle_testing()
+            .await
+            .expect("an Active generation publishes"),
+        7
+    );
+    db.query(text_write(&["three"]))
+        .await
+        .expect("publication freed the capacity");
+    db.close().await.expect("fixture closes");
+}
+
+/// Only the build measures an entity's vector output, so an oversized
+/// blocker's first write may leave it oversized. Once that write has taken
+/// the queue past its byte limit, a second write of it is refused, as is a
+/// resident's update, but deleting it is still admitted, and the retried
+/// build activates without it.
+#[tokio::test]
+async fn an_oversized_blocker_admits_its_deletion_after_its_first_write() {
+    let defaults = SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    // Every entity's own vector output exceeds one byte.
+    let one_byte_vectors = SearchIndexBackfillLimits::try_new(
+        SearchIndexBatchLimits::try_new(
+            batch.max_entities(),
+            batch.max_input_bytes(),
+            batch.max_output_operations(),
+            batch.max_output_bytes(),
+            nonzero(1),
+        )
+        .expect("batch limits validate"),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        defaults.text_compaction(),
+    )
+    .expect("a one-byte vector output budget validates");
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let open_tight = |tuning: IndexOperationQueueTuning| {
+        HelixDB::open_with_object_store_for_index_lifecycle_testing(
+            "queue-blocked-oversized",
+            Arc::clone(&store),
+            DbConfig::new()
+                .with_index_operation_queue_tuning(tuning)
+                .with_search_index_backfill_limits(one_byte_vectors),
+            LifecycleTestScheduling::Explicit,
+        )
+    };
+    let db = open_tight(IndexOperationQueueTuning::default())
+        .await
+        .expect("queue fixture opens");
+    let embed = |embedding: [f32; 2]| {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        LABEL,
+                        vec![(EMBEDDING, PropertyInput::from(embedding.to_vec()))],
+                    ),
+                )
+                .returning(["created"]),
+        )
+    };
+    let oversized = created_id(db.query(embed([1.0, 1.0])).await.expect("seed commits"));
+    let receipt = LifecycleTestController::new()
+        .create_index(
+            &db,
+            DataScope::LegacyUnscoped,
+            vector_definition(),
+            ir::IndexCreateMode::ErrorIfExists,
+        )
+        .await
+        .expect("create is accepted");
+    let IndexDdlReceipt::Accepted { operation_id, .. } = receipt else {
+        panic!("a new definition starts a build: {receipt:?}");
+    };
+    db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
+        .await
+        .expect("the hidden build is routed");
+    let blocked = |status: IndexOperationStatus| {
+        assert!(
+            matches!(
+                status,
+                IndexOperationStatus::Blocked {
+                    blocker_code: IndexOperationBlockerCode::OversizedEntity,
+                    ..
+                }
+            ),
+            "{status:?}"
+        );
+    };
+    blocked(drive(&db, operation_id).await);
+    let resident = created_id(
+        db.query(embed([2.0, 2.0]))
+            .await
+            .expect("a resident queues"),
+    );
+    // Room for the resident's operation and half of another, so any further
+    // write is above the byte limit while no single one is too large.
+    let resident_bytes = db.index_operation_queue_stats().retained_bytes;
+    db.close().await.expect("fixture closes");
+    let db = open_tight(
+        IndexOperationQueueTuning::default()
+            .with_max_retained_bytes(nonzero(resident_bytes * 3 / 2)),
+    )
+    .await
+    .expect("queue fixture reopens");
+    let move_to = |id: u64, embedding: [f32; 2]| {
+        QueryRequest::write(
+            batch::write_batch().var_as(
+                "moved",
+                traversal::g()
+                    .n(NodeRef::from(id))
+                    .set_property(EMBEDDING, embedding.to_vec()),
+            ),
+        )
+    };
+    db.query(move_to(oversized, [1.5, 1.5]))
+        .await
+        .expect("the blocker's first write is admitted beyond the byte limit");
+    db.retry_index_operation(DataScope::LegacyUnscoped, operation_id)
+        .await
+        .expect("the blocked build retries");
+    blocked(drive(&db, operation_id).await);
+    for (write, request) in [
+        (
+            "a second write of the oversized entity",
+            move_to(oversized, [1.25, 1.25]),
+        ),
+        ("a resident's update", move_to(resident, [2.5, 2.5])),
+        ("an unrelated insert", embed([3.0, 3.0])),
+    ] {
+        let error = db.query(request).await.expect_err(write);
+        assert!(
+            matches!(
+                error,
+                HelixDbError::IndexBuildBlocked {
+                    resource: IndexBackpressureResource::RetainedBytes,
+                    ..
+                }
+            ),
+            "{write}: {error}"
+        );
+    }
+    db.query(QueryRequest::write(batch::write_batch().var_as(
+        "dropped",
+        traversal::g().n(NodeRef::from(oversized)).drop(),
+    )))
+    .await
+    .expect("deleting the oversized entity is admitted beyond the byte limit");
+    let stats = db.index_operation_queue_stats();
+    assert_eq!((stats.pending_members, stats.pending_operations), (2, 3));
+    db.close().await.expect("fixture closes");
+
+    let db = open(
+        "queue-blocked-oversized",
+        &store,
+        IndexOperationQueueTuning::default(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await;
+    db.retry_index_operation(DataScope::LegacyUnscoped, operation_id)
+        .await
+        .expect("the blocked build retries");
+    assert!(
+        matches!(
+            drive(&db, operation_id).await,
+            IndexOperationStatus::Succeeded { .. }
+        ),
+        "the default budget fits every remaining entity"
+    );
+    assert_eq!(
+        db.publish_index_queues_for_lifecycle_testing()
+            .await
+            .expect("an Active generation publishes"),
+        3
+    );
+    db.close().await.expect("fixture closes");
+}
+
+/// A blocker that names no entity has no repair, so once its build's queue
+/// is saturated every write that would exceed the limits fails with
+/// `index_build_blocked`.
+#[tokio::test]
+async fn a_build_blocked_on_no_entity_admits_nothing_beyond_the_limits() {
+    let defaults = SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    // An input budget below one manifest root blocks the empty index's
+    // partition scan on its manifest rather than on an entity.
+    let one_byte = SearchIndexBackfillLimits::try_new(
+        SearchIndexBatchLimits::try_new(
+            batch.max_entities(),
+            nonzero(1),
+            batch.max_output_operations(),
+            batch.max_output_bytes(),
+            batch.max_single_vector_output_bytes(),
+        )
+        .expect("batch limits validate"),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        defaults.text_compaction(),
+    )
+    .expect("a one-byte input budget validates");
+    let db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
+        "queue-blocked-manifest",
+        Arc::new(InMemory::new()),
+        DbConfig::new()
+            .with_index_operation_queue_tuning(
+                IndexOperationQueueTuning::default().with_max_members(nonzero(1)),
+            )
+            .with_search_index_backfill_limits(one_byte),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("queue fixture opens");
+    let receipt = LifecycleTestController::new()
+        .create_index(
+            &db,
+            DataScope::LegacyUnscoped,
+            text_definition(),
+            ir::IndexCreateMode::ErrorIfExists,
+        )
+        .await
+        .expect("create is accepted");
+    let IndexDdlReceipt::Accepted { operation_id, .. } = receipt else {
+        panic!("a new definition starts a build: {receipt:?}");
+    };
+    db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
+        .await
+        .expect("the hidden build is routed");
+    let status = drive(&db, operation_id).await;
+    assert!(
+        matches!(
+            status,
+            IndexOperationStatus::Blocked {
+                blocker_code: IndexOperationBlockerCode::ManifestLimit,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+    db.query(text_write(&["one"]))
+        .await
+        .expect("the limit itself is admitted");
+    let error = db
+        .query(text_write(&["two"]))
+        .await
+        .expect_err("a second member saturates the blocked build");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBuildBlocked {
+                resource: IndexBackpressureResource::PendingMembers,
+                requested: 2,
+                limit: 1,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(&operation_id.as_uuid().to_string()),
+        "{error}"
+    );
+    assert_eq!(db.index_operation_queue_stats().pending_operations, 1);
     db.close().await.expect("fixture closes");
 }
 

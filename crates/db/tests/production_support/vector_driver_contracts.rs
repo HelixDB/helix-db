@@ -43,6 +43,8 @@ pub(crate) async fn run() {
     partitioned_drop_resumes_each_mapping_and_removes_every_namespace().await;
     cleanup_checkpoint_rejections_and_limit_blockers_are_typed().await;
     source_scan_rejects_every_preplanning_boundary().await;
+    a_scan_step_ends_before_a_blocker_behind_admitted_rows().await;
+    a_scan_step_ends_before_an_entity_its_output_budget_cannot_admit().await;
     descriptor_validation_cursor_dispatch_is_typed().await;
     pre_queue_build_deltas_block_catch_up_validation_and_activation().await;
     typed_row_decoders_and_batch_accounting_fail_closed().await;
@@ -746,6 +748,160 @@ pub(super) async fn source_scan_rejects_every_preplanning_boundary() {
     db.close().await.expect("vector test database closes");
 }
 
+/// A blocked step commits what it staged beside an unchanged cursor, and a
+/// rescan cannot revisit an entity with applied state. So a `Scan` step that
+/// admits rows and then meets an invalid one commits the admitted rows with
+/// the cursor at the last of them, the next step blocks with nothing staged,
+/// and once the row is repaired the retried build activates.
+pub(super) async fn a_scan_step_ends_before_a_blocker_behind_admitted_rows() {
+    let db = test_db("vector-driver-blocker-behind-admitted-rows").await;
+    let scope = DataScope::LegacyUnscoped;
+    let definition = definition(Some("account_id"));
+    put_source(&db, scope, 0, &properties([1.0, 2.0, 3.0], Some(10))).await;
+    put_source(&db, scope, 1, &properties([3.0, 2.0, 1.0], Some(10))).await;
+    let wrong_dimension = vec![
+        Property::new("$label", PropertyValue::String("Document".to_string())),
+        Property::new("embedding", PropertyValue::F32Array(vec![1.0, 2.0])),
+        Property::new("account_id", PropertyValue::I64(10)),
+    ];
+    put_source(&db, scope, 2, &wrong_dimension).await;
+    let (operation_id, _, _) = create_build(&db, scope, &definition, 2).await;
+    let scan = |operation: &IndexOperationRecord| {
+        let IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::Scan(progress),
+        )) = operation.progress()
+        else {
+            panic!("the build is still scanning: {:?}", operation.progress());
+        };
+        (progress.cursor.clone(), progress.counters.entities)
+    };
+    let driver = driver();
+    let limits = SearchIndexBackfillLimits::default().batch();
+    let mut claim_sequence = 1;
+    let mut progressed = None;
+    let blocked = loop {
+        match drive_one(&db, &driver, operation_id, &mut claim_sequence, limits).await {
+            CommittedOperationStep::Progressed => {
+                progressed = Some(read_operation(&db, scope, operation_id).await);
+            }
+            CommittedOperationStep::Blocked => {
+                break read_operation(&db, scope, operation_id).await
+            }
+            step @ (CommittedOperationStep::TransientFailure
+            | CommittedOperationStep::Completed) => {
+                panic!("the scan must block on the invalid row: {step:?}")
+            }
+        }
+    };
+    let admitted = progressed.expect("a progressed step commits the admitted rows");
+    assert_eq!(scan(&admitted), (Some(source_cursor(scope, 1)), 2));
+    assert!(
+        matches!(
+            blocked.execution_state(),
+            crate::index_lifecycle::IndexOperationExecutionState::Blocked(
+                IndexOperationBlocker::InvalidSourceData { entity_id, .. }
+            ) if *entity_id == IndexEntityId::new(2)
+        ),
+        "{:?}",
+        blocked.execution_state()
+    );
+    assert_eq!(
+        scan(&blocked),
+        scan(&admitted),
+        "the blocker leaves the admitted rows' cursor"
+    );
+
+    put_source(&db, scope, 2, &properties([2.0, 2.0, 2.0], Some(10))).await;
+    crate::index_lifecycle::outbox::retry_operation(&db, scope, operation_id)
+        .await
+        .expect("the blocked build retries");
+    assert_eq!(
+        drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed,
+        "the rescan resumes after the admitted rows"
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition).await.state(),
+        IndexStateV2::Active { .. }
+    ));
+    db.close().await.expect("vector test database closes");
+}
+
+/// An entity whose output the step's budget cannot admit behind admitted
+/// entities ends the step like an invalid row: with an output budget of
+/// exactly the first entity's output, the first step commits that entity
+/// alone, and the build still activates under the default budget.
+pub(super) async fn a_scan_step_ends_before_an_entity_its_output_budget_cannot_admit() {
+    let scope = DataScope::LegacyUnscoped;
+    let definition = definition(Some("account_id"));
+    let seeded = |name: &'static str| {
+        let definition = definition.clone();
+        async move {
+            let db = test_db(name).await;
+            put_source(&db, scope, 0, &properties([1.0, 2.0, 3.0], Some(10))).await;
+            put_source(&db, scope, 1, &properties([3.0, 2.0, 1.0], Some(10))).await;
+            let (operation_id, _, _) = create_build(&db, scope, &definition, 1).await;
+            (db, operation_id)
+        }
+    };
+    let scan = |operation: &IndexOperationRecord| {
+        let IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::Scan(progress),
+        )) = operation.progress()
+        else {
+            panic!("the build is still scanning: {:?}", operation.progress());
+        };
+        (progress.cursor.clone(), progress.counters)
+    };
+    let driver = driver();
+
+    // The first entity's exact output, measured by a one-entity step.
+    let (db, operation_id) = seeded("vector-driver-first-entity-output").await;
+    let mut claim_sequence = 1;
+    assert_eq!(
+        drive_one(
+            &db,
+            &driver,
+            operation_id,
+            &mut claim_sequence,
+            batch_limits(1, 1024 * 1024, 1024, 16 * 1024 * 1024),
+        )
+        .await,
+        CommittedOperationStep::Progressed
+    );
+    let (cursor, first) = scan(&read_operation(&db, scope, operation_id).await);
+    assert_eq!((cursor, first.entities), (Some(source_cursor(scope, 0)), 1));
+    db.close().await.expect("vector test database closes");
+
+    let (db, operation_id) = seeded("vector-driver-output-budget-behind-admitted").await;
+    let mut claim_sequence = 1;
+    assert_eq!(
+        drive_one(
+            &db,
+            &driver,
+            operation_id,
+            &mut claim_sequence,
+            batch_limits(16, 1024 * 1024, 1024, first.output_bytes),
+        )
+        .await,
+        CommittedOperationStep::Progressed
+    );
+    assert_eq!(
+        scan(&read_operation(&db, scope, operation_id).await),
+        (Some(source_cursor(scope, 0)), first),
+        "the step ends before the entity its budget cannot admit"
+    );
+    assert_eq!(
+        drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition).await.state(),
+        IndexStateV2::Active { .. }
+    ));
+    db.close().await.expect("vector test database closes");
+}
+
 /// Verifies descriptor-validation cursors fail on malformed bytes and
 /// dispatch typed non-V2 and mapping keys to their exact scan lanes.
 pub(super) async fn descriptor_validation_cursor_dispatch_is_typed() {
@@ -1225,58 +1381,6 @@ pub(super) async fn typed_row_decoders_and_batch_accounting_fail_closed() {
     ));
 
     let limits = SearchIndexBackfillLimits::default().batch();
-    let progress = SourceScanProgress {
-        inclusive_upper_bound: source_cursor(scope, 0),
-        cursor: None,
-        counters: OperationCounters::default(),
-    };
-    assert!(matches!(
-        finish_or_block_scan(
-            EntityPlanOutcome::Blocked(IndexOperationBlocker::InvariantViolation),
-            VectorBatchAccounting::new(OperationCounters::default(), limits),
-            entity.kind,
-            entity.id,
-            &progress,
-            None,
-            VectorBuildSessionStats::default(),
-        )
-        .unwrap()
-        .result,
-        IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
-    ));
-    assert!(matches!(
-        finish_or_block_scan(
-            EntityPlanOutcome::BatchFull,
-            VectorBatchAccounting::new(OperationCounters::default(), limits),
-            entity.kind,
-            entity.id,
-            &progress,
-            None,
-            VectorBuildSessionStats::default(),
-        )
-        .unwrap()
-        .result,
-        IndexOperationStepResult::Progressed(IndexOperationProgress::VectorBuild(
-            VectorBuildProgress::Constructing(VectorBuildStage::Scan(_))
-        ))
-    ));
-    assert!(finish_or_block_scan(
-        EntityPlanOutcome::Admitted {
-            vector_writes: VectorWriteMeasurement::zero(),
-            single_vector_output_bytes: 0,
-            lifecycle_operations: 0,
-            lifecycle_bytes: 0,
-            next_partition: None,
-        },
-        VectorBatchAccounting::new(OperationCounters::default(), limits),
-        entity.kind,
-        entity.id,
-        &progress,
-        None,
-        VectorBuildSessionStats::default(),
-    )
-    .is_err());
-
     let mut accounting = VectorBatchAccounting::new(
         OperationCounters {
             entities: u64::MAX,

@@ -2729,7 +2729,9 @@ async fn enqueue_search_mutation(
     let mut reservation = if staged.is_empty() {
         None
     } else {
-        let reservation = db.index_operation_backlog().reserve(staged.charges)?;
+        let reservation = staged
+            .reserve(db.index_operation_backlog(), &transaction)
+            .await?;
         for staged in staged.operands {
             db.index_queue_store().stage_enqueue(
                 &transaction,

@@ -73,6 +73,7 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::InvalidQueryJson(_)
             | HelixDbError::Encoding(EncodingError::InvalidTenantId(_))
             | HelixDbError::IndexBusy { .. }
+            | HelixDbError::IndexBuildBlocked { .. }
             | HelixDbError::IndexOperationNotFound { .. }
             | HelixDbError::IndexOperationNotAbortable { .. }
             | HelixDbError::ActiveTextMutationLimitExceeded { .. }
@@ -209,6 +210,23 @@ mod tests {
                 limit: 1,
             }),
             HelixError::Transaction { error, .. } if error == "index_backpressure"
+        ));
+    }
+
+    #[test]
+    fn a_blocked_build_refusal_is_an_invalid_request_naming_its_operation() {
+        let operation_id = "0b6f4c1e-5d0a-4a43-9e57-3f2d1c0b9a87";
+        assert!(matches!(
+            HelixError::from(HelixDbError::IndexBuildBlocked {
+                scope: db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                index_id: 7,
+                operation_id: operation_id.to_string(),
+                resource: db::error::IndexBackpressureResource::PendingMembers,
+                requested: 2,
+                limit: 1,
+            }),
+            HelixError::InvalidRequest { error, msg }
+                if error == "index_build_blocked" && msg.contains(operation_id)
         ));
     }
 

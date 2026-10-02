@@ -34,6 +34,33 @@
 //! Every other acknowledgement is counted as censored rather than assigned a
 //! guessed lag, including one for an operation whose acknowledgement
 //! publication committed or attempted before its producer's commit returned.
+//!
+//! # Blocked builds
+//!
+//! A hidden build's generation publishes nothing before the build activates,
+//! so once its build blocks, a saturated limit cannot clear until an operator
+//! retries or aborts the operation. Such a refusal is the non-retryable
+//! [`HelixDbError::IndexBuildBlocked`] rather than backpressure, except for a
+//! transaction whose only operation in that generation repairs the entity
+//! the blocker names. That repair is admitted beyond the limits when it is
+//! the entity's first queued operation, or when it removes the entity from
+//! the index, so every such blocker stays repairable:
+//!
+//! - An invalid source row needs only its first write. Every write queued for
+//!   a hidden build is validated against the build's own rules, so once the
+//!   entity has a queued operation its row is valid and a retry rereads it.
+//! - An oversized entity has no such check, so its first write may leave it
+//!   oversized. Deleting the entity is then still admitted, as is clearing
+//!   its indexed property, and writes to properties the index does not read
+//!   queue nothing.
+//!
+//! A transaction is refused only for a limit it grows, and a write to an
+//! entity already pending in the generation adds no member. So while repairs
+//! hold the member count above its limit, writes to pending entities are
+//! still admitted within the byte limit; only new entities are refused. A
+//! removal leaves the entity a member, so writing it back is not exempt from
+//! the byte limit: each entity a build blocks on adds at most one member and
+//! two operations (its first write and a removal) beyond the limits.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -46,7 +73,7 @@ use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue::QueuedOperationId;
 use crate::error::{HelixDbError, IndexBackpressureResource, IndexOperationBatchResource, Result};
-use crate::index_lifecycle::{IndexGenerationId, IndexId};
+use crate::index_lifecycle::{IndexGenerationId, IndexId, IndexOperationId};
 
 use super::lag::PublicationLagHistogram;
 use super::QueueTarget;
@@ -56,6 +83,29 @@ use super::QueueTarget;
 pub(crate) struct BacklogLimits {
     pub(crate) max_retained_bytes: u64,
     pub(crate) max_members: u64,
+}
+
+/// A hidden build stopped on a blocker, as the reserving transaction read it.
+///
+/// See "Blocked builds" in the module documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockedBuild {
+    /// The build's hidden generation.
+    pub(crate) target: QueueTarget,
+    pub(crate) operation_id: IndexOperationId,
+    /// The reserving transaction's operation on the entity the blocker names;
+    /// `None` when the blocker names no entity or the transaction does not
+    /// write it.
+    pub(crate) repair: Option<BlockerRepair>,
+}
+
+/// A reserving transaction's operation on the entity a blocker names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockerRepair {
+    /// Leaves the entity indexed; exempt only as its first queued operation.
+    Replace(IndexEntity),
+    /// Removes the entity from the index; always exempt.
+    Remove(IndexEntity),
 }
 
 /// One logical index across all of its generations.
@@ -213,22 +263,33 @@ impl IndexOperationBacklog {
     ///
     /// Either every charge is admitted or none is: limits are checked for all
     /// touched logical indexes before any state changes. Acceptance at exactly
-    /// the limit succeeds; one byte or member above it fails. A transaction
-    /// whose own charges exceed a limit could never be admitted, so it fails
-    /// with the non-retryable [`HelixDbError::IndexOperationBatchTooLarge`]
-    /// before any retryable [`HelixDbError::IndexBackpressure`] is considered.
+    /// the limit succeeds; one byte or member above it fails. Only a limit the
+    /// transaction grows can refuse it: an entity already pending in the
+    /// generation adds no member, so its writes are admitted even while the
+    /// member count is above the limit, as after a blocker repair (below) or
+    /// a reopen with a lower limit. A transaction whose own charges exceed a
+    /// limit could never be admitted, so it fails with the non-retryable
+    /// [`HelixDbError::IndexOperationBatchTooLarge`] before any retryable
+    /// [`HelixDbError::IndexBackpressure`] is considered.
     /// A transaction routes through one catalog snapshot, which holds a single
     /// generation per logical index, so charges for two generations of one
     /// index are an [`HelixDbError::InvariantViolation`].
+    ///
+    /// A saturated index whose generation is one of `blocked` fails with
+    /// [`HelixDbError::IndexBuildBlocked`] instead of backpressure, unless the
+    /// transaction's only charge for it is its blocker's repair: the entity's
+    /// first operation, or one removing it from the index, which is admitted
+    /// beyond the limits.
     pub(crate) fn reserve(
         self: &Arc<Self>,
-        charges: Vec<OperationCharge>,
+        charges: &[OperationCharge],
+        blocked: &[BlockedBuild],
     ) -> Result<BacklogReservation> {
         let mut state = self.state.lock();
         let mut staged: BTreeMap<LogicalIndex, (IndexGenerationId, u64, HashSet<IndexEntity>)> =
             BTreeMap::new();
         let mut ids = HashSet::with_capacity(charges.len());
-        for charge in &charges {
+        for charge in charges {
             if !ids.insert(charge.id) || state.charges.contains_key(&charge.id) {
                 return Err(HelixDbError::InvariantViolation(
                     "queued operation ID was reserved twice".to_string(),
@@ -274,34 +335,69 @@ impl IndexOperationBacklog {
         }
         for (index, (generation, bytes, entities)) in &staged {
             let usage = state.indexes.get(index);
-            let requested_bytes = usage
-                .map_or(0, |usage| usage.retained_bytes)
-                .saturating_add(*bytes);
-            if requested_bytes > self.limits.max_retained_bytes {
-                return Err(backpressure(
-                    *index,
-                    IndexBackpressureResource::RetainedBytes,
-                    requested_bytes,
-                    self.limits.max_retained_bytes,
-                ));
-            }
-            let requested_members = usage.map_or(entities.len() as u64, |usage| {
+            let (members, new_members) = usage.map_or((0, entities.len()), |usage| {
                 let new = entities
                     .iter()
                     .filter(|entity| !usage.members.contains_key(&(*generation, **entity)))
                     .count();
-                (usage.members.len() as u64).saturating_add(new as u64)
+                (usage.members.len(), new)
             });
-            if requested_members > self.limits.max_members {
-                return Err(backpressure(
-                    *index,
+            // Each resource as (current, added, limit); one the transaction
+            // does not grow cannot refuse it.
+            let Some((resource, requested, limit)) = [
+                (
+                    IndexBackpressureResource::RetainedBytes,
+                    usage.map_or(0, |usage| usage.retained_bytes),
+                    *bytes,
+                    self.limits.max_retained_bytes,
+                ),
+                (
                     IndexBackpressureResource::PendingMembers,
-                    requested_members,
+                    members as u64,
+                    new_members as u64,
                     self.limits.max_members,
-                ));
+                ),
+            ]
+            .into_iter()
+            .filter(|(_, _, added, _)| *added > 0)
+            .map(|(resource, current, added, limit)| {
+                (resource, current.saturating_add(added), limit)
+            })
+            .find(|(_, requested, limit)| requested > limit) else {
+                continue;
+            };
+            let target = QueueTarget::new(index.scope, index.index_id, *generation);
+            let Some(build) = blocked.iter().find(|build| build.target == target) else {
+                return Err(HelixDbError::IndexBackpressure {
+                    scope: index.scope,
+                    index_id: index.index_id.get(),
+                    resource,
+                    requested,
+                    limit,
+                });
+            };
+            let exempt = entities.len() == 1
+                && build.repair.is_some_and(|repair| match repair {
+                    BlockerRepair::Replace(entity) => {
+                        entities.contains(&entity)
+                            && !usage.is_some_and(|usage| {
+                                usage.members.contains_key(&(*generation, entity))
+                            })
+                    }
+                    BlockerRepair::Remove(entity) => entities.contains(&entity),
+                });
+            if !exempt {
+                return Err(HelixDbError::IndexBuildBlocked {
+                    scope: index.scope,
+                    index_id: index.index_id.get(),
+                    operation_id: build.operation_id.as_uuid().to_string(),
+                    resource,
+                    requested,
+                    limit,
+                });
             }
         }
-        for charge in &charges {
+        for charge in charges {
             state.insert(*charge, ChargeState::Reserved);
         }
         Ok(BacklogReservation {
@@ -797,21 +893,6 @@ impl BacklogState {
             }
             DurableOrigin::Discovered => self.outcomes.acknowledged_censored += 1,
         }
-    }
-}
-
-fn backpressure(
-    index: LogicalIndex,
-    resource: IndexBackpressureResource,
-    requested: u64,
-    limit: u64,
-) -> HelixDbError {
-    HelixDbError::IndexBackpressure {
-        scope: index.scope,
-        index_id: index.index_id.get(),
-        resource,
-        requested,
-        limit,
     }
 }
 

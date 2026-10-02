@@ -1378,15 +1378,18 @@ async fn an_empty_queue_with_charged_work_backs_off() {
     // example while SlateDB write backpressure stalls it.
     let reservation = db
         .index_operation_backlog()
-        .reserve(vec![OperationCharge {
-            target,
-            entity: IndexEntity {
-                kind: IndexElementKind::Node,
-                id: IndexEntityId::new(1),
-            },
-            id: QueuedOperationId::generate(),
-            bytes: 64,
-        }])
+        .reserve(
+            &[OperationCharge {
+                target,
+                entity: IndexEntity {
+                    kind: IndexElementKind::Node,
+                    id: IndexEntityId::new(1),
+                },
+                id: QueuedOperationId::generate(),
+                bytes: 64,
+            }],
+            &[],
+        )
         .unwrap();
     let publisher = publisher_with_limits(
         &db,

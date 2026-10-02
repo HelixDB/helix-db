@@ -707,6 +707,25 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
             grpc_code: tonic::Code::InvalidArgument,
             code: "index_operation_batch_too_large",
         },
+        // Waiting cannot clear a blocked build's saturation, so it is not
+        // retryable backpressure.
+        Case {
+            class: QueryFailureClass::Execution,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBuildBlocked {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    operation_id: "0b6f4c1e-5d0a-4a43-9e57-3f2d1c0b9a87".to_string(),
+                    resource: db::error::IndexBackpressureResource::PendingMembers,
+                    requested: 250_001,
+                    limit: 250_000,
+                })
+            },
+            http_status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: None,
+            grpc_code: tonic::Code::Internal,
+            code: "index_build_blocked",
+        },
         Case {
             class: QueryFailureClass::InvalidRequest,
             error: || QueryServiceError::InvalidRequest("bad request".to_string()),

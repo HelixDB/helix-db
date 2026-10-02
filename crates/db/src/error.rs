@@ -310,6 +310,29 @@ pub enum HelixDbError {
         limit: u64,
     },
 
+    /// A write would saturate the queued work of a blocked index build.
+    ///
+    /// A hidden build's generation publishes its queued work only once the
+    /// build activates, so waiting cannot clear this: the write may succeed
+    /// once the blocked build operation is retried or aborted. A repair of
+    /// the entity its blocker names, as that entity's first queued write or
+    /// as its removal from the index, is admitted beyond the limits instead.
+    #[error("index build {operation_id} of {scope:?} index {index_id} is blocked: {resource} would reach {requested}, limit {limit}. Repair what the blocker names and retry the operation, or abort it.")]
+    IndexBuildBlocked {
+        /// Data scope owning the logical index.
+        scope: crate::encoding::v2::keys::scope::DataScope,
+        /// Logical index whose retained work would exceed its limit.
+        index_id: u64,
+        /// Canonical lowercase UUID of the blocked build operation.
+        operation_id: String,
+        /// Saturated resource.
+        resource: IndexBackpressureResource,
+        /// Resource total the rejected transaction would have produced.
+        requested: u64,
+        /// Configured ceiling.
+        limit: u64,
+    },
+
     /// One transaction staged more queued index work than any single
     /// transaction may carry: an operand too large to commit, or more than a
     /// per-index backlog limit even with no outstanding work.
@@ -607,6 +630,7 @@ impl HelixDbError {
                 error_code::QueryErrorCode::MigrationSteppingRequiresDisabledMode
             }
             Self::IndexBackpressure { .. } => error_code::QueryErrorCode::IndexBackpressure,
+            Self::IndexBuildBlocked { .. } => error_code::QueryErrorCode::IndexBuildBlocked,
             Self::IndexOperationBatchTooLarge { .. } => {
                 error_code::QueryErrorCode::IndexOperationBatchTooLarge
             }
@@ -696,6 +720,7 @@ impl HelixDbError {
                 | error_code::QueryErrorCode::SecondaryLifecycleSteppingRequiresDisabledMode
                 | error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
                 | error_code::QueryErrorCode::IndexBackpressure
+                | error_code::QueryErrorCode::IndexBuildBlocked
                 | error_code::QueryErrorCode::IndexOperationBatchTooLarge
                 | error_code::QueryErrorCode::InvalidIndexSourceData
                 | error_code::QueryErrorCode::IndexAlreadyExists

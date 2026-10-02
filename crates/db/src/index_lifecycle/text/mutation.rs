@@ -9,8 +9,8 @@
 use crate::encoding::property::Property;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{
-    IndexGenerationId, IndexId, IndexRecordV2, ValidatedDynamicIndexDefinition,
-    ValidatedTextIndexDefinition,
+    IndexGenerationId, IndexId, IndexOperationId, IndexRecordV2, IndexStateV2,
+    ValidatedDynamicIndexDefinition, ValidatedTextIndexDefinition,
 };
 
 /// Transaction-local text generations that accept ordinary mutation work.
@@ -33,6 +33,8 @@ pub(crate) struct QueuedTextTarget<'a> {
     pub(crate) definition: &'a ValidatedTextIndexDefinition,
     /// Canonical record every publication of this generation revalidates.
     pub(crate) record: &'a IndexRecordV2,
+    /// Operation owning a hidden build; `None` for an Active generation.
+    pub(crate) build_operation: Option<IndexOperationId>,
 }
 
 /// Family-local target ordinal produced by the canonical catalog classifier.
@@ -59,17 +61,27 @@ impl TextMutationSet {
         &self,
         route: crate::index_lifecycle::mutation_catalog::MutationRouteTarget,
     ) -> Result<QueuedTextTarget<'_>> {
-        let record = match route {
+        let (record, build_operation) = match route {
             crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextBuilding(
                 ordinal,
-            ) => self.building.get(ordinal).ok_or_else(|| {
-                corruption("text mutation route named a build target outside its catalog")
-            })?,
-            crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(ordinal) => {
+            ) => {
+                let record = self.building.get(ordinal).ok_or_else(|| {
+                    corruption("text mutation route named a build target outside its catalog")
+                })?;
+                let IndexStateV2::Building {
+                    build_operation_id, ..
+                } = record.state()
+                else {
+                    return Err(corruption("hidden text mutation target is not building"));
+                };
+                (record, Some(*build_operation_id))
+            }
+            crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(ordinal) => (
                 self.active.get(ordinal).ok_or_else(|| {
                     corruption("text mutation route named an Active target outside its catalog")
-                })?
-            }
+                })?,
+                None,
+            ),
             crate::index_lifecycle::mutation_catalog::MutationRouteTarget::Secondary(_)
             | crate::index_lifecycle::mutation_catalog::MutationRouteTarget::Vector(_) => {
                 return Err(corruption(
@@ -87,6 +99,7 @@ impl TextMutationSet {
             generation: record.state().generation(),
             definition,
             record,
+            build_operation,
         })
     }
 

@@ -225,10 +225,9 @@ impl<'db> ExecutionContext<'db> {
         let mut reservation = if staged_queue.is_empty() {
             None
         } else {
-            let reservation = self
-                .db
-                .index_operation_backlog()
-                .reserve(staged_queue.charges)?;
+            let reservation = staged_queue
+                .reserve(self.db.index_operation_backlog(), &txn)
+                .await?;
             for staged in staged_queue.operands {
                 self.db.index_queue_store().stage_enqueue(
                     &txn,

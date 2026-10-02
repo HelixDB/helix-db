@@ -22,8 +22,8 @@ use crate::search;
 use crate::search::vector::{ValidatedMetricVector, VectorDimension};
 
 use super::{
-    ActiveIndexHandle, IndexEntityId, IndexGenerationId, IndexId, TextPartition,
-    ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition,
+    ActiveIndexHandle, IndexEntityId, IndexGenerationId, IndexId, IndexOperationId, IndexStateV2,
+    TextPartition, ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition,
 };
 
 mod driver;
@@ -78,9 +78,19 @@ struct VectorMutationTarget {
 #[derive(Debug, Clone)]
 enum VectorMutationMode {
     /// Planner-visible generation the queue worker publishes into.
-    Active(ActiveIndexHandle),
-    /// Hidden build that scans source rows; queued work waits for activation.
-    Building,
+    Active(
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "writes only queue work; tests publish through the handle directly"
+            )
+        )]
+        ActiveIndexHandle,
+    ),
+    /// Hidden build, owned by this operation, that scans source rows; queued
+    /// work waits for activation.
+    Building(IndexOperationId),
 }
 
 /// One vector generation selected for queued maintenance.
@@ -89,8 +99,8 @@ pub(crate) struct QueuedVectorTarget<'a> {
     pub(crate) index_id: IndexId,
     pub(crate) generation: IndexGenerationId,
     pub(crate) definition: &'a ValidatedVectorIndexDefinition,
-    /// Active generation handle; `None` for a hidden build.
-    pub(crate) active: Option<&'a ActiveIndexHandle>,
+    /// Operation owning a hidden build; `None` for an Active generation.
+    pub(crate) build_operation: Option<IndexOperationId>,
 }
 
 /// Transaction-local vector generations loaded from canonical records.
@@ -109,9 +119,9 @@ impl VectorMutationSet {
             index_id: target.index_id,
             generation: target.generation,
             definition: &target.definition,
-            active: match &target.mode {
-                VectorMutationMode::Active(handle) => Some(handle),
-                VectorMutationMode::Building => None,
+            build_operation: match &target.mode {
+                VectorMutationMode::Active(_) => None,
+                VectorMutationMode::Building(operation_id) => Some(*operation_id),
             },
         })
     }
@@ -135,23 +145,33 @@ impl VectorMutationSet {
         &mut self,
         entry: super::mutation_catalog::MutationCatalogEntry<'_>,
     ) -> Result<usize> {
-        let (record, mode) = match entry {
-            super::mutation_catalog::MutationCatalogEntry::Building(record) => {
-                (record, VectorMutationMode::Building)
-            }
+        let (record, handle) = match entry {
+            super::mutation_catalog::MutationCatalogEntry::Building(record) => (record, None),
             super::mutation_catalog::MutationCatalogEntry::Active { record, handle } => {
                 if !matches!(handle, ActiveIndexHandle::Vector { .. }) {
                     return Err(corruption(
                         "active vector record carried another family handle",
                     ));
                 }
-                (record, VectorMutationMode::Active(handle.clone()))
+                (record, Some(handle))
             }
         };
         let ValidatedDynamicIndexDefinition::Vector(definition) = record.definition() else {
             return Err(corruption(
                 "vector mutation classifier received another family",
             ));
+        };
+        let mode = match handle {
+            Some(handle) => VectorMutationMode::Active(handle.clone()),
+            None => {
+                let IndexStateV2::Building {
+                    build_operation_id, ..
+                } = record.state()
+                else {
+                    return Err(corruption("hidden vector mutation target is not building"));
+                };
+                VectorMutationMode::Building(*build_operation_id)
+            }
         };
         let ordinal = self.targets.len();
         self.targets.push(VectorMutationTarget {
@@ -480,6 +500,62 @@ mod tests {
             },
             handle,
         )
+    }
+
+    /// A hidden build's target carries its owning operation, an Active one
+    /// none, and a Building entry whose record is not building fails closed.
+    #[test]
+    fn routed_targets_carry_a_hidden_build_operation() {
+        let definition = validated_definition(None, VectorDistanceMetric::Euclidean);
+        let operation_id = IndexOperationId::new_v4();
+        let building = IndexRecordV2::building(
+            IndexId::new(31).unwrap(),
+            ValidatedDynamicIndexDefinition::Vector(definition.clone()),
+            IndexRevision::initial(),
+            PhysicalGeneration::Vector {
+                generation: IndexGenerationId::new(7).unwrap(),
+                layout: VectorPhysicalLayout::Unpartitioned {
+                    physical_index_id: VectorPhysicalIndexId::new(45).unwrap(),
+                },
+                descriptor: VectorGenerationDescriptor::for_definition(&definition),
+            },
+            operation_id,
+        )
+        .unwrap();
+        let active = building
+            .clone()
+            .transition(IndexStateTransition::Activate)
+            .unwrap();
+        let handle =
+            ActiveIndexHandle::try_from_record(DataScope::LegacyUnscoped, &active).unwrap();
+        let mut routed = VectorMutationSet::default();
+        let hidden = routed
+            .include_catalog_entry(
+                super::super::mutation_catalog::MutationCatalogEntry::Building(&building),
+            )
+            .unwrap();
+        let published = routed
+            .include_catalog_entry(
+                super::super::mutation_catalog::MutationCatalogEntry::Active {
+                    record: &active,
+                    handle: &handle,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            routed.queued_target(hidden).unwrap().build_operation,
+            Some(operation_id)
+        );
+        assert_eq!(
+            routed.queued_target(published).unwrap().build_operation,
+            None
+        );
+        assert!(matches!(
+            routed.include_catalog_entry(
+                super::super::mutation_catalog::MutationCatalogEntry::Building(&active)
+            ),
+            Err(HelixDbError::IndexCatalogCorruption(reason)) if reason.contains("not building")
+        ));
     }
 
     /// Exercises one unpartitioned active generation through insert and removal.

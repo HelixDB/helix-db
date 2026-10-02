@@ -214,8 +214,9 @@ async fn empty_tenant_reclamation_fails_closed() {
 /// Proves publication and routed-catalog entry points reject another family.
 ///
 /// Staging queued effects or targeting planning at a text generation fails
-/// closed, as do a routed ordinal outside the classified catalog and a
-/// classifier entry whose record or handle is another family's.
+/// closed, as do a routed ordinal outside the classified catalog, a
+/// classifier entry whose record or handle is another family's, and a text
+/// build route whose record is not building.
 async fn other_family_targets_fail_closed() {
     let db = Db::builder("vector-publication-other-family", Arc::new(InMemory::new()))
         .build()
@@ -284,6 +285,17 @@ async fn other_family_targets_fail_closed() {
             handle: &text_handle,
         }),
         Err(HelixDbError::IndexCatalogCorruption(reason)) if reason.contains("another family handle")
+    ));
+    // A text build route whose record is not building has no owning build.
+    let mut text_routed = crate::index_lifecycle::text::mutation::TextMutationSet::default();
+    text_routed
+        .include_catalog_entry(MutationCatalogEntry::Building(&text_record))
+        .expect("the text classifier checks only the family");
+    assert!(matches!(
+        text_routed.queued_target(
+            crate::index_lifecycle::mutation_catalog::MutationRouteTarget::TextBuilding(0)
+        ),
+        Err(HelixDbError::IndexCatalogCorruption(reason)) if reason.contains("not building")
     ));
     db.close().await.expect("other-family database closes");
 }
