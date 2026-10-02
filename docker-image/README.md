@@ -126,6 +126,13 @@ until the next admission. A split larger than the whole share is never copied.
 After a restart, the first search to use each split in `fts/` reads and checksums
 the whole split, up to 64 MiB, before it answers.
 
+Once storage opens, the server warms the cache in the background: the index, filter
+and stats blocks of the newest SSTs go into `slate/`, and with S3 the search rows of
+every Active vector index go into `object-store/`, reading at most half that tier.
+Neither warm delays startup or `/readyz`; queries that arrive first read through to
+the object store as usual. Set `HELIX_DISK_CACHE_WARM=off` to skip both, for example
+to avoid the startup reads from S3; every tier then fills only as queries read.
+
 On a miss the object-store tier fetches and keeps a whole part of an SST: 4 MiB, or
 less for budgets under 2 GiB so that the tier always holds at least 256 parts. Budget
 at least twice the data the server reads often. Once that data outgrows half the
@@ -146,6 +153,7 @@ too.
 | `HELIX_DISK_CACHE_DIR` | Disk cache directory, created with its `slate/`, `object-store/` and `fts/` subdirectories if needed. With S3 it defaults to `/var/cache/helix`. With `HELIX_DATA_DIR`, setting it enables the disk cache and leaving it unset keeps memory-only caches. Rejected with memory storage. |
 | `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). With S3, `object-store/` also keeps the SSTs the server writes; with `HELIX_DATA_DIR` those are already on local disk, so it keeps only SSTs the server reads. |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the SlateDB block cache in bytes; defaults to 640 MiB, the memory-only default. |
+| `HELIX_DISK_CACHE_WARM` | `on` (the default) or `off`, in any case: whether the server warms the disk cache in the background at startup. Rejected with memory storage, and with `HELIX_DATA_DIR` unless `HELIX_DISK_CACHE_DIR` is set. |
 
 Size the container's memory for more than `HELIX_DISK_CACHE_MEMORY_BYTES`: the block
 cache also indexes everything in `slate/` in memory. Once `slate/` fills, that index
@@ -165,8 +173,9 @@ it; budgets of 1 GiB or less need about 8,200 or fewer. Run natively on macOS, t
 limit is also capped by `sysctl kern.maxfilesperproc`.
 
 Startup also fails with a message naming the variable when a size is not a positive
-integer (including non-UTF-8 text) or is out of range, a size is set with
-`HELIX_DATA_DIR` but without `HELIX_DISK_CACHE_DIR`, the default budget does not
+integer (including non-UTF-8 text) or is out of range, `HELIX_DISK_CACHE_WARM` is
+neither `on` nor `off`, a cache variable is set with `HELIX_DATA_DIR` but without
+`HELIX_DISK_CACHE_DIR`, the default budget does not
 fit, the directory or a tier subdirectory cannot be created or written, the
 directory cannot be locked (some network and FUSE filesystems do not support
 locks), or another running server already uses the directory. A server holds a
