@@ -111,7 +111,8 @@ fn cache_config() -> DbConfig {
                     None,
                     1_024,
                 )
-                .unwrap(),
+                .unwrap()
+                .with_vector_part_warm(db::config::VectorPartWarm::Background),
                 slate_warm: db::config::SlateWarmConfig::default(),
                 fts: Some(
                     db::config::FtsHybridCacheConfig::try_new(

@@ -2836,16 +2836,16 @@ impl HelixDB {
                 handle,
             });
 
-        // Only in front of a remote durable store, where the tier also caches
-        // the SSTs this node writes: a local store serves cold reads itself.
+        // Only when configured, which the server does in front of S3 unless
+        // told not to warm: a local store serves cold reads itself.
         let Some(tier) = self
             .inner
             .config
             .db()
             .cache()
             .object_store_cache()
+            .filter(|tier| matches!(tier.vector_part_warm(), config::VectorPartWarm::Background))
             .map(config::SlateObjectStoreCacheSettings::to_slate_options)
-            .filter(|tier| tier.cache_puts)
         else {
             return Ok(());
         };
@@ -3534,19 +3534,19 @@ mod tests {
         DataScope::Tenant(TenantId::from_ulid_str(value).expect("valid tenant"))
     }
 
-    /// The object-store warm runs only in front of a remote durable store,
-    /// which the tier marks by caching written SSTs: memory caches and a
-    /// hybrid cache over local SSTs start no warm. A started warm is waited
-    /// for by `wait_for_startup_cache_warm` without being taken from
+    /// The object-store warm runs only when the tier enables it, whether or
+    /// not the tier caches written SSTs: memory caches and a tier left at
+    /// [`config::VectorPartWarm::Off`] start no warm. A started warm is
+    /// waited for by `wait_for_startup_cache_warm` without being taken from
     /// `close()`, which stops it.
     #[tokio::test]
-    async fn object_store_warm_starts_only_in_front_of_a_remote_store() {
+    async fn object_store_warm_starts_only_when_the_tier_enables_it() {
         use crate::config::{
             ObjectStoreWarmLevel, SlateHybridCacheConfig, SlateObjectStoreCacheSettings,
-            SlateWarmConfig,
+            SlateWarmConfig, VectorPartWarm,
         };
 
-        let hybrid = |root: &std::path::Path, cache_puts: bool| {
+        let hybrid = |root: &std::path::Path, cache_puts: bool, warm: VectorPartWarm| {
             DbConfig::new().with_cache(config::CacheConfig::new(
                 config::VectorMemorySettings::default(),
                 CacheMode::Hybrid {
@@ -3565,7 +3565,8 @@ mod tests {
                         None,
                         8,
                     )
-                    .expect("valid object-store cache"),
+                    .expect("valid object-store cache")
+                    .with_vector_part_warm(warm),
                     slate_warm: SlateWarmConfig::Off,
                     fts: None,
                 },
@@ -3583,8 +3584,30 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary cache root");
         for (config, started) in [
             (DbConfig::new(), false),
-            (hybrid(&root.path().join("local"), false), false),
-            (hybrid(&root.path().join("remote"), true), true),
+            (
+                hybrid(&root.path().join("local"), false, VectorPartWarm::Off),
+                false,
+            ),
+            (
+                hybrid(&root.path().join("remote-off"), true, VectorPartWarm::Off),
+                false,
+            ),
+            (
+                hybrid(
+                    &root.path().join("remote"),
+                    true,
+                    VectorPartWarm::Background,
+                ),
+                true,
+            ),
+            (
+                hybrid(
+                    &root.path().join("local-on"),
+                    false,
+                    VectorPartWarm::Background,
+                ),
+                true,
+            ),
         ] {
             let db = HelixDB::open_with_object_store_and_config(
                 "object-store-warm-gate",
@@ -3608,7 +3631,11 @@ mod tests {
         let db = HelixDB::open_with_object_store_and_config(
             "object-store-warm-close",
             Arc::new(InMemory::new()),
-            hybrid(&root.path().join("closing"), true),
+            hybrid(
+                &root.path().join("closing"),
+                true,
+                VectorPartWarm::Background,
+            ),
         )
         .await
         .expect("writer opens");

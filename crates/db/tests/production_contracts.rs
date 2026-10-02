@@ -11646,9 +11646,9 @@ mod vector_object_store_warm {
         }
     }
 
-    /// Hybrid caches rooted in `root` with small parts. `remote` marks the
-    /// durable store remote, as the server does for S3, by caching the SSTs
-    /// the writer puts.
+    /// Hybrid caches rooted in `root` with small parts. `remote` sets the
+    /// object-store tier up as the server does for S3: it caches the SSTs
+    /// the writer puts and warms vector search rows at startup.
     fn hybrid(root: &std::path::Path, remote: bool) -> config::DbConfig {
         config::DbConfig::new().with_cache(config::CacheConfig::new(
             config::VectorMemorySettings::default(),
@@ -11668,7 +11668,12 @@ mod vector_object_store_warm {
                     None,
                     64,
                 )
-                .expect("valid object-store cache"),
+                .expect("valid object-store cache")
+                .with_vector_part_warm(if remote {
+                    config::VectorPartWarm::Background
+                } else {
+                    config::VectorPartWarm::Off
+                }),
                 slate_warm: config::SlateWarmConfig::Off,
                 fts: None,
             },
@@ -11783,8 +11788,8 @@ mod vector_object_store_warm {
 
     /// In front of a remote durable store, opening warms the vector rows a
     /// search reads into the object-store tier, so the first search after a
-    /// restart reads fewer SST objects and returns the same rows. A local
-    /// store (no cached puts) is not warmed.
+    /// restart reads fewer SST objects and returns the same rows. A tier set
+    /// up for a local store is not warmed.
     #[tokio::test(flavor = "multi_thread")]
     async fn hybrid_open_warms_vector_search_rows_before_the_first_search() {
         let store = Arc::new(CountingStore::default());
