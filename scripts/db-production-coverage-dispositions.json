@@ -23,15 +23,6 @@
     "reason": "The named contract exercises fresh and replacement workloads for every metric, validates cache and workload limits, and forces cache pressure. Residual zero-count lines are validation errors, tracing fields, and async continuation regions around asserted outcomes."
   },
   {
-    "path": "crates/db/src/search/vector/generation.rs",
-    "lines": [
-      549
-    ],
-    "classification": "named-test",
-    "evidence": "vector_generation_exercises_descriptor_bound_authority",
-    "reason": "The named contract asserts both directly created and catalog-projected current generations own SimHashDirectoryV1. LLVM constant-folds the const matches expression while retaining this zero-count source region."
-  },
-  {
     "path": "crates/db/src/search/vector/hnsw/index.rs",
     "lines": [
       329,
@@ -343,5 +334,23 @@
     "classification": "named-test",
     "evidence": "vector_storage_exercises_all_current_row_families",
     "reason": "The named contract runs successful, malformed, row-limited, byte-limited, and cursor-resumed legacy, directory-validation, canonical-backfill, and cleanup scans, including foreign-prefix isolation. LLVM retains zero-count async continuation regions on the exercised scan-prefix awaits."
+  },
+  {
+    "path": "crates/db/src/search/vector/cache/part_warm.rs",
+    "lines": [
+      84
+    ],
+    "classification": "named-test",
+    "evidence": "vector_hydration_exercises_active_generation_boundaries",
+    "reason": "The named contract fails a target's payload scan and asserts the target is skipped, counted as failed, and charged the hot lane it already read. The zero-count line is a tracing field of the skip warning, which is evaluated only when a warn-level subscriber is installed."
+  },
+  {
+    "path": "crates/db/src/search/vector/storage/mod.rs",
+    "lines": [
+      102
+    ],
+    "classification": "named-test",
+    "evidence": "vector_hydration_exercises_active_generation_boundaries",
+    "reason": "The named contract fails warm scans as they open and asserts the skip, the failure count, and the partial charge. A row read that fails partway through a range returns the same RangeEnd::Failed with the bytes read so far; failing an open SlateDB iterator between rows needs an object-store fault beneath SlateDB, which no current fixture injects."
   }
 ]
