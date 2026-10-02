@@ -387,6 +387,10 @@ pub async fn create_indexes(
             "kind",
             g().create_index_if_not_exists(IndexSpec::node_equality("Attribute", "kind")),
         ),
+        "item_owner" => batch.var_as(
+            "item_owner",
+            g().create_index_if_not_exists(IndexSpec::node_equality("Item", "owner")),
+        ),
         other => panic!("unknown index {other}"),
     });
     let receipts = backend
@@ -683,8 +687,13 @@ pub fn shapes(query: &[f32]) -> Vec<Shape> {
 }
 
 pub fn query_vectors(count: usize, dimension: usize) -> Vec<Vec<f32>> {
+    query_vectors_seeded(count, dimension, 9_001)
+}
+
+/// Kind-B query vectors, half of them near the target group, from `seed`.
+pub fn query_vectors_seeded(count: usize, dimension: usize, seed: u64) -> Vec<Vec<f32>> {
     let fixture = Fixture::new(dimension);
-    let mut rng = Rng(9_001);
+    let mut rng = Rng(seed);
     (0..count)
         .map(|index| {
             let group = match index % 2 {

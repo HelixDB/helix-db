@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::super::filter::RECORD_BATCH_ROWS;
 use super::super::values::DistinctKey;
 use super::*;
 
@@ -45,21 +46,50 @@ impl<'db> ExecutionContext<'db> {
         names: &ir::PropertyNames,
     ) -> Result<ExecutionValue> {
         let mut scalars = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            let mut resolver = eval::RowValueResolver::new(self);
-            let mut object = BTreeMap::new();
-            for name in names.as_ref() {
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut resolver = self.prefetched_resolver(batch, names.as_ref()).await?;
+            for row in batch {
                 self.check_execution_deadline()?;
-                if let Some(value) = resolver.row_property(row, name).await? {
-                    object.insert(name.as_ref().to_string(), value);
+                let mut object = BTreeMap::new();
+                for name in names.as_ref() {
+                    self.check_execution_deadline()?;
+                    if let Some(value) = resolver.row_property(row, name).await? {
+                        object.insert(name.as_ref().to_string(), value);
+                    }
                 }
-            }
-            if !object.is_empty() {
-                scalars.push(ExecutionScalar::Object(object));
+                if !object.is_empty() {
+                    scalars.push(ExecutionScalar::Object(object));
+                }
             }
         }
         Ok(ExecutionValue::Scalars(scalars))
+    }
+
+    /// A resolver shared by one record batch of rows, with the records that
+    /// resolving `names` on each row will read already loaded through one
+    /// overlapped multi-get instead of one read per row.
+    ///
+    /// Only records per-row resolution would read are loaded (see
+    /// [`eval::record_read`]). Their read and decode errors therefore surface
+    /// per batch: one from any row of the batch wins over an earlier row's
+    /// expression error, as in a filter's batches.
+    async fn prefetched_resolver<'ctx>(
+        &'ctx self,
+        batch: &[ExecutionRow],
+        names: &[ir::NonEmptyString],
+    ) -> Result<eval::RowValueResolver<'ctx, 'db>> {
+        let mut resolver = eval::RowValueResolver::new(self);
+        // Boxed: projections run inside recursive evaluation, and the batch
+        // read's state would otherwise sit inline in every nested projection.
+        Box::pin(
+            resolver.prefetch(
+                batch
+                    .iter()
+                    .filter_map(|row| names.iter().find_map(|name| eval::record_read(row, name))),
+            ),
+        )
+        .await?;
+        Ok(resolver)
     }
 
     async fn project_value_map(
@@ -68,10 +98,10 @@ impl<'db> ExecutionContext<'db> {
         selection: &ir::PropertySelection,
     ) -> Result<ExecutionValue> {
         let mut scalars = Vec::with_capacity(rows.len());
-        for row in rows {
-            self.check_execution_deadline()?;
-            let object = match selection {
-                ir::PropertySelection::All => {
+        match selection {
+            ir::PropertySelection::All => {
+                for row in rows {
+                    self.check_execution_deadline()?;
                     let mut object = helpers::properties_to_object(self.row_properties(row).await?);
                     if let Some(element) = row.current.as_ref() {
                         object.insert(
@@ -79,21 +109,25 @@ impl<'db> ExecutionContext<'db> {
                             DbPropertyValue::I64(element.id().try_into().unwrap_or(i64::MAX)),
                         );
                     }
-                    object
+                    scalars.push(ExecutionScalar::Object(object));
                 }
-                ir::PropertySelection::Selected(names) => {
-                    let mut resolver = eval::RowValueResolver::new(self);
-                    let mut object = BTreeMap::new();
-                    for name in names.as_ref() {
+            }
+            ir::PropertySelection::Selected(names) => {
+                for batch in rows.chunks(RECORD_BATCH_ROWS) {
+                    let mut resolver = self.prefetched_resolver(batch, names.as_ref()).await?;
+                    for row in batch {
                         self.check_execution_deadline()?;
-                        if let Some(value) = resolver.row_property(row, name).await? {
-                            object.insert(name.as_ref().to_string(), value);
+                        let mut object = BTreeMap::new();
+                        for name in names.as_ref() {
+                            self.check_execution_deadline()?;
+                            if let Some(value) = resolver.row_property(row, name).await? {
+                                object.insert(name.as_ref().to_string(), value);
+                            }
                         }
+                        scalars.push(ExecutionScalar::Object(object));
                     }
-                    object
                 }
-            };
-            scalars.push(ExecutionScalar::Object(object));
+            }
         }
         Ok(ExecutionValue::Scalars(scalars))
     }
@@ -103,29 +137,41 @@ impl<'db> ExecutionContext<'db> {
         rows: &[ExecutionRow],
         items: &ir::ProjectionItems,
     ) -> Result<ExecutionValue> {
+        // Only property items always read their source; an expression may
+        // short-circuit, so its reads stay lazy.
+        let sources = items
+            .as_ref()
+            .iter()
+            .filter_map(|item| match item {
+                ir::ProjectionItem::Property { source, .. } => Some(source.clone()),
+                ir::ProjectionItem::Expr { .. } => None,
+            })
+            .collect::<Vec<_>>();
         let mut scalars = Vec::with_capacity(rows.len());
-        for row in rows {
-            self.check_execution_deadline()?;
-            let mut resolver = eval::RowValueResolver::new(self);
-            let mut object = BTreeMap::new();
-            for item in items.as_ref() {
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut resolver = self.prefetched_resolver(batch, &sources).await?;
+            for row in batch {
                 self.check_execution_deadline()?;
-                match item {
-                    ir::ProjectionItem::Property { source, alias } => {
-                        if let Some(value) = resolver.row_property(row, source).await? {
-                            object.insert(alias.as_ref().to_string(), value);
+                let mut object = BTreeMap::new();
+                for item in items.as_ref() {
+                    self.check_execution_deadline()?;
+                    match item {
+                        ir::ProjectionItem::Property { source, alias } => {
+                            if let Some(value) = resolver.row_property(row, source).await? {
+                                object.insert(alias.as_ref().to_string(), value);
+                            }
+                        }
+                        ir::ProjectionItem::Expr { alias, expr } => {
+                            object.insert(
+                                alias.as_ref().to_string(),
+                                self.eval_expr_with_resolver(row, expr.expr(), &mut resolver)
+                                    .await?,
+                            );
                         }
                     }
-                    ir::ProjectionItem::Expr { alias, expr } => {
-                        object.insert(
-                            alias.as_ref().to_string(),
-                            self.eval_expr_with_resolver(row, expr.expr(), &mut resolver)
-                                .await?,
-                        );
-                    }
                 }
+                scalars.push(ExecutionScalar::Object(object));
             }
-            scalars.push(ExecutionScalar::Object(object));
         }
         Ok(ExecutionValue::Scalars(scalars))
     }

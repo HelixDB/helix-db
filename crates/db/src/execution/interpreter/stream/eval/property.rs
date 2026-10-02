@@ -4,12 +4,18 @@ use std::collections::{btree_map::Entry, BTreeMap};
 
 use super::*;
 
-/// Lazy stored-value resolver owned by one input row's evaluation.
+/// Lazy stored-value resolver owned by one input row's evaluation, or by one
+/// record batch of rows whose records it prefetched.
 ///
 /// Cache absence means an element has not been visited. [`CachedPropertyBlob::Missing`]
 /// records a completed negative lookup, so repeated missing fields remain lazy without
-/// repeating storage I/O. Resolved values are deliberately not cached because virtual
-/// properties belong to the row or binding that requested them.
+/// repeating storage I/O. The cache is keyed by element, never by row, so rows sharing
+/// one resolver read each record once and resolve the same values they would alone.
+/// Resolved values are deliberately not cached because virtual properties belong to
+/// the row or binding that requested them.
+///
+/// A batch owner that prefetches decodes every prefetched record first, so a read or
+/// decode error anywhere in the batch is returned before an earlier row's own error.
 pub(in crate::execution::interpreter::stream) struct RowValueResolver<'ctx, 'db> {
     context: &'ctx ExecutionContext<'db>,
     property_blobs: BTreeMap<ElementRef, CachedPropertyBlob>,
@@ -72,7 +78,7 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         if let Some(value) = row.virtual_properties.get(property) {
             return Ok(Some(value));
         }
-        let Some(element) = row.current.as_ref() else {
+        let Some(element) = record_read(row, property) else {
             return Ok(None);
         };
         let properties = self.element_properties(element).await?;
@@ -129,6 +135,25 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         self.edge_endpoints.insert(edge_id, endpoints);
         Ok(endpoints)
     }
+}
+
+/// The element whose stored record [`RowValueResolver::row_property`] reads
+/// to resolve `property` on `row`, or `None` when it resolves without one:
+/// `$id`, a virtual property the row carries, or, on an edge row, an endpoint
+/// path, which reads the endpoint's record rather than the edge's.
+///
+/// `row_property` takes its record read from here, so prefetching these
+/// elements never reads a record that per-row resolution would skip.
+pub(in crate::execution::interpreter::stream) fn record_read<'r>(
+    row: &'r ExecutionRow,
+    property: &ir::NonEmptyString,
+) -> Option<&'r ElementRef> {
+    let element = row.current.as_ref()?;
+    let name = property.as_ref();
+    let endpoint_path = matches!(element, ElementRef::Edge(_))
+        && (matches!(name, "$from" | "$to") || edge_endpoint_property(name).is_some());
+    (!endpoint_path && name != "$id" && !row.virtual_properties.contains(property))
+        .then_some(element)
 }
 
 impl<'db> ExecutionContext<'db> {

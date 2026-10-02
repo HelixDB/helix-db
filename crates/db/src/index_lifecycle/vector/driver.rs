@@ -77,7 +77,7 @@ pub(crate) struct VectorIndexDriver {
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     scan_tuning: IndexLifecycleScanTuning,
     /// How build handles fetch HNSW row batches, fixed by the database's cache mode.
-    batch_reads: vector::VectorBatchReads,
+    batch_reads: crate::batch_reads::BatchReads,
     build_cache: VectorBuildCache,
 }
 
@@ -362,7 +362,7 @@ impl VectorIndexDriver {
             cache_registry,
             simhasher_registry,
             scan_tuning: IndexLifecycleScanTuning::default(),
-            batch_reads: vector::VectorBatchReads::Single,
+            batch_reads: crate::batch_reads::BatchReads::Single,
             build_cache: VectorBuildCache::new(
                 SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
             ),
@@ -380,7 +380,10 @@ impl VectorIndexDriver {
     /// Builds issue one `multi_get` per batch until the database opts into
     /// concurrent chunks, which it does only when a SlateDB block cache
     /// deduplicates their SST filter and index reads.
-    pub(crate) const fn with_batch_reads(mut self, batch_reads: vector::VectorBatchReads) -> Self {
+    pub(crate) const fn with_batch_reads(
+        mut self,
+        batch_reads: crate::batch_reads::BatchReads,
+    ) -> Self {
         self.batch_reads = batch_reads;
         self
     }
@@ -1410,7 +1413,7 @@ async fn step_build<D: Distance>(
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
-    batch_reads: vector::VectorBatchReads,
+    batch_reads: crate::batch_reads::BatchReads,
     build_cache: &VectorBuildCache,
 ) -> Result<VectorStepResult> {
     match stage {
@@ -2090,7 +2093,7 @@ async fn scan_source<D: Distance>(
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
-    batch_reads: vector::VectorBatchReads,
+    batch_reads: crate::batch_reads::BatchReads,
     build_session: &mut VectorBuildSession<D>,
 ) -> Result<VectorStepResult> {
     let source_prefix = source_prefix(scope, definition.element_kind());
@@ -2286,7 +2289,7 @@ async fn catch_up<D: Distance>(
     progress: &PrefixScanProgress,
     limits: SearchIndexBatchLimits,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
-    batch_reads: vector::VectorBatchReads,
+    batch_reads: crate::batch_reads::BatchReads,
     build_session: &mut VectorBuildSession<D>,
 ) -> Result<VectorStepResult> {
     let prefix = generation_prefix(
@@ -2462,7 +2465,7 @@ async fn plan_and_apply<D: Distance>(
     record: &IndexRecordV2,
     definition: &ValidatedVectorIndexDefinition,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
-    batch_reads: vector::VectorBatchReads,
+    batch_reads: crate::batch_reads::BatchReads,
     entity_id: IndexEntityId,
     previous_partition: Option<&TextPartition>,
     next_document: Option<&VectorIndexedDocument>,
@@ -2606,7 +2609,7 @@ async fn apply_planned_change<D: Distance>(
     record: &IndexRecordV2,
     definition: &ValidatedVectorIndexDefinition,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
-    batch_reads: vector::VectorBatchReads,
+    batch_reads: crate::batch_reads::BatchReads,
     entity_id: IndexEntityId,
     previous: Option<&BuildPhysicalResolution>,
     next: Option<&BuildPhysicalResolution>,

@@ -101,7 +101,7 @@ impl<'db> ExecutionContext<'db> {
                 "validated vector read factory rejected generation: {error}"
             ))
         })?
-        .with_batch_reads(self.db.vector_batch_reads());
+        .with_batch_reads(self.db.batch_reads());
         let metadata = if let Some(active) = self.active_write_tx() {
             let view = VectorReadView::<
                 crate::execution::interpreter::read_view::StableRequestReadView,

@@ -268,7 +268,7 @@ pub(crate) use storage::transaction::{
 pub(crate) use storage::{
     CanonicalVectorDirectoryBackfillOutcome, LegacyVectorValidationMode,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
-    SimHashDirectoryValidationOutcome, VectorBatchReads, VectorCleanupRow,
+    SimHashDirectoryValidationOutcome, VectorCleanupRow,
 };
 pub(crate) use vector_values::metadata::{VectorIndexConfig, VectorIndexMetadata};
 
