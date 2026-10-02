@@ -199,8 +199,12 @@ mod planning_session_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
+mod soak_tests;
+#[cfg(test)]
 mod stats_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
 mod text_publication_tests;
+#[cfg(test)]
+mod vector_graph_tests;

@@ -212,9 +212,9 @@ pub(crate) use hnsw::index::VectorIndex;
 pub(crate) use hnsw::model::Candidate;
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::mutation::production_contracts::run as run_mutation_contracts;
-#[cfg(test)]
-pub(crate) use hnsw::mutation::REPLACE_REPLAYS;
 pub(crate) use hnsw::mutation::{VectorBuildSession, VectorBuildSessionStats};
+#[cfg(test)]
+pub(crate) use hnsw::mutation::{DISCARDED_ENTITIES, REPLACE_REPLAYS};
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
 #[cfg(any(test, feature = "production-scale"))]

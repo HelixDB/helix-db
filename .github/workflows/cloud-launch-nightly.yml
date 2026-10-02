@@ -98,6 +98,22 @@ jobs:
       - name: Isolation and transport restart contracts
         run: cargo test -p helix-db-testkit --test isolation_histories && cargo test -p server
 
+  queue-soak:
+    name: Queued index publication soak
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Writers, readers, builds, and publication under compaction and restarts
+        env:
+          SOAK_SEEDS: "4"
+        run: >-
+          cargo test --release -p db --lib
+          index_lifecycle::queue::soak_tests::concurrent_writes_builds_and_publication_stay_exact_under_compaction
+          -- --ignored --exact --nocapture
+
   vector-lifecycle:
     name: Bounded 8k vector lifecycle
     runs-on: ubuntu-24.04-arm
