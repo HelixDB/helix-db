@@ -1466,3 +1466,83 @@ async fn blocked_vector_build_accepts_repairs_of_invalid_source_rows() {
     );
     db.close().await.unwrap();
 }
+
+/// Creates one `Doc` holding `properties`, which may be invalid for an index.
+async fn add_raw(db: &HelixDB, properties: Vec<(&'static str, PropertyInput)>) -> u64 {
+    let created = write(db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as("created", traversal::g().add_n("Doc", properties.clone()))
+                .returning(["created"]),
+        )
+    })
+    .await;
+    created["created"][0]["$id"].as_u64().unwrap()
+}
+
+async fn set_property(db: &HelixDB, id: u64, property: &str, value: PropertyInput) {
+    write(db, || {
+        QueryRequest::write(
+            batch::write_batch().var_as(
+                "repaired",
+                traversal::g()
+                    .n(NodeRef::from(id))
+                    .set_property(property, value.clone()),
+            ),
+        )
+    })
+    .await;
+}
+
+/// Text control: an invalid body after two valid documents of one batch
+/// blocks, and the repaired row builds.
+#[tokio::test]
+async fn blocked_text_build_repairs_invalid_row_after_valid_rows_in_batch() {
+    let db = open(
+        "build-text-invalid-mid-batch",
+        Arc::new(InMemory::new()),
+        config(),
+    )
+    .await;
+    let mut residents = Vec::new();
+    for body in ["alpha resident", "beta resident"] {
+        residents.push(add(&db, [0.0, 0.0], body, None).await);
+    }
+    let invalid = add_raw(&db, vec![("body", PropertyInput::from(7_i64))]).await;
+    assert!(residents.iter().all(|valid| *valid < invalid), "scan order");
+    let operation = create(&db, text_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "blocked");
+    let blocked = status(&db, &operation).await;
+    assert_eq!(blocked["blocker_code"], "invalid_source_data");
+    assert_eq!(
+        scanned(&blocked),
+        0,
+        "blocked in the first scan step: {blocked}"
+    );
+    set_property(
+        &db,
+        invalid,
+        "body",
+        PropertyInput::from("repaired words".to_string()),
+    )
+    .await;
+    retry(&db, &operation).await;
+    assert_eq!(
+        wait_terminal(&db, &operation).await,
+        "succeeded",
+        "retry after repair: {}",
+        status(&db, &operation).await
+    );
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        let mut found = text_ids(text_search(&db, "resident", 10, None, consistency).await);
+        found.sort_unstable();
+        assert_eq!(found, residents, "{consistency:?}");
+        assert_eq!(
+            text_ids(text_search(&db, "repaired", 10, None, consistency).await),
+            vec![invalid],
+            "{consistency:?}"
+        );
+    }
+    db.close().await.unwrap();
+}

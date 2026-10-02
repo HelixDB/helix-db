@@ -14,8 +14,8 @@ use bytes::Bytes;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{IndexEntity, IndexOperationQueueKey, ManagedIndexKey, ScopedKey};
 use crate::encoding::v2::values::indexes::operation_queue::{
-    OperationQueue, QueueFamily, QueueOperand, QueuedOperation, QueuedOperationId, QueuedPayload,
-    QueuedTextPayload, QueuedTextReplacement,
+    merge_partial, merge_with_base, OperationQueue, QueueFamily, QueueMergeResult, QueueOperand,
+    QueuedOperation, QueuedOperationId, QueuedPayload, QueuedTextPayload, QueuedTextReplacement,
 };
 use crate::index_lifecycle::work::TextPartition;
 use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
@@ -420,16 +420,15 @@ async fn compacted_ids(store: &Arc<InMemory>) -> Vec<u128> {
     ids
 }
 
-#[tokio::test]
-async fn multi_level_compaction_preserves_order_resets_and_acknowledgements() {
-    let store = Arc::new(InMemory::new());
-    let settings = config::Settings {
+/// Settings under which only submitted compactions run, so a test decides
+/// exactly which base stays hidden below upper sorted runs.
+fn manual_compaction_settings() -> config::Settings {
+    config::Settings {
         flush_interval: Some(Duration::from_millis(1)),
         manifest_poll_interval: Duration::from_millis(10),
         compactor_options: Some(config::CompactorOptions {
             poll_interval: Duration::from_millis(10),
             commit_compacted_interval: Duration::from_millis(10),
-            // Manual submissions decide exactly which base stays hidden.
             scheduler_options: config::SizeTieredCompactionSchedulerOptions {
                 min_compaction_sources: 1024,
                 max_compaction_sources: 1024,
@@ -443,7 +442,13 @@ async fn multi_level_compaction_preserves_order_resets_and_acknowledgements() {
             ..Default::default()
         }),
         ..Default::default()
-    };
+    }
+}
+
+#[tokio::test]
+async fn multi_level_compaction_preserves_order_resets_and_acknowledgements() {
+    let store = Arc::new(InMemory::new());
+    let settings = manual_compaction_settings();
     let db = Db::builder(PATH, store.clone())
         .with_settings(settings.clone())
         .with_merge_operator(Arc::new(HelixMergeOperator::new()))
@@ -550,4 +555,165 @@ async fn multi_level_compaction_preserves_order_resets_and_acknowledgements() {
         .unwrap();
     assert_eq!(reopened.get(queue_key()).await.unwrap(), None);
     reopened.close().await.unwrap();
+}
+
+/// IDs of the compacted sorted runs, in ascending order.
+async fn sorted_runs(admin: &slatedb::admin::Admin) -> Vec<u32> {
+    let manifest = admin.read_manifest(None).await.unwrap().unwrap();
+    let mut runs = manifest
+        .compacted()
+        .iter()
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    runs.sort_unstable();
+    runs
+}
+
+/// Resolves `operands` over `base` and returns the retained IDs in order.
+fn resolved_ids(base: Option<&Bytes>, operands: &[Bytes]) -> Vec<u128> {
+    match merge_with_base(base.map(Bytes::as_ref), operands).expect("operands resolve") {
+        QueueMergeResult::Value(value) => ids_of(Some(
+            &OperationQueue::decode(&value).expect("resolved queue decodes"),
+        )),
+        QueueMergeResult::Empty => Vec::new(),
+    }
+}
+
+/// A replay keeps its sequence number, so it always composes below the
+/// acknowledgement that follows its original. Re-applying the same bytes
+/// above an acknowledgement is not a replay but an ID reuse, which the reset
+/// semantics define (`acknowledge_then_reenqueue_resets_even_above_an_unresolved_base`
+/// keeps that contract).
+#[tokio::test]
+async fn replayed_operands_never_resurrect_acknowledged_operations() {
+    let replayed_operation = || text_operation(2, 2, Some("acknowledged"));
+    let before = enqueue(&[text_operation(1, 1, Some("before"))])
+        .bytes()
+        .clone();
+    let replayed = enqueue(&[replayed_operation()]).bytes().clone();
+    let after = enqueue(&[text_operation(3, 3, Some("after"))])
+        .bytes()
+        .clone();
+    let ack = acknowledge(&[2]).bytes().clone();
+    assert_eq!(
+        enqueue(&[replayed_operation()]).bytes(),
+        &replayed,
+        "a replay carries identical operand bytes"
+    );
+
+    // The enqueue and its acknowledgement compose without any base, as an
+    // upper compaction does; the output stays a valid merge input wherever
+    // it lands, even if it composes to no records at all.
+    let partial = merge_partial(None, &[replayed.clone(), ack.clone()]).unwrap();
+    assert_eq!(
+        merge_with_base(None, std::slice::from_ref(&partial)).unwrap(),
+        QueueMergeResult::Empty
+    );
+    assert_eq!(
+        resolved_ids(
+            None,
+            &[merge_partial(Some(&partial), std::slice::from_ref(&after)).unwrap()]
+        ),
+        vec![3]
+    );
+    assert_eq!(
+        resolved_ids(None, &[before.clone(), partial.clone(), after.clone()]),
+        vec![1, 3]
+    );
+
+    // The replay as the existing value under that partial output ...
+    let under = merge_partial(Some(&replayed), std::slice::from_ref(&partial)).unwrap();
+    assert_eq!(
+        resolved_ids(None, &[before.clone(), under, after.clone()]),
+        vec![1, 3]
+    );
+    // ... duplicated inside one operand set ...
+    let duplicated =
+        merge_partial(None, &[replayed.clone(), replayed.clone(), ack.clone()]).unwrap();
+    assert_eq!(
+        resolved_ids(None, &[before.clone(), duplicated, after.clone()]),
+        vec![1, 3]
+    );
+    // ... in two partial operand sets, each folded before their outputs
+    // resolve or compose ...
+    let lower = merge_partial(None, &[before.clone(), replayed.clone()]).unwrap();
+    let upper = merge_partial(None, &[replayed.clone(), ack.clone(), after.clone()]).unwrap();
+    assert_eq!(
+        resolved_ids(None, &[lower.clone(), upper.clone()]),
+        vec![1, 3]
+    );
+    assert_eq!(
+        resolved_ids(
+            None,
+            &[merge_partial(Some(&lower), std::slice::from_ref(&upper)).unwrap()]
+        ),
+        vec![1, 3]
+    );
+    // ... and inside a resolved base below the partial output.
+    let QueueMergeResult::Value(base) =
+        merge_with_base(None, &[before.clone(), replayed.clone()]).unwrap()
+    else {
+        panic!("two operations are outstanding");
+    };
+    assert_eq!(resolved_ids(None, std::slice::from_ref(&base)), vec![1, 2]);
+    assert_eq!(
+        resolved_ids(Some(&base), &[partial.clone(), after.clone()]),
+        vec![1, 3]
+    );
+    assert_eq!(
+        resolved_ids(
+            Some(&base),
+            &[merge_partial(None, &[partial, after]).unwrap()]
+        ),
+        vec![1, 3]
+    );
+
+    // Real storage: SR0 holds the base, SR1 the original enqueue, SR2 the
+    // replay composed with its acknowledgement and no base, L0 a later op.
+    let store = Arc::new(InMemory::new());
+    let db = Db::builder(PATH, store.clone())
+        .with_settings(manual_compaction_settings())
+        .with_merge_operator(Arc::new(HelixMergeOperator::new()))
+        .build()
+        .await
+        .unwrap();
+    let admin = slatedb::admin::Admin::builder(PATH, store.clone()).build();
+    flushed_commit(&db, vec![enqueue(&[text_operation(1, 1, Some("before"))])]).await;
+    compact_l0(&admin, 0).await;
+    commit(&db, vec![enqueue(&[replayed_operation()])]).await;
+    flushed_commit(&db, vec![enqueue(&[text_operation(4, 4, Some("between"))])]).await;
+    compact_l0(&admin, 1).await;
+    commit(&db, vec![enqueue(&[replayed_operation()])]).await;
+    flushed_commit(&db, vec![acknowledge(&[2])]).await;
+    compact_l0(&admin, 2).await;
+    flushed_commit(&db, vec![enqueue(&[text_operation(3, 3, Some("after"))])]).await;
+    assert_eq!(sorted_runs(&admin).await, vec![0, 1, 2]);
+    assert_eq!(queued_ids(&db).await, vec![1, 4, 3]);
+
+    compact_l0(&admin, 3).await;
+    submit_compaction(
+        &admin,
+        vec![
+            compactor::SourceId::SortedRun(3),
+            compactor::SourceId::SortedRun(2),
+            compactor::SourceId::SortedRun(1),
+        ],
+        1,
+    )
+    .await;
+    assert_eq!(sorted_runs(&admin).await, vec![0, 1]);
+    assert_eq!(queued_ids(&db).await, vec![1, 4, 3]);
+    assert_eq!(compacted_ids(&store).await, vec![1, 4, 3]);
+    submit_compaction(
+        &admin,
+        vec![
+            compactor::SourceId::SortedRun(1),
+            compactor::SourceId::SortedRun(0),
+        ],
+        0,
+    )
+    .await;
+    assert_eq!(compacted_ids(&store).await, vec![1, 4, 3]);
+    assert_eq!(queued_ids(&db).await, vec![1, 4, 3]);
+    db.close().await.unwrap();
 }

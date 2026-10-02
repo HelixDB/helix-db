@@ -1,5 +1,6 @@
 //! Vector publication through the supervisor-owned publisher and real storage.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use helix_ast::{
     batch,
-    graph::NodeRef,
+    graph::{EdgeRef, NodeRef},
     query::{QueryRequest, SearchConsistency},
     traversal,
     value::PropertyInput,
@@ -18,7 +19,7 @@ use slatedb::object_store::ObjectStore;
 use tokio::sync::oneshot;
 
 use super::backlog::OperationCharge;
-use super::overlay_tests::vector_search;
+use super::overlay_tests::{hits, vector_search, write};
 use super::publication::{NextTarget, PublicationOutcome, QueuePublisher};
 use super::tests::{
     add_doc, all_keys, open, publisher_with_limits, queue, queued, release_within_operand_bound,
@@ -28,7 +29,7 @@ use super::QueueTarget;
 use crate::batch_reads::BatchReads;
 use crate::config::{
     CacheConfig, CacheMode, DbConfig, IndexOperationQueueTuning, QueueLayout,
-    SearchIndexBatchLimits, VectorIndexDefinition,
+    SearchIndexBatchLimits, TextIndexDefinition, VectorIndexDefinition,
 };
 use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorKey, VectorStorageLane,
@@ -40,6 +41,7 @@ use crate::encoding::v2::keys::{
 use crate::encoding::v2::values::indexes::operation_queue::{
     QueueFamily, QueueOperand, QueuedOperationId,
 };
+use crate::index_lifecycle::work::{TextPartition, TextStatisticsContribution};
 use crate::index_lifecycle::{
     ActiveIndexHandle, IndexElementKind, IndexEntityId, ValidatedDynamicIndexDefinition,
     VectorPhysicalLayout,
@@ -2435,6 +2437,508 @@ async fn publication_reads_rows_with_the_database_batch_policy() {
             Some(expected),
             "{name}: publication follows the cache mode"
         );
+        db.close().await.unwrap();
+    }
+}
+
+/// One edge's expected index state.
+#[derive(Debug, Clone, Copy)]
+struct Link {
+    tenant: &'static str,
+    embedding: Option<[f32; 2]>,
+    body: Option<&'static str>,
+}
+
+/// Asserts tenant-scoped edge searches with `consistency` find exactly the
+/// live `links`: every embedded edge of the tenant in exact distance order,
+/// and every edge of the tenant whose body holds the term.
+async fn assert_edge_searches(
+    db: &HelixDB,
+    links: &BTreeMap<u64, Link>,
+    consistency: SearchConsistency,
+    step: &str,
+) {
+    let found = async |search: traversal::Traversal<traversal::OnEdges>| {
+        let request = QueryRequest::read(
+            batch::read_batch()
+                .var_as("hits", search)
+                .returning(["hits"]),
+        )
+        .with_search_consistency(consistency)
+        .unwrap();
+        hits(&Box::pin(db.query(request)).await.unwrap(), "hits")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    };
+    for tenant in ["a", "b", "c"] {
+        for query in [[0.1_f32, 0.35], [3.3, 1.7]] {
+            let mut exact = links
+                .iter()
+                .filter(|(_, link)| link.tenant == tenant)
+                .filter_map(|(id, link)| {
+                    let vector = link.embedding?;
+                    Some((
+                        (vector[0] - query[0]).powi(2) + (vector[1] - query[1]).powi(2),
+                        *id,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            exact.sort_by(|left, right| left.partial_cmp(right).unwrap());
+            assert_eq!(
+                found(traversal::g().vector_search_edges(
+                    "LINK",
+                    "embedding",
+                    query.to_vec(),
+                    8,
+                    Some(PropertyValue::from(tenant)),
+                ))
+                .await,
+                exact.into_iter().map(|(_, id)| id).collect::<Vec<_>>(),
+                "{step}: tenant {tenant} vector {query:?} with {consistency:?} search"
+            );
+        }
+        for term in [
+            "shared", "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "omega", "rebirth",
+        ] {
+            let expected = links
+                .iter()
+                .filter(|(_, link)| {
+                    link.tenant == tenant
+                        && link
+                            .body
+                            .is_some_and(|body| body.split(' ').any(|word| word == term))
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            let mut text = found(traversal::g().text_search_edges(
+                "LINK",
+                "body",
+                term,
+                8,
+                Some(PropertyValue::from(tenant)),
+            ))
+            .await;
+            text.sort_unstable();
+            assert_eq!(
+                text, expected,
+                "{step}: tenant {tenant} text {term:?} with {consistency:?} search"
+            );
+        }
+    }
+}
+
+/// Every edge mutation (inserts, updates, tenant moves, property removals,
+/// edge drops, cascading node drops, and re-adding a dropped edge's
+/// endpoints) reaches edge vector and text indexes, whether its operations
+/// collapse in the queue or each publishes before the next.
+///
+/// Edge hydration only checks that an edge still exists, so a leftover
+/// physical row is invisible to search: the final rows are checked directly.
+#[tokio::test]
+async fn edge_vector_and_text_indexes_publish_every_edge_mutation() {
+    for publish_each_step in [false, true] {
+        let db = open(
+            &format!("publish-edge-mutations-{publish_each_step}"),
+            Arc::new(InMemory::new()),
+            queued(IndexOperationQueueTuning::default()),
+        )
+        .await;
+        for definition in [
+            ValidatedDynamicIndexDefinition::try_from(
+                VectorIndexDefinition::new_edge(
+                    "LINK",
+                    "embedding",
+                    2,
+                    VectorDistanceMetric::Euclidean,
+                )
+                .unwrap()
+                .with_tenant_property("tenant")
+                .unwrap(),
+            )
+            .unwrap(),
+            ValidatedDynamicIndexDefinition::try_from(
+                TextIndexDefinition::new_edge("LINK", "body")
+                    .unwrap()
+                    .with_tenant_property("tenant")
+                    .unwrap(),
+            )
+            .unwrap(),
+        ] {
+            db.install_index_for_tests(definition).await.unwrap();
+        }
+        let targets = [
+            target(&db, QueueFamily::Vector).await,
+            target(&db, QueueFamily::Text).await,
+        ];
+        let nodes = write(&db, || {
+            QueryRequest::write(
+                (0..4)
+                    .fold(batch::write_batch(), |nodes, node| {
+                        nodes.var_as(
+                            &format!("n{node}"),
+                            traversal::g().add_n("Node", Vec::<(&str, PropertyInput)>::new()),
+                        )
+                    })
+                    .returning(["n0", "n1", "n2", "n3"]),
+            )
+        })
+        .await;
+        let nodes = ["n0", "n1", "n2", "n3"].map(|name| nodes[name][0]["$id"].as_u64().unwrap());
+        let mut links = BTreeMap::<u64, Link>::new();
+        // After each step strong search sees every queued mutation; when
+        // publishing each step, both consistencies see published rows.
+        let checkpoint = async |links: &BTreeMap<u64, Link>, step: &str| {
+            assert_edge_searches(&db, links, SearchConsistency::Strong, step).await;
+            if publish_each_step {
+                for target in targets {
+                    drain(&db, target).await;
+                }
+                for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+                    assert_edge_searches(&db, links, consistency, step).await;
+                }
+            }
+        };
+        let mutate =
+            async |change: traversal::Traversal<traversal::OnEdges, traversal::WriteEnabled>| {
+                write(&db, || {
+                    QueryRequest::write(batch::write_batch().var_as("changed", change.clone()))
+                })
+                .await;
+            };
+
+        let mut ids = Vec::new();
+        for (from, to, embedding, body, tenant) in [
+            (0, 1, [0.0, 0.0], "alpha shared", "a"),
+            (1, 2, [1.0, 0.25], "beta shared", "a"),
+            (2, 3, [2.0, 0.5], "gamma shared", "a"),
+            (1, 3, [0.5, 2.0], "delta shared", "b"),
+            (2, 1, [3.0, 3.0], "alpha epsilon", "b"),
+            (0, 2, [4.0, 1.0], "beta zeta", "c"),
+        ] {
+            let created = write(&db, || {
+                QueryRequest::write(
+                    batch::write_batch()
+                        .var_as(
+                            "created",
+                            traversal::g()
+                                .n(NodeRef::from(nodes[from]))
+                                .add_e(
+                                    "LINK",
+                                    NodeRef::from(nodes[to]),
+                                    vec![
+                                        ("embedding", PropertyInput::from(embedding.to_vec())),
+                                        ("body", PropertyInput::from(body.to_string())),
+                                        ("tenant", PropertyInput::from(tenant.to_string())),
+                                    ],
+                                )
+                                .id(),
+                        )
+                        .returning(["created"]),
+                )
+            })
+            .await;
+            let id = created["created"][0].as_u64().unwrap();
+            ids.push(id);
+            links.insert(
+                id,
+                Link {
+                    tenant,
+                    embedding: Some(embedding),
+                    body: Some(body),
+                },
+            );
+            checkpoint(&links, &format!("add edge {}", ids.len())).await;
+        }
+
+        mutate(
+            traversal::g()
+                .e(EdgeRef::id(ids[1]))
+                .set_property("embedding", vec![1.5_f32, 1.5])
+                .set_property("body", "omega shared".to_string()),
+        )
+        .await;
+        let link = links.get_mut(&ids[1]).unwrap();
+        (link.embedding, link.body) = (Some([1.5, 1.5]), Some("omega shared"));
+        checkpoint(&links, "update embedding and body").await;
+
+        mutate(
+            traversal::g()
+                .e(EdgeRef::id(ids[2]))
+                .set_property("tenant", "b".to_string()),
+        )
+        .await;
+        links.get_mut(&ids[2]).unwrap().tenant = "b";
+        checkpoint(&links, "tenant move").await;
+
+        mutate(
+            traversal::g()
+                .e(EdgeRef::id(ids[4]))
+                .remove_property("embedding"),
+        )
+        .await;
+        links.get_mut(&ids[4]).unwrap().embedding = None;
+        checkpoint(&links, "remove the embedding").await;
+        mutate(
+            traversal::g()
+                .e(EdgeRef::id(ids[3]))
+                .remove_property("body"),
+        )
+        .await;
+        links.get_mut(&ids[3]).unwrap().body = None;
+        checkpoint(&links, "remove the body").await;
+
+        write(&db, || {
+            QueryRequest::write(batch::write_batch().var_as(
+                "dropped",
+                traversal::g().drop_edge_by_id(EdgeRef::id(ids[1])),
+            ))
+        })
+        .await;
+        links.remove(&ids[1]);
+        checkpoint(&links, "drop one edge").await;
+
+        // Dropping the source node cascades to both edges it starts.
+        write(&db, || {
+            QueryRequest::write(
+                batch::write_batch()
+                    .var_as("dropped", traversal::g().n(NodeRef::from(nodes[0])).drop()),
+            )
+        })
+        .await;
+        links.remove(&ids[0]);
+        links.remove(&ids[5]);
+        checkpoint(&links, "drop a source node").await;
+
+        // The dropped edge's endpoints are linked again under a new ID.
+        let created = write(&db, || {
+            QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "created",
+                        traversal::g()
+                            .n(NodeRef::from(nodes[1]))
+                            .add_e(
+                                "LINK",
+                                NodeRef::from(nodes[2]),
+                                vec![
+                                    ("embedding", PropertyInput::from(vec![0.25_f32, 0.25])),
+                                    ("body", PropertyInput::from("alpha rebirth".to_string())),
+                                    ("tenant", PropertyInput::from("a".to_string())),
+                                ],
+                            )
+                            .id(),
+                    )
+                    .returning(["created"]),
+            )
+        })
+        .await;
+        let readded = created["created"][0].as_u64().unwrap();
+        assert!(!ids.contains(&readded));
+        links.insert(
+            readded,
+            Link {
+                tenant: "a",
+                embedding: Some([0.25, 0.25]),
+                body: Some("alpha rebirth"),
+            },
+        );
+        checkpoint(&links, "re-add an edge").await;
+
+        for target in targets {
+            drain(&db, target).await;
+        }
+        for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+            assert_edge_searches(&db, &links, consistency, "published").await;
+        }
+        assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
+
+        // Vector rows: only live embedded edges are placed, once each, in
+        // their tenant's partition, and no row or link names any other edge.
+        let mut placed = BTreeMap::<u64, BTreeSet<u64>>::new();
+        let mut counts = BTreeMap::<u64, u64>::new();
+        let mut named = BTreeSet::<u64>::new();
+        for (key, value) in rows(&db, VectorKey::is_vector_keyspace).await {
+            let Ok(DataKey::Data {
+                kind: DataKeyKind::Vector(key),
+                ..
+            }) = DataKey::parse_from_slice(DataScope::LegacyUnscoped, &key)
+            else {
+                panic!("unparsed vector row {key:?}");
+            };
+            match key {
+                VectorKey::Vector(item) => {
+                    assert!(
+                        placed
+                            .entry(key.index_id())
+                            .or_default()
+                            .insert(item.node_id()),
+                        "edge {} placed twice in one partition",
+                        item.node_id()
+                    );
+                    named.insert(item.node_id());
+                }
+                VectorKey::UpperVector(item) => {
+                    named.insert(item.node_id());
+                }
+                VectorKey::SimHash(item) => {
+                    named.insert(item.node_id());
+                }
+                VectorKey::SimHashDirectory(item) => {
+                    named.insert(item.node_id());
+                }
+                VectorKey::EntryCandidateSorted(item) => {
+                    named.insert(item.node_id());
+                }
+                VectorKey::EntryCandidateNode(item) => {
+                    named.insert(item.node_id());
+                }
+                VectorKey::Layer0Neighbors(item) => {
+                    named.insert(item.node_id());
+                    named.extend(
+                        crate::encoding::v2::values::indexes::vector::decode_layer0_neighbors(
+                            &value,
+                        )
+                        .unwrap(),
+                    );
+                }
+                VectorKey::UpperNeighbors(item) => {
+                    named.insert(item.node_id());
+                    named.extend(
+                        crate::encoding::v2::values::indexes::vector::neighbors::decode_upper_neighbors(
+                            &value,
+                        )
+                        .unwrap(),
+                    );
+                }
+                VectorKey::ReverseEdge(item) => {
+                    named.insert(item.target_node_id());
+                    named.insert(item.source_node_id());
+                }
+                VectorKey::IndexMetadata(item) => {
+                    let metadata = crate::search::vector::decode_metadata(&value).unwrap();
+                    counts.insert(item.index_id(), metadata.count);
+                    named.extend(metadata.entry_point);
+                }
+                VectorKey::IndexPrefix(_)
+                | VectorKey::TxnGuard(_)
+                | VectorKey::VectorPrefix(_)
+                | VectorKey::SimHashDirectoryPrefix(_)
+                | VectorKey::EntryCandidatePrefix(_)
+                | VectorKey::MemoryPrefix(_)
+                | VectorKey::L0Prefix(_)
+                | VectorKey::ReverseEdgePrefix(_) => {}
+            }
+        }
+        let embedded = |tenant| {
+            links
+                .iter()
+                .filter(|(_, link)| link.tenant == tenant && link.embedding.is_some())
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            placed.values().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([embedded("a"), embedded("b")]),
+            "publish each step {publish_each_step}"
+        );
+        let live = embedded("a")
+            .union(&embedded("b"))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            named.is_subset(&live),
+            "publish each step {publish_each_step}: vector rows name dead edges {:?}",
+            named.difference(&live).collect::<Vec<_>>()
+        );
+        // The emptied partition `c` was reclaimed, and every remaining
+        // partition's metadata counts exactly its live edges.
+        let mut partitions = mapped_partitions(&db).await;
+        partitions.sort_unstable();
+        assert_eq!(
+            partitions,
+            placed.keys().copied().collect::<Vec<_>>(),
+            "publish each step {publish_each_step}"
+        );
+        for (partition, members) in &placed {
+            assert_eq!(
+                counts.get(partition).copied(),
+                Some(members.len() as u64),
+                "publish each step {publish_each_step}: partition {partition} metadata count"
+            );
+        }
+
+        // Text markers: live bodies are accounted once per tenant partition,
+        // and corpus statistics count exactly them. Removing a published
+        // document tombstones its marker as absent; a document never
+        // published leaves none.
+        let mut accounted = BTreeMap::<TextPartition, BTreeSet<u64>>::new();
+        let mut tombstoned = BTreeSet::new();
+        let mut corpus = BTreeMap::<TextPartition, u64>::new();
+        let is_corpus = |key: &[u8]| {
+            matches!(
+                ManagedIndexKey::parse_data_from_slice(key),
+                Ok(ManagedIndexKey::Data {
+                    kind: ScopedKey::TextCorpusStatistics(_),
+                    ..
+                })
+            )
+        };
+        for (_, value) in rows(&db, is_corpus).await {
+            let statistics = crate::encoding::v2::values::decode_corpus_statistics(&value).unwrap();
+            if statistics.document_count > 0 {
+                corpus.insert(statistics.partition, statistics.document_count);
+            }
+        }
+        let is_marker = |key: &[u8]| {
+            matches!(
+                ManagedIndexKey::parse_data_from_slice(key),
+                Ok(ManagedIndexKey::Data {
+                    kind: ScopedKey::TextStatisticsEntity(_),
+                    ..
+                })
+            )
+        };
+        for (_, value) in rows(&db, is_marker).await {
+            let marker = crate::encoding::v2::values::decode_statistics_entity(&value).unwrap();
+            match marker.contribution {
+                TextStatisticsContribution::Present { partition, .. } => {
+                    accounted
+                        .entry(partition)
+                        .or_default()
+                        .insert(marker.entity_id.get());
+                }
+                TextStatisticsContribution::Absent => {
+                    tombstoned.insert(marker.entity_id.get());
+                }
+            }
+        }
+        let bodies = |tenant| {
+            links
+                .iter()
+                .filter(|(_, link)| link.tenant == tenant && link.body.is_some())
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            accounted.values().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([bodies("a"), bodies("b")]),
+            "publish each step {publish_each_step}"
+        );
+        assert_eq!(
+            corpus,
+            accounted
+                .iter()
+                .map(|(partition, members)| (partition.clone(), members.len() as u64))
+                .collect::<BTreeMap<_, _>>(),
+            "publish each step {publish_each_step}: corpus document counts"
+        );
+        let removed = BTreeSet::from([ids[0], ids[1], ids[3], ids[5]]);
+        if publish_each_step {
+            assert_eq!(tombstoned, removed);
+        } else {
+            assert!(tombstoned.is_empty(), "{tombstoned:?}");
+        }
         db.close().await.unwrap();
     }
 }
