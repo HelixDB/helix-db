@@ -6,12 +6,13 @@ use std::num::NonZeroU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use helix_ast::query::SearchConsistency;
+use helix_ast::query::{QueryRequest, SearchConsistency};
+use helix_ast::{batch, traversal, value::PropertyInput};
 use slatedb::config::{MergeOptions, WriteOptions};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
-use super::overlay_tests::{add, add_many, drain, update, vector_search};
+use super::overlay_tests::{add, add_many, drain, hits, update, vector_search, write};
 use super::publication::PublicationOutcome;
 use super::publication_tests::batch_limits;
 use super::tests::{
@@ -19,7 +20,9 @@ use super::tests::{
     target,
 };
 use super::QueueTarget;
-use crate::config::{DbConfig, IndexOperationQueueTuning, VectorIndexDefinition};
+use crate::config::{
+    DbConfig, IndexOperationQueueTuning, TextIndexDefinition, VectorIndexDefinition,
+};
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue::{
@@ -210,8 +213,9 @@ async fn publication_queue_reads_are_linear_in_backlog() {
 }
 
 /// Draining a vector and a text index of one label together, as the worker
-/// does, reads each queue once: every target keeps its own remainder, even
-/// when their remainders together exceed one index's retained-byte ceiling.
+/// does, reads each queue once: the writer retains one index's retained-byte
+/// ceiling per publication task, so both remainders stay held even when
+/// together they exceed one index's ceiling.
 #[tokio::test]
 async fn interleaved_drains_read_each_targets_queue_once() {
     const DOCS: usize = 4_000;
@@ -268,7 +272,8 @@ async fn interleaved_drains_read_each_targets_queue_once() {
                 | PublicationOutcome::Deferred
                 | PublicationOutcome::Retry
                 | PublicationOutcome::Trimmed
-                | PublicationOutcome::Blocked) => panic!("publication stalled: {outcome:?}"),
+                | PublicationOutcome::Blocked
+                | PublicationOutcome::Stalled) => panic!("publication stalled: {outcome:?}"),
             }
         }
     }
@@ -290,8 +295,153 @@ async fn interleaved_drains_read_each_targets_queue_once() {
     db.close().await.unwrap();
 }
 
+/// Draining more backlogged indexes than the writer-wide retention budget
+/// holds keeps retention within that budget: a remainder that does not fit
+/// beside those held is dropped and its target reads storage again, and
+/// every target still drains completely.
 #[tokio::test]
-async fn publication_continues_from_its_last_commit_and_rereads_after_any_other_outcome() {
+async fn retained_queues_stay_within_the_writer_budget_across_many_targets() {
+    const DOCS: usize = 4_000;
+    const PROPERTIES: [&str; 4] = ["p0", "p1", "p2", "p3"];
+    const CEILING: u64 = 120_000;
+    let db = open(
+        "queue-retained-budget",
+        Arc::new(InMemory::new()),
+        queued(
+            IndexOperationQueueTuning::default()
+                .with_max_retained_bytes(NonZeroU64::new(CEILING).unwrap())
+                .unwrap(),
+        ),
+    )
+    .await;
+    for property in PROPERTIES {
+        db.install_index_for_tests(
+            ValidatedDynamicIndexDefinition::try_from(
+                TextIndexDefinition::new_node("Doc", property).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    for _ in 0..DOCS / 100 {
+        write(&db, || {
+            let properties = || {
+                PROPERTIES
+                    .iter()
+                    .map(|property| (*property, PropertyInput::from("alpha".to_string())))
+                    .collect::<Vec<_>>()
+            };
+            QueryRequest::write(
+                (0..100)
+                    .fold(batch::write_batch(), |batch, index| {
+                        batch.var_as(
+                            &format!("d{index}"),
+                            traversal::g().add_n("Doc", properties()),
+                        )
+                    })
+                    .returning(["d0"]),
+            )
+        })
+        .await;
+    }
+    let targets = db.index_operation_backlog().outstanding_targets();
+    assert_eq!(targets.len(), PROPERTIES.len());
+    let budget = CEILING
+        * u64::try_from(
+            DbConfig::new()
+                .index_lifecycle_throughput()
+                .concurrency()
+                .publication_tasks()
+                .get(),
+        )
+        .unwrap();
+    let mut backlogs = Vec::new();
+    for target in &targets {
+        backlogs.push(
+            db.index_queue_store()
+                .read(db.inner_db().as_ref(), *target)
+                .await
+                .unwrap()
+                .unwrap()
+                .queue()
+                .operations()
+                .iter()
+                .map(QueuedOperation::retained_bytes)
+                .sum::<u64>(),
+        );
+    }
+    // Every queue fits one index's ceiling, but together they exceed the
+    // budget.
+    assert!(
+        backlogs.iter().all(|backlog| *backlog <= CEILING) && backlogs.iter().sum::<u64>() > budget,
+        "{backlogs:?} against {budget}"
+    );
+
+    let publisher = db.index_queue_publisher().unwrap();
+    let retained = || db.index_queue_store().retained().retained_bytes();
+    let before = db.index_operation_queue_stats();
+    let mut attempts = 0_u64;
+    let mut drained = vec![false; targets.len()];
+    while drained.contains(&false) {
+        for (target, drained) in targets.iter().zip(&mut drained) {
+            if *drained {
+                continue;
+            }
+            attempts += 1;
+            match publisher.publish_once(*target).await.unwrap() {
+                PublicationOutcome::Published { .. } => {}
+                PublicationOutcome::Empty => *drained = true,
+                outcome @ (PublicationOutcome::Discarded { .. }
+                | PublicationOutcome::Deferred
+                | PublicationOutcome::Retry
+                | PublicationOutcome::Trimmed
+                | PublicationOutcome::Blocked
+                | PublicationOutcome::Stalled) => panic!("publication stalled: {outcome:?}"),
+            }
+            assert!(retained() <= budget, "{} retained bytes", retained());
+        }
+    }
+    let after = db.index_operation_queue_stats();
+    assert_eq!(
+        after.published_operations - before.published_operations,
+        (PROPERTIES.len() * DOCS) as u64
+    );
+    // Each target reads its queue first and finds it empty last; in between
+    // a dropped remainder is read again, while held ones spare their reads.
+    let reads = after.queue_reads - before.queue_reads;
+    assert!(
+        reads > 2 * targets.len() as u64 && reads < attempts,
+        "{reads} queue reads over {attempts} attempts"
+    );
+    assert_eq!(retained(), 0);
+    assert!(db
+        .index_operation_backlog()
+        .outstanding_targets()
+        .is_empty());
+    for property in PROPERTIES {
+        let found = hits(
+            &Box::pin(
+                db.query(QueryRequest::read(
+                    batch::read_batch()
+                        .var_as(
+                            "hits",
+                            traversal::g().text_search_nodes("Doc", property, "alpha", 10, None),
+                        )
+                        .returning(["hits"]),
+                )),
+            )
+            .await
+            .unwrap(),
+            "hits",
+        );
+        assert_eq!(found.len(), 10, "{property}");
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_continues_from_its_last_commit_and_rereads_after_an_error() {
     let db = open(
         "queue-retained",
         Arc::new(InMemory::new()),
@@ -345,7 +495,8 @@ async fn publication_continues_from_its_last_commit_and_rereads_after_any_other_
         | PublicationOutcome::Deferred
         | PublicationOutcome::Retry
         | PublicationOutcome::Trimmed
-        | PublicationOutcome::Blocked) => panic!("publication did not commit: {outcome:?}"),
+        | PublicationOutcome::Blocked
+        | PublicationOutcome::Stalled) => panic!("publication did not commit: {outcome:?}"),
     };
 
     assert_eq!(published(narrow.publish_once(target).await.unwrap()), 10);
@@ -375,8 +526,8 @@ async fn publication_continues_from_its_last_commit_and_rereads_after_any_other_
         "strong search sees the move"
     );
 
-    // An attempt that does not commit takes the retained queue and drops it:
-    // the next one reads storage again, newer work included.
+    // An attempt that fails takes the retained queue and drops it: the next
+    // one reads storage again, newer work included.
     narrow
         .hooks()
         .fail_before_commit
@@ -414,7 +565,7 @@ async fn publication_continues_from_its_last_commit_and_rereads_after_any_other_
 }
 
 #[tokio::test]
-async fn publication_rereads_its_queue_after_a_conflict_or_an_uncertain_commit() {
+async fn publication_keeps_its_queue_after_a_conflict_and_rereads_after_an_uncertain_commit() {
     let gate = Arc::new(GatedWalStore::new());
     let db = open(
         "queue-retained-uncommitted",
@@ -442,6 +593,13 @@ async fn publication_rereads_its_queue_after_a_conflict_or_an_uncertain_commit()
             .map_or(0, |queue| queue.operations().len())
     };
     assert_eq!(queued_operations().await, 3);
+    let queued_bytes = queue(&db, QueueFamily::Vector)
+        .await
+        .unwrap()
+        .operations()
+        .iter()
+        .map(QueuedOperation::retained_bytes)
+        .sum::<u64>();
     let narrow = publisher_with_limits(
         &db,
         batch_limits(1, 32_768),
@@ -452,15 +610,16 @@ async fn publication_rereads_its_queue_after_a_conflict_or_an_uncertain_commit()
     let reads = || narrow.metrics().queue_reads.load(Ordering::Relaxed);
     let retained = || db.index_queue_store().retained().retained_bytes();
 
-    // A conflicting commit acknowledged nothing, so its attempt keeps no
-    // queue: retaining the rest would publish the moves ahead of the add.
+    // A conflicting commit acknowledged nothing, so its attempt retains the
+    // whole queue unchanged, never the rest of it, which would publish the
+    // moves ahead of the add.
     let (outcome, ()) = tokio::join!(
         narrow.publish_once(target),
         conflict_next_commit(&db, &narrow)
     );
     assert_eq!(outcome.unwrap(), PublicationOutcome::Retry);
     assert_eq!(narrow.metrics().commit_conflicts.load(Ordering::Relaxed), 1);
-    assert_eq!((reads(), retained()), (1, 0));
+    assert_eq!((reads(), retained()), (1, queued_bytes));
     assert_eq!(queued_operations().await, 3, "nothing was acknowledged");
     let mut published = 0;
     loop {
@@ -471,14 +630,15 @@ async fn publication_rereads_its_queue_after_a_conflict_or_an_uncertain_commit()
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
             | PublicationOutcome::Trimmed
-            | PublicationOutcome::Blocked) => panic!("publication stalled: {outcome:?}"),
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => panic!("publication stalled: {outcome:?}"),
         }
     }
     assert_eq!(published, 3);
     assert_eq!(
         reads(),
-        3,
-        "the read after the conflict and the read that finds the queue empty"
+        2,
+        "the kept queue drains without reading storage until it finds it empty"
     );
     let hits = vector_search(&db, [9.0, 9.0], 1, None, SearchConsistency::Strong).await;
     let [(hit, distance)] = hits[..] else {
@@ -491,7 +651,7 @@ async fn publication_rereads_its_queue_after_a_conflict_or_an_uncertain_commit()
     );
 
     // An uncertain commit may have acknowledged its batch, so its attempt
-    // keeps no queue either.
+    // keeps no queue.
     update(&db, entity, [1.0, 1.0], "third move").await;
     update(&db, entity, [2.0, 2.0], "fourth move").await;
     gate.uploads.send_replace(WalUploads::Failing);

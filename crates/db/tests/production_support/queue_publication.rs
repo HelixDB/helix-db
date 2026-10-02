@@ -12,7 +12,7 @@
 //! fence the writer with a newer one; none introduces a row family or
 //! encoding.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -358,8 +358,9 @@ async fn vector_budgets_trim_then_block() {
     db.close().await.expect("vector budget writer closes");
 }
 
-/// Proves batch selection takes whole ordered prefixes within its limits and
-/// that effects collapse only operations of their own family.
+/// Proves batch selection takes whole ordered prefixes within its limits,
+/// skips held-back entities until a newer operation repairs them, and that
+/// effects collapse only operations of their own family.
 async fn selection_and_collapse_boundaries() {
     let db = open_explicit(
         "queue-publication-selection",
@@ -373,10 +374,17 @@ async fn selection_and_collapse_boundaries() {
     let vector_target = target(&db, QueueFamily::Vector).await;
     let vector = queued(&db, vector_target).await;
     let text = queued(&db, target(&db, QueueFamily::Text).await).await;
+    // Each selected entity's acknowledged and superseding operation counts.
     let shape = |selected: &[SelectedEntity<'_>]| {
         selected
             .iter()
-            .map(|selected| (selected.entity.id.get(), selected.operations.len()))
+            .map(|selected| {
+                (
+                    selected.entity.id.get(),
+                    selected.operations.len(),
+                    selected.superseding.len(),
+                )
+            })
             .collect::<Vec<_>>()
     };
 
@@ -385,11 +393,13 @@ async fn selection_and_collapse_boundaries() {
         shape(&select_batch(
             &vector,
             None,
+            &HashMap::new(),
             512,
             NonZeroUsize::MIN,
+            NonZeroUsize::MAX,
             u64::MAX
         )),
-        [(first, 1)]
+        [(first, 1, 0)]
     );
     // An input ceiling ends it before the next operation, but never before
     // the batch's first.
@@ -397,28 +407,160 @@ async fn selection_and_collapse_boundaries() {
         shape(&select_batch(
             &vector,
             None,
+            &HashMap::new(),
             512,
+            NonZeroUsize::MAX,
             NonZeroUsize::MAX,
             vector[0].retained_bytes()
         )),
-        [(first, 1)]
+        [(first, 1, 0)]
     );
     // A batch after the first entity rotates to the second, then wraps.
     assert_eq!(
         shape(&select_batch(
             &vector,
             Some(vector[0].entity()),
+            &HashMap::new(),
             512,
+            NonZeroUsize::MAX,
             NonZeroUsize::MAX,
             u64::MAX
         )),
-        [(second, 1), (first, 2)]
+        [(second, 1, 0), (first, 2, 0)]
+    );
+    // The acknowledgement ceiling bounds a batch like the operation ceiling.
+    assert_eq!(
+        shape(&select_batch(
+            &vector,
+            None,
+            &HashMap::new(),
+            512,
+            NonZeroUsize::MAX,
+            NonZeroUsize::MIN,
+            u64::MAX
+        )),
+        [(first, 1, 0)]
+    );
+    // A held entity without a newer selectable operation is skipped; with
+    // every entity held back so, nothing is selected.
+    let waiting = |entries: &[(usize, usize)]| {
+        entries
+            .iter()
+            .map(|(entity, operation)| {
+                (
+                    vector[*entity].entity(),
+                    HeldEntity::Waiting {
+                        through: vector[*operation].id(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    let select = |after: usize, held: &HashMap<_, _>, operations, acknowledged, input| {
+        select_batch(
+            &vector,
+            Some(vector[after].entity()),
+            held,
+            512,
+            operations,
+            acknowledged,
+            input,
+        )
+    };
+    let all = NonZeroUsize::MAX;
+    assert_eq!(
+        shape(&select(0, &waiting(&[(0, 1)]), all, all, u64::MAX)),
+        [(second, 1, 0)]
+    );
+    assert!(select(0, &waiting(&[(0, 1), (2, 2)]), all, all, u64::MAX).is_empty());
+    // A newer operation makes it a repair, which never joins a batch: the
+    // rotation from the first entity reaches the second before it.
+    assert_eq!(
+        shape(&select(0, &waiting(&[(0, 0)]), all, all, u64::MAX)),
+        [(second, 1, 0)]
+    );
+    // Once the rotation reaches it first, it is selected alone with every
+    // selectable operation, past the input and trimmed operation ceilings.
+    assert_eq!(
+        shape(&select(
+            2,
+            &waiting(&[(0, 0)]),
+            NonZeroUsize::MIN,
+            all,
+            vector[0].retained_bytes()
+        )),
+        [(first, 2, 0)]
+    );
+    // A repair takes every queued operation of its entity, but acknowledges
+    // only those within the acknowledgement ceiling; the rest supersede them
+    // and stay queued.
+    let past_the_ceiling = select(2, &waiting(&[(0, 0)]), all, NonZeroUsize::MIN, u64::MAX);
+    assert_eq!(shape(&past_the_ceiling), [(first, 1, 1)]);
+    assert_eq!(
+        past_the_ceiling[0]
+            .taken()
+            .map(QueuedOperation::id)
+            .collect::<Vec<_>>(),
+        [vector[0].id(), vector[1].id()]
+    );
+    // A draining entity is repaired again at full width, from whichever of
+    // its operations are still queued.
+    let draining = [(
+        vector[0].entity(),
+        HeldEntity::Draining {
+            through: vector[0].id(),
+        },
+    )]
+    .into_iter()
+    .collect::<HashMap<_, _>>();
+    assert_eq!(
+        shape(&select(2, &draining, all, all, u64::MAX)),
+        [(first, 2, 0)]
+    );
+    assert_eq!(
+        shape(&select(0, &draining, all, all, u64::MAX)),
+        [(second, 1, 0)],
+        "a draining entity never joins a batch"
+    );
+    // A repair in progress takes its own width.
+    let repairing = |width| {
+        [(
+            vector[0].entity(),
+            HeldEntity::Repairing {
+                through: vector[0].id(),
+                tried: vector[1].id(),
+                width,
+            },
+        )]
+        .into_iter()
+        .collect::<HashMap<_, _>>()
+    };
+    assert_eq!(
+        shape(&select(
+            2,
+            &repairing(NonZeroUsize::new(2).unwrap()),
+            all,
+            all,
+            u64::MAX
+        )),
+        [(first, 2, 0)]
+    );
+    assert_eq!(
+        shape(&select(
+            0,
+            &repairing(NonZeroUsize::new(2).unwrap()),
+            all,
+            all,
+            u64::MAX
+        )),
+        [(second, 1, 0)]
     );
 
     assert!(matches!(
         collapse_vector(&SelectedEntity {
             entity: vector[0].entity(),
             operations: vec![&text[0]],
+            superseding: Vec::new(),
         }),
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
@@ -426,6 +568,7 @@ async fn selection_and_collapse_boundaries() {
         collapse_text(&SelectedEntity {
             entity: vector[0].entity(),
             operations: vec![&vector[0]],
+            superseding: Vec::new(),
         }),
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
@@ -433,6 +576,7 @@ async fn selection_and_collapse_boundaries() {
         collapse_vector(&SelectedEntity {
             entity: vector[0].entity(),
             operations: Vec::new(),
+            superseding: Vec::new(),
         }),
         Err(HelixDbError::InvariantViolation(_))
     ));
@@ -440,9 +584,25 @@ async fn selection_and_collapse_boundaries() {
         collapse_text(&SelectedEntity {
             entity: vector[0].entity(),
             operations: Vec::new(),
+            superseding: Vec::new(),
         }),
         Err(HelixDbError::InvariantViolation(_))
     ));
+    // Superseding operations collapse with the acknowledged ones: the
+    // newest state, cleared from every partition either occupied.
+    let collapsed = collapse_vector(&SelectedEntity {
+        entity: vector[0].entity(),
+        operations: vec![&vector[0]],
+        superseding: vec![&vector[1]],
+    })
+    .expect("one entity's vector operations collapse");
+    assert_eq!(
+        collapsed
+            .replacement
+            .as_ref()
+            .map(|replacement| replacement.vector().to_vec()),
+        Some(vec![1.0, 1.0])
+    );
     assert_eq!(
         db.publish_index_queues_for_lifecycle_testing()
             .await
@@ -671,7 +831,7 @@ async fn retired_generations_discard_and_retry() {
     let permit = publisher.scope_gates.publication_permit(vector).await;
     assert_eq!(
         publisher
-            .publish_vector(&permit, &stored)
+            .publish_vector(&permit, stored)
             .await
             .expect("a retired vector generation retries"),
         PublicationOutcome::Retry
@@ -684,7 +844,7 @@ async fn retired_generations_discard_and_retry() {
         .expect("text queue remains");
     assert_eq!(
         publisher
-            .publish_text(text, &stored)
+            .publish_text(text, stored)
             .await
             .expect("a retired text generation retries"),
         PublicationOutcome::Retry

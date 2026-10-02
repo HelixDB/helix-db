@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
 pub use index_lifecycle::queue::lag::PublicationLagHistogram;
-pub use index_lifecycle::queue::IndexOperationQueueStats;
+pub use index_lifecycle::queue::{BlockedIndexEntity, IndexOperationQueueStats};
 pub use merge_operator::{operation_queue_merge_stats, OperationQueueMergeStats, QueueMergeCost};
 
 #[cfg(any(test, feature = "production-coverage"))]
@@ -1645,12 +1645,17 @@ impl HelixDB {
         let index_claim_sequences =
             Arc::new(index_lifecycle::worker::ClaimSequenceAllocator::new());
         let queue_tuning = config.db().index_operation_queue();
+        let index_worker_wake = index_lifecycle::worker::IndexWorkerWakeHandle::default();
         let index_operation_backlog = index_lifecycle::queue::backlog::IndexOperationBacklog::new(
             index_lifecycle::queue::backlog::BacklogLimits {
                 max_retained_bytes: queue_tuning.max_retained_bytes().get(),
                 max_members: queue_tuning.max_members().get(),
             },
+            index_worker_wake.clone(),
         );
+        // Publishers retain between attempts at most one logical index's
+        // backlog ceiling per publication task, as much as the attempts
+        // themselves may hold at once.
         let index_queue_store = Arc::new(index_lifecycle::queue::storage::QueueStore::new(
             queue_tuning.layout(),
             queue_tuning.effective_operand_bytes(
@@ -1660,6 +1665,10 @@ impl HelixDB {
                     .to_writer_settings(None)
                     .wal_replay
                     .max_inflight_bytes,
+            ),
+            queue_tuning.max_retained_bytes().get().saturating_mul(
+                u64::try_from(lifecycle_throughput.concurrency().publication_tasks().get())
+                    .unwrap_or(u64::MAX),
             ),
         ));
         // Every writer owns a publisher; only automatic scheduling hands it to
@@ -1713,15 +1722,14 @@ impl HelixDB {
                     queue_tuning.recovery_sweep_interval(),
                     config.db().index_lifecycle_throughput().concurrency(),
                     Arc::clone(&index_claim_sequences),
+                    index_worker_wake.clone(),
                     #[cfg(feature = "index-lifecycle-testing")]
                     Arc::clone(&lifecycle_metrics),
                 ))
             }
             HelixStorage::Reader(_) => None,
         };
-        let index_worker_wake = index_worker
-            .as_ref()
-            .map(index_lifecycle::worker::IndexWorkerSupervisor::wake_handle);
+        let index_worker_wake = index_worker.is_some().then_some(index_worker_wake);
         Self {
             inner: Arc::new(HelixDBInner {
                 storage,
@@ -3273,6 +3281,7 @@ impl HelixDB {
             uncertain_commits: load(&metrics.uncertain_commits),
             output_retries: load(&metrics.output_retries),
             blocked_attempts: load(&metrics.blocked_attempts),
+            blocked_entities: publisher.blocked_entity_count() as u64,
             discarded_operations: load(&metrics.discarded_operations),
             queue_reads: load(&metrics.queue_reads),
             queue_read_bytes: load(&metrics.queue_read_bytes),
@@ -3284,6 +3293,44 @@ impl HelixDB {
             deferred_attempts: load(&metrics.deferred_attempts),
             ..stats
         }
+    }
+
+    /// Returns how many entities this writer's publisher holds back, without
+    /// listing them: what [`Self::blocked_index_entities`] would list. Zero on
+    /// a reader.
+    pub fn blocked_index_entity_count(&self) -> u64 {
+        self.inner
+            .index_queue_publisher
+            .as_ref()
+            .map_or(0, |publisher| publisher.blocked_entity_count() as u64)
+    }
+
+    /// Returns the entities whose queued vector/text work this writer's
+    /// publisher holds back, in ascending order.
+    ///
+    /// Each one has an operation that alone can never fit a publication under
+    /// the current limits; see [`BlockedIndexEntity`] for what that means for
+    /// writes and searches, including strong text searches that fail with
+    /// backpressure no publication clears. The list is the publisher's
+    /// process memory: it is empty on a reader and is rebuilt after a
+    /// restart as publication blocks again.
+    pub fn blocked_index_entities(&self) -> Vec<BlockedIndexEntity> {
+        let Some(publisher) = &self.inner.index_queue_publisher else {
+            return Vec::new();
+        };
+        let mut blocked = publisher
+            .blocked_entities()
+            .into_iter()
+            .map(|(target, entity)| BlockedIndexEntity {
+                scope: target.scope,
+                index_id: target.index_id,
+                generation: target.generation,
+                kind: entity.kind,
+                id: entity.id,
+            })
+            .collect::<Vec<_>>();
+        blocked.sort_unstable();
+        blocked
     }
 
     /// Returns the cumulative publication lag of operations committed and
@@ -3316,12 +3363,12 @@ impl HelixDB {
                 match publisher.publish_once(target).await? {
                     PublicationOutcome::Published { operations, .. }
                     | PublicationOutcome::Discarded { operations } => released += operations,
-                    PublicationOutcome::Trimmed => {}
+                    PublicationOutcome::Trimmed | PublicationOutcome::Blocked => {}
                     PublicationOutcome::Empty => break,
                     PublicationOutcome::Retry if retries < 100 => retries += 1,
                     outcome @ (PublicationOutcome::Retry
                     | PublicationOutcome::Deferred
-                    | PublicationOutcome::Blocked) => {
+                    | PublicationOutcome::Stalled) => {
                         return Err(HelixDbError::InvariantViolation(format!(
                             "queued publication stalled for index {}: {outcome:?}",
                             target.index_id.get()

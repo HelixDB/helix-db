@@ -159,7 +159,8 @@ async fn drain(writer: &HelixDB) {
             outcome @ (PublicationOutcome::Discarded { .. }
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => panic!("publication stalled: {outcome:?}"),
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => panic!("publication stalled: {outcome:?}"),
         }
     }
     panic!("publication did not drain the vector queue");

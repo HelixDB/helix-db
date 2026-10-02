@@ -320,7 +320,8 @@ async fn publish(
             outcome @ (PublicationOutcome::Discarded { .. }
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => {
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => {
                 panic!("{context}: publication did not progress: {outcome:?}")
             }
         }

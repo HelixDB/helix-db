@@ -300,7 +300,7 @@ async fn readers_check_the_queue_layout_of_every_tenant_scope() {
             1,
             QueuedPayload::Text(QueuedTextPayload { replacement: None }),
         )];
-        QueueStore::new(layout, writer.index_operand_limit())
+        QueueStore::new(layout, writer.index_operand_limit(), 0)
             .stage_enqueue(
                 &transaction,
                 QueueTarget::new(
@@ -372,7 +372,7 @@ async fn corrupt_row_queues_fail_closed() {
     install_vector_and_text(&db).await;
     let text = target(&db, QueueFamily::Text).await;
     let storage = db.inner_db();
-    let store = QueueStore::new(QueueLayout::Rows, db.index_operand_limit());
+    let store = QueueStore::new(QueueLayout::Rows, db.index_operand_limit(), 0);
     let text_row = deletion(
         1,
         QueuedPayload::Text(QueuedTextPayload { replacement: None }),

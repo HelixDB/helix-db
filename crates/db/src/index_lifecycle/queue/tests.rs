@@ -262,7 +262,8 @@ pub(super) async fn release_within_operand_bound(
             PublicationOutcome::Empty => return released,
             outcome @ (PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => panic!("publication did not progress: {outcome:?}"),
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => panic!("publication did not progress: {outcome:?}"),
         };
         let acknowledged = before
             .difference(&queued_ids().await)

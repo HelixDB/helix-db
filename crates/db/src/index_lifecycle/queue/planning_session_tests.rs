@@ -77,7 +77,8 @@ async fn publish_all(publisher: &QueuePublisher, target: QueueTarget, retain: bo
             outcome @ (PublicationOutcome::Discarded { .. }
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => panic!("publication did not progress: {outcome:?}"),
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => panic!("publication did not progress: {outcome:?}"),
         }
     }
     panic!("publication did not drain")
@@ -336,7 +337,8 @@ async fn evicting_sessions_publish_what_cold_sessions_publish() {
                 | PublicationOutcome::Deferred
                 | PublicationOutcome::Retry
                 | PublicationOutcome::Trimmed
-                | PublicationOutcome::Blocked) => {
+                | PublicationOutcome::Blocked
+                | PublicationOutcome::Stalled) => {
                     panic!("publication did not progress: {outcome:?}")
                 }
             }

@@ -60,22 +60,14 @@ impl StoredQueue {
 
     /// Returns what remains of this queue once `acknowledged` committed, or
     /// `None` when nothing remains; the remainder was read from no storage.
-    fn without(&self, acknowledged: &[QueuedOperationId]) -> Option<Self> {
+    fn without(self, acknowledged: &[QueuedOperationId]) -> Option<Self> {
         let acknowledged = acknowledged.iter().copied().collect::<HashSet<_>>();
-        let operations = self
-            .queue
-            .operations()
-            .iter()
-            .filter(|operation| !acknowledged.contains(&operation.id()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let rows = self
-            .rows
-            .iter()
-            .filter(|(id, _)| !acknowledged.contains(*id))
-            .map(|(id, key)| (*id, key.clone()))
-            .collect();
-        OperationQueue::from_rows(self.queue.family(), operations).map(|queue| Self {
+        let family = self.queue.family();
+        let mut operations = self.queue.into_operations();
+        operations.retain(|operation| !acknowledged.contains(&operation.id()));
+        let mut rows = self.rows;
+        rows.retain(|id, _| !acknowledged.contains(id));
+        OperationQueue::from_rows(family, operations).map(|queue| Self {
             queue,
             rows,
             encoded_bytes: 0,
@@ -94,61 +86,93 @@ impl StoredQueue {
 /// queue in its storage order: every operation it holds is still
 /// outstanding, and anything enqueued since committed after the read, so it
 /// follows every retained operation of its entity. An attempt therefore
-/// [takes](Self::take) its target's queue before it classifies the target,
-/// and only a commit that succeeded [retains](Self::retain) what it left:
-/// no outcome whose acknowledgement may or may not have committed, and no
-/// retired or hidden generation, can reuse a queue. Newer work becomes
-/// visible once the retained operations are published and the next attempt
-/// reads storage again.
+/// [takes](Self::take) its target's queue before it classifies the target
+/// and [retains](Self::retain) only what an outcome it knows the durable
+/// effect of left: the remainder after a commit that succeeded, or the
+/// whole queue after an attempt that provably committed nothing (a trimmed
+/// selection or a definite commit conflict). An outcome whose
+/// acknowledgement may or may not have committed, an error, a blocked
+/// operation, an ownership change, and a retired or hidden generation drop
+/// it. Newer work becomes visible once the retained operations are
+/// published and the next attempt reads storage again; a retained queue
+/// whose every entity is held back is dropped and read again in the same
+/// attempt, since only newer work can repair a held entity.
 ///
 /// Every publisher of one writer shares one instance (it lives in the
 /// writer's [`QueueStore`]), so the take-then-retain discipline holds
-/// whichever publisher attempts a target. Every target keeps its own
-/// remainder, so draining several targets at once reads each queue once.
-/// A remainder holds only outstanding operations, which admission charges
-/// against their logical index's `max_retained_bytes`
-/// ([`super::backlog::BacklogLimits`]), so retention never holds more than
-/// the admitted backlog of the logical indexes being published: memory
-/// grows with the number of indexes that have a backlog, up to that ceiling
-/// each.
-#[derive(Debug, Default)]
+/// whichever publisher attempts a target. Retained queues are charged their
+/// operations' retained bytes against one budget shared by every target. A
+/// queue that does not fit beside those already held is dropped and read
+/// again by its target's next attempt; held queues are never evicted for
+/// it. Publication visits targets round-robin, so evicting the least
+/// recently used queue would evict exactly the one attempted next, while a
+/// held queue only shrinks as its target drains and so frees its share.
+#[derive(Debug)]
 pub(crate) struct RetainedQueues {
-    queues: Mutex<HashMap<QueueTarget, StoredQueue>>,
+    /// Most retained bytes held across every target.
+    budget: u64,
+    state: Mutex<RetainedState>,
+}
+
+#[derive(Debug, Default)]
+struct RetainedState {
+    /// Retained bytes of every held queue.
+    held: u64,
+    queues: HashMap<QueueTarget, (StoredQueue, u64)>,
 }
 
 impl RetainedQueues {
-    /// Removes and returns `target`'s retained queue.
+    /// Holds at most `budget` retained bytes of operations across every
+    /// target.
+    pub(crate) fn new(budget: u64) -> Self {
+        Self {
+            budget,
+            state: Mutex::new(RetainedState::default()),
+        }
+    }
+
+    /// Removes and returns `target`'s retained queue, releasing its bytes.
     pub(crate) fn take(&self, target: QueueTarget) -> Option<StoredQueue> {
-        self.queues.lock().remove(&target)
+        let mut state = self.state.lock();
+        let (stored, bytes) = state.queues.remove(&target)?;
+        state.held -= bytes;
+        Some(stored)
     }
 
     /// Retains what remains of `stored`, which `target`'s attempt read or
-    /// took, once the commit acknowledging `acknowledged` succeeded.
+    /// took, once exactly `acknowledged` committed: empty when the attempt
+    /// committed nothing. Drops it when it does not fit the budget.
     pub(crate) fn retain(
         &self,
         target: QueueTarget,
-        stored: &StoredQueue,
+        stored: StoredQueue,
         acknowledged: &[QueuedOperationId],
     ) {
         let Some(remaining) = stored.without(acknowledged) else {
             return;
         };
-        let previous = self.queues.lock().insert(target, remaining);
+        let bytes = remaining
+            .queue
+            .operations()
+            .iter()
+            .map(QueuedOperation::retained_bytes)
+            .sum::<u64>();
+        let mut state = self.state.lock();
         assert!(
-            previous.is_none(),
+            !state.queues.contains_key(&target),
             "an attempt retains only the queue it took"
         );
+        if bytes > self.budget.saturating_sub(state.held) {
+            return;
+        }
+        state.held += bytes;
+        state.queues.insert(target, (remaining, bytes));
     }
 
-    /// Returns the retained bytes of every retained operation.
+    /// Returns the retained bytes of every held queue.
     #[cfg(test)]
     pub(crate) fn retained_bytes(&self) -> u64 {
-        self.queues
-            .lock()
-            .values()
-            .flat_map(|stored| stored.queue.operations())
-            .map(QueuedOperation::retained_bytes)
-            .sum()
+        self.state.lock().held
     }
 }
 
@@ -166,14 +190,16 @@ pub(crate) struct QueueStore {
 
 impl QueueStore {
     /// Creates storage for `layout` whose operands stay within
-    /// `max_operand_bytes`; recovery raises the row sequence past every
-    /// retained row before the first write.
-    pub(crate) fn new(layout: QueueLayout, max_operand_bytes: u64) -> Self {
+    /// `max_operand_bytes` and whose publishers retain at most
+    /// `retained_budget` bytes of queued operations between attempts;
+    /// recovery raises the row sequence past every retained row before the
+    /// first write.
+    pub(crate) fn new(layout: QueueLayout, max_operand_bytes: u64, retained_budget: u64) -> Self {
         Self {
             layout,
             max_operand_bytes,
             next_sequence: AtomicU64::new(0),
-            retained: RetainedQueues::default(),
+            retained: RetainedQueues::new(retained_budget),
         }
     }
 

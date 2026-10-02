@@ -65,6 +65,7 @@ fn health_response(status: StatusCode, state: ServerState) -> Response {
             "ready": state.index_readiness().is_ready(),
             "mode": state.db_mode().as_str(),
             "index_runtime": state.index_readiness().code(),
+            "blocked_index_entity_count": state.blocked_index_entity_count(),
         }),
     )
 }
