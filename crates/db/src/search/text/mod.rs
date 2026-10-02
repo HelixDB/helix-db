@@ -1724,14 +1724,27 @@ fn search_index(
     search_reader(&reader, fields, analyzer, query, k)
 }
 
+/// Analysis bytes each successful pending-document analysis charged, by
+/// index label, so a test bounds its own searches' analysis without observing
+/// searches of tests running beside it.
+#[cfg(test)]
+pub(crate) static PENDING_ANALYSIS_BYTES: std::sync::Mutex<Vec<(String, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Searches pending documents in memory exactly as persisted splits are searched.
 ///
 /// The same schema, analyzer, OR-term query, deterministic collector, traversal
 /// scope, and caller-supplied BM25 statistics produce scores that merge
 /// directly with physical split results.
+///
+/// The caller sized `documents` to fit `analysis_limit` with
+/// [`analyze_text_within_budget`], which charges exactly what indexing them
+/// here charges, so analysis past it is an invariant violation rather than a
+/// limit a request can reach.
 pub(crate) fn search_pending_documents(
     definition: &TextIndexDefinition,
     documents: &[(u64, Arc<str>)],
+    analysis_limit: NonZeroU64,
     query: &str,
     k: usize,
     statistics: &crate::index_lifecycle::text::statistics::TextBm25Statistics,
@@ -1741,7 +1754,7 @@ pub(crate) fn search_pending_documents(
         return Ok(Vec::new());
     }
     let (index, fields) = create_ram_index(definition)?;
-    let mut budget = TextAnalysisMemoryBudget::new(std::num::NonZeroU64::MAX);
+    let mut budget = TextAnalysisMemoryBudget::new(analysis_limit);
     let analyzed = documents
         .iter()
         .map(|(entity_id, text)| {
@@ -1752,10 +1765,27 @@ pub(crate) fn search_pending_documents(
                     definition.analyzer(),
                     text.to_string(),
                     &mut budget,
-                )?,
+                )
+                .map_err(|error| {
+                    let HelixDbError::ActiveTextMutationLimitExceeded {
+                        observed, limit, ..
+                    } = error
+                    else {
+                        return error;
+                    };
+                    HelixDbError::InvariantViolation(format!(
+                        "pending text analysis reached {observed} bytes past the {limit} its \
+                         selection was sized to"
+                    ))
+                })?,
             })
         })
         .collect::<Result<Vec<_>, HelixDbError>>()?;
+    #[cfg(test)]
+    PENDING_ANALYSIS_BYTES
+        .lock()
+        .expect("pending analysis log is never poisoned")
+        .push((definition.label().to_string(), budget.used()));
     populate_analyzed_index(&index, fields, analyzed)?;
     let reader = build_reader(&index)?;
     Ok(search_reader_candidates_with_statistics(

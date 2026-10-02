@@ -225,12 +225,7 @@ impl WorkerPermits {
             secondary: Arc::new(Semaphore::new(concurrency.secondary_tasks().get())),
             vector: Arc::new(Semaphore::new(concurrency.vector_tasks().get())),
             text: Arc::new(Semaphore::new(concurrency.text_tasks().get())),
-            publication: Arc::new(Semaphore::new(
-                concurrency
-                    .vector_tasks()
-                    .get()
-                    .saturating_add(concurrency.text_tasks().get()),
-            )),
+            publication: Arc::new(Semaphore::new(concurrency.publication_tasks().get())),
         }
     }
 
@@ -348,6 +343,7 @@ impl InFlightTask {
                         PublicationOutcome::Published { .. }
                             | PublicationOutcome::Discarded { .. }
                             | PublicationOutcome::Trimmed
+                            | PublicationOutcome::Blocked
                     ),
                 )
             }
@@ -396,14 +392,24 @@ pub(crate) struct IndexWorkerSupervisor {
 }
 
 /// Cloneable lock-free notification capability for the lifecycle worker.
-#[derive(Clone)]
+///
+/// Created before the worker so the operation ledger can wake it too; a
+/// handle whose worker never starts (a reader) wakes nothing.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IndexWorkerWakeHandle {
     wake: Arc<Notify>,
 }
 
 impl IndexWorkerWakeHandle {
+    /// Wakes the worker, or its next wait if it is busy.
     pub(crate) fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Consumes a pending wake, returning whether there was one.
+    #[cfg(test)]
+    pub(crate) fn take_wake(&self) -> bool {
+        futures::FutureExt::now_or_never(self.wake.notified()).is_some()
     }
 }
 
@@ -420,12 +426,13 @@ impl IndexWorkerSupervisor {
         sweep_interval: Duration,
         concurrency: IndexLifecycleConcurrency,
         claim_sequences: Arc<ClaimSequenceAllocator>,
+        wake: IndexWorkerWakeHandle,
         #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: Arc<
             crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
         >,
     ) -> Self {
         let writer_epoch = WriterEpoch::new_v4();
-        let wake = Arc::new(Notify::new());
+        let IndexWorkerWakeHandle { wake } = wake;
         let (shutdown, shutdown_rx) = watch::channel(false);
         let handle = tokio::spawn(supervise_worker(WorkerSupervisorContext {
             db,
@@ -451,13 +458,6 @@ impl IndexWorkerSupervisor {
     /// Writer epoch used to fence every claim emitted by this runtime.
     pub(crate) const fn writer_epoch(&self) -> WriterEpoch {
         self.writer_epoch
-    }
-
-    /// Returns a notification-only handle with no supervisor ownership.
-    pub(crate) fn wake_handle(&self) -> IndexWorkerWakeHandle {
-        IndexWorkerWakeHandle {
-            wake: Arc::clone(&self.wake),
-        }
     }
 
     /// Idempotently requests shutdown and joins before storage is closed.

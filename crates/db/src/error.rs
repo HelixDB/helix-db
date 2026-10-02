@@ -84,6 +84,11 @@ pub enum IndexBackpressureResource {
     PendingMembers,
     /// Superseded physical results one search would have to skip.
     SuppressedSearchResults,
+    /// Analysis charge of the committed but unpublished documents one text
+    /// search would analyze in its partition: the conservative charge, text
+    /// bytes plus a fixed overhead per token, that bounds one text
+    /// publication's analysis.
+    PendingTextAnalysisBytes,
 }
 
 impl core::fmt::Display for IndexBackpressureResource {
@@ -92,6 +97,7 @@ impl core::fmt::Display for IndexBackpressureResource {
             Self::RetainedBytes => "retained_bytes",
             Self::PendingMembers => "pending_members",
             Self::SuppressedSearchResults => "suppressed_search_results",
+            Self::PendingTextAnalysisBytes => "pending_text_analysis_bytes",
         })
     }
 }
@@ -109,6 +115,10 @@ pub enum IndexOperationBatchResource {
     /// Distinct entity/generation members staged, bounded by the per-index
     /// pending-member limit.
     PendingMembers,
+    /// Analysis charge of the transaction's own unpublished documents that a
+    /// text search in it would analyze in one partition, bounded by one text
+    /// publication's analysis budget.
+    PendingTextAnalysisBytes,
 }
 
 impl core::fmt::Display for IndexOperationBatchResource {
@@ -117,6 +127,7 @@ impl core::fmt::Display for IndexOperationBatchResource {
             Self::OperandBytes => "operand_bytes",
             Self::RetainedBytes => "retained_bytes",
             Self::PendingMembers => "pending_members",
+            Self::PendingTextAnalysisBytes => "pending_text_analysis_bytes",
         })
     }
 }
@@ -291,11 +302,16 @@ pub enum HelixDbError {
     ///
     /// Either a write transaction was rejected before commit, or a strong
     /// search found more results superseded by committed but unpublished work
-    /// ahead of its answer than it may skip; results superseded by a write's
-    /// own changes never count. Eventual searches never fail this way.
-    /// The whole request may be retried unchanged once the index worker
-    /// publishes outstanding work. A write that exceeds a limit on its own
-    /// fails with [`Self::IndexOperationBatchTooLarge`] instead.
+    /// ahead of its answer than it may skip, or a strong text search found
+    /// more committed but unpublished text to analyze than one text
+    /// publication's analysis budget; a write's own changes alone never
+    /// cause it. Eventual searches never fail this way. The whole request may be
+    /// retried unchanged once the index worker publishes outstanding work.
+    /// Work the worker holds back ([`crate::BlockedIndexEntity`], only after
+    /// limits were lowered) is never published, so text it alone keeps past
+    /// the bound fails strong text searches until a later write to it
+    /// publishes or the limits are raised. A write that exceeds a limit on its
+    /// own fails with [`Self::IndexOperationBatchTooLarge`] instead.
     #[error("index backpressure on {scope:?} index {index_id}: {resource} would reach {requested}, limit {limit}. Retry after outstanding index work is published.")]
     IndexBackpressure {
         /// Data scope owning the logical index.
@@ -304,7 +320,8 @@ pub enum HelixDbError {
         index_id: u64,
         /// Saturated resource.
         resource: IndexBackpressureResource,
-        /// Resource total the rejected transaction would have produced.
+        /// Resource total the rejected transaction would have produced, or
+        /// the amount a rejected search reached when it stopped.
         requested: u64,
         /// Configured ceiling.
         limit: u64,
@@ -334,8 +351,9 @@ pub enum HelixDbError {
     },
 
     /// One transaction staged more queued index work than any single
-    /// transaction may carry: an operand too large to commit, or more than a
-    /// per-index backlog limit even with no outstanding work.
+    /// transaction may carry: an operand too large to commit, more than a
+    /// per-index backlog limit even with no outstanding work, or more text of
+    /// its own than one of its text searches may analyze.
     #[error("queued index operations for index {index_id} in one transaction need {resource} {observed}, limit {limit}. This is a hard write-batch limit; split the write into smaller transactions.")]
     IndexOperationBatchTooLarge {
         /// Logical index whose ceiling the transaction exceeded.

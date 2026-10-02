@@ -89,8 +89,11 @@ pub struct IndexOperationQueueStats {
     /// output budget.
     pub output_retries: u64,
     /// Attempts where one operation's effect and acknowledgement alone
-    /// exceeded an output budget.
+    /// exceeded an output budget, holding its entity back.
     pub blocked_attempts: u64,
+    /// Entities held back right now (a gauge, unlike the publication
+    /// counters): see [`crate::HelixDB::blocked_index_entities`].
+    pub blocked_entities: u64,
     /// Operations of retired generations acknowledged without publication.
     pub discarded_operations: u64,
     /// Storage reads of a generation queue by publication, including reads
@@ -137,6 +140,56 @@ pub struct IndexOperationQueueStats {
     pub publication_error_retries: u64,
     /// Attempts deferred because a hidden build owns the generation.
     pub deferred_attempts: u64,
+}
+
+/// One entity whose queued vector/text work is held back because one of its
+/// operations alone can never fit a publication under the current limits,
+/// for example after they were lowered.
+///
+/// It blocks only its own publication: the rest of its generation keeps
+/// publishing. Its operations stay queued, so strong searches keep serving
+/// its newest committed state, and each later write to the entity is retried,
+/// alone and at full width, once the publisher's rotation reaches it; it
+/// publishes once one publication fits its newest state. However many of its
+/// operations are queued, that repair publishes its newest state; one
+/// publication acknowledges at most one acknowledgement's worth of them, so
+/// further repairs republish that state until every one is acknowledged.
+/// Only the publisher's process memory knows that: after a restart, the rest
+/// publish in regular batches, each serving the newest operation it
+/// acknowledges, so the published state can step back to an older queued
+/// state until they are all acknowledged. Strong searches overlay every
+/// queued operation and never see that; eventual searches that do not reach
+/// the entity within their budget can.
+///
+/// A rewrite or delete repairs it only once one publication fits the change
+/// from its published state: removing a document published under larger
+/// limits, or relinking a deleted vector's neighbors, can exceed the lowered
+/// limits too. Raising the limits again lets it publish.
+///
+/// Its queued text still counts toward the pending text a strong text search
+/// may analyze in its partition (one text publication's analysis budget),
+/// and no publication drains it: while held-back text alone exceeds that
+/// budget, strong text searches of the partition fail with
+/// `index_backpressure` (`pending_text_analysis_bytes`) that retrying cannot
+/// clear. Raise the limits again, rewrite or delete the entity where that
+/// fits, or search with eventual consistency.
+///
+/// [`crate::HelixDB::blocked_index_entities`] lists them, and the writer logs
+/// an error naming each one's scope, index, generation, and entity when it is
+/// held back. The server's unauthenticated health responses report only how
+/// many there are, never which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BlockedIndexEntity {
+    /// Data scope owning the index.
+    pub scope: DataScope,
+    /// Logical index.
+    pub index_id: IndexId,
+    /// Physical generation whose queue holds the operations.
+    pub generation: IndexGenerationId,
+    /// Node or edge.
+    pub kind: super::IndexElementKind,
+    /// Graph ID of the node or edge.
+    pub id: super::IndexEntityId,
 }
 
 /// Exact output ceilings for one publication transaction.

@@ -988,7 +988,7 @@ async fn a_replaying_reader_drops_an_enqueue_its_new_manifest_cancelled() {
 }
 
 #[tokio::test]
-async fn retained_queues_keep_each_targets_unacknowledged_operations() {
+async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operations() {
     let db = open(
         Arc::new(InMemory::new()),
         Arc::new(HelixMergeOperator::new()),
@@ -1008,35 +1008,63 @@ async fn retained_queues_keep_each_targets_unacknowledged_operations() {
         IndexGenerationId::new(1).unwrap(),
     );
     assert_eq!(target.key(), queue_key());
-    let other = QueueTarget::new(
-        target.scope,
-        target.index_id,
-        IndexGenerationId::new(2).unwrap(),
-    );
+    let targets = (2..=5)
+        .map(|generation| {
+            QueueTarget::new(
+                target.scope,
+                target.index_id,
+                IndexGenerationId::new(generation).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
     let one = text_operation(2, 2, Some("b")).retained_bytes();
     let both = one + text_operation(1, 1, Some("a")).retained_bytes();
-    let store = QueueStore::new(QueueLayout::Map, 1 << 20);
+    assert_eq!(both, 2 * one);
+    // Room for two whole queues across every target.
+    let store = QueueStore::new(QueueLayout::Map, 1 << 20, 2 * both);
     let retained = store.retained();
-    let stored = store.read(&db, target).await.unwrap().unwrap();
+    let stored = || async { store.read(&db, target).await.unwrap().unwrap() };
 
     // Nothing remains once every operation read is acknowledged.
-    retained.retain(target, &stored, &[id(1), id(2)]);
+    retained.retain(target, stored().await, &[id(1), id(2)]);
     assert!(retained.take(target).is_none());
-    // Every target keeps its own remainder, whatever the others hold.
-    retained.retain(target, &stored, &[]);
-    retained.retain(other, &stored, &[id(1)]);
+    assert_eq!(retained.retained_bytes(), 0);
+    // An attempt that committed nothing retains the whole queue; one that
+    // acknowledged an operation retains the rest.
+    retained.retain(target, stored().await, &[]);
+    retained.retain(targets[0], stored().await, &[id(1)]);
     assert_eq!(retained.retained_bytes(), both + one);
-    let taken = retained.take(other).expect("the remainder was retained");
+    // A queue that does not fit beside those held is dropped, and evicts
+    // none of them; one that fits exactly is held.
+    retained.retain(targets[1], stored().await, &[]);
+    assert!(retained.take(targets[1]).is_none());
+    retained.retain(targets[2], stored().await, &[id(1)]);
+    assert_eq!(retained.retained_bytes(), 2 * both);
+    retained.retain(targets[3], stored().await, &[id(2)]);
+    assert!(retained.take(targets[3]).is_none());
+    assert_eq!(retained.retained_bytes(), 2 * both);
+
+    // A take releases its bytes for the next queue.
+    let taken = retained.take(targets[0]).expect("the remainder was held");
     assert_eq!(ids_of(Some(taken.queue())), vec![2]);
     assert_eq!(
         taken.encoded_bytes(),
         0,
         "a retained queue reads no storage"
     );
-    assert!(retained.take(other).is_none(), "a take removes the queue");
-    assert_eq!(retained.retained_bytes(), both);
-    let taken = retained.take(target).expect("the whole queue was retained");
-    assert_eq!(ids_of(Some(taken.queue())), vec![1, 2]);
+    assert!(
+        retained.take(targets[0]).is_none(),
+        "a take removes the queue"
+    );
+    let whole = retained.take(target).expect("the whole queue was held");
+    assert_eq!(ids_of(Some(whole.queue())), vec![1, 2]);
+    assert_eq!(retained.retained_bytes(), one);
+    retained.retain(targets[1], stored().await, &[]);
+    assert_eq!(retained.retained_bytes(), both + one);
+    for (target, ids) in [(targets[1], vec![1, 2]), (targets[2], vec![2])] {
+        let taken = retained.take(target).expect("the queue was held");
+        assert_eq!(ids_of(Some(taken.queue())), ids);
+    }
     assert_eq!(retained.retained_bytes(), 0);
     db.close().await.unwrap();
 }
@@ -1055,10 +1083,11 @@ async fn retaining_a_queue_that_was_not_taken_is_an_invariant_violation() {
         IndexId::new(3).unwrap(),
         IndexGenerationId::new(1).unwrap(),
     );
-    let store = QueueStore::new(QueueLayout::Map, 1 << 20);
-    let stored = store.read(&db, target).await.unwrap().unwrap();
-    store.retained().retain(target, &stored, &[]);
-    store.retained().retain(target, &stored, &[]);
+    let store = QueueStore::new(QueueLayout::Map, 1 << 20, u64::MAX);
+    for _ in 0..2 {
+        let stored = store.read(&db, target).await.unwrap().unwrap();
+        store.retained().retain(target, stored, &[]);
+    }
 }
 
 #[tokio::test]
@@ -1079,7 +1108,7 @@ async fn latest_reads_of_rows_decode_only_the_operations_they_select() {
         text_operation(3, 1, Some("c")),
     ];
     let one = operations[0].retained_bytes();
-    let store = QueueStore::new(QueueLayout::Rows, 1 << 20);
+    let store = QueueStore::new(QueueLayout::Rows, 1 << 20, 0);
     let row = |sequence| {
         ManagedIndexKey::Data {
             scope: target.scope,
@@ -1162,7 +1191,7 @@ async fn known_limitation_a_latest_read_merges_the_whole_queue_below_a_pending_o
         IndexId::new(3).unwrap(),
         IndexGenerationId::new(1).unwrap(),
     );
-    let store = QueueStore::new(QueueLayout::Map, 1 << 20);
+    let store = QueueStore::new(QueueLayout::Map, 1 << 20, 0);
     let operations = (1..=BACKLOG)
         .map(|entity| text_operation(u128::from(entity), entity, Some("backlog")))
         .collect::<Vec<_>>();

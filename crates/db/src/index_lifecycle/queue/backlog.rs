@@ -73,6 +73,7 @@ use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue::QueuedOperationId;
 use crate::error::{HelixDbError, IndexBackpressureResource, IndexOperationBatchResource, Result};
+use crate::index_lifecycle::worker::IndexWorkerWakeHandle;
 use crate::index_lifecycle::{IndexGenerationId, IndexId, IndexOperationId};
 
 use super::lag::PublicationLagHistogram;
@@ -177,19 +178,44 @@ struct Charge {
     state: ChargeState,
 }
 
+/// Ledger-wide order of the events that can make queued work newly readable:
+/// an operation's charge and the return of its enqueue commit.
+///
+/// A target's latest admission therefore changes when an operation is
+/// charged to it and again when that operation's enqueue commit returns,
+/// committed or uncertain. A queue read that begins after observing a
+/// target's latest admission sees every operation whose commit returned
+/// before; any other operation changes the admission later. So publication
+/// can wait for new work on a target without reading its queue, and the
+/// ledger wakes the index worker whenever a commit's return changes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Admission(u64);
+
 /// Current retained work for one logical index.
 #[derive(Debug, Default)]
 struct IndexUsage {
     retained_bytes: u64,
     /// Outstanding operation references per `(generation, entity)` member.
     members: HashMap<(IndexGenerationId, IndexEntity), u32>,
-    /// Outstanding operation count per generation.
-    generations: BTreeMap<IndexGenerationId, u64>,
+    /// Outstanding work per generation; a generation is present only while
+    /// it retains an operation.
+    generations: BTreeMap<IndexGenerationId, GenerationUsage>,
+}
+
+/// Outstanding work of one generation.
+#[derive(Debug, Clone, Copy)]
+struct GenerationUsage {
+    /// Outstanding operations; never zero.
+    operations: u64,
+    /// The generation's latest [`Admission`].
+    latest: Admission,
 }
 
 #[derive(Debug, Default)]
 struct BacklogState {
     indexes: HashMap<LogicalIndex, IndexUsage>,
+    /// The latest admission issued.
+    admissions: u64,
     charges: HashMap<QueuedOperationId, Charge>,
     /// Exactly the IDs of uncertain charges, per queue target; a target is
     /// present only while it holds one.
@@ -248,14 +274,19 @@ pub(crate) struct BacklogTotals {
 pub(crate) struct IndexOperationBacklog {
     limits: BacklogLimits,
     state: Mutex<BacklogState>,
+    /// Woken whenever an enqueue commit's return changes a target's latest
+    /// [`Admission`], however the producer learned the outcome.
+    worker: IndexWorkerWakeHandle,
 }
 
 impl IndexOperationBacklog {
-    /// Creates an empty ledger; open must [`Self::load_durable`] before writes.
-    pub(crate) fn new(limits: BacklogLimits) -> Arc<Self> {
+    /// Creates an empty ledger that wakes `worker`; open must
+    /// [`Self::load_durable`] before writes.
+    pub(crate) fn new(limits: BacklogLimits, worker: IndexWorkerWakeHandle) -> Arc<Self> {
         Arc::new(Self {
             limits,
             state: Mutex::new(BacklogState::default()),
+            worker,
         })
     }
 
@@ -608,18 +639,41 @@ impl IndexOperationBacklog {
 
     /// Returns generations with outstanding charges, in a stable order.
     pub(crate) fn outstanding_targets(&self) -> Vec<QueueTarget> {
+        self.outstanding_admissions()
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect()
+    }
+
+    /// Returns generations with outstanding charges, in a stable order, each
+    /// with its latest [`Admission`].
+    pub(crate) fn outstanding_admissions(&self) -> Vec<(QueueTarget, Admission)> {
         let state = self.state.lock();
         let mut targets = state
             .indexes
             .iter()
             .flat_map(|(index, usage)| {
-                usage.generations.keys().map(move |generation| {
-                    QueueTarget::new(index.scope, index.index_id, *generation)
+                usage.generations.iter().map(move |(generation, work)| {
+                    (
+                        QueueTarget::new(index.scope, index.index_id, *generation),
+                        work.latest,
+                    )
                 })
             })
             .collect::<Vec<_>>();
         targets.sort_unstable();
         targets
+    }
+
+    /// Returns `target`'s latest [`Admission`], or `None` while it retains
+    /// no operation.
+    pub(crate) fn latest_admission(&self, target: QueueTarget) -> Option<Admission> {
+        self.state
+            .lock()
+            .indexes
+            .get(&target.logical_index())
+            .and_then(|usage| usage.generations.get(&target.generation))
+            .map(|work| work.latest)
     }
 
     /// Returns usage summed across every logical index, outcome counters,
@@ -709,11 +763,15 @@ impl IndexOperationBacklog {
         }
     }
 
+    /// Records an enqueue commit's outcome and wakes the index worker if it
+    /// readmitted an operation: a stalled attempt may have read the queue
+    /// before the commit returned, and otherwise sleeps until its deadline.
     fn resolve(&self, ids: &[QueuedOperationId], outcome: ReservationOutcome) {
         let now = Instant::now();
         let mut guard = self.state.lock();
         let state = &mut *guard;
         let marked = state.reconcile_clock;
+        let admissions = state.admissions;
         for id in ids {
             match outcome {
                 ReservationOutcome::Committed => {
@@ -725,12 +783,15 @@ impl IndexOperationBacklog {
                     // Either way the ledger learned of durability through
                     // publication, not this observation, so the lag is
                     // censored.
-                    state.transition(*id, |current| match current {
+                    let previous = state.transition(*id, |current| match current {
                         ChargeState::Reserved => {
                             ChargeState::Durable(DurableOrigin::Committed(now))
                         }
                         seen @ (ChargeState::Durable(_) | ChargeState::Uncertain { .. }) => seen,
                     });
+                    if previous == Some(ChargeState::Reserved) {
+                        state.readmit(*id);
+                    }
                 }
                 ReservationOutcome::Aborted => {
                     state.release(*id);
@@ -746,11 +807,19 @@ impl IndexOperationBacklog {
                     // Publication already acknowledged it, or attempted to,
                     // so the enqueue is durable although this producer saw no
                     // outcome.
-                    if previous != Some(ChargeState::Reserved) {
-                        state.outcomes.discovered += 1;
+                    match previous {
+                        Some(ChargeState::Reserved) => state.readmit(*id),
+                        Some(ChargeState::Durable(_) | ChargeState::Uncertain { .. }) | None => {
+                            state.outcomes.discovered += 1;
+                        }
                     }
                 }
             }
+        }
+        let readmitted = state.admissions != admissions;
+        drop(guard);
+        if readmitted {
+            self.worker.wake();
         }
     }
 }
@@ -761,6 +830,8 @@ impl BacklogState {
             !state.is_uncertain(),
             "charges enter the ledger reserved or durable"
         );
+        self.admissions += 1;
+        let latest = Admission(self.admissions);
         let usage = self
             .indexes
             .entry(charge.target.logical_index())
@@ -770,10 +841,17 @@ impl BacklogState {
             .members
             .entry((charge.target.generation, charge.entity))
             .or_default() += 1;
-        *usage
+        usage
             .generations
             .entry(charge.target.generation)
-            .or_default() += 1;
+            .and_modify(|work| {
+                work.operations += 1;
+                work.latest = latest;
+            })
+            .or_insert(GenerationUsage {
+                operations: 1,
+                latest,
+            });
         self.charges.insert(
             charge.id,
             Charge {
@@ -783,6 +861,19 @@ impl BacklogState {
                 state,
             },
         );
+    }
+
+    /// Gives the generation of retained charge `id` a new latest admission
+    /// once its enqueue commit returned: a queue read that began earlier may
+    /// have missed the operation.
+    fn readmit(&mut self, id: QueuedOperationId) {
+        let target = self.charges[&id].target;
+        self.admissions += 1;
+        self.indexes
+            .get_mut(&target.logical_index())
+            .and_then(|usage| usage.generations.get_mut(&target.generation))
+            .expect("a retained charge's generation is counted")
+            .latest = Admission(self.admissions);
     }
 
     /// Charges a durable operation found in storage unless it is retained.
@@ -838,12 +929,12 @@ impl BacklogState {
         if *references == 0 {
             usage.members.remove(&member);
         }
-        let count = usage
+        let work = usage
             .generations
             .get_mut(&charge.target.generation)
             .expect("a retained charge's generation is counted");
-        *count -= 1;
-        if *count == 0 {
+        work.operations -= 1;
+        if work.operations == 0 {
             usage.generations.remove(&charge.target.generation);
         }
         if usage.generations.is_empty() {

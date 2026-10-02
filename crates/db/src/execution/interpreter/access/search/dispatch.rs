@@ -399,6 +399,16 @@ impl<'db> ExecutionContext<'db> {
                 .search_text_manifest_with_scope(&manifest, &query, k, scope)
                 .await;
         };
+        // An absent partition has neither physical nor pending documents.
+        let super::generation::TextSearchAuthority::Managed(handle) = generation.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let analysis_limit = self.db.active_text_mutation_limits().max_input_bytes();
+        pending.yield_to_text_analysis_limit(
+            handle.partition(),
+            definition.analyzer(),
+            analysis_limit,
+        )?;
         // One logical search records one use of its splits, however often it
         // widens or reruns with a smaller selection.
         let mut demand = crate::search::text::SplitDemand::Record;
@@ -406,8 +416,9 @@ impl<'db> ExecutionContext<'db> {
             match self
                 .overlaid_text_hits(
                     &definition,
-                    generation.as_ref(),
+                    handle,
                     &pending,
+                    analysis_limit,
                     &query,
                     k,
                     &scope,
@@ -434,42 +445,33 @@ impl<'db> ExecutionContext<'db> {
     /// with [`settle_physical`], reporting a search past its suppression
     /// limit to the caller, which fails or reruns it with a smaller
     /// selection. Only the first physical search that `demand` allows
-    /// records a use of its splits.
+    /// records a use of its splits. The caller has already bounded the
+    /// pending text it analyzes in `handle`'s partition to `analysis_limit`
+    /// with [`PendingSelection::yield_to_text_analysis_limit`], which the
+    /// in-memory index asserts.
+    ///
+    /// [`PendingSelection::yield_to_text_analysis_limit`]: super::pending::PendingSelection::yield_to_text_analysis_limit
     #[allow(
         clippy::too_many_arguments,
-        reason = "one overlaid attempt binds its definition, generation, selection, query, and demand"
+        reason = "one overlaid attempt binds its definition, partition, selection, bound, query, and demand"
     )]
     async fn overlaid_text_hits(
         &self,
         definition: &crate::config::TextIndexDefinition,
-        generation: super::generation::TextSearchAuthority<
-            &super::generation::ResolvedTextGenerationHandle,
-        >,
+        handle: &super::generation::ResolvedTextGenerationHandle,
         pending: &super::pending::PendingSelection,
+        analysis_limit: std::num::NonZeroU64,
         query: &str,
         k: usize,
         scope: &TextSearchScope,
         demand: &mut crate::search::text::SplitDemand,
     ) -> Result<Settlement<crate::search::text::TextSearchHit>> {
-        let super::generation::TextSearchAuthority::Managed(handle) = generation else {
-            return Ok(Settlement::Settled(Vec::new()));
-        };
         let partition = handle.partition();
         let authority = handle.physical();
         let overlay = pending
             .entities
             .iter()
-            .map(|pending| {
-                let text = match &pending.latest {
-                    Some((pending_partition, super::pending::PendingValue::Text(text)))
-                        if pending_partition == partition =>
-                    {
-                        Some(&**text)
-                    }
-                    Some(_) | None => None,
-                };
-                (pending.entity, text)
-            })
+            .map(|pending| (pending.entity, pending.text_in(partition)))
             .collect::<Vec<_>>();
         let statistics = if let Some(active) = self.active_write_tx() {
             crate::index_lifecycle::text::statistics::load_overlaid_query_statistics(
@@ -525,6 +527,7 @@ impl<'db> ExecutionContext<'db> {
                 crate::search::text::search_pending_documents(
                     &definition,
                     &documents,
+                    analysis_limit,
                     &query,
                     k,
                     &statistics,

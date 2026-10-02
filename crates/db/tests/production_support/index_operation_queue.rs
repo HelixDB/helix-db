@@ -86,10 +86,13 @@ pub fn index_operation_queue_ledger_contracts() {
         };
         assert!(message.contains(expected), "{message}");
     };
-    let backlog = IndexOperationBacklog::new(BacklogLimits {
-        max_retained_bytes: 1_000,
-        max_members: 10,
-    });
+    let backlog = IndexOperationBacklog::new(
+        BacklogLimits {
+            max_retained_bytes: 1_000,
+            max_members: 10,
+        },
+        crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+    );
 
     // One identity is reserved at most once, within or across transactions.
     let first = charge(target(1), 1, 10);
@@ -820,7 +823,8 @@ pub async fn index_operation_queue_tenant_scope_contracts() {
                 | PublicationOutcome::Deferred
                 | PublicationOutcome::Retry
                 | PublicationOutcome::Trimmed
-                | PublicationOutcome::Blocked) => {
+                | PublicationOutcome::Blocked
+                | PublicationOutcome::Stalled) => {
                     panic!("the first scope did not publish: {outcome:?}")
                 }
             }

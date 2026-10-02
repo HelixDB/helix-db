@@ -1,5 +1,6 @@
 //! Strong and eventual pending-data search overlays through public queries.
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use helix_ast::{
@@ -14,10 +15,11 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
 use super::publication::PublicationOutcome;
-use super::tests::{open, queue, queued, target};
+use super::tests::{open, publisher_with_limits, queue, queued, target};
 use super::QueueTarget;
 use crate::config::{
-    DbConfig, IndexOperationQueueTuning, SecondaryIndexDefinition, TextIndexDefinition,
+    DbConfig, IndexOperationQueueTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits,
+    SecondaryIndexDefinition, TextBackfillCompactionLimits, TextIndexDefinition,
     VectorIndexDefinition,
 };
 use crate::encoding::v2::values::indexes::operation_queue::{
@@ -187,7 +189,8 @@ pub(super) async fn drain(db: &HelixDB, target: QueueTarget) {
             outcome @ (PublicationOutcome::Discarded { .. }
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => panic!("publication stalled: {outcome:?}"),
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => panic!("publication stalled: {outcome:?}"),
         }
     }
 }
@@ -2026,5 +2029,600 @@ async fn eventual_search_shows_an_entity_at_its_latest_state_or_not_at_all() {
         nearest(vector_search(&db, [3.0, 4.0], 10, None, SearchConsistency::Eventual).await),
         0.0
     );
+    db.close().await.unwrap();
+}
+
+/// Backfill limits whose text publications analyze at most `budget` bytes.
+fn analysis_budget(budget: u64) -> SearchIndexBackfillLimits {
+    let defaults = SearchIndexBackfillLimits::default();
+    let compaction = defaults.text_compaction();
+    SearchIndexBackfillLimits::try_new(
+        defaults.batch(),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        TextBackfillCompactionLimits::new(
+            compaction.max_fan_in(),
+            NonZeroU64::new(budget).unwrap(),
+            compaction.max_temporary_disk_bytes(),
+            compaction.max_output_blob_bytes(),
+            NonZeroU64::new(8 * 1024).unwrap(),
+        ),
+    )
+    .unwrap()
+}
+
+/// What one text publication's analysis charges for `text` under the default
+/// analyzer.
+fn analysis_charge(text: &str) -> u64 {
+    crate::search::text::analyze_text_within_budget(
+        TextIndexDefinition::new_node("Doc", "body")
+            .unwrap()
+            .analyzer(),
+        text,
+        &mut crate::search::text::TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+    )
+    .unwrap()
+    .1
+    .analysis_bytes
+}
+
+/// Analysis bytes each pending-document analysis of `label` charged.
+fn analyzed(label: &str) -> Vec<u64> {
+    crate::search::text::PENDING_ANALYSIS_BYTES
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(analyzed, _)| analyzed == label)
+        .map(|(_, bytes)| *bytes)
+        .collect()
+}
+
+/// Opens a queued database under `limits` with a `label` text index on
+/// `body`.
+async fn open_with_text_index(
+    name: &str,
+    label: &str,
+    limits: SearchIndexBackfillLimits,
+) -> HelixDB {
+    let db = open(
+        name,
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()).with_search_index_backfill_limits(limits),
+    )
+    .await;
+    db.install_index_for_tests(
+        ValidatedDynamicIndexDefinition::try_from(
+            TextIndexDefinition::new_node(label, "body").unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    db
+}
+
+/// Creates one `label` node per body, each in its own write.
+async fn add_bodies(db: &HelixDB, label: &str, bodies: &[String]) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for body in bodies {
+        let created = write(db, || {
+            QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "created",
+                        traversal::g()
+                            .add_n(label, vec![("body", PropertyInput::from(body.clone()))]),
+                    )
+                    .returning(["created"]),
+            )
+        })
+        .await;
+        ids.push(created["created"][0]["$id"].as_u64().unwrap());
+    }
+    ids
+}
+
+fn text_search_request(
+    label: &str,
+    term: &str,
+    k: usize,
+    consistency: SearchConsistency,
+) -> QueryRequest {
+    QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "hits",
+                traversal::g().text_search_nodes(label, "body", term, k, None),
+            )
+            .returning(["hits"]),
+    )
+    .with_search_consistency(consistency)
+    .unwrap()
+}
+
+#[tokio::test]
+async fn strong_text_overlay_is_bounded_by_the_publication_budget() {
+    // A label no other test indexes keys this test's analysis log entries.
+    const LABEL: &str = "OverlayBudgetDoc";
+    const BUDGET: u64 = 64 * 1024;
+    const DOCS: usize = 40;
+    let db = open_with_text_index("overlay-text-budget", LABEL, analysis_budget(BUDGET)).await;
+    // One term padded to 4 KiB, so each document alone fits the per-document
+    // admission allowances and only their sum exceeds the budget.
+    let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
+    add_bodies(&db, LABEL, &vec![body.clone(); DOCS]).await;
+    assert_eq!(
+        queue(&db, QueueFamily::Text)
+            .await
+            .unwrap()
+            .operations()
+            .len(),
+        DOCS
+    );
+    let charge = analysis_charge(&body);
+    assert!(DOCS as u64 * charge > 2 * BUDGET);
+
+    let error = Box::pin(db.query(text_search_request(
+        LABEL,
+        "alpha",
+        DOCS,
+        SearchConsistency::Strong,
+    )))
+    .await
+    .expect_err("strong search fails rather than analyze past the budget");
+    assert!(error.is_index_backpressure(), "{error}");
+    assert!(analyzed(LABEL).is_empty(), "nothing was analyzed in memory");
+    // Eventual search degrades within the budget instead of failing.
+    let result = Box::pin(db.query(text_search_request(
+        LABEL,
+        "alpha",
+        DOCS,
+        SearchConsistency::Eventual,
+    )))
+    .await
+    .expect("eventual search never fails for backlog");
+    let calls = analyzed(LABEL);
+    let found = hits(&result, "hits").len() as u64;
+    assert_eq!(found, BUDGET / charge);
+    assert!(
+        calls.len() == 1 && calls.iter().all(|bytes| *bytes <= BUDGET),
+        "eventual overlay charged {calls:?} bytes; the publication budget is {BUDGET}"
+    );
+    db.close().await.unwrap();
+}
+
+/// The strong text bound is one text publication's analysis budget, not what
+/// one publication drains: a publication that selects less input than that
+/// budget analyzes leaves a strong search past the bound failing until enough
+/// publications bring the backlog back within it, here one per document past
+/// the bound.
+#[tokio::test]
+async fn a_strong_text_search_past_the_bound_waits_for_every_publication_it_needs() {
+    const LABEL: &str = "OverlayNarrowInputDoc";
+    const BUDGET: u64 = 64 * 1024;
+    const PAST: usize = 3;
+    let limits = analysis_budget(BUDGET);
+    let db = open_with_text_index("overlay-text-narrow-input", LABEL, limits).await;
+    let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
+    let within = usize::try_from(BUDGET / analysis_charge(&body)).unwrap();
+    add_bodies(&db, LABEL, &vec![body; within + PAST]).await;
+    let target = target(&db, QueueFamily::Text).await;
+    // Each publication's input budget is one document's, so it selects one.
+    let document = queue(&db, QueueFamily::Text).await.unwrap().operations()[0].retained_bytes();
+    assert!(document < BUDGET);
+    let batch = limits.batch();
+    let narrow = publisher_with_limits(
+        &db,
+        SearchIndexBatchLimits::try_new(
+            batch.max_entities(),
+            NonZeroU64::new(document).unwrap(),
+            batch.max_output_operations(),
+            batch.max_output_bytes(),
+            batch.max_single_vector_output_bytes(),
+        )
+        .unwrap(),
+        limits.active_text_mutation(),
+    );
+    let strong = || {
+        Box::pin(db.query(text_search_request(
+            LABEL,
+            "alpha",
+            within + PAST,
+            SearchConsistency::Strong,
+        )))
+    };
+    for published in 0..PAST {
+        let error = strong()
+            .await
+            .expect_err("the backlog is still past the bound");
+        assert!(
+            error.to_string().contains("pending_text_analysis_bytes"),
+            "after {published} publications: {error}"
+        );
+        assert_eq!(
+            narrow.publish_once(target).await.unwrap(),
+            PublicationOutcome::Published {
+                operations: 1,
+                entities: 1
+            }
+        );
+    }
+    let result = strong()
+        .await
+        .expect("the backlog is back within the bound");
+    assert_eq!(hits(&result, "hits").len(), within + PAST);
+    db.close().await.unwrap();
+}
+
+/// Short dense tokens cost far more analysis than their text: documents
+/// whose text together is well within the budget still exceed it once each
+/// token is charged, so strong search fails and eventual search keeps only
+/// the documents whose analysis fits.
+#[tokio::test]
+async fn dense_token_text_is_bounded_by_its_analysis_not_its_length() {
+    const LABEL: &str = "OverlayDenseDoc";
+    const BUDGET: u64 = 64 * 1024;
+    const DOCS: usize = 3;
+    let db = open_with_text_index("overlay-text-dense", LABEL, analysis_budget(BUDGET)).await;
+    let body = "a ".repeat(100);
+    let ids = add_bodies(&db, LABEL, &vec![body.clone(); DOCS]).await;
+    let charge = analysis_charge(&body);
+    assert!(
+        (DOCS * body.len()) as u64 * 100 < BUDGET && DOCS as u64 * charge > BUDGET,
+        "{DOCS} documents of {} text bytes charge {charge} each",
+        body.len()
+    );
+    let error = Box::pin(db.query(text_search_request(
+        LABEL,
+        "a",
+        DOCS,
+        SearchConsistency::Strong,
+    )))
+    .await
+    .expect_err("dense text past the analysis budget fails strong search");
+    assert!(error.is_index_backpressure(), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("pending_text_analysis_bytes would reach "),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains(&format!("limit {BUDGET}")),
+        "{error}"
+    );
+    assert!(analyzed(LABEL).is_empty());
+
+    let result = Box::pin(db.query(text_search_request(
+        LABEL,
+        "a",
+        DOCS,
+        SearchConsistency::Eventual,
+    )))
+    .await
+    .unwrap();
+    let within = usize::try_from(BUDGET / charge).unwrap();
+    assert!(within < DOCS);
+    let mut found = hits(&result, "hits")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    found.sort_unstable();
+    assert_eq!(found, ids[..within], "eventual search keeps the oldest");
+    assert_eq!(analyzed(LABEL), [within as u64 * charge]);
+
+    // Once published, nothing is left to analyze and strong search is exact.
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    let result = Box::pin(db.query(text_search_request(
+        LABEL,
+        "a",
+        DOCS,
+        SearchConsistency::Strong,
+    )))
+    .await
+    .unwrap();
+    assert_eq!(hits(&result, "hits").len(), DOCS);
+    db.close().await.unwrap();
+}
+
+/// Prefiltered text searches analyze every pending document of their
+/// partition for corpus statistics, so the analysis bound covers them too. A
+/// write batch's own documents count first: past the bound alone they fail it
+/// for good, since no publication clears them.
+#[tokio::test]
+async fn text_analysis_bound_covers_prefiltered_searches_and_a_write_batchs_own_text() {
+    const LABEL: &str = "OverlayBoundDoc";
+    const BUDGET: u64 = 64 * 1024;
+    const DOCS: usize = 20;
+    let db =
+        open_with_text_index("overlay-text-bound-scopes", LABEL, analysis_budget(BUDGET)).await;
+    let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
+    let add = || traversal::g().add_n(LABEL, vec![("body", PropertyInput::from(body.clone()))]);
+    let ids = add_bodies(&db, LABEL, &vec![body.clone(); DOCS]).await;
+    let charge = analysis_charge(&body);
+    let within = usize::try_from(BUDGET / charge).unwrap();
+    // The first document past the bound crosses it reserving its text.
+    let reached = within as u64 * charge + body.len() as u64;
+    assert!(within < DOCS - 1 && reached > BUDGET);
+    let past_the_bound =
+        format!("pending_text_analysis_bytes would reach {reached}, limit {BUDGET}");
+
+    // Two candidates, but statistics would analyze all twenty documents.
+    let candidates = [ids[0], ids[DOCS - 1]];
+    let prefiltered = |consistency| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g()
+                        .n(NodeRef::from(candidates.to_vec()))
+                        .text_search(LABEL, "body", "alpha", 10, None),
+                )
+                .returning(["hits"]),
+        )
+        .with_search_consistency(consistency)
+        .unwrap()
+    };
+    let error = Box::pin(db.query(prefiltered(SearchConsistency::Strong)))
+        .await
+        .expect_err("a prefiltered strong search analyzes its whole partition");
+    assert!(error.to_string().contains(&past_the_bound), "{error}");
+    // Eventual search overlays the oldest documents within the bound: the
+    // first candidate is among them, the last is not yet published.
+    let result = Box::pin(db.query(prefiltered(SearchConsistency::Eventual)))
+        .await
+        .unwrap();
+    assert_eq!(
+        hits(&result, "hits")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        [ids[0]]
+    );
+
+    // A write batch searches strongly, so committed text past the bound
+    // beside its own document fails it retryably, and nothing commits.
+    let own_search = |documents: usize| {
+        let batch = (0..documents).fold(batch::write_batch(), |batch, index| {
+            batch.var_as(&format!("created{index}"), add())
+        });
+        QueryRequest::write(
+            batch
+                .var_as(
+                    "hits",
+                    traversal::g().text_search_nodes(LABEL, "body", "alpha", 2 * DOCS, None),
+                )
+                .returning(["hits"]),
+        )
+    };
+    let error = Box::pin(db.query(own_search(1)))
+        .await
+        .expect_err("a write batch's search analyzes the committed backlog");
+    assert!(error.is_index_backpressure(), "{error}");
+    assert!(error.to_string().contains(&past_the_bound), "{error}");
+    assert_eq!(
+        queue(&db, QueueFamily::Text)
+            .await
+            .unwrap()
+            .operations()
+            .len(),
+        DOCS,
+        "nothing from the failed batch commits"
+    );
+
+    // Published work leaves only a write batch's own documents: within the
+    // bound the batch searches them all strongly; past it, it can never
+    // search them, so it fails for good and commits nothing.
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    let result = Box::pin(db.query(own_search(within))).await.unwrap();
+    assert_eq!(hits(&result, "hits").len(), DOCS + within);
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    let error = Box::pin(db.query(own_search(within + 1)))
+        .await
+        .expect_err("a write batch's own text past the bound fails it");
+    assert!(
+        matches!(
+            error,
+            crate::error::HelixDbError::IndexOperationBatchTooLarge {
+                resource: crate::error::IndexOperationBatchResource::PendingTextAnalysisBytes,
+                observed,
+                limit: BUDGET,
+                ..
+            } if observed == reached
+        ),
+        "{error}"
+    );
+    assert!(queue(&db, QueueFamily::Text).await.is_none());
+    db.close().await.unwrap();
+}
+
+/// The analysis bound counts only the searched tenant's partition: a tenant
+/// past it fails strong text searches and degrades eventual ones, while a
+/// tenant within it stays exact.
+#[tokio::test]
+async fn text_analysis_bound_counts_only_the_searched_tenant_partition() {
+    const BUDGET: u64 = 64 * 1024;
+    const DOCS: usize = 20;
+    let db = open(
+        "overlay-text-bound-tenants",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default())
+            .with_search_index_backfill_limits(analysis_budget(BUDGET)),
+    )
+    .await;
+    install(&db, Some("tenant")).await;
+    let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
+    let mut crowded = Vec::new();
+    for _ in 0..DOCS {
+        crowded.push(add(&db, [0.0, 0.0], &body, Some("crowded")).await);
+    }
+    let quiet = add(&db, [0.0, 0.0], &body, Some("quiet")).await;
+    let charge = analysis_charge(&body);
+    let within = usize::try_from(BUDGET / charge).unwrap();
+    // The first document past the bound crosses it reserving its text.
+    let reached = within as u64 * charge + body.len() as u64;
+    assert!(within < DOCS && reached > BUDGET);
+
+    let strong = QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "hits",
+                traversal::g().text_search_nodes(
+                    "Doc",
+                    "body",
+                    "alpha",
+                    2 * DOCS,
+                    Some(PropertyValue::from("crowded")),
+                ),
+            )
+            .returning(["hits"]),
+    );
+    let error = Box::pin(db.query(strong))
+        .await
+        .expect_err("the crowded tenant's backlog exceeds the bound");
+    assert!(
+        error.to_string().contains(&format!(
+            "pending_text_analysis_bytes would reach {reached}, limit {BUDGET}"
+        )),
+        "{error}"
+    );
+    assert_eq!(
+        text_search(
+            &db,
+            "alpha",
+            2 * DOCS,
+            Some("quiet"),
+            SearchConsistency::Strong
+        )
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>(),
+        [quiet]
+    );
+    let mut found = text_search(
+        &db,
+        "alpha",
+        2 * DOCS,
+        Some("crowded"),
+        SearchConsistency::Eventual,
+    )
+    .await
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect::<Vec<_>>();
+    found.sort_unstable();
+    let mut oldest = crowded[..within].to_vec();
+    oldest.sort_unstable();
+    assert_eq!(found, oldest, "eventual search keeps the oldest documents");
+    db.close().await.unwrap();
+}
+
+/// Text the index worker holds back still counts toward the strong text
+/// analysis bound, although no publication drains it: with limits lowered
+/// below a queued document, strong text searches of its partition fail with
+/// backpressure that no retry or publication attempt clears, eventual ones
+/// serve the published index, and a rewrite that publishes makes strong
+/// search exact again.
+#[tokio::test]
+async fn held_back_text_counts_toward_the_strong_text_analysis_bound() {
+    const LABEL: &str = "OverlayHeldBackDoc";
+    const BUDGET: u64 = 64 * 1024;
+    let name = "overlay-text-held-back";
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open(
+        name,
+        Arc::clone(&store),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    db.install_index_for_tests(
+        ValidatedDynamicIndexDefinition::try_from(
+            TextIndexDefinition::new_node(LABEL, "body").unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    // Admitted under the default limits, but its analysis alone exceeds the
+    // lowered bound.
+    let body = (0..400)
+        .map(|term| format!("held{term}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(analysis_charge(&body) > BUDGET);
+    let [held]: [u64; 1] = add_bodies(&db, LABEL, &[body])
+        .await
+        .try_into()
+        .expect("one document");
+    db.close().await.unwrap();
+
+    let db = open(
+        name,
+        store,
+        queued(IndexOperationQueueTuning::default())
+            .with_search_index_backfill_limits(analysis_budget(BUDGET)),
+    )
+    .await;
+    let target = target(&db, QueueFamily::Text).await;
+    let publisher = db.index_queue_publisher().expect("writer runs a publisher");
+    assert_eq!(
+        publisher.publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    assert_eq!(db.blocked_index_entity_count(), 1);
+    let search =
+        |term, consistency| Box::pin(db.query(text_search_request(LABEL, term, 10, consistency)));
+    for _ in 0..2 {
+        let error = search("held0", SearchConsistency::Strong)
+            .await
+            .expect_err("held-back text alone exceeds the bound");
+        assert!(
+            error.is_index_backpressure()
+                && error.to_string().contains("pending_text_analysis_bytes"),
+            "{error}"
+        );
+        assert_eq!(
+            publisher.publish_once(target).await.unwrap(),
+            PublicationOutcome::Stalled
+        );
+    }
+    let eventual = search("held0", SearchConsistency::Eventual)
+        .await
+        .expect("eventual search never fails for backlog");
+    assert!(
+        hits(&eventual, "hits").is_empty(),
+        "eventual search serves the published index"
+    );
+
+    write(&db, || {
+        QueryRequest::write(
+            batch::write_batch().var_as(
+                "updated",
+                traversal::g()
+                    .n(NodeRef::from(held))
+                    .set_property("body", "tiny".to_string()),
+            ),
+        )
+    })
+    .await;
+    assert_eq!(
+        publisher.publish_once(target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 2,
+            entities: 1
+        }
+    );
+    assert_eq!(db.blocked_index_entity_count(), 0);
+    let repaired = search("tiny", SearchConsistency::Strong).await.unwrap();
+    assert_eq!(
+        hits(&repaired, "hits")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        [held]
+    );
+    let replaced = search("held0", SearchConsistency::Strong).await.unwrap();
+    assert!(hits(&replaced, "hits").is_empty());
     db.close().await.unwrap();
 }

@@ -463,7 +463,11 @@ removed the value.
 
 - `strong` (the default) treats every superseded candidate this way. Unlike a
   whole-index search, a prefiltered search never fails with `index_backpressure`
-  because of unpublished changes; only the limits above apply.
+  because of superseded results; only the limits above apply. A prefiltered text
+  search still fails with `index_backpressure` when its partition holds more
+  [unpublished text](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes)
+  than one text publication may analyze, since its BM25 statistics cover every
+  unpublished document.
 - `eventual` does this for the oldest unpublished work within its per-search budget and
   ranks the remaining candidates by their last published values until publication.
 

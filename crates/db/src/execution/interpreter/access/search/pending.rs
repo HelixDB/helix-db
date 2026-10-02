@@ -19,6 +19,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use helix_ast::query::SearchConsistency;
@@ -49,6 +50,17 @@ pub(super) struct PendingEntity {
     pub(super) entity: IndexEntity,
     /// `None` means the latest state deletes the entity from the index.
     pub(super) latest: Option<(TextPartition, PendingValue)>,
+}
+
+impl PendingEntity {
+    /// The latest text a text search of `partition` analyzes for the entity:
+    /// `None` when it is deleted, moved to another partition, or a vector.
+    pub(super) fn text_in(&self, partition: &TextPartition) -> Option<&str> {
+        match &self.latest {
+            Some((latest, PendingValue::Text(text))) if latest == partition => Some(text),
+            Some(_) | None => None,
+        }
+    }
 }
 
 /// Consistency a selection was made under.
@@ -202,6 +214,119 @@ impl PendingSelection {
             ))),
         }
     }
+
+    /// Bounds the unpublished text one text search analyzes in `partition`
+    /// to `limit` analysis bytes, the analysis budget of one text
+    /// publication.
+    ///
+    /// A text overlay analyzes the latest document of every selected entity
+    /// in the searched partition, for corpus statistics and again for its
+    /// in-memory index, whether or not a traversal restricts the search. That
+    /// work grows with the committed backlog rather than with `k`, so it is
+    /// charged exactly as one publication charges the documents it analyzes
+    /// ([`crate::search::text::TextAnalysisMemoryBudget`]: text bytes plus a
+    /// fixed overhead per retained token, so dense short-token text costs
+    /// far more than its length) and bounded by that publication budget.
+    /// Charging stops at the first token past the bound, so sizing never
+    /// analyzes more than the bound either.
+    ///
+    /// The bound caps one search's analysis memory at one publication's; it
+    /// is not what one publication drains. A publication also selects at most
+    /// its batch input bytes and entities, across every partition of its
+    /// generation, so the index worker may need several publications to bring
+    /// a partition's backlog back within the bound.
+    ///
+    /// The searching write transaction's own documents are charged first: no
+    /// publication clears them, so a write whose own documents exceed the
+    /// bound fails with [`HelixDbError::IndexOperationBatchTooLarge`]. Past
+    /// the bound with committed documents, strong search fails with retryable
+    /// index backpressure rather than analyze more; within it, it stays
+    /// exact. Eventual search keeps the longest prefix of its selection
+    /// within the bound and leaves the rest to their published
+    /// representation until publication. Either error reports the charge
+    /// reached when analysis stopped.
+    ///
+    /// Text of entities the index worker holds back
+    /// ([`crate::BlockedIndexEntity`]) counts too, although no publication
+    /// drains it: only a writer knows which entities those are, and exempting
+    /// them would let analysis grow with the retained backlog again. While
+    /// held-back text alone exceeds the bound, which takes limits lowered
+    /// below documents already admitted, strong text searches of the
+    /// partition keep failing until a later write to each of those entities
+    /// publishes or the limits are raised.
+    pub(super) fn yield_to_text_analysis_limit(
+        &mut self,
+        partition: &TextPartition,
+        analyzer: crate::config::TextAnalyzerKind,
+        limit: NonZeroU64,
+    ) -> Result<()> {
+        let mut budget = crate::search::text::TextAnalysisMemoryBudget::new(limit);
+        // The charge the bound refused, or `None` once the document fits.
+        let mut refused = |text: &str| match crate::search::text::analyze_text_within_budget(
+            analyzer,
+            text,
+            &mut budget,
+        ) {
+            Ok(_) => Ok(None),
+            Err(HelixDbError::ActiveTextMutationLimitExceeded { observed, .. }) => {
+                Ok(Some(observed))
+            }
+            Err(error) => Err(error),
+        };
+        let local = self.local();
+        let is_local = |pending: &PendingEntity| {
+            local.is_some_and(|local| local.contains(pending.entity.id.get()))
+        };
+        self.entities
+            .iter()
+            .filter(|pending| is_local(pending))
+            .filter_map(|pending| pending.text_in(partition))
+            .map(&mut refused)
+            .find_map(Result::transpose)
+            .transpose()?
+            .map_or(Ok(()), |observed| {
+                Err(HelixDbError::IndexOperationBatchTooLarge {
+                    index_id: self.target.index_id.get(),
+                    resource: crate::error::IndexOperationBatchResource::PendingTextAnalysisBytes,
+                    observed,
+                    limit: limit.get(),
+                })
+            })?;
+        let committed = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter(|(_, pending)| !is_local(pending))
+            .filter_map(|(position, pending)| {
+                pending.text_in(partition).map(|text| (position, text))
+            })
+            .map(|(position, text)| {
+                refused(text).map(|refused| refused.map(|observed| (position, observed)))
+            })
+            .find_map(Result::transpose)
+            .transpose()?;
+        let Some((end, requested)) = committed else {
+            return Ok(());
+        };
+        match self.consistency {
+            SelectionConsistency::Strong { .. } => Err(HelixDbError::IndexBackpressure {
+                scope: self.target.scope,
+                index_id: self.target.index_id.get(),
+                resource: crate::error::IndexBackpressureResource::PendingTextAnalysisBytes,
+                requested,
+                limit: limit.get(),
+            }),
+            SelectionConsistency::Eventual => {
+                self.entities.truncate(end);
+                self.superseded = self
+                    .entities
+                    .iter()
+                    .map(|pending| pending.entity.id.get())
+                    .collect();
+                Ok(())
+            }
+        }
+    }
 }
 
 impl<'db> ExecutionContext<'db> {
@@ -346,7 +471,7 @@ mod tests {
         VectorIndexDefinition,
     };
     use crate::encoding::v2::keys::DataScope;
-    use crate::error::IndexBackpressureResource;
+    use crate::error::{IndexBackpressureResource, IndexOperationBatchResource};
     use crate::index_lifecycle::queue::publication::PublicationOutcome;
     use crate::index_lifecycle::{
         IndexElementKind, IndexEntityId, IndexGenerationId, IndexId,
@@ -532,6 +657,275 @@ mod tests {
         );
         assert_eq!(selection.local(), Some(&RoaringTreemap::new()));
         assert_eq!(deletions(SearchConsistency::Eventual, 1).local(), None);
+    }
+
+    /// A selection whose entity `id` has latest state `documents[id]`: text in
+    /// a partition, or a deletion.
+    fn texts(
+        consistency: SearchConsistency,
+        documents: &[Option<(TextPartition, &str)>],
+    ) -> PendingSelection {
+        let mut selection = deletions(consistency, documents.len() as u64);
+        for (pending, document) in selection.entities.iter_mut().zip(documents) {
+            pending.latest = document
+                .clone()
+                .map(|(partition, text)| (partition, PendingValue::Text(Arc::from(text))));
+        }
+        selection
+    }
+
+    fn selected(selection: &PendingSelection) -> Vec<u64> {
+        selection
+            .entities
+            .iter()
+            .map(|pending| pending.entity.id.get())
+            .collect()
+    }
+
+    const ANALYZER: crate::config::TextAnalyzerKind = crate::config::TextAnalyzerKind::Standard;
+
+    /// What one publication's analysis charges for `texts`.
+    fn charge(texts: &[&str]) -> u64 {
+        texts
+            .iter()
+            .map(|text| {
+                crate::search::text::analyze_text_within_budget(
+                    ANALYZER,
+                    text,
+                    &mut crate::search::text::TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap()
+                .1
+                .analysis_bytes
+            })
+            .sum()
+    }
+
+    fn bound(bytes: u64) -> NonZeroU64 {
+        NonZeroU64::new(bytes).unwrap()
+    }
+
+    /// `committed` with one write transaction's own `text` overlaid as entity
+    /// `id` in `partition`.
+    fn with_local(
+        committed: PendingSelection,
+        id: u64,
+        partition: &TextPartition,
+        text: &str,
+    ) -> PendingSelection {
+        let local = PendingEntityState::Text {
+            first: None,
+            current: Some(
+                crate::index_lifecycle::queue::producer::QueuedTextDocument {
+                    partition: partition.clone(),
+                    text: Arc::from(text),
+                },
+            ),
+        };
+        PendingSelection::overlaid(
+            committed.target,
+            committed.entities,
+            std::iter::once((
+                IndexEntity {
+                    kind: IndexElementKind::Node,
+                    id: IndexEntityId::new(id),
+                },
+                &local,
+            )),
+        )
+    }
+
+    #[test]
+    fn text_analysis_charges_only_text_in_the_searched_partition() {
+        let searched = TextPartition::Unpartitioned;
+        let other = TextPartition::try_tenant_value(bytes::Bytes::from_static(b"t")).unwrap();
+        let documents = [
+            Some((searched.clone(), "abcd")),
+            None,
+            Some((other, "a much longer document elsewhere")),
+            Some((searched.clone(), "efgh")),
+        ];
+        // Exactly at the bound: nothing changes and strong stays exact.
+        let limit = bound(charge(&["abcd", "efgh"]));
+        for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+            let mut selection = texts(consistency, &documents);
+            selection
+                .yield_to_text_analysis_limit(&searched, ANALYZER, limit)
+                .unwrap();
+            assert_eq!(selected(&selection), [0, 1, 2, 3], "{consistency:?}");
+            assert_eq!(
+                selection.superseded,
+                [0, 1, 2, 3].into_iter().collect::<RoaringTreemap>()
+            );
+        }
+    }
+
+    /// The charge is per retained token, not per byte: short dense tokens
+    /// cost far more than their length, so a bound in text bytes would let
+    /// them through.
+    #[test]
+    fn dense_short_tokens_are_charged_per_token() {
+        let searched = TextPartition::Unpartitioned;
+        let dense = "a a a a a a a a";
+        let wide = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+        assert!(dense.len() < wide.len() && charge(&[dense]) > 4 * charge(&[wide]));
+        let limit = bound(charge(&[wide, wide]));
+        let mut strong = texts(
+            SearchConsistency::Strong,
+            &[
+                Some((searched.clone(), wide)),
+                Some((searched.clone(), wide)),
+            ],
+        );
+        strong
+            .yield_to_text_analysis_limit(&searched, ANALYZER, limit)
+            .unwrap();
+        let mut strong = texts(
+            SearchConsistency::Strong,
+            &[Some((searched.clone(), dense))],
+        );
+        let error = strong
+            .yield_to_text_analysis_limit(&searched, ANALYZER, limit)
+            .expect_err("dense text shorter than the bound exceeds it");
+        assert!(
+            matches!(
+                error,
+                HelixDbError::IndexBackpressure {
+                    resource: IndexBackpressureResource::PendingTextAnalysisBytes,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn strong_text_analysis_past_the_bound_fails_with_backpressure() {
+        let searched = TextPartition::Unpartitioned;
+        let mut strong = texts(
+            SearchConsistency::Strong,
+            &[
+                Some((searched.clone(), "abcd")),
+                Some((searched.clone(), "efgh")),
+                None,
+                Some((searched.clone(), "ij")),
+            ],
+        );
+        // "ij" crosses the bound at its only token, so the charge reached is
+        // the whole selection's.
+        let limit = charge(&["abcd", "efgh"]) + 2;
+        let error = strong
+            .yield_to_text_analysis_limit(&searched, ANALYZER, bound(limit))
+            .expect_err("strong search never analyzes past the bound");
+        let requested = charge(&["abcd", "efgh", "ij"]);
+        assert!(
+            matches!(
+                error,
+                HelixDbError::IndexBackpressure {
+                    scope: DataScope::LegacyUnscoped,
+                    index_id: 7,
+                    resource: IndexBackpressureResource::PendingTextAnalysisBytes,
+                    requested: reached,
+                    limit: reported,
+                } if reached == requested && reported == limit
+            ),
+            "{error}"
+        );
+        assert!(error.is_index_backpressure());
+        assert_eq!(selected(&strong), [0, 1, 2, 3], "the selection is kept");
+    }
+
+    #[test]
+    fn eventual_text_analysis_keeps_the_longest_prefix_within_the_bound() {
+        let searched = TextPartition::Unpartitioned;
+        let documents = [
+            Some((searched.clone(), "abcd")),
+            None,
+            Some((searched.clone(), "efgh")),
+            None,
+            Some((searched.clone(), "ij")),
+        ];
+        let mut eventual = texts(SearchConsistency::Eventual, &documents);
+        eventual
+            .yield_to_text_analysis_limit(&searched, ANALYZER, bound(charge(&["abcd", "efgh"]) - 1))
+            .unwrap();
+        // The deletion after the first document costs nothing, but the
+        // prefix ends at the first document past the bound.
+        assert_eq!(selected(&eventual), [0, 1]);
+        assert_eq!(
+            eventual.superseded,
+            [0, 1].into_iter().collect::<RoaringTreemap>()
+        );
+        // A first document past the bound leaves nothing to overlay.
+        let mut eventual = texts(SearchConsistency::Eventual, &documents);
+        eventual
+            .yield_to_text_analysis_limit(&searched, ANALYZER, bound(charge(&["abcd"]) - 1))
+            .unwrap();
+        assert!(eventual.entities.is_empty());
+        assert!(eventual.superseded.is_empty());
+    }
+
+    /// A write transaction's own documents are charged first. No publication
+    /// clears them, so past the bound alone they fail the write for good;
+    /// committed documents past the bound beside them fail it retryably.
+    #[test]
+    fn a_write_transactions_own_text_is_charged_first_and_fails_it_for_good() {
+        let searched = TextPartition::Unpartitioned;
+        let other = TextPartition::try_tenant_value(bytes::Bytes::from_static(b"t")).unwrap();
+        let committed = || {
+            texts(
+                SearchConsistency::Strong,
+                &[
+                    Some((searched.clone(), "abcd")),
+                    Some((searched.clone(), "efgh")),
+                ],
+            )
+        };
+        let own = "one two three";
+        let limit = charge(&["abcd", "efgh"]);
+        assert!(charge(&[own]) > limit);
+        // Its own document past the bound alone, even overlaying a committed
+        // entity, can never be searched.
+        for id in [1, 2] {
+            let error = with_local(committed(), id, &searched, own)
+                .yield_to_text_analysis_limit(&searched, ANALYZER, bound(limit))
+                .expect_err("a write's own text past the bound fails it");
+            assert!(
+                matches!(
+                    error,
+                    HelixDbError::IndexOperationBatchTooLarge {
+                        index_id: 7,
+                        resource: IndexOperationBatchResource::PendingTextAnalysisBytes,
+                        observed,
+                        limit: reported,
+                    } if observed == charge(&[own]) && reported == limit
+                ),
+                "{error}"
+            );
+            assert!(!error.is_index_backpressure());
+        }
+        // Within the bound, committed documents past it beside it fail the
+        // search retryably, charging its own document first.
+        let error = with_local(committed(), 2, &searched, "ij")
+            .yield_to_text_analysis_limit(&searched, ANALYZER, bound(limit))
+            .expect_err("committed text past the bound beside the write's own fails it");
+        assert!(
+            matches!(
+                error,
+                HelixDbError::IndexBackpressure {
+                    resource: IndexBackpressureResource::PendingTextAnalysisBytes,
+                    requested,
+                    ..
+                } if requested == charge(&["ij", "abcd", "efgh"])
+            ),
+            "{error}"
+        );
+        // Its own text in another partition costs nothing.
+        let mut selection = with_local(committed(), 2, &other, own);
+        selection
+            .yield_to_text_analysis_limit(&searched, ANALYZER, bound(limit))
+            .unwrap();
+        assert_eq!(selected(&selection), [0, 1, 2]);
     }
 
     /// The property `family` indexes, set for a document at `position`.

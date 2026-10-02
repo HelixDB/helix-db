@@ -1,6 +1,6 @@
 //! Vector publication through the supervisor-owned publisher and real storage.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -19,8 +19,10 @@ use slatedb::object_store::ObjectStore;
 use tokio::sync::oneshot;
 
 use super::backlog::OperationCharge;
-use super::overlay_tests::{hits, vector_search, write};
-use super::publication::{NextTarget, PublicationOutcome, QueuePublisher};
+use super::overlay_tests::{delete, hits, vector_search, write};
+use super::publication::{
+    select_batch, HeldEntity, NextTarget, PublicationOutcome, QueuePublisher,
+};
 use super::tests::{
     add_doc, all_keys, open, publisher_with_limits, queue, queued, release_within_operand_bound,
     rows, target,
@@ -39,7 +41,7 @@ use crate::encoding::v2::keys::{
     DataKey, DataKeyKind, IndexEntity, ManagedIndexKey, RecordKind, ScopedKey,
 };
 use crate::encoding::v2::values::indexes::operation_queue::{
-    QueueFamily, QueueOperand, QueuedOperationId,
+    QueueFamily, QueueOperand, QueuedOperation, QueuedOperationId, QueuedPayload, QueuedTextPayload,
 };
 use crate::index_lifecycle::work::{TextPartition, TextStatisticsContribution};
 use crate::index_lifecycle::{
@@ -112,7 +114,8 @@ async fn drain(db: &HelixDB, target: QueueTarget) -> u64 {
             outcome @ (PublicationOutcome::Discarded { .. }
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => {
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => {
                 panic!("publication did not progress: {outcome:?}")
             }
         }
@@ -359,7 +362,10 @@ async fn acknowledging_a_prefix_leaves_newer_operations_queued() {
 ///
 /// Below the ceiling at which the first selected entity fits, attempts halve
 /// the selection's operations until one operation alone crosses it: blocked,
-/// nothing written.
+/// nothing written. A trimmed attempt committed nothing, so every attempt
+/// after a candidate's first reuses the queue that one read, or the one an
+/// earlier publisher's commit retained, which the candidate then never
+/// reads.
 async fn smallest_publishing_ceiling(
     db: &HelixDB,
     target: QueueTarget,
@@ -374,6 +380,7 @@ async fn smallest_publishing_ceiling(
             batch_limits(8 * 1024 * 1024, max_output_operations),
             text,
         );
+        let retained = db.index_queue_store().retained().retained_bytes() > 0;
         let outcome = loop {
             match candidate.publish_once(target).await.unwrap() {
                 PublicationOutcome::Trimmed => {}
@@ -382,14 +389,24 @@ async fn smallest_publishing_ceiling(
                 | PublicationOutcome::Empty
                 | PublicationOutcome::Deferred
                 | PublicationOutcome::Retry
-                | PublicationOutcome::Blocked) => break outcome,
+                | PublicationOutcome::Blocked
+                | PublicationOutcome::Stalled) => break outcome,
             }
         };
+        assert_eq!(
+            candidate.metrics().queue_reads.load(Ordering::Relaxed),
+            u64::from(!retained),
+            "{max_output_operations} operations: trimmed attempts keep their queue"
+        );
         match outcome {
             PublicationOutcome::Blocked => {
                 assert_eq!(
                     candidate.metrics().blocked_attempts.load(Ordering::Relaxed),
                     1
+                );
+                assert!(
+                    queued == 1 || candidate.metrics().output_retries.load(Ordering::Relaxed) > 0,
+                    "several operations trim before one blocks"
                 );
                 assert_eq!(
                     queued_operations(db).await,
@@ -408,7 +425,8 @@ async fn smallest_publishing_ceiling(
             | PublicationOutcome::Empty
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Trimmed) => {
+            | PublicationOutcome::Trimmed
+            | PublicationOutcome::Stalled) => {
                 panic!("{max_output_operations} operations gave {outcome:?}")
             }
         }
@@ -765,7 +783,8 @@ async fn publication_builds_the_graph_a_build_of_the_same_inserts_builds() {
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
             | PublicationOutcome::Trimmed
-            | PublicationOutcome::Blocked) => {
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => {
                 panic!("publication did not progress: {outcome:?}")
             }
         }
@@ -1289,7 +1308,8 @@ async fn row_acknowledgements_leave_room_for_their_effects() {
             | PublicationOutcome::Trimmed
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => {
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => {
                 panic!("row acknowledgements wasted an attempt: {outcome:?}")
             }
         }
@@ -1327,17 +1347,37 @@ async fn one_operation_that_cannot_fit_blocks_without_trimming() {
         // Every backoff deadline lies after this instant, however long the
         // attempts take.
         let attempted = Instant::now();
-        for attempt in 1..=3_u64 {
+        assert_eq!(
+            narrow.publish_once(target).await.unwrap(),
+            PublicationOutcome::Blocked,
+            "{layout:?}"
+        );
+        assert!(
+            matches!(
+                narrow.next_target(&std::collections::HashSet::new(), attempted),
+                NextTarget::Ready(ready) if ready == target
+            ),
+            "{layout:?}: holding the entity back lets the rest publish at once"
+        );
+        let held = narrow.blocked_entities();
+        assert_eq!(
+            held.iter()
+                .map(|(target, entity)| (*target, entity.id.get()))
+                .collect::<Vec<_>>(),
+            [(target, id)],
+            "{layout:?}"
+        );
+        // With only the held-back entity queued, attempts stall without
+        // blocking again.
+        for _ in 0..2 {
             assert_eq!(
                 narrow.publish_once(target).await.unwrap(),
-                PublicationOutcome::Blocked,
+                PublicationOutcome::Stalled,
                 "{layout:?}"
             );
-            assert_eq!(
-                narrow.metrics().blocked_attempts.load(Ordering::Relaxed),
-                attempt
-            );
         }
+        assert_eq!(narrow.metrics().blocked_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(narrow.blocked_entities(), held);
         assert_eq!(
             narrow.metrics().output_retries.load(Ordering::Relaxed),
             0,
@@ -1348,7 +1388,7 @@ async fn one_operation_that_cannot_fit_blocks_without_trimming() {
                 narrow.next_target(&std::collections::HashSet::new(), attempted),
                 NextTarget::Delayed(_)
             ),
-            "{layout:?}: blocked work backs off"
+            "{layout:?}: stalled work backs off"
         );
         assert_eq!(
             all_keys(&db).await,
@@ -2444,6 +2484,250 @@ async fn publication_reads_rows_with_the_database_batch_policy() {
     }
 }
 
+/// Publishes 40 grid points, then queues a move of a central point far
+/// outside the grid when `update` is set, then two inserts inside it.
+///
+/// Returns the database, its vector target, the moved point, and the inserts.
+async fn queue_behind_a_moved_point(
+    name: &str,
+    update: bool,
+) -> (HelixDB, QueueTarget, u64, [u64; 2]) {
+    let db = open(
+        name,
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default().with_eventual_search_budget_for_tests(0)),
+    )
+    .await;
+    install_vector(&db, None).await;
+    let mut ids = Vec::new();
+    for index in 0..40_u16 {
+        let vector = vec![f32::from(index % 7), f32::from(index / 7)];
+        ids.push(add_doc(&db, vector, "doc").await.unwrap());
+    }
+    let target = target(&db, QueueFamily::Vector).await;
+    assert_eq!(drain(&db, target).await, 40);
+    if update {
+        set_embedding(&db, ids[17], vec![40.0, 40.0]).await;
+    }
+    let inserts = [
+        add_doc(&db, vec![2.5, 2.5], "doc").await.unwrap(),
+        add_doc(&db, vec![4.5, 1.5], "doc").await.unwrap(),
+    ];
+    (db, target, ids[17], inserts)
+}
+
+/// A queued update whose relink and reinsertion cannot fit a narrowed
+/// publication blocks only its own entity: inserts queued after it, each of
+/// which fits alone, still publish.
+#[tokio::test]
+async fn blocked_vector_head_does_not_stall_later_entities() {
+    // Without the update the same inserts plan against the same graph, so
+    // the smallest ceiling publishing each alone fits both here too.
+    let (twin, target, _, _) = queue_behind_a_moved_point("publish-blocked-head-twin", false).await;
+    let (_, first, published) = smallest_publishing_ceiling(&twin, target, 2).await;
+    let ceiling = if published
+        == (PublicationOutcome::Published {
+            operations: 2,
+            entities: 2,
+        }) {
+        first
+    } else {
+        first.max(smallest_publishing_ceiling(&twin, target, 1).await.1)
+    };
+    twin.close().await.unwrap();
+
+    let (db, target, moved, inserts) =
+        queue_behind_a_moved_point("publish-blocked-head", true).await;
+    let narrow = publisher_with_limits(
+        &db,
+        batch_limits(8 * 1024 * 1024, ceiling),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
+    let mut outcomes = Vec::new();
+    for _ in 0..16 {
+        match narrow.publish_once(target).await.unwrap() {
+            PublicationOutcome::Empty => break,
+            outcome @ (PublicationOutcome::Published { .. }
+            | PublicationOutcome::Discarded { .. }
+            | PublicationOutcome::Deferred
+            | PublicationOutcome::Retry
+            | PublicationOutcome::Trimmed
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => outcomes.push(outcome),
+        }
+    }
+    assert!(
+        narrow.metrics().blocked_attempts.load(Ordering::Relaxed) > 0,
+        "the update cannot fit {ceiling} operations: {outcomes:?}"
+    );
+    assert_eq!(search(&db, vec![40.0, 40.0], 1, None).await, [moved]);
+    assert_eq!(
+        queue(&db, QueueFamily::Vector)
+            .await
+            .map_or_else(Vec::new, |queue| queue
+                .operations()
+                .iter()
+                .map(|operation| operation.entity().id.get())
+                .collect::<Vec<_>>()),
+        [moved],
+        "only the blocked update stays queued after {outcomes:?}"
+    );
+    for (insert, point) in inserts.into_iter().zip([[2.5, 2.5], [4.5, 1.5]]) {
+        assert_eq!(physical(&db, point).await.first(), Some(&(insert, 0.0)));
+    }
+    assert_eq!(drain(&db, target).await, 1);
+    assert_eq!(search(&db, vec![40.0, 40.0], 1, None).await, [moved]);
+    db.close().await.unwrap();
+}
+
+/// Queues [`queue_behind_a_moved_point`]'s move behind a publisher whose
+/// output ceiling fits each insert alone but not the move, and whose input
+/// budget the move alone fills, then publishes until only the held-back move
+/// is left.
+///
+/// Returns the database, its vector target, the narrowed publisher, and the
+/// held-back point.
+async fn hold_back_a_moved_point(name: &str) -> (HelixDB, QueueTarget, Arc<QueuePublisher>, u64) {
+    let (twin, target, _, _) = queue_behind_a_moved_point(&format!("{name}-twin"), false).await;
+    let (_, first, published) = smallest_publishing_ceiling(&twin, target, 2).await;
+    let ceiling = if published
+        == (PublicationOutcome::Published {
+            operations: 2,
+            entities: 2,
+        }) {
+        first
+    } else {
+        first.max(smallest_publishing_ceiling(&twin, target, 1).await.1)
+    };
+    twin.close().await.unwrap();
+
+    let (db, target, moved, inserts) = queue_behind_a_moved_point(name, true).await;
+    let queued = queue(&db, QueueFamily::Vector).await.unwrap();
+    assert_eq!(queued.operations()[0].entity().id.get(), moved);
+    // Every batch holds one entity: the first operation fills the budget.
+    let narrow = publisher_with_limits(
+        &db,
+        batch_limits(queued.operations()[0].retained_bytes(), ceiling),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
+    let mut outcomes = Vec::new();
+    for _ in 0..16 {
+        match narrow.publish_once(target).await.unwrap() {
+            PublicationOutcome::Stalled => break,
+            outcome @ (PublicationOutcome::Published { .. }
+            | PublicationOutcome::Discarded { .. }
+            | PublicationOutcome::Empty
+            | PublicationOutcome::Deferred
+            | PublicationOutcome::Retry
+            | PublicationOutcome::Trimmed
+            | PublicationOutcome::Blocked) => outcomes.push(outcome),
+        }
+    }
+    assert_eq!(
+        narrow
+            .blocked_entities()
+            .into_iter()
+            .map(|(_, entity)| entity.id.get())
+            .collect::<Vec<_>>(),
+        [moved],
+        "{outcomes:?}"
+    );
+    for (insert, point) in inserts.into_iter().zip([[2.5, 2.5], [4.5, 1.5]]) {
+        assert_eq!(physical(&db, point).await.first(), Some(&(insert, 0.0)));
+    }
+    (db, target, narrow, moved)
+}
+
+/// A held-back entity whose repair queues behind its blocked operation is
+/// retried first, alone, and past the input budget: the repair publishes even
+/// though the blocked operation alone fills that budget.
+#[tokio::test]
+async fn a_repair_publishes_a_held_back_vector_past_the_input_budget() {
+    let (db, target, narrow, moved) = hold_back_a_moved_point("publish-repair-input").await;
+
+    // Moving the point back restores its published vector.
+    set_embedding(&db, moved, vec![3.0, 2.0]).await;
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 2,
+            entities: 1
+        }
+    );
+    assert!(narrow.blocked_entities().is_empty());
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Empty
+    );
+    assert_eq!(physical(&db, [3.0, 2.0]).await.first(), Some(&(moved, 0.0)));
+    assert_ne!(
+        physical(&db, [40.0, 40.0]).await.first(),
+        Some(&(moved, 0.0))
+    );
+    db.close().await.unwrap();
+}
+
+/// Deleting a held-back point repairs it only once removing it fits one
+/// publication. Removal relinks the point's neighbors, which here needs more
+/// than the narrowed ceiling, so the delete is held back too: strong search
+/// serves it at once while the published graph keeps the point, until a
+/// publisher with the default limits removes it.
+#[tokio::test]
+async fn a_deleted_held_back_vector_publishes_once_its_removal_fits() {
+    let (db, target, narrow, moved) = hold_back_a_moved_point("publish-repair-delete").await;
+    // Whether the published graph still holds the point's vector row; a
+    // deleted node is never served, whatever the graph holds.
+    let published = async || {
+        rows(&db, VectorKey::is_vector_keyspace)
+            .await
+            .keys()
+            .any(|key| {
+                matches!(
+                    DataKey::parse_from_slice(DataScope::LegacyUnscoped, key),
+                    Ok(DataKey::Data {
+                        kind: DataKeyKind::Vector(VectorKey::Vector(item)),
+                        ..
+                    }) if item.node_id() == moved
+                )
+            })
+    };
+    assert!(published().await);
+    delete(&db, moved).await;
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    assert_eq!(
+        narrow
+            .blocked_entities()
+            .into_iter()
+            .map(|(_, entity)| entity.id.get())
+            .collect::<Vec<_>>(),
+        [moved]
+    );
+    assert!(!search(&db, vec![3.0, 2.0], 10, None).await.contains(&moved));
+    assert!(published().await);
+
+    assert_eq!(
+        publisher(&db).publish_once(target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 2,
+            entities: 1
+        }
+    );
+    assert_eq!(
+        publisher(&db).publish_once(target).await.unwrap(),
+        PublicationOutcome::Empty
+    );
+    assert!(publisher(&db).blocked_entities().is_empty());
+    assert!(!published().await);
+    db.close().await.unwrap();
+}
+
 /// One edge's expected index state.
 #[derive(Debug, Clone, Copy)]
 struct Link {
@@ -2944,4 +3228,81 @@ async fn edge_vector_and_text_indexes_publish_every_edge_mutation() {
         }
         db.close().await.unwrap();
     }
+}
+
+/// A held entity whose repair the rotation reaches after other entities ends
+/// that batch, so the next batch, which starts after its last entity, repairs
+/// it. Skipping it instead kept wrapping past it: with two entities rewritten
+/// in a fixed order between publications, every batch ended on the same
+/// entity and the repair never ran.
+#[test]
+fn a_repair_is_reached_however_its_generation_is_rewritten() {
+    let entity = |id| IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(id),
+    };
+    let (held, alpha, bravo) = (entity(1), entity(2), entity(3));
+    let operation = |id, entity| {
+        QueuedOperation::new(
+            QueuedOperationId::try_from_u128(id).unwrap(),
+            entity,
+            QueuedPayload::Text(QueuedTextPayload { replacement: None }),
+        )
+    };
+    // `held` blocked alone, which moved the rotation past it; `bravo` and
+    // then `alpha` were written behind it.
+    let mut queue = vec![operation(1, held), operation(2, bravo), operation(3, alpha)];
+    let holds = HashMap::from([(
+        held,
+        HeldEntity::Waiting {
+            through: queue[0].id(),
+        },
+    )]);
+    let mut cursor = held;
+    let mut batches = Vec::new();
+    for round in 0..8_u128 {
+        let selected = select_batch(
+            &queue,
+            Some(cursor),
+            &holds,
+            512,
+            NonZeroUsize::MAX,
+            NonZeroUsize::MAX,
+            u64::MAX,
+        )
+        .iter()
+        .map(|selected| {
+            (
+                selected.entity.id.get(),
+                selected.operations.len() + selected.superseding.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+        // Publishing acknowledges the batch, and the next one starts after
+        // its last entity.
+        queue.retain(|queued| {
+            selected
+                .iter()
+                .all(|(entity, _)| queued.entity().id.get() != *entity)
+        });
+        cursor = entity(selected.last().expect("a repair is selectable").0);
+        batches.push(selected);
+        if cursor == held {
+            break;
+        }
+        if round == 0 {
+            // The repair, then `alpha` and `bravo`, rewritten in that order
+            // before every later attempt.
+            queue.push(operation(4, held));
+        }
+        queue.extend([
+            operation(10 + 2 * round, alpha),
+            operation(11 + 2 * round, bravo),
+        ]);
+    }
+    assert_eq!(
+        batches,
+        [vec![(3, 1), (2, 1)], vec![(3, 1)], vec![(1, 2)]],
+        "the repair runs once the batch the rotation carried up to it publishes"
+    );
 }

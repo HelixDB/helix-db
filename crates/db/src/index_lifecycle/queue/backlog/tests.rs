@@ -33,10 +33,13 @@ fn charge(target: QueueTarget, entity_id: u64, operation: u128, bytes: u64) -> O
 }
 
 fn ledger(max_retained_bytes: u64, max_members: u64) -> Arc<IndexOperationBacklog> {
-    IndexOperationBacklog::new(BacklogLimits {
-        max_retained_bytes,
-        max_members,
-    })
+    IndexOperationBacklog::new(
+        BacklogLimits {
+            max_retained_bytes,
+            max_members,
+        },
+        IndexWorkerWakeHandle::default(),
+    )
 }
 
 fn usage(backlog: &IndexOperationBacklog, index: u64) -> BacklogUsage {
@@ -152,6 +155,120 @@ fn generations_are_distinct_members_aggregated_per_logical_index() {
         .reserve(&[charge(tenant, 7, 4, 10)], &[])
         .unwrap()
         .committed();
+}
+
+/// A target's latest admission changes when an operation is charged to it,
+/// however it was admitted, and again when that operation's enqueue commit
+/// returns, but never when one is released or another target is charged; a
+/// target emptied and charged again never repeats one.
+#[test]
+fn a_targets_latest_admission_changes_when_it_is_charged_or_its_enqueue_returns() {
+    let backlog = ledger(u64::MAX, u64::MAX);
+    let (first, second) = (target(1, 1), target(2, 1));
+    assert_eq!(backlog.latest_admission(first), None);
+    backlog
+        .reserve(&[charge(first, 1, 1, 10)], &[])
+        .unwrap()
+        .committed();
+    let admitted = backlog.latest_admission(first).unwrap();
+    backlog
+        .reserve(&[charge(second, 1, 2, 10)], &[])
+        .unwrap()
+        .committed();
+    backlog.acknowledge([id(2)]);
+    assert_eq!(backlog.latest_admission(first), Some(admitted));
+    // A reservation charges before its commit returns; an abort releases it
+    // without restoring the earlier admission.
+    backlog
+        .reserve(&[charge(first, 2, 3, 10)], &[])
+        .unwrap()
+        .aborted();
+    let aborted = backlog.latest_admission(first).unwrap();
+    assert!(aborted > admitted);
+    // Operations found in storage are admitted too.
+    backlog.load_durable(first, [(id(4), entity(3), 10)]);
+    let discovered = backlog.latest_admission(first).unwrap();
+    assert!(discovered > aborted);
+    assert_eq!(
+        backlog.outstanding_admissions(),
+        [(first, discovered)],
+        "an emptied target is not outstanding"
+    );
+    backlog.acknowledge([id(1), id(4)]);
+    assert_eq!(backlog.latest_admission(first), None);
+    assert!(backlog.outstanding_admissions().is_empty());
+    let reservation = backlog.reserve(&[charge(first, 1, 5, 10)], &[]).unwrap();
+    let reserved = backlog.latest_admission(first).unwrap();
+    assert!(reserved > discovered);
+    // A queue read between the charge and the commit's return misses the
+    // operation, so the return admits it again; an uncertain return may have
+    // committed too.
+    reservation.committed();
+    let committed = backlog.latest_admission(first).unwrap();
+    assert!(committed > reserved);
+    let mut reservation = backlog.reserve(&[charge(first, 2, 6, 10)], &[]).unwrap();
+    let reserved = backlog.latest_admission(first).unwrap();
+    assert!(reserved > committed);
+    reservation.begin_commit();
+    drop(reservation);
+    let uncertain = backlog.latest_admission(first).unwrap();
+    assert!(uncertain > reserved);
+    // A commit returning after publication already acknowledged its
+    // operation admits nothing.
+    let reservation = backlog.reserve(&[charge(first, 3, 7, 10)], &[]).unwrap();
+    let reserved = backlog.latest_admission(first).unwrap();
+    backlog.acknowledge([id(7)]);
+    reservation.committed();
+    assert_eq!(backlog.latest_admission(first), Some(reserved));
+    assert_eq!(backlog.latest_admission(second), None);
+}
+
+/// The ledger wakes the index worker exactly when an enqueue commit's return
+/// readmits an operation: committed, uncertain, or dropped mid-commit by a
+/// cancelled request. A charge, an abort, a reservation dropped before its
+/// commit, and a commit returning after publication acknowledged its
+/// operation make nothing newly readable and wake nothing.
+#[test]
+fn an_enqueue_commit_returning_wakes_the_index_worker() {
+    let worker = IndexWorkerWakeHandle::default();
+    let backlog = IndexOperationBacklog::new(
+        BacklogLimits {
+            max_retained_bytes: u64::MAX,
+            max_members: u64::MAX,
+        },
+        worker.clone(),
+    );
+    let reserve = |operation| {
+        backlog
+            .reserve(&[charge(target(1, 1), 1, operation, 10)], &[])
+            .unwrap()
+    };
+    let mut committed = reserve(1);
+    committed.begin_commit();
+    assert!(!worker.take_wake(), "a charge is not readable yet");
+    committed.committed();
+    assert!(worker.take_wake(), "a committed enqueue wakes the worker");
+    let mut uncertain = reserve(2);
+    uncertain.begin_commit();
+    uncertain.uncertain();
+    assert!(worker.take_wake(), "an uncertain enqueue wakes the worker");
+    let mut cancelled = reserve(3);
+    cancelled.begin_commit();
+    drop(cancelled);
+    assert!(
+        worker.take_wake(),
+        "an enqueue cancelled mid-commit wakes the worker"
+    );
+
+    let mut aborted = reserve(4);
+    aborted.begin_commit();
+    aborted.aborted();
+    drop(reserve(5));
+    let mut acknowledged = reserve(6);
+    acknowledged.begin_commit();
+    backlog.acknowledge([id(6)]);
+    acknowledged.committed();
+    assert!(!worker.take_wake(), "nothing newly readable wakes nothing");
 }
 
 #[test]

@@ -627,6 +627,7 @@ async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound
     let store = Arc::new(queue::storage::QueueStore::new(
         crate::config::QueueLayout::Rows,
         1 << 20,
+        1 << 20,
     ));
     let transaction = build
         .db
@@ -648,10 +649,13 @@ async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound
 
     let publisher = publication::QueuePublisher::new(
         Arc::new(build.db.clone()),
-        backlog::IndexOperationBacklog::new(backlog::BacklogLimits {
-            max_retained_bytes: u64::MAX,
-            max_members: u64::MAX,
-        }),
+        backlog::IndexOperationBacklog::new(
+            backlog::BacklogLimits {
+                max_retained_bytes: u64::MAX,
+                max_members: u64::MAX,
+            },
+            crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+        ),
         Arc::clone(&store),
         Arc::clone(&driver.scope_gates),
         publication::VectorPublicationResources {
@@ -2330,6 +2334,7 @@ async fn publication_shares_the_planning_budget_with_a_retained_build() {
     let store = Arc::new(queue::storage::QueueStore::new(
         crate::config::QueueLayout::Rows,
         1 << 20,
+        1 << 20,
     ));
     let transaction = active
         .db
@@ -2350,10 +2355,13 @@ async fn publication_shares_the_planning_budget_with_a_retained_build() {
         .expect("fixture operation commits");
     let publisher = publication::QueuePublisher::new(
         Arc::new(active.db.clone()),
-        backlog::IndexOperationBacklog::new(backlog::BacklogLimits {
-            max_retained_bytes: u64::MAX,
-            max_members: u64::MAX,
-        }),
+        backlog::IndexOperationBacklog::new(
+            backlog::BacklogLimits {
+                max_retained_bytes: u64::MAX,
+                max_members: u64::MAX,
+            },
+            crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+        ),
         Arc::clone(&store),
         Arc::clone(&driver.scope_gates),
         publication::VectorPublicationResources {

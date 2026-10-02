@@ -13,9 +13,12 @@
 //!    ([`super::storage::RetainedQueues`]), or read the resolved queue outside
 //!    any transaction (no read dependency).
 //! 4. Select a bounded batch: whole ordered per-entity prefixes, rotating the
-//!    starting entity for fairness, never skipping an earlier operation, and
-//!    never naming more IDs than an acknowledgement may carry beside its
-//!    effects.
+//!    starting entity for fairness, never skipping an earlier operation of an
+//!    entity, and never naming more IDs than an acknowledgement may carry
+//!    beside its effects. An entity whose lone operation cannot fit one
+//!    publication is held back, so it blocks only itself; once a newer
+//!    operation of it is selectable, it is repaired: retried alone, at full
+//!    width, when the rotation reaches it.
 //! 5. Open a serializable publication transaction and re-read the canonical
 //!    record through it, so a generation that retired while the attempt
 //!    awaited ownership, or a concurrent lifecycle change, retries instead.
@@ -33,7 +36,9 @@
 //! two attempts for one generation at once (the worker skips in-flight
 //! targets). Conflicts and uncertain outcomes discard all prepared work,
 //! including the planning session; the next attempt rediscovers durable
-//! state instead of reusing an acknowledgement.
+//! state instead of reusing an acknowledgement. A trimmed selection or a
+//! definite conflict committed nothing, so it retains the queue unchanged
+//! for the next attempt; an uncertain outcome drops it.
 
 use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -48,7 +53,7 @@ use crate::config::{ActiveTextMutationLimits, SearchIndexBatchLimits};
 use crate::encoding::v2::keys::{IndexEntity, ManagedIndexKey, RecordKind, ScopedKey};
 use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::indexes::operation_queue::{
-    QueueFamily, QueuedOperation, QueuedPayload,
+    QueueFamily, QueuedOperation, QueuedOperationId, QueuedPayload,
 };
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::vector::publication::{
@@ -61,7 +66,7 @@ use crate::index_lifecycle::{
 };
 use crate::search::vector::{self, SimHasherRegistry, VectorCacheRegistry};
 
-use super::backlog::IndexOperationBacklog;
+use super::backlog::{Admission, IndexOperationBacklog};
 use super::storage::{QueueStore, StoredQueue};
 use super::{OutputBudget, QueueTarget};
 
@@ -74,6 +79,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// or the in-flight commit of charged work that reads empty. It bounds how
 /// long that work waits once it becomes publishable.
 const MAX_DEFERRED_BACKOFF: Duration = Duration::from_secs(1);
+/// Longest a [`PublicationOutcome::Stalled`] generation waits without new
+/// work. Only a new operation can give it a publishable entity, and one
+/// makes it eligible at once; this bounds how long a retirement, which only
+/// an attempt discovers, leaves its held operations charged before they are
+/// discarded.
+const MAX_STALLED_WAIT: Duration = Duration::from_secs(60);
 /// Most operation IDs one discard transaction acknowledges (about a 1 MiB
 /// map operand); the operand and output bounds may lower it further.
 const MAX_DISCARDED_OPERATIONS: usize = 65_536;
@@ -95,8 +106,14 @@ pub(crate) enum PublicationOutcome {
     /// Exact output crossed a budget before anything fit; retry immediately
     /// with fewer text entities, or fewer operations.
     Trimmed,
-    /// One operation's effect and acknowledgement cannot fit an output budget.
+    /// One operation's effect and acknowledgement cannot fit an output budget,
+    /// so its entity is held back until a later operation supersedes it;
+    /// retry immediately with the generation's other entities.
     Blocked,
+    /// Every queued entity is held back after blocking; nothing was attempted.
+    /// The generation waits for a new operation rather than retrying on a
+    /// timer.
+    Stalled,
 }
 
 /// Monotonic counters for publication observability.
@@ -121,12 +138,16 @@ pub(crate) struct QueuePublicationMetrics {
 }
 
 /// Per-generation fairness and retry state.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TargetSchedule {
-    /// Last entity whose prefix was published; the next batch starts after it.
+    /// Last entity whose prefix was published, or that was held back; the
+    /// next batch starts after it.
     cursor: Option<IndexEntity>,
     /// Current text entity ceiling, reduced when a text epoch crossed a
     /// budget. Vector batches end at the first entity that does not fit.
+    /// Like the operation ceiling, it outlives a block, so the next of
+    /// several unpublishable heads (a restarted publisher rediscovering
+    /// them) is held back in one attempt; publications double both back.
     entity_limit: usize,
     /// Current operation ceiling, reduced when not even the first entity fit
     /// beside the selection's acknowledgement.
@@ -134,22 +155,145 @@ struct TargetSchedule {
     /// Publisher sequence number of the target's latest vector commit; a
     /// retained planning session is reused only at exactly this commit.
     last_vector_commit: Option<NonZeroU64>,
-    /// Earliest instant the target is eligible again.
-    not_before: Option<Instant>,
+    /// When the target is eligible again.
+    eligibility: Eligibility,
     /// Consecutive attempts without progress.
     failures: u32,
+    /// Entities held back because a lone operation of theirs could not fit a
+    /// publication, or draining after their repair. Process memory only: a
+    /// restarted publisher rediscovers blocked entities by blocking again,
+    /// and publishes a draining entity's remaining operations in regular
+    /// batches (see [`HeldEntity`]).
+    held: HashMap<IndexEntity, HeldEntity>,
+}
+
+/// One entity held back after one of its operations could not fit a
+/// publication.
+///
+/// A held entity is selected only alone, as a repair, once the rotation
+/// reaches it ahead of every entity that is not held back; a batch the
+/// rotation carries up to it ends there, so its repair runs next. Holding it
+/// back again moves the rotation past it: however often it is written, the
+/// rest of its generation publishes between its repairs.
+///
+/// A repair takes the entity's ordered prefix whatever its input bytes, since
+/// its effect materializes only the prefix's newest state. Its first attempt
+/// takes every queued operation of the entity, and each attempt that does not
+/// fit halves the operations past `through`, so it never retries a state
+/// already known not to publish. A repair that ends without publishing waits
+/// through the newest operation its first attempt took; any later operation
+/// starts a new repair at full width.
+///
+/// A repair acknowledges at most one acknowledgement's worth of its oldest
+/// operations, but publishes the state of all it took, so a later write
+/// (such as a delete) repairs the entity however many operations are queued
+/// before it. A repair that committed past its acknowledgement keeps the
+/// entity draining: it is repaired again at full width, republishing that
+/// state or a newer one, until every operation it took is acknowledged,
+/// rather than publishing an older prefix of them in a regular batch. A
+/// draining repair that does not fit is never halved, since every shorter
+/// prefix is older than the state the entity serves; it waits through its
+/// newest operation like any other blocked entity.
+///
+/// Nothing durable records that an entity is draining, and storing it would
+/// add state to every repair for a transient effect. A restarted publisher
+/// therefore publishes the remaining operations in regular batches, each
+/// serving the newest operation it acknowledges, so the entity's published
+/// state can step back to an older queued state and forward again until the
+/// last one is acknowledged. Strong searches overlay every queued operation
+/// and never observe it; eventual searches that do not reach the entity
+/// within their budget can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldEntity {
+    /// Skipped until an operation newer than `through` is queued.
+    Waiting {
+        /// Newest operation of the entity known not to publish.
+        through: QueuedOperationId,
+    },
+    /// Published its newest selected state, but operations past the last one
+    /// acknowledged, `through`, are still queued: repaired again at full
+    /// width. Not blocked.
+    Draining {
+        /// Last operation the committed repair acknowledged.
+        through: QueuedOperationId,
+    },
+    /// Retried alone with its `width` oldest operations.
+    Repairing {
+        /// Newest operation of the entity known not to publish; `width`
+        /// always extends past it.
+        through: QueuedOperationId,
+        /// Newest operation the repair's first, full-width attempt took.
+        tried: QueuedOperationId,
+        /// Operations the next attempt takes.
+        width: NonZeroUsize,
+    },
+}
+
+impl HeldEntity {
+    /// Operations the entity's next repair takes from `queued`, its queued
+    /// operations in order, or `None` while it waits for a newer operation.
+    fn repair_width(self, queued: &[&QueuedOperation]) -> Option<usize> {
+        match self {
+            Self::Waiting { through } | Self::Draining { through } => {
+                let known = queued
+                    .iter()
+                    .position(|operation| operation.id() == through)
+                    .map_or(0, |position| position + 1);
+                (queued.len() > known).then_some(queued.len())
+            }
+            Self::Repairing { width, .. } => Some(width.get().min(queued.len())),
+        }
+    }
+
+    /// Whether the entity is held back because a state of it could not fit.
+    const fn is_blocked(self) -> bool {
+        match self {
+            Self::Waiting { .. } | Self::Repairing { .. } => true,
+            Self::Draining { .. } => false,
+        }
+    }
 }
 
 impl TargetSchedule {
-    /// Starts at `entity_limit` with no cursor, backoff, or operation ceiling.
-    const fn new(entity_limit: usize) -> Self {
+    /// Starts at `entity_limit` with no cursor, backoff, operation ceiling,
+    /// or held-back entity.
+    fn new(entity_limit: usize) -> Self {
         Self {
             cursor: None,
             entity_limit,
             operation_limit: NonZeroUsize::MAX,
             last_vector_commit: None,
-            not_before: None,
+            eligibility: Eligibility::Now,
             failures: 0,
+            held: HashMap::new(),
+        }
+    }
+}
+
+/// When a target is eligible for its next attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Eligibility {
+    /// At once.
+    Now,
+    /// Once the instant passes: the backoff of an attempt without progress.
+    After(Instant),
+    /// Every queued entity was held back ([`PublicationOutcome::Stalled`]):
+    /// once the target's latest admission moves past `admitted`, its latest
+    /// admission when the stalled attempt began, or at `deadline`.
+    NewWork {
+        admitted: Option<Admission>,
+        deadline: Instant,
+    },
+}
+
+impl Eligibility {
+    /// The instant the target becomes eligible, given `latest`, its latest
+    /// admission; `None` once it is.
+    fn waits_until(self, latest: Admission) -> Option<Instant> {
+        match self {
+            Self::Now => None,
+            Self::After(instant) => Some(instant),
+            Self::NewWork { admitted, deadline } => (admitted == Some(latest)).then_some(deadline),
         }
     }
 }
@@ -230,6 +374,9 @@ pub(crate) mod test_hooks {
         /// Fails the next vector attempt after its commit, as a post-commit
         /// cache invariant violation would.
         pub(crate) fail_after_commit: AtomicBool,
+        /// Reports the next text attempt's successful commit as uncertain, as
+        /// a commit whose response was lost would be.
+        pub(crate) uncertain_after_commit: AtomicBool,
         /// Row-batch fetch policy of the last staged vector attempt's
         /// mutation indexes.
         pub(crate) batch_reads: Mutex<Option<crate::batch_reads::BatchReads>>,
@@ -305,24 +452,24 @@ impl QueuePublisher {
         if self.hooks.paused.load(Ordering::SeqCst) {
             return NextTarget::Idle;
         }
-        let targets = self.backlog.outstanding_targets();
+        let targets = self.backlog.outstanding_admissions();
         if targets.is_empty() {
             return NextTarget::Idle;
         }
         let mut cursor = self.cursor.lock();
         let schedules = self.schedules.lock();
         let start = cursor
-            .and_then(|previous| targets.iter().position(|target| *target > previous))
+            .and_then(|previous| targets.iter().position(|(target, _)| *target > previous))
             .unwrap_or(0);
         let mut earliest = None::<Instant>;
         for offset in 0..targets.len() {
-            let target = targets[(start + offset) % targets.len()];
+            let (target, latest) = targets[(start + offset) % targets.len()];
             if in_flight.contains(&target) {
                 continue;
             }
             if let Some(not_before) = schedules
                 .get(&target)
-                .and_then(|schedule| schedule.not_before)
+                .and_then(|schedule| schedule.eligibility.waits_until(latest))
                 && not_before > now
             {
                 earliest = Some(earliest.map_or(not_before, |current| current.min(not_before)));
@@ -351,6 +498,10 @@ impl QueuePublisher {
             attempts: &self.attempts,
             target,
         };
+        // Read before the queue, so an operation admitted, or whose enqueue
+        // commit returns, while the attempt runs makes a stalled target
+        // eligible again.
+        let admitted = self.backlog.latest_admission(target);
         let started = Instant::now();
         let outcome = match self.try_publish(target).await {
             Ok(outcome) => outcome,
@@ -384,7 +535,8 @@ impl QueuePublisher {
             | PublicationOutcome::Discarded { .. }
             | PublicationOutcome::Empty
             | PublicationOutcome::Trimmed
-            | PublicationOutcome::Blocked => {}
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled => {}
         }
         // Only a vector commit retains a planning session; every other outcome
         // forgets the target's, so no session outlives the attempt that could
@@ -396,15 +548,23 @@ impl QueuePublisher {
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
             | PublicationOutcome::Trimmed
-            | PublicationOutcome::Blocked => {
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled => {
                 self.vector.planning_cache.forget_publication(target).await;
             }
         }
-        self.reschedule(target, outcome);
+        self.reschedule(target, outcome, admitted);
         Ok(outcome)
     }
 
-    fn reschedule(&self, target: QueueTarget, outcome: PublicationOutcome) {
+    /// Updates `target`'s schedule after an attempt that began when the
+    /// target's latest admission was `admitted`.
+    fn reschedule(
+        &self,
+        target: QueueTarget,
+        outcome: PublicationOutcome,
+        admitted: Option<Admission>,
+    ) {
         // Charged work that reads empty is not visible yet, for example a
         // reservation whose commit is still in flight: it waits like a hidden
         // build instead of being dispatched again at once.
@@ -413,31 +573,45 @@ impl QueuePublisher {
         let default_limit = self.limits.max_entities().get();
         let schedule = schedules
             .entry(target)
-            .or_insert(TargetSchedule::new(default_limit));
+            .or_insert_with(|| TargetSchedule::new(default_limit));
         match outcome {
             PublicationOutcome::Published { .. } => {
                 schedule.failures = 0;
-                schedule.not_before = None;
+                schedule.eligibility = Eligibility::Now;
                 schedule.entity_limit = schedule.entity_limit.saturating_mul(2).min(default_limit);
                 schedule.operation_limit = schedule
                     .operation_limit
                     .saturating_add(schedule.operation_limit.get());
             }
+            // A retired generation never publishes again.
             PublicationOutcome::Discarded { .. } => {
                 schedule.failures = 0;
-                schedule.not_before = None;
+                schedule.eligibility = Eligibility::Now;
+                schedule.held.clear();
             }
             PublicationOutcome::Empty if !unsettled => {
                 schedules.remove(&target);
             }
-            PublicationOutcome::Trimmed => {
-                schedule.not_before = None;
+            // Holding back a blocked entity is progress: the generation's
+            // other entities can publish at once.
+            PublicationOutcome::Trimmed | PublicationOutcome::Blocked => {
+                schedule.eligibility = Eligibility::Now;
+            }
+            // Only a write can give a held-back entity a repair, so polling
+            // would reread and decode the queue for nothing.
+            PublicationOutcome::Stalled => {
+                schedule.failures = schedule.failures.saturating_add(1);
+                schedule.eligibility = Eligibility::NewWork {
+                    admitted,
+                    deadline: Instant::now() + MAX_STALLED_WAIT,
+                };
             }
             PublicationOutcome::Empty
             | PublicationOutcome::Deferred
-            | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked => {
+            | PublicationOutcome::Retry => {
                 schedule.failures = schedule.failures.saturating_add(1);
+                // Deferred and unsettled work waits on another actor: an
+                // activation or an in-flight commit.
                 let ceiling = if matches!(
                     outcome,
                     PublicationOutcome::Deferred | PublicationOutcome::Empty
@@ -449,14 +623,14 @@ impl QueuePublisher {
                 let backoff = RETRY_DELAY
                     .saturating_mul(1_u32 << schedule.failures.min(9))
                     .min(ceiling);
-                schedule.not_before = Some(Instant::now() + backoff);
+                schedule.eligibility = Eligibility::After(Instant::now() + backoff);
             }
         }
     }
 
     async fn try_publish(&self, target: QueueTarget) -> Result<PublicationOutcome> {
-        // Taken before anything can return, so only this attempt's own
-        // successful commit retains a queue for the next one.
+        // Taken before anything can return, so only an outcome of this
+        // attempt whose durable effect it knows retains a queue for the next.
         let retained = self.store.retained().take(target);
         // Build, abort, cleanup, and compaction steps hold the generation's
         // ownership for a whole step, so it is classified before waiting for
@@ -481,18 +655,25 @@ impl QueuePublisher {
         // Retirement while awaiting ownership is caught by the publication
         // transaction's own read of the record.
         let ownership = self.scope_gates.publication_permit(target).await;
-        let stored = match retained {
-            Some(stored) => stored,
-            None => {
-                let Some(stored) = self.read_queue(target).await? else {
-                    return Ok(PublicationOutcome::Empty);
-                };
-                stored
+        // A retained queue lacks every operation admitted since its read, so
+        // holding back all of its entities proves nothing: a write may have
+        // queued a repair. Only a stall on a fresh read waits for new work
+        // (see `Eligibility::NewWork`); the stalled retained queue is dropped.
+        if let Some(stored) = retained {
+            let outcome = match stored.queue().family() {
+                QueueFamily::Vector => self.publish_vector(&ownership, stored).await?,
+                QueueFamily::Text => self.publish_text(target, stored).await?,
+            };
+            if outcome != PublicationOutcome::Stalled {
+                return Ok(outcome);
             }
+        }
+        let Some(stored) = self.read_queue(target).await? else {
+            return Ok(PublicationOutcome::Empty);
         };
         match stored.queue().family() {
-            QueueFamily::Vector => self.publish_vector(&ownership, &stored).await,
-            QueueFamily::Text => self.publish_text(target, &stored).await,
+            QueueFamily::Vector => self.publish_vector(&ownership, stored).await,
+            QueueFamily::Text => self.publish_text(target, stored).await,
         }
     }
 
@@ -616,10 +797,12 @@ impl QueuePublisher {
         Ok(())
     }
 
+    /// Publishes one batch of `stored`, which the attempt took or read, and
+    /// retains what is left of it (see [`super::storage::RetainedQueues`]).
     async fn publish_vector(
         &self,
         ownership: &IndexGenerationPublicationPermit,
-        stored: &StoredQueue,
+        stored: StoredQueue,
     ) -> Result<PublicationOutcome> {
         let target = ownership.target();
         let queue = stored.queue();
@@ -630,6 +813,7 @@ impl QueuePublisher {
             cursor,
             operation_limit,
             last_vector_commit,
+            held,
             ..
         } = self.schedule(target);
         // The acknowledgement may take at most half of each output budget,
@@ -645,10 +829,15 @@ impl QueuePublisher {
         let selection = select_batch(
             queue.operations(),
             cursor,
+            &held,
             self.limits.max_entities().get(),
-            operation_limit.min(capacity),
+            operation_limit,
+            capacity,
             self.limits.max_input_bytes().get(),
         );
+        if selection.is_empty() {
+            return Ok(PublicationOutcome::Stalled);
+        }
         let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let Some(handle) = load_generation_record(&transaction, target)
             .await?
@@ -673,7 +862,7 @@ impl QueuePublisher {
         // bounds that of any prefix.
         let reserved = self.store.acknowledgement_output(
             target,
-            stored,
+            &stored,
             &selection
                 .iter()
                 .flat_map(|selected| selected.operations.iter().map(|operation| operation.id()))
@@ -700,11 +889,18 @@ impl QueuePublisher {
             Ok(StagedEffects::Prefix { staged, retained }) => (staged.get(), retained),
             Ok(StagedEffects::NoneFits) => {
                 let outcome = self.shrink(target, &selection, 0);
-                if outcome == PublicationOutcome::Blocked {
+                if outcome == PublicationOutcome::Trimmed {
+                    // Nothing committed: the next, smaller selection reuses
+                    // the queue.
+                    self.store.retained().retain(target, stored, &[]);
+                } else {
                     tracing::error!(
+                        scope = ?target.scope,
+                        entity = ?selection.first().map(|selected| selected.entity),
                         index_id = target.index_id.get(),
                         generation = target.generation.get(),
-                        "one queued vector operation exceeds the publication output budget"
+                        "one queued vector operation exceeds the publication output budget; \
+                         its entity is held back until a later write supersedes it"
                     );
                 }
                 return Ok(outcome);
@@ -714,6 +910,7 @@ impl QueuePublisher {
                 self.metrics
                     .commit_conflicts
                     .fetch_add(1, Ordering::Relaxed);
+                self.store.retained().retain(target, stored, &[]);
                 return Ok(PublicationOutcome::Retry);
             }
             Err(error) => return Err(error),
@@ -726,7 +923,7 @@ impl QueuePublisher {
             .flat_map(|selected| selected.operations.iter().map(|operation| operation.id()))
             .collect::<Vec<_>>();
         self.store
-            .stage_acknowledge(&transaction, target, stored, &acknowledged)?;
+            .stage_acknowledge(&transaction, target, &stored, &acknowledged)?;
         let cache_effects = cache_writes.entries();
         let retirements = cache_effects
             .iter()
@@ -751,7 +948,7 @@ impl QueuePublisher {
         self.schedules
             .lock()
             .entry(target)
-            .or_insert(TargetSchedule::new(self.limits.max_entities().get()))
+            .or_insert_with(|| TargetSchedule::new(self.limits.max_entities().get()))
             .last_vector_commit = Some(commit);
         // Fences are taken only once nothing but the commit remains, so an
         // early return never leaves one outstanding. The fenced commit
@@ -764,10 +961,12 @@ impl QueuePublisher {
         let fenced = !pending_cache.is_empty();
         let committed = match vector::commit_fenced(transaction, pending_cache).await {
             Ok(committed) => committed,
+            // A definite conflict committed nothing.
             Err(error) if error.kind() == slatedb::ErrorKind::Transaction => {
                 self.metrics
                     .commit_conflicts
                     .fetch_add(1, Ordering::Relaxed);
+                self.store.retained().retain(target, stored, &[]);
                 return Ok(PublicationOutcome::Retry);
             }
             Err(error) => {
@@ -775,13 +974,7 @@ impl QueuePublisher {
                 if is_fatal(&error) {
                     return Err(error);
                 }
-                // The acknowledgement may have committed: keep capacity
-                // charged until a flushed read proves which IDs remain.
-                self.metrics
-                    .uncertain_commits
-                    .fetch_add(1, Ordering::Relaxed);
-                self.backlog
-                    .mark_acknowledgement_uncertain(acknowledged.iter().copied());
+                self.record_uncertain_commit(target, selection, &acknowledged);
                 tracing::warn!(%error, "queued vector publication outcome is uncertain");
                 return Ok(PublicationOutcome::Retry);
             }
@@ -790,9 +983,10 @@ impl QueuePublisher {
         // a cache effect can fail, so a post-commit error never strands
         // capacity or keeps an emptied generation schedulable.
         self.backlog.acknowledge(acknowledged.iter().copied());
-        self.store.retained().retain(target, stored, &acknowledged);
         let operations = acknowledged.len() as u64;
         let entities = selection.len() as u64;
+        self.advance_past(target, selection);
+        self.store.retained().retain(target, stored, &acknowledged);
         self.metrics
             .published_operations
             .fetch_add(operations, Ordering::Relaxed);
@@ -802,9 +996,6 @@ impl QueuePublisher {
         self.metrics
             .committed_batches
             .fetch_add(1, Ordering::Relaxed);
-        if let Some(last) = selection.last() {
-            self.advance_cursor(target, last.entity);
-        }
         #[cfg(test)]
         if self.hooks.fail_after_commit.swap(false, Ordering::SeqCst) {
             return Err(HelixDbError::InvariantViolation(
@@ -855,8 +1046,41 @@ impl QueuePublisher {
         self.schedules
             .lock()
             .get(&target)
-            .copied()
-            .unwrap_or(TargetSchedule::new(self.limits.max_entities().get()))
+            .cloned()
+            .unwrap_or_else(|| TargetSchedule::new(self.limits.max_entities().get()))
+    }
+
+    /// Returns how many entities are held back after blocking, without
+    /// collecting them. An entity draining after its repair published is not
+    /// blocked.
+    pub(crate) fn blocked_entity_count(&self) -> usize {
+        self.schedules
+            .lock()
+            .values()
+            .map(|schedule| {
+                schedule
+                    .held
+                    .values()
+                    .filter(|hold| hold.is_blocked())
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Returns every entity held back after blocking, by generation. An
+    /// entity draining after its repair published is not blocked.
+    pub(crate) fn blocked_entities(&self) -> Vec<(QueueTarget, IndexEntity)> {
+        self.schedules
+            .lock()
+            .iter()
+            .flat_map(|(target, schedule)| {
+                schedule
+                    .held
+                    .iter()
+                    .filter(|(_, hold)| hold.is_blocked())
+                    .map(|(entity, _)| (*target, *entity))
+            })
+            .collect()
     }
 
     /// Shrinks the next selection of `target` after `selection`'s exact
@@ -866,8 +1090,14 @@ impl QueuePublisher {
     /// only those. When not even the first entity fit beside the selection's
     /// acknowledgement, the retry takes half the operations, which shrinks the
     /// acknowledgement too; that is the only vector trim, since a vector batch
-    /// otherwise commits its fitting prefix. Only a single operation that
-    /// cannot fit is blocked.
+    /// otherwise commits its fitting prefix. A repair halves only its own
+    /// width past the operations known not to publish (see [`HeldEntity`]),
+    /// leaving the trims of other entities.
+    ///
+    /// Only a single operation that cannot fit, or a repair with nothing left
+    /// to halve, is blocked: its entity is held back and the rotation moves
+    /// past it. The trims that isolated it are kept, so the next of several
+    /// unpublishable heads is held back in one attempt.
     fn shrink(
         &self,
         target: QueueTarget,
@@ -881,40 +1111,152 @@ impl QueuePublisher {
         let mut schedules = self.schedules.lock();
         let schedule = schedules
             .entry(target)
-            .or_insert(TargetSchedule::new(self.limits.max_entities().get()));
-        if fitting == 0 {
-            let Some(half) = NonZeroUsize::new(operations / 2) else {
-                self.metrics
-                    .blocked_attempts
-                    .fetch_add(1, Ordering::Relaxed);
-                return PublicationOutcome::Blocked;
-            };
-            schedule.operation_limit = half;
+            .or_insert_with(|| TargetSchedule::new(self.limits.max_entities().get()));
+        // A held entity is only ever selected alone, as a repair.
+        let repair = match selection {
+            [only] => schedule.held.get(&only.entity).map(|hold| (only, *hold)),
+            _ => None,
+        };
+        let outcome = match (repair, NonZeroUsize::new(operations / 2)) {
+            (Some((only, hold)), _) => {
+                let taken = only.taken().collect::<Vec<_>>();
+                let (through, tried) = match hold {
+                    HeldEntity::Waiting { through } => {
+                        (through, taken.last().map_or(through, |last| last.id()))
+                    }
+                    // A draining entity already serves a state newer than
+                    // every shorter prefix of its queue, so nothing is
+                    // halved: its newest state is known not to publish.
+                    HeldEntity::Draining { through } => {
+                        let newest = taken.last().map_or(through, |last| last.id());
+                        (newest, newest)
+                    }
+                    HeldEntity::Repairing { through, tried, .. } => (through, tried),
+                };
+                let known = taken
+                    .iter()
+                    .position(|operation| operation.id() == through)
+                    .map_or(0, |position| position + 1);
+                let halved = known + taken.len().saturating_sub(known) / 2;
+                let (next, outcome) = match NonZeroUsize::new(halved).filter(|_| halved > known) {
+                    Some(width) => (
+                        HeldEntity::Repairing {
+                            through,
+                            tried,
+                            width,
+                        },
+                        PublicationOutcome::Trimmed,
+                    ),
+                    None => {
+                        schedule.cursor = Some(only.entity);
+                        (
+                            HeldEntity::Waiting { through: tried },
+                            PublicationOutcome::Blocked,
+                        )
+                    }
+                };
+                schedule.held.insert(only.entity, next);
+                outcome
+            }
+            (None, _) if fitting > 0 => {
+                schedule.entity_limit = fitting;
+                PublicationOutcome::Trimmed
+            }
+            (None, Some(half)) => {
+                schedule.operation_limit = half;
+                PublicationOutcome::Trimmed
+            }
+            (None, None) => {
+                debug_assert_eq!(operations, 1, "an attempt selects at least one operation");
+                schedule.held.extend(selection.iter().flat_map(|selected| {
+                    selected.operations.iter().map(|operation| {
+                        (
+                            selected.entity,
+                            HeldEntity::Waiting {
+                                through: operation.id(),
+                            },
+                        )
+                    })
+                }));
+                schedule.cursor = selection
+                    .last()
+                    .map(|blocked| blocked.entity)
+                    .or(schedule.cursor);
+                PublicationOutcome::Blocked
+            }
+        };
+        if outcome == PublicationOutcome::Blocked {
+            &self.metrics.blocked_attempts
         } else {
-            schedule.entity_limit = fitting;
+            &self.metrics.output_retries
         }
-        self.metrics.output_retries.fetch_add(1, Ordering::Relaxed);
-        PublicationOutcome::Trimmed
+        .fetch_add(1, Ordering::Relaxed);
+        outcome
     }
 
-    fn advance_cursor(&self, target: QueueTarget, last: IndexEntity) {
-        self.schedules
-            .lock()
+    /// Records a publication commit of `selection` whose outcome is unknown.
+    ///
+    /// The acknowledgement may have committed, so its capacity stays charged
+    /// until a flushed read proves which IDs remain. A repair that may have
+    /// published no longer holds its entity back: rediscovery holds it again
+    /// if it did not.
+    fn record_uncertain_commit(
+        &self,
+        target: QueueTarget,
+        selection: &[SelectedEntity<'_>],
+        acknowledged: &[QueuedOperationId],
+    ) {
+        self.metrics
+            .uncertain_commits
+            .fetch_add(1, Ordering::Relaxed);
+        self.backlog
+            .mark_acknowledgement_uncertain(acknowledged.iter().copied());
+        self.advance_past(target, selection);
+    }
+
+    /// Starts `target`'s next batch after `selection`, whose entities are no
+    /// longer held back: their committed publication, or one whose outcome
+    /// is uncertain, superseded every hold (rediscovery holds an entity again
+    /// if it did not commit). A repair that took operations past its
+    /// acknowledgement keeps its entity draining, so the rest are republished
+    /// by full-width repairs rather than older prefixes; if its commit did
+    /// not land, the next full-width repair retries it.
+    fn advance_past(&self, target: QueueTarget, selection: &[SelectedEntity<'_>]) {
+        let mut schedules = self.schedules.lock();
+        let schedule = schedules
             .entry(target)
-            .or_insert(TargetSchedule::new(self.limits.max_entities().get()))
-            .cursor = Some(last);
+            .or_insert_with(|| TargetSchedule::new(self.limits.max_entities().get()));
+        for selected in selection {
+            let (false, Some(acknowledged)) =
+                (selected.superseding.is_empty(), selected.operations.last())
+            else {
+                schedule.held.remove(&selected.entity);
+                continue;
+            };
+            schedule.held.insert(
+                selected.entity,
+                HeldEntity::Draining {
+                    through: acknowledged.id(),
+                },
+            );
+        }
+        schedule.cursor = selection.last().map(|last| last.entity).or(schedule.cursor);
     }
 
+    /// Publishes one text epoch of `stored`, which the attempt took or read,
+    /// and retains what is left of it (see
+    /// [`super::storage::RetainedQueues`]).
     async fn publish_text(
         &self,
         target: QueueTarget,
-        stored: &StoredQueue,
+        stored: StoredQueue,
     ) -> Result<PublicationOutcome> {
         let queue = stored.queue();
         let TargetSchedule {
             cursor,
             entity_limit,
             operation_limit,
+            held,
             ..
         } = self.schedule(target);
         // As for vectors, the acknowledgement leaves its epoch half of each
@@ -929,10 +1271,15 @@ impl QueuePublisher {
         let selection = select_batch(
             queue.operations(),
             cursor,
+            &held,
             entity_limit.min(self.text.limits.max_entities().get()),
-            operation_limit.min(capacity),
+            operation_limit,
+            capacity,
             self.limits.max_input_bytes().get(),
         );
+        if selection.is_empty() {
+            return Ok(PublicationOutcome::Stalled);
+        }
         let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
         let Some(handle) = load_generation_record(&transaction, target)
             .await?
@@ -951,7 +1298,7 @@ impl QueuePublisher {
             .collect::<Vec<_>>();
         let acknowledgement = self
             .store
-            .acknowledgement_output(target, stored, &acknowledged)?;
+            .acknowledgement_output(target, &stored, &acknowledged)?;
         let prepared = match crate::index_lifecycle::text::active_batch::prepare_queued_text_epoch(
             &transaction,
             &handle,
@@ -968,13 +1315,19 @@ impl QueuePublisher {
             // shrank after admission.
             Err(error @ HelixDbError::ActiveTextMutationLimitExceeded { .. }) => {
                 let outcome = self.shrink(target, &selection, selection.len() / 2);
-                if outcome == PublicationOutcome::Blocked {
+                if outcome == PublicationOutcome::Trimmed {
+                    // Nothing committed: the next, smaller epoch reuses the
+                    // queue.
+                    self.store.retained().retain(target, stored, &[]);
+                } else {
                     tracing::error!(
+                        scope = ?target.scope,
                         entity = ?selection.first().map(|selected| selected.entity),
                         %error,
                         index_id = target.index_id.get(),
                         generation = target.generation.get(),
-                        "one queued text operation exceeds the publication budget"
+                        "one queued text operation exceeds the publication budget; its entity \
+                         is held back until a later write supersedes it"
                     );
                 }
                 return Ok(outcome);
@@ -996,7 +1349,7 @@ impl QueuePublisher {
             &published,
         )?;
         self.store
-            .stage_acknowledge(&transaction, target, stored, &acknowledged)?;
+            .stage_acknowledge(&transaction, target, &stored, &acknowledged)?;
         #[cfg(test)]
         {
             let barrier = self.hooks.before_commit.lock().take();
@@ -1012,10 +1365,12 @@ impl QueuePublisher {
         }
         match transaction.commit().await {
             Ok(_) => {}
+            // A definite conflict committed nothing.
             Err(error) if error.kind() == slatedb::ErrorKind::Transaction => {
                 self.metrics
                     .commit_conflicts
                     .fetch_add(1, Ordering::Relaxed);
+                self.store.retained().retain(target, stored, &[]);
                 return Ok(PublicationOutcome::Retry);
             }
             Err(error) => {
@@ -1023,19 +1378,25 @@ impl QueuePublisher {
                 if is_fatal(&error) {
                     return Err(error);
                 }
-                self.metrics
-                    .uncertain_commits
-                    .fetch_add(1, Ordering::Relaxed);
-                self.backlog
-                    .mark_acknowledgement_uncertain(acknowledged.iter().copied());
+                self.record_uncertain_commit(target, &selection, &acknowledged);
                 tracing::warn!(%error, "queued text publication outcome is uncertain");
                 return Ok(PublicationOutcome::Retry);
             }
         }
+        #[cfg(test)]
+        if self
+            .hooks
+            .uncertain_after_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            self.record_uncertain_commit(target, &selection, &acknowledged);
+            return Ok(PublicationOutcome::Retry);
+        }
         self.backlog.acknowledge(acknowledged.iter().copied());
-        self.store.retained().retain(target, stored, &acknowledged);
         let operations = acknowledged.len() as u64;
         let entities = selection.len() as u64;
+        self.advance_past(target, &selection);
+        self.store.retained().retain(target, stored, &acknowledged);
         self.metrics
             .published_operations
             .fetch_add(operations, Ordering::Relaxed);
@@ -1045,9 +1406,6 @@ impl QueuePublisher {
         self.metrics
             .committed_batches
             .fetch_add(1, Ordering::Relaxed);
-        if let Some(last) = selection.last() {
-            self.advance_cursor(target, last.entity);
-        }
         Ok(PublicationOutcome::Published {
             operations,
             entities,
@@ -1059,7 +1417,7 @@ impl QueuePublisher {
 fn collapse_text(
     selected: &SelectedEntity<'_>,
 ) -> Result<crate::index_lifecycle::text::active_batch::QueuedTextEffect> {
-    let Some(last) = selected.operations.last() else {
+    let Some(last) = selected.taken().last() else {
         return Err(HelixDbError::InvariantViolation(
             "a selected entity has no operations".to_string(),
         ));
@@ -1097,7 +1455,19 @@ pub(crate) enum NextTarget {
 #[derive(Debug)]
 pub(crate) struct SelectedEntity<'a> {
     pub(crate) entity: IndexEntity,
+    /// Oldest operations, which the publication acknowledges; never empty.
     pub(crate) operations: Vec<&'a QueuedOperation>,
+    /// Newer operations a repair took past one acknowledgement's worth: its
+    /// effect publishes their newest state too, but they stay queued and
+    /// later repairs republish it. Empty for every other selection.
+    pub(crate) superseding: Vec<&'a QueuedOperation>,
+}
+
+impl<'a> SelectedEntity<'a> {
+    /// Every operation whose state the effect collapses, oldest first.
+    pub(crate) fn taken(&self) -> impl Iterator<Item = &'a QueuedOperation> + '_ {
+        self.operations.iter().chain(&self.superseding).copied()
+    }
 }
 
 /// Selects whole ordered per-entity prefixes within entity, operation, and
@@ -1107,14 +1477,31 @@ pub(crate) struct SelectedEntity<'a> {
 /// repeated batches rotate across entities. An entity's operations are taken
 /// oldest first and never skipped; only the final selected entity may be cut
 /// to an ordered prefix when the operation or input budget ends inside it.
-/// The first entity always contributes at least one operation.
-pub(crate) fn select_batch(
-    operations: &[QueuedOperation],
+/// The first selected entity always contributes at least one operation. No
+/// selection names more than `max_acknowledged` operations, the most one
+/// acknowledgement may carry beside its effects.
+///
+/// An entity in `held` never joins a batch, so it blocks no other entity.
+/// When the rotation reaches it before any other entity and it has a repair
+/// to try ([`HeldEntity`]), it is selected alone, with its repair's oldest
+/// operations whatever their input bytes or the trimmed operation ceiling:
+/// its effect materializes only its newest selected state, and its
+/// operations are already decoded. Only its first `max_acknowledged` are
+/// acknowledged; the rest are `superseding`. When the rotation reaches it
+/// after other entities, the batch ends there: the next batch starts after
+/// this one's last published entity, so the rotation never carries past a
+/// repair, however the rest of its generation is written. The result is
+/// empty only when every queued entity is held back without a repair to
+/// try.
+pub(crate) fn select_batch<'a>(
+    operations: &'a [QueuedOperation],
     after: Option<IndexEntity>,
+    held: &HashMap<IndexEntity, HeldEntity>,
     max_entities: usize,
     max_operations: NonZeroUsize,
+    max_acknowledged: NonZeroUsize,
     max_input_bytes: u64,
-) -> Vec<SelectedEntity<'_>> {
+) -> Vec<SelectedEntity<'a>> {
     let mut order = Vec::new();
     let mut grouped: HashMap<IndexEntity, Vec<&QueuedOperation>> = HashMap::new();
     for operation in operations {
@@ -1129,19 +1516,34 @@ pub(crate) fn select_batch(
     let start = after
         .and_then(|entity| order.iter().position(|candidate| *candidate == entity))
         .map_or(0, |position| position + 1);
+    let max_operations = max_operations.min(max_acknowledged).get();
     let mut selected = Vec::new();
     let mut input_bytes = 0_u64;
     let mut selected_operations = 0_usize;
-    for offset in 0..order.len() {
+    for entity in (0..order.len()).map(|offset| order[(start + offset) % order.len()]) {
         if selected.len() >= max_entities.max(1) {
             break;
         }
-        let entity = order[(start + offset) % order.len()];
+        let mut queued = grouped.remove(&entity).unwrap_or_default();
+        match held.get(&entity).map(|hold| hold.repair_width(&queued)) {
+            Some(None) => continue,
+            Some(Some(_)) if !selected.is_empty() => break,
+            Some(Some(width)) => {
+                queued.truncate(width);
+                let superseding = queued.split_off(width.min(max_acknowledged.get()));
+                return vec![SelectedEntity {
+                    entity,
+                    operations: queued,
+                    superseding,
+                }];
+            }
+            None => {}
+        }
         let mut prefix = Vec::new();
-        for operation in grouped.remove(&entity).unwrap_or_default() {
+        for operation in queued {
             let bytes = operation.retained_bytes();
             let first_of_batch = selected.is_empty() && prefix.is_empty();
-            if selected_operations == max_operations.get()
+            if selected_operations == max_operations
                 || (!first_of_batch && input_bytes.saturating_add(bytes) > max_input_bytes)
             {
                 break;
@@ -1155,12 +1557,10 @@ pub(crate) fn select_batch(
             selected.push(SelectedEntity {
                 entity,
                 operations: prefix,
+                superseding: Vec::new(),
             });
         }
-        if exhausted
-            || input_bytes >= max_input_bytes
-            || selected_operations == max_operations.get()
-        {
+        if exhausted || input_bytes >= max_input_bytes || selected_operations == max_operations {
             break;
         }
     }
@@ -1170,8 +1570,7 @@ pub(crate) fn select_batch(
 /// Collapses one entity's ordered vector prefix into its physical effect.
 fn collapse_vector(selected: &SelectedEntity<'_>) -> Result<QueuedVectorEffect> {
     let payloads = selected
-        .operations
-        .iter()
+        .taken()
         .map(|operation| match operation.payload() {
             QueuedPayload::Vector(payload) => Ok(payload),
             QueuedPayload::Text(_) => Err(HelixDbError::IndexCatalogCorruption(

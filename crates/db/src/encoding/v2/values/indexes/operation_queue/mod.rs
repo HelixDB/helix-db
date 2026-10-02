@@ -509,7 +509,6 @@ impl OperationQueue {
     }
 
     /// Consumes the queue into its ordered operations.
-    #[cfg(test)]
     pub(crate) fn into_operations(self) -> Vec<QueuedOperation> {
         self.operations
     }

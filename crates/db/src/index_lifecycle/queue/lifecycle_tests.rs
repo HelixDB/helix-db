@@ -1027,7 +1027,8 @@ async fn discard_all(db: &HelixDB, target: QueueTarget) -> u64 {
             | PublicationOutcome::Trimmed
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => {
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => {
                 panic!("retired queue was not discarded: {outcome:?}")
             }
         }
@@ -1440,7 +1441,8 @@ async fn row_discards_fill_the_output_operation_budget() {
             | PublicationOutcome::Trimmed
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
-            | PublicationOutcome::Blocked) => {
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => {
                 panic!("retired queue was not discarded: {outcome:?}")
             }
         }

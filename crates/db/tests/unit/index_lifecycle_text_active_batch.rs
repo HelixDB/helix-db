@@ -425,7 +425,8 @@ async fn single_entity_publication_fits_both_document_footprints() {
             | PublicationOutcome::Deferred
             | PublicationOutcome::Retry
             | PublicationOutcome::Trimmed
-            | PublicationOutcome::Blocked) => panic!("fixture publication stalled: {outcome:?}"),
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled) => panic!("fixture publication stalled: {outcome:?}"),
         }
     }
 
