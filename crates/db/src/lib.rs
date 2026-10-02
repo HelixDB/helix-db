@@ -5,6 +5,7 @@
 #[cfg(test)]
 extern crate self as db;
 
+mod batch_reads;
 pub mod config;
 pub mod encoding;
 pub mod error;
@@ -530,10 +531,6 @@ impl VectorMemoryRefreshTask {
 struct VectorMemoryCache {
     registry: Arc<search::vector::VectorCacheRegistry>,
     simhasher_registry: Arc<search::vector::SimHasherRegistry>,
-    /// How managed searches, mutations and lifecycle builds fetch row batches
-    /// the resident cache does not hold, fixed by whether SlateDB has a block
-    /// cache.
-    batch_reads: search::vector::VectorBatchReads,
     refresh_task: Mutex<Option<VectorMemoryRefreshTask>>,
 }
 
@@ -542,14 +539,12 @@ impl VectorMemoryCache {
     fn new(
         settings: config::VectorMemorySettings,
         visibility: search::vector::VectorCacheVisibility,
-        batch_reads: search::vector::VectorBatchReads,
     ) -> Self {
         Self {
             registry: Arc::new(search::vector::VectorCacheRegistry::new(visibility)),
             simhasher_registry: Arc::new(search::vector::SimHasherRegistry::new(
                 search::vector::SimHasherRegistryLimits::from_config(settings.simhasher_cache()),
             )),
-            batch_reads,
             refresh_task: Mutex::new(None),
         }
     }
@@ -1475,14 +1470,6 @@ impl HelixDB {
                 HelixStorage::Writer(_) => search::vector::VectorCacheVisibility::CommitFenced,
                 HelixStorage::Reader(_) => search::vector::VectorCacheVisibility::ExactSequence,
             },
-            // Concurrent chunks repeat SST filter and index reads that only a
-            // SlateDB block cache deduplicates.
-            match config.db().cache().mode() {
-                CacheMode::VectorMemoryOnly => search::vector::VectorBatchReads::Single,
-                CacheMode::Memory { .. } | CacheMode::Hybrid { .. } => {
-                    search::vector::VectorBatchReads::Concurrent
-                }
-            },
         );
         let index_scope_gates = Arc::new(index_lifecycle::IndexScopeGates::default());
         let secondary_tuning = config.db().secondary_index_lifecycle();
@@ -1511,7 +1498,9 @@ impl HelixDB {
                 Arc::clone(&vector_memory.simhasher_registry),
             )
             .with_scan_tuning(lifecycle_throughput.scan())
-            .with_batch_reads(vector_memory.batch_reads)
+            .with_batch_reads(batch_reads::BatchReads::for_block_cache(
+                slate_db_cache.as_ref(),
+            ))
             .with_build_cache_bytes(
                 config
                     .db()
@@ -3048,9 +3037,11 @@ impl HelixDB {
         &self.inner.caches.vector_memory.simhasher_registry
     }
 
-    /// Returns how managed vector reads fetch row batches on this node.
-    pub(crate) fn vector_batch_reads(&self) -> search::vector::VectorBatchReads {
-        self.inner.caches.vector_memory.batch_reads
+    /// Returns how this node's reads resolve batches of point reads: runs of
+    /// sorted keys overlap their cold block fetches only when a SlateDB block
+    /// cache serves the filter and index reads each run repeats.
+    pub(crate) fn batch_reads(&self) -> batch_reads::BatchReads {
+        batch_reads::BatchReads::for_block_cache(self.inner.caches.slate_db.as_ref())
     }
 
     pub(crate) fn runtime_config_snapshot_loaded(&self, scope: DataScope) -> RuntimeIndexCatalog {
@@ -4560,7 +4551,6 @@ mod tests {
         let cache = VectorMemoryCache::new(
             settings,
             search::vector::VectorCacheVisibility::ExactSequence,
-            search::vector::VectorBatchReads::Single,
         );
         assert!(cache.simhasher_registry.validate_dimension(3).is_ok());
         assert!(cache.simhasher_registry.validate_dimension(4).is_err());

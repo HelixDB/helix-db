@@ -404,10 +404,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Selects how this handle's row batches are fetched from storage.
-    pub(crate) fn with_batch_reads(
-        mut self,
-        batch_reads: crate::search::vector::storage::VectorBatchReads,
-    ) -> Self {
+    pub(crate) fn with_batch_reads(mut self, batch_reads: crate::batch_reads::BatchReads) -> Self {
         self.rows = self.rows.with_batch_reads(batch_reads);
         self
     }

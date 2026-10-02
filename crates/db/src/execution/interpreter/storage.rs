@@ -74,13 +74,15 @@ impl<'db> ExecutionContext<'db> {
         self.pull_work
             .multi_get_keys
             .fetch_add(keys.len(), std::sync::atomic::Ordering::Relaxed);
+        let batch_reads = self.db.batch_reads();
         match (
             self.active_write_tx(),
             self.request_read_view(),
             self.db.storage(),
         ) {
-            (Some(active), _, _) => Ok(active.txn.multi_get(keys).await?),
-            (None, Some(view), _) => Ok(view.multi_get(keys).await?),
+            (Some(active), _, _) => batch_reads.multi_get(&active.txn, keys).await,
+            (None, Some(view), _) => batch_reads.multi_get(view, keys).await,
+            // Live handles are not one view, so tests read them with one call.
             #[cfg(test)]
             (None, None, HelixStorage::Reader(reader)) => Ok(reader.multi_get(keys).await?),
             #[cfg(test)]

@@ -14,7 +14,8 @@ use parking_lot::Mutex;
 
 use super::registry::{VectorCacheCommitOutcome, VectorCacheIdentity, VectorCachePendingCommit};
 use super::store::VectorMemoryDirtyRows;
-use crate::search::vector::{SimHasherRegistry, ValidatedVectorGenerationHandle, VectorBatchReads};
+use crate::batch_reads::BatchReads;
+use crate::search::vector::{SimHasherRegistry, ValidatedVectorGenerationHandle};
 
 /// Commits one storage transaction and resolves its vector cache fences.
 ///
@@ -117,7 +118,7 @@ impl VectorCacheWriteEntry {
 pub(crate) struct VectorCacheWriteSet {
     entries: Mutex<HashMap<VectorCacheIdentity, VectorCacheWriteEntry>>,
     simhasher_registry: Arc<SimHasherRegistry>,
-    batch_reads: VectorBatchReads,
+    batch_reads: BatchReads,
 }
 
 impl VectorCacheWriteSet {
@@ -129,12 +130,12 @@ impl VectorCacheWriteSet {
         Self {
             entries: Mutex::new(HashMap::new()),
             simhasher_registry,
-            batch_reads: VectorBatchReads::Single,
+            batch_reads: BatchReads::Single,
         }
     }
 
     /// Applies the database's row-batch fetch policy to mutation indexes.
-    pub(crate) fn with_batch_reads(mut self, batch_reads: VectorBatchReads) -> Self {
+    pub(crate) fn with_batch_reads(mut self, batch_reads: BatchReads) -> Self {
         self.batch_reads = batch_reads;
         self
     }
@@ -145,7 +146,7 @@ impl VectorCacheWriteSet {
     }
 
     /// Returns how mutation indexes fetch row batches from storage.
-    pub(crate) const fn batch_reads(&self) -> VectorBatchReads {
+    pub(crate) const fn batch_reads(&self) -> BatchReads {
         self.batch_reads
     }
 
