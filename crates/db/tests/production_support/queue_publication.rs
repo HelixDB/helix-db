@@ -12,14 +12,20 @@
 //! fence the writer with a newer one; none introduces a row family or
 //! encoding.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use helix_ast::{batch, graph::NodeRef, query::QueryRequest, traversal, value::PropertyInput};
+use helix_ast::{
+    batch,
+    graph::NodeRef,
+    query::{QueryRequest, SearchConsistency},
+    traversal,
+    value::{PropertyInput, PropertyValue},
+};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::{
     path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
@@ -32,7 +38,7 @@ use crate::config::{
     DbConfig, SearchIndexBackfillLimits, TextBackfillCompactionLimits, TextIndexDefinition,
     VectorIndexDefinition,
 };
-use crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey;
+use crate::encoding::v2::keys::indexes::vector::{VectorIndexMetadataKey, VectorKey};
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::index_lifecycle::{
@@ -1104,5 +1110,524 @@ async fn fenced_commits_end_publication() {
             "{name}: {fenced:?}"
         );
         newer.close().await.expect("the newer writer closes");
+    }
+}
+
+/// Vector definition partitioned by tenant, so a tenant move changes the
+/// physical namespace that places a node.
+fn tenant_vector_definition() -> ValidatedDynamicIndexDefinition {
+    ValidatedDynamicIndexDefinition::try_from(
+        VectorIndexDefinition::new_node("Doc", "embedding", 2, VectorDistanceMetric::Euclidean)
+            .expect("fixture vector definition validates")
+            .with_tenant_property("tenant")
+            .expect("fixture vector tenant property validates"),
+    )
+    .expect("fixture vector definition converts to V2")
+}
+
+/// Text definition partitioned by tenant.
+fn tenant_text_definition() -> ValidatedDynamicIndexDefinition {
+    ValidatedDynamicIndexDefinition::try_from(
+        TextIndexDefinition::new_node("Doc", "body")
+            .expect("fixture text definition validates")
+            .with_tenant_property("tenant")
+            .expect("fixture text tenant property validates"),
+    )
+    .expect("fixture text definition converts to V2")
+}
+
+/// Batch limits admitting one entity per publication; every other limit is
+/// the default.
+fn one_entity_limits() -> SearchIndexBatchLimits {
+    let batch = SearchIndexBackfillLimits::default().batch();
+    SearchIndexBatchLimits::try_new(
+        NonZeroUsize::MIN,
+        batch.max_input_bytes(),
+        batch.max_output_operations(),
+        batch.max_output_bytes(),
+        batch.max_single_vector_output_bytes(),
+    )
+    .expect("one-entity batch limits validate")
+}
+
+/// Text limits whose epochs publish one entity.
+fn one_entity_text_limits() -> ActiveTextMutationLimits {
+    let defaults = SearchIndexBackfillLimits::default();
+    ActiveTextMutationLimits::from_backfill(
+        SearchIndexBackfillLimits::try_new(
+            one_entity_limits(),
+            NonZeroUsize::MIN,
+            defaults.text_artifacts(),
+            defaults.text_compaction(),
+        )
+        .expect("one-entity text limits validate"),
+    )
+}
+
+/// A live document's tenant, embedding, and body.
+type LiveDocuments = BTreeMap<u64, (&'static str, [f32; 2], String)>;
+
+/// Commits an insert, an update, a tenant move, and a delete to both
+/// families, returning the live documents.
+async fn wal_workload(db: &HelixDB) -> LiveDocuments {
+    let mut live = LiveDocuments::new();
+    let mut ids = Vec::new();
+    for (tenant, embedding, body) in [
+        ("a", [0.0, 0.0], "alpha one"),
+        ("a", [1.0, 1.0], "beta two"),
+        ("b", [2.0, 2.0], "gamma three"),
+        ("b", [3.0, 3.0], "delta four"),
+    ] {
+        let mut properties = document(embedding, body);
+        properties.push(("tenant", PropertyInput::from(tenant.to_string())));
+        let id = add(db, properties).await;
+        ids.push(id);
+        live.insert(id, (tenant, embedding, body.to_string()));
+    }
+    Box::pin(
+        db.query(QueryRequest::write(
+            batch::write_batch().var_as(
+                "updated",
+                traversal::g()
+                    .n(NodeRef::from(ids[0]))
+                    .set_property("embedding", vec![0.5_f32, 4.0])
+                    .set_property("body", "alpha revised".to_string()),
+            ),
+        )),
+    )
+    .await
+    .expect("document update commits");
+    live.insert(ids[0], ("a", [0.5, 4.0], "alpha revised".to_string()));
+    Box::pin(
+        db.query(QueryRequest::write(
+            batch::write_batch().var_as(
+                "moved",
+                traversal::g()
+                    .n(NodeRef::from(ids[1]))
+                    .set_property("tenant", "b".to_string()),
+            ),
+        )),
+    )
+    .await
+    .expect("tenant move commits");
+    live.get_mut(&ids[1]).expect("moved document is live").0 = "b";
+    remove(db, ids[2]).await;
+    live.remove(&ids[2]);
+    live
+}
+
+/// Hit IDs of one search request in rank order.
+async fn search_ids(
+    db: &HelixDB,
+    request: QueryRequest,
+    consistency: SearchConsistency,
+) -> Vec<u64> {
+    let result = Box::pin(
+        db.query(
+            request
+                .with_search_consistency(consistency)
+                .expect("read requests accept a search consistency"),
+        ),
+    )
+    .await
+    .expect("search runs");
+    if result["hits"].is_null() {
+        return Vec::new();
+    }
+    result["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search returned {result}"))
+        .iter()
+        .map(|hit| hit["$id"].as_u64().expect("hit ID"))
+        .collect()
+}
+
+/// Asserts tenant-restricted searches equal exact search over `live`: vector
+/// rank order when `vector` is set, and text hit sets.
+async fn assert_searches_exact(
+    db: &HelixDB,
+    live: &LiveDocuments,
+    consistency: SearchConsistency,
+    vector: bool,
+) {
+    for tenant in ["a", "b"] {
+        let owned = live
+            .iter()
+            .filter(|(_, (owner, _, _))| *owner == tenant)
+            .collect::<Vec<_>>();
+        if vector {
+            for query in [[0.13_f32, 0.29], [2.71, 3.17], [0.5, 3.9]] {
+                let mut exact = owned
+                    .iter()
+                    .map(|(id, (_, embedding, _))| {
+                        (
+                            (embedding[0] - query[0]).powi(2) + (embedding[1] - query[1]).powi(2),
+                            **id,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                exact.sort_by(|left, right| left.partial_cmp(right).expect("finite distance"));
+                let request = QueryRequest::read(
+                    batch::read_batch()
+                        .var_as(
+                            "hits",
+                            traversal::g().vector_search_nodes(
+                                "Doc",
+                                "embedding",
+                                query.to_vec(),
+                                10,
+                                Some(PropertyValue::from(tenant)),
+                            ),
+                        )
+                        .returning(["hits"]),
+                );
+                assert_eq!(
+                    search_ids(db, request, consistency).await,
+                    exact.into_iter().map(|(_, id)| id).collect::<Vec<_>>(),
+                    "{consistency:?} vector search of tenant {tenant} at {query:?}"
+                );
+            }
+        }
+        for term in [
+            "alpha", "revised", "one", "beta", "two", "gamma", "three", "delta", "four",
+        ] {
+            let exact = owned
+                .iter()
+                .filter(|(_, (_, _, body))| body.split(' ').any(|word| word == term))
+                .map(|(id, _)| **id)
+                .collect::<BTreeSet<_>>();
+            let request = QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "hits",
+                        traversal::g().text_search_nodes(
+                            "Doc",
+                            "body",
+                            term,
+                            10,
+                            Some(PropertyValue::from(tenant)),
+                        ),
+                    )
+                    .returning(["hits"]),
+            );
+            assert_eq!(
+                search_ids(db, request, consistency)
+                    .await
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                exact,
+                "{consistency:?} text search of tenant {tenant} for {term:?}"
+            );
+        }
+    }
+}
+
+/// Physical vector namespaces holding rows that place each node: its
+/// vector, SimHash, layers, neighbor lists, or entry candidacy.
+async fn vector_placements(db: &HelixDB) -> BTreeMap<u64, BTreeSet<u64>> {
+    let storage = db.inner_db();
+    let mut rows = storage
+        .scan::<std::ops::RangeFull>(..)
+        .await
+        .expect("database scans");
+    let mut placements = BTreeMap::<u64, BTreeSet<u64>>::new();
+    while let Some(row) = rows.next().await.expect("row reads") {
+        let Ok(DataKey::Data {
+            kind: DataKeyKind::Vector(key),
+            ..
+        }) = DataKey::parse_from_slice(SCOPE, &row.key)
+        else {
+            continue;
+        };
+        let node = match key {
+            VectorKey::Vector(placed) => placed.node_id(),
+            VectorKey::SimHash(placed) => placed.node_id(),
+            VectorKey::SimHashDirectory(placed) => placed.node_id(),
+            VectorKey::UpperVector(placed) => placed.node_id(),
+            VectorKey::UpperNeighbors(placed) => placed.node_id(),
+            VectorKey::EntryCandidateSorted(placed) => placed.node_id(),
+            // Both keys end in the node ID, which only test builds expose.
+            VectorKey::Layer0Neighbors(_) | VectorKey::EntryCandidateNode(_) => u64::from_be_bytes(
+                row.key[row.key.len() - 8..]
+                    .try_into()
+                    .expect("vector node keys end in an eight-byte node ID"),
+            ),
+            VectorKey::IndexMetadata(_)
+            | VectorKey::IndexPrefix(_)
+            | VectorKey::TxnGuard(_)
+            | VectorKey::VectorPrefix(_)
+            | VectorKey::SimHashDirectoryPrefix(_)
+            | VectorKey::EntryCandidatePrefix(_)
+            | VectorKey::MemoryPrefix(_)
+            | VectorKey::L0Prefix(_)
+            | VectorKey::ReverseEdgePrefix(_)
+            | VectorKey::ReverseEdge(_) => continue,
+        };
+        placements.entry(node).or_default().insert(key.index_id());
+    }
+    placements
+}
+
+/// Entities holding a text statistics marker.
+async fn text_marker_entities(db: &HelixDB) -> BTreeSet<u64> {
+    let prefix = ManagedIndexKey::data_prefix(
+        SCOPE,
+        ScopedKey::logical_prefix(RecordKind::TextStatisticsEntity),
+    );
+    let storage = db.inner_db();
+    let mut rows = storage
+        .scan_prefix(&prefix, ..)
+        .await
+        .expect("statistics markers scan");
+    let mut entities = BTreeSet::new();
+    while let Some(row) = rows.next().await.expect("marker reads") {
+        let ManagedIndexKey::Data {
+            kind: ScopedKey::TextStatisticsEntity(marker),
+            ..
+        } = ManagedIndexKey::parse_from_slice(SCOPE, &row.key).expect("marker key parses")
+        else {
+            panic!("the marker prefix holds another key");
+        };
+        entities.insert(marker.entity.id.get());
+    }
+    entities
+}
+
+/// Paths of the SSTs `store` holds outside the WAL: memtable flushes and
+/// compaction output.
+async fn flushed_tables(store: &Arc<dyn ObjectStore>) -> BTreeSet<String> {
+    use futures::TryStreamExt;
+    store
+        .list(None)
+        .try_filter(|meta| futures::future::ready(meta.location.as_ref().contains("/compacted/")))
+        .map_ok(|meta| meta.location.to_string())
+        .try_collect()
+        .await
+        .expect("object store lists")
+}
+
+/// How a writer holding WAL-only queue work loses its store.
+#[derive(Debug, Clone, Copy)]
+enum WriterLoss {
+    /// A newer writer fences it.
+    Fenced,
+    /// A publication or discard WAL upload fails; a new writer opens once the
+    /// store heals.
+    FailedWal,
+}
+
+/// Proves queue work that only the WAL holds survives a writer that loses
+/// its store mid-publication.
+///
+/// Runs apart from [`run`]: its overlaid searches over a replayed writer
+/// need a larger stack than a default debug-build test thread.
+///
+/// For each family, and for a retired generation's discard, a writer
+/// commits an insert, an update, a tenant move, and a delete to
+/// tenant-partitioned vector and text indexes, publishes one entity under
+/// one-entity limits, and loses its store during the next attempt. Nothing
+/// flushes the memtable, so the next writer recovers every queue by WAL
+/// replay: it charges exactly the decoded queues and strong search is exact
+/// before publication. Once drained, every queue is gone, eventual search is
+/// exact, each live node's vector rows sit in exactly one partition, and only
+/// live documents keep text statistics markers.
+pub(crate) async fn wal_only_queue_work_survives_fencing_and_failed_commits() {
+    for loss in [WriterLoss::Fenced, WriterLoss::FailedWal] {
+        for (name, family, retired) in [
+            ("vector", QueueFamily::Vector, false),
+            ("text", QueueFamily::Text, false),
+            ("discard", QueueFamily::Vector, true),
+        ] {
+            let case = format!("{loss:?}/{name}");
+            let failing = Arc::new(FailingWalStore::default());
+            let store: Arc<dyn ObjectStore> = Arc::clone(&failing) as Arc<dyn ObjectStore>;
+            let database = format!("queue-publication-wal-only-{loss:?}-{name}");
+            let db = Box::pin(open_explicit(
+                &database,
+                Arc::clone(&store),
+                &[tenant_vector_definition(), tenant_text_definition()],
+            ))
+            .await;
+            let flushed = flushed_tables(&store).await;
+            assert!(!flushed.is_empty(), "{case}: the building writer flushed");
+            let live = Box::pin(wal_workload(&db)).await;
+            let targets = [
+                target(&db, QueueFamily::Vector).await,
+                target(&db, QueueFamily::Text).await,
+            ];
+            let target = target(&db, family).await;
+            let before = queued(&db, target).await.len();
+            assert!(
+                matches!(
+                    Box::pin(
+                        publisher_with_limits(&db, one_entity_limits(), one_entity_text_limits())
+                            .publish_once(target)
+                    )
+                    .await
+                    .expect("the partial attempt publishes"),
+                    PublicationOutcome::Published { entities: 1, .. }
+                ),
+                "{case}"
+            );
+            let remaining = queued(&db, target).await.len();
+            assert!(
+                remaining > 0 && remaining < before,
+                "{case}: the partial attempt published part of the queue"
+            );
+            let dropped = if retired {
+                Some(drop_index(&db, &tenant_vector_definition()).await)
+            } else {
+                None
+            };
+            let mut charged = 0;
+            for pending in db.index_operation_backlog().outstanding_targets() {
+                charged += queued(&db, pending).await.len() as u64;
+            }
+            assert_eq!(
+                db.index_operation_queue_stats().pending_operations,
+                charged,
+                "{case}"
+            );
+            assert_eq!(
+                flushed_tables(&store).await,
+                flushed,
+                "{case}: nothing flushed the memtable, so only the WAL holds the queue work"
+            );
+
+            let next = match loss {
+                WriterLoss::Fenced => {
+                    let newer =
+                        Box::pin(HelixDB::open_with_object_store_for_index_lifecycle_testing(
+                            database.as_str(),
+                            Arc::clone(&store),
+                            DbConfig::new(),
+                            LifecycleTestScheduling::Explicit,
+                        ))
+                        .await
+                        .expect("a newer writer opens and fences the old one");
+                    let fenced = Box::pin(writer_publisher(&db).publish_once(target)).await;
+                    assert!(
+                        matches!(&fenced, Err(HelixDbError::WriterFencedCommitOutcomeUnknown))
+                            || matches!(
+                                &fenced,
+                                Err(HelixDbError::Storage(error)) if error.kind()
+                                    == slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+                            ),
+                        "{case}: {fenced:?}"
+                    );
+                    newer
+                }
+                WriterLoss::FailedWal => {
+                    failing.failing.store(true, Ordering::SeqCst);
+                    assert_eq!(
+                        Box::pin(writer_publisher(&db).publish_once(target))
+                            .await
+                            .expect("an uncertain commit retries"),
+                        PublicationOutcome::Retry,
+                        "{case}"
+                    );
+                    assert_eq!(
+                        load(&writer_publisher(&db).metrics().uncertain_commits),
+                        1,
+                        "{case}"
+                    );
+                    failing.failing.store(false, Ordering::SeqCst);
+                    Box::pin(HelixDB::open_with_object_store_for_index_lifecycle_testing(
+                        database.as_str(),
+                        Arc::clone(&store),
+                        DbConfig::new(),
+                        LifecycleTestScheduling::Explicit,
+                    ))
+                    .await
+                    .expect("a writer opens on the healed store")
+                }
+            };
+            drop(db);
+            let db = next;
+
+            let mut decoded = 0;
+            for pending in db.index_operation_backlog().outstanding_targets() {
+                decoded += queued(&db, pending).await.len() as u64;
+            }
+            let stats = db.index_operation_queue_stats();
+            assert_eq!(
+                (
+                    stats.pending_operations,
+                    stats.discovered_operations,
+                    stats.uncertain_operations
+                ),
+                (decoded, decoded, 0),
+                "{case}: the new writer charges exactly the decoded queues"
+            );
+            assert_eq!(
+                decoded, charged,
+                "{case}: WAL replay restored the queue the lost attempt saw"
+            );
+            Box::pin(assert_searches_exact(
+                &db,
+                &live,
+                SearchConsistency::Strong,
+                !retired,
+            ))
+            .await;
+
+            assert_eq!(
+                Box::pin(db.publish_index_queues_for_lifecycle_testing())
+                    .await
+                    .expect("the recovered queues drain"),
+                decoded,
+                "{case}"
+            );
+            for pending in targets {
+                assert!(
+                    writer_publisher(&db)
+                        .store
+                        .read(db.inner_db().as_ref(), pending)
+                        .await
+                        .expect("queue reads")
+                        .is_none(),
+                    "{case}: the drained queue is gone"
+                );
+            }
+            assert!(
+                db.index_operation_backlog()
+                    .outstanding_targets()
+                    .is_empty(),
+                "{case}"
+            );
+            Box::pin(assert_searches_exact(
+                &db,
+                &live,
+                SearchConsistency::Eventual,
+                !retired,
+            ))
+            .await;
+            if let Some(dropped) = dropped {
+                Box::pin(drive(&db, dropped)).await;
+            }
+            let placements = vector_placements(&db).await;
+            if retired {
+                assert!(
+                    placements.is_empty(),
+                    "{case}: cleanup reclaimed the dropped generation: {placements:?}"
+                );
+            } else {
+                assert_eq!(
+                    placements.keys().copied().collect::<Vec<_>>(),
+                    live.keys().copied().collect::<Vec<_>>(),
+                    "{case}: exactly the live nodes are placed"
+                );
+                assert!(
+                    placements.values().all(|partitions| partitions.len() == 1),
+                    "{case}: a node is placed in two partitions: {placements:?}"
+                );
+            }
+            assert_eq!(
+                text_marker_entities(&db).await,
+                live.keys().copied().collect::<BTreeSet<_>>(),
+                "{case}: only live documents keep text markers"
+            );
+            db.close().await.expect("the recovered writer closes");
+        }
     }
 }

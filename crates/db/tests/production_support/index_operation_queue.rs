@@ -14,19 +14,23 @@
 //! Writers that publish open with explicit lifecycle scheduling, so no
 //! background worker publishes or reconciles between a contract's steps.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use helix_ast::graph::NodeRef;
-use helix_ast::query::QueryRequest;
+use helix_ast::query::{QueryRequest, SearchConsistency};
 use helix_ast::value::PropertyInput;
 use helix_ast::{batch, traversal};
+use helix_planner::ir;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::IsolationLevel;
 
-use crate::config::{DbConfig, SecondaryIndexDefinition, VectorIndexDefinition};
-use crate::encoding::v2::keys::scope::{DataScope, TENANT_KEY_PREFIX};
+use crate::config::{
+    DbConfig, SecondaryIndexDefinition, TextIndexDefinition, VectorIndexDefinition,
+};
+use crate::encoding::v2::keys::scope::{DataScope, TenantId, TENANT_KEY_PREFIX};
 use crate::encoding::v2::keys::{
     IndexEntity, IndexOperationRowKey, ManagedIndexKey, RecordKind, ScopedKey,
 };
@@ -39,15 +43,18 @@ use crate::index_lifecycle::queue::backlog::{
 use crate::index_lifecycle::queue::publication::PublicationOutcome;
 use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::{
-    IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, TextPartition,
-    ValidatedDynamicIndexDefinition,
+    IndexDdlReceipt, IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, IndexOperationId,
+    IndexOperationStatus, TextPartition, ValidatedDynamicIndexDefinition,
 };
-use crate::index_lifecycle_testing::LifecycleTestScheduling;
+use crate::index_lifecycle_testing::{
+    LifecycleTestController, LifecycleTestScheduling, LifecycleWorkTarget,
+};
 use crate::search::vector::VectorDistanceMetric;
 use crate::HelixDB;
 
 const LABEL: &str = "Doc";
 const EMBEDDING: &str = "embedding";
+const BODY: &str = "body";
 const VECTOR: u8 = 0x01;
 const TEXT: u8 = 0x02;
 const IF_ABSENT: u8 = 0x01;
@@ -682,6 +689,476 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
         .await;
         assert!(error.to_string().contains(expected), "{name}: {error}");
     }
+}
+
+/// One tenant scope's live documents: embedding and body by node ID.
+type ScopeDocuments = BTreeMap<u64, ([f32; 2], String)>;
+
+/// Proves tenant scopes queue, publish, recover, and retire independently.
+///
+/// Two tenant scopes hold identical vector and text definitions. Inserts,
+/// updates, and deletes interleave across both scopes; strong search in each
+/// sees only its own pending documents. Publishing one scope leaves the
+/// other's queues pending, a reopened writer rediscovers exactly what is
+/// left, and dropping one scope's vector index discards and releases only
+/// that scope's queued work.
+pub async fn index_operation_queue_tenant_scope_contracts() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "queue-tenant-scopes";
+    let db = Box::pin(open_explicit(name, &store)).await;
+    let scopes = [1_u128, 2].map(|tenant| DataScope::Tenant(TenantId::from_u128(tenant)));
+    let mut targets = Vec::new();
+    for scope in scopes {
+        for definition in [vector_definition(), text_definition()] {
+            let receipt = LifecycleTestController
+                .create_index(&db, scope, definition, ir::IndexCreateMode::ErrorIfExists)
+                .await
+                .expect("create is accepted");
+            let IndexDdlReceipt::Accepted { operation_id, .. } = receipt else {
+                panic!("a new definition starts a build: {receipt:?}");
+            };
+            Box::pin(drive_scoped(&db, scope, operation_id)).await;
+        }
+        targets.push(scoped_targets(&db, scope).await);
+    }
+    let [first, second] = <[[QueueTarget; 2]; 2]>::try_from(targets).expect("two scopes");
+    // Index IDs are allocated database-wide, so only the scope tells the
+    // queues of identical definitions apart from each other's charges.
+    assert!(first.iter().all(|target| !second.contains(target)));
+
+    let mut documents = [ScopeDocuments::new(), ScopeDocuments::new()];
+    for round in 0..3_u8 {
+        for (ordinal, scope) in scopes.into_iter().enumerate() {
+            let embedding = [
+                f32::from(round) * 2.0 + ordinal as f32 * 0.5,
+                ordinal as f32 + f32::from(round) * 0.25,
+            ];
+            let body = format!("shared round{round} scope{ordinal}");
+            let id = Box::pin(scoped_insert(&db, scope, embedding, &body)).await;
+            documents[ordinal].insert(id, (embedding, body));
+        }
+    }
+    for (ordinal, scope) in scopes.into_iter().enumerate() {
+        let ids = documents[ordinal].keys().copied().collect::<Vec<_>>();
+        let (updated, deleted) = (ids[ordinal], ids[1 - ordinal]);
+        let embedding = [7.25 + ordinal as f32, 0.75];
+        let body = format!("shared revised scope{ordinal}");
+        Box::pin(scoped_update(&db, scope, updated, embedding, &body)).await;
+        documents[ordinal].insert(updated, (embedding, body));
+        Box::pin(scoped_delete(&db, scope, deleted)).await;
+        documents[ordinal].remove(&deleted);
+    }
+    for (ordinal, scope) in scopes.into_iter().enumerate() {
+        Box::pin(assert_scope_searches_exact(
+            &db,
+            scope,
+            &documents[ordinal],
+            SearchConsistency::Strong,
+        ))
+        .await;
+    }
+
+    // Publishing the first scope leaves the second's queues and charges.
+    let pending_second = queued_per_target(&db, second).await;
+    assert!(pending_second.iter().all(|operations| *operations > 0));
+    let charged = |db: &HelixDB, targets: [QueueTarget; 2]| {
+        targets.map(|target| db.index_operation_backlog().has_charges(target))
+    };
+    for target in first {
+        loop {
+            match Box::pin(publish(&db, target)).await {
+                PublicationOutcome::Published { .. } => {}
+                PublicationOutcome::Empty => break,
+                outcome @ (PublicationOutcome::Discarded { .. }
+                | PublicationOutcome::Deferred
+                | PublicationOutcome::Retry
+                | PublicationOutcome::Trimmed
+                | PublicationOutcome::Blocked) => {
+                    panic!("the first scope did not publish: {outcome:?}")
+                }
+            }
+        }
+    }
+    assert_eq!(queued_per_target(&db, first).await, [0, 0]);
+    assert_eq!(queued_per_target(&db, second).await, pending_second);
+    assert_eq!(
+        (charged(&db, first), charged(&db, second)),
+        ([false, false], [true, true])
+    );
+    assert_eq!(
+        db.index_operation_queue_stats().pending_operations,
+        pending_second.iter().sum::<u64>(),
+        "only the first scope's charges were released"
+    );
+    for (ordinal, scope) in scopes.into_iter().enumerate() {
+        Box::pin(assert_scope_searches_exact(
+            &db,
+            scope,
+            &documents[ordinal],
+            SearchConsistency::Strong,
+        ))
+        .await;
+    }
+    Box::pin(assert_scope_searches_exact(
+        &db,
+        scopes[0],
+        &documents[0],
+        SearchConsistency::Eventual,
+    ))
+    .await;
+    db.close().await.expect("tenant scope writer closes");
+
+    // A reopened writer rediscovers exactly the second scope's queues.
+    let db = Box::pin(open_explicit(name, &store)).await;
+    let remaining = pending_second.iter().sum::<u64>();
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(
+        (stats.pending_operations, stats.discovered_operations),
+        (remaining, remaining)
+    );
+    assert_eq!(
+        db.index_operation_backlog()
+            .outstanding_targets()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        second.into_iter().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        (charged(&db, first), charged(&db, second)),
+        ([false, false], [true, true])
+    );
+    assert_eq!(
+        Box::pin(db.publish_index_queues_for_lifecycle_testing())
+            .await
+            .expect("the second scope publishes"),
+        remaining
+    );
+    for (ordinal, scope) in scopes.into_iter().enumerate() {
+        for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+            Box::pin(assert_scope_searches_exact(
+                &db,
+                scope,
+                &documents[ordinal],
+                consistency,
+            ))
+            .await;
+        }
+    }
+
+    // Dropping the first scope's vector index discards only its queue.
+    for (ordinal, scope) in scopes.into_iter().enumerate() {
+        let embedding = [11.5 + ordinal as f32, 2.25];
+        let body = format!("shared late scope{ordinal}");
+        let id = Box::pin(scoped_insert(&db, scope, embedding, &body)).await;
+        documents[ordinal].insert(id, (embedding, body));
+        let updated = *documents[ordinal].keys().next().expect("a live document");
+        let embedding = [0.5, 9.5 + ordinal as f32];
+        let body = format!("shared final scope{ordinal}");
+        Box::pin(scoped_update(&db, scope, updated, embedding, &body)).await;
+        documents[ordinal].insert(updated, (embedding, body));
+    }
+    let pending_first = queued_per_target(&db, first).await;
+    let pending_second = queued_per_target(&db, second).await;
+    assert!(pending_first
+        .iter()
+        .chain(&pending_second)
+        .all(|operations| *operations > 0));
+    let receipt = LifecycleTestController
+        .drop_index(&db, scopes[0], &vector_definition())
+        .await
+        .expect("drop is accepted");
+    let IndexDdlReceipt::Accepted { operation_id, .. } = receipt else {
+        panic!("dropping an Active index starts cleanup: {receipt:?}");
+    };
+    Box::pin(drive_scoped(&db, scopes[0], operation_id)).await;
+    assert_eq!(
+        Box::pin(publish(&db, first[0])).await,
+        PublicationOutcome::Discarded {
+            operations: pending_first[0]
+        }
+    );
+    assert_eq!(
+        Box::pin(publish(&db, first[0])).await,
+        PublicationOutcome::Empty
+    );
+    assert_eq!(
+        (charged(&db, first), charged(&db, second)),
+        ([false, true], [true, true])
+    );
+    assert_eq!(queued_per_target(&db, first).await, [0, pending_first[1]]);
+    assert_eq!(queued_per_target(&db, second).await, pending_second);
+    assert_eq!(
+        db.index_operation_queue_stats().pending_operations,
+        pending_first[1] + pending_second.iter().sum::<u64>(),
+        "only the first scope's vector charges were released"
+    );
+    assert_eq!(
+        db.index_operation_queue_stats().discarded_operations,
+        pending_first[0]
+    );
+    assert_eq!(
+        Box::pin(db.publish_index_queues_for_lifecycle_testing())
+            .await
+            .expect("the remaining queues publish"),
+        pending_first[1] + pending_second.iter().sum::<u64>()
+    );
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        Box::pin(assert_scope_searches_exact(
+            &db,
+            scopes[1],
+            &documents[1],
+            consistency,
+        ))
+        .await;
+        Box::pin(assert_scope_text_exact(
+            &db,
+            scopes[0],
+            &documents[0],
+            consistency,
+        ))
+        .await;
+    }
+    db.close().await.expect("tenant scope writer closes");
+}
+
+/// Opens an explicitly scheduled writer, so only the contract publishes.
+async fn open_explicit(name: &str, store: &Arc<dyn ObjectStore>) -> HelixDB {
+    HelixDB::open_with_object_store_for_index_lifecycle_testing(
+        name,
+        Arc::clone(store),
+        DbConfig::new(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("explicit writer opens")
+}
+
+/// Steps one scoped operation until it succeeds.
+async fn drive_scoped(db: &HelixDB, scope: DataScope, operation_id: IndexOperationId) {
+    for _ in 0..256 {
+        match db
+            .get_index_operation(scope, operation_id)
+            .await
+            .expect("operation status reads")
+        {
+            IndexOperationStatus::Succeeded { .. } => return,
+            IndexOperationStatus::Queued { .. } | IndexOperationStatus::Running { .. } => {
+                LifecycleTestController
+                    .advance(
+                        db,
+                        LifecycleWorkTarget::Operation {
+                            scope,
+                            operation_id,
+                        },
+                    )
+                    .await
+                    .expect("operation step runs");
+            }
+            status @ (IndexOperationStatus::Blocked { .. }
+            | IndexOperationStatus::Aborted { .. }) => {
+                panic!("scoped operation did not succeed: {status:?}")
+            }
+        }
+    }
+    panic!("scoped operation exceeded its step bound");
+}
+
+/// Returns the vector and text queue targets of `scope`'s canonical records.
+async fn scoped_targets(db: &HelixDB, scope: DataScope) -> [QueueTarget; 2] {
+    let prefix =
+        ManagedIndexKey::data_prefix(scope, ScopedKey::logical_prefix(RecordKind::IndexRecord));
+    let storage = db.inner_db();
+    let mut rows = storage
+        .scan_prefix(&prefix, ..)
+        .await
+        .expect("index records scan");
+    let (mut vector, mut text) = (None, None);
+    while let Some(row) = rows.next().await.expect("index record reads") {
+        let record = decode_index_record(&row.value).expect("index record decodes");
+        let target = QueueTarget::new(scope, record.index_id(), record.state().generation());
+        match record.definition() {
+            ValidatedDynamicIndexDefinition::Vector(_) => vector = Some(target),
+            ValidatedDynamicIndexDefinition::Text(_) => text = Some(target),
+            ValidatedDynamicIndexDefinition::Secondary(_) => {}
+        }
+    }
+    [
+        vector.expect("the scope has a vector index"),
+        text.expect("the scope has a text index"),
+    ]
+}
+
+async fn queued_per_target(db: &HelixDB, targets: [QueueTarget; 2]) -> [u64; 2] {
+    let mut lengths = [0; 2];
+    for (length, target) in lengths.iter_mut().zip(targets) {
+        *length = queued(db, target).await.len() as u64;
+    }
+    lengths
+}
+
+async fn scoped_insert(db: &HelixDB, scope: DataScope, embedding: [f32; 2], body: &str) -> u64 {
+    let created = Box::pin(
+        db.query_scoped(
+            QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "created",
+                        traversal::g().add_n(
+                            LABEL,
+                            vec![
+                                (EMBEDDING, PropertyInput::from(embedding.to_vec())),
+                                (BODY, PropertyInput::from(body.to_string())),
+                            ],
+                        ),
+                    )
+                    .returning(["created"]),
+            ),
+            scope,
+        ),
+    )
+    .await
+    .expect("scoped insert commits");
+    created["created"][0]["$id"]
+        .as_u64()
+        .expect("created node ID")
+}
+
+async fn scoped_update(db: &HelixDB, scope: DataScope, id: u64, embedding: [f32; 2], body: &str) {
+    Box::pin(
+        db.query_scoped(
+            QueryRequest::write(
+                batch::write_batch().var_as(
+                    "updated",
+                    traversal::g()
+                        .n(NodeRef::from(id))
+                        .set_property(EMBEDDING, embedding.to_vec())
+                        .set_property(BODY, body.to_string()),
+                ),
+            ),
+            scope,
+        ),
+    )
+    .await
+    .expect("scoped update commits");
+}
+
+async fn scoped_delete(db: &HelixDB, scope: DataScope, id: u64) {
+    Box::pin(db.query_scoped(
+        QueryRequest::write(
+            batch::write_batch().var_as("dropped", traversal::g().n(NodeRef::from(id)).drop()),
+        ),
+        scope,
+    ))
+    .await
+    .expect("scoped delete commits");
+}
+
+/// Hit IDs of one scoped search in rank order.
+async fn scoped_hits(
+    db: &HelixDB,
+    scope: DataScope,
+    request: QueryRequest,
+    consistency: SearchConsistency,
+) -> Vec<u64> {
+    let result = Box::pin(
+        db.query_scoped(
+            request
+                .with_search_consistency(consistency)
+                .expect("read requests accept a search consistency"),
+            scope,
+        ),
+    )
+    .await
+    .expect("scoped search runs");
+    if result["hits"].is_null() {
+        return Vec::new();
+    }
+    result["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search returned {result}"))
+        .iter()
+        .map(|hit| hit["$id"].as_u64().expect("hit ID"))
+        .collect()
+}
+
+/// Asserts `scope`'s vector search ranks exactly its own documents and its
+/// text search matches exactly its own documents.
+async fn assert_scope_searches_exact(
+    db: &HelixDB,
+    scope: DataScope,
+    documents: &ScopeDocuments,
+    consistency: SearchConsistency,
+) {
+    for query in [[0.37_f32, 0.11], [4.91, 1.29], [7.93, 0.61], [0.41, 9.83]] {
+        let mut exact = documents
+            .iter()
+            .map(|(id, (embedding, _))| {
+                (
+                    (embedding[0] - query[0]).powi(2) + (embedding[1] - query[1]).powi(2),
+                    *id,
+                )
+            })
+            .collect::<Vec<_>>();
+        exact.sort_by(|left, right| left.partial_cmp(right).expect("finite distance"));
+        let request = QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g().vector_search_nodes(LABEL, EMBEDDING, query.to_vec(), 20, None),
+                )
+                .returning(["hits"]),
+        );
+        assert_eq!(
+            scoped_hits(db, scope, request, consistency).await,
+            exact.into_iter().map(|(_, id)| id).collect::<Vec<_>>(),
+            "{scope:?} {consistency:?} vector search at {query:?}"
+        );
+    }
+    assert_scope_text_exact(db, scope, documents, consistency).await;
+}
+
+/// Asserts `scope`'s text search matches exactly its own documents.
+async fn assert_scope_text_exact(
+    db: &HelixDB,
+    scope: DataScope,
+    documents: &ScopeDocuments,
+    consistency: SearchConsistency,
+) {
+    let terms = documents
+        .values()
+        .flat_map(|(_, body)| body.split(' ').map(str::to_string))
+        .chain(["scope0", "scope1", "round0", "revised"].map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    for term in terms {
+        let exact = documents
+            .iter()
+            .filter(|(_, (_, body))| body.split(' ').any(|word| word == term))
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>();
+        let request = QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g().text_search_nodes(LABEL, BODY, term.as_str(), 20, None),
+                )
+                .returning(["hits"]),
+        );
+        assert_eq!(
+            scoped_hits(db, scope, request, consistency)
+                .await
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            exact,
+            "{scope:?} {consistency:?} text search for {term:?}"
+        );
+    }
+}
+
+fn text_definition() -> ValidatedDynamicIndexDefinition {
+    ValidatedDynamicIndexDefinition::try_from(
+        TextIndexDefinition::new_node(LABEL, BODY).expect("text definition validates"),
+    )
+    .expect("text definition converts")
 }
 
 /// Opens a writer, installs `definitions`, runs `corrupt`, closes, and

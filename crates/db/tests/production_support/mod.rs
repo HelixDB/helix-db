@@ -45,6 +45,7 @@ pub use index_operation_queue::{
     index_operation_queue_codec_contracts, index_operation_queue_ledger_contracts,
     index_operation_queue_reconciliation_contracts,
     index_operation_queue_recovery_corruption_contracts,
+    index_operation_queue_tenant_scope_contracts,
 };
 pub use secondary_equality_hot_path::{
     benchmark_million_sequential_id_bitmap, SecondaryEqualityHotPathFixture,
@@ -324,6 +325,14 @@ pub async fn vector_lifecycle_driver_contracts() {
 #[cfg(feature = "index-lifecycle-testing")]
 pub async fn queue_publication_contracts() {
     crate::index_lifecycle::queue::publication::production_contracts::run().await;
+}
+
+/// Drives queue work that only the WAL holds through a fenced writer and a
+/// failed WAL upload, then proves the next writer recovers, serves, and
+/// drains it exactly.
+#[cfg(feature = "index-lifecycle-testing")]
+pub async fn queue_publication_wal_only_contracts() {
+    crate::index_lifecycle::queue::publication::production_contracts::wal_only_queue_work_survives_fencing_and_failed_commits().await;
 }
 /// Characterizes the independent finite-score magnitude oracle and active kernels.
 pub fn vector_magnitude_oracle_and_kernel_contracts() {

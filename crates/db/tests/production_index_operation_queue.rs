@@ -63,6 +63,13 @@ async fn queue_codec_and_merge_algebra_fail_closed() {
     db::production_coverage::index_operation_queue_codec_contracts().await;
 }
 
+/// Proves tenant scopes with identical definitions queue, publish, recover,
+/// and retire independently.
+#[tokio::test]
+async fn tenant_scopes_queue_publish_and_recover_independently() {
+    Box::pin(db::production_coverage::index_operation_queue_tenant_scope_contracts()).await;
+}
+
 /// Proves a writer refuses queues its catalog cannot own or read.
 #[tokio::test]
 async fn writer_open_fails_closed_on_unowned_queues() {
