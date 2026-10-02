@@ -301,6 +301,7 @@ directory. Use one cache directory per running server and per database; changing
 | `HELIX_DISK_CACHE_DIR` | Disk cache directory, created if needed. Defaults to `/var/cache/helix` with `S3_BUCKET`; with `HELIX_DATA_DIR`, setting it enables the disk cache |
 | `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
+| `HELIX_DISK_CACHE_WARM` | `on` (the default) or `off`: whether the server warms the disk cache at startup |
 
 Half of the disk budget caches object-store files, 3/8 caches database blocks,
 and the rest caches full-text search data. With `S3_BUCKET`, the object-store cache
@@ -325,6 +326,13 @@ When `HELIX_DISK_CACHE_BYTES` is unset and the 8 GiB default does not fit, start
 fails naming the variable; without a volume the cache would otherwise share, and
 could fill, the filesystem of the container runtime. A budget you set that does not
 fit only logs a warning at startup.
+
+Once storage opens, the server warms the disk cache in the background: it caches the
+database blocks that index the newest files and, with `S3_BUCKET`, the rows vector
+searches read, using at most half the object-store cache. The warm delays neither
+startup nor readiness; queries that arrive first read from the object store as usual.
+Set `HELIX_DISK_CACHE_WARM=off` to skip it, and the caches then fill only as queries
+read.
 
 The block cache also indexes its disk share in memory, outside
 `HELIX_DISK_CACHE_MEMORY_BYTES`. Once full, the index takes roughly 2–9 MiB of RAM

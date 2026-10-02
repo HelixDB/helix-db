@@ -11558,3 +11558,250 @@ async fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served
         db.close().await.unwrap();
     }
 }
+
+mod vector_object_store_warm {
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    use futures::stream::BoxStream;
+    use helix_ast::prelude::{g, read_batch, write_batch};
+    use slatedb::object_store::{
+        path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        Result as ObjectStoreResult,
+    };
+
+    use super::*;
+
+    const DATABASE: &str = "production-vector-object-store-warm";
+    const DIMENSION: usize = 64;
+
+    /// In-memory durable store that counts reads of SST objects.
+    #[derive(Debug, Default)]
+    struct CountingStore {
+        inner: InMemory,
+        sst_gets: AtomicU64,
+    }
+
+    impl std::fmt::Display for CountingStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("counting-memory")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> ObjectStoreResult<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> ObjectStoreResult<GetResult> {
+            if location.as_ref().contains("/compacted/") {
+                self.sst_gets.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, ObjectStoreResult<Path>>,
+        ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> ObjectStoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> ObjectStoreResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Hybrid caches rooted in `root` with small parts. `remote` sets the
+    /// object-store tier up as the server does for S3: it caches the SSTs
+    /// the writer puts and warms vector search rows at startup.
+    fn hybrid(root: &std::path::Path, remote: bool) -> config::DbConfig {
+        config::DbConfig::new().with_cache(config::CacheConfig::new(
+            config::VectorMemorySettings::default(),
+            config::CacheMode::Hybrid {
+                slate_db: config::SlateHybridCacheConfig::try_new(
+                    1024 * 1024,
+                    root.join("foyer"),
+                    16 * 1024 * 1024,
+                )
+                .expect("valid Slate hybrid cache"),
+                object_store: config::SlateObjectStoreCacheSettings::try_new(
+                    root.join("object-store"),
+                    Some(64 * 1024 * 1024),
+                    4096,
+                    remote,
+                    config::ObjectStoreWarmLevel::Off,
+                    None,
+                    64,
+                )
+                .expect("valid object-store cache")
+                .with_vector_part_warm(if remote {
+                    config::VectorPartWarm::Background
+                } else {
+                    config::VectorPartWarm::Off
+                }),
+                slate_warm: config::SlateWarmConfig::Off,
+                fts: None,
+            },
+        ))
+    }
+
+    /// A deterministic unit-ish vector for node `seed`.
+    fn embedding(seed: usize) -> Vec<f32> {
+        (0..DIMENSION)
+            .map(|index| (((seed * 31 + index * 17) % 97) as f32 - 48.0) / 48.0)
+            .collect()
+    }
+
+    /// Writes 400 embedded documents under an Active vector index.
+    async fn load(store: Arc<CountingStore>) {
+        let db = HelixDB::open_with_object_store(DATABASE, store)
+            .await
+            .expect("loading writer opens");
+        let receipt = db
+            .query(QueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "vector",
+                        g().create_vector_index_nodes(
+                            "Doc",
+                            "embedding",
+                            NonZeroUsize::new(DIMENSION).expect("dimension is nonzero"),
+                            index::VectorDistanceMetric::Cosine,
+                            None::<String>,
+                        ),
+                    )
+                    .returning(["vector"]),
+            ))
+            .await
+            .expect("vector index is created");
+        if receipt["vector"]["kind"] != "already_active" {
+            let operation = receipt["vector"]["operation_id"]
+                .as_str()
+                .expect("a queued index reports its operation")
+                .to_string();
+            let status = tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    let status = db
+                        .query(QueryRequest::read(
+                            read_batch()
+                                .var_as("op", g().get_index_operation(operation.clone()))
+                                .returning(["op"]),
+                        ))
+                        .await
+                        .expect("index operation is readable");
+                    match status["op"]["status"].as_str() {
+                        Some("queued" | "running") => {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        other => break other.map(str::to_owned),
+                    }
+                }
+            })
+            .await
+            .expect("the vector index build finishes");
+            assert_eq!(status.as_deref(), Some("succeeded"));
+        }
+        for chunk in (0..400).collect::<Vec<_>>().chunks(50) {
+            let batch = chunk.iter().fold(write_batch(), |batch, seed| {
+                batch.var_as(
+                    &format!("d{seed}"),
+                    g().add_n(
+                        "Doc",
+                        vec![("embedding", PropertyValue::from(embedding(*seed)))],
+                    ),
+                )
+            });
+            db.query(QueryRequest::write(batch))
+                .await
+                .expect("documents are written");
+        }
+        db.flush_writer().await.expect("documents are flushed");
+        db.close().await.expect("loading writer closes");
+    }
+
+    /// Opens `store` with an empty cache in `mode`, waits for startup warming,
+    /// and returns the SST reads and rows of one search.
+    async fn cold_search(store: &Arc<CountingStore>, remote: bool) -> (u64, serde_json::Value) {
+        let root = tempfile::tempdir().expect("temporary cache root");
+        let db = HelixDB::open_with_object_store_and_config(
+            DATABASE,
+            Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            hybrid(root.path(), remote),
+        )
+        .await
+        .expect("hybrid writer opens");
+        db.wait_for_startup_cache_warm().await;
+        store.sst_gets.store(0, AtomicOrdering::SeqCst);
+        let response = db
+            .query(QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "r",
+                        g().vector_search_nodes("Doc", "embedding", embedding(1_000), 10, None)
+                            .project(vec![helix_ast::projection::PropertyProjection::renamed(
+                                "$id", "id",
+                            )]),
+                    )
+                    .returning(["r"]),
+            ))
+            .await
+            .expect("vector search runs");
+        let gets = store.sst_gets.load(AtomicOrdering::SeqCst);
+        db.close().await.expect("hybrid writer closes");
+        (gets, response["r"].clone())
+    }
+
+    /// In front of a remote durable store, opening warms the vector rows a
+    /// search reads into the object-store tier, so the first search after a
+    /// restart reads fewer SST objects and returns the same rows. A tier set
+    /// up for a local store is not warmed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hybrid_open_warms_vector_search_rows_before_the_first_search() {
+        let store = Arc::new(CountingStore::default());
+        load(Arc::clone(&store)).await;
+
+        let (unwarmed_gets, unwarmed) = cold_search(&store, false).await;
+        let (warmed_gets, warmed) = cold_search(&store, true).await;
+        assert_eq!(warmed, unwarmed);
+        assert_eq!(warmed.as_array().map(Vec::len), Some(10));
+        assert!(
+            warmed_gets < unwarmed_gets,
+            "warmed {warmed_gets} SST reads, unwarmed {unwarmed_gets}"
+        );
+    }
+}

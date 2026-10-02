@@ -75,6 +75,21 @@ impl FromStr for ObjectStoreWarmLevel {
     }
 }
 
+/// Startup warm of vector search rows into the object-store tier.
+///
+/// Worth enabling only in front of a remote durable store: a local store
+/// serves cold reads itself, so the warm would only copy local files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorPartWarm {
+    /// Rows reach the tier only as searches read them.
+    #[default]
+    Off,
+    /// After open and the first vector memory refresh, stream every loaded
+    /// scope's Active vector search rows through the tier once in the
+    /// background, reading at most half the tier.
+    Background,
+}
+
 /// Checked settings for SlateDB's block/meta Foyer hybrid cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlateHybridCacheConfig {
@@ -298,6 +313,7 @@ pub struct SlateObjectStoreCacheSettings {
     part_size_bytes: NonZeroUsize,
     cache_puts: bool,
     warm: ObjectStoreWarmLevel,
+    vector_part_warm: VectorPartWarm,
     scan_interval: Option<Duration>,
     max_open_file_handles: NonZeroUsize,
 }
@@ -326,6 +342,7 @@ impl SlateObjectStoreCacheSettings {
                 .ok_or_else(|| ConfigError::new("object-store cache part size must be nonzero"))?,
             cache_puts,
             warm,
+            vector_part_warm: VectorPartWarm::Off,
             scan_interval,
             max_open_file_handles: NonZeroUsize::new(max_open_file_handles).ok_or_else(|| {
                 ConfigError::new("object-store cache file-handle count must be nonzero")
@@ -384,6 +401,41 @@ impl SlateObjectStoreCacheSettings {
     #[must_use]
     pub fn with_cache_puts(self, cache_puts: bool) -> Self {
         Self { cache_puts, ..self }
+    }
+
+    /// These settings, warming vector search rows into the tier at startup
+    /// as `vector_part_warm` says. [`Self::try_new`] starts with
+    /// [`VectorPartWarm::Off`].
+    ///
+    /// ```
+    /// use db::config::{ObjectStoreWarmLevel, SlateObjectStoreCacheSettings, VectorPartWarm};
+    ///
+    /// let settings = SlateObjectStoreCacheSettings::try_new(
+    ///     "/var/cache/helix/object-store",
+    ///     None,
+    ///     4096,
+    ///     true,
+    ///     ObjectStoreWarmLevel::Off,
+    ///     None,
+    ///     8,
+    /// )?;
+    /// assert_eq!(settings.vector_part_warm(), VectorPartWarm::Off);
+    /// let warmed = settings.clone().with_vector_part_warm(VectorPartWarm::Background);
+    /// assert_eq!(warmed.vector_part_warm(), VectorPartWarm::Background);
+    /// assert_eq!(warmed.with_vector_part_warm(VectorPartWarm::Off), settings);
+    /// # Ok::<(), db::config::ConfigError>(())
+    /// ```
+    #[must_use]
+    pub fn with_vector_part_warm(self, vector_part_warm: VectorPartWarm) -> Self {
+        Self {
+            vector_part_warm,
+            ..self
+        }
+    }
+
+    /// Startup warm of vector search rows into this tier.
+    pub const fn vector_part_warm(&self) -> VectorPartWarm {
+        self.vector_part_warm
     }
 }
 

@@ -590,6 +590,17 @@ pub struct SlateCacheStateSnapshot {
 struct StartupCacheTasks {
     slate: Mutex<Option<CacheWarmTask>>,
     fts: Mutex<Option<CacheWarmTask>>,
+    /// Streams vector search rows into the object-store tier after the first
+    /// vector memory refresh; see [`HelixDB::warm_vector_object_store_parts`].
+    vector_parts: Mutex<Option<WatchedWarmTask>>,
+}
+
+/// A startup warm that `close()` can always stop: waiters watch `finished`,
+/// which closes when the task ends or is aborted, instead of taking the
+/// handle away from `close()`.
+struct WatchedWarmTask {
+    task: CacheWarmTask,
+    finished: watch::Receiver<()>,
 }
 
 impl StartupCacheTasks {
@@ -597,6 +608,7 @@ impl StartupCacheTasks {
         Self {
             slate: Mutex::new(None),
             fts: Mutex::new(None),
+            vector_parts: Mutex::new(None),
         }
     }
 }
@@ -2242,6 +2254,17 @@ impl HelixDB {
             if let Some(task) = self.inner.caches.startup_tasks.fts.lock().await.take() {
                 task.stop().await;
             }
+            if let Some(warm) = self
+                .inner
+                .caches
+                .startup_tasks
+                .vector_parts
+                .lock()
+                .await
+                .take()
+            {
+                warm.task.stop().await;
+            }
             if let Some(task) = self
                 .inner
                 .caches
@@ -2493,6 +2516,20 @@ impl HelixDB {
                 break;
             }
         }
+        let vector_parts = self
+            .inner
+            .caches
+            .startup_tasks
+            .vector_parts
+            .lock()
+            .await
+            .as_ref()
+            .map(|warm| warm.finished.clone());
+        let Some(mut finished) = vector_parts else {
+            return;
+        };
+        // Nothing is ever sent: the channel closes when the warm ends.
+        while finished.changed().await.is_ok() {}
     }
 
     /// Best-effort warm of currently loaded Active V2 text splits from one snapshot.
@@ -2780,13 +2817,132 @@ impl HelixDB {
                 })
             }
         };
+        let mut first_refresh = initial_refresh.clone();
         *self.inner.caches.vector_memory.refresh_task.lock().await =
             Some(VectorMemoryRefreshTask {
                 shutdown,
                 initial_refresh,
                 handle,
             });
+
+        // Only when configured, which the server does in front of S3 unless
+        // told not to warm: a local store serves cold reads itself.
+        let Some(tier) = self
+            .inner
+            .config
+            .db()
+            .cache()
+            .object_store_cache()
+            .filter(|tier| matches!(tier.vector_part_warm(), config::VectorPartWarm::Background))
+            .map(config::SlateObjectStoreCacheSettings::to_slate_options)
+        else {
+            return Ok(());
+        };
+        // Half the tier, so the warm never evicts everything else.
+        let budget = tier.max_cache_size_bytes.map_or(u64::MAX, |bytes| {
+            u64::try_from(bytes / 2).unwrap_or(u64::MAX)
+        });
+        let runtime = Arc::downgrade(&self.inner);
+        let (finished_tx, finished) = watch::channel(());
+        let handle = tokio::spawn(async move {
+            // Dropped when the task ends or is aborted, closing `finished`.
+            let _finished = finished_tx;
+            // After the first refresh, so the resident rows load first.
+            while !*first_refresh.borrow() {
+                if first_refresh.changed().await.is_err() {
+                    return;
+                }
+            }
+            let Some(inner) = runtime.upgrade() else {
+                return;
+            };
+            let started = Instant::now();
+            let (failed_scopes, summary) = (HelixDB { inner })
+                .warm_vector_object_store_parts(tier.part_size_bytes, budget)
+                .await;
+            tracing::info!(
+                warmed_targets = summary.warmed_targets,
+                failed_targets = summary.failed_targets,
+                failed_scopes,
+                charged = ?summary.read,
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "vector search rows warmed into the object-store cache"
+            );
+        });
+        *self.inner.caches.startup_tasks.vector_parts.lock().await = Some(WatchedWarmTask {
+            task: CacheWarmTask { handle },
+            finished,
+        });
         Ok(())
+    }
+
+    /// Streams the search rows of every loaded scope's Active vector
+    /// generations through the object-store cache tier once, reading at most
+    /// `budget` key and value bytes, with `read_ahead` bytes (one part) read
+    /// ahead of each scan.
+    ///
+    /// Generations are enumerated from one snapshot; the rows are read
+    /// through the live handle. See [`search::vector::warm_object_store_parts`]
+    /// for what is warmed and its limits. Best effort: a scope whose
+    /// generations cannot be enumerated is logged and skipped, and the count
+    /// of such scopes is returned with the summary.
+    async fn warm_vector_object_store_parts(
+        &self,
+        read_ahead: usize,
+        budget: u64,
+    ) -> (usize, search::vector::VectorPartWarmSummary) {
+        let scopes = self
+            .inner
+            .runtime_state
+            .read()
+            .expect("runtime state lock is not poisoned")
+            .loaded_scopes();
+        let inventory = match self.storage() {
+            HelixStorage::Writer(writer) => writer.db().snapshot().await,
+            HelixStorage::Reader(reader) => reader.snapshot().await,
+        };
+        let mut targets = Vec::new();
+        let mut failed_scopes = 0;
+        match inventory {
+            Ok(inventory) => {
+                for scope in scopes {
+                    let active = self.active_index_handles_loaded(scope);
+                    match search::vector::active_vector_targets(inventory.as_ref(), scope, active)
+                        .await
+                    {
+                        Ok(scope_targets) => targets.extend(scope_targets),
+                        Err(error) => {
+                            tracing::warn!(
+                                ?scope,
+                                %error,
+                                "skipping a scope the object-store warm could not enumerate"
+                            );
+                            failed_scopes += 1;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the object-store warm could not snapshot the catalog");
+                failed_scopes = scopes.len();
+            }
+        }
+        let summary = match self.storage() {
+            HelixStorage::Writer(writer) => {
+                search::vector::warm_object_store_parts(writer.db(), &targets, read_ahead, budget)
+                    .await
+            }
+            HelixStorage::Reader(reader) => {
+                search::vector::warm_object_store_parts(
+                    reader.as_ref(),
+                    &targets,
+                    read_ahead,
+                    budget,
+                )
+                .await
+            }
+        };
+        (failed_scopes, summary)
     }
 
     async fn run_configured_startup_cache_warm(&self, allow_blocking: bool) -> Result<()> {
@@ -3367,6 +3523,117 @@ mod tests {
 
     fn tenant_scope(value: &str) -> DataScope {
         DataScope::Tenant(TenantId::from_ulid_str(value).expect("valid tenant"))
+    }
+
+    /// The object-store warm runs only when the tier enables it, whether or
+    /// not the tier caches written SSTs: memory caches and a tier left at
+    /// [`config::VectorPartWarm::Off`] start no warm. A started warm is
+    /// waited for by `wait_for_startup_cache_warm` without being taken from
+    /// `close()`, which stops it.
+    #[tokio::test]
+    async fn object_store_warm_starts_only_when_the_tier_enables_it() {
+        use crate::config::{
+            ObjectStoreWarmLevel, SlateHybridCacheConfig, SlateObjectStoreCacheSettings,
+            SlateWarmConfig, VectorPartWarm,
+        };
+
+        let hybrid = |root: &std::path::Path, cache_puts: bool, warm: VectorPartWarm| {
+            DbConfig::new().with_cache(config::CacheConfig::new(
+                config::VectorMemorySettings::default(),
+                CacheMode::Hybrid {
+                    slate_db: SlateHybridCacheConfig::try_new(
+                        1024 * 1024,
+                        root.join("foyer"),
+                        16 * 1024 * 1024,
+                    )
+                    .expect("valid Slate hybrid cache"),
+                    object_store: SlateObjectStoreCacheSettings::try_new(
+                        root.join("object-store"),
+                        Some(16 * 1024 * 1024),
+                        4096,
+                        cache_puts,
+                        ObjectStoreWarmLevel::Off,
+                        None,
+                        8,
+                    )
+                    .expect("valid object-store cache")
+                    .with_vector_part_warm(warm),
+                    slate_warm: SlateWarmConfig::Off,
+                    fts: None,
+                },
+            ))
+        };
+        let warm_started = |db: &HelixDB| {
+            db.inner
+                .caches
+                .startup_tasks
+                .vector_parts
+                .try_lock()
+                .expect("no one holds the warm slot")
+                .is_some()
+        };
+        let root = tempfile::tempdir().expect("temporary cache root");
+        for (config, started) in [
+            (DbConfig::new(), false),
+            (
+                hybrid(&root.path().join("local"), false, VectorPartWarm::Off),
+                false,
+            ),
+            (
+                hybrid(&root.path().join("remote-off"), true, VectorPartWarm::Off),
+                false,
+            ),
+            (
+                hybrid(
+                    &root.path().join("remote"),
+                    true,
+                    VectorPartWarm::Background,
+                ),
+                true,
+            ),
+            (
+                hybrid(
+                    &root.path().join("local-on"),
+                    false,
+                    VectorPartWarm::Background,
+                ),
+                true,
+            ),
+        ] {
+            let db = HelixDB::open_with_object_store_and_config(
+                "object-store-warm-gate",
+                Arc::new(InMemory::new()),
+                config,
+            )
+            .await
+            .expect("writer opens");
+            assert_eq!(warm_started(&db), started);
+            db.wait_for_startup_cache_warm().await;
+            assert_eq!(
+                warm_started(&db),
+                started,
+                "waiting leaves the warm to close()"
+            );
+            db.close().await.expect("writer closes");
+            assert!(!warm_started(&db), "close() stops the warm");
+        }
+
+        // close() stops a warm that has not finished, without waiting for it.
+        let db = HelixDB::open_with_object_store_and_config(
+            "object-store-warm-close",
+            Arc::new(InMemory::new()),
+            hybrid(
+                &root.path().join("closing"),
+                true,
+                VectorPartWarm::Background,
+            ),
+        )
+        .await
+        .expect("writer opens");
+        tokio::time::timeout(Duration::from_secs(10), db.close())
+            .await
+            .expect("close() does not wait for the warm")
+            .expect("writer closes");
     }
 
     #[tokio::test]
