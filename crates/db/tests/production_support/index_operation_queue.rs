@@ -357,23 +357,21 @@ pub async fn index_operation_queue_codec_contracts() {
             vec![0x01, 0x14, 0x03, 0, 0],
             "unknown queued operation family",
         ),
-        (raw_value(VECTOR, &[2, 1], &[]), "not strictly ascending"),
         (
             raw_value(VECTOR, &[], &[(0x03, 1, &body)]),
             "unknown queued insert mode",
         ),
         (
-            raw_value(VECTOR, &[7], &[(IF_ABSENT, 7, &body)]),
-            "both removes and inserts",
-        ),
-        (
-            raw_value(VECTOR, &[], &[(IF_ABSENT, 9, &body), (SET, 9, &body)]),
+            raw_value(VECTOR, &[], &[(IF_ABSENT, 9, &body), (IF_ABSENT, 9, &body)]),
             "inserts one operation ID twice",
         ),
-        (raw_value(VECTOR, &[], &[]), "contains no records"),
-        (header_then(&[0x05]), "Buffer too short"),
         (
-            raw_value(VECTOR, &[(1 << 127) | 1], &[]),
+            raw_value(VECTOR, &[], &[]),
+            "resolved operation queue is empty instead of absent",
+        ),
+        (header_then(&[0x00, 0x05]), "Buffer too short"),
+        (
+            raw_value(VECTOR, &[], &[(IF_ABSENT, (1 << 127) | 1, &body)]),
             "reserved entity-token bit",
         ),
         (
@@ -418,7 +416,7 @@ pub async fn index_operation_queue_codec_contracts() {
                 &[],
                 &[(IF_ABSENT, 1, &[0x01, 0x05, 0x02, 0x00, 0x00])],
             ),
-            "outside 1..=",
+            "tenant partition value must not be empty",
         ),
         (
             raw_value(VECTOR, &[], &[(IF_ABSENT, 1, &[0x01, 0x05, 0x03, 0x00])]),
@@ -527,13 +525,39 @@ pub async fn index_operation_queue_codec_contracts() {
     );
 
     // A checked merge validates against the resolved base: another family's
-    // operand and a corrupt operand are refused before they are staged.
+    // operand and a corrupt or noncanonical operand are refused before they
+    // are staged.
     let text = text_operation(2);
     let text_operand =
         codec::QueueOperand::enqueue(std::slice::from_ref(&text)).expect("text operand encodes");
     for (operand, expected) in [
         (text_operand.bytes().clone(), "mixes index families"),
         (bytes::Bytes::from_static(&[0x01]), "Buffer too short"),
+        (
+            raw_value(VECTOR, &[2, 1], &[]).into(),
+            "not strictly ascending",
+        ),
+        (
+            raw_value(VECTOR, &[7], &[(IF_ABSENT, 7, &body)]).into(),
+            "both removes and inserts",
+        ),
+        (
+            raw_value(VECTOR, &[], &[(IF_ABSENT, 9, &body), (SET, 9, &body)]).into(),
+            "inserts one operation ID twice",
+        ),
+        (
+            raw_value(VECTOR, &[(1 << 127) | 1], &[]).into(),
+            "reserved entity-token bit",
+        ),
+        (
+            raw_value(
+                VECTOR,
+                &[],
+                &[(IF_ABSENT, 1, &[0x01, 0x05, 0x02, 0x00, 0x00])],
+            )
+            .into(),
+            "outside 1..=",
+        ),
     ] {
         let transaction = storage
             .begin(IsolationLevel::SerializableSnapshot)
@@ -561,6 +585,23 @@ pub async fn index_operation_queue_codec_contracts() {
         .await
         .expect("a canonical operand passes validation");
     transaction.commit().await.expect("checked merge commits");
+    assert_eq!(queued(&db, kept).await, vec![first.clone(), second.clone()]);
+    // A value without records is what a partial merge stores once each
+    // acknowledgement it composed cancelled its own enqueue: it composes as
+    // the identity.
+    let transaction = storage
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .expect("transaction begins");
+    transaction
+        .merge_disjoint_tokens_checked(
+            kept.key(),
+            [codec::QueuedOperationId::generate().token()],
+            raw_value(VECTOR, &[], &[]),
+        )
+        .await
+        .expect("the identity passes validation");
+    transaction.commit().await.expect("identity merge commits");
     assert_eq!(queued(&db, kept).await, vec![first.clone(), second]);
 
     // Operand construction rejects batches no producer may stage.

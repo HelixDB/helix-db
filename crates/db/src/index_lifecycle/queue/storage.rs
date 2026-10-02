@@ -11,19 +11,20 @@
 //! writer opens fail closed on the other layout's queues, and so do reader
 //! opens in builds that can select it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use slatedb::{DbReadOps, DbTransaction};
 
 use crate::config::QueueLayout;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{IndexOperationRowKey, ManagedIndexKey, RecordKind, ScopedKey};
 use crate::encoding::v2::values::indexes::operation_queue::{
-    OperationQueue, QueueFamily, QueueOperand, QueueRow, QueuedOperation, QueuedOperationId,
-    QueuedPayload,
+    LatestOperations, OperationQueue, QueueFamily, QueueOperand, QueueRow, QueuedOperation,
+    QueuedOperationId, QueuedPayload,
 };
 use crate::error::{HelixDbError, Result};
 
@@ -52,14 +53,102 @@ impl StoredQueue {
         &self.queue
     }
 
-    /// Consumes the read into its decoded queue.
-    pub(crate) fn into_queue(self) -> OperationQueue {
-        self.queue
-    }
-
     /// Returns the stored key and value bytes read to materialize the queue.
     pub(crate) const fn encoded_bytes(&self) -> u64 {
         self.encoded_bytes
+    }
+
+    /// Returns what remains of this queue once `acknowledged` committed, or
+    /// `None` when nothing remains; the remainder was read from no storage.
+    fn without(&self, acknowledged: &[QueuedOperationId]) -> Option<Self> {
+        let acknowledged = acknowledged.iter().copied().collect::<HashSet<_>>();
+        let operations = self
+            .queue
+            .operations()
+            .iter()
+            .filter(|operation| !acknowledged.contains(&operation.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let rows = self
+            .rows
+            .iter()
+            .filter(|(id, _)| !acknowledged.contains(*id))
+            .map(|(id, key)| (*id, key.clone()))
+            .collect();
+        OperationQueue::from_rows(self.queue.family(), operations).map(|queue| Self {
+            queue,
+            rows,
+            encoded_bytes: 0,
+        })
+    }
+}
+
+/// Queues publication read from storage, each minus the operations its own
+/// commits acknowledged since, kept for the target's next attempt so that
+/// draining a backlog reads it once instead of once per batch.
+///
+/// # Contract
+///
+/// Only publication acknowledges a queue and only one attempt per target
+/// runs at a time, so a retained queue is always a subset of the durable
+/// queue in its storage order: every operation it holds is still
+/// outstanding, and anything enqueued since committed after the read, so it
+/// follows every retained operation of its entity. An attempt therefore
+/// [takes](Self::take) its target's queue before it classifies the target,
+/// and only a commit that succeeded [retains](Self::retain) what it left:
+/// no outcome whose acknowledgement may or may not have committed, and no
+/// retired or hidden generation, can reuse a queue. Newer work becomes
+/// visible once the retained operations are published and the next attempt
+/// reads storage again.
+///
+/// Every publisher of one writer shares one instance (it lives in the
+/// writer's [`QueueStore`]), so the take-then-retain discipline holds
+/// whichever publisher attempts a target. Every target keeps its own
+/// remainder, so draining several targets at once reads each queue once.
+/// A remainder holds only outstanding operations, which admission charges
+/// against their logical index's `max_retained_bytes`
+/// ([`super::backlog::BacklogLimits`]), so retention never holds more than
+/// the admitted backlog of the logical indexes being published: memory
+/// grows with the number of indexes that have a backlog, up to that ceiling
+/// each.
+#[derive(Debug, Default)]
+pub(crate) struct RetainedQueues {
+    queues: Mutex<HashMap<QueueTarget, StoredQueue>>,
+}
+
+impl RetainedQueues {
+    /// Removes and returns `target`'s retained queue.
+    pub(crate) fn take(&self, target: QueueTarget) -> Option<StoredQueue> {
+        self.queues.lock().remove(&target)
+    }
+
+    /// Retains what remains of `stored`, which `target`'s attempt read or
+    /// took, once the commit acknowledging `acknowledged` succeeded.
+    pub(crate) fn retain(
+        &self,
+        target: QueueTarget,
+        stored: &StoredQueue,
+        acknowledged: &[QueuedOperationId],
+    ) {
+        let Some(remaining) = stored.without(acknowledged) else {
+            return;
+        };
+        let previous = self.queues.lock().insert(target, remaining);
+        assert!(
+            previous.is_none(),
+            "an attempt retains only the queue it took"
+        );
+    }
+
+    /// Returns the retained bytes of every retained operation.
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        self.queues
+            .lock()
+            .values()
+            .flat_map(|stored| stored.queue.operations())
+            .map(QueuedOperation::retained_bytes)
+            .sum()
     }
 }
 
@@ -71,6 +160,8 @@ pub(crate) struct QueueStore {
     max_operand_bytes: u64,
     /// Next row sequence (row layout only); rows sort in enqueue order.
     next_sequence: AtomicU64,
+    /// Queues every publisher of this writer retains between attempts.
+    retained: RetainedQueues,
 }
 
 impl QueueStore {
@@ -82,7 +173,14 @@ impl QueueStore {
             layout,
             max_operand_bytes,
             next_sequence: AtomicU64::new(0),
+            retained: RetainedQueues::default(),
         }
+    }
+
+    /// Returns the queues publication retains between attempts. Searches
+    /// never read them: they read storage.
+    pub(crate) const fn retained(&self) -> &RetainedQueues {
+        &self.retained
     }
 
     /// Returns the per-transaction operand ceiling for one queue key: the
@@ -118,14 +216,7 @@ impl QueueStore {
                 }))
             }
             QueueLayout::Rows => {
-                let prefix = ManagedIndexKey::data_prefix(
-                    target.scope,
-                    ScopedKey::generation_prefix(
-                        RecordKind::IndexOperationRow,
-                        target.index_id,
-                        target.generation,
-                    ),
-                );
+                let prefix = row_prefix(target);
                 let mut scan = read.scan_prefix(&prefix, ..).await?;
                 let mut family = None;
                 let mut operations = Vec::new();
@@ -153,6 +244,51 @@ impl QueueStore {
                         encoded_bytes,
                     }),
                 )
+            }
+        }
+    }
+
+    /// Reads, for a search, each entity of one generation queue at its
+    /// latest outstanding operation, selecting entities in the order of
+    /// their oldest operation while their latest operations' retained bytes
+    /// fit `budget` (see [`LatestOperations`]); `None` when the queue is
+    /// absent or not even the first entity fits.
+    ///
+    /// Only decoding follows the budget. Finding each entity's latest
+    /// operation walks every record's framing, and the map layout's read
+    /// fetches the whole value: while merge operands are pending above its
+    /// base, which is the normal state of an index taking writes, SlateDB
+    /// first resolves them against all of it, validating and re-encoding
+    /// every record. Such a read therefore costs the backlog (up to the
+    /// per-index `max_retained_bytes`) whatever the budget, and fails on a
+    /// corrupt record the budget never selects; once the value is resolved
+    /// in storage, only the walk follows the backlog. The row layout scans
+    /// every row. Everything decoded must be valid, otherwise the read fails
+    /// closed.
+    pub(crate) async fn read_latest(
+        &self,
+        read: &(impl DbReadOps + Sync),
+        target: QueueTarget,
+        budget: u64,
+    ) -> Result<Option<LatestOperations>> {
+        match self.layout {
+            QueueLayout::Map => {
+                let Some(value) = read.get(target.key()).await? else {
+                    return Ok(None);
+                };
+                Ok(LatestOperations::decode(&value, budget)?)
+            }
+            QueueLayout::Rows => {
+                let prefix = row_prefix(target);
+                let mut scan = read.scan_prefix(&prefix, ..).await?;
+                let mut values = Vec::new();
+                while let Some(row) = scan.next().await? {
+                    values.push(row.value);
+                }
+                Ok(LatestOperations::decode_rows(
+                    values.iter().map(Bytes::as_ref),
+                    budget,
+                )?)
             }
         }
     }
@@ -372,6 +508,18 @@ fn finish_rows(
 ) -> Option<(QueueTarget, OperationQueue)> {
     let (target, family, operations) = rows?;
     OperationQueue::from_rows(family, operations).map(|queue| (target, queue))
+}
+
+/// Prefix of every row of one generation queue (row layout).
+fn row_prefix(target: QueueTarget) -> Bytes {
+    ManagedIndexKey::data_prefix(
+        target.scope,
+        ScopedKey::generation_prefix(
+            RecordKind::IndexOperationRow,
+            target.index_id,
+            target.generation,
+        ),
+    )
 }
 
 fn row_key(target: QueueTarget, sequence: u64) -> Bytes {

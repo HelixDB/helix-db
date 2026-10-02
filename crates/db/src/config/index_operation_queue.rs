@@ -10,16 +10,32 @@
 //! use std::num::NonZeroU64;
 //! use std::time::Duration;
 //!
-//! use db::config::{DbConfig, IndexOperationQueueTuning};
+//! use db::config::{DbConfig, IndexOperationQueueTuning, IndexOperationQueueTuningError};
 //!
 //! let tuning = IndexOperationQueueTuning::default()
 //!     .with_max_retained_bytes(NonZeroU64::new(64 * 1024 * 1024).unwrap())
+//!     .unwrap()
 //!     .with_max_members(NonZeroU64::new(10_000).unwrap())
 //!     .with_recovery_sweep_interval(Duration::from_millis(250))
 //!     .unwrap();
 //! let config = DbConfig::new().with_index_operation_queue_tuning(tuning);
 //! assert_eq!(config.index_operation_queue(), tuning);
 //! assert_eq!(IndexOperationQueueTuning::default().max_members().get(), 250_000);
+//!
+//! // A larger retained-byte ceiling could let one queue value outgrow the
+//! // longest value storage can encode.
+//! let largest = IndexOperationQueueTuning::MAX_RETAINED_BYTES;
+//! assert_eq!(largest, 2_437_684_127);
+//! assert!(IndexOperationQueueTuning::default()
+//!     .with_max_retained_bytes(NonZeroU64::new(largest).unwrap())
+//!     .is_ok());
+//! assert_eq!(
+//!     IndexOperationQueueTuning::default()
+//!         .with_max_retained_bytes(NonZeroU64::new(largest + 1).unwrap()),
+//!     Err(IndexOperationQueueTuningError::RetainedBytesAboveQueueValueLimit {
+//!         requested: largest + 1,
+//!     })
+//! );
 //! ```
 
 use std::num::NonZeroU64;
@@ -30,12 +46,19 @@ const DEFAULT_MAX_MEMBERS: u64 = 250_000;
 const DEFAULT_MAX_OPERAND_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_RECOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const EVENTUAL_SEARCH_SOURCE_INPUT_BYTES: u64 = 128 * 1024 * 1024;
+const _: () = assert!(DEFAULT_MAX_RETAINED_BYTES <= IndexOperationQueueTuning::MAX_RETAINED_BYTES);
 
 /// Invalid queue policy rejected before a database opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexOperationQueueTuningError {
     /// The periodic recovery sweep must run.
     ZeroRecoverySweepInterval,
+    /// The retained-byte ceiling exceeds
+    /// [`IndexOperationQueueTuning::MAX_RETAINED_BYTES`].
+    RetainedBytesAboveQueueValueLimit {
+        /// The rejected ceiling.
+        requested: u64,
+    },
 }
 
 impl core::fmt::Display for IndexOperationQueueTuningError {
@@ -44,6 +67,12 @@ impl core::fmt::Display for IndexOperationQueueTuningError {
             Self::ZeroRecoverySweepInterval => {
                 formatter.write_str("index operation queue recovery sweep interval must be nonzero")
             }
+            Self::RetainedBytesAboveQueueValueLimit { requested } => write!(
+                formatter,
+                "index operation queue max retained bytes {requested} exceed the queue value \
+                 limit {}",
+                IndexOperationQueueTuning::MAX_RETAINED_BYTES
+            ),
         }
     }
 }
@@ -106,6 +135,16 @@ impl Default for IndexOperationQueueTuning {
 }
 
 impl IndexOperationQueueTuning {
+    /// Largest accepted [retained-byte ceiling](Self::max_retained_bytes),
+    /// about 2.27 GiB.
+    ///
+    /// Storage encodes a value's length in 32 bits, and one generation's
+    /// queue value can hold, besides its outstanding operations, a 16-byte
+    /// acknowledgement for each operation that was outstanding before it.
+    /// A larger ceiling could let such a value outgrow that length.
+    pub const MAX_RETAINED_BYTES: u64 =
+        crate::encoding::v2::values::indexes::operation_queue::MAX_RETAINED_BYTES;
+
     /// Returns the retained-operation byte ceiling per logical index.
     pub const fn max_retained_bytes(self) -> NonZeroU64 {
         self.max_retained_bytes
@@ -143,10 +182,21 @@ impl IndexOperationQueueTuning {
         self
     }
 
-    /// Replaces the retained-operation byte ceiling.
-    pub const fn with_max_retained_bytes(mut self, bytes: NonZeroU64) -> Self {
+    /// Replaces the retained-operation byte ceiling; a ceiling above
+    /// [`Self::MAX_RETAINED_BYTES`] is rejected.
+    pub const fn with_max_retained_bytes(
+        mut self,
+        bytes: NonZeroU64,
+    ) -> Result<Self, IndexOperationQueueTuningError> {
+        if bytes.get() > Self::MAX_RETAINED_BYTES {
+            return Err(
+                IndexOperationQueueTuningError::RetainedBytesAboveQueueValueLimit {
+                    requested: bytes.get(),
+                },
+            );
+        }
         self.max_retained_bytes = bytes;
-        self
+        Ok(self)
     }
 
     /// Replaces the distinct pending member ceiling.

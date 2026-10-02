@@ -196,6 +196,41 @@ pub(super) fn publisher_with_limits(
     )
 }
 
+/// Makes `publisher`'s next staged attempt conflict at commit.
+///
+/// The returned future waits until that attempt reaches its commit, rewrites
+/// every default-scope index record with its own bytes (inside the range the
+/// attempt read its ownership from), and then releases the attempt. Run it
+/// concurrently with the attempt.
+pub(super) fn conflict_next_commit(
+    db: &HelixDB,
+    publisher: &QueuePublisher,
+) -> impl std::future::Future<Output = ()> {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *publisher.hooks().before_commit.lock() = Some((reached_tx, release_rx));
+    async move {
+        reached_rx.await.expect("the attempt reaches its commit");
+        let storage = db.inner_db();
+        let prefix = ManagedIndexKey::data_prefix(
+            DataScope::LegacyUnscoped,
+            ScopedKey::logical_prefix(RecordKind::IndexRecord),
+        );
+        let mut rows = storage.scan_prefix(&prefix, ..).await.unwrap();
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            records.push(row);
+        }
+        assert!(!records.is_empty(), "an index is installed");
+        for record in records {
+            storage.put(&record.key, &record.value).await.unwrap();
+        }
+        release_tx
+            .send(())
+            .expect("the attempt waits for its release");
+    }
+}
+
 /// Publishes or discards `target` until it is empty, asserting that every
 /// committed acknowledgement operand fits the producer operand bound (the
 /// WAL entry limit); returns the operations released.
@@ -544,8 +579,9 @@ async fn byte_backpressure_accepts_the_limit_and_rejects_one_byte_more() {
     // mode(1) + id(16) + body_len(1) + body(kind 1, id 1, some 1,
     // partition 1, len 1, text 1).
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let tuning =
-        IndexOperationQueueTuning::default().with_max_retained_bytes(NonZeroU64::new(48).unwrap());
+    let tuning = IndexOperationQueueTuning::default()
+        .with_max_retained_bytes(NonZeroU64::new(48).unwrap())
+        .unwrap();
     let db = open("queue-bytes", store, queued(tuning)).await;
     install_text(&db).await;
     add_text(&db, "a").await.unwrap();

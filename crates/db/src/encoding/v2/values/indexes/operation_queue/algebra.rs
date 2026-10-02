@@ -8,21 +8,56 @@
 //! | unseen               | insert (mode `m`)     | insert `m`, new position|
 //! | removed              | remove                | removed                 |
 //! | removed              | insert (any mode)     | set, new position       |
-//! | insert               | remove                | removed                 |
+//! | insert-if-absent     | remove                | unseen                  |
+//! | set                  | remove                | removed                 |
 //! | insert               | insert-if-absent      | unchanged               |
 //! | insert               | set                   | set, new position       |
-//!
-//! Every record is a total function on one ID's state (absent, or present with
-//! bytes and a position), and the composed representation is closed under
-//! function composition, so the algebra is associative for every grouping.
-//! Producers never reuse IDs; if bytes were ever reused, the first retained
-//! bytes win deterministically rather than failing only for some groupings.
 //!
 //! A removal only ever names one ID, so acknowledging an older operation can
 //! never erase a newer operation. Remove-then-insert composes to an
 //! unconditional set, so an unresolved older base cannot defeat the reset.
 //! Resolving against a known base drops removals and turns surviving sets
 //! into ordinary retained entries.
+//!
+//! # Acknowledgements cancel their own enqueue
+//!
+//! An insert-if-absent followed by a removal of the same ID composes to
+//! *unseen*: the pair leaves nothing behind, even without a base. This keeps
+//! unresolved values bounded no matter how long SlateDB defers resolving
+//! them against the bottom run. A removal survives a partial composition only
+//! while its insert lies below it, so each one names an operation that was
+//! outstanding just before the composition's oldest operand, and each live
+//! insert names one still outstanding after its newest: a value holds at
+//! most one removal per operation of the earlier backlog plus the later
+//! backlog's records. [`super::MAX_RETAINED_BYTES`] keeps that within
+//! SlateDB's value length.
+//!
+//! Cancelling is exact on the histories storage can present, in which each
+//! operation ID is inserted by exactly one committed operand that appears
+//! once in any view, and is removed at most once, after that operand:
+//!
+//! - producers mint a fresh random ID for every operation of every
+//!   transaction attempt, and SlateDB commits a staged operand at most once;
+//!   only the publication worker removes IDs, and only IDs it read from the
+//!   queue, so every removal follows its insert;
+//! - SlateDB applies every committed operand exactly once in every view: its
+//!   merge contract requires associativity but not idempotence (additive
+//!   counters are valid operators, and Helix's metadata counters already
+//!   depend on that). Concretely, WAL replay in writers and readers skips
+//!   every entry at or below `last_l0_seq`, a flush swaps its memtable for
+//!   its L0 under one state lock, and compactions replace their sources
+//!   atomically, so no view holds two copies of one committed operand.
+//!
+//! Under those histories a composition that holds an ID's insert holds its
+//! only insert, so nothing below can resurrect it once the pair cancels, and
+//! every grouping resolves to the same queue. Outside them (a re-enqueued or
+//! duplicated insert below its own cancelled acknowledgement) the composition
+//! stays total and deterministic but may keep the lower copy.
+//!
+//! Nothing weaker can bound removals: a partial merge cannot see whether
+//! another copy of an insert lies below it, so forgetting a removal is exact
+//! only where no copy can, and writing a resolved base instead would race the
+//! blind enqueues it must not shadow.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -63,30 +98,11 @@ pub(super) struct RawValue<'a> {
 
 impl<'a> RawValue<'a> {
     /// Parses and validates every record without resolving any other value.
+    ///
+    /// A value with no records is the composition's identity: a partial
+    /// merge whose acknowledgements cancelled every insert it held.
     pub(super) fn parse(value: &'a [u8]) -> Result<Self, EncodingError> {
-        const VERSION_OFFSET: usize = 0;
-        const KIND_OFFSET: usize = VERSION_OFFSET + core::mem::size_of::<u8>();
-        const FAMILY_OFFSET: usize = KIND_OFFSET + core::mem::size_of::<u8>();
-        if value.len() < HEADER_LEN {
-            return Err(EncodingError::BufferTooShort {
-                expected: HEADER_LEN,
-                actual: value.len(),
-            });
-        }
-        if value[VERSION_OFFSET] != QUEUE_VALUE_VERSION {
-            return Err(EncodingError::Custom(format!(
-                "unsupported operation queue value version {:#04x}",
-                value[VERSION_OFFSET]
-            )));
-        }
-        if value[KIND_OFFSET] != QUEUE_VALUE_KIND {
-            return Err(EncodingError::UnexpectedValueKind {
-                expected: QUEUE_VALUE_KIND,
-                actual: value[KIND_OFFSET],
-            });
-        }
-        let family = QueueFamily::try_from_u8(value[FAMILY_OFFSET])?;
-        let mut cursor = Cursor::new(&value[HEADER_LEN..HEADER_LEN + value.len() - HEADER_LEN]);
+        let (family, mut cursor) = parse_header(value)?;
 
         let remove_count = bounded_count(&mut cursor, OPERATION_ID_LEN)?;
         let mut removes = Vec::with_capacity(remove_count);
@@ -104,15 +120,7 @@ impl<'a> RawValue<'a> {
         let mut inserts = Vec::with_capacity(insert_count);
         let mut insert_ids = std::collections::HashSet::with_capacity(insert_count);
         for _ in 0..insert_count {
-            let mode = match cursor.take_u8()? {
-                0x01 => InsertMode::IfAbsent,
-                0x02 => InsertMode::Set,
-                unknown => {
-                    return Err(EncodingError::Custom(format!(
-                        "unknown queued insert mode {unknown:#04x}"
-                    )));
-                }
-            };
+            let mode = InsertMode::try_from_u8(cursor.take_u8()?)?;
             let id = cursor.take_operation_id()?;
             if removes.binary_search(&id).is_ok() {
                 return Err(EncodingError::Custom(
@@ -131,11 +139,6 @@ impl<'a> RawValue<'a> {
             inserts.push(RawInsert { mode, id, body });
         }
         cursor.finish("operation queue value")?;
-        if removes.is_empty() && inserts.is_empty() {
-            return Err(EncodingError::Custom(
-                "operation queue value contains no records".to_string(),
-            ));
-        }
         Ok(Self {
             family,
             removes,
@@ -144,8 +147,48 @@ impl<'a> RawValue<'a> {
     }
 }
 
+impl InsertMode {
+    pub(super) fn try_from_u8(value: u8) -> Result<Self, EncodingError> {
+        match value {
+            0x01 => Ok(Self::IfAbsent),
+            0x02 => Ok(Self::Set),
+            unknown => Err(EncodingError::Custom(format!(
+                "unknown queued insert mode {unknown:#04x}"
+            ))),
+        }
+    }
+}
+
+/// Validates the version, kind, and family header and returns the family
+/// and a cursor positioned at the removal count.
+pub(super) fn parse_header(value: &[u8]) -> Result<(QueueFamily, Cursor<'_>), EncodingError> {
+    const VERSION_OFFSET: usize = 0;
+    const KIND_OFFSET: usize = VERSION_OFFSET + core::mem::size_of::<u8>();
+    const FAMILY_OFFSET: usize = KIND_OFFSET + core::mem::size_of::<u8>();
+    if value.len() < HEADER_LEN {
+        return Err(EncodingError::BufferTooShort {
+            expected: HEADER_LEN,
+            actual: value.len(),
+        });
+    }
+    if value[VERSION_OFFSET] != QUEUE_VALUE_VERSION {
+        return Err(EncodingError::Custom(format!(
+            "unsupported operation queue value version {:#04x}",
+            value[VERSION_OFFSET]
+        )));
+    }
+    if value[KIND_OFFSET] != QUEUE_VALUE_KIND {
+        return Err(EncodingError::UnexpectedValueKind {
+            expected: QUEUE_VALUE_KIND,
+            actual: value[KIND_OFFSET],
+        });
+    }
+    let family = QueueFamily::try_from_u8(value[FAMILY_OFFSET])?;
+    Ok((family, Cursor::new(&value[HEADER_LEN..])))
+}
+
 /// Reads a count and rejects one that cannot fit in the remaining bytes.
-fn bounded_count(
+pub(super) fn bounded_count(
     cursor: &mut Cursor<'_>,
     minimum_record_len: usize,
 ) -> Result<usize, EncodingError> {
@@ -287,10 +330,16 @@ impl<'a> Composition<'a> {
         }
         self.input_bytes = self.input_bytes.saturating_add(encoded_len);
         for id in value.removes {
-            if let Some(slot) = self.live.remove(&id) {
-                self.slots[slot].live = false;
+            let Some(slot) = self.live.remove(&id) else {
+                self.removes.insert(id);
+                continue;
+            };
+            self.slots[slot].live = false;
+            // An insert-if-absent and its acknowledgement cancel; a set also
+            // removed whatever lay below it, so its removal is kept.
+            if self.slots[slot].mode == InsertMode::Set {
+                self.removes.insert(id);
             }
-            self.removes.insert(id);
         }
         for insert in value.inserts {
             if self.removes.remove(&insert.id) {
@@ -384,8 +433,10 @@ pub(crate) enum QueueMergeResult {
 /// Composes values whose older base may still be unresolved.
 ///
 /// `existing` is itself a composed value (or an earlier resolved value) that
-/// precedes `operands`. Removals and sets are preserved so a later merge with
-/// the eventual base applies them exactly once.
+/// precedes `operands`. Removals whose insert lies below the composition and
+/// sets are preserved so a later merge with the eventual base applies them
+/// exactly once; an acknowledgement composed with its own enqueue leaves
+/// nothing. The result may hold no records at all.
 pub(crate) fn merge_partial(
     existing: Option<&[u8]>,
     operands: &[Bytes],

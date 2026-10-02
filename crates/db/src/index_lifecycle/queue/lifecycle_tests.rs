@@ -20,6 +20,7 @@ use slatedb::object_store::ObjectStore;
 use super::backlog::OperationCharge;
 use super::overlay_tests::{add, delete, drain, text_search, update, vector_search, write};
 use super::publication::PublicationOutcome;
+use super::publication_tests::batch_limits;
 use super::tests::{
     open, publisher_with_limits, queue, queued, release_within_operand_bound, rows, target,
 };
@@ -933,6 +934,88 @@ async fn build_then_drain_places_every_node_as_the_unskipped_run_does() {
     assert_ne!(skipped, replaced, "the full path relinked replayed nodes");
 }
 
+/// A build reads every entity at its latest state, so the chains its scan
+/// raced stay queued as replays of states no newer than the rows it wrote.
+/// Whatever the eventual budget cuts, an eventual search must show such an
+/// entity at that latest state or through its built row, never at an earlier
+/// state of its chain: here, a document updated twice ahead of the scan and
+/// one that moves to a tenant whose name makes its latest operation far
+/// larger than its first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eventual_searches_after_a_build_never_show_a_state_older_than_its_rows() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open("build-eventual-budgets", Arc::clone(&store), config()).await;
+    let (ids, mut state, operation, pause) = hold_first_vector_scan(&db).await;
+    write_ahead_of_the_scan(&db, &ids, &mut state).await;
+    let far: &'static str = Box::leak("f".repeat(300).into_boxed_str());
+    update(&db, ids[100], [50.0, 50.0], "doc").await;
+    write(&db, || {
+        QueryRequest::write(
+            batch::write_batch().var_as(
+                "moved",
+                traversal::g()
+                    .n(NodeRef::from(ids[100]))
+                    .set_property("embedding", vec![-50.0_f32, -50.0])
+                    .set_property("tenant", PropertyInput::from(far.to_string())),
+            ),
+        )
+    })
+    .await;
+    state.insert(ids[100], (far, [-50.0, -50.0]));
+    pause.release();
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    let sizes = queue(&db, QueueFamily::Vector)
+        .await
+        .expect("the raced chains stay queued as replays")
+        .operations()
+        .iter()
+        .map(|operation| operation.retained_bytes())
+        .collect::<Vec<_>>();
+    db.close().await.unwrap();
+
+    // No budget, every budget that ends between two operations, and all.
+    let budgets = std::iter::once(0).chain(sizes.iter().scan(0, |total, size| {
+        *total += size;
+        Some(*total)
+    }));
+    for budget in budgets {
+        let base = config();
+        let tuning = base
+            .index_operation_queue()
+            .with_eventual_search_budget_for_tests(budget);
+        let reopened = base.with_index_operation_queue_tuning(tuning);
+        let db = open("build-eventual-budgets", Arc::clone(&store), reopened).await;
+        assert_eq!(
+            queue(&db, QueueFamily::Vector)
+                .await
+                .map_or(0, |queue| queue.operations().len()),
+            sizes.len(),
+            "publication stays paused"
+        );
+        for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+            assert_exact_vectors(&db, &state, consistency).await;
+            let label = format!("{consistency:?} search within {budget}");
+            let moved = vector_search(&db, [-50.0, -50.0], 1, Some(far), consistency).await;
+            assert_eq!(
+                moved
+                    .iter()
+                    .map(|(id, bits)| (*id, f64::from_bits(*bits)))
+                    .collect::<Vec<_>>(),
+                [(ids[100], 0.0)],
+                "{label} finds the move"
+            );
+            assert!(
+                !vector_search(&db, [50.0, 50.0], 8, Some("a"), consistency)
+                    .await
+                    .iter()
+                    .any(|(id, _)| *id == ids[100]),
+                "{label} shows the moved document at its first update"
+            );
+        }
+        db.close().await.unwrap();
+    }
+}
+
 async fn discard_all(db: &HelixDB, target: QueueTarget) -> u64 {
     let publisher = db.index_queue_publisher().unwrap();
     let mut discarded = 0;
@@ -985,7 +1068,63 @@ async fn dropping_an_index_discards_its_queued_operations_even_after_restart() {
     assert!(db.inner_db().get(target.key()).await.unwrap().is_none());
     let stats = db.index_operation_queue_stats();
     assert_eq!(stats.discarded_operations, 5);
-    assert_eq!(stats.queue_reads, 1, "the discard read is counted");
+    assert_eq!(
+        stats.queue_reads, 2,
+        "the discard read and the read that finds the queue empty are counted"
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_queue_retained_before_its_index_drops_is_discarded_and_never_published() {
+    let db = open("drop-retained", Arc::new(InMemory::new()), config()).await;
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    let target = target(&db, QueueFamily::Vector).await;
+    for index in 0..5_u8 {
+        add(&db, [f32::from(index), 1.0], "doc", Some("a")).await;
+    }
+    // One operation per batch, so the first commit retains the other four.
+    let operations = queue(&db, QueueFamily::Vector)
+        .await
+        .unwrap()
+        .into_operations();
+    let narrow = publisher_with_limits(
+        &db,
+        batch_limits(operations[0].retained_bytes(), 32_768),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 1,
+            entities: 1
+        }
+    );
+    assert!(db.index_queue_store().retained().retained_bytes() > 0);
+
+    // The retained remainder belongs to a generation that retires before the
+    // next attempt: that attempt drops it and discards from storage.
+    let drop_operation = drop_index(&db, vector_spec()).await.unwrap();
+    assert_eq!(wait_terminal(&db, &drop_operation).await, "succeeded");
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Discarded { operations: 4 }
+    );
+    assert_eq!(db.index_queue_store().retained().retained_bytes(), 0);
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Empty
+    );
+    assert_eq!(
+        narrow
+            .metrics()
+            .published_operations
+            .load(Ordering::Relaxed),
+        1
+    );
     db.close().await.unwrap();
 }
 
@@ -2126,7 +2265,8 @@ async fn blocked_build_admits_removing_an_entity_its_first_write_left_oversized(
         Arc::clone(&store),
         tight(
             IndexOperationQueueTuning::default()
-                .with_max_retained_bytes(NonZeroU64::new(resident_bytes * 3 / 2).unwrap()),
+                .with_max_retained_bytes(NonZeroU64::new(resident_bytes * 3 / 2).unwrap())
+                .unwrap(),
         ),
     )
     .await;

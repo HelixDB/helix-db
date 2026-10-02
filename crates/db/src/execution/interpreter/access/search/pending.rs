@@ -2,9 +2,16 @@
 //!
 //! One pinned request view supplies the physical index, the outstanding
 //! operation queue, and (for text) indexed-entity statistics, so an overlay
-//! never mixes snapshots. Outstanding operations deduplicate to each entity's
-//! latest state in that view; historical payloads are never searched. Write
-//! transactions read the queue through their serializable transaction,
+//! never mixes snapshots. A search only ever sees a pending entity at its
+//! latest state in that view, never at an earlier state of its chain: a build
+//! or publication may already have written the latest state physically, and
+//! an earlier one would hide it. Strong searches select every pending entity;
+//! eventual searches select the oldest pending entities whose latest
+//! operations fit their budget and leave the rest to their physical
+//! representation. Only decoding and searching follow that budget; reading
+//! the queue still follows the backlog (see
+//! [`crate::index_lifecycle::queue::storage::QueueStore::read_latest`]).
+//! Write transactions read the queue through their serializable transaction,
 //! additionally overlay their own uncommitted changes from the write context,
 //! and always search strongly. No publication clears the physical results
 //! their own changes supersede, so those never count toward the suppression
@@ -20,10 +27,9 @@ use roaring::RoaringTreemap;
 use super::*;
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue::{
-    OperationQueue, QueueFamily, QueuedOperation, QueuedPayload,
+    LatestOperations, QueueFamily, QueuedPayload,
 };
 use crate::index_lifecycle::queue::producer::PendingEntityState;
-use crate::index_lifecycle::queue::storage::StoredQueue;
 use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::work::TextPartition;
 use crate::index_lifecycle::IndexIdentity;
@@ -52,8 +58,9 @@ enum SelectionConsistency {
     /// write transaction changed itself, which no publication clears; it is
     /// empty for read requests.
     Strong { local: RoaringTreemap },
-    /// Complete committed entities within the eventual search budget. Only
-    /// read requests search eventually.
+    /// The oldest committed pending entities whose latest operations fit
+    /// the eventual search budget, each at that latest state. Only read
+    /// requests search eventually.
     Eventual,
 }
 
@@ -201,13 +208,23 @@ impl<'db> ExecutionContext<'db> {
     /// Selects pending entities for one index search, or `None` when none
     /// is pending or no queued publication is configured.
     ///
+    /// Every selected entity is searched at its latest state in the view.
     /// Strong search selects every pending entity. Eventual search selects
-    /// complete entities in queue order until the next would exceed the
-    /// per-search source-input budget; unselected entities keep their stale
-    /// physical representation until published. An eventual search may
-    /// shrink its selection further to stay within the suppression limit
-    /// (see [`PendingSelection::yield_to_suppression_limit`]). Write
-    /// transactions are always strong and add their own uncommitted changes.
+    /// entities in the order of their oldest pending operation until the
+    /// next one's latest operation would exceed the per-search source-input
+    /// budget; unselected entities keep their physical representation, stale
+    /// or not, until published, and an entity is never selected at an
+    /// earlier state, which could be older than that representation. The
+    /// budget bounds decoding and searching, not the queue read: the map
+    /// layout fetches its whole value, and while merge operands are pending
+    /// above its base SlateDB resolves them against all of it, validating
+    /// every record, so that read costs the backlog and fails on a corrupt
+    /// record the budget never selects (see
+    /// [`crate::index_lifecycle::queue::storage::QueueStore::read_latest`]).
+    /// An eventual search may shrink its selection further to stay within
+    /// the suppression limit (see
+    /// [`PendingSelection::yield_to_suppression_limit`]). Write transactions
+    /// are always strong and add their own uncommitted changes.
     ///
     /// A write transaction reads the queue through its serializable
     /// transaction, so the searched generation's queue becomes a read
@@ -220,7 +237,7 @@ impl<'db> ExecutionContext<'db> {
         identity: &IndexIdentity,
         family: QueueFamily,
     ) -> Result<Option<PendingSelection>> {
-        let (target, stored, consistency) = if let Some(active) = self.active_write_tx() {
+        let (target, latest, consistency) = if let Some(active) = self.active_write_tx() {
             let Some(handle) = crate::index_lifecycle::repository::load_active_handle(
                 &active.txn,
                 self.tenant_scope,
@@ -232,12 +249,12 @@ impl<'db> ExecutionContext<'db> {
             };
             let target =
                 QueueTarget::new(self.tenant_scope, handle.index_id(), handle.generation());
-            let stored = self
+            let latest = self
                 .db
                 .index_queue_store()
-                .read(&active.txn, target)
+                .read_latest(&active.txn, target, u64::MAX)
                 .await?;
-            (target, stored, SearchConsistency::Strong)
+            (target, latest, SearchConsistency::Strong)
         } else if let Some(view) = self.request_read_view() {
             let Some(handle) = crate::index_lifecycle::repository::load_active_handle(
                 view,
@@ -250,32 +267,40 @@ impl<'db> ExecutionContext<'db> {
             };
             let target =
                 QueueTarget::new(self.tenant_scope, handle.index_id(), handle.generation());
-            let stored = self.db.index_queue_store().read(view, target).await?;
-            (target, stored, self.search_consistency)
+            let budget = match self.search_consistency {
+                SearchConsistency::Strong => u64::MAX,
+                SearchConsistency::Eventual => self
+                    .db
+                    .config()
+                    .db()
+                    .index_operation_queue()
+                    .eventual_search_budget(),
+            };
+            let latest = self
+                .db
+                .index_queue_store()
+                .read_latest(view, target, budget)
+                .await?;
+            (target, latest, self.search_consistency)
         } else {
             return Ok(None);
         };
-        let queue = stored.map(StoredQueue::into_queue);
-        if let Some(queue) = &queue
-            && queue.family() != family
+        if let Some(latest) = &latest
+            && latest.family() != family
         {
             return Err(HelixDbError::IndexCatalogCorruption(
                 "search overlay read another family's operation queue".to_string(),
             ));
         }
-        let budget = match consistency {
-            SearchConsistency::Strong => u64::MAX,
-            SearchConsistency::Eventual => self
-                .db
-                .config()
-                .db()
-                .index_operation_queue()
-                .eventual_search_budget(),
-        };
-        let entities = select_latest(
-            queue.as_ref().map_or(&[][..], OperationQueue::operations),
-            budget,
-        );
+        let entities = latest
+            .map(LatestOperations::into_operations)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|operation| PendingEntity {
+                entity: operation.entity(),
+                latest: latest_value(operation.payload()),
+            })
+            .collect();
         let selection = match self.active_write_tx() {
             Some(active) => PendingSelection::overlaid(
                 target,
@@ -289,33 +314,6 @@ impl<'db> ExecutionContext<'db> {
         };
         Ok((!selection.entities.is_empty()).then_some(selection))
     }
-}
-
-/// Deduplicates queue operations to each entity's latest state and selects
-/// complete entities in queue order within `budget` source-input bytes.
-fn select_latest(operations: &[QueuedOperation], budget: u64) -> Vec<PendingEntity> {
-    let mut order = Vec::new();
-    let mut latest: HashMap<IndexEntity, &QueuedOperation> = HashMap::new();
-    for operation in operations {
-        if latest.insert(operation.entity(), operation).is_none() {
-            order.push(operation.entity());
-        }
-    }
-    let mut selected = Vec::new();
-    let mut remaining = budget;
-    for entity in order {
-        let operation = latest[&entity];
-        let cost = operation.retained_bytes();
-        if cost > remaining {
-            break;
-        }
-        remaining -= cost;
-        selected.push(PendingEntity {
-            entity,
-            latest: latest_value(operation.payload()),
-        });
-    }
-    selected
 }
 
 fn latest_value(payload: &QueuedPayload) -> Option<(TextPartition, PendingValue)> {

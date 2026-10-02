@@ -1,25 +1,36 @@
 //! Queue contracts against real SlateDB transactions, flushes, and compaction.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::BoxStream;
 use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::{
+    path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    Result as ObjectStoreResult,
+};
 use slatedb::{
     compactor, config, Db, IsolationLevel, MergeOperator, MergeOperatorError, MergeResult,
 };
 
 use bytes::Bytes;
 
-use crate::encoding::v2::keys::scope::DataScope;
-use crate::encoding::v2::keys::{IndexEntity, IndexOperationQueueKey, ManagedIndexKey, ScopedKey};
+use super::storage::QueueStore;
+use super::QueueTarget;
+use crate::config::QueueLayout;
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
+use crate::encoding::v2::keys::{
+    IndexEntity, IndexOperationQueueKey, IndexOperationRowKey, ManagedIndexKey, ScopedKey,
+};
 use crate::encoding::v2::values::indexes::operation_queue::{
-    merge_partial, merge_with_base, OperationQueue, QueueFamily, QueueMergeResult, QueueOperand,
+    merge_with_base, OperationQueue, QueueFamily, QueueMergeResult, QueueOperand, QueueRow,
     QueuedOperation, QueuedOperationId, QueuedPayload, QueuedTextPayload, QueuedTextReplacement,
 };
 use crate::index_lifecycle::work::TextPartition;
 use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
-use crate::merge_operator::HelixMergeOperator;
+use crate::merge_operator::{HelixMergeOperator, QueueMerges};
 
 fn id(value: u128) -> QueuedOperationId {
     QueuedOperationId::try_from_u128(value).expect("test operation IDs keep bit 127 clear")
@@ -54,7 +65,7 @@ const PATH: &str = "operation-queue-storage";
 
 fn queue_key() -> Bytes {
     ManagedIndexKey::Data {
-        scope: DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(0x51)),
+        scope: DataScope::Tenant(TenantId::from_u128(0x51)),
         kind: ScopedKey::IndexOperationQueue(IndexOperationQueueKey {
             index_id: IndexId::new(3).unwrap(),
             generation: IndexGenerationId::new(1).unwrap(),
@@ -569,107 +580,338 @@ async fn sorted_runs(admin: &slatedb::admin::Admin) -> Vec<u32> {
     runs
 }
 
-/// Resolves `operands` over `base` and returns the retained IDs in order.
-fn resolved_ids(base: Option<&Bytes>, operands: &[Bytes]) -> Vec<u128> {
-    match merge_with_base(base.map(Bytes::as_ref), operands).expect("operands resolve") {
-        QueueMergeResult::Value(value) => ids_of(Some(
-            &OperationQueue::decode(&value).expect("resolved queue decodes"),
-        )),
-        QueueMergeResult::Empty => Vec::new(),
+#[tokio::test]
+async fn acknowledged_removals_stay_bounded_above_an_uncompacted_bottom_run() {
+    // Only this database counts here, so parallel tests cannot move the costs.
+    static MERGES: QueueMerges = QueueMerges::new();
+    const LIVE: u128 = 1;
+    const ROUNDS: u128 = 20;
+    const PER_ROUND: u128 = 500;
+    // Enqueued just before the midway snapshot and acknowledged after it, so
+    // that snapshot provably retains a version the upper runs superseded.
+    const SPLIT: u128 = LIVE + ROUNDS * PER_ROUND + 1;
+    let store = Arc::new(InMemory::new());
+    let db = Db::builder(PATH, store.clone())
+        .with_settings(manual_compaction_settings())
+        .with_merge_operator(Arc::new(HelixMergeOperator::with_queue_merges(&MERGES)))
+        .build()
+        .await
+        .unwrap();
+    let admin = slatedb::admin::Admin::builder(PATH, store.clone()).build();
+
+    flushed_commit(&db, vec![enqueue(&[text_operation(LIVE, 1, Some("live"))])]).await;
+    compact_l0(&admin, 0).await;
+    let mut snapshots = vec![db.snapshot().await.unwrap()];
+    for round in 0..ROUNDS {
+        let ids = (0..PER_ROUND)
+            .map(|offset| LIVE + 1 + round * PER_ROUND + offset)
+            .collect::<Vec<_>>();
+        let operations = ids
+            .iter()
+            .map(|&operation| {
+                text_operation(
+                    operation,
+                    u64::try_from(operation).unwrap(),
+                    Some("acknowledged"),
+                )
+            })
+            .collect::<Vec<_>>();
+        commit(&db, vec![enqueue(&operations)]).await;
+        let mut acknowledged = ids;
+        if round == ROUNDS / 2 + 1 {
+            acknowledged.push(SPLIT);
+        }
+        flushed_commit(&db, vec![acknowledge(&acknowledged)]).await;
+        // Every round composes into SR1; SR0 keeps the only base.
+        if round == 0 {
+            compact_l0(&admin, 1).await;
+        } else {
+            compact_l0(&admin, 2).await;
+            submit_compaction(
+                &admin,
+                vec![
+                    compactor::SourceId::SortedRun(2),
+                    compactor::SourceId::SortedRun(1),
+                ],
+                1,
+            )
+            .await;
+        }
+        if round == ROUNDS / 2 {
+            commit(
+                &db,
+                vec![enqueue(&[text_operation(SPLIT, 0, Some("split"))])],
+            )
+            .await;
+            snapshots.push(db.snapshot().await.unwrap());
+        }
+    }
+    assert_eq!(sorted_runs(&admin).await, vec![0, 1]);
+    assert_eq!(
+        queued_ids(snapshots[1].as_ref()).await,
+        vec![LIVE, SPLIT],
+        "the midway snapshot still pins its version across the compactions"
+    );
+
+    let before = MERGES.stats();
+    assert_eq!(queued_ids(&db).await, vec![LIVE]);
+    let read = MERGES.stats();
+    assert_eq!(
+        read.resolved.merges - before.resolved.merges,
+        1,
+        "the read resolves the upper run against SR0's base"
+    );
+    let read_cost = read.resolved.input_bytes - before.resolved.input_bytes;
+    assert!(
+        read_cost < 4 * 1024,
+        "reading a one-operation queue resolved {read_cost} bytes after {} acknowledgements",
+        ROUNDS * PER_ROUND + 1
+    );
+
+    // Released snapshots stop pinning anything: once a flush publishes that,
+    // compacting everything into the bottom run leaves only the live value.
+    drop(snapshots);
+    let ids = (0..PER_ROUND)
+        .map(|offset| SPLIT + 1 + offset)
+        .collect::<Vec<_>>();
+    let operations = ids
+        .iter()
+        .map(|&operation| {
+            text_operation(
+                operation,
+                u64::try_from(operation).unwrap(),
+                Some("acknowledged"),
+            )
+        })
+        .collect::<Vec<_>>();
+    commit(&db, vec![enqueue(&operations)]).await;
+    flushed_commit(&db, vec![acknowledge(&ids)]).await;
+    let manifest = admin.read_manifest(None).await.unwrap().unwrap();
+    submit_compaction(
+        &admin,
+        manifest
+            .l0()
+            .iter()
+            .map(|sst| compactor::SourceId::SstView(sst.id))
+            .chain([
+                compactor::SourceId::SortedRun(1),
+                compactor::SourceId::SortedRun(0),
+            ])
+            .collect(),
+        0,
+    )
+    .await;
+    assert_eq!(sorted_runs(&admin).await, vec![0]);
+    let live = match merge_with_base(
+        None,
+        std::slice::from_ref(enqueue(&[text_operation(LIVE, 1, Some("live"))]).bytes()),
+    )
+    .unwrap()
+    {
+        QueueMergeResult::Value(value) => value,
+        QueueMergeResult::Empty => unreachable!("one operation is live"),
+    };
+    // A reader built now starts from the committed manifest; the writer
+    // would see it only after its next manifest poll. Every commit is
+    // flushed, so the compacted runs hold the whole history.
+    let reader = slatedb::DbReader::builder(PATH, store.clone())
+        .with_options(config::DbReaderOptions {
+            skip_wal_replay: true,
+            ..Default::default()
+        })
+        .with_merge_operator(Arc::new(HelixMergeOperator::with_queue_merges(&MERGES)))
+        .build()
+        .await
+        .unwrap();
+    let before = MERGES.stats();
+    let stored = reader.get(queue_key()).await.unwrap().unwrap();
+    let read = MERGES.stats();
+    reader.close().await.unwrap();
+    assert_eq!(stored, live, "storage keeps exactly the live operation");
+    let read_cost = (read.resolved.input_bytes - before.resolved.input_bytes)
+        + (read.partial.input_bytes - before.partial.input_bytes);
+    assert!(
+        read_cost <= live.len() as u64,
+        "a fully compacted read costs {read_cost} bytes for {} live bytes",
+        live.len()
+    );
+    db.close().await.unwrap();
+}
+
+/// WAL replay re-applies only commits above the flushed L0 frontier, so an
+/// acknowledgement replayed above its flushed enqueue meets the only copy of
+/// that insert: an upper compaction cancels the pair instead of carrying the
+/// removal until the bottom run, and nothing resurrects across the restart.
+#[tokio::test]
+async fn wal_replay_and_upper_compaction_cancel_acknowledged_enqueues() {
+    static MERGES: QueueMerges = QueueMerges::new();
+    let store = Arc::new(InMemory::new());
+    let open = || {
+        Db::builder(PATH, store.clone())
+            .with_settings(manual_compaction_settings())
+            .with_merge_operator(Arc::new(HelixMergeOperator::with_queue_merges(&MERGES)))
+            .build()
+    };
+    let base = enqueue(&[text_operation(1, 1, Some("base"))]);
+    let live = enqueue(&[text_operation(4, 4, Some("live"))]);
+
+    let db = open().await.unwrap();
+    let admin = slatedb::admin::Admin::builder(PATH, store.clone()).build();
+    flushed_commit(&db, vec![base.clone()]).await;
+    compact_l0(&admin, 0).await;
+    flushed_commit(&db, vec![enqueue(&[text_operation(2, 2, Some("flushed"))])]).await;
+    compact_l0(&admin, 1).await;
+    // Only the WAL holds the acknowledgement of 2 and a pair that cancels.
+    commit(&db, vec![acknowledge(&[2])]).await;
+    commit(
+        &db,
+        vec![enqueue(&[text_operation(3, 3, Some("cancelled"))])],
+    )
+    .await;
+    commit(&db, vec![acknowledge(&[3])]).await;
+    commit(&db, vec![live.clone()]).await;
+    db.close_with_options(
+        config::CloseOptions::default().with_flush_type(Some(config::FlushType::Wal)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(compacted_ids(&store).await, vec![1, 2]);
+
+    let db = open().await.unwrap();
+    assert_eq!(queued_ids(&db).await, vec![1, 4]);
+    db.flush_with_options(config::FlushOptions {
+        flush_type: config::FlushType::MemTable,
+    })
+    .await
+    .unwrap();
+    compact_l0(&admin, 2).await;
+    submit_compaction(
+        &admin,
+        vec![
+            compactor::SourceId::SortedRun(2),
+            compactor::SourceId::SortedRun(1),
+        ],
+        1,
+    )
+    .await;
+    assert_eq!(sorted_runs(&admin).await, vec![0, 1]);
+    assert_eq!(compacted_ids(&store).await, vec![1, 4]);
+    // The upper run keeps exactly the live insert: a read of the compacted
+    // runs folds that one operand and resolves SR0's base against it. A
+    // reader built now starts from the committed manifest, whereas the
+    // writer may still read the uncompacted runs, whose read folds SR1's
+    // enqueue and the removal too before resolving the same input.
+    let reader = slatedb::DbReader::builder(PATH, store.clone())
+        .with_db_cache_disabled()
+        .with_options(config::DbReaderOptions {
+            skip_wal_replay: true,
+            ..Default::default()
+        })
+        .with_merge_operator(Arc::new(HelixMergeOperator::with_queue_merges(&MERGES)))
+        .build()
+        .await
+        .unwrap();
+    let before = MERGES.stats();
+    assert_eq!(queued_ids(&reader).await, vec![1, 4]);
+    let read = MERGES.stats();
+    reader.close().await.unwrap();
+    assert_eq!(
+        (
+            read.partial.input_bytes - before.partial.input_bytes,
+            read.resolved.input_bytes - before.resolved.input_bytes,
+        ),
+        (
+            live.bytes().len() as u64,
+            (base.bytes().len() + live.bytes().len()) as u64
+        ),
+        "the compacted upper run holds one insert and no removal"
+    );
+    assert_eq!(queued_ids(&db).await, vec![1, 4]);
+    db.close().await.unwrap();
+}
+
+/// Object store over a shared in-memory store that can hide every WAL object
+/// from its user, so a reader stops replaying the writer's WAL.
+#[derive(Debug)]
+struct WalBlindStore {
+    inner: Arc<InMemory>,
+    blind: AtomicBool,
+}
+
+impl std::fmt::Display for WalBlindStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("wal-blind-memory")
     }
 }
 
-/// A replay keeps its sequence number, so it always composes below the
-/// acknowledgement that follows its original. Re-applying the same bytes
-/// above an acknowledgement is not a replay but an ID reuse, which the reset
-/// semantics define (`acknowledge_then_reenqueue_resets_even_above_an_unresolved_base`
-/// keeps that contract).
+#[async_trait::async_trait]
+impl ObjectStore for WalBlindStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> ObjectStoreResult<PutResult> {
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
+        if self.blind.load(Ordering::SeqCst) && location.as_ref().contains("/wal/") {
+            return Err(slatedb::object_store::Error::NotFound {
+                path: location.to_string(),
+                source: "the WAL is hidden from this store".into(),
+            });
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, ObjectStoreResult<Path>>,
+    ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> ObjectStoreResult<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// A reader that replayed an enqueue from the WAL drops that copy once the
+/// writer's flush and compaction cancel the enqueue against its
+/// acknowledgement.
+///
+/// Cancellation is exact only while no view holds two copies of one
+/// committed operand (see the algebra's cancellation contract). Here the
+/// reader holds the enqueue in a replayed memtable and never sees the
+/// acknowledgement's WAL, so the acknowledgement reaches it only inside the
+/// compacted run where the pair already cancelled. Installing that manifest
+/// must drop the replayed copy, which SlateDB does by filtering replayed
+/// memtables at the manifest's last L0 sequence; a copy kept beside the run
+/// would resurrect the acknowledged operation.
 #[tokio::test]
-async fn replayed_operands_never_resurrect_acknowledged_operations() {
-    let replayed_operation = || text_operation(2, 2, Some("acknowledged"));
-    let before = enqueue(&[text_operation(1, 1, Some("before"))])
-        .bytes()
-        .clone();
-    let replayed = enqueue(&[replayed_operation()]).bytes().clone();
-    let after = enqueue(&[text_operation(3, 3, Some("after"))])
-        .bytes()
-        .clone();
-    let ack = acknowledge(&[2]).bytes().clone();
-    assert_eq!(
-        enqueue(&[replayed_operation()]).bytes(),
-        &replayed,
-        "a replay carries identical operand bytes"
-    );
-
-    // The enqueue and its acknowledgement compose without any base, as an
-    // upper compaction does; the output stays a valid merge input wherever
-    // it lands, even if it composes to no records at all.
-    let partial = merge_partial(None, &[replayed.clone(), ack.clone()]).unwrap();
-    assert_eq!(
-        merge_with_base(None, std::slice::from_ref(&partial)).unwrap(),
-        QueueMergeResult::Empty
-    );
-    assert_eq!(
-        resolved_ids(
-            None,
-            &[merge_partial(Some(&partial), std::slice::from_ref(&after)).unwrap()]
-        ),
-        vec![3]
-    );
-    assert_eq!(
-        resolved_ids(None, &[before.clone(), partial.clone(), after.clone()]),
-        vec![1, 3]
-    );
-
-    // The replay as the existing value under that partial output ...
-    let under = merge_partial(Some(&replayed), std::slice::from_ref(&partial)).unwrap();
-    assert_eq!(
-        resolved_ids(None, &[before.clone(), under, after.clone()]),
-        vec![1, 3]
-    );
-    // ... duplicated inside one operand set ...
-    let duplicated =
-        merge_partial(None, &[replayed.clone(), replayed.clone(), ack.clone()]).unwrap();
-    assert_eq!(
-        resolved_ids(None, &[before.clone(), duplicated, after.clone()]),
-        vec![1, 3]
-    );
-    // ... in two partial operand sets, each folded before their outputs
-    // resolve or compose ...
-    let lower = merge_partial(None, &[before.clone(), replayed.clone()]).unwrap();
-    let upper = merge_partial(None, &[replayed.clone(), ack.clone(), after.clone()]).unwrap();
-    assert_eq!(
-        resolved_ids(None, &[lower.clone(), upper.clone()]),
-        vec![1, 3]
-    );
-    assert_eq!(
-        resolved_ids(
-            None,
-            &[merge_partial(Some(&lower), std::slice::from_ref(&upper)).unwrap()]
-        ),
-        vec![1, 3]
-    );
-    // ... and inside a resolved base below the partial output.
-    let QueueMergeResult::Value(base) =
-        merge_with_base(None, &[before.clone(), replayed.clone()]).unwrap()
-    else {
-        panic!("two operations are outstanding");
-    };
-    assert_eq!(resolved_ids(None, std::slice::from_ref(&base)), vec![1, 2]);
-    assert_eq!(
-        resolved_ids(Some(&base), &[partial.clone(), after.clone()]),
-        vec![1, 3]
-    );
-    assert_eq!(
-        resolved_ids(
-            Some(&base),
-            &[merge_partial(None, &[partial, after]).unwrap()]
-        ),
-        vec![1, 3]
-    );
-
-    // Real storage: SR0 holds the base, SR1 the original enqueue, SR2 the
-    // replay composed with its acknowledgement and no base, L0 a later op.
+async fn a_replaying_reader_drops_an_enqueue_its_new_manifest_cancelled() {
     let store = Arc::new(InMemory::new());
     let db = Db::builder(PATH, store.clone())
         .with_settings(manual_compaction_settings())
@@ -678,42 +920,303 @@ async fn replayed_operands_never_resurrect_acknowledged_operations() {
         .await
         .unwrap();
     let admin = slatedb::admin::Admin::builder(PATH, store.clone()).build();
-    flushed_commit(&db, vec![enqueue(&[text_operation(1, 1, Some("before"))])]).await;
+    flushed_commit(&db, vec![enqueue(&[text_operation(1, 1, Some("base"))])]).await;
     compact_l0(&admin, 0).await;
-    commit(&db, vec![enqueue(&[replayed_operation()])]).await;
-    flushed_commit(&db, vec![enqueue(&[text_operation(4, 4, Some("between"))])]).await;
-    compact_l0(&admin, 1).await;
-    commit(&db, vec![enqueue(&[replayed_operation()])]).await;
-    flushed_commit(&db, vec![acknowledge(&[2])]).await;
-    compact_l0(&admin, 2).await;
-    flushed_commit(&db, vec![enqueue(&[text_operation(3, 3, Some("after"))])]).await;
-    assert_eq!(sorted_runs(&admin).await, vec![0, 1, 2]);
-    assert_eq!(queued_ids(&db).await, vec![1, 4, 3]);
+    // Only the WAL and the writer's memtable hold the enqueue of 2.
+    commit(
+        &db,
+        vec![enqueue(&[text_operation(2, 2, Some("replayed"))])],
+    )
+    .await;
 
-    compact_l0(&admin, 3).await;
-    submit_compaction(
-        &admin,
-        vec![
-            compactor::SourceId::SortedRun(3),
-            compactor::SourceId::SortedRun(2),
-            compactor::SourceId::SortedRun(1),
-        ],
-        1,
-    )
-    .await;
+    let reader_store = Arc::new(WalBlindStore {
+        inner: Arc::clone(&store),
+        blind: AtomicBool::new(false),
+    });
+    // A hidden WAL looks truncated once the manifest's replay boundary
+    // passes the last WAL the reader finds: a reader following the latest
+    // manifest logs that and keeps polling, where a checkpointing one would
+    // stop.
+    let reader =
+        slatedb::DbReader::builder(PATH, Arc::clone(&reader_store) as Arc<dyn ObjectStore>)
+            .with_reader_mode(slatedb::DbReaderMode::FollowLatest)
+            .with_db_cache_disabled()
+            .with_options(config::DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(10),
+                ..Default::default()
+            })
+            .with_merge_operator(Arc::new(HelixMergeOperator::new()))
+            .build()
+            .await
+            .unwrap();
+    assert!(reader.manifest().l0().is_empty(), "2 was never flushed");
+    assert_eq!(queued_ids(&reader).await, vec![1, 2], "2 is replayed");
+
+    // From here on the reader sees no WAL, so it never replays the
+    // acknowledgement.
+    reader_store.blind.store(true, Ordering::SeqCst);
+    commit(&db, vec![acknowledge(&[2])]).await;
+    assert_eq!(queued_ids(&db).await, vec![1]);
+    assert_eq!(queued_ids(&reader).await, vec![1, 2]);
+    db.flush_with_options(config::FlushOptions {
+        flush_type: config::FlushType::MemTable,
+    })
+    .await
+    .unwrap();
+    compact_l0(&admin, 1).await;
     assert_eq!(sorted_runs(&admin).await, vec![0, 1]);
-    assert_eq!(queued_ids(&db).await, vec![1, 4, 3]);
-    assert_eq!(compacted_ids(&store).await, vec![1, 4, 3]);
-    submit_compaction(
-        &admin,
-        vec![
-            compactor::SourceId::SortedRun(1),
-            compactor::SourceId::SortedRun(0),
-        ],
-        0,
+    assert_eq!(compacted_ids(&store).await, vec![1], "the pair cancelled");
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let installed = reader.manifest();
+            if installed.l0().is_empty() && installed.compacted().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reader installs the compacted manifest");
+    assert_eq!(
+        queued_ids(&reader).await,
+        vec![1],
+        "the replayed enqueue of 2 is not resurrected"
+    );
+    reader.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_queues_keep_each_targets_unacknowledged_operations() {
+    let db = open(
+        Arc::new(InMemory::new()),
+        Arc::new(HelixMergeOperator::new()),
     )
     .await;
-    assert_eq!(compacted_ids(&store).await, vec![1, 4, 3]);
-    assert_eq!(queued_ids(&db).await, vec![1, 4, 3]);
+    commit(
+        &db,
+        vec![enqueue(&[
+            text_operation(1, 1, Some("a")),
+            text_operation(2, 2, Some("b")),
+        ])],
+    )
+    .await;
+    let target = QueueTarget::new(
+        DataScope::Tenant(TenantId::from_u128(0x51)),
+        IndexId::new(3).unwrap(),
+        IndexGenerationId::new(1).unwrap(),
+    );
+    assert_eq!(target.key(), queue_key());
+    let other = QueueTarget::new(
+        target.scope,
+        target.index_id,
+        IndexGenerationId::new(2).unwrap(),
+    );
+    let one = text_operation(2, 2, Some("b")).retained_bytes();
+    let both = one + text_operation(1, 1, Some("a")).retained_bytes();
+    let store = QueueStore::new(QueueLayout::Map, 1 << 20);
+    let retained = store.retained();
+    let stored = store.read(&db, target).await.unwrap().unwrap();
+
+    // Nothing remains once every operation read is acknowledged.
+    retained.retain(target, &stored, &[id(1), id(2)]);
+    assert!(retained.take(target).is_none());
+    // Every target keeps its own remainder, whatever the others hold.
+    retained.retain(target, &stored, &[]);
+    retained.retain(other, &stored, &[id(1)]);
+    assert_eq!(retained.retained_bytes(), both + one);
+    let taken = retained.take(other).expect("the remainder was retained");
+    assert_eq!(ids_of(Some(taken.queue())), vec![2]);
+    assert_eq!(
+        taken.encoded_bytes(),
+        0,
+        "a retained queue reads no storage"
+    );
+    assert!(retained.take(other).is_none(), "a take removes the queue");
+    assert_eq!(retained.retained_bytes(), both);
+    let taken = retained.take(target).expect("the whole queue was retained");
+    assert_eq!(ids_of(Some(taken.queue())), vec![1, 2]);
+    assert_eq!(retained.retained_bytes(), 0);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+#[should_panic(expected = "an attempt retains only the queue it took")]
+async fn retaining_a_queue_that_was_not_taken_is_an_invariant_violation() {
+    let db = open(
+        Arc::new(InMemory::new()),
+        Arc::new(HelixMergeOperator::new()),
+    )
+    .await;
+    commit(&db, vec![enqueue(&[text_operation(1, 1, Some("a"))])]).await;
+    let target = QueueTarget::new(
+        DataScope::Tenant(TenantId::from_u128(0x51)),
+        IndexId::new(3).unwrap(),
+        IndexGenerationId::new(1).unwrap(),
+    );
+    let store = QueueStore::new(QueueLayout::Map, 1 << 20);
+    let stored = store.read(&db, target).await.unwrap().unwrap();
+    store.retained().retain(target, &stored, &[]);
+    store.retained().retain(target, &stored, &[]);
+}
+
+#[tokio::test]
+async fn latest_reads_of_rows_decode_only_the_operations_they_select() {
+    let db = open(
+        Arc::new(InMemory::new()),
+        Arc::new(HelixMergeOperator::new()),
+    )
+    .await;
+    let target = QueueTarget::new(
+        DataScope::Tenant(TenantId::from_u128(0x51)),
+        IndexId::new(3).unwrap(),
+        IndexGenerationId::new(1).unwrap(),
+    );
+    let operations = [
+        text_operation(1, 1, Some("a")),
+        text_operation(2, 2, Some("b")),
+        text_operation(3, 1, Some("c")),
+    ];
+    let one = operations[0].retained_bytes();
+    let store = QueueStore::new(QueueLayout::Rows, 1 << 20);
+    let row = |sequence| {
+        ManagedIndexKey::Data {
+            scope: target.scope,
+            kind: ScopedKey::IndexOperationRow(IndexOperationRowKey {
+                index_id: target.index_id,
+                generation: target.generation,
+                sequence,
+            }),
+        }
+        .to_bytes()
+    };
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    for (sequence, operation) in operations.iter().enumerate() {
+        transaction
+            .put(
+                row(u64::try_from(sequence).unwrap()),
+                QueueRow::encode(QueueFamily::Text, operation),
+            )
+            .unwrap();
+    }
+    // A fourth row whose entity is intact but whose payload is truncated.
+    let corrupt = QueueRow::encode(QueueFamily::Text, &text_operation(4, 4, Some("d")));
+    transaction
+        .put(row(3), corrupt.slice(..corrupt.len() - 1))
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let latest = |budget| {
+        let store = &store;
+        let db = &db;
+        async move {
+            store.read_latest(db, target, budget).await.map(|latest| {
+                latest.map_or_else(Vec::new, |latest| {
+                    latest
+                        .into_operations()
+                        .iter()
+                        .map(|operation| operation.id().get())
+                        .collect::<Vec<_>>()
+                })
+            })
+        }
+    };
+    // Entity 1 is selected at its latest operation, 3, or not at all.
+    assert_eq!(latest(one - 1).await.unwrap(), Vec::<u128>::new());
+    assert_eq!(latest(one).await.unwrap(), vec![3]);
+    assert_eq!(latest(2 * one).await.unwrap(), vec![3, 2]);
+    assert!(
+        latest(u64::MAX).await.is_err(),
+        "a read that selects the corrupt row decodes it"
+    );
+    assert!(store.read(&db, target).await.is_err());
+    db.close().await.unwrap();
+}
+
+/// Known limitation, pinned so that lifting it shows up here; not a contract.
+///
+/// A latest read's budget bounds what it decodes, not what SlateDB merges to
+/// produce the value. Once the queue is resolved in storage, a read merges
+/// nothing; while an operand is pending above it, which is the normal state
+/// of an index taking writes, every read resolves the whole queue whatever
+/// its budget. Bounding the merge needs a queue layout whose reads can stop
+/// at the budget; once one exists, assert that bound here instead.
+#[tokio::test]
+async fn known_limitation_a_latest_read_merges_the_whole_queue_below_a_pending_operand() {
+    // Only this database counts here, so parallel tests cannot move the costs.
+    static MERGES: QueueMerges = QueueMerges::new();
+    const BACKLOG: u64 = 1_000;
+    // Only submitted compactions run, so nothing resolves the pending operand.
+    let db = Db::builder(PATH, Arc::new(InMemory::new()))
+        .with_settings(manual_compaction_settings())
+        .with_merge_operator(Arc::new(HelixMergeOperator::with_queue_merges(&MERGES)))
+        .build()
+        .await
+        .unwrap();
+    let target = QueueTarget::new(
+        DataScope::Tenant(TenantId::from_u128(0x51)),
+        IndexId::new(3).unwrap(),
+        IndexGenerationId::new(1).unwrap(),
+    );
+    let store = QueueStore::new(QueueLayout::Map, 1 << 20);
+    let operations = (1..=BACKLOG)
+        .map(|entity| text_operation(u128::from(entity), entity, Some("backlog")))
+        .collect::<Vec<_>>();
+    let QueueMergeResult::Value(resolved) =
+        merge_with_base(None, std::slice::from_ref(enqueue(&operations).bytes())).unwrap()
+    else {
+        unreachable!("the backlog is outstanding");
+    };
+    // A resolved value in storage: the read merges nothing. The flush makes
+    // it a base that no flush folds the later operand into.
+    db.put(queue_key(), resolved.clone()).await.unwrap();
+    db.flush_with_options(config::FlushOptions {
+        flush_type: config::FlushType::MemTable,
+    })
+    .await
+    .unwrap();
+    let budget = operations[0].retained_bytes();
+    let merged = || {
+        let stats = MERGES.stats();
+        stats.partial.input_bytes + stats.resolved.input_bytes
+    };
+    let before = merged();
+    let latest = store
+        .read_latest(&db, target, budget)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.into_operations(), operations[..1]);
+    assert_eq!(merged() - before, 0, "a resolved value is read as stored");
+
+    // One pending operand: every read resolves the whole backlog.
+    commit(
+        &db,
+        vec![enqueue(&[text_operation(
+            u128::from(BACKLOG) + 1,
+            BACKLOG + 1,
+            Some("pending"),
+        )])],
+    )
+    .await;
+    for _ in 0..2 {
+        let before = merged();
+        let latest = store
+            .read_latest(&db, target, budget)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.into_operations(), operations[..1]);
+        let read = merged() - before;
+        assert!(
+            read >= resolved.len() as u64,
+            "a {budget}-byte latest read merged {read} bytes of a {}-byte queue",
+            resolved.len()
+        );
+    }
     db.close().await.unwrap();
 }

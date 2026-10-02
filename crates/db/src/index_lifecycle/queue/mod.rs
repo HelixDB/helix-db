@@ -93,8 +93,11 @@ pub struct IndexOperationQueueStats {
     pub blocked_attempts: u64,
     /// Operations of retired generations acknowledged without publication.
     pub discarded_operations: u64,
-    /// Queues read and decoded by publication, including retired-generation
-    /// discards and uncertain-commit reconciliation.
+    /// Storage reads of a generation queue by publication, including reads
+    /// that find it empty, retired-generation discards, and uncertain-commit
+    /// reconciliation. An attempt that continues from the queue its target's
+    /// previous commit left reads nothing, so draining a backlog reads it
+    /// once rather than once per batch.
     pub queue_reads: u64,
     /// Stored key and value bytes those reads returned.
     pub queue_read_bytes: u64,

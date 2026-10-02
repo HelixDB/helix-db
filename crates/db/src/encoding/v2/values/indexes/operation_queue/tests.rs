@@ -284,10 +284,6 @@ fn malformed_values_are_errors_not_empty_queues() {
     let mut trailing = valid.to_vec();
     trailing.push(0);
     cases.push(("trailing byte", trailing));
-    cases.push((
-        "no records",
-        raw_value(QueueFamily::Text, &[], &[]).to_vec(),
-    ));
     let mut mode = valid.to_vec();
     mode[HEADER_LEN + 2] = 0x03;
     cases.push(("unknown mode", mode));
@@ -571,6 +567,383 @@ fn reused_ids_keep_the_first_retained_bytes_in_every_grouping() {
     assert_eq!(ids_of(resolve(&[first.clone(), first]).as_ref()), vec![1]);
 }
 
+#[test]
+fn an_acknowledgement_cancels_its_own_enqueue_without_a_base() {
+    let enqueue = |operation: u128| {
+        QueueOperand::enqueue(&[text_operation(operation, 1, Some("x"))])
+            .unwrap()
+            .bytes()
+            .clone()
+    };
+    let ack = |ids: &[u128]| {
+        QueueOperand::acknowledge(QueueFamily::Text, ids.iter().copied().map(id))
+            .unwrap()
+            .bytes()
+            .clone()
+    };
+    // Rounds of enqueues and their acknowledgements composed with no base,
+    // as upper compactions and read batches fold them: nothing accumulates.
+    let rounds = (0..50_u128)
+        .flat_map(|round| [enqueue(round + 10), ack(&[round + 10])])
+        .collect::<Vec<_>>();
+    let partial = merge_partial(None, &rounds).unwrap();
+    assert_eq!(partial, raw_value(QueueFamily::Text, &[], &[]));
+    // An acknowledgement whose enqueue lies below keeps its removal, and a
+    // cancelled pair beside it adds nothing.
+    let below = merge_partial(None, &[enqueue(1), enqueue(2)]).unwrap();
+    let upper = merge_partial(None, &[ack(&[1]), enqueue(3), ack(&[3])]).unwrap();
+    assert_eq!(upper, raw_value(QueueFamily::Text, &[1], &[]));
+    assert_eq!(
+        ids_of(resolve(&[below.clone(), upper.clone()]).as_ref()),
+        vec![2]
+    );
+    assert_eq!(
+        ids_of(
+            resolve(&[merge_partial(Some(&below), std::slice::from_ref(&upper)).unwrap()]).as_ref()
+        ),
+        vec![2]
+    );
+    // A set also removed whatever it replaced below, so acknowledging it
+    // keeps that removal.
+    let reset = merge_partial(None, &[ack(&[1]), enqueue(1), ack(&[1])]).unwrap();
+    assert_eq!(reset, raw_value(QueueFamily::Text, &[1], &[]));
+    assert_eq!(ids_of(resolve(&[below, reset]).as_ref()), vec![2]);
+}
+
+#[test]
+fn the_retained_byte_ceiling_keeps_every_queue_value_within_a_u32_length() {
+    // A text deletion is the smallest operation; every other shape is larger.
+    assert_eq!(
+        text_operation(1, 0, None).retained_bytes(),
+        MIN_RETAINED_RECORD_LEN as u64
+    );
+    assert!(vector_operation(1, 0, None, None).retained_bytes() > MIN_RETAINED_RECORD_LEN as u64);
+    // The largest value a ceiling admits: a removal for each smallest
+    // operation of one full backlog, plus a second full backlog of records.
+    let largest_value = |ceiling: u64| {
+        MAX_VALUE_FRAMING_LEN as u64
+            + OPERATION_ID_LEN as u64 * (ceiling / MIN_RETAINED_RECORD_LEN as u64)
+            + ceiling
+    };
+    assert!(largest_value(MAX_RETAINED_BYTES) <= u64::from(u32::MAX));
+    // Exact up to one smallest operation.
+    assert!(
+        largest_value(MAX_RETAINED_BYTES + MIN_RETAINED_RECORD_LEN as u64) > u64::from(u32::MAX)
+    );
+}
+
+#[test]
+fn a_value_without_records_is_the_identity_of_composition() {
+    let empty = raw_value(QueueFamily::Text, &[], &[]);
+    let one = QueueOperand::enqueue(&[text_operation(1, 1, Some("a"))])
+        .unwrap()
+        .bytes()
+        .clone();
+    assert!(validate_operand(&empty).is_ok());
+    assert_eq!(
+        merge_with_base(None, std::slice::from_ref(&empty)).unwrap(),
+        QueueMergeResult::Empty
+    );
+    assert_eq!(
+        merge_partial(None, std::slice::from_ref(&empty)).unwrap(),
+        empty
+    );
+    for operands in [
+        vec![empty.clone(), one.clone()],
+        vec![one.clone(), empty.clone()],
+    ] {
+        assert_eq!(
+            merge_partial(None, &operands).unwrap(),
+            merge_partial(None, std::slice::from_ref(&one)).unwrap()
+        );
+        assert_eq!(ids_of(resolve(&operands).as_ref()), vec![1]);
+    }
+    let QueueMergeResult::Value(resolved) =
+        merge_with_base(Some(&one), std::slice::from_ref(&empty)).unwrap()
+    else {
+        panic!("the base operation remains");
+    };
+    assert_eq!(
+        ids_of(Some(&OperationQueue::decode(&resolved).unwrap())),
+        vec![1]
+    );
+    // A resolved empty queue is a tombstone, never a stored value.
+    assert!(OperationQueue::decode(&empty).is_err());
+    // Families still never mix through an empty value.
+    let vector = raw_value(QueueFamily::Vector, &[], &[]);
+    assert!(merge_partial(Some(&vector), std::slice::from_ref(&one)).is_err());
+}
+
+#[test]
+fn latest_decodes_select_each_entity_at_its_latest_operation_within_the_budget() {
+    // Entity 1 changes twice; its latest operation is the largest.
+    let operations = [
+        text_operation(1, 1, Some("first")),
+        text_operation(3, 3, None),
+        text_operation(2, 1, Some("a much longer latest state")),
+    ];
+    let [_, deleted, latest] = operations.clone();
+    let (deleted_bytes, latest_bytes) = (deleted.retained_bytes(), latest.retained_bytes());
+    assert!(operations[0].retained_bytes() < latest_bytes);
+    let QueueMergeResult::Value(value) = merge_with_base(
+        None,
+        std::slice::from_ref(QueueOperand::enqueue(&operations[..2]).unwrap().bytes()),
+    )
+    .unwrap() else {
+        panic!("two operations are outstanding");
+    };
+    let QueueMergeResult::Value(value) = merge_with_base(
+        Some(&value),
+        std::slice::from_ref(QueueOperand::enqueue(&operations[2..]).unwrap().bytes()),
+    )
+    .unwrap() else {
+        panic!("three operations are outstanding");
+    };
+    let selected = |value: &[u8], budget| {
+        LatestOperations::decode(value, budget)
+            .unwrap()
+            .map(LatestOperations::into_operations)
+    };
+    // Entity 1 is selected at its latest state or not at all, never at the
+    // first operation that alone would fit; entity 3 follows in first-seen
+    // order and is never selected ahead of it.
+    assert_eq!(selected(&value, latest_bytes - 1), None);
+    assert_eq!(selected(&value, latest_bytes), Some(vec![latest.clone()]));
+    assert_eq!(
+        selected(&value, latest_bytes + deleted_bytes - 1),
+        Some(vec![latest.clone()])
+    );
+    let both = Some(vec![latest.clone(), deleted.clone()]);
+    assert_eq!(selected(&value, latest_bytes + deleted_bytes), both);
+    assert_eq!(selected(&value, u64::MAX), both);
+    assert_eq!(
+        OperationQueue::decode(&value).unwrap().operations(),
+        operations.as_slice()
+    );
+
+    // Neither a superseded payload nor one past the budget is decoded; a
+    // budget that selects a corrupt payload, and a full decode, fail closed.
+    let corrupt_payload = |entity: u8| vec![0x01, entity, 0x7F, 0x7F];
+    let corrupt = raw_value(
+        QueueFamily::Text,
+        &[],
+        &[
+            (InsertMode::IfAbsent, 1, corrupt_payload(1)),
+            (InsertMode::IfAbsent, 3, text_body(3, "kept")),
+            (
+                InsertMode::IfAbsent,
+                2,
+                text_body(1, "a much longer latest state"),
+            ),
+            (
+                InsertMode::IfAbsent,
+                4,
+                [corrupt_payload(4), vec![0x7F; 96]].concat(),
+            ),
+        ],
+    );
+    let small = text_operation(3, 3, Some("kept")).retained_bytes();
+    assert_eq!(
+        selected(&corrupt, latest_bytes + small),
+        Some(vec![latest.clone(), text_operation(3, 3, Some("kept"))])
+    );
+    assert!(LatestOperations::decode(&corrupt, u64::MAX).is_err());
+    assert!(OperationQueue::decode(&corrupt).is_err());
+
+    // Entities are compared by their raw bytes and validated only once
+    // selected: an entity kind no body may name, a non-minimal ID, an ID
+    // that never terminates, and an empty body each fail only a budget that
+    // reaches them.
+    let body = text_body(1, "first");
+    let first = text_operation(1, 1, Some("first"));
+    let mut unknown_entity = body.clone();
+    unknown_entity[0] = 0x7F;
+    let non_minimal_id = [&[0x01_u8, 0x82, 0x00][..], &text_body(2, "second")[2..]].concat();
+    for (name, corrupt) in [
+        ("unknown entity", unknown_entity),
+        ("non-minimal ID", non_minimal_id),
+        ("unterminated ID", [vec![0x01], vec![0xFF; 12]].concat()),
+        ("empty body", Vec::new()),
+    ] {
+        let bytes = raw_value(
+            QueueFamily::Text,
+            &[],
+            &[
+                (InsertMode::IfAbsent, 1, body.clone()),
+                (InsertMode::IfAbsent, 2, corrupt),
+            ],
+        );
+        assert_eq!(selected(&bytes, 0), None, "{name}");
+        assert_eq!(
+            selected(&bytes, first.retained_bytes()),
+            Some(vec![first.clone()]),
+            "{name}"
+        );
+        assert!(
+            LatestOperations::decode(&bytes, u64::MAX).is_err(),
+            "{name}"
+        );
+        assert!(OperationQueue::decode(&bytes).is_err(), "{name}");
+    }
+
+    // Every record's framing is walked whatever the budget: trailing bytes
+    // and a set fail even when the budget selects nothing.
+    let mut trailing = value.to_vec();
+    trailing.push(0);
+    for (name, bytes) in [
+        ("trailing", Bytes::from(trailing)),
+        (
+            "late set",
+            raw_value(
+                QueueFamily::Text,
+                &[],
+                &[
+                    (InsertMode::IfAbsent, 1, body.clone()),
+                    (InsertMode::Set, 2, text_body(2, "set")),
+                ],
+            ),
+        ),
+        ("removal", raw_value(QueueFamily::Text, &[9], &[])),
+        ("no records", raw_value(QueueFamily::Text, &[], &[])),
+        ("truncated", value.slice(..HEADER_LEN)),
+    ] {
+        for budget in [0, u64::MAX] {
+            assert!(
+                LatestOperations::decode(&bytes, budget).is_err(),
+                "{name} must not decode within {budget}"
+            );
+        }
+    }
+    // A full decode also rejects a repeated ID, which the walk does not track.
+    let duplicate = raw_value(
+        QueueFamily::Text,
+        &[],
+        &[
+            (InsertMode::IfAbsent, 1, body.clone()),
+            (InsertMode::IfAbsent, 1, body.clone()),
+        ],
+    );
+    assert!(OperationQueue::decode(&duplicate).is_err());
+}
+
+#[test]
+fn latest_decodes_select_as_many_minimal_entities_as_the_budget_covers() {
+    // Each distinct entity's smallest valid operation is a text deletion.
+    let operations = (0..10)
+        .map(|entity| text_operation(u128::from(entity) + 1, entity, None))
+        .collect::<Vec<_>>();
+    assert!(operations
+        .iter()
+        .all(|operation| operation.retained_bytes() == MIN_RETAINED_RECORD_LEN as u64));
+    let QueueMergeResult::Value(value) = merge_with_base(
+        None,
+        std::slice::from_ref(QueueOperand::enqueue(&operations).unwrap().bytes()),
+    )
+    .unwrap() else {
+        panic!("ten operations are outstanding");
+    };
+    for count in 0..=10 {
+        let budget = MIN_RETAINED_RECORD_LEN as u64 * count;
+        assert_eq!(
+            LatestOperations::decode(&value, budget)
+                .unwrap()
+                .map_or_else(Vec::new, LatestOperations::into_operations),
+            operations[..usize::try_from(count).unwrap()],
+            "within {budget}"
+        );
+    }
+    // An untracked entity's later operation is still walked, never selected.
+    let mut late = operations.clone();
+    late.push(text_operation(99, 9, Some("late")));
+    let mut bytes = Vec::new();
+    put_header(&mut bytes, QueueFamily::Text);
+    put_varint(&mut bytes, 0);
+    put_varint(&mut bytes, late.len() as u64);
+    for operation in &late {
+        put_insert(&mut bytes, InsertMode::IfAbsent, operation);
+    }
+    assert_eq!(
+        LatestOperations::decode(&bytes, MIN_RETAINED_RECORD_LEN as u64 * 2)
+            .unwrap()
+            .map(LatestOperations::into_operations),
+        Some(operations[..2].to_vec())
+    );
+}
+
+#[test]
+fn latest_row_decodes_match_the_map_layout() {
+    let operations = [
+        text_operation(1, 1, Some("first")),
+        text_operation(3, 3, None),
+        text_operation(2, 1, Some("a much longer latest state")),
+    ];
+    let rows = operations
+        .iter()
+        .map(|operation| QueueRow::encode(QueueFamily::Text, operation))
+        .collect::<Vec<_>>();
+    let QueueMergeResult::Value(value) = merge_with_base(
+        None,
+        std::slice::from_ref(QueueOperand::enqueue(&operations[..2]).unwrap().bytes()),
+    )
+    .unwrap() else {
+        panic!("two operations are outstanding");
+    };
+    let QueueMergeResult::Value(value) = merge_with_base(
+        Some(&value),
+        std::slice::from_ref(QueueOperand::enqueue(&operations[2..]).unwrap().bytes()),
+    )
+    .unwrap() else {
+        panic!("three operations are outstanding");
+    };
+    let budgets = [
+        0,
+        operations[2].retained_bytes(),
+        operations[2].retained_bytes() + operations[1].retained_bytes(),
+        u64::MAX,
+    ];
+    for budget in budgets {
+        assert_eq!(
+            LatestOperations::decode_rows(rows.iter().map(Bytes::as_ref), budget).unwrap(),
+            LatestOperations::decode(&value, budget).unwrap(),
+            "within {budget}"
+        );
+    }
+    assert_eq!(
+        LatestOperations::decode_rows(std::iter::empty(), u64::MAX).unwrap(),
+        None
+    );
+
+    // A corrupt payload or entity is decoded only once selected; rows of two
+    // families and a corrupt row header fail whatever the budget.
+    let mut truncated = rows[2].to_vec();
+    truncated.truncate(truncated.len() - 1);
+    // Version, kind, family, and operation ID precede the body.
+    let mut unknown_entity = rows[1].to_vec();
+    unknown_entity[3 + 16] = 0x7F;
+    for corrupt in [
+        [rows[0].to_vec(), rows[1].to_vec(), truncated],
+        [rows[0].to_vec(), unknown_entity, rows[2].to_vec()],
+    ] {
+        assert_eq!(
+            LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), 0).unwrap(),
+            None
+        );
+        assert!(
+            LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), u64::MAX).is_err()
+        );
+    }
+    let vector = QueueRow::encode(QueueFamily::Vector, &vector_operation(4, 4, None, None));
+    let mut header = rows[0].to_vec();
+    header[0] = 0x02;
+    for (name, bad) in [("mixed families", vector.to_vec()), ("version", header)] {
+        let rows = [rows[0].to_vec(), bad];
+        assert!(
+            LatestOperations::decode_rows(rows.iter().map(Vec::as_slice), 0).is_err(),
+            "{name}"
+        );
+    }
+}
+
 /// Sequential reference model: an ordered list of retained operations.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ModelQueue {
@@ -663,14 +1036,13 @@ impl ModelOperand {
     }
 }
 
-fn operand_strategy(allow_conflicts: bool) -> impl Strategy<Value = ModelOperand> {
+fn operand_strategy() -> impl Strategy<Value = ModelOperand> {
     // A small ID space forces repeats, removals of unseen IDs, and resets.
-    proptest::collection::btree_map(0_u128..8, (0_u8..6, 0_u8..2), 1..5).prop_map(move |records| {
+    proptest::collection::btree_map(0_u128..8, (0_u8..6, 0_u8..2), 1..5).prop_map(|records| {
         ModelOperand {
             records: records
                 .into_iter()
                 .map(|(id, (action, variant))| {
-                    let variant = if allow_conflicts { variant } else { 0 };
                     let body =
                         text_body(u64::try_from(id % 3).unwrap(), &format!("{id}-{variant}"));
                     match action {
@@ -681,6 +1053,44 @@ fn operand_strategy(allow_conflicts: bool) -> impl Strategy<Value = ModelOperand
                 })
                 .collect(),
         }
+    })
+}
+
+/// Histories storage can present: an operand enqueues IDs that are absent
+/// and acknowledges IDs that are present, so each ID alternates between one
+/// insert and its removal (re-enqueueing after a removal is a reset).
+fn history_strategy() -> impl Strategy<Value = Vec<ModelOperand>> {
+    proptest::collection::vec(
+        proptest::collection::btree_map(0_u128..8, any::<bool>(), 1..5),
+        1..10,
+    )
+    .prop_map(|steps| {
+        let mut present = std::collections::BTreeSet::new();
+        let mut inserts = 0_u32;
+        steps
+            .into_iter()
+            .filter_map(|step| {
+                let records = step
+                    .into_iter()
+                    .filter_map(|(id, acknowledge)| {
+                        if present.contains(&id) {
+                            return acknowledge.then(|| {
+                                present.remove(&id);
+                                ModelRecord::Remove(id)
+                            });
+                        }
+                        present.insert(id);
+                        inserts += 1;
+                        Some(ModelRecord::Insert(
+                            InsertMode::IfAbsent,
+                            id,
+                            text_body(u64::try_from(id % 3).unwrap(), &format!("{id}-{inserts}")),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                (!records.is_empty()).then_some(ModelOperand { records })
+            })
+            .collect()
     })
 }
 
@@ -707,56 +1117,127 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
     #[test]
-    fn every_partial_grouping_matches_the_sequential_model(
-        operands in proptest::collection::vec(operand_strategy(true), 1..8),
-        base_len in 0_usize..8,
-        splits in proptest::collection::vec(0_usize..16, 0..6),
-        nested_split in 0_usize..8,
+    fn every_partial_grouping_of_a_stored_history_matches_the_sequential_model(
+        operands in history_strategy(),
+        base_len in 0_usize..10,
+        splits in proptest::collection::vec(0_usize..20, 0..6),
+        nested_split in 0_usize..10,
     ) {
+        prop_assume!(!operands.is_empty());
         let encoded = operands.iter().map(ModelOperand::encode).collect::<Vec<_>>();
         let mut model = ModelQueue::default();
-        let expected = operands
+        operands
             .iter()
             .try_for_each(|operand| operand.apply(&mut model))
-            .map(|()| model.encode());
+            .expect("the model applies every record");
+        let expected = model.encode();
 
         // One flat batch.
-        let flat = merge_with_base(None, &encoded);
-        prop_assert_eq!(flat.as_ref().ok(), expected.as_ref().ok());
+        prop_assert_eq!(merge_with_base(None, &encoded).unwrap(), expected.clone());
 
         // Arbitrary contiguous partial groups, then resolution.
-        let grouped = grouped_partial(&encoded, &splits)
-            .and_then(|groups| merge_with_base(None, &groups));
-        prop_assert_eq!(grouped.as_ref().ok(), expected.as_ref().ok());
+        let groups = grouped_partial(&encoded, &splits).unwrap();
+        prop_assert_eq!(merge_with_base(None, &groups).unwrap(), expected.clone());
 
-        // A resolved prefix acts as the base for an unresolved suffix.
+        // A resolved prefix acts as the base for an unresolved suffix, whole
+        // or folded first.
         let base_len = base_len.min(encoded.len());
-        let with_base = merge_with_base(None, &encoded[0..base_len]).and_then(|base| {
-            let suffix = &encoded[base_len..];
-            match base {
-                QueueMergeResult::Value(base) => merge_with_base(Some(&base), suffix),
-                QueueMergeResult::Empty if suffix.is_empty() => Ok(QueueMergeResult::Empty),
-                QueueMergeResult::Empty => merge_with_base(None, suffix),
-            }
-        });
-        prop_assert_eq!(with_base.as_ref().ok(), expected.as_ref().ok());
+        let (prefix, suffix) = encoded.split_at(base_len);
+        let base = match merge_with_base(None, prefix).unwrap() {
+            QueueMergeResult::Value(base) => Some(base),
+            QueueMergeResult::Empty => None,
+        };
+        let with_base = if suffix.is_empty() {
+            base.map_or(QueueMergeResult::Empty, QueueMergeResult::Value)
+        } else {
+            let folded = grouped_partial(suffix, &splits).unwrap();
+            prop_assert_eq!(
+                merge_with_base(base.as_deref(), &folded).unwrap(),
+                merge_with_base(base.as_deref(), suffix).unwrap()
+            );
+            merge_with_base(base.as_deref(), suffix).unwrap()
+        };
+        prop_assert_eq!(with_base, expected.clone());
 
-        // Nested partial composition: (A)∘B == A∘(B) byte-for-byte.
+        // Nested partial composition: (A)∘B is byte-for-byte A∘B, and A∘(B)
+        // resolves identically.
         if encoded.len() >= 2 {
             let middle = 1 + nested_split % (encoded.len() - 1);
             let (prefix, suffix) = encoded.split_at(middle);
-            let whole = merge_partial(None, &encoded);
-            let left = merge_partial(None, prefix)
-                .and_then(|left| merge_partial(Some(&left), suffix));
-            let right = merge_partial(None, suffix).and_then(|right| {
-                merge_partial(
-                    None,
-                    &prefix.iter().cloned().chain(std::iter::once(right)).collect::<Vec<_>>(),
-                )
-            });
-            prop_assert_eq!(left.as_ref().ok(), whole.as_ref().ok());
-            prop_assert_eq!(right.as_ref().ok(), whole.as_ref().ok());
-            prop_assert_eq!(left.is_err(), whole.is_err());
+            let whole = merge_partial(None, &encoded).unwrap();
+            let left = merge_partial(Some(&merge_partial(None, prefix).unwrap()), suffix).unwrap();
+            prop_assert_eq!(&left, &whole);
+            let right = merge_partial(
+                None,
+                &prefix
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(merge_partial(None, suffix).unwrap()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            prop_assert_eq!(
+                merge_with_base(None, std::slice::from_ref(&right)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_value_holds_at_most_the_backlogs_around_it(operands in history_strategy()) {
+        // `MAX_RETAINED_BYTES` relies on this bound: a partial value over
+        // operands `start..end` keeps at most one removal per operation
+        // outstanding before `start` and records only of operations still
+        // outstanding after `end`.
+        let encoded = operands.iter().map(ModelOperand::encode).collect::<Vec<_>>();
+        let mut backlogs = vec![ModelQueue::default()];
+        for operand in &operands {
+            let mut next = backlogs.last().expect("one backlog per prefix").clone();
+            operand.apply(&mut next).expect("the model applies every record");
+            backlogs.push(next);
+        }
+        for start in 0..encoded.len() {
+            for end in start + 1..=encoded.len() {
+                let partial = merge_partial(None, &encoded[start..end]).unwrap();
+                let removals = OPERATION_ID_LEN * backlogs[start].entries.len();
+                let records = backlogs[end]
+                    .entries
+                    .iter()
+                    .map(|(_, body)| MODE_LEN + OPERATION_ID_LEN + varint_len(body.len() as u64) + body.len())
+                    .sum::<usize>();
+                prop_assert!(
+                    partial.len() <= MAX_VALUE_FRAMING_LEN + removals + records,
+                    "operands {}..{}: {} > {} + {} + {}",
+                    start,
+                    end,
+                    partial.len(),
+                    MAX_VALUE_FRAMING_LEN,
+                    removals,
+                    records
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arbitrary_records_compose_totally_and_fold_left_exactly(
+        operands in proptest::collection::vec(operand_strategy(), 1..8),
+        splits in proptest::collection::vec(0_usize..16, 0..6),
+        nested_split in 0_usize..8,
+    ) {
+        // Duplicated inserts and removals of unseen IDs lie outside stored
+        // histories: every grouping still composes and resolves without
+        // error, and folding left is exact.
+        let encoded = operands.iter().map(ModelOperand::encode).collect::<Vec<_>>();
+        prop_assert!(merge_with_base(None, &encoded).is_ok());
+        let groups = grouped_partial(&encoded, &splits).unwrap();
+        prop_assert!(merge_with_base(None, &groups).is_ok());
+        if encoded.len() >= 2 {
+            let middle = 1 + nested_split % (encoded.len() - 1);
+            let (prefix, suffix) = encoded.split_at(middle);
+            let whole = merge_partial(None, &encoded).unwrap();
+            let left = merge_partial(Some(&merge_partial(None, prefix).unwrap()), suffix).unwrap();
+            prop_assert_eq!(left, whole);
         }
     }
 
@@ -873,6 +1354,10 @@ fn row_values_round_trip_every_payload_shape() {
         assert_eq!(
             row.len(),
             HEADER_LEN + OPERATION_ID_LEN + body_encoded_len(&operation)
+        );
+        assert_eq!(
+            retained_len(row.len() - HEADER_LEN - OPERATION_ID_LEN),
+            operation.retained_bytes()
         );
         assert_eq!(QueueRow::decode(&row).unwrap(), (family, operation));
     }
