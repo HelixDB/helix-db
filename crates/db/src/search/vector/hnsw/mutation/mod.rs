@@ -7,6 +7,12 @@
 //! cache stores each loaded row in one closed state ADT, so absence, cleanliness,
 //! the first storage snapshot, and the latest staged value cannot disagree
 //! across parallel collections.
+//!
+//! Flushing a cached row is the only way a neighbor row or its reverse
+//! locators reach the transaction: each flush stages the row's transition
+//! from the value the transaction holds to its current value, locators
+//! included. Inserts, deletes, relinks, and a delete followed by a reinsert
+//! of the same node therefore leave exactly one locator per link.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -54,6 +60,8 @@ tokio::task_local! {
     /// Plans every upsert in scope through the full delete-and-reinsert path,
     /// the unskipped reference replay tests compare against.
     pub(crate) static REPLACE_REPLAYS: ();
+    /// Counts the entities [`VectorBuildSession::discard_entity`] discards in scope.
+    pub(crate) static DISCARDED_ENTITIES: std::cell::Cell<u64>;
 }
 
 /// Whether an upsert may keep a node that already holds its exact state.
@@ -743,7 +751,6 @@ impl<D: Distance> VectorIndex<D> {
 
         let node_layer =
             selected_layer.unwrap_or_else(|| self.select_mutation_layer(metadata.config.ml));
-        mutation_cache.invalidate_neighbors(node_id);
         let canonical_key = self.canonical_vector_key_from_simhash(node_id, simhash);
         let encoded_item = encode_item(&item);
         let encoded_item_bytes = encoded_item.len();
@@ -1164,6 +1171,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages one canonical layer-0 neighbor row through typed storage.
+    #[cfg(test)]
     pub(in crate::search::vector) async fn store_neighbors_layer0(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1174,6 +1182,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages one canonical upper-neighbor row through typed storage.
+    #[cfg(feature = "production-coverage")]
     pub(in crate::search::vector) fn store_upper_neighbors(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1195,24 +1204,52 @@ impl<D: Distance> VectorIndex<D> {
             .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))
     }
 
-    /// Stages only reverse-locator changes implied by a canonical row update.
-    pub(in crate::search::vector) fn update_reverse_edge_locator(
-        &self,
-        txn: &MeasuredVectorTransaction<'_>,
-        layer: u16,
-        source_node_id: NodeId,
-        old_neighbors: &NeighborSet,
-        new_neighbors: &NeighborSet,
+    /// Stages one cached row's transition from its baseline to its current
+    /// value: the only writer of neighbor rows and their reverse locators.
+    ///
+    /// The baseline is the value the transaction holds for the row (the value
+    /// first loaded, or the one its previous flush staged), and the
+    /// transaction holds the baseline's locators. So the transition deletes
+    /// the locators only the baseline links, puts those only the current
+    /// value links, and puts the row, or deletes it once its current value is
+    /// absent. A clean row, or one whose current value equals its baseline,
+    /// stages nothing.
+    fn stage_neighbor_row_transition(
+        rows: &VectorWriteRows<'_, '_>,
+        row: NeighborRowId,
+        cached: &CachedNeighbor,
+        degree_limit: NeighborDegreeLimit,
     ) -> Result<(), HelixDbError> {
-        let (removed, added) = Self::neighbor_deltas(old_neighbors, new_neighbors)?.into_parts();
-        let rows = VectorWriteRows::new(txn, self.row_keyspace());
+        let Some(baseline) = cached.original() else {
+            return Ok(());
+        };
+        let current = cached.current();
+        if baseline == current {
+            return Ok(());
+        }
+        let (layer, node_id) = row.storage_parts();
+        let empty = NeighborSet::empty(node_id, degree_limit);
+        let [baseline_links, current_links] = [baseline, current].map(|value| match value {
+            NeighborRowValue::KnownAbsent => &empty,
+            NeighborRowValue::Present(neighbors) => neighbors,
+        });
+        let (removed, added) = Self::neighbor_deltas(baseline_links, current_links)?.into_parts();
         for target_node_id in removed {
-            rows.delete_reverse_locator(target_node_id, layer, source_node_id)?;
+            rows.delete_reverse_locator(target_node_id, layer, node_id)?;
         }
         for target_node_id in added {
-            rows.put_reverse_locator(target_node_id, layer, source_node_id)?;
+            rows.put_reverse_locator(target_node_id, layer, node_id)?;
         }
-        Ok(())
+        match (layer, current) {
+            (0, NeighborRowValue::Present(neighbors)) => {
+                rows.put_layer0_neighbors(node_id, neighbors.as_slice())
+            }
+            (0, NeighborRowValue::KnownAbsent) => rows.delete_layer0_neighbors(node_id),
+            (layer, NeighborRowValue::Present(neighbors)) => {
+                rows.put_upper_neighbors(layer, node_id, neighbors.as_slice())
+            }
+            (layer, NeighborRowValue::KnownAbsent) => rows.delete_upper_neighbors(layer, node_id),
+        }
     }
 
     /// Loads every reverse source grouped by layer for deletion repair.
@@ -1371,10 +1408,13 @@ impl<D: Distance> VectorIndex<D> {
             .await
     }
 
-    /// Stages a freshly allocated row using the cache’s private absent-row proof.
+    /// Stages the row an insertion gives the inserting node at one layer.
     ///
-    /// The proof prevents an unloaded existing row from being misclassified as
-    /// absent; canonical validation still occurs before the cache is mutated.
+    /// A cached row is staged over, keeping the baseline its flush diffs
+    /// against: the row a preceding delete of the node staged absent, or
+    /// residue the transaction still holds. An unloaded row is new by the
+    /// insertion contract and staged through the cache’s private absent-row
+    /// proof. Canonical validation occurs before the cache is mutated.
     pub(in crate::search::vector) async fn stage_new_neighbors_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1384,12 +1424,17 @@ impl<D: Distance> VectorIndex<D> {
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<(), HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-        let proof = mutation_cache.prove_new_neighbor_row(row)?;
         neighbors.sort_unstable();
         let neighbors =
             NeighborSet::try_from_canonical(node_id, mutation_cache.degree_limit(layer), neighbors)
                 .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
-        mutation_cache.stage_new_neighbor(proof, NeighborRowValue::Present(neighbors));
+        let value = NeighborRowValue::Present(neighbors);
+        if mutation_cache.contains_neighbor(row) {
+            mutation_cache.stage_loaded_neighbor(row, value)?;
+        } else {
+            let proof = mutation_cache.prove_new_neighbor_row(row)?;
+            mutation_cache.stage_new_neighbor(proof, value);
+        }
         self.enforce_mutation_cache_bounds(txn, mutation_cache)
             .await
     }
@@ -1467,8 +1512,7 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Flushes one dirty row and transitions it only after all writes succeed.
     ///
-    /// Reverse locators are staged before the canonical neighbor row. If the
-    /// original and current values agree, no storage operation is emitted.
+    /// [`Self::stage_neighbor_row_transition`] stages the row and its locators.
     /// Successful callers may retain the row as clean or evict it atomically
     /// from the operation cache; any error preserves the exact dirty state.
     pub(in crate::search::vector) async fn flush_one_cached_neighbor(
@@ -1478,43 +1522,19 @@ impl<D: Distance> VectorIndex<D> {
         row: NeighborRowId,
         evict_after_flush: bool,
     ) -> Result<(), HelixDbError> {
-        let Some(cached) = mutation_cache.neighbor(row).cloned() else {
+        let Some(cached) = mutation_cache
+            .neighbor(row)
+            .filter(|cached| cached.is_dirty())
+        else {
             return Ok(());
         };
-        if !cached.is_dirty() {
-            return Ok(());
-        }
         let (layer, node_id) = row.storage_parts();
-        let NeighborRowValue::Present(current_neighbors) = cached.current() else {
-            return Err(HelixDbError::InvariantViolation(
-                "vector mutation cannot flush a deleted neighbor row".to_string(),
-            ));
-        };
-        let original = cached
-            .original()
-            .expect("dirty vector neighbor rows retain an original value");
-        let previous_neighbors = match original {
-            NeighborRowValue::KnownAbsent => {
-                NeighborSet::empty(node_id, mutation_cache.degree_limit(layer))
-            }
-            NeighborRowValue::Present(neighbors) => neighbors.clone(),
-        };
-
-        if original != cached.current() {
-            self.update_reverse_edge_locator(
-                txn,
-                layer,
-                node_id,
-                &previous_neighbors,
-                current_neighbors,
-            )?;
-            if layer == 0 {
-                self.store_neighbors_layer0(txn, node_id, current_neighbors.as_slice())
-                    .await?;
-            } else {
-                self.store_upper_neighbors(txn, layer, node_id, current_neighbors.as_slice())?;
-            }
-        }
+        Self::stage_neighbor_row_transition(
+            &VectorWriteRows::new(txn, self.row_keyspace()),
+            row,
+            cached,
+            mutation_cache.degree_limit(layer),
+        )?;
 
         if evict_after_flush {
             mutation_cache.remove_neighbor(row);
@@ -1681,6 +1701,23 @@ impl<D: Distance> VectorIndex<D> {
         result
     }
 
+    /// Stages the deletion of `node_id` through `mutation_cache`, returning
+    /// whether it held an item.
+    ///
+    /// The node's neighbor rows are staged absent and every row naming it is
+    /// relinked in the cache, so the caller's flush writes each of those rows
+    /// with exactly its locator changes, even when a reinsertion in the same
+    /// cache restores a row. Only locators naming the node that no cached
+    /// row owns are deleted here. Item, SimHash, entry-candidate, and
+    /// metadata rows are staged directly.
+    ///
+    /// Requires one locator per link: a source is found only through its
+    /// link's locator or the node's own rows, so a link without a locator
+    /// from a source the node does not link back survives the delete. A
+    /// reinsertion of the node in the same cache then searches through it
+    /// back to the node and fails; otherwise the link dangles. Released
+    /// versions v3.1.0 through v3.4.2 (Docker images through v0.0.9) left links
+    /// without locators on re-embeddings, and nothing here repairs them.
     pub(in crate::search::vector) async fn stage_delete_with_metadata(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1707,32 +1744,45 @@ impl<D: Distance> VectorIndex<D> {
         let mut layers_to_process = (0..=node_max_layer).collect::<BTreeSet<_>>();
         layers_to_process.extend(reverse_sources.sources_by_layer().keys().copied());
 
-        let mut deleted_node_outgoing_by_layer = HashMap::<u16, Vec<NodeId>>::new();
+        // The node's own rows and every row naming it change only in the
+        // cache, whose flush stages each row with its locators. A locator
+        // deleted here instead would stay deleted when a relink, or the
+        // node's reinsertion, restores its row to the baseline: that row then
+        // flushes nothing and keeps the link without its locator.
         for layer in layers_to_process.iter().rev().copied() {
             let maximum_neighbors = if layer == 0 {
                 maximum_layer0_connections
             } else {
                 maximum_upper_connections
             };
-            let outgoing_neighbors = self
-                .delete_from_layer(
-                    txn,
-                    node_id,
-                    layer,
-                    maximum_neighbors,
-                    reverse_sources.sources_at(layer),
-                    mutation_cache,
-                )
+            self.delete_from_layer(
+                txn,
+                node_id,
+                layer,
+                maximum_neighbors,
+                reverse_sources.sources_at(layer),
+                mutation_cache,
+            )
+            .await?;
+            // Loading again restores the row should bounded eviction have
+            // flushed it since `delete_from_layer` read it.
+            self.load_neighbors_for_mutation(txn, layer, node_id, mutation_cache)
                 .await?;
-            deleted_node_outgoing_by_layer.insert(layer, outgoing_neighbors);
+            mutation_cache.stage_loaded_neighbor(
+                MutationOpCache::<D>::node_row_id(layer, node_id),
+                NeighborRowValue::KnownAbsent,
+            )?;
+            self.enforce_mutation_cache_bounds(txn, mutation_cache)
+                .await?;
         }
-
-        for (layer, neighbors) in deleted_node_outgoing_by_layer {
-            for target_node_id in neighbors {
-                rows.delete_reverse_locator(target_node_id, layer, node_id)?;
-            }
-        }
-        rows.delete_reverse_sources(&reverse_sources)?;
+        // `delete_from_layer` removed the node from every source row, so a
+        // source whose baseline still links it owns that locator until its
+        // flush. Every other locator naming the node is residue no flush
+        // owns: its source never linked the node, or an evicting flush
+        // already wrote the source without it.
+        rows.delete_reverse_sources(&reverse_sources, |layer, source| {
+            mutation_cache.baseline_links(MutationOpCache::<D>::node_row_id(layer, source), node_id)
+        })?;
 
         let (canonical_key, _) = self
             .resolve_canonical_vector_key_cached(
@@ -1749,22 +1799,13 @@ impl<D: Distance> VectorIndex<D> {
             rows.delete_canonical_vector(&canonical_key)?;
         }
 
-        rows.delete_layer0_neighbors(node_id)?;
-        for layer in 1..=node_max_layer {
-            rows.delete_upper_neighbors(layer, node_id)?;
-        }
-
         rows.delete_upper_vector(node_id)?;
         rows.delete_simhash(node_id)?;
         self.remove_entry_candidate(txn, node_id).await?;
         mutation_cache.invalidate_items(node_id);
         mutation_cache.invalidate_simhash(node_id);
         mutation_cache.put_simhash(node_id, None);
-        mutation_cache.invalidate_neighbors(node_id);
         for layer in layers_to_process {
-            let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-            mutation_cache.install_loaded_neighbor(row, NeighborRowValue::KnownAbsent);
-            mutation_cache.record_neighbor_change(row, NeighborRowValue::KnownAbsent);
             mutation_cache.put_item(layer, node_id, None, 0);
         }
 
@@ -2723,6 +2764,25 @@ impl<D: Distance> MutationOpCache<D> {
         self.neighbor_rows.contains_key(&row)
     }
 
+    /// Returns whether the loaded row's baseline links `target`: the value
+    /// the transaction holds for it until its next flush, whose locators the
+    /// transaction therefore holds too.
+    ///
+    /// The locator of such a link belongs to the row's pending transition.
+    /// An unloaded row reports `false`.
+    pub(in crate::search::vector) fn baseline_links(
+        &self,
+        row: NeighborRowId,
+        target: NodeId,
+    ) -> bool {
+        self.neighbor_rows.get(&row).is_some_and(|cached| {
+            matches!(
+                cached.original().unwrap_or(cached.current()),
+                NeighborRowValue::Present(neighbors) if neighbors.contains(target)
+            )
+        })
+    }
+
     /// Installs one storage-proven row unless staging already owns it.
     pub(in crate::search::vector) fn install_loaded_neighbor(
         &mut self,
@@ -3492,6 +3552,8 @@ impl<D: Distance> VectorBuildSession<D> {
             !self.has_dirty_neighbors(),
             "vector build entity discard follows a complete flush"
         );
+        #[cfg(test)]
+        let _ = DISCARDED_ENTITIES.try_with(|discards| discards.set(discards.get() + 1));
         for (identity, changes) in core::mem::take(&mut self.entity_changes) {
             let Some(mut cache) = self.detach(&identity) else {
                 continue;
@@ -3826,55 +3888,29 @@ struct SessionEvictionOrder {
     identity: VectorGenerationIdentity,
 }
 
+/// Flushes one dirty row of a build-session namespace through
+/// [`VectorIndex::stage_neighbor_row_transition`], leaving it clean only once
+/// every write succeeded.
 fn flush_build_session_neighbor<D: Distance>(
     txn: &MeasuredVectorTransaction<'_>,
     identity: &VectorGenerationIdentity,
     cache: &mut MutationOpCache<D>,
     row: NeighborRowId,
 ) -> Result<(), HelixDbError> {
-    let Some(cached) = cache.neighbor(row).cloned() else {
+    let Some(cached) = cache.neighbor(row).filter(|cached| cached.is_dirty()) else {
         return Ok(());
     };
-    if !cached.is_dirty() {
-        return Ok(());
-    }
-    let (layer, node_id) = row.storage_parts();
-    let NeighborRowValue::Present(current) = cached.current() else {
-        return Err(HelixDbError::InvariantViolation(
-            "vector build session cannot flush a deleted neighbor row".to_string(),
-        ));
-    };
-    let original = cached
-        .original()
-        .expect("dirty vector build neighbors retain their original value");
-    let previous = match original {
-        NeighborRowValue::KnownAbsent => NeighborSet::empty(node_id, cache.degree_limit(layer)),
-        NeighborRowValue::Present(neighbors) => neighbors.clone(),
-    };
-    if original != cached.current() {
-        let keyspace = VectorRowKeyspace::from_allocated(
-            identity.physical_name().to_string(),
-            identity.physical_index_id(),
-            identity.scope(),
-        );
-        let rows = VectorWriteRows::new(txn, &keyspace);
-        let difference = match previous.difference(current) {
-            Ok(difference) => difference,
-            Err(error) => return Err(HelixDbError::InvariantViolation(error.to_string())),
-        };
-        let (removed, added) = difference.into_parts();
-        for target_node_id in removed {
-            rows.delete_reverse_locator(target_node_id, layer, node_id)?;
-        }
-        for target_node_id in added {
-            rows.put_reverse_locator(target_node_id, layer, node_id)?;
-        }
-        if layer == 0 {
-            rows.put_layer0_neighbors(node_id, current.as_slice())?;
-        } else {
-            rows.put_upper_neighbors(layer, node_id, current.as_slice())?;
-        }
-    }
+    let keyspace = VectorRowKeyspace::from_allocated(
+        identity.physical_name().to_string(),
+        identity.physical_index_id(),
+        identity.scope(),
+    );
+    VectorIndex::<D>::stage_neighbor_row_transition(
+        &VectorWriteRows::new(txn, &keyspace),
+        row,
+        cached,
+        cache.degree_limit(row.layer.number()),
+    )?;
     cache.mark_neighbor_flushed(row);
     Ok(())
 }
@@ -3921,6 +3957,8 @@ const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) ->
 #[path = "../../../../../tests/production_support/vector/mutation.rs"]
 pub(crate) mod production_contracts;
 
+#[cfg(test)]
+mod locator_tests;
 #[cfg(test)]
 mod relink_tests;
 

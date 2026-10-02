@@ -2029,52 +2029,66 @@ mod tests {
         );
     }
 
-    /// Proves upsert measurement equals explicit delete-plus-insert composition.
+    /// Proves an upsert commits what an explicit delete then insert commits,
+    /// in one write set that skips the rows the replacement restores: the
+    /// node's layer-0 row ends empty, as it began, so only the composition,
+    /// whose delete flushed before its insert, writes it.
     #[tokio::test]
-    async fn measured_upsert_includes_delete_and_replacement_in_one_write_set() {
-        let db = test_inner_db("measured_upsert_owns_complete_write_set").await;
-        let index =
-            create_test_vector_index(&db, "measured_upsert_owns_complete_write_set_idx").await;
-        let seed_txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        index
-            .stage_known_fresh_at_layer(
-                &MeasuredVectorTransaction::new(&seed_txn),
-                1,
-                &[1.0, 0.0],
-                2,
-                crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
-            )
-            .await
-            .unwrap();
-        seed_txn.commit().await.unwrap();
+    async fn measured_upsert_commits_what_delete_then_insert_commits() {
+        let mut committed = Vec::new();
+        let mut measurements = Vec::new();
+        for compose in [false, true] {
+            let db = test_inner_db(&format!("measured_upsert_composition_{compose}")).await;
+            let index = create_test_vector_index(&db, "measured_upsert_composition_idx").await;
+            let seed_txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            index
+                .stage_known_fresh_at_layer(
+                    &MeasuredVectorTransaction::new(&seed_txn),
+                    1,
+                    &[1.0, 0.0],
+                    2,
+                    crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
+                )
+                .await
+                .unwrap();
+            seed_txn.commit().await.unwrap();
 
-        let upsert_txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        let measured_upsert = MeasuredVectorTransaction::new(&upsert_txn);
-        index
-            .stage_upsert_at_layer(&measured_upsert, 1, &[0.0, 1.0], 0)
-            .await
-            .unwrap();
+            let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            let measured = MeasuredVectorTransaction::new(&txn);
+            if compose {
+                index.stage_delete(&measured, 1).await.unwrap();
+                index
+                    .stage_known_fresh_at_layer(
+                        &measured,
+                        1,
+                        &[0.0, 1.0],
+                        0,
+                        crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                index
+                    .stage_upsert_at_layer(&measured, 1, &[0.0, 1.0], 0)
+                    .await
+                    .unwrap();
+            }
+            measurements.push(measured.measurement().unwrap());
+            txn.commit().await.unwrap();
 
-        let composed_txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        let measured_composition = MeasuredVectorTransaction::new(&composed_txn);
-        index.stage_delete(&measured_composition, 1).await.unwrap();
-        index
-            .stage_known_fresh_at_layer(
-                &measured_composition,
-                1,
-                &[0.0, 1.0],
-                0,
-                crate::search::vector::hnsw::mutation::FreshVectorBuildProof::for_test(),
-            )
-            .await
-            .unwrap();
-
+            let mut rows = Vec::new();
+            let mut scan = db.scan::<std::ops::RangeFull>(..).await.unwrap();
+            while let Some(row) = scan.next().await.unwrap() {
+                rows.push((row.key, row.value));
+            }
+            committed.push(rows);
+        }
+        assert_eq!(committed[0], committed[1]);
         assert_eq!(
-            measured_upsert.measurement().unwrap(),
-            measured_composition.measurement().unwrap()
+            measurements[0].operations() + 1,
+            measurements[1].operations(),
+            "{measurements:?}"
         );
-        upsert_txn.rollback();
-        composed_txn.rollback();
     }
 
     #[test]

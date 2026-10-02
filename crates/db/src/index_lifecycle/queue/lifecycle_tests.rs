@@ -132,7 +132,7 @@ async fn status(db: &HelixDB, operation: &str) -> serde_json::Value {
     result["status"].clone()
 }
 
-fn scanned(status: &serde_json::Value) -> u64 {
+pub(super) fn scanned(status: &serde_json::Value) -> u64 {
     status["progress"]["entities"]
         .as_str()
         .and_then(|entities| entities.parse().ok())
@@ -155,7 +155,7 @@ pub(super) async fn wait_terminal(db: &HelixDB, operation: &str) -> String {
 
 /// Lets the build take steps one ownership handoff at a time until `ready`
 /// holds, then returns with ownership held so no further step runs.
-async fn pause_when(
+pub(super) async fn pause_when(
     db: &HelixDB,
     operation: &str,
     target: QueueTarget,

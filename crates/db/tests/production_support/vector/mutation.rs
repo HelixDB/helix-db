@@ -559,10 +559,16 @@ async fn run_neighbor_write_contracts(db: &Db) {
         .stage_new_neighbors_for_mutation(&measured, 0, 700, Vec::new(), &mut cache)
         .await
         .unwrap();
-    assert!(index
-        .stage_new_neighbors_for_mutation(&measured, 0, 700, Vec::new(), &mut cache)
+    // A loaded row is staged over and keeps its absent baseline.
+    index
+        .stage_new_neighbors_for_mutation(&measured, 0, 700, vec![2], &mut cache)
         .await
-        .is_err());
+        .unwrap();
+    let restaged = cache
+        .neighbor(MutationOpCache::<Cosine>::node_row_id(0, 700))
+        .unwrap();
+    assert_eq!(restaged.original(), Some(&NeighborRowValue::KnownAbsent));
+    assert_eq!(restaged.current(), &neighbors(700, vec![2]));
     assert!(index
         .stage_neighbors_vec_for_mutation(&measured, 0, 700, vec![700], &mut cache)
         .await
@@ -597,10 +603,16 @@ async fn run_neighbor_write_contracts(db: &Db) {
     cache
         .stage_loaded_neighbor(absent, NeighborRowValue::KnownAbsent)
         .unwrap();
-    assert!(index
+    let before = measured.measurement().unwrap().operations();
+    index
         .flush_one_cached_neighbor(&measured, &mut cache, absent, false)
         .await
-        .is_err());
+        .unwrap();
+    assert_eq!(
+        measured.measurement().unwrap().operations(),
+        before,
+        "an absent row staged absent writes nothing"
+    );
     index
         .stage_neighbors_for_mutation(&measured, 0, 999, &[], &mut cache)
         .await
@@ -1317,7 +1329,14 @@ async fn run_build_session_flush_edge_contract<D: Distance>() {
     cache
         .stage_loaded_neighbor(deleted, NeighborRowValue::KnownAbsent)
         .unwrap();
-    assert!(flush_build_session_neighbor(&measured, &identity, &mut cache, deleted).is_err());
+    let before = measured.measurement().unwrap().operations();
+    flush_build_session_neighbor(&measured, &identity, &mut cache, deleted).unwrap();
+    assert!(!cache.neighbor(deleted).unwrap().is_dirty());
+    assert_eq!(
+        measured.measurement().unwrap().operations(),
+        before + 2,
+        "a deleted row deletes its locator and itself"
+    );
 
     let upper = MutationOpCache::<D>::node_row_id(1, 6);
     cache.install_loaded_neighbor(upper, neighbors(6, vec![7, 8]));

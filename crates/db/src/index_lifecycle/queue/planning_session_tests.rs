@@ -22,6 +22,7 @@ use super::publication_tests::{
     batch_limits, install_vector, mapped_partitions, physical_rows, publisher,
     unpartitioned_vector_rows,
 };
+use super::soak_tests::{assert_vector_graph, History};
 use super::tests::{open, publisher_with_limits, queue, queued, target};
 use super::QueueTarget;
 use crate::config::{
@@ -377,7 +378,8 @@ async fn evicting_sessions_publish_what_cold_sessions_publish() {
 ///
 /// Every document moves at its unchanged layer, so each update a batch
 /// discards replaces an indexed vector. Retained sessions publish exactly
-/// what fresh sessions that replace every upsert publish.
+/// what fresh sessions that replace every upsert publish, and both leave a
+/// valid graph: one reverse locator per link and no link to a removed node.
 #[tokio::test]
 async fn updates_discarded_from_full_batches_publish_through_the_retained_session() {
     let moved = |index: u8| [f32::from(index % 5) + 0.5, f32::from(index / 5) + 10.0];
@@ -408,7 +410,7 @@ async fn updates_discarded_from_full_batches_publish_through_the_retained_sessio
 
         // Every attempt selects each queued update, so each commit that
         // leaves one queued planned it and discarded it as `BatchFull`.
-        let publisher = narrow_publisher(&db, 256);
+        let publisher = narrow_publisher(&db, 64);
         let reads = publisher.planning_cache().publication_reads();
         let commits = if retain {
             publish_all(&publisher, target, true).await
@@ -431,6 +433,7 @@ async fn updates_discarded_from_full_batches_publish_through_the_retained_sessio
                 "document {index} holds its new vector (retained sessions: {retain})"
             );
         }
+        assert_vector_graph(&db, &History::new(), name).await;
         runs.push((commits, reads, unpartitioned_vector_rows(&db).await));
         db.close().await.unwrap();
     }
@@ -453,9 +456,9 @@ async fn updates_discarded_from_full_batches_publish_through_the_retained_sessio
 /// Planning caches decide only which rows publication reads again, so no
 /// cache policy may change a byte of this graph.
 const PUBLISHED_GOLDEN_DIGEST: &str =
-    "0c933d927973144e6870f7aa399767947beac1304a980e7ec94b377d558c26b4";
+    "9fcd3917bbbfbce187715f431e471b548ff48366d95d7798ca5f5277b22b8abb";
 /// Physical row count [`publish_golden_workload`] leaves.
-const PUBLISHED_GOLDEN_ROWS: usize = 7_511;
+const PUBLISHED_GOLDEN_ROWS: usize = 7_954;
 
 /// Integral embedding of `seed`. Every squared distance is exact in `f32`,
 /// and embeddings repeat, so neighbor selection breaks many distance ties.
