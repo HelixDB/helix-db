@@ -237,6 +237,11 @@ pub enum SearchConsistency {
     /// Searches overlay a bounded budget of the oldest unpublished changes
     /// and never fail for lack of publication; the rest become visible once
     /// the index worker publishes them.
+    ///
+    /// Until then those entities are served as last published, so a search,
+    /// whole-index or prefiltered, may return a node or edge that has since
+    /// moved to another tenant partition, changed label, or lost the indexed
+    /// property. [`Self::Strong`] never returns such a row.
     Eventual,
 }
 

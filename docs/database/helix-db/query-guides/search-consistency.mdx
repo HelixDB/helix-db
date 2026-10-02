@@ -17,6 +17,12 @@ is committed but not yet published. It applies to whole-index and
 | `strong` (default) | Every write committed in the request's snapshot is searchable, including unpublished work. |
 | `eventual` | Each search includes up to 128 MiB of unpublished work, oldest first, and a text search analyzes at most as much of it as one text publication may (64 MiB of analysis by default). The rest is served as last published until the index worker publishes it. |
 
+Because the rest is served as last published, an `eventual` search, whole-index or
+prefiltered, can return a node or edge that has since moved to another tenant, changed
+label, or lost the indexed property, until the index worker publishes that change. A
+`strong` search never returns one. Search `strong` when every result must match the
+search's current tenant, label, and property.
+
 ## Request eventual search
 
 <Note>
