@@ -182,6 +182,15 @@ activation, so a heavy write load during a long build can fail with
 `index_backpressure` until the build activates. Bounded retries may run out first;
 throttle writes to an index while it builds.
 
+A blocked build does not activate until you retry or abort it, so waiting cannot
+clear its limits. A write that would exceed them fails with the non-retryable
+`index_build_blocked` error, which names the blocked operation. A write to an entity
+that already has pending work adds no pending entity, so only the byte limit can refuse
+it. The exception is a write to only the entity the blocker names: its first write is
+admitted even past the limits, and so is deleting the entity or clearing its indexed
+property. If that first write does not clear the blocker, delete the entity, then
+retry the build.
+
 ## Next steps
 
 <CardGroup cols={2}>

@@ -11,6 +11,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use slatedb::DbTransaction;
+
 use crate::config::ActiveTextMutationLimits;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
@@ -23,9 +25,13 @@ use crate::index_lifecycle::graph_mutation::{CanonicalPropertyRow, GraphMutation
 use crate::index_lifecycle::mutation_catalog::{MutationRouteTarget, RoutedMutationTargets};
 use crate::index_lifecycle::vector::VectorIndexedDocument;
 use crate::index_lifecycle::work::TextPartition;
-use crate::index_lifecycle::IndexRecordV2;
+use crate::index_lifecycle::{
+    outbox, IndexOperationBlocker, IndexOperationExecutionState, IndexOperationId, IndexRecordV2,
+};
 
-use super::backlog::OperationCharge;
+use super::backlog::{
+    BacklogReservation, BlockedBuild, BlockerRepair, IndexOperationBacklog, OperationCharge,
+};
 use super::QueueTarget;
 
 /// Validated text source state carried by a queued text operation.
@@ -63,6 +69,8 @@ pub(crate) struct QueuedMutationCollector {
     generations: BTreeMap<QueueTarget, PendingGeneration>,
     /// Canonical record of every routed text generation, for admission.
     text_records: BTreeMap<QueueTarget, IndexRecordV2>,
+    /// Operation owning every routed hidden build generation.
+    builds: BTreeMap<QueueTarget, IndexOperationId>,
 }
 
 /// One generation's fresh operations and their map-layout operand.
@@ -78,12 +86,110 @@ pub(crate) struct StagedQueueOperand {
 pub(crate) struct StagedQueueWrites {
     pub(crate) operands: Vec<StagedQueueOperand>,
     pub(crate) charges: Vec<OperationCharge>,
+    /// Operation owning every routed hidden build generation.
+    builds: BTreeMap<QueueTarget, IndexOperationId>,
 }
 
 impl StagedQueueWrites {
     /// Returns whether the transaction queued no index work.
     pub(crate) fn is_empty(&self) -> bool {
         self.operands.is_empty()
+    }
+
+    /// Reserves admission for every charge in `backlog`.
+    ///
+    /// Only when a hidden build's index is saturated is its operation read,
+    /// through `transaction`, to tell a blocked build (see
+    /// [`IndexOperationBacklog::reserve`]) from one still running, whose
+    /// backpressure clears on activation. Each saturated build is read at most
+    /// once, and a blocked one is passed with this transaction's operation on
+    /// the entity its blocker names. The read joins the transaction's
+    /// serializable read set, so a retry or abort of the build that commits
+    /// first fails this commit rather than admitting work under a stale
+    /// blocker. Unsaturated writes never read operation rows, which a running
+    /// build rewrites every step.
+    pub(crate) async fn reserve(
+        &self,
+        backlog: &Arc<IndexOperationBacklog>,
+        transaction: &DbTransaction,
+    ) -> Result<BacklogReservation> {
+        let mut blocked: Vec<BlockedBuild> = Vec::new();
+        loop {
+            let error = match backlog.reserve(&self.charges, &blocked) {
+                Ok(reservation) => return Ok(reservation),
+                Err(error) => error,
+            };
+            let HelixDbError::IndexBackpressure {
+                scope, index_id, ..
+            } = &error
+            else {
+                return Err(error);
+            };
+            let Some((target, operation_id)) = self
+                .builds
+                .iter()
+                .find(|(target, _)| target.scope == *scope && target.index_id.get() == *index_id)
+            else {
+                return Err(error);
+            };
+            assert!(
+                blocked.iter().all(|build| build.target != *target),
+                "a known blocked build is refused without backpressure"
+            );
+            let Some(operation) =
+                outbox::read_operation(transaction, *scope, *operation_id).await?
+            else {
+                return Err(HelixDbError::IndexCatalogCorruption(
+                    "a hidden build's operation is missing".to_string(),
+                ));
+            };
+            let IndexOperationExecutionState::Blocked(blocker) = operation.execution_state() else {
+                return Err(error);
+            };
+            let blocker_entity = match *blocker {
+                IndexOperationBlocker::InvalidSourceData {
+                    entity_kind,
+                    entity_id,
+                }
+                | IndexOperationBlocker::OversizedEntity {
+                    entity_kind,
+                    entity_id,
+                    ..
+                } => Some(IndexEntity {
+                    kind: entity_kind,
+                    id: entity_id,
+                }),
+                IndexOperationBlocker::UniquenessViolation { .. }
+                | IndexOperationBlocker::ManifestLimit { .. }
+                | IndexOperationBlocker::ObjectStoreConfigurationUnavailable
+                | IndexOperationBlocker::InvariantViolation
+                | IndexOperationBlocker::InvalidLegacyPhysical => None,
+            };
+            let repair = blocker_entity.and_then(|entity| {
+                let queued = self
+                    .operands
+                    .iter()
+                    .filter(|staged| staged.target == *target)
+                    .flat_map(|staged| &staged.operations)
+                    .find(|queued| queued.entity() == entity)?;
+                Some(match queued.payload() {
+                    QueuedPayload::Vector(QueuedVectorPayload {
+                        replacement: None, ..
+                    })
+                    | QueuedPayload::Text(QueuedTextPayload { replacement: None }) => {
+                        BlockerRepair::Remove(entity)
+                    }
+                    QueuedPayload::Vector(_) | QueuedPayload::Text(_) => {
+                        BlockerRepair::Replace(entity)
+                    }
+                })
+            });
+            blocked.push(BlockedBuild {
+                target: *target,
+                operation_id: *operation_id,
+                repair,
+            });
+        }
     }
 }
 
@@ -94,6 +200,7 @@ impl QueuedMutationCollector {
             scope,
             generations: BTreeMap::new(),
             text_records: BTreeMap::new(),
+            builds: BTreeMap::new(),
         }
     }
 
@@ -141,14 +248,21 @@ impl QueuedMutationCollector {
                         Ok(document) => document,
                         // A hidden build blocks on every invalid row without
                         // indexing it, so its repair has no previous routing.
-                        Err(_) if target.active.is_none() => None,
+                        Err(_) if target.build_operation.is_some() => None,
                         // An already-invalid Active row stays untouched until a
                         // rebuild.
                         Err(HelixDbError::VectorComponentMagnitudeExceeded { .. }) => continue,
                         Err(error) => return Err(error),
                     };
+                    let queue_target =
+                        QueueTarget::new(self.scope, target.index_id, target.generation);
+                    self.builds.extend(
+                        target
+                            .build_operation
+                            .map(|operation_id| (queue_target, operation_id)),
+                    );
                     self.record(
-                        QueueTarget::new(self.scope, target.index_id, target.generation),
+                        queue_target,
                         entity,
                         PendingEntityState::Vector {
                             first: before,
@@ -180,6 +294,11 @@ impl QueuedMutationCollector {
                     self.text_records
                         .entry(queue_target)
                         .or_insert_with(|| target.record.clone());
+                    self.builds.extend(
+                        target
+                            .build_operation
+                            .map(|operation_id| (queue_target, operation_id)),
+                    );
                     self.record(
                         queue_target,
                         entity,
@@ -282,7 +401,10 @@ impl QueuedMutationCollector {
         max_operand_bytes: u64,
         text_limits: ActiveTextMutationLimits,
     ) -> Result<StagedQueueWrites> {
-        let mut staged = StagedQueueWrites::default();
+        let mut staged = StagedQueueWrites {
+            builds: self.builds.clone(),
+            ..StagedQueueWrites::default()
+        };
         for (target, generation) in &self.generations {
             let mut operations = Vec::with_capacity(generation.order.len());
             for entity in &generation.order {

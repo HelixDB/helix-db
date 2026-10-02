@@ -153,6 +153,11 @@ pub(crate) enum IndexOperationStepResult {
     /// No physical work commits; the exact checkpoint is durably backed off.
     TransientFailure,
     /// No further automatic retry is legal until an explicit retry/abort.
+    ///
+    /// The step's transaction commits the blocker beside the operation's
+    /// unchanged checkpoint, so anything the driver staged commits too and a
+    /// retry rescans it: a driver stages before blocking only work that a
+    /// rescan from that checkpoint reconciles.
     Blocked(IndexOperationBlocker),
     /// The canonical lifecycle state and terminal operation commit together.
     Completed(IndexOperationOutcome),

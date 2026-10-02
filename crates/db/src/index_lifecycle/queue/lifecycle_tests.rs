@@ -1084,15 +1084,18 @@ async fn uncertain_charges_of_a_hidden_build_reconcile_while_it_runs() {
     // one never committed.
     let mut lost = db
         .index_operation_backlog()
-        .reserve(vec![OperationCharge {
-            target,
-            entity: IndexEntity {
-                kind: IndexElementKind::Node,
-                id: IndexEntityId::new(ids[2]),
-            },
-            id: QueuedOperationId::generate(),
-            bytes: 64,
-        }])
+        .reserve(
+            &[OperationCharge {
+                target,
+                entity: IndexEntity {
+                    kind: IndexElementKind::Node,
+                    id: IndexEntityId::new(ids[2]),
+                },
+                id: QueuedOperationId::generate(),
+                bytes: 64,
+            }],
+            &[],
+        )
         .unwrap();
     lost.begin_commit();
     drop(lost);
@@ -1133,15 +1136,18 @@ async fn uncertain_charges_of_an_active_generation_reconcile_while_its_ownership
     // one never committed.
     let mut lost = db
         .index_operation_backlog()
-        .reserve(vec![OperationCharge {
-            target,
-            entity: IndexEntity {
-                kind: IndexElementKind::Node,
-                id: IndexEntityId::new(ids[2]),
-            },
-            id: QueuedOperationId::generate(),
-            bytes: 64,
-        }])
+        .reserve(
+            &[OperationCharge {
+                target,
+                entity: IndexEntity {
+                    kind: IndexElementKind::Node,
+                    id: IndexEntityId::new(ids[2]),
+                },
+                id: QueuedOperationId::generate(),
+                bytes: 64,
+            }],
+            &[],
+        )
         .unwrap();
     lost.begin_commit();
     drop(lost);
@@ -1324,13 +1330,20 @@ fn text_ids(hits: Vec<(u64, u64)>) -> Vec<u64> {
 }
 
 /// A build admits a document only when any later replacement can publish, so
-/// it blocks on an oversized source row until that row is repaired.
+/// it blocks on an oversized source row until that row is repaired. Nothing
+/// publishes the blocked build's queued work, so once writes fill its member
+/// cap, the repair is still admitted and an unrelated insert is refused
+/// without retryable backpressure.
 #[tokio::test]
 async fn text_build_blocks_on_a_document_publication_could_not_replace() {
     let db = open(
         "build-text-oversized",
         Arc::new(InMemory::new()),
-        tight_publication_config(),
+        tight_publication_config().with_index_operation_queue_tuning(
+            IndexOperationQueueTuning::default()
+                .with_max_members(NonZeroU64::new(2).unwrap())
+                .with_publication_paused_for_tests(),
+        ),
     )
     .await;
     let resident = add(&db, [0.0, 0.0], "small resident", None).await;
@@ -1341,18 +1354,48 @@ async fn text_build_blocks_on_a_document_publication_could_not_replace() {
         status(&db, &operation).await["blocker_code"],
         "oversized_entity"
     );
+    let mut fillers = Vec::new();
+    for body in ["alpha filler", "beta filler"] {
+        fillers.push(add(&db, [0.0, 0.0], body, None).await);
+    }
+    assert_eq!(db.index_operation_queue_stats().pending_members, 2);
     // The oversized row is only the previous document of the repair.
-    update(&db, wide, [0.0, 0.0], "narrow repaired").await;
+    db.query(QueryRequest::write(
+        batch::write_batch().var_as(
+            "repaired",
+            traversal::g()
+                .n(NodeRef::from(wide))
+                .set_property("body", "narrow repaired".to_string()),
+        ),
+    ))
+    .await
+    .expect("the oversized document's repair is admitted beyond the member cap");
+    assert_build_blocked(
+        db.query(QueryRequest::write(batch::write_batch().var_as(
+            "created",
+            traversal::g().add_n(
+                "Doc",
+                vec![("body", PropertyInput::from("gamma".to_string()))],
+            ),
+        )))
+        .await,
+        &operation,
+        crate::error::IndexBackpressureResource::PendingMembers,
+        "an unrelated insert",
+    );
     retry(&db, &operation).await;
     assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
     let target = target(&db, QueueFamily::Text).await;
     drain(&db, target).await;
-    for (query, expected) in [("repaired", wide), ("resident", resident)] {
-        assert_eq!(
-            text_ids(text_search(&db, query, 10, None, SearchConsistency::Eventual).await),
-            vec![expected],
-            "{query}"
-        );
+    for (query, expected) in [
+        ("repaired", vec![wide]),
+        ("resident", vec![resident]),
+        ("filler", fillers),
+    ] {
+        let mut found =
+            text_ids(text_search(&db, query, 10, None, SearchConsistency::Eventual).await);
+        found.sort_unstable();
+        assert_eq!(found, expected, "{query}");
     }
     db.close().await.unwrap();
 }
@@ -1494,6 +1537,209 @@ async fn set_property(db: &HelixDB, id: u64, property: &str, value: PropertyInpu
     .await;
 }
 
+/// [`config`] with every entity's own vector output capped at `limit` bytes.
+fn single_vector_output_config(limit: u64) -> DbConfig {
+    let defaults = SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    let limits = SearchIndexBackfillLimits::try_new(
+        SearchIndexBatchLimits::try_new(
+            NonZeroUsize::new(4).unwrap(),
+            batch.max_input_bytes(),
+            batch.max_output_operations(),
+            batch.max_output_bytes(),
+            NonZeroU64::new(limit).unwrap(),
+        )
+        .unwrap(),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        defaults.text_compaction(),
+    )
+    .unwrap();
+    config().with_search_index_backfill_limits(limits)
+}
+
+/// Whether a vector build over `embeddings` (tenant "a", in ID order)
+/// succeeds when no entity's own output may exceed `limit` bytes; a build
+/// that does not fit blocks on an oversized entity.
+async fn vector_build_fits(embeddings: &[[f32; 2]], limit: u64) -> bool {
+    let db = open(
+        &format!("build-vector-single-output-{}-{limit}", embeddings.len()),
+        Arc::new(InMemory::new()),
+        single_vector_output_config(limit),
+    )
+    .await;
+    for embedding in embeddings {
+        add(&db, *embedding, "doc", Some("a")).await;
+    }
+    let operation = create(&db, vector_spec()).await;
+    let fits = match wait_terminal(&db, &operation).await.as_str() {
+        "succeeded" => true,
+        "blocked" => {
+            assert_eq!(
+                status(&db, &operation).await["blocker_code"],
+                "oversized_entity"
+            );
+            false
+        }
+        other => panic!("probe build ended {other}"),
+    };
+    db.close().await.unwrap();
+    fits
+}
+
+/// A vector `Scan` step that admits valid rows and then reaches a row it
+/// cannot index commits the valid rows and leaves the blocker to the next
+/// step. Repairing that row and retrying must build every row: no staged
+/// work for the earlier rows may make the retried scan fail.
+#[tokio::test]
+async fn blocked_vector_build_repairs_invalid_row_after_valid_rows_in_batch() {
+    // An invalid (three-dimensional) embedding after two valid rows of one
+    // four-entity batch.
+    let db = open(
+        "build-vector-invalid-mid-batch",
+        Arc::new(InMemory::new()),
+        config(),
+    )
+    .await;
+    let mut state = VectorState::new();
+    for embedding in [[1.0, 1.0], [2.0, 2.0]] {
+        let id = add(&db, embedding, "doc", Some("a")).await;
+        state.insert(id, ("a", embedding));
+    }
+    let invalid = add_raw(
+        &db,
+        vec![
+            ("embedding", PropertyInput::from(vec![1.0_f32, 2.0, 3.0])),
+            ("tenant", PropertyInput::from("a".to_string())),
+        ],
+    )
+    .await;
+    assert!(state.keys().all(|valid| *valid < invalid), "scan order");
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "blocked");
+    let blocked = status(&db, &operation).await;
+    assert_eq!(blocked["blocker_code"], "invalid_source_data");
+    assert_eq!(
+        scanned(&blocked),
+        2,
+        "the valid rows ahead of the blocker commit with their cursor: {blocked}"
+    );
+    set_property(
+        &db,
+        invalid,
+        "embedding",
+        PropertyInput::from(vec![0.5_f32, 0.5]),
+    )
+    .await;
+    state.insert(invalid, ("a", [0.5, 0.5]));
+    retry(&db, &operation).await;
+    let retried = wait_terminal(&db, &operation).await;
+    assert_eq!(
+        retried,
+        "succeeded",
+        "retry after repair: {}",
+        status(&db, &operation).await
+    );
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+    assert_eq!(
+        vector_search(&db, [0.5, 0.5], 10, Some("a"), SearchConsistency::Strong)
+            .await
+            .len(),
+        3
+    );
+    db.close().await.unwrap();
+}
+
+/// The oversized-entity blocker inside `plan_and_apply`: an entity whose own
+/// output exceeds the single-vector limit after earlier entities of its
+/// batch were admitted. Reopening with the default limit and retrying must
+/// build every row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocked_vector_build_retries_oversized_entity_after_valid_rows_in_batch() {
+    let embeddings = [[1.0_f32, 1.0], [2.0, 2.0], [3.0, 3.0]];
+    // The smallest single-vector limit the whole build fits in is the
+    // largest entity's own output. Probes are independent databases, so each
+    // round runs concurrently and narrows the range ninefold.
+    let probe = |limits: Vec<u64>| async move {
+        let fits = futures::future::join_all(
+            limits
+                .iter()
+                .map(|limit| vector_build_fits(&embeddings, *limit)),
+        )
+        .await;
+        limits.into_iter().zip(fits).collect::<Vec<_>>()
+    };
+    let doubling = probe((10..=22).map(|shift| 1_u64 << shift).collect()).await;
+    let mut fits = doubling
+        .iter()
+        .find(|(_, fit)| *fit)
+        .map(|(limit, _)| *limit)
+        .expect("the probe build fits under 4 MiB");
+    let mut blocks = doubling
+        .iter()
+        .filter(|(limit, fit)| !fit && *limit < fits)
+        .map(|(limit, _)| *limit)
+        .max()
+        .unwrap_or(0);
+    while fits - blocks > 1 {
+        let step = ((fits - blocks) / 9).max(1);
+        let round = probe(
+            (1..=8)
+                .map(|ordinal| blocks + ordinal * step)
+                .filter(|limit| *limit < fits)
+                .collect(),
+        )
+        .await;
+        if let Some((limit, _)) = round.iter().find(|(_, fit)| *fit) {
+            fits = *limit;
+        }
+        blocks = round
+            .iter()
+            .filter(|(limit, fit)| !fit && *limit < fits)
+            .map(|(limit, _)| *limit)
+            .fold(blocks, u64::max);
+    }
+    // One byte less blocks the build, but not on its first entity: a later
+    // entity of the same batch is the one that exceeds the limit.
+    let limit = fits - 1;
+    assert!(
+        vector_build_fits(&embeddings[..1], limit).await,
+        "the first entity's output is the largest; no mid-batch case at {limit} bytes"
+    );
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "build-vector-oversized-mid-batch";
+    let db = open(name, Arc::clone(&store), single_vector_output_config(limit)).await;
+    let mut state = VectorState::new();
+    for embedding in embeddings {
+        let id = add(&db, embedding, "doc", Some("a")).await;
+        state.insert(id, ("a", embedding));
+    }
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "blocked");
+    let blocked = status(&db, &operation).await;
+    assert_eq!(blocked["blocker_code"], "oversized_entity");
+    assert!(
+        (1..embeddings.len() as u64).contains(&scanned(&blocked)),
+        "the entities ahead of the oversized one commit with their cursor: {blocked}"
+    );
+    db.close().await.unwrap();
+
+    let db = open(name, Arc::clone(&store), config()).await;
+    retry(&db, &operation).await;
+    let retried = wait_terminal(&db, &operation).await;
+    assert_eq!(
+        retried,
+        "succeeded",
+        "retry under the default limit: {}",
+        status(&db, &operation).await
+    );
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+    db.close().await.unwrap();
+}
+
 /// Text control: an invalid body after two valid documents of one batch
 /// blocks, and the repaired row builds.
 #[tokio::test]
@@ -1545,4 +1791,792 @@ async fn blocked_text_build_repairs_invalid_row_after_valid_rows_in_batch() {
         );
     }
     db.close().await.unwrap();
+}
+
+/// A build blocked on an invalid row still routes writes to its hidden
+/// generation, whose queue cannot publish until the build activates. Once
+/// ordinary writes fill the member cap, the repair the blocker asks for must
+/// still be admitted, and an unrelated insert must not fail with a
+/// retryable backpressure error that can never clear.
+#[tokio::test]
+async fn blocked_build_at_member_cap_still_admits_its_repair() {
+    let mut refused = Vec::new();
+    for family in [QueueFamily::Vector, QueueFamily::Text] {
+        let config = config().with_index_operation_queue_tuning(
+            IndexOperationQueueTuning::default()
+                .with_max_members(NonZeroU64::new(2).unwrap())
+                .with_publication_paused_for_tests(),
+        );
+        let db = open(
+            &format!("blocked-build-member-cap-{family:?}"),
+            Arc::new(InMemory::new()),
+            config,
+        )
+        .await;
+        let (spec, property, invalid_value, repaired_value) = match family {
+            QueueFamily::Vector => (
+                vector_spec(),
+                "embedding",
+                PropertyInput::from(vec![1.0_f32, 2.0, 3.0]),
+                PropertyInput::from(vec![0.5_f32, 0.5]),
+            ),
+            QueueFamily::Text => (
+                text_spec(),
+                "body",
+                PropertyInput::from(7_i64),
+                PropertyInput::from("repaired words".to_string()),
+            ),
+        };
+        let invalid = add_raw(
+            &db,
+            vec![
+                (property, invalid_value),
+                ("tenant", PropertyInput::from("a".to_string())),
+            ],
+        )
+        .await;
+        let operation = create(&db, spec).await;
+        assert_eq!(
+            wait_terminal(&db, &operation).await,
+            "blocked",
+            "{family:?}"
+        );
+        assert_eq!(
+            status(&db, &operation).await["blocker_code"],
+            "invalid_source_data",
+            "{family:?}"
+        );
+        let mut state = VectorState::from([(invalid, ("a", [0.5, 0.5]))]);
+        let mut bodies = BTreeMap::from([(invalid, "repaired words".to_string())]);
+        for (embedding, body) in [([1.0, 1.0], "alpha"), ([2.0, 2.0], "beta")] {
+            let id = add(&db, embedding, body, Some("a")).await;
+            state.insert(id, ("a", embedding));
+            bodies.insert(id, body.to_string());
+        }
+        assert_eq!(
+            db.index_operation_queue_stats().pending_members,
+            2,
+            "{family:?}: ordinary writes filled the member cap"
+        );
+
+        let repair = db
+            .query(QueryRequest::write(
+                batch::write_batch().var_as(
+                    "repaired",
+                    traversal::g()
+                        .n(NodeRef::from(invalid))
+                        .set_property(property, repaired_value),
+                ),
+            ))
+            .await;
+        let insert = db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "created",
+                        traversal::g().add_n(
+                            "Doc",
+                            vec![
+                                ("embedding", PropertyInput::from(vec![3.0_f32, 3.0])),
+                                ("body", PropertyInput::from("gamma".to_string())),
+                                ("tenant", PropertyInput::from("a".to_string())),
+                            ],
+                        ),
+                    )
+                    .returning(["created"]),
+            ))
+            .await;
+        let insert_settles = match &insert {
+            Ok(_) => true,
+            Err(error) => !error.is_index_backpressure() && error.to_string().contains(&operation),
+        };
+        if !(repair.is_ok() && insert_settles) {
+            // Both families are reported before the test fails.
+            refused.push(format!(
+                "{family:?}: the repair must be admitted ({repair:?}) and an unrelated \
+                 insert must not be refused with backpressure that never clears ({insert:?})"
+            ));
+            db.close().await.unwrap();
+            continue;
+        }
+        if let Ok(created) = &insert {
+            let id = created["created"][0]["$id"].as_u64().unwrap();
+            state.insert(id, ("a", [3.0, 3.0]));
+            bodies.insert(id, "gamma".to_string());
+        }
+
+        retry(&db, &operation).await;
+        assert_eq!(
+            wait_terminal(&db, &operation).await,
+            "succeeded",
+            "{family:?}: {}",
+            status(&db, &operation).await
+        );
+        drain(&db, target(&db, family).await).await;
+        match family {
+            QueueFamily::Vector => {
+                for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+                    assert_exact_vectors(&db, &state, consistency).await;
+                }
+            }
+            QueueFamily::Text => {
+                for (id, body) in &bodies {
+                    let term = body.split(' ').next().unwrap();
+                    assert_eq!(
+                        text_ids(
+                            text_search(&db, term, 10, None, SearchConsistency::Eventual).await
+                        ),
+                        vec![*id],
+                        "{term}"
+                    );
+                }
+            }
+        }
+        db.close().await.unwrap();
+    }
+    assert!(refused.is_empty(), "{refused:#?}");
+}
+
+/// Asserts that `result` is the non-retryable refusal of a write that would
+/// saturate `expected` of the queued work of the blocked build `operation`.
+fn assert_build_blocked(
+    result: crate::Result<serde_json::Value>,
+    operation: &str,
+    expected: crate::error::IndexBackpressureResource,
+    write: &str,
+) {
+    let error = result.expect_err(write);
+    assert!(
+        matches!(
+            error,
+            crate::error::HelixDbError::IndexBuildBlocked { resource, .. } if resource == expected
+        ),
+        "{write}: {error:?}"
+    );
+    assert_eq!(
+        error.error_code(),
+        helix_ast::error_code::QueryErrorCode::IndexBuildBlocked,
+        "{write}"
+    );
+    assert!(!error.is_index_backpressure(), "{write}: {error}");
+    assert!(error.to_string().contains(operation), "{write}: {error}");
+}
+
+/// Beyond the member cap a blocked build admits no new member but its
+/// blocker's first repair: an unrelated insert and the repair bundled with
+/// another entity are refused. Writes to pending entities add no member, so
+/// a resident's update and a second write of the repaired entity stay
+/// admitted, before and after the retry. Once the retried build runs, a new
+/// member is ordinary retryable backpressure again and clears as publication
+/// drains.
+#[tokio::test]
+async fn blocked_build_beyond_the_member_cap_refuses_only_new_members() {
+    let config = config().with_index_operation_queue_tuning(
+        IndexOperationQueueTuning::default()
+            .with_max_members(NonZeroU64::new(2).unwrap())
+            .with_publication_paused_for_tests(),
+    );
+    let db = open("blocked-build-bounded", Arc::new(InMemory::new()), config).await;
+    let invalid = add_raw(
+        &db,
+        vec![
+            ("embedding", PropertyInput::from(vec![1.0_f32, 2.0, 3.0])),
+            ("tenant", PropertyInput::from("a".to_string())),
+        ],
+    )
+    .await;
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "blocked");
+    let mut state = VectorState::from([(invalid, ("a", [0.5, 0.5]))]);
+    let mut residents = Vec::new();
+    for embedding in [[1.0, 1.0], [2.0, 2.0]] {
+        let id = add(&db, embedding, "doc", Some("a")).await;
+        state.insert(id, ("a", embedding));
+        residents.push(id);
+    }
+    let insert = || {
+        db.query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![
+                            ("embedding", PropertyInput::from(vec![3.0_f32, 3.0])),
+                            ("tenant", PropertyInput::from("a".to_string())),
+                        ],
+                    ),
+                )
+                .returning(["created"]),
+        ))
+    };
+    let repair = |embedding: [f32; 2]| {
+        traversal::g()
+            .n(NodeRef::from(invalid))
+            .set_property("embedding", PropertyInput::from(embedding.to_vec()))
+    };
+    let pending = || {
+        let stats = db.index_operation_queue_stats();
+        (stats.pending_members, stats.pending_operations)
+    };
+    assert_eq!(pending(), (2, 2));
+
+    let members = crate::error::IndexBackpressureResource::PendingMembers;
+    assert_build_blocked(insert().await, &operation, members, "an unrelated insert");
+    assert_build_blocked(
+        db.query(QueryRequest::write(
+            batch::write_batch()
+                .var_as("repaired", repair([0.5, 0.5]))
+                .var_as(
+                    "moved",
+                    traversal::g()
+                        .n(NodeRef::from(residents[0]))
+                        .set_property("embedding", PropertyInput::from(vec![1.5_f32, 1.5])),
+                ),
+        ))
+        .await,
+        &operation,
+        members,
+        "the repair bundled with another entity",
+    );
+    assert_eq!(pending(), (2, 2), "refused writes queue nothing");
+    db.query(QueryRequest::write(
+        batch::write_batch().var_as("repaired", repair([0.5, 0.5])),
+    ))
+    .await
+    .expect("the blocker's first repair is admitted beyond the cap");
+    assert_eq!(pending(), (3, 3));
+    db.query(QueryRequest::write(
+        batch::write_batch().var_as("repaired", repair([0.25, 0.25])),
+    ))
+    .await
+    .expect("a second write of the repaired entity adds no member");
+    state.insert(invalid, ("a", [0.25, 0.25]));
+    update(&db, residents[0], [1.5, 1.5], "doc").await;
+    state.insert(residents[0], ("a", [1.5, 1.5]));
+    assert_build_blocked(
+        insert().await,
+        &operation,
+        members,
+        "an insert after the repair",
+    );
+    assert_eq!(pending(), (3, 5));
+
+    retry(&db, &operation).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    assert!(
+        insert()
+            .await
+            .expect_err("still saturated")
+            .is_index_backpressure(),
+        "an Active generation's saturation is retryable"
+    );
+    update(&db, residents[1], [2.5, 2.5], "doc").await;
+    state.insert(residents[1], ("a", [2.5, 2.5]));
+    assert_eq!(pending(), (3, 6), "a resident's update adds no member");
+    let target = target(&db, QueueFamily::Vector).await;
+    drain(&db, target).await;
+    let created = insert().await.expect("publication cleared the backlog");
+    state.insert(
+        created["created"][0]["$id"].as_u64().unwrap(),
+        ("a", [3.0, 3.0]),
+    );
+    drain(&db, target).await;
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        assert_exact_vectors(&db, &state, consistency).await;
+    }
+    db.close().await.unwrap();
+}
+
+/// Only the build measures an entity's vector output, so the first queued
+/// write of an oversized entity may leave it oversized. Once that write has
+/// taken the queue past its byte limit, every further write is refused,
+/// including the entity's own and a resident's update, except removing the
+/// entity from the index, which clears the blocker.
+#[tokio::test]
+async fn blocked_build_admits_removing_an_entity_its_first_write_left_oversized() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "blocked-build-oversized-removal";
+    // Every entity's own output exceeds one byte.
+    let tight = |tuning: IndexOperationQueueTuning| {
+        single_vector_output_config(1)
+            .with_index_operation_queue_tuning(tuning.with_publication_paused_for_tests())
+    };
+    let db = open(
+        name,
+        Arc::clone(&store),
+        tight(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    let oversized = add(&db, [1.0, 1.0], "doc", Some("a")).await;
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "blocked");
+    assert_eq!(
+        status(&db, &operation).await["blocker_code"],
+        "oversized_entity"
+    );
+    let resident = add(&db, [2.0, 2.0], "doc", Some("a")).await;
+    assert!(oversized < resident, "scan order");
+    // Room for the resident's operation and half of another, so any further
+    // write is above the byte limit while no single one is too large.
+    let resident_bytes = db.index_operation_queue_stats().retained_bytes;
+    db.close().await.unwrap();
+    let db = open(
+        name,
+        Arc::clone(&store),
+        tight(
+            IndexOperationQueueTuning::default()
+                .with_max_retained_bytes(NonZeroU64::new(resident_bytes * 3 / 2).unwrap()),
+        ),
+    )
+    .await;
+    let embed = |id: u64, embedding: [f32; 2]| {
+        db.query(QueryRequest::write(
+            batch::write_batch().var_as(
+                "moved",
+                traversal::g()
+                    .n(NodeRef::from(id))
+                    .set_property("embedding", PropertyInput::from(embedding.to_vec())),
+            ),
+        ))
+    };
+    embed(oversized, [1.5, 1.5])
+        .await
+        .expect("the blocker's first write is admitted beyond the byte limit");
+    retry(&db, &operation).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "blocked");
+    assert_eq!(
+        status(&db, &operation).await["blocker_code"],
+        "oversized_entity",
+        "the first write left the first entity oversized"
+    );
+    let bytes = crate::error::IndexBackpressureResource::RetainedBytes;
+    assert_build_blocked(
+        embed(oversized, [1.25, 1.25]).await,
+        &operation,
+        bytes,
+        "a second write of the oversized entity",
+    );
+    assert_build_blocked(
+        embed(resident, [2.5, 2.5]).await,
+        &operation,
+        bytes,
+        "a resident's update",
+    );
+    assert_build_blocked(
+        db.query(QueryRequest::write(batch::write_batch().var_as(
+            "created",
+            traversal::g().add_n(
+                "Doc",
+                vec![
+                    ("embedding", PropertyInput::from(vec![3.0_f32, 3.0])),
+                    ("tenant", PropertyInput::from("a".to_string())),
+                ],
+            ),
+        )))
+        .await,
+        &operation,
+        bytes,
+        "an unrelated insert",
+    );
+    db.query(QueryRequest::write(batch::write_batch().var_as(
+        "dropped",
+        traversal::g().n(NodeRef::from(oversized)).drop(),
+    )))
+    .await
+    .expect("removing the oversized entity is admitted beyond the byte limit");
+    let stats = db.index_operation_queue_stats();
+    assert_eq!((stats.pending_members, stats.pending_operations), (2, 3));
+    db.close().await.unwrap();
+
+    // Under the default limits the retried build and the drained queue index
+    // the resident alone.
+    let db = open(name, Arc::clone(&store), config()).await;
+    retry(&db, &operation).await;
+    assert_eq!(
+        wait_terminal(&db, &operation).await,
+        "succeeded",
+        "{}",
+        status(&db, &operation).await
+    );
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    let state = VectorState::from([(resident, ("a", [2.0, 2.0]))]);
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        assert_exact_vectors(&db, &state, consistency).await;
+    }
+    db.close().await.unwrap();
+}
+
+/// A row invalid for both a vector and a text index blocks both builds. With
+/// both saturated, one write repairing both properties charges two blocked
+/// generations, and each must admit it as its blocker's repair, while an
+/// unrelated insert is refused by a blocked build.
+#[tokio::test]
+async fn one_write_repairs_a_row_two_saturated_blocked_builds_block_on() {
+    let config = config().with_index_operation_queue_tuning(
+        IndexOperationQueueTuning::default()
+            .with_max_members(NonZeroU64::new(2).unwrap())
+            .with_publication_paused_for_tests(),
+    );
+    let db = open(
+        "blocked-builds-shared-repair",
+        Arc::new(InMemory::new()),
+        config,
+    )
+    .await;
+    let invalid = add_raw(
+        &db,
+        vec![
+            ("embedding", PropertyInput::from(vec![1.0_f32, 2.0, 3.0])),
+            ("body", PropertyInput::from(7_i64)),
+            ("tenant", PropertyInput::from("a".to_string())),
+        ],
+    )
+    .await;
+    let operations = [
+        create(&db, vector_spec()).await,
+        create(&db, text_spec()).await,
+    ];
+    for operation in &operations {
+        assert_eq!(wait_terminal(&db, operation).await, "blocked");
+        assert_eq!(
+            status(&db, operation).await["blocker_code"],
+            "invalid_source_data"
+        );
+    }
+    let mut state = VectorState::from([(invalid, ("a", [0.5, 0.5]))]);
+    let mut bodies = BTreeMap::from([(invalid, "repaired words".to_string())]);
+    for (embedding, body) in [([1.0, 1.0], "alpha"), ([2.0, 2.0], "beta")] {
+        let id = add(&db, embedding, body, Some("a")).await;
+        state.insert(id, ("a", embedding));
+        bodies.insert(id, body.to_string());
+    }
+    let pending = || {
+        let stats = db.index_operation_queue_stats();
+        (stats.pending_members, stats.pending_operations)
+    };
+    assert_eq!(pending(), (4, 4), "both indexes are at their member cap");
+
+    db.query(QueryRequest::write(
+        batch::write_batch().var_as(
+            "repaired",
+            traversal::g()
+                .n(NodeRef::from(invalid))
+                .set_property("embedding", vec![0.5_f32, 0.5])
+                .set_property("body", "repaired words".to_string()),
+        ),
+    ))
+    .await
+    .expect("both blocked builds admit the shared repair");
+    assert_eq!(pending(), (6, 6));
+    let error = db
+        .query(QueryRequest::write(batch::write_batch().var_as(
+            "created",
+            traversal::g().add_n(
+                "Doc",
+                vec![
+                    ("embedding", PropertyInput::from(vec![3.0_f32, 3.0])),
+                    ("body", PropertyInput::from("gamma".to_string())),
+                    ("tenant", PropertyInput::from("a".to_string())),
+                ],
+            ),
+        )))
+        .await
+        .expect_err("an unrelated insert is refused");
+    assert!(
+        matches!(error, crate::error::HelixDbError::IndexBuildBlocked { .. })
+            && operations
+                .iter()
+                .any(|operation| error.to_string().contains(operation)),
+        "{error:?}"
+    );
+    assert_eq!(pending(), (6, 6));
+
+    for operation in &operations {
+        retry(&db, operation).await;
+        assert_eq!(
+            wait_terminal(&db, operation).await,
+            "succeeded",
+            "{}",
+            status(&db, operation).await
+        );
+    }
+    for family in [QueueFamily::Vector, QueueFamily::Text] {
+        drain(&db, target(&db, family).await).await;
+    }
+    for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+        assert_exact_vectors(&db, &state, consistency).await;
+    }
+    for (id, body) in &bodies {
+        let term = body.split(' ').next().unwrap();
+        assert_eq!(
+            text_ids(text_search(&db, term, 10, None, SearchConsistency::Eventual).await),
+            vec![*id],
+            "{term}"
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// A running build's saturated generation clears once the build activates
+/// and publication drains it, so its refusal stays retryable backpressure.
+#[tokio::test]
+async fn running_build_beyond_the_member_cap_is_retryable_backpressure() {
+    let config = config().with_index_operation_queue_tuning(
+        IndexOperationQueueTuning::default()
+            .with_max_members(NonZeroU64::new(2).unwrap())
+            .with_publication_paused_for_tests(),
+    );
+    let db = open(
+        "running-build-backpressure",
+        Arc::new(InMemory::new()),
+        config,
+    )
+    .await;
+    let (ids, mut state) = seed_vectors(&db, 12).await;
+    let operation = create(&db, vector_spec()).await;
+    let target = target(&db, QueueFamily::Vector).await;
+    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 4).await;
+    for position in [1_usize, 2] {
+        update(&db, ids[position], [7.0, 7.0], "doc").await;
+        state.get_mut(&ids[position]).unwrap().1 = [7.0, 7.0];
+    }
+    let error = db
+        .query(QueryRequest::write(
+            batch::write_batch().var_as(
+                "moved",
+                traversal::g()
+                    .n(NodeRef::from(ids[3]))
+                    .set_property("embedding", PropertyInput::from(vec![8.0_f32, 8.0])),
+            ),
+        ))
+        .await
+        .expect_err("a third member is above the cap");
+    assert!(
+        matches!(
+            error,
+            crate::error::HelixDbError::IndexBackpressure {
+                resource: crate::error::IndexBackpressureResource::PendingMembers,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    drop(paused);
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    drain(&db, target).await;
+    update(&db, ids[3], [8.0, 8.0], "doc").await;
+    state.get_mut(&ids[3]).unwrap().1 = [8.0, 8.0];
+    drain(&db, target).await;
+    assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+    db.close().await.unwrap();
+}
+
+/// How an operator resolves a blocked build while a write races it.
+#[derive(Debug, Clone, Copy)]
+enum BlockedBuildResolution {
+    Retry,
+    Abort,
+}
+
+/// A saturated blocked build admits its blocker's repair from the writing
+/// transaction's own read of the build's operation. A retry or abort of the
+/// build that commits between that read and the write's commit must fail the
+/// write with a transaction conflict, so the repair never lands above the
+/// limits in a running or retired generation, and releasing the aborted
+/// reservation leaves the ledger as it was.
+///
+/// The retry rewrites only the operation row and its pointer, so it conflicts
+/// solely through the admission read; the abort also rewrites the canonical
+/// index row the transaction's mutation catalog read.
+#[tokio::test]
+async fn a_retry_or_abort_committed_after_a_blocker_repair_reserves_fails_the_repair() {
+    for resolution in [BlockedBuildResolution::Retry, BlockedBuildResolution::Abort] {
+        let config = config().with_index_operation_queue_tuning(
+            IndexOperationQueueTuning::default()
+                .with_max_members(NonZeroU64::new(2).unwrap())
+                .with_publication_paused_for_tests(),
+        );
+        let db = open(
+            &format!("blocked-build-stale-blocker-{resolution:?}"),
+            Arc::new(InMemory::new()),
+            config,
+        )
+        .await;
+        let scope = DataScope::LegacyUnscoped;
+        let invalid = add_raw(
+            &db,
+            vec![
+                ("embedding", PropertyInput::from(vec![1.0_f32, 2.0, 3.0])),
+                ("tenant", PropertyInput::from("a".to_string())),
+            ],
+        )
+        .await;
+        let operation = create(&db, vector_spec()).await;
+        assert_eq!(wait_terminal(&db, &operation).await, "blocked");
+        let mut state = VectorState::from([(invalid, ("a", [0.5, 0.5]))]);
+        for embedding in [[1.0, 1.0], [2.0, 2.0]] {
+            let id = add(&db, embedding, "doc", Some("a")).await;
+            state.insert(id, ("a", embedding));
+        }
+        let target = target(&db, QueueFamily::Vector).await;
+        let ledger = || {
+            db.index_operation_backlog()
+                .usage(target.scope, target.index_id)
+        };
+        let saturated = ledger();
+        assert_eq!((saturated.members, saturated.operations), (2, 2));
+        // No build step runs while its generation's ownership is held, so
+        // only the resolution's own commit races the repair.
+        let held = db.inner.index_scope_gates.publication_permit(target).await;
+
+        // The repair, staged exactly as a graph write stages it.
+        let scope_permit = db.index_mutation_scope_permit(scope).await;
+        let transaction = db
+            .inner_db()
+            .begin(slatedb::IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let (_, _, vector, text, routes) =
+            crate::index_lifecycle::mutation_catalog::MutationIndexCatalog::load(
+                &transaction,
+                scope,
+            )
+            .await
+            .unwrap()
+            .into_components();
+        let entity = crate::index_lifecycle::graph_mutation::GraphEntity::node(invalid);
+        let before = crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::decode(
+            transaction
+                .get(entity.property_key(scope))
+                .await
+                .unwrap()
+                .expect("the blocker's row exists"),
+        )
+        .unwrap();
+        let crate::index_lifecycle::graph_mutation::PropertyEditOutcome::Changed(transition) =
+            crate::index_lifecycle::graph_mutation::GraphMutationTransition::edit(
+                scope,
+                entity,
+                before,
+                crate::index_lifecycle::graph_mutation::PropertyEdit::set(
+                    crate::encoding::v2::values::property::Property::new(
+                        "embedding",
+                        crate::encoding::v2::values::property::property_value::PropertyValue::F32Array(
+                            vec![0.5, 0.5],
+                        ),
+                    ),
+                ),
+            )
+        else {
+            panic!("the repair changes the blocker's row");
+        };
+        let mut collector = super::producer::QueuedMutationCollector::new(scope);
+        collector
+            .collect(
+                &vector,
+                &text,
+                &routes.targets_for(&transition),
+                &transition,
+            )
+            .unwrap();
+        let staged = collector
+            .finalize(db.index_operand_limit(), db.active_text_mutation_limits())
+            .unwrap();
+        let mut reservation = staged
+            .reserve(db.index_operation_backlog(), &transaction)
+            .await
+            .expect("the blocker's first repair is admitted beyond the member cap");
+        let admitted = ledger();
+        assert_eq!((admitted.members, admitted.operations), (3, 3));
+        for staged in staged.operands {
+            db.index_queue_store()
+                .stage_enqueue(
+                    &transaction,
+                    staged.target,
+                    staged.operand,
+                    &staged.operations,
+                )
+                .unwrap();
+        }
+        transaction
+            .put(
+                transition.graph_key(),
+                transition.after().unwrap().encoded().clone(),
+            )
+            .unwrap();
+
+        let operation_id = crate::index_lifecycle::IndexOperationId::new(
+            uuid::Uuid::parse_str(&operation).unwrap(),
+        )
+        .unwrap();
+        match resolution {
+            BlockedBuildResolution::Retry => {
+                db.retry_index_operation(scope, operation_id).await.unwrap();
+            }
+            BlockedBuildResolution::Abort => {
+                db.abort_index_operation(scope, operation_id).await.unwrap();
+            }
+        }
+        reservation.begin_commit();
+        let error = transaction
+            .commit()
+            .await
+            .expect_err("the build changed after the repair read it blocked");
+        assert_eq!(
+            error.kind(),
+            slatedb::ErrorKind::Transaction,
+            "{resolution:?}: {error}"
+        );
+        reservation.aborted();
+        drop(scope_permit);
+        assert_eq!(ledger(), saturated, "{resolution:?}: nothing stays charged");
+
+        let repair = || {
+            db.query(QueryRequest::write(
+                batch::write_batch().var_as(
+                    "repaired",
+                    traversal::g()
+                        .n(NodeRef::from(invalid))
+                        .set_property("embedding", PropertyInput::from(vec![0.5_f32, 0.5])),
+                ),
+            ))
+        };
+        match resolution {
+            BlockedBuildResolution::Retry => {
+                assert!(
+                    repair()
+                        .await
+                        .expect_err("a runnable build admits no repair above the cap")
+                        .is_index_backpressure(),
+                    "a runnable build's saturation is retryable"
+                );
+                assert_eq!(ledger(), saturated);
+                drop(held);
+                assert_eq!(
+                    wait_terminal(&db, &operation).await,
+                    "blocked",
+                    "the refused repairs left the row invalid"
+                );
+                repair()
+                    .await
+                    .expect("the blocker's first repair is admitted once it blocks again");
+                retry(&db, &operation).await;
+                assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+                drain(&db, target).await;
+                for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+                    assert_exact_vectors(&db, &state, consistency).await;
+                }
+            }
+            BlockedBuildResolution::Abort => {
+                repair()
+                    .await
+                    .expect("an aborting build routes no queued work");
+                assert_eq!(ledger(), saturated, "the retired generation is not charged");
+                drop(held);
+                assert_eq!(wait_terminal(&db, &operation).await, "aborted");
+            }
+        }
+        db.close().await.unwrap();
+    }
 }

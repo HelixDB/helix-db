@@ -131,6 +131,12 @@ pub enum QueryErrorCode {
     /// committed but unpublished work) and is safe to retry after the index
     /// worker publishes outstanding operations.
     IndexBackpressure,
+    /// A write would saturate the queued work of a blocked hidden index
+    /// build. Its generation publishes nothing until the build activates, so
+    /// retrying the same write cannot succeed until the blocked build
+    /// operation is retried (after repairing what its blocker names) or
+    /// aborted.
+    IndexBuildBlocked,
     /// One transaction staged more queued index work than a single transaction
     /// may carry (an operand above the durable write-ahead-log entry limit, or
     /// a per-index backlog limit exceeded on its own); retrying the same write
@@ -296,6 +302,7 @@ impl QueryErrorCode {
         Self::MigrationSteppingRequiresDisabledMode,
         Self::ActiveTextMutationLimitExceeded,
         Self::IndexBackpressure,
+        Self::IndexBuildBlocked,
         Self::IndexOperationBatchTooLarge,
         Self::InvalidIndexSourceData,
         Self::InvalidIndexModel,
@@ -392,6 +399,7 @@ impl QueryErrorCode {
             }
             Self::ActiveTextMutationLimitExceeded => "active_text_mutation_limit_exceeded",
             Self::IndexBackpressure => "index_backpressure",
+            Self::IndexBuildBlocked => "index_build_blocked",
             Self::IndexOperationBatchTooLarge => "index_operation_batch_too_large",
             Self::InvalidIndexSourceData => "invalid_index_source_data",
             Self::InvalidIndexModel => "invalid_index_model",

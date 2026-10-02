@@ -93,19 +93,19 @@ pub fn index_operation_queue_ledger_contracts() {
 
     // One identity is reserved at most once, within or across transactions.
     let first = charge(target(1), 1, 10);
-    invariant(backlog.reserve(vec![first, first]), "reserved twice");
-    let staged = backlog.reserve(vec![first]).expect("a fresh identity");
-    invariant(backlog.reserve(vec![first]), "reserved twice");
+    invariant(backlog.reserve(&[first, first], &[]), "reserved twice");
+    let staged = backlog.reserve(&[first], &[]).expect("a fresh identity");
+    invariant(backlog.reserve(&[first], &[]), "reserved twice");
     // One catalog snapshot routes each logical index to one generation.
     invariant(
-        backlog.reserve(vec![charge(target(1), 2, 10), charge(target(2), 3, 10)]),
+        backlog.reserve(&[charge(target(1), 2, 10), charge(target(2), 3, 10)], &[]),
         "two generations of one index",
     );
     assert!(backlog.has_charges(target(1)));
     // Dropping a reservation before commit submission is a definite abort,
     // and so is an explicit abort after it.
     drop(staged);
-    let mut aborted = backlog.reserve(vec![first]).expect("the abort freed it");
+    let mut aborted = backlog.reserve(&[first], &[]).expect("the abort freed it");
     aborted.begin_commit();
     aborted.aborted();
     assert!(!backlog.has_charges(target(1)));
@@ -125,7 +125,7 @@ pub fn index_operation_queue_ledger_contracts() {
 
     // An acknowledgement of an uncertain enqueue proves it durable.
     let proven = charge(target(1), 5, 10);
-    let mut reservation = backlog.reserve(vec![proven]).expect("capacity");
+    let mut reservation = backlog.reserve(&[proven], &[]).expect("capacity");
     reservation.begin_commit();
     reservation.uncertain();
     assert!(backlog.has_uncertain(target(1)));
@@ -145,7 +145,7 @@ pub fn index_operation_queue_ledger_contracts() {
     // presence proves an enqueue durable whenever it was marked.
     let ticket = backlog.begin_reconciliation();
     let late = charge(target(1), 6, 10);
-    let mut reservation = backlog.reserve(vec![late]).expect("capacity");
+    let mut reservation = backlog.reserve(&[late], &[]).expect("capacity");
     reservation.begin_commit();
     drop(reservation);
     assert_eq!(backlog.finish_reconciliation(ticket, target(1), []), 0);
@@ -162,7 +162,10 @@ pub fn index_operation_queue_ledger_contracts() {
     // its commit instant: it bounds the oldest pending age and times the
     // acknowledgement a later absent read proves.
     let timed = charge(target(1), 7, 10);
-    backlog.reserve(vec![timed]).expect("capacity").committed();
+    backlog
+        .reserve(&[timed], &[])
+        .expect("capacity")
+        .committed();
     backlog.mark_acknowledgement_uncertain([timed.id]);
     // A repeated uncertain acknowledgement keeps the observed commit.
     backlog.mark_acknowledgement_uncertain([timed.id]);
@@ -208,12 +211,15 @@ pub async fn index_operation_queue_reconciliation_contracts() {
     set_embedding(&db, document, [1.0, 0.5]).await;
     let mut lost = db
         .index_operation_backlog()
-        .reserve(vec![OperationCharge {
-            target,
-            entity: node(document),
-            id: codec::QueuedOperationId::generate(),
-            bytes: 64,
-        }])
+        .reserve(
+            &[OperationCharge {
+                target,
+                entity: node(document),
+                id: codec::QueuedOperationId::generate(),
+                bytes: 64,
+            }],
+            &[],
+        )
         .expect("capacity");
     lost.begin_commit();
     drop(lost);
@@ -1313,12 +1319,15 @@ async fn commit_reserved(
 ) -> BacklogReservation {
     let mut reservation = db
         .index_operation_backlog()
-        .reserve(vec![OperationCharge {
-            target,
-            entity: operation.entity(),
-            id: operation.id(),
-            bytes: operation.retained_bytes(),
-        }])
+        .reserve(
+            &[OperationCharge {
+                target,
+                entity: operation.entity(),
+                id: operation.id(),
+                bytes: operation.retained_bytes(),
+            }],
+            &[],
+        )
         .expect("capacity is available");
     reservation.begin_commit();
     commit_operation(db, target, operation).await;

@@ -2748,6 +2748,14 @@ async fn validate_adopted_directory<D: Distance>(
     Ok(VectorStepResult::ordinary(progressed_build(next)))
 }
 
+/// Runs one bounded build `Scan` step over source rows after `progress`.
+///
+/// A blocked step commits whatever it staged with its operation's unchanged
+/// progress (see [`IndexOperationStepResult::Blocked`]), and a later scan
+/// cannot revisit an entity with applied state. A step therefore blocks
+/// only with an empty batch: a blocker behind admitted entities ends the
+/// step like a full batch, committing them with the cursor at the last one,
+/// and the next step meets the blocker with nothing staged.
 #[allow(
     clippy::too_many_arguments,
     reason = "source scanning retains exact operation and physical planning authority"
@@ -2837,6 +2845,10 @@ async fn scan_source<D: Distance>(
             .ok()
             .and_then(|properties| vector_document(definition, &properties).ok())
         else {
+            if !accounting.is_empty() {
+                exhausted = false;
+                break;
+            }
             transaction.get(&row.key).await?;
             return Ok(VectorStepResult::ordinary(invalid_source(
                 definition.element_kind(),
@@ -2883,17 +2895,16 @@ async fn scan_source<D: Distance>(
         } = outcome
         else {
             build_session.discard_entity();
-            if matches!(outcome, EntityPlanOutcome::Blocked(_)) {
-                transaction.get(&row.key).await?;
-            }
-            return finish_or_block_scan(
-                outcome,
-                accounting,
-                definition.element_kind(),
-                entity_id,
-                progress,
-                cursor,
-                build_session.stats(),
+            // A full batch, or a blocker behind admitted entities, ends the step.
+            let (EntityPlanOutcome::Blocked(blocker), true) = (outcome, accounting.is_empty())
+            else {
+                exhausted = false;
+                break;
+            };
+            transaction.get(&row.key).await?;
+            return Ok(
+                VectorStepResult::ordinary(IndexOperationStepResult::Blocked(blocker))
+                    .with_vector_planning(accounting.planning_usage(build_session.stats())),
             );
         };
         if next_partition.is_some() {
@@ -4206,43 +4217,6 @@ fn invalid_source(
     })
 }
 
-fn finish_or_block_scan(
-    outcome: EntityPlanOutcome,
-    accounting: VectorBatchAccounting,
-    entity_kind: IndexElementKind,
-    entity_id: IndexEntityId,
-    progress: &SourceScanProgress,
-    cursor: Option<IndexCursor>,
-    session_stats: VectorBuildSessionStats,
-) -> Result<VectorStepResult> {
-    let vector_planning = accounting.planning_usage(session_stats);
-    match outcome {
-        EntityPlanOutcome::Blocked(blocker) => Ok(VectorStepResult::ordinary(
-            IndexOperationStepResult::Blocked(blocker),
-        )
-        .with_vector_planning(vector_planning)),
-        EntityPlanOutcome::BatchFull => {
-            let (counters, single_vector_output_bytes) = accounting.finish_with_max()?;
-            Ok(VectorStepResult {
-                result: progressed_build(VectorBuildStage::Scan(SourceScanProgress {
-                    inclusive_upper_bound: progress.inclusive_upper_bound.clone(),
-                    cursor,
-                    counters,
-                })),
-                single_vector_output_bytes,
-                physical_operations: 0,
-                output_bytes: 0,
-                vector_planning,
-                retained: None,
-            })
-        }
-        EntityPlanOutcome::Admitted { .. } => Err(corruption(format!(
-            "admitted vector entity {entity_kind:?}/{} escaped application",
-            entity_id.get()
-        ))),
-    }
-}
-
 /// Admission of one planned entity.
 pub(super) enum EntityPlanOutcome {
     /// The plan was applied to the target transaction.
@@ -4498,6 +4472,17 @@ mod tests {
     #[tokio::test]
     async fn source_scan_rejects_every_preplanning_boundary() {
         super::driver_contracts::source_scan_rejects_every_preplanning_boundary().await;
+    }
+
+    #[tokio::test]
+    async fn a_scan_step_ends_before_a_blocker_behind_admitted_rows() {
+        super::driver_contracts::a_scan_step_ends_before_a_blocker_behind_admitted_rows().await;
+    }
+
+    #[tokio::test]
+    async fn a_scan_step_ends_before_an_entity_its_output_budget_cannot_admit() {
+        super::driver_contracts::a_scan_step_ends_before_an_entity_its_output_budget_cannot_admit()
+            .await;
     }
 
     #[tokio::test]
