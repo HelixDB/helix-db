@@ -649,9 +649,11 @@ static QUEUE_MERGES: QueueMerges = QueueMerges::new();
 
 /// Immutable index-operation queue algebra.
 ///
-/// Partial merges keep removals and unconditional sets so an unresolved older
-/// base cannot defeat them; resolution against a known base yields the
-/// ordered retained operations or a tombstone for the empty queue.
+/// Partial merges cancel each acknowledgement against its own enqueue and
+/// keep the removals whose insert lies below them, and unconditional sets,
+/// so an unresolved older base cannot defeat them; resolution against a
+/// known base yields the ordered retained operations or a tombstone for the
+/// empty queue.
 struct OperationQueueMergeOperator {
     /// Cost counters: the process-wide set outside tests.
     merges: &'static QueueMerges,

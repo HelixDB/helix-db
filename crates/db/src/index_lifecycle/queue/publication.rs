@@ -9,7 +9,9 @@
 //!    physical rows.
 //! 2. Acquire exclusive process-local publication ownership of an Active
 //!    generation.
-//! 3. Read the resolved queue outside any transaction (no read dependency).
+//! 3. Take the queue the target's previous commit left
+//!    ([`super::storage::RetainedQueues`]), or read the resolved queue outside
+//!    any transaction (no read dependency).
 //! 4. Select a bounded batch: whole ordered per-entity prefixes, rotating the
 //!    starting entity for fairness, never skipping an earlier operation, and
 //!    never naming more IDs than an acknowledgement may carry beside its
@@ -21,10 +23,11 @@
 //!    acknowledgement: vectors through the build planner
 //!    ([`crate::index_lifecycle::vector::publication`]), text as one epoch.
 //! 7. Stage one acknowledgement naming exactly the published IDs.
-//! 8. Commit through the vector cache's commit fence, release accounting,
-//!    then retire emptied partition caches and retain the vector planning
-//!    session for the target's next attempt: in a fair share of the planning
-//!    budget while the target has work left, in spare budget once drained.
+//! 8. Commit through the vector cache's commit fence, release accounting and
+//!    retain the rest of the queue, then retire emptied partition caches and
+//!    retain the vector planning session for the target's next attempt: in a
+//!    fair share of the planning budget while the target has work left, in
+//!    spare budget once drained.
 //!
 //! Only this attempt acknowledges its generation's queue: callers never run
 //! two attempts for one generation at once (the worker skips in-flight
@@ -452,6 +455,9 @@ impl QueuePublisher {
     }
 
     async fn try_publish(&self, target: QueueTarget) -> Result<PublicationOutcome> {
+        // Taken before anything can return, so only this attempt's own
+        // successful commit retains a queue for the next one.
+        let retained = self.store.retained().take(target);
         // Build, abort, cleanup, and compaction steps hold the generation's
         // ownership for a whole step, so it is classified before waiting for
         // ownership. Reconciliation, deferral, and discards touch only the
@@ -475,8 +481,14 @@ impl QueuePublisher {
         // Retirement while awaiting ownership is caught by the publication
         // transaction's own read of the record.
         let ownership = self.scope_gates.publication_permit(target).await;
-        let Some(stored) = self.read_queue(target).await? else {
-            return Ok(PublicationOutcome::Empty);
+        let stored = match retained {
+            Some(stored) => stored,
+            None => {
+                let Some(stored) = self.read_queue(target).await? else {
+                    return Ok(PublicationOutcome::Empty);
+                };
+                stored
+            }
         };
         match stored.queue().family() {
             QueueFamily::Vector => self.publish_vector(&ownership, &stored).await,
@@ -484,22 +496,21 @@ impl QueuePublisher {
         }
     }
 
-    /// Reads `target`'s queue outside any transaction, counting every queue
-    /// that is read and decoded.
+    /// Reads `target`'s queue from storage outside any transaction, counting
+    /// every read, including one that finds the queue empty.
     async fn read_queue(&self, target: QueueTarget) -> Result<Option<StoredQueue>> {
         let started = Instant::now();
-        let Some(stored) = self.store.read(self.db.as_ref(), target).await? else {
-            return Ok(None);
-        };
+        let stored = self.store.read(self.db.as_ref(), target).await?;
         self.metrics.queue_reads.fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .queue_read_bytes
-            .fetch_add(stored.encoded_bytes(), Ordering::Relaxed);
+        self.metrics.queue_read_bytes.fetch_add(
+            stored.as_ref().map_or(0, StoredQueue::encoded_bytes),
+            Ordering::Relaxed,
+        );
         self.metrics.queue_read_micros.fetch_add(
             u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
-        Ok(Some(stored))
+        Ok(stored)
     }
 
     /// Acknowledges a bounded batch of a retired generation's operations
@@ -779,6 +790,7 @@ impl QueuePublisher {
         // a cache effect can fail, so a post-commit error never strands
         // capacity or keeps an emptied generation schedulable.
         self.backlog.acknowledge(acknowledged.iter().copied());
+        self.store.retained().retain(target, stored, &acknowledged);
         let operations = acknowledged.len() as u64;
         let entities = selection.len() as u64;
         self.metrics
@@ -1021,6 +1033,7 @@ impl QueuePublisher {
             }
         }
         self.backlog.acknowledge(acknowledged.iter().copied());
+        self.store.retained().retain(target, stored, &acknowledged);
         let operations = acknowledged.len() as u64;
         let entities = selection.len() as u64;
         self.metrics

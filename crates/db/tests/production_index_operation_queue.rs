@@ -100,6 +100,7 @@ fn queue_tuning_lag_histogram_and_merge_counters_are_public_contracts() {
     );
     let tuning = defaults
         .with_max_retained_bytes(nonzero(4_096))
+        .expect("a small retained-byte ceiling is valid")
         .with_max_members(nonzero(7))
         .with_max_operand_bytes(nonzero(512))
         .with_recovery_sweep_interval(Duration::from_millis(250))
@@ -123,6 +124,31 @@ fn queue_tuning_lag_histogram_and_merge_counters_are_public_contracts() {
     assert_eq!(
         error.to_string(),
         "index operation queue recovery sweep interval must be nonzero"
+    );
+    let largest = IndexOperationQueueTuning::MAX_RETAINED_BYTES;
+    assert_eq!(
+        tuning
+            .with_max_retained_bytes(nonzero(largest))
+            .expect("the largest ceiling is valid")
+            .max_retained_bytes()
+            .get(),
+        largest
+    );
+    let error = tuning
+        .with_max_retained_bytes(nonzero(largest + 1))
+        .expect_err("one byte more could outgrow a storage value");
+    assert_eq!(
+        error,
+        IndexOperationQueueTuningError::RetainedBytesAboveQueueValueLimit {
+            requested: largest + 1
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "index operation queue max retained bytes {} exceed the queue value limit {largest}",
+            largest + 1
+        )
     );
     assert_eq!(
         DbConfig::new()
@@ -289,7 +315,9 @@ async fn member_backpressure_rejects_whole_writes_until_publication_drains() {
 #[tokio::test]
 async fn byte_and_operand_limits_reject_writes_before_commit() {
     let store = fixture("queue-bytes", vec![text_definition()]).await;
-    let tuning = IndexOperationQueueTuning::default().with_max_retained_bytes(nonzero(60));
+    let tuning = IndexOperationQueueTuning::default()
+        .with_max_retained_bytes(nonzero(60))
+        .expect("a small retained-byte ceiling is valid");
     let db = open(
         "queue-bytes",
         &store,
@@ -875,7 +903,8 @@ async fn an_oversized_blocker_admits_its_deletion_after_its_first_write() {
     db.close().await.expect("fixture closes");
     let db = open_tight(
         IndexOperationQueueTuning::default()
-            .with_max_retained_bytes(nonzero(resident_bytes * 3 / 2)),
+            .with_max_retained_bytes(nonzero(resident_bytes * 3 / 2))
+            .expect("a small retained-byte ceiling is valid"),
     )
     .await
     .expect("queue fixture reopens");

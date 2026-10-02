@@ -13,9 +13,10 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
 use super::publication::{PublicationOutcome, QueuePublisher};
+use super::publication_tests::batch_limits;
 use super::tests::{
-    add_text, all_keys, node_count, open, publisher_with_limits, queue, queued,
-    release_within_operand_bound, target,
+    add_text, all_keys, conflict_next_commit, node_count, open, publisher_with_limits, queue,
+    queued, release_within_operand_bound, target, text_of,
 };
 use super::QueueTarget;
 use crate::config::{
@@ -25,9 +26,10 @@ use crate::config::{
 };
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{ManagedIndexKey, ScopedKey};
-use crate::encoding::v2::values::indexes::operation_queue::QueueFamily;
+use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperation};
 use crate::error::{ActiveTextMutationResource, HelixDbError};
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
+use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
 use crate::HelixDB;
 
 fn publisher(db: &HelixDB) -> &Arc<QueuePublisher> {
@@ -830,4 +832,219 @@ async fn text_output_limits_halve_the_batch_then_block_one_entity() {
     assert_eq!(drain(&db, target).await, (4, 1));
     assert_eq!(search(&db, "beta", 10, None).await.len(), 1);
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn text_publication_continues_from_its_last_commit_and_rereads_after_any_other_outcome() {
+    let db = open(
+        "text-retained",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&db, None).await;
+    let mut ids = Vec::new();
+    for body in [
+        "apple shared",
+        "banana shared",
+        "cherry shared",
+        "damson shared",
+    ] {
+        ids.push(add(&db, body, None).await);
+    }
+    let target = target(&db, QueueFamily::Text).await;
+    // An input budget below any operation: one operation per batch.
+    let narrow = publisher_with_limits(
+        &db,
+        batch_limits(1, 32_768),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
+    let reads = || narrow.metrics().queue_reads.load(Ordering::Relaxed);
+    let retained = || db.index_queue_store().retained().retained_bytes();
+    let stored = || async {
+        queue(&db, QueueFamily::Text)
+            .await
+            .map_or_else(Vec::new, |queue| queue.into_operations())
+    };
+    let published = |outcome| match outcome {
+        PublicationOutcome::Published { operations, .. } => operations,
+        outcome @ (PublicationOutcome::Discarded { .. }
+        | PublicationOutcome::Empty
+        | PublicationOutcome::Deferred
+        | PublicationOutcome::Retry
+        | PublicationOutcome::Trimmed
+        | PublicationOutcome::Blocked) => panic!("publication did not commit: {outcome:?}"),
+    };
+    let hits = |query| {
+        let db = &db;
+        async move {
+            let mut found = search(db, query, 10, None)
+                .await
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>();
+            found.sort_unstable();
+            found
+        }
+    };
+
+    assert_eq!(published(narrow.publish_once(target).await.unwrap()), 1);
+    assert_eq!(reads(), 1);
+    assert_eq!(
+        retained(),
+        stored()
+            .await
+            .iter()
+            .map(QueuedOperation::retained_bytes)
+            .sum::<u64>(),
+        "the rest is retained"
+    );
+
+    // Work committed after the read waits for the retained operations: the
+    // next batch continues from them without reading storage and publishes
+    // the second document's original body, leaving its update queued.
+    set(&db, ids[1], "body", "plum moved").await;
+    let late = add(&db, "fig shared", None).await;
+    assert_eq!(published(narrow.publish_once(target).await.unwrap()), 1);
+    assert_eq!(reads(), 1);
+    assert!(retained() > 0);
+    assert_eq!(
+        stored()
+            .await
+            .iter()
+            .map(|operation| text_of(operation.payload()))
+            .collect::<Vec<_>>(),
+        [
+            Some("cherry shared".to_string()),
+            Some("damson shared".to_string()),
+            Some("plum moved".to_string()),
+            Some("fig shared".to_string()),
+        ]
+    );
+    assert_eq!(hits("plum").await, [ids[1]], "strong search sees the move");
+    assert!(hits("banana").await.is_empty());
+
+    // An attempt that does not commit takes the retained queue and drops it:
+    // the next one reads storage again, newer work included.
+    narrow
+        .hooks()
+        .fail_before_commit
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Retry
+    );
+    assert_eq!(retained(), 0);
+    let mut drained = 0;
+    loop {
+        let outcome = narrow.publish_once(target).await.unwrap();
+        if outcome == PublicationOutcome::Empty {
+            break;
+        }
+        drained += published(outcome);
+    }
+    assert_eq!(drained, 4, "the rest, the move, and the late add");
+    assert_eq!(retained(), 0);
+    assert!(stored().await.is_empty());
+    assert_eq!(
+        reads(),
+        3,
+        "the read after the failure and the read that finds the queue empty"
+    );
+    // The move was published after the retained insert it follows.
+    assert_eq!(hits("plum").await, [ids[1]]);
+    assert!(hits("banana").await.is_empty());
+    assert_eq!(hits("fig").await, [late]);
+    let mut shared = vec![ids[0], ids[2], ids[3], late];
+    shared.sort_unstable();
+    assert_eq!(hits("shared").await, shared);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn text_publication_rereads_its_queue_after_a_conflict_or_an_uncertain_commit() {
+    let gate = Arc::new(GatedWalStore::new());
+    let db = open(
+        "text-retained-uncommitted",
+        Arc::clone(&gate) as Arc<dyn ObjectStore>,
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&db, None).await;
+    // One document's add and two rewrites, published one operation per
+    // batch.
+    let entity = add(&db, "apple", None).await;
+    set(&db, entity, "body", "plum").await;
+    set(&db, entity, "body", "kiwi").await;
+    let target = target(&db, QueueFamily::Text).await;
+    let queued_operations = || async {
+        queue(&db, QueueFamily::Text)
+            .await
+            .map_or(0, |queue| queue.operations().len())
+    };
+    assert_eq!(queued_operations().await, 3);
+    let narrow = publisher_with_limits(
+        &db,
+        batch_limits(1, 32_768),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
+    let reads = || narrow.metrics().queue_reads.load(Ordering::Relaxed);
+    let retained = || db.index_queue_store().retained().retained_bytes();
+
+    // A conflicting commit acknowledged nothing, so its attempt keeps no
+    // queue: retaining the rest would publish the rewrites ahead of the add.
+    let (outcome, ()) = tokio::join!(
+        narrow.publish_once(target),
+        conflict_next_commit(&db, &narrow)
+    );
+    assert_eq!(outcome.unwrap(), PublicationOutcome::Retry);
+    assert_eq!(narrow.metrics().commit_conflicts.load(Ordering::Relaxed), 1);
+    assert_eq!((reads(), retained()), (1, 0));
+    assert_eq!(queued_operations().await, 3, "nothing was acknowledged");
+    let mut published = 0;
+    loop {
+        match narrow.publish_once(target).await.unwrap() {
+            PublicationOutcome::Empty => break,
+            PublicationOutcome::Published { operations, .. } => published += operations,
+            outcome @ (PublicationOutcome::Discarded { .. }
+            | PublicationOutcome::Deferred
+            | PublicationOutcome::Retry
+            | PublicationOutcome::Trimmed
+            | PublicationOutcome::Blocked) => panic!("publication stalled: {outcome:?}"),
+        }
+    }
+    assert_eq!(published, 3);
+    assert_eq!(
+        reads(),
+        3,
+        "the read after the conflict and the read that finds the queue empty"
+    );
+    let ids = |hits: Vec<(u64, u64)>| hits.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(search(&db, "kiwi", 10, None).await),
+        [entity],
+        "the last rewrite is published last"
+    );
+    assert!(search(&db, "apple", 10, None).await.is_empty());
+    assert!(search(&db, "plum", 10, None).await.is_empty());
+
+    // An uncertain commit may have acknowledged its batch, so its attempt
+    // keeps no queue either.
+    set(&db, entity, "body", "fig").await;
+    set(&db, entity, "body", "lime").await;
+    gate.uploads.send_replace(WalUploads::Failing);
+    assert_eq!(
+        narrow.publish_once(target).await.unwrap(),
+        PublicationOutcome::Retry
+    );
+    assert_eq!(
+        narrow.metrics().uncertain_commits.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(retained(), 0);
+    // The failed WAL upload closed the writer, so it is dropped unclosed.
 }

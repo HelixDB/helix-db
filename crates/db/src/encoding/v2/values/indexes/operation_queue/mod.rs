@@ -32,7 +32,10 @@
 //! per value, and an operation ID never appears both as a removal and an
 //! insert. A value resolved against a known base contains only
 //! insert-if-absent records; an empty resolved queue is a SlateDB tombstone,
-//! so an absent key is the empty queue.
+//! so an absent key is the empty queue. A partial merge result may hold no
+//! records at all (both counts zero) when every acknowledgement it composed
+//! cancelled its own enqueue; it is the identity of composition and is never
+//! a resolved value.
 //!
 //! Relative insert order is storage commit order. Producers serialize enqueue
 //! operations for one entity with a per-entity conflict token, so one
@@ -86,6 +89,31 @@ const MAX_VARINT_LEN: usize = 10;
 /// Largest tenant partition accepted by canonical partitions.
 const MAX_PARTITION_LEN: usize = 16 * 1024 * 1024;
 const OPERATION_TOKEN_BIT: u128 = 1 << 127;
+/// Smallest record an operation retains: mode, identity, a one-byte body
+/// length, and a text deletion of an entity whose ID is one varint byte
+/// (entity kind, ID, absent replacement). A vector deletion adds an absent
+/// previous partition.
+const MIN_RETAINED_RECORD_LEN: usize = MODE_LEN + OPERATION_ID_LEN + 1 + 3;
+/// Upper bound on the bytes of a value that are not records: the header and
+/// both counts.
+const MAX_VALUE_FRAMING_LEN: usize = HEADER_LEN + 2 * MAX_VARINT_LEN;
+
+/// Largest per-index retained-operation ceiling whose queue values SlateDB
+/// can store.
+///
+/// SlateDB encodes a stored value's length as a `u32`, and a longer merge
+/// result written by a flush or compaction is truncated, corrupting its
+/// table. Admission keeps the retained bytes of a generation's outstanding
+/// operations within the ceiling `R`, which bounds a resolved value. An
+/// unresolved value also keeps one [`OPERATION_ID_LEN`]-byte removal per
+/// operation that was outstanding before its oldest operand (see the
+/// cancellation contract in `algebra`), and every operation retains at least
+/// `MIN_RETAINED_RECORD_LEN` bytes, so no value exceeds
+/// `MAX_VALUE_FRAMING_LEN + OPERATION_ID_LEN * (R / MIN_RETAINED_RECORD_LEN) + R`.
+/// This is the largest `R` for which that fits a `u32`.
+pub(crate) const MAX_RETAINED_BYTES: u64 = (u32::MAX as u64 - MAX_VALUE_FRAMING_LEN as u64)
+    * MIN_RETAINED_RECORD_LEN as u64
+    / (MIN_RETAINED_RECORD_LEN + OPERATION_ID_LEN) as u64;
 
 /// Unique immutable identity of one queued operation.
 ///
@@ -305,9 +333,7 @@ impl QueuedOperation {
     /// Accounting charges this size: mode, identity, body length, entity, and
     /// the complete payload, including deletions.
     pub(crate) fn retained_bytes(&self) -> u64 {
-        let body_len = body_encoded_len(self);
-        u64::try_from(MODE_LEN + OPERATION_ID_LEN + varint_len(body_len as u64) + body_len)
-            .unwrap_or(u64::MAX)
+        retained_len(body_encoded_len(self))
     }
 }
 
@@ -450,33 +476,20 @@ impl OperationQueue {
     /// corruption at this boundary. Corrupt values are errors, never empty
     /// queues.
     pub(crate) fn decode(value: &[u8]) -> Result<Self, EncodingError> {
-        let raw = algebra::RawValue::parse(value)?;
-        if !raw.removes.is_empty() {
-            return Err(EncodingError::Custom(
-                "resolved operation queue retains acknowledgements".to_string(),
-            ));
-        }
-        let operations = raw
-            .inserts
-            .iter()
-            .map(|insert| {
-                if insert.mode != algebra::InsertMode::IfAbsent {
+        let (family, records) = resolved_records(value)?;
+        let mut ids = std::collections::HashSet::new();
+        let operations = records
+            .map(|record| {
+                let (id, body) = record?;
+                if !ids.insert(id) {
                     return Err(EncodingError::Custom(
-                        "resolved operation queue retains an unconditional set".to_string(),
+                        "queued value inserts one operation ID twice".to_string(),
                     ));
                 }
-                decode_body(raw.family, insert.id, insert.body)
+                decode_body(family, id, body)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if operations.is_empty() {
-            return Err(EncodingError::Custom(
-                "resolved operation queue is empty instead of absent".to_string(),
-            ));
-        }
-        Ok(Self {
-            family: raw.family,
-            operations,
-        })
+        Ok(Self { family, operations })
     }
 
     /// Assembles a queue from row-layout operations in sequence order,
@@ -502,6 +515,216 @@ impl OperationQueue {
     }
 }
 
+/// Each pending entity's latest outstanding operation, as a search reads it.
+///
+/// Holds the longest run of entities, in the order of each one's oldest
+/// outstanding operation, whose latest operations'
+/// [`QueuedOperation::retained_bytes`] fit the read's budget. An entity is
+/// selected at its latest state or not at all, never at an earlier state of
+/// its chain: a build or publication may already have written the latest
+/// state physically, and an earlier one would hide it.
+///
+/// # Contract
+///
+/// Every record's framing is validated whatever the budget: header, counts,
+/// insert modes, operation IDs, body lengths, and trailing bytes (for rows,
+/// each row's header and ID). Finding each entity's latest operation walks
+/// the whole value, comparing entities by their raw bytes without
+/// validating them: a canonical body names its entity with one known kind
+/// byte and a minimal varint, so equal entities have equal bytes. Only the
+/// selected operations' bodies are decoded and validated, entity included:
+/// neither a superseded operation nor one past the budget is decoded, so
+/// corruption inside such a body fails this read only once a budget selects
+/// it (a full [`OperationQueue::decode`], which publication uses, always
+/// fails). The walk keeps state for at most as many entities as the budget
+/// can select. Unique operation IDs are not checked; a full decode checks
+/// them.
+///
+/// ```text
+/// value  = [e1 op1: 28 bytes][e2 op2: 40 bytes][e1 op3: 30 bytes][?? op4: corrupt body]
+/// budget = 70       -> [op3, op2]  (e1 at its latest state; op1 and op4 never decoded)
+/// budget = 50       -> [op3]
+/// budget = 29       -> None        (e1's latest operation does not fit)
+/// budget = u64::MAX -> error       (op4 is selected and fails to decode)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LatestOperations {
+    family: QueueFamily,
+    operations: Vec<QueuedOperation>,
+}
+
+impl LatestOperations {
+    /// Selects from one resolved queue value within `budget`; `None` when
+    /// not even the first entity's latest operation fits.
+    pub(crate) fn decode(value: &[u8], budget: u64) -> Result<Option<Self>, EncodingError> {
+        let (family, records) = resolved_records(value)?;
+        let selected = select_latest(records, budget)?;
+        Self::decode_selected(family, selected)
+    }
+
+    /// Selects from one generation's row values in sequence order within
+    /// `budget`; `None` when there are no rows or not even the first
+    /// entity's latest operation fits.
+    pub(crate) fn decode_rows<'a>(
+        rows: impl IntoIterator<Item = &'a [u8]>,
+        budget: u64,
+    ) -> Result<Option<Self>, EncodingError> {
+        let mut family = None;
+        let selected = select_latest(
+            rows.into_iter().map(|row| {
+                let (row_family, id, body) = QueueRow::split(row)?;
+                if *family.get_or_insert(row_family) != row_family {
+                    return Err(EncodingError::Custom(
+                        "queued operation rows mix families".to_string(),
+                    ));
+                }
+                Ok((id, body))
+            }),
+            budget,
+        )?;
+        let Some(family) = family else {
+            return Ok(None);
+        };
+        Self::decode_selected(family, selected)
+    }
+
+    fn decode_selected(
+        family: QueueFamily,
+        selected: Vec<(QueuedOperationId, &[u8])>,
+    ) -> Result<Option<Self>, EncodingError> {
+        let operations = selected
+            .into_iter()
+            .map(|(id, body)| decode_body(family, id, body))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((!operations.is_empty()).then_some(Self { family, operations }))
+    }
+
+    /// Returns the retained family.
+    pub(crate) const fn family(&self) -> QueueFamily {
+        self.family
+    }
+
+    /// Consumes the selection into its operations, one per entity, in
+    /// selection order.
+    pub(crate) fn into_operations(self) -> Vec<QueuedOperation> {
+        self.operations
+    }
+}
+
+/// Selects each entity's latest record, in the order of each entity's first
+/// record, while the records' retained bytes fit `budget`; the first that
+/// does not fit ends the selection.
+///
+/// Records are `(operation ID, encoded body)` and are grouped by the raw
+/// bytes naming their entity: the kind byte and the ID varint, up to its
+/// first terminating byte (or whatever prefix a malformed body has). Nothing
+/// in a body is validated here. Every valid operation retains at least
+/// [`MIN_RETAINED_RECORD_LEN`] bytes, so entities past the first
+/// `budget / MIN_RETAINED_RECORD_LEN` are not tracked: memory follows the
+/// budget, not the backlog. Selecting one of them would take an operation
+/// smaller than any valid one, so the cap only ever leaves such a corrupt
+/// operation undecoded.
+fn select_latest<'a>(
+    records: impl Iterator<Item = Result<(QueuedOperationId, &'a [u8]), EncodingError>>,
+    budget: u64,
+) -> Result<Vec<(QueuedOperationId, &'a [u8])>, EncodingError> {
+    const MAX_ENTITY_LEN: usize = KIND_LEN + MAX_VARINT_LEN;
+    let trackable = usize::try_from(budget / MIN_RETAINED_RECORD_LEN as u64).unwrap_or(usize::MAX);
+    let mut order = Vec::new();
+    let mut latest = std::collections::HashMap::new();
+    for record in records {
+        let (id, body) = record?;
+        let entity_len = body
+            .iter()
+            .skip(KIND_LEN)
+            .take(MAX_VARINT_LEN)
+            .position(|byte| byte & 0x80 == 0)
+            .map_or(body.len(), |last| KIND_LEN + last + 1)
+            .min(MAX_ENTITY_LEN);
+        let entity = &body[..entity_len];
+        let state = (retained_len(body.len()), (id, body));
+        match latest.entry(entity) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                slot.insert(state);
+            }
+            std::collections::hash_map::Entry::Vacant(slot) if order.len() < trackable => {
+                order.push(entity);
+                slot.insert(state);
+            }
+            std::collections::hash_map::Entry::Vacant(_) => {}
+        }
+    }
+    let mut remaining = budget;
+    Ok(order
+        .into_iter()
+        .map_while(|entity| {
+            let (retained, record) = latest
+                .remove(entity)
+                .expect("every tracked entity has a latest record");
+            remaining = remaining.checked_sub(retained)?;
+            Some(record)
+        })
+        .collect())
+}
+
+/// Validates one resolved value's header, empty removal set, and non-zero
+/// record count, and returns its family and records.
+fn resolved_records(value: &[u8]) -> Result<(QueueFamily, ResolvedRecords<'_>), EncodingError> {
+    let (family, mut cursor) = algebra::parse_header(value)?;
+    if cursor.take_varint()? != 0 {
+        return Err(EncodingError::Custom(
+            "resolved operation queue retains acknowledgements".to_string(),
+        ));
+    }
+    let remaining = algebra::bounded_count(&mut cursor, MODE_LEN + OPERATION_ID_LEN + 1)?;
+    if remaining == 0 {
+        return Err(EncodingError::Custom(
+            "resolved operation queue is empty instead of absent".to_string(),
+        ));
+    }
+    Ok((family, ResolvedRecords { cursor, remaining }))
+}
+
+/// Each record of one resolved value as its operation ID and encoded body,
+/// in storage order.
+///
+/// Yields an error for a record that is not insert-if-absent, has an invalid
+/// ID, or overruns the value, and once for trailing bytes after the last
+/// record; bodies are not validated.
+struct ResolvedRecords<'a> {
+    cursor: Cursor<'a>,
+    remaining: usize,
+}
+
+impl<'a> Iterator for ResolvedRecords<'a> {
+    type Item = Result<(QueuedOperationId, &'a [u8]), EncodingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Some(remaining) = self.remaining.checked_sub(1) else {
+            let rest = std::mem::replace(&mut self.cursor, Cursor::new(&[]));
+            return rest.finish("operation queue value").err().map(Err);
+        };
+        self.remaining = remaining;
+        Some(self.take_record())
+    }
+}
+
+impl<'a> ResolvedRecords<'a> {
+    fn take_record(&mut self) -> Result<(QueuedOperationId, &'a [u8]), EncodingError> {
+        if algebra::InsertMode::try_from_u8(self.cursor.take_u8()?)?
+            != algebra::InsertMode::IfAbsent
+        {
+            return Err(EncodingError::Custom(
+                "resolved operation queue retains an unconditional set".to_string(),
+            ));
+        }
+        let id = self.cursor.take_operation_id()?;
+        let body_len = usize::try_from(self.cursor.take_varint()?)
+            .map_err(|_| EncodingError::Custom("queued body length overflows".to_string()))?;
+        Ok((id, self.cursor.take_raw(body_len)?))
+    }
+}
+
 /// One operation persisted as its own row in the row-layout baseline.
 pub(crate) struct QueueRow;
 
@@ -520,6 +743,13 @@ impl QueueRow {
 
     /// Fully validates and decodes one row value.
     pub(crate) fn decode(value: &[u8]) -> Result<(QueueFamily, QueuedOperation), EncodingError> {
+        let (family, id, body) = Self::split(value)?;
+        Ok((family, decode_body(family, id, body)?))
+    }
+
+    /// Validates one row value's header and operation ID and returns them
+    /// with the still-encoded body.
+    fn split(value: &[u8]) -> Result<(QueueFamily, QueuedOperationId, &[u8]), EncodingError> {
         let mut cursor = Cursor::new(value);
         if cursor.take_u8()? != QUEUE_VALUE_VERSION {
             return Err(EncodingError::Custom(
@@ -538,8 +768,7 @@ impl QueueRow {
                 .try_into()
                 .expect("operation ID slice is sixteen bytes"),
         ))?;
-        let body = cursor.take_raw(cursor.remaining_len())?;
-        Ok((family, decode_body(family, id, body)?))
+        Ok((family, id, cursor.take_raw(cursor.remaining_len())?))
     }
 }
 
@@ -649,18 +878,7 @@ fn decode_body(
     body: &[u8],
 ) -> Result<QueuedOperation, EncodingError> {
     let mut cursor = Cursor::new(body);
-    let entity = IndexEntity {
-        kind: match cursor.take_u8()? {
-            0x01 => IndexElementKind::Node,
-            0x02 => IndexElementKind::Edge,
-            unknown => {
-                return Err(EncodingError::Custom(format!(
-                    "unknown queued entity kind {unknown:#04x}"
-                )));
-            }
-        },
-        id: IndexEntityId::new(cursor.take_varint()?),
-    };
+    let entity = cursor.take_entity()?;
     let payload = match family {
         QueueFamily::Vector => {
             let previous = match cursor.take_u8()? {
@@ -726,6 +944,13 @@ fn decode_body(
 
 fn noncanonical_option(tag: u8) -> EncodingError {
     EncodingError::Custom(format!("noncanonical queued option tag {tag:#04x}"))
+}
+
+/// Bytes an operation whose encoded body is `body_len` bytes retains in a
+/// resolved queue: mode, identity, body length, and body.
+fn retained_len(body_len: usize) -> u64 {
+    u64::try_from(MODE_LEN + OPERATION_ID_LEN + varint_len(body_len as u64) + body_len)
+        .unwrap_or(u64::MAX)
 }
 
 pub(super) const fn varint_len(mut value: u64) -> usize {
@@ -809,6 +1034,23 @@ impl<'a> Cursor<'a> {
         Err(EncodingError::Custom(
             "queued varint is too long".to_string(),
         ))
+    }
+
+    /// Reads the entity kind and ID that begin every operation body.
+    fn take_entity(&mut self) -> Result<IndexEntity, EncodingError> {
+        let kind = match self.take_u8()? {
+            0x01 => IndexElementKind::Node,
+            0x02 => IndexElementKind::Edge,
+            unknown => {
+                return Err(EncodingError::Custom(format!(
+                    "unknown queued entity kind {unknown:#04x}"
+                )));
+            }
+        };
+        Ok(IndexEntity {
+            kind,
+            id: IndexEntityId::new(self.take_varint()?),
+        })
     }
 
     fn take_partition_body(&mut self, tag: u8) -> Result<TextPartition, EncodingError> {

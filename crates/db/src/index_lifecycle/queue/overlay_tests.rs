@@ -20,7 +20,9 @@ use crate::config::{
     DbConfig, IndexOperationQueueTuning, SecondaryIndexDefinition, TextIndexDefinition,
     VectorIndexDefinition,
 };
-use crate::encoding::v2::values::indexes::operation_queue::QueueFamily;
+use crate::encoding::v2::values::indexes::operation_queue::{
+    OperationQueue, QueueFamily, QUEUE_VALUE_KIND,
+};
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
 use crate::search::vector::VectorDistanceMetric;
 use crate::HelixDB;
@@ -652,7 +654,10 @@ async fn readers_overlay_pending_operations_from_their_own_snapshot() {
 
 /// Adds one `Doc` per embedding (all bodies `"alpha"`) in batched writes and
 /// returns their IDs in input order.
-async fn add_many(db: &HelixDB, embeddings: impl IntoIterator<Item = [f32; 2]>) -> Vec<u64> {
+pub(super) async fn add_many(
+    db: &HelixDB,
+    embeddings: impl IntoIterator<Item = [f32; 2]>,
+) -> Vec<u64> {
     let embeddings = embeddings.into_iter().collect::<Vec<_>>();
     let mut ids = Vec::with_capacity(embeddings.len());
     for chunk in embeddings.chunks(100) {
@@ -1799,4 +1804,227 @@ async fn index_membership_after_overlaid_searches_matches_the_per_row_filter() {
     }
     indexed.close().await.unwrap();
     per_row.close().await.unwrap();
+}
+
+/// Hit IDs in ascending order.
+fn sorted_ids(found: Vec<(u64, u64)>) -> Vec<u64> {
+    let mut ids = found.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
+/// Opens a database whose eventual budget covers exactly one small
+/// operation, adds one `alpha` document at the origin, and rewrites each
+/// family's resolved queue value to follow its operation with a malformed one
+/// larger than the rest of the budget. Returns the database and the document.
+async fn open_with_a_corrupt_queue_tail(name: &str) -> (HelixDB, u64) {
+    // Probe one small operation's retained size per family.
+    let probe = open(
+        &format!("{name}-probe"),
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&probe, None).await;
+    add(&probe, [0.0, 0.0], "alpha", None).await;
+    let mut budget = 0;
+    for family in [QueueFamily::Text, QueueFamily::Vector] {
+        budget = budget.max(queue(&probe, family).await.unwrap().operations()[0].retained_bytes());
+    }
+    probe.close().await.unwrap();
+
+    let tuning = IndexOperationQueueTuning::default().with_eventual_search_budget_for_tests(budget);
+    let db = open(name, Arc::new(InMemory::new()), queued(tuning)).await;
+    install(&db, None).await;
+    let first = add(&db, [0.0, 0.0], "alpha", None).await;
+    let storage = db.inner_db();
+    for family in [QueueFamily::Text, QueueFamily::Vector] {
+        // Version, kind, and family bytes, then no removals and one insert.
+        const HEADER: usize = 3;
+        let key = target(&db, family).await.key();
+        let stored = storage.get(&key).await.unwrap().unwrap();
+        assert_eq!(stored[1], QUEUE_VALUE_KIND);
+        assert_eq!(&stored[HEADER..HEADER + 2], &[0x00, 0x01]);
+        let mut value = stored[..HEADER].to_vec();
+        value.extend_from_slice(&[0x00, 0x02]);
+        value.extend_from_slice(&stored[HEADER + 2..]);
+        // A later operation whose body names an unknown entity kind and is
+        // larger than anything left of the budget after the first.
+        value.push(0x01);
+        value.extend_from_slice(&(u128::MAX >> 1).to_be_bytes());
+        value.push(100);
+        value.extend_from_slice(&[0x7F; 100]);
+        let decoded = OperationQueue::decode(&value);
+        assert!(
+            decoded.is_err(),
+            "{family:?}: the later operation is malformed"
+        );
+        storage.put(&key, value).await.unwrap();
+    }
+    (db, first)
+}
+
+/// Named text (`alpha`) and vector (origin) searches of the corrupt-tail
+/// fixture at `consistency`.
+fn corrupt_tail_searches(consistency: SearchConsistency) -> [(&'static str, QueryRequest); 2] {
+    let search = |traversal| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as("hits", traversal)
+                .returning(["hits"]),
+        )
+        .with_search_consistency(consistency)
+        .unwrap()
+    };
+    [
+        (
+            "text",
+            search(traversal::g().text_search_nodes("Doc", "body", "alpha", 10, None)),
+        ),
+        (
+            "vector",
+            search(traversal::g().vector_search_nodes(
+                "Doc",
+                "embedding",
+                vec![0.0, 0.0],
+                10,
+                None,
+            )),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn eventual_search_decodes_only_its_budget() {
+    let (db, first) = open_with_a_corrupt_queue_tail("overlay-decode-budget").await;
+    // Eventual search decodes only the operations its budget can select.
+    for (name, request) in corrupt_tail_searches(SearchConsistency::Eventual) {
+        let result = Box::pin(db.query(request)).await.unwrap_or_else(|error| {
+            panic!("eventual {name} search decoded past its budget: {error}")
+        });
+        assert_eq!(sorted_ids(hits(&result, "hits")), [first], "{name}");
+    }
+    // Strong search needs every operation and still fails closed.
+    for (name, request) in corrupt_tail_searches(SearchConsistency::Strong) {
+        assert!(
+            Box::pin(db.query(request)).await.is_err(),
+            "strong {name} search must not answer past a corrupt operation"
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// Known limitation, pinned so that lifting it shows up here; not a contract.
+///
+/// The eventual budget bounds which operations a search decodes, not the
+/// queue read. In the map layout a read fetches the whole value, and while a
+/// merge operand is pending above it (the normal state of an index taking
+/// writes or being drained) SlateDB first resolves that operand against all
+/// of it, parsing, validating, and re-encoding every record. Such a search
+/// therefore costs the whole backlog, up to `max_retained_bytes`, and fails
+/// on a corrupt record its budget never selects. Even a resolved value is
+/// walked record by record, since an entity's latest operation may be its
+/// last record. Bounding the read by the budget needs a queue layout whose
+/// reads can stop there and still find each entity's latest operation; once
+/// one exists, replace this with a bound on the bytes each eventual search
+/// reads and merges.
+#[tokio::test]
+async fn known_limitation_eventual_search_resolves_the_whole_queue_below_a_pending_operand() {
+    let (db, _) = open_with_a_corrupt_queue_tail("overlay-pending-operand").await;
+    // The flush first makes the corrupt value a base that no flush merges the
+    // new operand into.
+    db.inner_db()
+        .flush_with_options(slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+    add(&db, [1.0, 1.0], "beta", None).await;
+    for (name, request) in corrupt_tail_searches(SearchConsistency::Eventual) {
+        let Err(error) = Box::pin(db.query(request)).await else {
+            panic!("eventual {name} search no longer resolves the whole queue");
+        };
+        assert!(
+            format!("{error:?}").contains("unknown queued entity kind"),
+            "{name}: {error:?}"
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// An eventual search shows a pending entity at its latest state or not at
+/// all. An earlier state that alone fits the budget is never shown: the
+/// entity's physical representation may already hold the latest state.
+#[tokio::test]
+async fn eventual_search_shows_an_entity_at_its_latest_state_or_not_at_all() {
+    // Probe one small operation's retained size per family.
+    let probe = open(
+        "overlay-latest-probe",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&probe, None).await;
+    add(&probe, [0.0, 0.0], "alpha", None).await;
+    let mut budget = 0;
+    for family in [QueueFamily::Text, QueueFamily::Vector] {
+        budget = budget.max(queue(&probe, family).await.unwrap().operations()[0].retained_bytes());
+    }
+    probe.close().await.unwrap();
+
+    // The budget covers the add but not the larger update that follows it.
+    let tuning = IndexOperationQueueTuning::default().with_eventual_search_budget_for_tests(budget);
+    let db = open(
+        "overlay-latest-state",
+        Arc::new(InMemory::new()),
+        queued(tuning),
+    )
+    .await;
+    install(&db, None).await;
+    let id = add(&db, [0.0, 0.0], "alpha", None).await;
+    let omega = "omega replaces the first body with one longer than the eventual budget";
+    update(&db, id, [3.0, 4.0], omega).await;
+    for family in [QueueFamily::Text, QueueFamily::Vector] {
+        let operations = queue(&db, family).await.unwrap().into_operations();
+        assert_eq!(operations.len(), 2, "{family:?}");
+        assert!(operations[0].retained_bytes() <= budget, "{family:?}");
+    }
+    assert!(queue(&db, QueueFamily::Text).await.unwrap().operations()[1].retained_bytes() > budget);
+    let nearest = |found: Vec<(u64, u64)>| {
+        let [(found, bits)] = found.try_into().expect("one hit");
+        assert_eq!(found, id);
+        f64::from_bits(bits)
+    };
+
+    // Strong search reads every operation and sees the update.
+    assert_eq!(
+        sorted_ids(text_search(&db, "omega", 10, None, SearchConsistency::Strong).await),
+        [id]
+    );
+    assert!(
+        text_search(&db, "alpha", 10, None, SearchConsistency::Strong)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        nearest(vector_search(&db, [3.0, 4.0], 10, None, SearchConsistency::Strong).await),
+        0.0
+    );
+    // The text update does not fit the eventual budget, so the entity keeps
+    // its (absent) physical representation; its add, which alone fits, is
+    // never shown.
+    for query in ["alpha", "omega"] {
+        assert!(
+            text_search(&db, query, 10, None, SearchConsistency::Eventual)
+                .await
+                .is_empty(),
+            "{query}"
+        );
+    }
+    // The vector update fits, so the entity is shown at its latest state.
+    assert_eq!(
+        nearest(vector_search(&db, [3.0, 4.0], 10, None, SearchConsistency::Eventual).await),
+        0.0
+    );
+    db.close().await.unwrap();
 }
