@@ -24,6 +24,7 @@ import {
   bytes,
   defineParams,
   g,
+  i64,
   param,
   parseIndexDdlReceipt,
   parseIndexOperationStatus,
@@ -457,6 +458,20 @@ assert.throws(() => readBatch().toQueryJson(bytesParams, { payload: new Uint8Arr
 
 assert.equal(stringifyJson(PropertyValue.i64(9223372036854775807n)), '{"i64":9223372036854775807}');
 assert.equal(stringifyJson(QueryValue.i64(9223372036854775807n)), "9223372036854775807");
+const i64Params = defineParams({ value: param.i64() });
+for (const value of [-(1n << 63n), (1n << 63n) - 1n]) {
+  assert.doesNotThrow(() => PropertyValue.i64(value));
+  assert.doesNotThrow(() => PropertyValue.from(i64(value)));
+  assert.doesNotThrow(() => QueryValue.i64(value));
+}
+for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+  assert.throws(() => i64(value), /signed 64-bit range/);
+  assert.throws(() => PropertyValue.i64(value), /signed 64-bit range/);
+  assert.throws(() => PropertyValue.i64Array([value]), /signed 64-bit range/);
+  assert.throws(() => QueryValue.i64(value), /signed 64-bit range/);
+  assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("value", QueryParamType.i64(), value), /signed 64-bit range/);
+  assert.throws(() => readBatch().toQueryJson(i64Params, { value }), /signed 64-bit range/);
+}
 
 assert.deepEqual(parsed(Expr.case([WhenThen(Predicate.isNotNull("email"), Expr.prop("email"))], Expr.val("missing"))), {
   case: {

@@ -240,6 +240,18 @@ function intToJson(value: number | bigint): number | bigint {
   return value;
 }
 
+const I64_MIN = -(1n << 63n);
+const I64_MAX = (1n << 63n) - 1n;
+
+function i64ToJson(value: number | bigint): number | bigint {
+  const integer = intToJson(value);
+  const exact = typeof integer === "bigint" ? integer : BigInt(integer);
+  if (exact < I64_MIN || exact > I64_MAX) {
+    throw new RangeError("integer outside signed 64-bit range");
+  }
+  return integer;
+}
+
 export class DateTime {
   private readonly value: bigint;
 
@@ -308,7 +320,7 @@ class DateTimeLiteral {
 }
 
 export function i64(value: number | bigint): I64Literal {
-  return new I64Literal(value);
+  return new I64Literal(i64ToJson(value));
 }
 export function f32(value: number): F32Literal {
   return new F32Literal(value);
@@ -358,7 +370,7 @@ export class PropertyValue implements Encodable {
     return new PropertyValue("Bool", value);
   }
   static i64(value: number | bigint): PropertyValue {
-    return new PropertyValue("I64", intToJson(value));
+    return new PropertyValue("I64", i64ToJson(value));
   }
   static dateTime(value: DateTime | number | bigint): PropertyValue {
     return new PropertyValue("DateTime", value instanceof DateTime ? value.millis() : intToJson(value));
@@ -382,7 +394,7 @@ export class PropertyValue implements Encodable {
     return new PropertyValue("Bytes", normalized);
   }
   static i64Array(values: (number | bigint)[]): PropertyValue {
-    return new PropertyValue("I64Array", values.map(intToJson));
+    return new PropertyValue("I64Array", values.map(i64ToJson));
   }
   static f64Array(values: number[]): PropertyValue {
     return new PropertyValue("F64Array", values);
@@ -2905,7 +2917,7 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
       if (typeof value !== "boolean") throw new TypeError(`parameter '${path}' must be boolean`);
       return value;
     case "I64":
-      return intToJson(value as number | bigint);
+      return i64ToJson(value as number | bigint);
     case "F64":
       if (typeof value !== "number") throw new TypeError(`parameter '${path}' must be number`);
       return finiteNumber(value, path);
@@ -2970,7 +2982,7 @@ function normalizeTypedQueryValue(type: QueryParamType, value: JsonValue, path: 
       return value;
     case "I64":
       if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError(`parameter '${path}' must be an integer`);
-      return intToJson(value);
+      return i64ToJson(value);
     case "F64":
       if (typeof value !== "number") throw new TypeError(`parameter '${path}' must be number`);
       return finiteNumber(value, path);
@@ -3040,7 +3052,7 @@ export type QueryValue = JsonValue;
 export const QueryValue = {
   null: (): JsonValue => null,
   bool: (value: boolean): JsonValue => value,
-  i64: (value: number | bigint): JsonValue => intToJson(value),
+  i64: (value: number | bigint): JsonValue => i64ToJson(value),
   f64: (value: number): JsonValue => finiteNumber(value, "value"),
   f32: (value: number): JsonValue => normalizeF32(value, "value"),
   string: (value: string): JsonValue => value,
