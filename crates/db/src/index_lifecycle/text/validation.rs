@@ -210,14 +210,12 @@ pub(super) async fn select(
     let delta_prefix = generation_prefix(scope, index_keys::RecordKind::BuildDelta, operation);
     let (delta_range, delta) = select_one(transaction, delta_prefix, None).await?;
     if delta.is_some() {
+        // Pre-queue build deltas are never replayed; see `has_pre_queue_deltas`.
         return Ok(ValidationSelection::Database(PreparedDatabaseValidation {
             diagnostic: ValidationDiagnostic::new(operation),
             ranges: vec![delta_range],
             observations: Vec::new(),
-            result: progressed(TextBuildStage::CatchUp(PrefixScanProgress {
-                cursor: None,
-                counters: progress.counters(),
-            })),
+            result: IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation),
         }));
     }
     let mut selection = match progress {
@@ -954,12 +952,7 @@ async fn select_activation_prerequisites(
     let artifact_prefix =
         generation_prefix(scope, index_keys::RecordKind::TextBuildArtifact, operation);
     let (artifact_range, artifact) = select_one(transaction, artifact_prefix, None).await?;
-    let result = if delta.is_some() {
-        progressed(TextBuildStage::CatchUp(PrefixScanProgress {
-            cursor: None,
-            counters,
-        }))
-    } else if artifact.is_some() {
+    let result = if delta.is_some() || artifact.is_some() {
         IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
     } else {
         progressed(TextBuildStage::Activate(
@@ -1247,9 +1240,8 @@ mod tests {
                 &transaction,
             )
             .await,
-            IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
-                TextBuildProgress::Constructing(TextBuildStage::CatchUp(_))
-            ))
+            // Pre-queue build deltas are never replayed.
+            IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation)
         ));
         transaction.delete(delta_key).unwrap();
 

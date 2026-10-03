@@ -27,6 +27,7 @@ from helixdb import (
     RangeIndexDirection,
     ReadBatch,
     RepeatConfig,
+    SearchConsistency,
     ShortestPathDirection,
     SourcePredicate,
     StreamBound,
@@ -784,6 +785,37 @@ class DslAstTests(unittest.TestCase):
         self.assertEqual(set(write_request_json["query"]), {"write"})
         self.assertEqual(write_request_json["query"]["write"]["returns"], ["created"])
         self.assertEqual(QueryValue.i64(9223372036854775807), 9223372036854775807)
+
+        self.assertIs(QueryRequest.read(read_batch()).search_consistency, SearchConsistency.STRONG)
+        self.assertNotIn("search_consistency", QueryRequest.read(read_batch()).to_json_string())
+        eventual = QueryRequest.read(read_batch()).with_search_consistency(
+            SearchConsistency.EVENTUAL
+        )
+        self.assertEqual(json.loads(eventual.to_json_string())["search_consistency"], "eventual")
+        self.assertNotIn(
+            "search_consistency",
+            QueryRequest.read(read_batch())
+            .with_search_consistency(SearchConsistency.STRONG)
+            .to_json_string(),
+        )
+        self.assertEqual(
+            json.loads(
+                read_query(params).to_query_json(
+                    params,
+                    {"tenant_id": "acme", "limit": 1},
+                    search_consistency=SearchConsistency.EVENTUAL,
+                )
+            )["search_consistency"],
+            "eventual",
+        )
+        with self.assertRaisesRegex(TypeError, "only valid for read requests"):
+            QueryRequest.write(write_batch()).with_search_consistency(SearchConsistency.EVENTUAL)
+        with self.assertRaisesRegex(TypeError, "only valid for read requests"):
+            write_query(write_params).to_query_json(
+                write_params, {"data": []}, search_consistency=SearchConsistency.EVENTUAL
+            )
+        with self.assertRaisesRegex(TypeError, "unknown search consistency"):
+            QueryRequest.read(read_batch()).with_search_consistency("eventual")  # type: ignore[arg-type]
 
         bytes_params = define_params({"payload": param.bytes()})
         with self.assertRaises(QueryError):

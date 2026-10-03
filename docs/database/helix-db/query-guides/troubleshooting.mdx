@@ -77,6 +77,28 @@ a multi-mutation request.
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.
 
+## Request returns `index_backpressure`
+
+An HTTP 429 with `index_backpressure` comes from the database engine, not a rate limit.
+Either a vector or text index already holds its maximum unpublished work, so the write
+was rejected before commit, or a whole-index `strong` search's answer lies behind more
+than 800 unpublished changes, or a `strong` text search would analyze more unpublished
+text than one text publication may (64 MiB of analysis by default). Nothing from the
+request took effect.
+
+Retry the unchanged request with bounded backoff and jitter; it succeeds once the index
+worker publishes the backlog, or, while the index is building, once it activates. Reads
+that can tolerate lag can use `eventual` search.
+See [Search consistency](/database/helix-db/query-guides/search-consistency).
+
+If `strong` text searches keep returning `pending_text_analysis_bytes` after the worker
+has caught up, the text limits were probably lowered below documents already admitted.
+The worker holds those documents back and never publishes them. Health responses
+(`GET /healthz`) count them under `blocked_index_entity_count`, and the server logs an
+error naming each one when it is held back. Raise the limits again. Rewriting or
+deleting a document also clears it once replacing or removing its published version
+fits the lowered limits.
+
 ## Request returns HTTP 429 (Helix Cloud)
 
 `rate_limited` means the shared request bucket for the Cloud database has no

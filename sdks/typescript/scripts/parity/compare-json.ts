@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { canonicalizeJson, parseJsonStructural, structuralJsonEqual } from "../../src/index.js";
 import { goGeneratedRoot, pythonGeneratedRoot, rustGeneratedRoot, typescriptGeneratedRoot } from "./paths.js";
 
-const EXPECTED_RUNTIME = 233;
+const EXPECTED_RUNTIME = 234;
 const EXPECTED_JSON_ONLY = 15;
 
 type Generated = {

@@ -180,7 +180,8 @@
                   "database/helix-db/query-guides/secondary-indexes",
                   "database/helix-db/query-guides/vector-indexes",
                   "database/helix-db/query-guides/text-indexes",
-                  "database/helix-db/query-guides/prefiltering"
+                  "database/helix-db/query-guides/prefiltering",
+                  "database/helix-db/query-guides/search-consistency"
                 ]
               },
               {
@@ -1072,6 +1073,18 @@
     {
       "source": "/filtered-search",
       "destination": "/database/helix-db/query-guides/prefiltering"
+    },
+    {
+      "source": "/search-consistency",
+      "destination": "/database/helix-db/query-guides/search-consistency"
+    },
+    {
+      "source": "/eventual-consistency",
+      "destination": "/database/helix-db/query-guides/search-consistency"
+    },
+    {
+      "source": "/index-backpressure",
+      "destination": "/database/helix-db/query-guides/search-consistency#index-backpressure"
     },
     {
       "source": "/http-api",

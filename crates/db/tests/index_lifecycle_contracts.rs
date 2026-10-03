@@ -47,9 +47,11 @@ fn index_lifecycle_backfill_mutations_and_unique_retry_converge() {
         .expect("lifecycle mutation test thread should not panic");
 }
 
-/// Proves every shape converges after repeated mutations at each build boundary.
+/// Proves every shape converges after repeated late writes at each build
+/// boundary: secondary builds re-enter catch-up, while vector/text writes are
+/// queued operations published after activation.
 #[test]
-fn index_lifecycle_all_index_shapes_reenter_catch_up_before_activation() {
+fn index_lifecycle_all_index_shapes_converge_after_late_writes_at_every_stage() {
     std::thread::Builder::new()
         .name("index-lifecycle-all-index-validation".to_string())
         .stack_size(16 * 1024 * 1024)
@@ -97,6 +99,17 @@ fn index_lifecycle_secondary_vector_public_writes_cover_every_build_boundary() {
         .expect("secondary/vector public-boundary test thread should spawn")
         .join()
         .expect("secondary/vector public-boundary test thread should not panic");
+}
+
+/// Proves text builds activate and match a fresh build when scanned entities
+/// are deleted, re-texted, moved, or un-indexed before partition construction.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_lifecycle_text_builds_reconcile_entities_changed_between_source_reads() {
+    let _permit = CONTRACT_SUITE
+        .acquire()
+        .await
+        .expect("lifecycle contract semaphore remains open");
+    db::index_lifecycle_testing::run_deterministic_text_build_reconciliation_contracts().await;
 }
 
 /// Proves simultaneous CREATE requests converge after retryable serialization.

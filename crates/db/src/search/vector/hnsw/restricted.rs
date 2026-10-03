@@ -575,11 +575,38 @@ impl RestrictedVectorCandidates {
     }
 
     /// Tests authoritative membership.
-    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn contains(&self, node_id: NodeId) -> bool {
         match self {
             Self::Empty => false,
             Self::NonEmpty(candidates) => candidates.contains(node_id),
+        }
+    }
+
+    /// Rejects `k` when `min(k, candidates)` exceeds the restricted result cap.
+    ///
+    /// Callers that shrink the set (for example with [`Self::without`]) check
+    /// the caller's own set first, so shrinking cannot lift the cap.
+    pub(crate) fn validate_result_count(&self, k: usize) -> Result<(), HelixDbError> {
+        match self {
+            Self::Empty => Ok(()),
+            Self::NonEmpty(candidates) => RestrictedResultCount::try_new(k, candidates.len())
+                .map(drop)
+                .map_err(|error| HelixDbError::Query(error.to_string())),
+        }
+    }
+
+    /// Removes `excluded` IDs, collapsing to `Empty` when none remain.
+    pub(crate) fn without(&self, excluded: &RoaringTreemap) -> Self {
+        match self {
+            Self::Empty => Self::Empty,
+            Self::NonEmpty(candidates) => {
+                let ids = &candidates.ids - excluded;
+                if ids.is_empty() {
+                    Self::Empty
+                } else {
+                    Self::NonEmpty(NonEmptyCandidateSet { ids })
+                }
+            }
         }
     }
 
@@ -1427,3 +1454,55 @@ mod contracts;
 
 #[cfg(feature = "production-coverage")]
 pub(crate) use contracts::run as run_production_contracts;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_removes_exactly_the_excluded_ids() {
+        let candidates = RestrictedVectorCandidates::from_ids([2, 4, 9]).unwrap();
+        let remaining = candidates.without(&RoaringTreemap::from_iter([4, 7]));
+        assert!(remaining.contains(2));
+        assert!(!remaining.contains(4));
+        assert!(remaining.contains(9));
+        assert!(candidates.contains(4), "the original set is unchanged");
+
+        assert!(matches!(
+            candidates.without(&RoaringTreemap::from_iter([2, 4, 9])),
+            RestrictedVectorCandidates::Empty
+        ));
+        assert!(matches!(
+            RestrictedVectorCandidates::Empty.without(&RoaringTreemap::new()),
+            RestrictedVectorCandidates::Empty
+        ));
+    }
+
+    #[test]
+    fn result_count_is_validated_against_the_exact_candidate_set() {
+        let at_cap = RestrictedVectorCandidates::from_ids(0..800).unwrap();
+        at_cap.validate_result_count(800).unwrap();
+        at_cap
+            .validate_result_count(10_000)
+            .expect("the effective count is bounded by the candidates");
+
+        let over_cap = RestrictedVectorCandidates::from_ids(0..801).unwrap();
+        over_cap.validate_result_count(800).unwrap();
+        let error = over_cap
+            .validate_result_count(801)
+            .expect_err("801 effective results exceed the cap");
+        assert!(
+            error
+                .to_string()
+                .contains("restricted vector search result count must be at most 800, got 801"),
+            "{error}"
+        );
+        assert!(matches!(
+            over_cap.validate_result_count(0),
+            Err(HelixDbError::Query(_))
+        ));
+        RestrictedVectorCandidates::Empty
+            .validate_result_count(10_000)
+            .unwrap();
+    }
+}

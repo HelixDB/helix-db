@@ -176,6 +176,31 @@ async fn build_to_active(
     }
 }
 
+/// Returns every physical vector row of `physical_index_id`, sorted by key.
+async fn physical_vector_rows(
+    db: &Db,
+    scope: DataScope,
+    physical_index_id: VectorPhysicalIndexId,
+) -> Vec<(Bytes, Bytes)> {
+    let mut result = Vec::new();
+    for lane in VectorStorageLane::ALL {
+        let prefix = DataKey::Data {
+            scope,
+            kind: DataKeyKind::Vector(lane.prefix_key(physical_index_id.get())),
+        }
+        .to_bytes();
+        let mut rows = db
+            .scan_prefix(prefix, ..)
+            .await
+            .expect("physical vector lane scans");
+        while let Some(row) = rows.next().await.expect("physical vector row reads") {
+            result.push((row.key, row.value));
+        }
+    }
+    result.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    result
+}
+
 /// Returns the physical row count and SHA-256 over every sorted key/value pair.
 async fn physical_digest(
     db: &Db,
@@ -346,15 +371,16 @@ impl GoldenBuild {
     }
 }
 
-/// Returns the checkpoint of the session a driver most recently retained.
+/// Returns the checkpoint of the build session a driver most recently retained.
 fn retained_checkpoint(driver: &VectorIndexDriver) -> Option<VectorBuildCheckpoint> {
     driver
         .build_cache
         .retained
         .try_lock()
         .expect("no commit is trimming the retained sessions")
-        .last()
-        .map(|retained| retained.checkpoint.clone())
+        .iter()
+        .rev()
+        .find_map(|retained| retained.build_checkpoint().cloned())
 }
 
 /// Returns the checkpoint of the session a driver retains for one operation.
@@ -368,8 +394,12 @@ fn retained_checkpoint_for(
         .try_lock()
         .expect("no commit is trimming the retained sessions")
         .iter()
-        .find(|retained| retained.checkpoint.operation_id == operation_id)
-        .map(|retained| retained.checkpoint.clone())
+        .find_map(|retained| {
+            retained
+                .build_checkpoint()
+                .filter(|checkpoint| checkpoint.operation_id == operation_id)
+                .cloned()
+        })
 }
 
 /// Returns the budget-charged bytes of the most recently retained Euclidean session.
@@ -379,6 +409,7 @@ fn retained_euclidean_bytes(driver: &VectorIndexDriver) -> Option<usize> {
         .retained
         .try_lock()
         .expect("no commit is trimming the retained sessions")
+        .builds
         .last()
         .map(|retained| {
             let session: &dyn Any = retained.session.as_ref();
@@ -511,6 +542,203 @@ async fn session_is_not_reused_after_another_driver_commits() {
     );
 }
 
+/// Pins why a retained session may mirror a `Building` generation's rows.
+///
+/// Writes routed to a hidden build only enqueue operations for its
+/// generation, and publication defers that generation without touching its
+/// rows, its index record, or the build's progress. The next Scan step
+/// therefore reuses the retained session, and the finished graph still
+/// matches the golden graph built without the queued writes.
+#[tokio::test]
+async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound() {
+    use crate::encoding::v2::values::indexes::operation_queue;
+    use crate::index_lifecycle::queue::{self, backlog, publication};
+
+    let driver = driver();
+    let mut build = GoldenBuild::start("vector-build-cache-queued-writes").await;
+    assert_eq!(
+        build.step(&driver).await,
+        CommittedOperationStep::Progressed
+    );
+    let operation = build.operation().await;
+    assert!(
+        matches!(
+            operation.progress(),
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::Scan(_)
+            ))
+        ),
+        "the first committed step leaves the build scanning"
+    );
+    let checkpoint = retained_checkpoint(&driver).expect("the Scan step retains its session");
+    let retained_bytes = retained_euclidean_bytes(&driver).expect("the session is retained");
+    let record = read_index(&build.db, build.scope, &build.definition).await;
+    let IndexStateV2::Building {
+        physical:
+            PhysicalGeneration::Vector {
+                layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                ..
+            },
+        ..
+    } = record.state()
+    else {
+        panic!("the golden build is hidden and unpartitioned");
+    };
+    let physical_index_id = *physical_index_id;
+    let rows = physical_vector_rows(&build.db, build.scope, physical_index_id).await;
+    assert!(!rows.is_empty(), "the Scan step wrote physical rows");
+
+    // Enqueue a replacement of a scanned entity, a deletion, and a
+    // replacement of an unscanned one, as foreground producers would. The
+    // source rows stay unchanged, so the golden graph still applies.
+    let target =
+        queue::QueueTarget::new(build.scope, record.index_id(), record.state().generation());
+    let replacement = |seed: u64| {
+        Some(
+            operation_queue::QueuedVectorReplacement::try_new(
+                TextPartition::Unpartitioned,
+                integral_vector(seed, GOLDEN_DIMENSION).into(),
+            )
+            .expect("fixture replacement is finite"),
+        )
+    };
+    let operations = [
+        (0, replacement(10_000)),
+        (1, None),
+        (GOLDEN_ENTITIES - 1, replacement(10_001)),
+    ]
+    .into_iter()
+    .map(|(entity_id, replacement)| {
+        operation_queue::QueuedOperation::new(
+            operation_queue::QueuedOperationId::generate(),
+            IndexEntity {
+                kind: IndexElementKind::Node,
+                id: IndexEntityId::new(entity_id),
+            },
+            operation_queue::QueuedPayload::Vector(operation_queue::QueuedVectorPayload {
+                previous: Some(TextPartition::Unpartitioned),
+                replacement,
+            }),
+        )
+    })
+    .collect::<Vec<_>>();
+    // The row layout stages plain puts, so this raw database needs no queue
+    // merge operator.
+    let store = Arc::new(queue::storage::QueueStore::new(
+        crate::config::QueueLayout::Rows,
+        1 << 20,
+        1 << 20,
+    ));
+    let transaction = build
+        .db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .expect("enqueue transaction opens");
+    store
+        .stage_enqueue(
+            &transaction,
+            target,
+            operation_queue::QueueOperand::enqueue(&operations).expect("fixture operand encodes"),
+            &operations,
+        )
+        .expect("fixture operations stage");
+    transaction
+        .commit()
+        .await
+        .expect("fixture operations commit");
+
+    let publisher = publication::QueuePublisher::new(
+        Arc::new(build.db.clone()),
+        backlog::IndexOperationBacklog::new(
+            backlog::BacklogLimits {
+                max_retained_bytes: u64::MAX,
+                max_members: u64::MAX,
+            },
+            crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+        ),
+        Arc::clone(&store),
+        Arc::clone(&driver.scope_gates),
+        publication::VectorPublicationResources {
+            cache_registry: Arc::clone(&driver.cache_registry),
+            simhasher_registry: Arc::clone(&driver.simhasher_registry),
+            batch_reads: driver.batch_reads,
+            planning_cache: driver.build_cache(),
+        },
+        limits_with_output_operations(2_048),
+        publication::TextPublicationResources {
+            object_store: Arc::new(InMemory::new()),
+            database: "vector-build-cache-queued-writes".to_string(),
+            limits: SearchIndexBackfillLimits::default().active_text_mutation(),
+        },
+    );
+    // A publication session left for the target is forgotten by deferral,
+    // while the build's own session stays.
+    retain_marked_publication(
+        &driver.build_cache,
+        &driver.scope_gates,
+        publication_checkpoint(target),
+        PublicationBacklog::Pending,
+    )
+    .await;
+    assert_eq!(
+        publisher
+            .publish_once(target)
+            .await
+            .expect("publication classifies the hidden generation"),
+        publication::PublicationOutcome::Deferred
+    );
+    assert!(driver.build_cache.retained_publication(target).is_none());
+    assert_eq!(
+        store
+            .read(&build.db, target)
+            .await
+            .expect("the queue reads")
+            .expect("the deferred operations stay queued")
+            .queue()
+            .operations(),
+        operations.as_slice(),
+        "deferral acknowledges nothing"
+    );
+    assert_eq!(
+        physical_vector_rows(&build.db, build.scope, physical_index_id).await,
+        rows,
+        "deferral leaves every physical row byte-identical"
+    );
+    assert_eq!(retained_checkpoint(&driver), Some(checkpoint.clone()));
+
+    // The next Scan step checks out exactly the checkpoint it resumes from, so
+    // an unchanged operation and index record make that checkout a hit.
+    let operation = build.operation().await;
+    let record = read_index(&build.db, build.scope, &build.definition).await;
+    let resumed = VectorBuildCheckpoint::new(&operation, &record, operation.progress().clone());
+    assert_eq!(resumed, checkpoint);
+    let session = driver
+        .build_cache
+        .checkout::<vector::distance::Euclidean>(&resumed)
+        .await;
+    assert_eq!(
+        session.retained_bytes().expect("the session is measurable"),
+        retained_bytes,
+        "the checkout returns the retained session, not a fresh one"
+    );
+    driver
+        .build_cache
+        .after_commit(
+            build.operation_id,
+            CommittedOperationStep::Progressed,
+            committed_checkout(&resumed, session),
+        )
+        .await;
+    assert_eq!(
+        build.step(&driver).await,
+        CommittedOperationStep::Progressed
+    );
+    assert_golden(
+        build.finish(&driver).await,
+        "queued writes deferred during the build",
+    );
+}
+
 #[tokio::test]
 async fn blocked_and_aborted_builds_release_their_retained_session() {
     let driver = driver();
@@ -614,25 +842,26 @@ async fn build_cache_reuses_only_the_exact_committed_checkpoint() {
         VectorBuildCheckpoint::new(&second, &second_record, second.progress().clone());
     let mut advanced = checkpoint.clone();
     advanced.progress = IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
-        VectorBuildStage::CatchUp(PrefixScanProgress {
-            cursor: None,
+        VectorBuildStage::Scan(SourceScanProgress {
+            inclusive_upper_bound: source_cursor(scope, 1),
+            cursor: Some(source_cursor(scope, 1)),
             counters: OperationCounters::default(),
         }),
     ));
+    assert_ne!(advanced.progress, checkpoint.progress);
 
     const BUDGET: u64 = 1 << 20;
     const MARKED: usize = 3;
     let cache = VectorBuildCache::new(NonZeroU64::new(BUDGET).expect("budget is positive"));
     let marked = |checkpoint: &VectorBuildCheckpoint| {
-        Some(CommittedStepState::VectorBuild(Box::new(
-            RetainedVectorBuild {
-                checkpoint: checkpoint.clone(),
-                session: Box::new(VectorBuildSession::<Euclidean>::with_test_simhashes(
-                    NonZeroU64::new(BUDGET).expect("marker budget is positive"),
-                    u64::try_from(MARKED).expect("marker count fits u64"),
-                )),
-            },
-        )))
+        committed_session(
+            &cache,
+            checkpoint,
+            VectorBuildSession::<Euclidean>::with_test_simhashes(
+                NonZeroU64::new(BUDGET).expect("marker budget is positive"),
+                u64::try_from(MARKED).expect("marker count fits u64"),
+            ),
+        )
     };
 
     assert_eq!(
@@ -765,29 +994,47 @@ async fn checked_out_simhashes<D: Distance>(
     cache.checkout::<D>(checkpoint).await.simhash_count()
 }
 
-/// Returns the checkpoints a cache retains, least recently committed first.
+/// Returns the build checkpoints a cache retains, least recently committed first.
 fn retained_checkpoints(cache: &VectorBuildCache) -> Vec<VectorBuildCheckpoint> {
     cache
         .retained
         .try_lock()
         .expect("no commit is trimming the retained sessions")
         .iter()
-        .map(|retained| retained.checkpoint.clone())
+        .filter_map(|retained| retained.build_checkpoint().cloned())
         .collect()
 }
 
-/// Wraps `session` as the committed state of a progressed step at `checkpoint`.
+/// Offers `session` under a lease of `cache` as the committed state of a
+/// progressed step at `checkpoint`.
 fn committed_session(
+    cache: &VectorBuildCache,
     checkpoint: &VectorBuildCheckpoint,
     session: VectorBuildSession<vector::distance::Euclidean>,
 ) -> Option<CommittedStepState> {
     Some(CommittedStepState::VectorBuild(Box::new(
-        RetainedVectorBuild {
-            checkpoint: checkpoint.clone(),
-            session: Box::new(session),
-        },
+        OfferedVectorBuild::for_tests(
+            cache,
+            VectorPlanningCheckpoint::Build(checkpoint.clone()),
+            Box::new(session),
+        ),
     )))
 }
+
+/// Offers a checked-out `session` as the committed state of a progressed
+/// step at `checkpoint`, as a Scan step does.
+fn committed_checkout(
+    checkpoint: &VectorBuildCheckpoint,
+    session: CheckedOutSession<vector::distance::Euclidean>,
+) -> Option<CommittedStepState> {
+    let offered = session
+        .into_offer(VectorPlanningCheckpoint::Build(checkpoint.clone()))
+        .expect("a clean session is offered");
+    Some(CommittedStepState::VectorBuild(Box::new(offered)))
+}
+
+/// Input allowance publication checkouts in these tests plan with.
+const PUBLICATION_ALLOWANCE: NonZeroU64 = NonZeroU64::new(1 << 20).expect("positive");
 
 /// Returns a checkpoint of `checkpoint`'s shape for a new operation.
 fn another_operation(checkpoint: &VectorBuildCheckpoint) -> VectorBuildCheckpoint {
@@ -795,6 +1042,160 @@ fn another_operation(checkpoint: &VectorBuildCheckpoint) -> VectorBuildCheckpoin
         operation_id: IndexOperationId::new_v4(),
         ..checkpoint.clone()
     }
+}
+
+/// SimHashes that mark a retained publication session in checkout tests.
+const MARKED_PUBLICATION: usize = 3;
+
+/// Returns the first commit of `target` at the initial record revision.
+fn publication_checkpoint(target: QueueTarget) -> VectorPublicationCheckpoint {
+    VectorPublicationCheckpoint {
+        target,
+        index_record_revision: crate::index_lifecycle::IndexRevision::initial(),
+        commit: NonZeroU64::MIN,
+    }
+}
+
+/// Retains a marked Euclidean publication session committed at `checkpoint`
+/// with `backlog` left.
+async fn retain_marked_publication(
+    cache: &VectorBuildCache,
+    gates: &IndexScopeGates,
+    checkpoint: VectorPublicationCheckpoint,
+    backlog: PublicationBacklog,
+) {
+    let permit = gates.publication_permit(checkpoint.target).await;
+    let mut session = cache
+        .checkout_publication::<vector::distance::Euclidean>(&permit, None, PUBLICATION_ALLOWANCE)
+        .await;
+    *session = VectorBuildSession::with_test_simhashes(
+        NonZeroU64::new(1 << 20).expect("positive"),
+        u64::try_from(MARKED_PUBLICATION).expect("marker count fits u64"),
+    );
+    cache
+        .retain_publication(
+            &permit,
+            OfferedVectorBuild::publication(checkpoint, session)
+                .expect("a clean session is offered for retention"),
+            backlog,
+        )
+        .await;
+}
+
+/// Checks `target`'s session out for `reuse` and reports whether it was the
+/// marked retained one.
+async fn reuses_marked_publication<D: Distance>(
+    cache: &VectorBuildCache,
+    gates: &IndexScopeGates,
+    target: QueueTarget,
+    reuse: Option<VectorPublicationCheckpoint>,
+) -> bool {
+    let permit = gates.publication_permit(target).await;
+    cache
+        .checkout_publication::<D>(&permit, reuse.as_ref(), PUBLICATION_ALLOWANCE)
+        .await
+        .simhash_count()
+        == MARKED_PUBLICATION
+}
+
+/// A publication session is reused only at the exact target, record
+/// revision, and commit it was retained at. Any checkout of its target takes
+/// it out, so a stale session never survives an attempt.
+#[tokio::test]
+async fn publication_sessions_are_reused_only_at_their_exact_commit() {
+    type Euclidean = vector::distance::Euclidean;
+    let cache = VectorBuildCache::new(NonZeroU64::new(1 << 20).expect("positive"));
+    let gates = IndexScopeGates::default();
+    let target = QueueTarget::new(
+        DataScope::LegacyUnscoped,
+        IndexId::new(7).expect("fixture index id"),
+        IndexGenerationId::initial(),
+    );
+    let other = QueueTarget::new(
+        DataScope::LegacyUnscoped,
+        IndexId::new(8).expect("fixture index id"),
+        IndexGenerationId::initial(),
+    );
+    let committed = publication_checkpoint(target);
+
+    retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
+    assert_eq!(cache.retained_publication(target), Some(committed));
+    assert!(reuses_marked_publication::<Euclidean>(&cache, &gates, target, Some(committed)).await);
+    assert!(
+        !reuses_marked_publication::<Euclidean>(&cache, &gates, target, Some(committed)).await,
+        "the checkout took the session out"
+    );
+
+    let later = VectorPublicationCheckpoint {
+        commit: committed.commit.saturating_add(1),
+        ..committed
+    };
+    let revised = VectorPublicationCheckpoint {
+        index_record_revision: committed
+            .index_record_revision
+            .checked_next()
+            .expect("revision"),
+        ..committed
+    };
+    for reuse in [Some(later), Some(revised), None] {
+        retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
+        assert!(
+            !reuses_marked_publication::<Euclidean>(&cache, &gates, target, reuse).await,
+            "{reuse:?} is not the retained commit"
+        );
+        assert!(
+            cache.retained_publication(target).is_none(),
+            "a mismatched checkout drops the stale session"
+        );
+    }
+
+    // Another target's checkout and forgetting leave the session in place.
+    retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
+    assert!(!reuses_marked_publication::<Euclidean>(&cache, &gates, other, None).await);
+    cache.forget_publication(other).await;
+    assert_eq!(cache.retained_publication(target), Some(committed));
+    cache.forget_publication(target).await;
+    assert!(cache.retained_publication(target).is_none());
+
+    // A session of another metric is never reused.
+    retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
+    assert!(
+        !reuses_marked_publication::<vector::distance::Cosine>(
+            &cache,
+            &gates,
+            target,
+            Some(committed)
+        )
+        .await
+    );
+    assert!(cache.retained_publication(target).is_none());
+}
+
+#[tokio::test]
+#[should_panic(expected = "a publication checks out only its permitted target's session")]
+async fn a_publication_checks_out_only_its_permitted_target() {
+    let cache = VectorBuildCache::new(NonZeroU64::new(1 << 20).expect("positive"));
+    let gates = IndexScopeGates::default();
+    let target = QueueTarget::new(
+        DataScope::LegacyUnscoped,
+        IndexId::new(7).expect("fixture index id"),
+        IndexGenerationId::initial(),
+    );
+    let other = QueueTarget::new(
+        DataScope::LegacyUnscoped,
+        IndexId::new(8).expect("fixture index id"),
+        IndexGenerationId::initial(),
+    );
+    let permit = gates.publication_permit(other).await;
+    drop(
+        cache
+            .checkout_publication::<vector::distance::Euclidean>(
+                &permit,
+                Some(&publication_checkpoint(target)),
+                PUBLICATION_ALLOWANCE,
+            )
+            .await,
+    );
 }
 
 #[tokio::test]
@@ -806,7 +1207,7 @@ async fn retained_sessions_share_the_budget_max_min_fairly() {
     let first = VectorBuildCheckpoint::new(&operation, &record, operation.progress().clone());
     let second = another_operation(&first);
     let third = another_operation(&first);
-    let per_simhash = 96 + core::mem::size_of::<u64>();
+    let per_simhash = 104 + core::mem::size_of::<u64>();
     let namespace = 4_096;
     let session = |simhashes| {
         VectorBuildSession::<Euclidean>::with_test_simhashes(
@@ -837,7 +1238,7 @@ async fn retained_sessions_share_the_budget_max_min_fairly() {
         .after_commit(
             first.operation_id,
             CommittedOperationStep::Progressed,
-            committed_session(&first, session(400)),
+            committed_session(&cache, &first, session(400)),
         )
         .await;
     assert_eq!(sizes(), vec![namespace + 400 * per_simhash]);
@@ -847,7 +1248,7 @@ async fn retained_sessions_share_the_budget_max_min_fairly() {
         .after_commit(
             second.operation_id,
             CommittedOperationStep::Progressed,
-            committed_session(&second, session(400)),
+            committed_session(&cache, &second, session(400)),
         )
         .await;
     for size in sizes() {
@@ -863,7 +1264,7 @@ async fn retained_sessions_share_the_budget_max_min_fairly() {
         .after_commit(
             third.operation_id,
             CommittedOperationStep::Progressed,
-            committed_session(&third, session(10)),
+            committed_session(&cache, &third, session(10)),
         )
         .await;
     let cap = (BUDGET - small) / 2;
@@ -903,7 +1304,7 @@ async fn retained_sessions_are_bounded_per_operation_and_in_count() {
             .after_commit(
                 first.operation_id,
                 CommittedOperationStep::Progressed,
-                committed_session(&first, empty()),
+                committed_session(&cache, &first, empty()),
             )
             .await;
     }
@@ -914,7 +1315,7 @@ async fn retained_sessions_are_bounded_per_operation_and_in_count() {
             .after_commit(
                 checkpoint.operation_id,
                 CommittedOperationStep::Progressed,
-                committed_session(checkpoint, empty()),
+                committed_session(&cache, checkpoint, empty()),
             )
             .await;
     }
@@ -954,7 +1355,9 @@ async fn interleaved_builds_each_keep_their_own_retained_session() {
         .retained
         .try_lock()
         .expect("no commit is trimming the retained sessions")
-        .is_empty());
+        .iter()
+        .next()
+        .is_none());
 }
 
 /// Summarizes each retained golden session, least recently committed first.
@@ -975,7 +1378,10 @@ fn retained_summaries(driver: &VectorIndexDriver) -> Vec<(IndexOperationId, usiz
                 .expect("golden builds retain Euclidean sessions");
             let stats = session.stats();
             (
-                retained.checkpoint.operation_id,
+                retained
+                    .build_checkpoint()
+                    .expect("golden builds retain build sessions")
+                    .operation_id,
                 RetainedBuildSession::retained_bytes(session),
                 session.max_payload_bytes(),
                 stats.item_evictions() + stats.neighbor_evictions() + stats.simhash_evictions(),
@@ -1005,12 +1411,7 @@ async fn interleaved_builds_step_within_their_max_min_shares() {
                     .map(|(_, bytes, ..)| *bytes)
                     .collect::<Vec<_>>()
             };
-            let before = retained_summaries(&driver);
-            let own_before = before
-                .iter()
-                .find(|(other, ..)| *other == operation_id)
-                .map_or(0, |(_, bytes, ..)| *bytes);
-            let others_before = others(&before);
+            let others_before = others(&retained_summaries(&driver));
             let share = max_min_cap(
                 BUDGET,
                 others_before
@@ -1038,15 +1439,14 @@ async fn interleaved_builds_step_within_their_max_min_shares() {
                 own_after <= share,
                 "per-entity eviction keeps the step within its share"
             );
-            let trimmed = others_before
-                .iter()
-                .sum::<usize>()
-                .checked_sub(others(&after).iter().sum::<usize>())
-                .expect("other sessions never grow while one build steps");
-            assert!(
-                trimmed <= own_after.saturating_sub(own_before) + ENTRY_SLACK,
-                "a commit trims only what its step added beyond the budget: {trimmed}"
-            );
+            // The checkout trims each other session to the share, and the
+            // commit of a step within its share trims nothing more.
+            for (before, after) in others_before.iter().zip(others(&after)) {
+                assert!(
+                    after <= *before && after + ENTRY_SLACK >= (*before).min(share),
+                    "{before} -> {after} beside a share of {share}"
+                );
+            }
             assert!(after.iter().map(|(_, bytes, ..)| bytes).sum::<usize>() <= BUDGET);
         }
     }
@@ -1092,8 +1492,10 @@ impl RetainedBuildSession for ShrinkProbe {
     }
 }
 
-/// Wraps a [`ShrinkProbe`] bound to `budget` as a progressed step's committed state.
+/// Offers a [`ShrinkProbe`] bound to `budget` under a lease of `cache` as a
+/// progressed step's committed state.
 fn committed_probe(
+    cache: &VectorBuildCache,
     checkpoint: &VectorBuildCheckpoint,
     budget: usize,
     bytes: usize,
@@ -1101,15 +1503,16 @@ fn committed_probe(
     shrunk_on: &Arc<parking_lot::Mutex<Vec<std::thread::ThreadId>>>,
 ) -> Option<CommittedStepState> {
     Some(CommittedStepState::VectorBuild(Box::new(
-        RetainedVectorBuild {
-            checkpoint: checkpoint.clone(),
-            session: Box::new(ShrinkProbe {
+        OfferedVectorBuild::for_tests(
+            cache,
+            VectorPlanningCheckpoint::Build(checkpoint.clone()),
+            Box::new(ShrinkProbe {
                 bytes,
                 entries,
                 max_entries: budget / PROBE_BYTES_PER_ENTRY,
                 shrunk_on: Arc::clone(shrunk_on),
             }),
-        },
+        ),
     )))
 }
 
@@ -1124,7 +1527,7 @@ async fn commits_trim_retained_sessions_off_the_executor_thread() {
     let cache = VectorBuildCache::new(NonZeroU64::new(1_000).expect("budget is positive"));
     let shrunk_on = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let probe = |checkpoint: &VectorBuildCheckpoint, bytes| {
-        committed_probe(checkpoint, 1_000, bytes, 0, &shrunk_on)
+        committed_probe(&cache, checkpoint, 1_000, bytes, 0, &shrunk_on)
     };
 
     cache
@@ -1163,7 +1566,8 @@ async fn commits_trim_retained_sessions_off_the_executor_thread() {
         vec![500, 500]
     );
 
-    // Each build is checked out at its max-min share beside the others.
+    // A checkout is bound to its max-min share beside the retained and the
+    // other checked-out sessions, and trims the retained ones to it.
     assert_eq!(
         cache
             .checkout::<Euclidean>(&another_operation(&first))
@@ -1172,19 +1576,48 @@ async fn commits_trim_retained_sessions_off_the_executor_thread() {
         333,
         "a third build splits the budget three ways"
     );
+    assert_eq!(
+        cache
+            .retained
+            .try_lock()
+            .expect("the trim released the retained sessions")
+            .iter()
+            .map(|retained| retained.session.retained_bytes())
+            .collect::<Vec<_>>(),
+        vec![333, 333]
+    );
+    let threads = shrunk_on.lock().clone();
+    assert_eq!(
+        threads.len(),
+        4,
+        "the checkout trims both retained sessions"
+    );
+    assert!(
+        threads.iter().all(|thread| *thread != executor),
+        "trimming never runs on the executor thread"
+    );
+
+    // The third session was released, so `first` takes what `second` leaves.
     let reused = cache.checkout::<Euclidean>(&first).await;
     assert_eq!(
         (reused.simhash_count(), reused.max_payload_bytes()),
-        (0, 500),
+        (0, 667),
         "a session of another type is never reused"
     );
+    let other = cache.checkout::<Euclidean>(&second).await;
+    assert_eq!(
+        other.max_payload_bytes(),
+        500,
+        "checked-out sessions split the budget"
+    );
+    drop((reused, other));
     assert_eq!(
         cache
-            .checkout::<Euclidean>(&second)
+            .checkout_fresh::<Euclidean>()
             .await
             .max_payload_bytes(),
         1_000,
-        "the only build is bound to the whole budget"
+        "the only session is bound to the whole budget"
     );
     build.db.close().await.expect("trim thread database closes");
 }
@@ -1210,14 +1643,15 @@ async fn checkouts_evict_class_cap_excess_off_the_executor_thread() {
             .after_commit(
                 checkpoint.operation_id,
                 CommittedOperationStep::Progressed,
-                committed_probe(checkpoint, BUDGET, bytes, entries, &shrunk_on),
+                committed_probe(&cache, checkpoint, BUDGET, bytes, entries, &shrunk_on),
             )
             .await;
     }
     assert!(shrunk_on.lock().is_empty());
 
-    // Its share halves beside `second`, capping it at 5 entries: its bytes
-    // still fit, its entries do not, and checkout evicts them off the executor.
+    // Its share halves beside `second`, which the checkout trims to that
+    // share, and caps it at 5 entries: its bytes still fit, its entries do
+    // not, and checkout evicts them off the executor.
     assert_eq!(
         cache
             .checkout::<Euclidean>(&first)
@@ -1226,10 +1660,15 @@ async fn checkouts_evict_class_cap_excess_off_the_executor_thread() {
         BUDGET / 2
     );
     let threads = shrunk_on.lock().clone();
-    assert_eq!(threads.len(), 1, "checkout evicts the class-cap excess");
-    assert_ne!(
-        threads[0],
-        std::thread::current().id(),
+    assert_eq!(
+        threads.len(),
+        2,
+        "checkout trims `second` and evicts the class-cap excess"
+    );
+    assert!(
+        threads
+            .iter()
+            .all(|thread| *thread != std::thread::current().id()),
         "checkout never evicts on the executor thread"
     );
 
@@ -1238,11 +1677,11 @@ async fn checkouts_evict_class_cap_excess_off_the_executor_thread() {
         .after_commit(
             first.operation_id,
             CommittedOperationStep::Progressed,
-            committed_probe(&first, BUDGET, 300, 5, &shrunk_on),
+            committed_probe(&cache, &first, BUDGET, 300, 5, &shrunk_on),
         )
         .await;
     cache.checkout::<Euclidean>(&first).await;
-    assert_eq!(shrunk_on.lock().len(), 1);
+    assert_eq!(shrunk_on.lock().len(), 2);
     build
         .db
         .close()
@@ -1275,7 +1714,7 @@ async fn reused_sessions_are_checked_out_within_their_rebound_class_caps() {
     let dense = simhashes(BUDGET, 64);
     assert!(!dense.exceeds_limits());
     let dense_bytes = RetainedBuildSession::retained_bytes(&dense);
-    let large = simhashes(1 << 40, 450);
+    let large = simhashes(1 << 40, 440);
     let large_bytes = RetainedBuildSession::retained_bytes(&large);
     assert!(dense_bytes + large_bytes <= BUDGET);
     for (checkpoint, session) in [(&first, dense), (&second, large)] {
@@ -1283,7 +1722,7 @@ async fn reused_sessions_are_checked_out_within_their_rebound_class_caps() {
             .after_commit(
                 checkpoint.operation_id,
                 CommittedOperationStep::Progressed,
-                committed_session(checkpoint, session),
+                committed_session(&cache, checkpoint, session),
             )
             .await;
     }
@@ -1332,14 +1771,18 @@ async fn check_out_within_limits(
             .expect("no commit is trimming the retained sessions");
         retained
             .iter()
-            .find(|retained| retained.checkpoint.operation_id == operation_id)
+            .find(|retained| {
+                retained.checkpoint.owner() == VectorPlanningOwner::Build(operation_id)
+            })
             .map(|own| {
                 let session: &dyn Any = own.session.as_ref();
                 let session = session
                     .downcast_ref::<VectorBuildSession<vector::distance::Euclidean>>()
                     .expect("golden builds retain Euclidean sessions");
                 (
-                    own.checkpoint.clone(),
+                    own.build_checkpoint()
+                        .expect("a build owns a build checkpoint")
+                        .clone(),
                     (
                         session.item_count(),
                         session.neighbor_count(),
@@ -1348,7 +1791,9 @@ async fn check_out_within_limits(
                     own.session.retained_bytes(),
                     retained
                         .iter()
-                        .filter(|other| other.checkpoint.operation_id != operation_id)
+                        .filter(|other| {
+                            other.checkpoint.owner() != VectorPlanningOwner::Build(operation_id)
+                        })
                         .map(|other| other.session.retained_bytes())
                         .collect::<Vec<_>>(),
                 )
@@ -1395,7 +1840,7 @@ async fn check_out_within_limits(
         .after_commit(
             operation_id,
             CommittedOperationStep::Progressed,
-            committed_session(&checkpoint, session),
+            committed_checkout(&checkpoint, session),
         )
         .await;
     kept != held
@@ -1438,6 +1883,807 @@ async fn joining_builds_check_out_class_capped_sessions_within_their_caps() {
     assert_golden(second.finish(&driver).await, "second class-capped build");
 }
 
+/// Pins how sessions of unbounded demand share the budget: build steps check
+/// sessions out beside running and retained builds.
+#[tokio::test]
+async fn checked_out_sessions_split_the_budget_and_rebind_between_entities() {
+    type Euclidean = vector::distance::Euclidean;
+    // SimHash sessions reach their class cap of one entry per KiB before
+    // their bytes, so the shares show in the SimHashes each may keep.
+    const BUDGET: usize = 1 << 20;
+    let build = GoldenBuild::start("vector-build-cache-checked-out-shares").await;
+    let record = read_index(&build.db, build.scope, &build.definition).await;
+    let operation = build.operation().await;
+    let first = VectorBuildCheckpoint::new(&operation, &record, operation.progress().clone());
+    let cache = VectorBuildCache::new(
+        NonZeroU64::new(u64::try_from(BUDGET).expect("budget fits u64")).expect("positive"),
+    );
+    cache
+        .after_commit(
+            first.operation_id,
+            CommittedOperationStep::Progressed,
+            committed_session(
+                &cache,
+                &first,
+                VectorBuildSession::<Euclidean>::with_test_simhashes(
+                    NonZeroU64::new(1 << 40).expect("positive"),
+                    900,
+                ),
+            ),
+        )
+        .await;
+
+    // Alone, the build keeps its session and the whole budget.
+    let mut stepping = cache.checkout::<Euclidean>(&first).await;
+    assert_eq!(
+        (stepping.simhash_count(), stepping.max_payload_bytes()),
+        (900, BUDGET)
+    );
+
+    // Another build halves the share. The running build keeps its binding
+    // until its next entity boundary, then shrinks to the half.
+    let publication = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(publication.max_payload_bytes(), BUDGET / 2);
+    assert_eq!(stepping.max_payload_bytes(), BUDGET);
+    stepping.rebind().await;
+    assert_eq!(
+        (stepping.simhash_count(), stepping.max_payload_bytes()),
+        (BUDGET / 2 / 1024, BUDGET / 2)
+    );
+
+    // A third splits it three ways.
+    let mut second = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(second.max_payload_bytes(), BUDGET / 3);
+    stepping.rebind().await;
+    assert_eq!(
+        (stepping.simhash_count(), stepping.max_payload_bytes()),
+        (BUDGET / 3 / 1024, BUDGET / 3)
+    );
+
+    // Released checkouts leave the share low until the next rebalance.
+    drop((publication, second));
+    stepping.rebind().await;
+    assert_eq!(stepping.max_payload_bytes(), BUDGET / 3);
+    let held = stepping.simhash_count();
+    let held_bytes = stepping
+        .retained_bytes()
+        .expect("the session is measurable");
+    cache
+        .after_commit(
+            first.operation_id,
+            CommittedOperationStep::Progressed,
+            committed_checkout(&first, stepping),
+        )
+        .await;
+
+    // Beside the retained build, another takes the rest of the budget, and a
+    // rising share rebinds without evicting.
+    second = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(second.max_payload_bytes(), BUDGET - held_bytes);
+    let mut stepping = cache.checkout::<Euclidean>(&first).await;
+    assert_eq!(
+        (stepping.simhash_count(), stepping.max_payload_bytes()),
+        (held, BUDGET / 2)
+    );
+    drop(second);
+    let another = another_operation(&first);
+    cache
+        .after_commit(
+            another.operation_id,
+            CommittedOperationStep::Progressed,
+            committed_session(&cache, &another, VectorBuildSession::new(NonZeroU64::MIN)),
+        )
+        .await;
+    stepping.rebind().await;
+    assert_eq!(
+        (stepping.simhash_count(), stepping.max_payload_bytes()),
+        (held, BUDGET),
+        "the next rebalance returns the released share, and rebinding evicts nothing"
+    );
+    build
+        .db
+        .close()
+        .await
+        .expect("checked-out shares database closes");
+}
+
+/// Target of the publication sessions in budget tests.
+fn budget_target(index_id: u64) -> QueueTarget {
+    QueueTarget::new(
+        DataScope::LegacyUnscoped,
+        IndexId::new(index_id).expect("fixture index id"),
+        IndexGenerationId::initial(),
+    )
+}
+
+/// Returns the bytes every retained session holds plus the share every live
+/// lease is bound to: at most the budget after any rebalance.
+fn committed_and_leased(cache: &VectorBuildCache) -> usize {
+    let retained = cache
+        .retained
+        .try_lock()
+        .expect("no rebalance is trimming the retained sessions")
+        .iter()
+        .map(|retained| retained.session.retained_bytes())
+        .sum::<usize>();
+    let leased = cache
+        .leases
+        .live
+        .lock()
+        .values()
+        .map(|lease| usize::try_from(lease.share.get()).expect("share fits usize"))
+        .sum::<usize>();
+    retained + leased
+}
+
+/// Replaces `session`'s rows with `simhashes` fixture SimHashes, free of
+/// class caps, and returns the bytes it then holds.
+fn fill<D: Distance>(session: &mut CheckedOutSession<D>, simhashes: u64) -> usize {
+    **session = VectorBuildSession::with_test_simhashes(
+        NonZeroU64::new(1 << 40).expect("positive"),
+        simhashes,
+    );
+    RetainedBuildSession::retained_bytes(&**session)
+}
+
+/// A session offered for retention keeps its lease until its commit settles,
+/// so a checkout meanwhile is bound beside it rather than over it, and the
+/// budget counts it once: as a lease, then as retained bytes.
+#[tokio::test]
+async fn offered_publication_sessions_stay_leased_until_their_commit_settles() {
+    type Euclidean = vector::distance::Euclidean;
+    const BUDGET: usize = 1 << 20;
+    let cache = VectorBuildCache::new(
+        NonZeroU64::new(u64::try_from(BUDGET).expect("budget fits u64")).expect("positive"),
+    );
+    let gates = IndexScopeGates::default();
+    let target = budget_target(7);
+    let permit = gates.publication_permit(target).await;
+    let live = || cache.leases.live.lock().len();
+    let whole = NonZeroU64::new(u64::try_from(BUDGET).expect("budget fits u64")).expect("positive");
+
+    // A publication plans a session over half the budget and offers it.
+    let mut planning = cache
+        .checkout_publication::<Euclidean>(&permit, None, whole)
+        .await;
+    assert_eq!(planning.max_payload_bytes(), BUDGET);
+    let large = fill(&mut planning, 6_000);
+    assert!(large > BUDGET / 2 && large < BUDGET);
+    let offered = OfferedVectorBuild::publication(publication_checkpoint(target), planning)
+        .expect("a clean session is offered");
+
+    // A build checking out while that commit is in flight gets half, not all.
+    let build = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(build.max_payload_bytes(), BUDGET / 2);
+    assert_eq!(live(), 2);
+
+    // Retaining the session releases its lease under the same lock: it is
+    // counted once, as retained bytes trimmed to its half.
+    cache
+        .retain_publication(&permit, offered, PublicationBacklog::Pending)
+        .await;
+    assert_eq!(live(), 1);
+    assert!(committed_and_leased(&cache) <= BUDGET);
+    assert_eq!(
+        cache.retained_publication(target),
+        Some(publication_checkpoint(target))
+    );
+    drop(build);
+
+    // A small offered session is counted at its bytes, leaving the rest.
+    let mut planning = cache
+        .checkout_publication::<Euclidean>(&permit, None, whole)
+        .await;
+    assert!(cache.retained_publication(target).is_none());
+    let small = fill(&mut planning, 10);
+    let offered = OfferedVectorBuild::publication(publication_checkpoint(target), planning)
+        .expect("a clean session is offered");
+    let build = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(build.max_payload_bytes(), BUDGET - small);
+
+    // An offer dropped with its failed commit releases its lease, and the
+    // next rebalance returns its share.
+    drop(offered);
+    assert_eq!(live(), 1);
+    drop(build);
+    assert_eq!(live(), 0);
+    assert!(cache.retained_publication(target).is_none());
+    assert_eq!(
+        cache
+            .checkout_fresh::<Euclidean>()
+            .await
+            .max_payload_bytes(),
+        BUDGET
+    );
+}
+
+/// A build step's session stays leased while the outbox commits its step.
+#[tokio::test]
+async fn offered_build_sessions_stay_leased_until_their_commit_settles() {
+    type Euclidean = vector::distance::Euclidean;
+    const BUDGET: usize = 1 << 20;
+    let build = GoldenBuild::start("vector-build-cache-offered-build").await;
+    let record = read_index(&build.db, build.scope, &build.definition).await;
+    let operation = build.operation().await;
+    let first = VectorBuildCheckpoint::new(&operation, &record, operation.progress().clone());
+    let cache = VectorBuildCache::new(
+        NonZeroU64::new(u64::try_from(BUDGET).expect("budget fits u64")).expect("positive"),
+    );
+
+    let mut stepping = cache.checkout::<Euclidean>(&first).await;
+    assert_eq!(stepping.max_payload_bytes(), BUDGET);
+    let large = fill(&mut stepping, 6_000);
+    assert!(large > BUDGET / 2);
+    let state = committed_checkout(&first, stepping);
+
+    // The step's outbox commit is pending: a concurrent step is bound beside it.
+    let concurrent = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(concurrent.max_payload_bytes(), BUDGET / 2);
+    assert_eq!(cache.leases.live.lock().len(), 2);
+    cache
+        .after_commit(
+            first.operation_id,
+            CommittedOperationStep::Progressed,
+            state,
+        )
+        .await;
+    assert_eq!(cache.leases.live.lock().len(), 1);
+    assert_eq!(retained_checkpoints(&cache), vec![first.clone()]);
+    assert!(committed_and_leased(&cache) <= BUDGET);
+
+    // A step whose commit failed drops its state and releases its lease.
+    drop(concurrent);
+    let stepping = cache.checkout::<Euclidean>(&first).await;
+    drop(committed_checkout(&first, stepping));
+    assert_eq!(cache.leases.live.lock().len(), 0);
+    assert!(retained_checkpoints(&cache).is_empty());
+    build
+        .db
+        .close()
+        .await
+        .expect("offered build database closes");
+}
+
+/// A publication demands only what it resumes with plus the larger of that
+/// and its input allowance, so a small target leaves a concurrent build the
+/// rest of the budget, and a growing one at least doubles until it reaches
+/// its fair share.
+#[tokio::test]
+async fn publication_leases_demand_what_they_resume_with_plus_headroom() {
+    type Euclidean = vector::distance::Euclidean;
+    const BUDGET: usize = 1 << 20;
+    const ALLOWANCE: usize = 64 * 1024;
+    let cache = VectorBuildCache::new(
+        NonZeroU64::new(u64::try_from(BUDGET).expect("budget fits u64")).expect("positive"),
+    );
+    let allowance =
+        NonZeroU64::new(u64::try_from(ALLOWANCE).expect("allowance fits u64")).expect("positive");
+    let gates = IndexScopeGates::default();
+    let (target, other) = (budget_target(7), budget_target(8));
+    let (permit, other_permit) = (
+        gates.publication_permit(target).await,
+        gates.publication_permit(other).await,
+    );
+
+    // Alone, a fresh publication is bound to its allowance, and a smaller
+    // allowance to a sixteenth of the budget, so its session can still grow.
+    let alone = cache
+        .checkout_publication::<Euclidean>(&permit, None, allowance)
+        .await;
+    assert_eq!(alone.max_payload_bytes(), ALLOWANCE);
+    drop(alone);
+    let alone = cache
+        .checkout_publication::<Euclidean>(&permit, None, NonZeroU64::MIN)
+        .await;
+    assert_eq!(
+        alone.max_payload_bytes(),
+        BUDGET / MAX_RETAINED_PUBLICATIONS
+    );
+    drop(alone);
+
+    // A running build takes the whole budget. A publication beside it takes
+    // only its allowance, so rebinding keeps all 800 of the build's
+    // SimHashes; half the budget would allow 512.
+    let mut build = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(build.max_payload_bytes(), BUDGET);
+    fill(&mut build, 800);
+    let publication = cache
+        .checkout_publication::<Euclidean>(&permit, None, allowance)
+        .await;
+    assert_eq!(publication.max_payload_bytes(), ALLOWANCE);
+    build.rebind().await;
+    assert_eq!(
+        (build.max_payload_bytes(), build.simhash_count()),
+        (BUDGET - ALLOWANCE, 800)
+    );
+
+    // A second publication and the build still split exactly the budget.
+    let second = cache
+        .checkout_publication::<Euclidean>(&other_permit, None, allowance)
+        .await;
+    assert_eq!(second.max_payload_bytes(), ALLOWANCE);
+    build.rebind().await;
+    assert_eq!(
+        (build.max_payload_bytes(), build.simhash_count()),
+        (BUDGET - 2 * ALLOWANCE, 800)
+    );
+    assert_eq!(committed_and_leased(&cache), BUDGET);
+
+    // A released lease's demand leaves at the next rebalance.
+    drop((publication, second));
+    let publication = cache
+        .checkout_publication::<Euclidean>(&permit, None, allowance)
+        .await;
+    build.rebind().await;
+    assert_eq!(build.max_payload_bytes(), BUDGET - ALLOWANCE);
+    drop(publication);
+
+    // A resumed session demands its bytes plus the larger of them and the
+    // allowance, capped at its fair share beside the build.
+    for simhashes in [10, 1_000, 6_000] {
+        let mut planning = cache
+            .checkout_publication::<Euclidean>(&permit, None, allowance)
+            .await;
+        let held = fill(&mut planning, simhashes);
+        let committed = publication_checkpoint(target);
+        cache
+            .retain_publication(
+                &permit,
+                OfferedVectorBuild::publication(committed, planning)
+                    .expect("a clean session is offered"),
+                PublicationBacklog::Pending,
+            )
+            .await;
+        // Only this session is retained, trimmed to its fair share.
+        let retained = cache
+            .retained
+            .try_lock()
+            .expect("no rebalance is trimming the retained sessions")
+            .iter()
+            .map(|retained| retained.session.retained_bytes())
+            .sum::<usize>();
+        assert!(retained <= held);
+        let held = retained;
+        let resumed = cache
+            .checkout_publication::<Euclidean>(&permit, Some(&committed), allowance)
+            .await;
+        let demand = held + held.max(ALLOWANCE);
+        assert_eq!(
+            resumed.max_payload_bytes(),
+            demand.min(BUDGET / 2),
+            "{simhashes} SimHashes"
+        );
+        assert!(
+            resumed.simhash_count() > 0,
+            "the checkout resumed the session"
+        );
+        assert!(committed_and_leased(&cache) <= BUDGET);
+    }
+}
+
+/// Queue publication plans within the budget builds retain their sessions
+/// in: an attempt beside a retained build session over half the budget trims
+/// that session to its half, and the session of the attempt that drained its
+/// queue gives way to the build's next step.
+#[tokio::test]
+async fn publication_shares_the_planning_budget_with_a_retained_build() {
+    use crate::encoding::v2::values::indexes::operation_queue;
+    use crate::index_lifecycle::queue::{self, backlog, publication};
+
+    const BUDGET: usize = 64 * 1024;
+    // A trimmed session can end up to one evicted entry under its cap.
+    const ENTRY_SLACK: usize = 1024;
+    let driver = driver().with_build_cache_bytes(
+        NonZeroU64::new(u64::try_from(BUDGET).expect("budget fits u64")).expect("positive"),
+    );
+    let mut active = GoldenBuild::start("vector-build-cache-publication-share").await;
+    let operation = active.operation().await;
+    let record = read_index(&active.db, active.scope, &active.definition).await;
+    let retained_build = another_operation(&VectorBuildCheckpoint::new(
+        &operation,
+        &record,
+        operation.progress().clone(),
+    ));
+    assert_eq!(
+        drive_to_terminal(
+            &active.db,
+            &driver,
+            active.operation_id,
+            &mut active.claim_sequence
+        )
+        .await,
+        CommittedOperationStep::Completed
+    );
+    let held = VectorBuildSession::<vector::distance::Euclidean>::with_test_simhashes(
+        NonZeroU64::new(1 << 40).expect("positive"),
+        500,
+    );
+    let held_bytes = RetainedBuildSession::retained_bytes(&held);
+    assert!((BUDGET / 2 + ENTRY_SLACK..=BUDGET).contains(&held_bytes));
+    driver
+        .build_cache
+        .after_commit(
+            retained_build.operation_id,
+            CommittedOperationStep::Progressed,
+            committed_session(&driver.build_cache, &retained_build, held),
+        )
+        .await;
+
+    let record = read_index(&active.db, active.scope, &active.definition).await;
+    let target =
+        queue::QueueTarget::new(active.scope, record.index_id(), record.state().generation());
+    let operations = [operation_queue::QueuedOperation::new(
+        operation_queue::QueuedOperationId::generate(),
+        IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(GOLDEN_ENTITIES),
+        },
+        operation_queue::QueuedPayload::Vector(operation_queue::QueuedVectorPayload {
+            previous: None,
+            replacement: Some(
+                operation_queue::QueuedVectorReplacement::try_new(
+                    TextPartition::Unpartitioned,
+                    integral_vector(GOLDEN_ENTITIES, GOLDEN_DIMENSION).into(),
+                )
+                .expect("fixture replacement is finite"),
+            ),
+        }),
+    )];
+    // The row layout stages plain puts, so this raw database needs no queue
+    // merge operator.
+    let store = Arc::new(queue::storage::QueueStore::new(
+        crate::config::QueueLayout::Rows,
+        1 << 20,
+        1 << 20,
+    ));
+    let transaction = active
+        .db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .expect("enqueue transaction opens");
+    store
+        .stage_enqueue(
+            &transaction,
+            target,
+            operation_queue::QueueOperand::enqueue(&operations).expect("fixture operand encodes"),
+            &operations,
+        )
+        .expect("fixture operation stages");
+    transaction
+        .commit()
+        .await
+        .expect("fixture operation commits");
+    let publisher = publication::QueuePublisher::new(
+        Arc::new(active.db.clone()),
+        backlog::IndexOperationBacklog::new(
+            backlog::BacklogLimits {
+                max_retained_bytes: u64::MAX,
+                max_members: u64::MAX,
+            },
+            crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+        ),
+        Arc::clone(&store),
+        Arc::clone(&driver.scope_gates),
+        publication::VectorPublicationResources {
+            cache_registry: Arc::clone(&driver.cache_registry),
+            simhasher_registry: Arc::clone(&driver.simhasher_registry),
+            batch_reads: driver.batch_reads,
+            planning_cache: driver.build_cache(),
+        },
+        limits_with_output_operations(2_048),
+        publication::TextPublicationResources {
+            object_store: Arc::new(InMemory::new()),
+            database: "vector-build-cache-publication-share".to_string(),
+            limits: SearchIndexBackfillLimits::default().active_text_mutation(),
+        },
+    );
+    assert_eq!(
+        publisher
+            .publish_once(target)
+            .await
+            .expect("the queued insert publishes"),
+        publication::PublicationOutcome::Published {
+            operations: 1,
+            entities: 1
+        }
+    );
+    let retained_bytes = |owner: VectorPlanningOwner| {
+        driver
+            .build_cache
+            .retained
+            .try_lock()
+            .expect("no rebalance is trimming the retained sessions")
+            .iter()
+            .find(|retained| retained.checkpoint.owner() == owner)
+            .map(|retained| retained.session.retained_bytes())
+    };
+    let trimmed = retained_bytes(VectorPlanningOwner::Build(retained_build.operation_id))
+        .expect("the build's session stays retained");
+    assert!(
+        (BUDGET / 2 - ENTRY_SLACK..=BUDGET / 2).contains(&trimmed),
+        "the publication's checkout trimmed the build to its half: {trimmed}"
+    );
+    let published = retained_bytes(VectorPlanningOwner::Publication(target))
+        .expect("the committed publication retains its session");
+    assert!(published > 0);
+    assert!(
+        trimmed + published <= BUDGET,
+        "retained sessions stay within the budget: {trimmed} + {published}"
+    );
+
+    // The commit drained the target, so its session holds only spare budget:
+    // the next build step takes the whole budget and drops it.
+    let stepping = driver
+        .build_cache
+        .checkout::<vector::distance::Euclidean>(&retained_build)
+        .await;
+    assert_eq!(stepping.max_payload_bytes(), BUDGET);
+    assert_eq!(
+        retained_bytes(VectorPlanningOwner::Publication(target)),
+        None
+    );
+    drop(stepping);
+    active
+        .db
+        .close()
+        .await
+        .expect("publication share database closes");
+}
+
+/// Returns a Scan checkpoint of a new build operation, with no database behind it.
+fn scan_checkpoint() -> VectorBuildCheckpoint {
+    let bound = IndexCursor::try_new(
+        DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(1)),
+        }
+        .to_bytes(),
+    )
+    .expect("source key is a valid cursor");
+    VectorBuildCheckpoint {
+        operation_id: IndexOperationId::new_v4(),
+        generation: IndexGenerationId::initial(),
+        index_record_revision: crate::index_lifecycle::IndexRevision::initial(),
+        progress: IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::Scan(SourceScanProgress {
+                inclusive_upper_bound: bound,
+                cursor: None,
+                counters: OperationCounters::default(),
+            }),
+        )),
+    }
+}
+
+/// Retains a session of `simhashes` fixture SimHashes for `target`,
+/// committed with `backlog` left, and returns the bytes it held. Its checkout
+/// claims only the smallest publication demand, so it drops no other session.
+async fn retain_filled(
+    cache: &VectorBuildCache,
+    gates: &IndexScopeGates,
+    target: QueueTarget,
+    simhashes: u64,
+    backlog: PublicationBacklog,
+) -> usize {
+    let permit = gates.publication_permit(target).await;
+    let mut planning = cache
+        .checkout_publication::<vector::distance::Euclidean>(&permit, None, NonZeroU64::MIN)
+        .await;
+    let held = fill(&mut planning, simhashes);
+    cache
+        .retain_publication(
+            &permit,
+            OfferedVectorBuild::publication(publication_checkpoint(target), planning)
+                .expect("a clean session is offered"),
+            backlog,
+        )
+        .await;
+    held
+}
+
+/// Returns the bytes of the session retained for `target`.
+fn publication_bytes(cache: &VectorBuildCache, target: QueueTarget) -> Option<usize> {
+    cache
+        .retained
+        .try_lock()
+        .expect("no rebalance is trimming the retained sessions")
+        .iter()
+        .find(|retained| retained.checkpoint.owner() == VectorPlanningOwner::Publication(target))
+        .map(|retained| retained.session.retained_bytes())
+}
+
+/// A session retained by a commit that drained its target demands nothing:
+/// drained sessions keep, newest first, only what the leases and pending
+/// sessions leave free, so a build step takes the whole budget and drops
+/// them, while a pending session splits the budget with it.
+#[tokio::test]
+async fn drained_publication_sessions_keep_only_spare_budget() {
+    type Euclidean = vector::distance::Euclidean;
+    const BUDGET: usize = 1 << 20;
+    let cache = VectorBuildCache::new(
+        NonZeroU64::new(u64::try_from(BUDGET).expect("budget fits u64")).expect("positive"),
+    );
+    let gates = IndexScopeGates::default();
+    let (older, newer) = (budget_target(7), budget_target(8));
+    let other = gates.publication_permit(budget_target(9)).await;
+    let claiming = |bytes: usize| {
+        NonZeroU64::new(u64::try_from(bytes).expect("claim fits u64")).expect("positive")
+    };
+
+    // Drained sessions that fit beside each other keep every byte.
+    let held = retain_filled(&cache, &gates, older, 3_000, PublicationBacklog::Drained).await;
+    assert_eq!(
+        retain_filled(&cache, &gates, newer, 3_000, PublicationBacklog::Drained).await,
+        held
+    );
+    assert!(2 * held < BUDGET);
+    assert_eq!(
+        (
+            publication_bytes(&cache, older),
+            publication_bytes(&cache, newer)
+        ),
+        (Some(held), Some(held))
+    );
+
+    // A lease claims its demand first. The newest drained session keeps its
+    // bytes and the older shrinks to what is left.
+    let claim = BUDGET - held - held / 2;
+    let lease = cache
+        .checkout_publication::<Euclidean>(&other, None, claiming(claim))
+        .await;
+    assert_eq!(lease.max_payload_bytes(), claim);
+    assert_eq!(publication_bytes(&cache, newer), Some(held));
+    let rest = publication_bytes(&cache, older).expect("the older session keeps the rest");
+    assert!(rest > 0 && rest <= held / 2, "{rest}");
+    assert!(committed_and_leased(&cache) <= BUDGET);
+    drop(lease);
+
+    // A larger claim leaves part of the newest and none of the older.
+    let lease = cache
+        .checkout_publication::<Euclidean>(&other, None, claiming(BUDGET - held / 2))
+        .await;
+    let rest = publication_bytes(&cache, newer).expect("the newest session keeps the rest");
+    assert!(rest > 0 && rest <= held / 2, "{rest}");
+    assert_eq!(publication_bytes(&cache, older), None);
+    assert!(committed_and_leased(&cache) <= BUDGET);
+    drop(lease);
+
+    // A build step claims the whole budget and drops every drained session.
+    let build = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(build.max_payload_bytes(), BUDGET);
+    assert_eq!(publication_bytes(&cache, newer), None);
+    drop(build);
+
+    // A pending session instead splits the budget with the build.
+    let held = retain_filled(&cache, &gates, older, 6_000, PublicationBacklog::Pending).await;
+    assert!(held > BUDGET / 2);
+    let build = cache.checkout_fresh::<Euclidean>().await;
+    assert_eq!(build.max_payload_bytes(), BUDGET / 2);
+    let trimmed = publication_bytes(&cache, older).expect("a pending session stays beside a build");
+    assert!(trimmed <= BUDGET / 2, "{trimmed}");
+    drop(build);
+
+    // A drained target's next attempt resumes its own session.
+    let held = retain_filled(&cache, &gates, newer, 10, PublicationBacklog::Drained).await;
+    let permit = gates.publication_permit(newer).await;
+    let resumed = cache
+        .checkout_publication::<Euclidean>(
+            &permit,
+            Some(&publication_checkpoint(newer)),
+            PUBLICATION_ALLOWANCE,
+        )
+        .await;
+    assert_eq!(
+        resumed.retained_bytes().expect("the session is measurable"),
+        held
+    );
+}
+
+/// Publication commits never evict a build's session, and more targets with
+/// queued work than [`MAX_RETAINED_PUBLICATIONS`] keep that many warm under
+/// round-robin instead of each commit evicting the next target's session. A
+/// drained session gives its slot up to a new target.
+#[tokio::test]
+async fn publication_sessions_are_bounded_without_evicting_pending_targets_or_builds() {
+    type Euclidean = vector::distance::Euclidean;
+    let cache = VectorBuildCache::new(NonZeroU64::new(64 << 20).expect("positive"));
+    let gates = IndexScopeGates::default();
+    let builds = (0..MAX_RETAINED_VECTOR_BUILDS)
+        .map(|_| scan_checkpoint())
+        .collect::<Vec<_>>();
+    for build in &builds {
+        cache
+            .after_commit(
+                build.operation_id,
+                CommittedOperationStep::Progressed,
+                committed_session(&cache, build, VectorBuildSession::new(NonZeroU64::MIN)),
+            )
+            .await;
+    }
+    let targets = (1..=u64::try_from(MAX_RETAINED_PUBLICATIONS + 4).expect("count fits u64"))
+        .map(budget_target)
+        .collect::<Vec<_>>();
+    let committed = |target, round: u64| VectorPublicationCheckpoint {
+        commit: NonZeroU64::new(round + 1).expect("positive"),
+        ..publication_checkpoint(target)
+    };
+    let mut warm = Vec::new();
+    for round in 0..3_u64 {
+        let mut hits = 0;
+        for target in &targets {
+            let reuse = round
+                .checked_sub(1)
+                .map(|previous| committed(*target, previous));
+            hits += usize::from(
+                reuses_marked_publication::<Euclidean>(&cache, &gates, *target, reuse).await,
+            );
+            retain_marked_publication(
+                &cache,
+                &gates,
+                committed(*target, round),
+                PublicationBacklog::Pending,
+            )
+            .await;
+        }
+        warm.push(hits);
+    }
+    assert_eq!(
+        warm,
+        [0, MAX_RETAINED_PUBLICATIONS, MAX_RETAINED_PUBLICATIONS],
+        "the first targets stay warm and the rest plan cold"
+    );
+    assert_eq!(
+        retained_checkpoints(&cache),
+        builds,
+        "publication commits evict no build session"
+    );
+    assert!(targets[MAX_RETAINED_PUBLICATIONS..]
+        .iter()
+        .all(|target| cache.retained_publication(*target).is_none()));
+
+    // Once a retained target drains, a new target takes its slot.
+    let (first, last) = (targets[0], targets[targets.len() - 1]);
+    retain_marked_publication(
+        &cache,
+        &gates,
+        committed(first, 3),
+        PublicationBacklog::Drained,
+    )
+    .await;
+    assert_eq!(cache.retained_publication(first), Some(committed(first, 3)));
+    retain_marked_publication(
+        &cache,
+        &gates,
+        committed(last, 3),
+        PublicationBacklog::Pending,
+    )
+    .await;
+    assert_eq!(cache.retained_publication(last), Some(committed(last, 3)));
+    assert!(
+        cache.retained_publication(first).is_none(),
+        "the drained session gave its slot up"
+    );
+    assert_eq!(retained_checkpoints(&cache), builds);
+
+    // More builds than their own bound evict the oldest build only.
+    let newest = scan_checkpoint();
+    cache
+        .after_commit(
+            newest.operation_id,
+            CommittedOperationStep::Progressed,
+            committed_session(&cache, &newest, VectorBuildSession::new(NonZeroU64::MIN)),
+        )
+        .await;
+    assert_eq!(
+        retained_checkpoints(&cache),
+        builds[1..]
+            .iter()
+            .cloned()
+            .chain([newest])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(cache.retained_publication(last), Some(committed(last, 3)));
+}
+
 #[test]
 fn max_min_cap_splits_the_budget_fairly() {
     for (sizes, cap) in [
@@ -1463,7 +2709,7 @@ fn max_min_cap_splits_the_budget_fairly() {
 }
 
 #[tokio::test]
-async fn only_scan_and_catch_up_checkpoints_retain_a_session() {
+async fn only_scan_checkpoints_retain_a_session() {
     let driver = driver();
     let mut build = GoldenBuild::start("vector-build-cache-stage-scope").await;
     loop {
@@ -1473,7 +2719,7 @@ async fn only_scan_and_catch_up_checkpoints_retain_a_session() {
         );
         let progress = build.operation().await.progress().clone();
         let IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
-            VectorBuildStage::Scan(_) | VectorBuildStage::CatchUp(_),
+            VectorBuildStage::Scan(_),
         )) = &progress
         else {
             assert_eq!(
@@ -1517,7 +2763,7 @@ async fn drive_with(
 ) -> CommittedOperationStep {
     match drivers {
         StepDrivers::Shared(shared) => {
-            drive_one(db, shared, operation_id, claim_sequence, limits).await
+            drive_one(db, shared.as_ref(), operation_id, claim_sequence, limits).await
         }
         StepDrivers::FreshPerStep => {
             drive_one(db, &driver(), operation_id, claim_sequence, limits).await
@@ -1528,8 +2774,10 @@ async fn drive_with(
 /// Builds a fixture whose sources change mid-build and digests every namespace.
 ///
 /// Scanned and unscanned entities are replaced, removed, and (when
-/// partitioned) moved between tenants, so catch-up exercises deletes,
-/// replacements, partition moves, and new mappings on top of retained state.
+/// partitioned) moved between tenants. Writes made during a build are queued
+/// for publication after activation, so the build itself sees only the source
+/// rows: later scan steps plan changed and removed entities on top of
+/// retained state, while already-scanned entities keep what was planned.
 async fn mutated_build_digests(
     name: &str,
     partitioned: bool,
@@ -1570,14 +2818,9 @@ async fn mutated_build_digests(
         }
         properties
     };
-    let mut current = (0..ENTITIES)
-        .map(|entity_id| {
-            let tenant = 10 + 10 * i64::try_from(entity_id % 3).expect("tenant index fits i64");
-            source(entity_id, tenant)
-        })
-        .collect::<Vec<_>>();
-    for (entity_id, properties) in (0..ENTITIES).zip(&current) {
-        put_source(&db, scope, entity_id, properties).await;
+    for entity_id in 0..ENTITIES {
+        let tenant = 10 + 10 * i64::try_from(entity_id % 3).expect("tenant index fits i64");
+        put_source(&db, scope, entity_id, &source(entity_id, tenant)).await;
     }
     let (operation_id, index_id, generation) =
         create_build(&db, scope, &definition, ENTITIES - 1).await;
@@ -1639,9 +2882,7 @@ async fn mutated_build_digests(
                     )],
                 ),
             };
-            let index = usize::try_from(entity_id).expect("fixture entity fits usize");
-            mutate_building_source(&db, scope, entity_id, &current[index], &after).await;
-            current[index] = after;
+            put_source(&db, scope, entity_id, &after).await;
         }
     }
     loop {
@@ -1680,7 +2921,7 @@ async fn mutated_build_digests(
 }
 
 #[tokio::test]
-async fn catch_up_on_retained_sessions_matches_per_step_sessions() {
+async fn mid_build_source_changes_plan_identically_on_retained_and_per_step_sessions() {
     for partitioned in [false, true] {
         let reference = mutated_build_digests(
             &format!("vector-build-mutated-fresh-{partitioned}"),

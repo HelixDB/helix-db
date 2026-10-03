@@ -8786,6 +8786,9 @@ async fn public_query_boundary_rejects_folded_stream_consumers() {
 /// Blocking startup hydration publishes the reader's store before open
 /// returns. The hour-long poll interval leaves the reader's status change
 /// after a later writer commit as the only trigger that can refresh it.
+/// The second document only queues its vector operation, so the store grows
+/// once the reader applies the writer's queue publication commit, not the
+/// document's own commit.
 #[test]
 fn public_reader_hydrates_vector_memory_at_open_and_on_status_changes() {
     run_high_stack_contract(

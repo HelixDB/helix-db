@@ -78,6 +78,21 @@ impl<'db> ExecutionContext<'db> {
 /// `MAX_RESTRICTED_RESULT_COUNT` in `crate::search::vector::hnsw::restricted`.
 const DEFAULT_MAX_SEARCH_RESULT_COUNT: usize = 800;
 
+/// Most physical results superseded by committed but unpublished work that
+/// one overlaid search may skip.
+///
+/// A search suppresses the physical rows of pending entities and widens its
+/// physical request past them, which costs like a larger `k`. The widening is
+/// bounded like `k` itself instead of growing its beam with the backlog. A
+/// strong search whose answer lies behind more such rows than this fails with
+/// retryable index backpressure until publication catches up; an eventual
+/// search instead overlays only its oldest this-many pending entities and
+/// serves the rest as published. Rows superseded by the searching write
+/// transaction's own changes are not counted: no publication clears them, so
+/// the search widens past every one, bounded by the transaction itself.
+pub(in crate::execution::interpreter::access::search) const MAX_SUPPRESSED_SEARCH_RESULTS: usize =
+    DEFAULT_MAX_SEARCH_RESULT_COUNT;
+
 pub(in crate::execution::interpreter::access) fn limited_search_k(
     k: usize,
     limit: Option<properties::PositiveUsize>,

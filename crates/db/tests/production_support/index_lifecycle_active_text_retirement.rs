@@ -124,7 +124,7 @@ fn limits_with_max_output_operations(output_operations: u64) -> ActiveTextMutati
             NonZeroU64::MAX,
             NonZeroU64::MIN,
             NonZeroU64::MAX,
-            NonZeroU64::MAX,
+            NonZeroU64::new(1024).expect("manifest limit is non-zero"),
         ),
     )
     .expect("backfill limits validate")
@@ -457,21 +457,18 @@ async fn exercise_state_and_staging_contracts() {
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .expect("resource-limited transaction opens");
-    assert!(matches!(
-        prepare_active_text_retirement(
-            &transaction,
-            &fixture.handle,
-            work::TextPartition::Unpartitioned,
-            fixture.entity,
-            limits_with_max_output_operations(1),
-        )
-        .await,
-        Err(HelixDbError::ActiveTextMutationLimitExceeded {
-            resource: crate::error::ActiveTextMutationResource::OutputOperations,
-            observed: 2,
-            limit: 1,
-        })
-    ));
+    // Every valid policy allows at least 14 operations (twice a one-term
+    // document's seven), so a two-row retirement always fits.
+    let prepared = prepare_active_text_retirement(
+        &transaction,
+        &fixture.handle,
+        work::TextPartition::Unpartitioned,
+        fixture.entity,
+        limits_with_max_output_operations(14),
+    )
+    .await
+    .expect("a retirement fits the smallest valid operation ceiling");
+    assert_eq!(prepared.measurements().output_operations(), 2);
     drop(transaction);
 
     let transaction = db

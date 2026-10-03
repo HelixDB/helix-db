@@ -123,6 +123,8 @@ pub enum QueryError {
         /// Value names without declarations.
         extra_values: Vec<String>,
     },
+    /// Write batches always search strongly, so they cannot request eventual search.
+    EventualWriteSearchConsistency,
 }
 
 impl QueryError {
@@ -175,6 +177,10 @@ impl std::fmt::Display for QueryError {
                 f,
                 "parameter schema names do not match values (missing values: {missing_values:?}, extra values: {extra_values:?})"
             ),
+            Self::EventualWriteSearchConsistency => write!(
+                f,
+                "search_consistency \"eventual\" is only valid for read requests; write batches always search strongly"
+            ),
         }
     }
 }
@@ -208,6 +214,37 @@ impl Default for QueryParameters {
     }
 }
 
+/// Request-level visibility of committed but not yet indexed vector/text data.
+///
+/// Consistency is chosen per request, never per index. Write batches always
+/// search strongly and see their own uncommitted changes.
+///
+/// ```
+/// use helix_ast::query::SearchConsistency;
+///
+/// assert_eq!(SearchConsistency::default(), SearchConsistency::Strong);
+/// assert_eq!(sonic_rs::to_string(&SearchConsistency::Eventual).unwrap(), "\"eventual\"");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchConsistency {
+    /// Every committed graph change in the serving node's pinned snapshot is
+    /// searchable, including changes the index worker has not published yet.
+    /// A search whose answer lies behind too many unpublished changes fails
+    /// with retryable index backpressure rather than miss any.
+    #[default]
+    Strong,
+    /// Searches overlay a bounded budget of the oldest unpublished changes
+    /// and never fail for lack of publication; the rest become visible once
+    /// the index worker publishes them.
+    ///
+    /// Until then those entities are served as last published, so a search,
+    /// whole-index or prefiltered, may return a node or edge that has since
+    /// moved to another tenant partition, changed label, or lost the indexed
+    /// property. [`Self::Strong`] never returns such a row.
+    Eventual,
+}
+
 /// Full query request.
 ///
 /// The request kind is derived from the closed [`BatchQuery`] variant. The
@@ -220,6 +257,8 @@ pub struct QueryRequest {
     /// Query AST payload.
     query: BatchQuery,
     parameters: QueryParameters,
+    /// Visibility of unpublished vector/text work for searches in this request.
+    search_consistency: SearchConsistency,
 }
 
 impl QueryRequest {
@@ -228,6 +267,7 @@ impl QueryRequest {
             query_name: None,
             query,
             parameters: QueryParameters::default(),
+            search_consistency: SearchConsistency::Strong,
         }
     }
 
@@ -257,6 +297,48 @@ impl QueryRequest {
     /// Optional query name.
     pub fn query_name(&self) -> Option<&str> {
         self.query_name.as_deref()
+    }
+
+    /// Search visibility requested for unpublished vector/text work.
+    pub const fn search_consistency(&self) -> SearchConsistency {
+        self.search_consistency
+    }
+
+    /// Selects search visibility for this request.
+    ///
+    /// Write batches always search strongly, so selecting eventual search for
+    /// a write request is rejected.
+    ///
+    /// ```
+    /// use helix_ast::{batch, query::{QueryRequest, SearchConsistency}, traversal};
+    /// use helix_ast::graph::NodeRef;
+    ///
+    /// let read = QueryRequest::read(
+    ///     batch::read_batch()
+    ///         .var_as("nodes", traversal::g().n(NodeRef::all()))
+    ///         .returning(["nodes"]),
+    /// )
+    /// .with_search_consistency(SearchConsistency::Eventual)
+    /// .unwrap();
+    /// assert_eq!(read.search_consistency(), SearchConsistency::Eventual);
+    /// assert!(read.to_json_string().unwrap().contains("\"search_consistency\":\"eventual\""));
+    ///
+    /// let write = QueryRequest::write(
+    ///     batch::write_batch().var_as("created", traversal::g().add_n("Doc", Vec::<(&str, &str)>::new())),
+    /// );
+    /// assert!(write.with_search_consistency(SearchConsistency::Eventual).is_err());
+    /// ```
+    pub fn with_search_consistency(
+        mut self,
+        consistency: SearchConsistency,
+    ) -> Result<Self, QueryError> {
+        if consistency == SearchConsistency::Eventual
+            && self.request_type() == QueryRequestType::Write
+        {
+            return Err(QueryError::EventualWriteSearchConsistency);
+        }
+        self.search_consistency = consistency;
+        Ok(self)
     }
 
     /// Runtime parameter values.
@@ -395,6 +477,9 @@ struct QueryRequestRef<'a> {
     parameters: Option<&'a BTreeMap<String, QueryValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parameter_types: Option<&'a BTreeMap<String, QueryParamType>>,
+    /// Omitted for the strong default so existing request bytes are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_consistency: Option<SearchConsistency>,
 }
 
 impl Serialize for QueryRequest {
@@ -408,6 +493,8 @@ impl Serialize for QueryRequest {
             query: &self.query,
             parameters: self.parameters(),
             parameter_types: self.parameter_types(),
+            search_consistency: (self.search_consistency != SearchConsistency::Strong)
+                .then_some(self.search_consistency),
         }
         .serialize(serializer)
     }
@@ -423,6 +510,8 @@ struct RawQueryRequest {
     parameters: Option<UniqueMap<QueryValue>>,
     #[serde(default)]
     parameter_types: Option<UniqueMap<QueryParamType>>,
+    #[serde(default)]
+    search_consistency: Option<SearchConsistency>,
 }
 
 struct UniqueMap<T>(BTreeMap<String, T>);
@@ -483,6 +572,14 @@ impl<'de> Deserialize<'de> for QueryRequest {
             ));
         }
 
+        let search_consistency = raw.search_consistency.unwrap_or_default();
+        if search_consistency == SearchConsistency::Eventual
+            && raw.request_type == QueryRequestType::Write
+        {
+            return Err(serde::de::Error::custom(
+                QueryError::EventualWriteSearchConsistency,
+            ));
+        }
         let values = raw.parameters.map_or_else(BTreeMap::new, |values| values.0);
         let parameters = match raw.parameter_types.map(|types| types.0) {
             None => {
@@ -531,6 +628,7 @@ impl<'de> Deserialize<'de> for QueryRequest {
             query_name: raw.query_name,
             query: raw.query,
             parameters,
+            search_consistency,
         })
     }
 }
@@ -708,6 +806,69 @@ mod tests {
             read.replacen(r#""request_type":"read""#, r#""request_type":"write""#, 1);
         assert!(sonic_rs::from_str::<QueryRequest>(&read_tagged_write).is_err());
         assert!(sonic_rs::from_str::<QueryRequest>(&write_tagged_read).is_err());
+    }
+
+    #[test]
+    fn search_consistency_round_trips_and_rejects_eventual_writes() {
+        let strong = QueryRequest::read(read_batch())
+            .to_json_string()
+            .expect("strong read should serialize");
+        assert!(!strong.contains("search_consistency"));
+        assert_eq!(
+            sonic_rs::from_str::<QueryRequest>(&strong)
+                .expect("absent consistency is strong")
+                .search_consistency(),
+            SearchConsistency::Strong
+        );
+
+        let eventual = QueryRequest::read(read_batch())
+            .with_search_consistency(SearchConsistency::Eventual)
+            .expect("reads accept eventual search");
+        let wire = eventual
+            .to_json_string()
+            .expect("eventual read should serialize");
+        assert!(wire.contains(r#""search_consistency":"eventual""#));
+        assert_eq!(
+            sonic_rs::from_str::<QueryRequest>(&wire).expect("eventual read round-trips"),
+            eventual
+        );
+
+        let explicit_strong = format!(
+            "{},\"search_consistency\":\"strong\"}}",
+            &strong[..strong.len() - 1]
+        );
+        assert_eq!(
+            sonic_rs::from_str::<QueryRequest>(&explicit_strong)
+                .expect("explicit strong is accepted")
+                .search_consistency(),
+            SearchConsistency::Strong
+        );
+        let unknown = format!(
+            "{},\"search_consistency\":\"sometimes\"}}",
+            &strong[..strong.len() - 1]
+        );
+        assert!(sonic_rs::from_str::<QueryRequest>(&unknown).is_err());
+
+        let write = QueryRequest::write(write_batch());
+        assert!(matches!(
+            write
+                .clone()
+                .with_search_consistency(SearchConsistency::Eventual),
+            Err(QueryError::EventualWriteSearchConsistency)
+        ));
+        let write_wire = write.to_json_string().expect("write should serialize");
+        let eventual_write = format!(
+            "{},\"search_consistency\":\"eventual\"}}",
+            &write_wire[..write_wire.len() - 1]
+        );
+        let error = sonic_rs::from_str::<QueryRequest>(&eventual_write)
+            .expect_err("eventual writes are rejected on the wire");
+        assert!(error.to_string().contains("only valid for read requests"));
+        let strong_write = format!(
+            "{},\"search_consistency\":\"strong\"}}",
+            &write_wire[..write_wire.len() - 1]
+        );
+        assert!(sonic_rs::from_str::<QueryRequest>(&strong_write).is_ok());
     }
 
     #[test]

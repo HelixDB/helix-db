@@ -284,6 +284,14 @@ fn validate_managed_value(kind: &ScopedKey, value: &[u8]) -> Result<()> {
         ScopedKey::TextStatisticsEntity(_) => {
             let _ = decode_statistics_entity(value)?;
         }
+        ScopedKey::IndexOperationQueue(_) => {
+            let _ = crate::encoding::v2::values::indexes::operation_queue::OperationQueue::decode(
+                value,
+            )?;
+        }
+        ScopedKey::IndexOperationRow(_) => {
+            let _ = crate::encoding::v2::values::indexes::operation_queue::QueueRow::decode(value)?;
+        }
     }
     Ok(())
 }

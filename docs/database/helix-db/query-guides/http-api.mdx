@@ -75,7 +75,9 @@ flow for agents. See the [HelixDB MCP guide](/database/helix-cloud/connect/mcp) 
 `request_type` and the single `query` variant must agree: `read` with `read`, or
 `write` with `write`. `query_name` is optional diagnostic metadata. Parameters
 can be untyped, or every parameter can have a matching entry in
-`parameter_types`.
+`parameter_types`. Read requests can set `search_consistency` to `strong` (the
+default) or `eventual`; write requests accept only `strong`. See
+[Search consistency](/database/helix-db/query-guides/search-consistency).
 
 Raw HTTP JSON supports `f32` and `f64` parameter declarations. The decoder
 converts integer JSON values such as `5` and floating-point values such as `5.25`
@@ -143,7 +145,12 @@ durability waits on reads are rejected with `400 Bad Request`.
   it is idempotent or protected by an application idempotency key.
 - `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
   rejects it before query parsing.
-- `429` reports a Helix Cloud rate limit and can include `Retry-After`.
+- `429` reports a Helix Cloud rate limit (`rate_limited`), which can include
+  `Retry-After`, or database engine backpressure (`index_backpressure`): a vector
+  or text index holds its maximum unpublished work, or a whole-index `strong`
+  search lies behind too many unpublished changes. Backpressure responses carry
+  `retryable: true` and no `Retry-After`; nothing from the request took effect.
+  See [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - `500` reports an internal query or storage failure.
 - `503` reports that a required writer or ready database is unavailable.
 

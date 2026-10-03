@@ -75,6 +75,63 @@ impl core::fmt::Display for WriterMigrationRequirement {
     }
 }
 
+/// Retained queued-operation resource whose admission limit would be exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBackpressureResource {
+    /// Encoded bytes of every retained operation, including deletions.
+    RetainedBytes,
+    /// Distinct entity/generation members with one or more outstanding operations.
+    PendingMembers,
+    /// Superseded physical results one search would have to skip.
+    SuppressedSearchResults,
+    /// Analysis charge of the committed but unpublished documents one text
+    /// search would analyze in its partition: the conservative charge, text
+    /// bytes plus a fixed overhead per token, that bounds one text
+    /// publication's analysis.
+    PendingTextAnalysisBytes,
+}
+
+impl core::fmt::Display for IndexBackpressureResource {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::RetainedBytes => "retained_bytes",
+            Self::PendingMembers => "pending_members",
+            Self::SuppressedSearchResults => "suppressed_search_results",
+            Self::PendingTextAnalysisBytes => "pending_text_analysis_bytes",
+        })
+    }
+}
+
+/// Per-transaction ceiling that one write's queued index work exceeds on its
+/// own, so retrying it unchanged can never succeed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexOperationBatchResource {
+    /// Encoded bytes of one queue key's operand, bounded by the
+    /// write-ahead-log entry limit.
+    OperandBytes,
+    /// Encoded bytes of every staged operation, bounded by the per-index
+    /// retained-byte limit.
+    RetainedBytes,
+    /// Distinct entity/generation members staged, bounded by the per-index
+    /// pending-member limit.
+    PendingMembers,
+    /// Analysis charge of the transaction's own unpublished documents that a
+    /// text search in it would analyze in one partition, bounded by one text
+    /// publication's analysis budget.
+    PendingTextAnalysisBytes,
+}
+
+impl core::fmt::Display for IndexOperationBatchResource {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::OperandBytes => "operand_bytes",
+            Self::RetainedBytes => "retained_bytes",
+            Self::PendingMembers => "pending_members",
+            Self::PendingTextAnalysisBytes => "pending_text_analysis_bytes",
+        })
+    }
+}
+
 /// Serialized resource whose Active text-mutation preflight exceeded policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTextMutationResource {
@@ -227,14 +284,85 @@ pub enum HelixDbError {
     #[error("Explicit migration stepping requires Disabled worker mode")]
     MigrationSteppingRequiresDisabledMode,
 
-    /// A request-owned Active text mutation exceeded exact serialized admission.
-    #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}. This is a hard mutation-batch limit; reduce the number or size of mutations.")]
+    /// An indexed text document exceeds its per-document admission allowance.
+    ///
+    /// Writes report it before commit. The queue publisher also raises it
+    /// internally when one publication exceeds its budget, and trims instead.
+    #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}. This is a hard per-document limit; shorten the indexed text.")]
     ActiveTextMutationLimitExceeded {
         /// Resource rejected before intent creation or object I/O.
         resource: ActiveTextMutationResource,
         /// Exact serialized or operation count measured by preflight.
         observed: u64,
         /// Positive configured ceiling.
+        limit: u64,
+    },
+
+    /// Committed but unpublished vector/text work for one index is saturated.
+    ///
+    /// Either a write transaction was rejected before commit, or a strong
+    /// search found more results superseded by committed but unpublished work
+    /// ahead of its answer than it may skip, or a strong text search found
+    /// more committed but unpublished text to analyze than one text
+    /// publication's analysis budget; a write's own changes alone never
+    /// cause it. Eventual searches never fail this way. The whole request may be
+    /// retried unchanged once the index worker publishes outstanding work.
+    /// Work the worker holds back ([`crate::BlockedIndexEntity`], only after
+    /// limits were lowered) is never published, so text it alone keeps past
+    /// the bound fails strong text searches until a later write to it
+    /// publishes or the limits are raised. A write that exceeds a limit on its
+    /// own fails with [`Self::IndexOperationBatchTooLarge`] instead.
+    #[error("index backpressure on {scope:?} index {index_id}: {resource} would reach {requested}, limit {limit}. Retry after outstanding index work is published.")]
+    IndexBackpressure {
+        /// Data scope owning the logical index.
+        scope: crate::encoding::v2::keys::scope::DataScope,
+        /// Logical index whose retained work would exceed its limit.
+        index_id: u64,
+        /// Saturated resource.
+        resource: IndexBackpressureResource,
+        /// Resource total the rejected transaction would have produced, or
+        /// the amount a rejected search reached when it stopped.
+        requested: u64,
+        /// Configured ceiling.
+        limit: u64,
+    },
+
+    /// A write would saturate the queued work of a blocked index build.
+    ///
+    /// A hidden build's generation publishes its queued work only once the
+    /// build activates, so waiting cannot clear this: the write may succeed
+    /// once the blocked build operation is retried or aborted. A repair of
+    /// the entity its blocker names, as that entity's first queued write or
+    /// as its removal from the index, is admitted beyond the limits instead.
+    #[error("index build {operation_id} of {scope:?} index {index_id} is blocked: {resource} would reach {requested}, limit {limit}. Repair what the blocker names and retry the operation, or abort it.")]
+    IndexBuildBlocked {
+        /// Data scope owning the logical index.
+        scope: crate::encoding::v2::keys::scope::DataScope,
+        /// Logical index whose retained work would exceed its limit.
+        index_id: u64,
+        /// Canonical lowercase UUID of the blocked build operation.
+        operation_id: String,
+        /// Saturated resource.
+        resource: IndexBackpressureResource,
+        /// Resource total the rejected transaction would have produced.
+        requested: u64,
+        /// Configured ceiling.
+        limit: u64,
+    },
+
+    /// One transaction staged more queued index work than any single
+    /// transaction may carry: an operand too large to commit, more than a
+    /// per-index backlog limit even with no outstanding work, or more text of
+    /// its own than one of its text searches may analyze.
+    #[error("queued index operations for index {index_id} in one transaction need {resource} {observed}, limit {limit}. This is a hard write-batch limit; split the write into smaller transactions.")]
+    IndexOperationBatchTooLarge {
+        /// Logical index whose ceiling the transaction exceeded.
+        index_id: u64,
+        /// Exceeded per-transaction ceiling.
+        resource: IndexOperationBatchResource,
+        /// Exact amount the transaction alone requires.
+        observed: u64,
+        /// Configured ceiling.
         limit: u64,
     },
 
@@ -519,6 +647,11 @@ impl HelixDbError {
             Self::MigrationSteppingRequiresDisabledMode => {
                 error_code::QueryErrorCode::MigrationSteppingRequiresDisabledMode
             }
+            Self::IndexBackpressure { .. } => error_code::QueryErrorCode::IndexBackpressure,
+            Self::IndexBuildBlocked { .. } => error_code::QueryErrorCode::IndexBuildBlocked,
+            Self::IndexOperationBatchTooLarge { .. } => {
+                error_code::QueryErrorCode::IndexOperationBatchTooLarge
+            }
             Self::ActiveTextMutationLimitExceeded { .. } => {
                 error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
             }
@@ -604,6 +737,9 @@ impl HelixDbError {
             error_code::QueryErrorCode::IndexLifecycleUnavailable
                 | error_code::QueryErrorCode::SecondaryLifecycleSteppingRequiresDisabledMode
                 | error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
+                | error_code::QueryErrorCode::IndexBackpressure
+                | error_code::QueryErrorCode::IndexBuildBlocked
+                | error_code::QueryErrorCode::IndexOperationBatchTooLarge
                 | error_code::QueryErrorCode::InvalidIndexSourceData
                 | error_code::QueryErrorCode::IndexAlreadyExists
                 | error_code::QueryErrorCode::IndexDefinitionConflict
@@ -632,6 +768,14 @@ impl HelixDbError {
         } else {
             Self::Storage(error)
         }
+    }
+
+    /// Returns true when asynchronous index work rejected the whole request
+    /// (a write before commit, or a strong search) and an unchanged retry may
+    /// later succeed.
+    #[must_use]
+    pub fn is_index_backpressure(&self) -> bool {
+        self.error_code().is_retryable_backpressure()
     }
 
     /// Returns true when the error represents a retryable transaction conflict.
@@ -1211,7 +1355,7 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "Active text mutation exceeds output_bytes: observed 11, limit 10. This is a hard mutation-batch limit; reduce the number or size of mutations."
+            "Active text mutation exceeds output_bytes: observed 11, limit 10. This is a hard per-document limit; shorten the indexed text."
         );
         assert_eq!(
             error.index_error_code(),

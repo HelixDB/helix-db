@@ -28,7 +28,7 @@ use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
 use crate::encoding::v2::keys::{GlobalKey, ScopedKey, GLOBAL_SENTINEL};
 use crate::encoding::v2::values::{
     decode_corpus_statistics, decode_index_record, decode_metadata_value, decode_operation_record,
-    decode_statistics_entity, decode_term_statistics, encode_corpus_statistics,
+    decode_statistics_entity, decode_term_statistics,
 };
 use crate::{migrations, search, HelixDB, HelixStorage, Result};
 
@@ -196,12 +196,6 @@ pub struct MigrationParityTextEntityStatistics {
 pub enum MigrationParityTextStatisticsDamage {
     /// Remove the corpus row for one unpartitioned or named tenant partition.
     MissingCorpus { tenant: Option<String> },
-    /// Replace one corpus row with typed totals for a fail-closed regression.
-    ReplaceCorpus {
-        tenant: Option<String>,
-        document_count: u64,
-        total_token_count: u64,
-    },
     /// Remove the generation-owned accounting marker for one graph entity.
     MissingEntityMarker { entity_id: u64 },
 }
@@ -264,7 +258,7 @@ impl HelixDB {
         crate::migrations::make_legacy_equality_fixture(&db, 2).await
     }
 
-    /// Mutates one exact text-statistics row in an otherwise valid Active generation.
+    /// Deletes one exact text-statistics row in an otherwise valid Active generation.
     pub async fn migration_parity_damage_text_statistics(
         &self,
         definition: &crate::config::TextIndexDefinition,
@@ -296,54 +290,19 @@ impl HelixDB {
                 definition.property().as_str(),
             )));
         };
-        let (key, replacement) = match damage {
-            MigrationParityTextStatisticsDamage::MissingCorpus { tenant } => {
-                let partition = migration_parity_text_partition(&definition, tenant)?;
-                (
-                    IndexKey::Data {
-                        scope: authority.scope(),
-                        kind: ScopedKey::TextCorpusStatistics(
-                            crate::encoding::v2::keys::TextCorpusStatisticsKey {
-                                index_id: authority.index_id(),
-                                generation: authority.generation(),
-                                partition: partition.fingerprint(),
-                            },
-                        ),
-                    }
-                    .to_bytes(),
-                    None,
-                )
-            }
-            MigrationParityTextStatisticsDamage::ReplaceCorpus {
-                tenant,
-                document_count,
-                total_token_count,
-            } => {
-                let partition = migration_parity_text_partition(&definition, tenant)?;
-                let statistics = crate::index_lifecycle::work::TextCorpusStatisticsValue::try_new(
-                    authority.index_id(),
-                    authority.generation(),
-                    partition.clone(),
-                    document_count,
-                    total_token_count,
-                )
-                .map_err(|error| crate::error::HelixDbError::Config(error.to_string()))?;
-                (
-                    IndexKey::Data {
-                        scope: authority.scope(),
-                        kind: ScopedKey::TextCorpusStatistics(
-                            crate::encoding::v2::keys::TextCorpusStatisticsKey {
-                                index_id: authority.index_id(),
-                                generation: authority.generation(),
-                                partition: partition.fingerprint(),
-                            },
-                        ),
-                    }
-                    .to_bytes(),
-                    Some(encode_corpus_statistics(&statistics)),
-                )
-            }
-            MigrationParityTextStatisticsDamage::MissingEntityMarker { entity_id } => (
+        let key = match damage {
+            MigrationParityTextStatisticsDamage::MissingCorpus { tenant } => IndexKey::Data {
+                scope: authority.scope(),
+                kind: ScopedKey::TextCorpusStatistics(
+                    crate::encoding::v2::keys::TextCorpusStatisticsKey {
+                        index_id: authority.index_id(),
+                        generation: authority.generation(),
+                        partition: migration_parity_text_partition(&definition, tenant)?
+                            .fingerprint(),
+                    },
+                ),
+            },
+            MigrationParityTextStatisticsDamage::MissingEntityMarker { entity_id } => {
                 IndexKey::Data {
                     scope: authority.scope(),
                     kind: ScopedKey::TextStatisticsEntity(
@@ -357,15 +316,11 @@ impl HelixDB {
                         },
                     ),
                 }
-                .to_bytes(),
-                None,
-            ),
+            }
         };
-        let db = self.migration_parity_inner_db()?;
-        match replacement {
-            Some(value) => db.put(key, value).await?,
-            None => db.delete(key).await?,
-        };
+        self.migration_parity_inner_db()?
+            .delete(key.to_bytes())
+            .await?;
         Ok(())
     }
 
@@ -379,8 +334,10 @@ impl HelixDB {
         let handles = self.active_index_handles_loaded(DataScope::LegacyUnscoped);
         match self.storage() {
             HelixStorage::Writer(writer) => {
+                // One snapshot: automatic publication may commit between reads.
+                let snapshot = writer.db().snapshot().await?;
                 text_search_from_read(
-                    writer.db(),
+                    &*snapshot,
                     self.object_store(),
                     self.path(),
                     &handles,
@@ -427,8 +384,10 @@ impl HelixDB {
         let handles = self.active_index_handles_loaded(DataScope::LegacyUnscoped);
         match self.storage() {
             HelixStorage::Writer(writer) => {
+                // One snapshot: automatic publication may commit between reads.
+                let snapshot = writer.db().snapshot().await?;
                 text_search_from_read(
-                    writer.db(),
+                    &*snapshot,
                     self.object_store(),
                     self.path(),
                     &handles,
@@ -483,8 +442,10 @@ impl HelixDB {
         let handles = self.active_index_handles_loaded(DataScope::LegacyUnscoped);
         let searches = match self.storage() {
             HelixStorage::Writer(writer) => {
+                // One snapshot: automatic publication may commit between reads.
+                let snapshot = writer.db().snapshot().await?;
                 text_search_from_read(
-                    writer.db(),
+                    &*snapshot,
                     self.object_store(),
                     self.path(),
                     &handles,
@@ -528,7 +489,9 @@ impl HelixDB {
     pub async fn migration_parity_snapshot(&self) -> Result<MigrationParitySnapshot> {
         let scope = DataScope::LegacyUnscoped;
         let mut snapshot = match self.storage() {
-            HelixStorage::Writer(writer) => snapshot_from_read(writer.db(), scope).await?,
+            HelixStorage::Writer(writer) => {
+                snapshot_from_read(&*writer.db().snapshot().await?, scope).await?
+            }
             HelixStorage::Reader(reader) => snapshot_from_read(reader.as_ref(), scope).await?,
         };
         let writer_jobs = match self.storage() {
@@ -546,7 +509,9 @@ impl HelixDB {
         let scope = DataScope::LegacyUnscoped;
         let mut state = MigrationParityV2State::default();
         match self.storage() {
-            HelixStorage::Writer(writer) => scan_v2_state(writer.db(), scope, &mut state).await?,
+            HelixStorage::Writer(writer) => {
+                scan_v2_state(&*writer.db().snapshot().await?, scope, &mut state).await?
+            }
             HelixStorage::Reader(reader) => {
                 scan_v2_state(reader.as_ref(), scope, &mut state).await?
             }
@@ -1163,6 +1128,8 @@ async fn scan_v2_state(
             }
             ScopedKey::BuildDelta(_)
             | ScopedKey::AppliedState(_)
+            | ScopedKey::IndexOperationQueue(_)
+            | ScopedKey::IndexOperationRow(_)
             | ScopedKey::SecondaryEntry(_)
             | ScopedKey::SecondaryEqualityBitmap(_)
             | ScopedKey::TextManifestRoot(_)

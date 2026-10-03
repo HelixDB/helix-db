@@ -311,6 +311,16 @@ fn validate_fixture_coverage(fixtures: &[Fixture]) {
             .iter()
             .filter(|fixture| fixture.bucket == "json-only" && fixture.name.starts_with('9')),
     ));
+    // Request options are not AST nodes, so the executable corpus alone must
+    // exercise every search consistency.
+    let consistencies = fixtures
+        .iter()
+        .map(|fixture| match fixture.request.search_consistency() {
+            SearchConsistency::Strong => "Strong",
+            SearchConsistency::Eventual => "Eventual",
+        })
+        .collect::<BTreeSet<_>>();
+    assert_variants("SearchConsistency", &consistencies, &["Strong", "Eventual"]);
 }
 
 fn fixture_coverage<'a>(fixtures: impl Iterator<Item = &'a Fixture>) -> FixtureCoverage {
@@ -2200,6 +2210,34 @@ fn runtime_fixtures() -> Vec<Fixture> {
                     )
                     .returning(["edge_vector_hits"]),
             ),
+        ),
+        runtime(
+            "028a-read-eventual-search",
+            read_request(
+                read_batch()
+                    .var_as(
+                        "text_hits",
+                        g().text_search_nodes("ParityUser", "bio", "graph", 5, None)
+                            .value_map(Some(vec!["externalId", "bio", "$distance"])),
+                    )
+                    .var_as(
+                        "vector_hits",
+                        g().vector_search_nodes(
+                            "ParityUser",
+                            "embedding",
+                            vec![1.0, 0.0, 0.0],
+                            3,
+                            None,
+                        )
+                        .project(vec![
+                            Projection::property("externalId", "externalId"),
+                            Projection::property("$distance", "distance"),
+                        ]),
+                    )
+                    .returning(["text_hits", "vector_hits"]),
+            )
+            .with_search_consistency(SearchConsistency::Eventual)
+            .expect("read requests accept eventual search"),
         ),
         runtime(
             "029-write-drop-temp-node",

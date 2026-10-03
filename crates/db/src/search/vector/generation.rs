@@ -539,11 +539,6 @@ impl ValidatedVectorGenerationHandle {
         &self.definition
     }
 
-    /// Returns the descriptor-proven distance metric for closed runtime dispatch.
-    pub(crate) const fn metric(&self) -> VectorDistanceMetric {
-        self.metric
-    }
-
     /// Returns whether this complete generation owns the SimHash directory.
     pub(crate) const fn has_simhash_directory(&self) -> bool {
         matches!(

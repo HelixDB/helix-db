@@ -60,28 +60,15 @@ async fn run_capability_and_fence_contracts() {
 
     let uncached = VectorMemoryAccess::uncached();
     assert!(uncached.store().is_none());
-    uncached.mark_node_dirty(1);
-    uncached.mark_upper_neighbors_dirty(1, 1);
     assert!(!uncached.is_node_dirty(1));
+    assert!(!uncached.is_upper_neighbors_dirty(1, 1));
 
     let dirty = Arc::new(VectorMemoryDirtyRows::default());
     assert!(dirty.is_empty());
-    let local = VectorMemoryAccess::write_tracking(Arc::clone(&dirty));
-    local.mark_node_dirty(7);
-    local.mark_upper_neighbors_dirty(2, 9);
-    assert!(local.is_node_dirty(7));
-    assert!(local.is_upper_neighbors_dirty(4, 7));
-    assert!(local.is_upper_neighbors_dirty(2, 9));
+    dirty.mark_node_dirty(7);
+    dirty.mark_upper_neighbors_dirty(2, 9);
     assert_eq!(dirty.dirty_nodes(), vec![7]);
     assert_eq!(dirty.dirty_upper_neighbors(), vec![(2, 9)]);
-
-    let tracking_dirty = Arc::new(VectorMemoryDirtyRows::default());
-    let tracking = VectorMemoryAccess::write_tracking(Arc::clone(&tracking_dirty));
-    tracking.mark_node_dirty(11);
-    tracking.mark_upper_neighbors_dirty(3, 12);
-    assert!(tracking.store().is_none());
-    assert!(tracking.is_node_dirty(11));
-    assert!(tracking.is_upper_neighbors_dirty(3, 12));
 
     let pending = Arc::new(VectorMemoryPendingDirtyRows::default());
     assert_eq!(pending.generation(), 0);

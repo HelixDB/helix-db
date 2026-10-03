@@ -3318,9 +3318,16 @@ class ReadBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> "QueryRequest":
         request = QueryRequest.read(self)
-        return _build_query_request(request, params, values, query_name=query_name)
+        return _build_query_request(
+            request,
+            params,
+            values,
+            query_name=query_name,
+            search_consistency=search_consistency,
+        )
 
     def to_query_json(
         self,
@@ -3328,8 +3335,11 @@ class ReadBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> str:
-        return self.to_query_request(params, values, query_name=query_name).to_json_string()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_string()
 
     def to_query_bytes(
         self,
@@ -3337,8 +3347,11 @@ class ReadBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> bytes:
-        return self.to_query_request(params, values, query_name=query_name).to_json_bytes()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_bytes()
 
 
 @dataclass(frozen=True, init=False)
@@ -3403,9 +3416,16 @@ class WriteBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> "QueryRequest":
         request = QueryRequest.write(self)
-        return _build_query_request(request, params, values, query_name=query_name)
+        return _build_query_request(
+            request,
+            params,
+            values,
+            query_name=query_name,
+            search_consistency=search_consistency,
+        )
 
     def to_query_json(
         self,
@@ -3413,8 +3433,11 @@ class WriteBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> str:
-        return self.to_query_request(params, values, query_name=query_name).to_json_string()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_string()
 
     def to_query_bytes(
         self,
@@ -3422,8 +3445,11 @@ class WriteBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> bytes:
-        return self.to_query_request(params, values, query_name=query_name).to_json_bytes()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_bytes()
 
 
 def read_batch() -> ReadBatch:
@@ -3776,6 +3802,22 @@ QueryRequestType.Read = QueryRequestType.READ  # type: ignore[attr-defined]
 QueryRequestType.Write = QueryRequestType.WRITE  # type: ignore[attr-defined]
 
 
+class SearchConsistency(str, Enum):
+    """Request-level visibility of committed but not yet indexed vector/text data.
+
+    ``STRONG`` (the default) searches every committed graph change. ``EVENTUAL``
+    overlays a bounded budget of unpublished changes and is valid only for read
+    requests; write batches always search strongly.
+    """
+
+    STRONG = "strong"
+    EVENTUAL = "eventual"
+
+
+SearchConsistency.Strong = SearchConsistency.STRONG  # type: ignore[attr-defined]
+SearchConsistency.Eventual = SearchConsistency.EVENTUAL  # type: ignore[attr-defined]
+
+
 class _QueryValueNamespace:
     def null(self) -> JsonValue:
         return None
@@ -3883,6 +3925,7 @@ class QueryRequest:
     _parameters: dict[str, JsonValue]
     _parameter_types: dict[str, QueryParamType]
     _parameter_mode: Literal["untyped", "typed"] | None
+    _search_consistency: SearchConsistency
 
     def __init__(
         self,
@@ -3900,6 +3943,7 @@ class QueryRequest:
         self._parameters = {}
         self._parameter_types = {}
         self._parameter_mode = None
+        self._search_consistency = SearchConsistency.STRONG
 
     @property
     def request_type(self) -> QueryRequestType:
@@ -3976,6 +4020,28 @@ class QueryRequest:
         self.set_query_name(name)
         return self
 
+    @property
+    def search_consistency(self) -> SearchConsistency:
+        return self._search_consistency
+
+    def set_search_consistency(self, consistency: SearchConsistency) -> None:
+        """Selects search visibility; eventual search is rejected for writes."""
+        if not isinstance(consistency, SearchConsistency):
+            raise TypeError(f"unknown search consistency: {consistency!r}")
+        if (
+            consistency is SearchConsistency.EVENTUAL
+            and self.request_type is QueryRequestType.WRITE
+        ):
+            raise TypeError(
+                'search consistency "eventual" is only valid for read requests; '
+                "write batches always search strongly"
+            )
+        self._search_consistency = consistency
+
+    def with_search_consistency(self, consistency: SearchConsistency) -> "QueryRequest":
+        self.set_search_consistency(consistency)
+        return self
+
     def to_json(self) -> JsonValue:
         query_tag = self.request_type.value
         return {
@@ -3985,6 +4051,12 @@ class QueryRequest:
             "parameters": self._parameters if self._parameters else _OMIT,
             "parameter_types": (
                 self._parameter_types if self._parameter_mode == "typed" else _OMIT
+            ),
+            # Omitted for the strong default so existing request bytes are unchanged.
+            "search_consistency": (
+                self._search_consistency
+                if self._search_consistency is SearchConsistency.EVENTUAL
+                else _OMIT
             ),
         }
 
@@ -4029,9 +4101,12 @@ def _build_query_request(
     values: Mapping[str, Any] | None = None,
     *,
     query_name: str | None | object = _UNSET,
+    search_consistency: SearchConsistency | object = _UNSET,
 ) -> QueryRequest:
     if params is None and values is not None:
         raise TypeError("query parameter values require a parameter schema")
+    if search_consistency is not _UNSET:
+        request.set_search_consistency(search_consistency)  # type: ignore[arg-type]
     return _apply_query_name(_add_query_parameters(request, params, values), query_name)
 
 
@@ -4169,6 +4244,8 @@ def _install_aliases() -> None:
             "setQueryName": "set_query_name",
             "clearQueryName": "clear_query_name",
             "withQueryName": "with_query_name",
+            "setSearchConsistency": "set_search_consistency",
+            "withSearchConsistency": "with_search_consistency",
             "toJsonString": "to_json_string",
             "toJsonBytes": "to_json_bytes",
         },
@@ -4254,6 +4331,7 @@ prelude = {
     "DateTime": DateTime,
     "QueryRequest": QueryRequest,
     "QueryRequestType": QueryRequestType,
+    "SearchConsistency": SearchConsistency,
     "QueryValue": QueryValue,
     "PropertyValue": PropertyValue,
     "PropertyInput": PropertyInput,
@@ -4312,6 +4390,7 @@ __all__ = [
     "QueryError",
     "QueryRequest",
     "QueryRequestType",
+    "SearchConsistency",
     "QueryValue",
     "EdgeId",
     "EdgeRef",

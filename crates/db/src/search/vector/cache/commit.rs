@@ -14,8 +14,9 @@ use parking_lot::Mutex;
 
 use super::registry::{VectorCacheCommitOutcome, VectorCacheIdentity, VectorCachePendingCommit};
 use super::store::VectorMemoryDirtyRows;
-use crate::batch_reads::BatchReads;
-use crate::search::vector::{SimHasherRegistry, ValidatedVectorGenerationHandle};
+use crate::encoding::v2::keys::indexes::vector::VectorKey;
+use crate::error::HelixDbError;
+use crate::search::vector::{PlannedVectorMutation, ValidatedVectorGenerationHandle};
 
 /// Commits one storage transaction and resolves its vector cache fences.
 ///
@@ -114,42 +115,12 @@ impl VectorCacheWriteEntry {
 }
 
 /// Complete vector cache write ownership for one database transaction.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct VectorCacheWriteSet {
     entries: Mutex<HashMap<VectorCacheIdentity, VectorCacheWriteEntry>>,
-    simhasher_registry: Arc<SimHasherRegistry>,
-    batch_reads: BatchReads,
 }
 
 impl VectorCacheWriteSet {
-    /// Creates transaction tracking bound to its database's projection owner.
-    ///
-    /// Mutation indexes built from this set issue one `multi_get` per row
-    /// batch until [`Self::with_batch_reads`] applies the database's policy.
-    pub(crate) fn new(simhasher_registry: Arc<SimHasherRegistry>) -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-            simhasher_registry,
-            batch_reads: BatchReads::Single,
-        }
-    }
-
-    /// Applies the database's row-batch fetch policy to mutation indexes.
-    pub(crate) fn with_batch_reads(mut self, batch_reads: BatchReads) -> Self {
-        self.batch_reads = batch_reads;
-        self
-    }
-
-    /// Clones the projection owner for exact vector-index construction.
-    pub(crate) fn simhasher_registry(&self) -> Arc<SimHasherRegistry> {
-        Arc::clone(&self.simhasher_registry)
-    }
-
-    /// Returns how mutation indexes fetch row batches from storage.
-    pub(crate) const fn batch_reads(&self) -> BatchReads {
-        self.batch_reads
-    }
-
     /// Returns the single dirty tracker for an exact validated generation.
     ///
     /// Repeated mutations in one transaction share the tracker. Full identity
@@ -175,6 +146,57 @@ impl VectorCacheWriteSet {
         Arc::clone(dirty_rows)
     }
 
+    /// Marks every resident-cache row `plan` writes in `handle`'s namespace dirty.
+    ///
+    /// Resident stores hold only SimHash, upper-vector, and upper-neighbor
+    /// rows, so exactly those are fenced. Writes to another namespace are left
+    /// to that namespace's handle.
+    pub(crate) fn record_planned(
+        &self,
+        handle: &ValidatedVectorGenerationHandle,
+        plan: &PlannedVectorMutation,
+    ) -> Result<(), HelixDbError> {
+        let dirty_rows = self.dirty_rows_for(handle);
+        for key in plan.keys() {
+            let Some(logical) = handle.scope().strip_key(key) else {
+                return Err(HelixDbError::InvariantViolation(
+                    "planned vector write left its data scope".to_string(),
+                ));
+            };
+            let key = VectorKey::parse_from_slice(logical).map_err(|error| {
+                HelixDbError::InvariantViolation(format!(
+                    "planned vector write has a malformed key: {error}"
+                ))
+            })?;
+            if key.index_id() != handle.physical_index_id() {
+                continue;
+            }
+            match key {
+                VectorKey::SimHash(key) => dirty_rows.mark_node_dirty(key.node_id()),
+                VectorKey::UpperVector(key) => dirty_rows.mark_node_dirty(key.node_id()),
+                VectorKey::UpperNeighbors(key) => {
+                    dirty_rows.mark_upper_neighbors_dirty(key.layer(), key.node_id());
+                }
+                VectorKey::IndexMetadata(_)
+                | VectorKey::IndexPrefix(_)
+                | VectorKey::TxnGuard(_)
+                | VectorKey::Layer0Neighbors(_)
+                | VectorKey::VectorPrefix(_)
+                | VectorKey::Vector(_)
+                | VectorKey::SimHashDirectoryPrefix(_)
+                | VectorKey::SimHashDirectory(_)
+                | VectorKey::EntryCandidatePrefix(_)
+                | VectorKey::EntryCandidateSorted(_)
+                | VectorKey::EntryCandidateNode(_)
+                | VectorKey::MemoryPrefix(_)
+                | VectorKey::L0Prefix(_)
+                | VectorKey::ReverseEdgePrefix(_)
+                | VectorKey::ReverseEdge(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Replaces dirty-row eviction with exact post-commit physical retirement.
     ///
     /// The shared registry remains untouched until storage commits. Dropping
@@ -193,12 +215,6 @@ impl VectorCacheWriteSet {
     /// Takes a stable snapshot for pre-commit pending-guard acquisition.
     pub(crate) fn entries(&self) -> Vec<VectorCacheWriteEntry> {
         self.entries.lock().values().cloned().collect()
-    }
-}
-
-impl Default for VectorCacheWriteSet {
-    fn default() -> Self {
-        Self::new(Arc::new(SimHasherRegistry::default()))
     }
 }
 
@@ -237,11 +253,9 @@ pub(crate) mod production_contracts {
     }
 }
 
+/// Object store that holds or fails WAL uploads, shared by fenced-commit tests.
 #[cfg(test)]
-mod tests {
-    use std::num::NonZeroU64;
-
-    use bytes::Bytes;
+pub(crate) mod gated_wal {
     use futures::stream::BoxStream;
     use slatedb::object_store::memory::InMemory;
     use slatedb::object_store::{
@@ -249,65 +263,36 @@ mod tests {
         ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
         Result as ObjectStoreResult,
     };
-    use slatedb::{DbTransaction, IsolationLevel};
     use tokio::sync::watch;
-
-    use super::super::registry::{VectorCacheRegistry, VectorCacheVisibility};
-    use super::super::store::VectorMemoryStore;
-    use super::*;
-    use crate::encoding::keys::scope::DataScope;
-    use crate::search::vector::distance::Cosine;
-    use crate::search::vector::{VectorDimension, VectorGenerationIdentity};
-
-    /// Builds a distinct descriptor identity for write-set isolation tests.
-    fn handle(generation: u64) -> ValidatedVectorGenerationHandle {
-        ValidatedVectorGenerationHandle::create_current::<Cosine>(
-            VectorGenerationIdentity::try_new(
-                DataScope::LegacyUnscoped,
-                8,
-                format!("write-cache-generation-{generation}"),
-                80,
-                NonZeroU64::new(generation).unwrap(),
-                1,
-                crate::index_lifecycle::IndexElementKind::Node,
-                VectorDimension::try_new(3).unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn write_set_shares_exact_identity_and_isolates_successors() {
-        let writes = VectorCacheWriteSet::default();
-        let first = handle(1);
-        let successor = handle(2);
-        let first_rows = writes.dirty_rows_for(&first);
-        let same_rows = writes.dirty_rows_for(&first);
-        let successor_rows = writes.dirty_rows_for(&successor);
-
-        assert!(Arc::ptr_eq(&first_rows, &same_rows));
-        assert!(!Arc::ptr_eq(&first_rows, &successor_rows));
-        first_rows.mark_node_dirty(7);
-        assert!(same_rows.is_node_dirty(7));
-        assert!(!successor_rows.is_node_dirty(7));
-        assert_eq!(writes.entries().len(), 2);
-    }
 
     /// How the gated object store treats WAL uploads.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum WalUploads {
+    pub(crate) enum WalUploads {
+        /// Uploads pass through.
         Open,
+        /// Uploads wait until the policy changes.
         Held,
+        /// Uploads fail, as an unavailable object store would.
         Failing,
     }
 
     /// In-memory object store that can hold or fail WAL uploads, which lets a
     /// test observe a batch that reached the memtable but is not yet durable.
     #[derive(Debug)]
-    struct GatedWalStore {
+    pub(crate) struct GatedWalStore {
         inner: InMemory,
-        uploads: watch::Sender<WalUploads>,
+        /// Current WAL upload policy; tests switch it with `send_replace`.
+        pub(crate) uploads: watch::Sender<WalUploads>,
+    }
+
+    impl GatedWalStore {
+        /// Creates an empty store whose WAL uploads are open.
+        pub(crate) fn new() -> Self {
+            Self {
+                inner: InMemory::new(),
+                uploads: watch::Sender::new(WalUploads::Open),
+            }
+        }
     }
 
     impl std::fmt::Display for GatedWalStore {
@@ -384,6 +369,174 @@ mod tests {
             self.inner.copy_opts(from, to, options).await
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use bytes::Bytes;
+    use slatedb::object_store::ObjectStore;
+    use slatedb::{DbTransaction, IsolationLevel};
+
+    use super::super::registry::{VectorCacheRegistry, VectorCacheVisibility};
+    use super::super::store::VectorMemoryStore;
+    use super::gated_wal::{GatedWalStore, WalUploads};
+    use super::*;
+    use crate::encoding::keys::scope::DataScope;
+    use crate::search::vector::distance::Cosine;
+    use crate::search::vector::{VectorDimension, VectorGenerationIdentity};
+
+    /// Builds a distinct descriptor identity for write-set isolation tests.
+    fn handle(generation: u64) -> ValidatedVectorGenerationHandle {
+        ValidatedVectorGenerationHandle::create_current::<Cosine>(
+            VectorGenerationIdentity::try_new(
+                DataScope::LegacyUnscoped,
+                8,
+                format!("write-cache-generation-{generation}"),
+                80,
+                NonZeroU64::new(generation).unwrap(),
+                1,
+                crate::index_lifecycle::IndexElementKind::Node,
+                VectorDimension::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn write_set_shares_exact_identity_and_isolates_successors() {
+        let writes = VectorCacheWriteSet::default();
+        let first = handle(1);
+        let successor = handle(2);
+        let first_rows = writes.dirty_rows_for(&first);
+        let same_rows = writes.dirty_rows_for(&first);
+        let successor_rows = writes.dirty_rows_for(&successor);
+
+        assert!(Arc::ptr_eq(&first_rows, &same_rows));
+        assert!(!Arc::ptr_eq(&first_rows, &successor_rows));
+        first_rows.mark_node_dirty(7);
+        assert_eq!(same_rows.dirty_nodes(), [7]);
+        assert!(successor_rows.dirty_nodes().is_empty());
+        assert_eq!(writes.entries().len(), 2);
+    }
+
+    /// Returns a Cosine generation handle for one scope and physical namespace.
+    fn physical_handle(
+        scope: DataScope,
+        physical_index_id: u64,
+    ) -> ValidatedVectorGenerationHandle {
+        ValidatedVectorGenerationHandle::create_current::<Cosine>(
+            VectorGenerationIdentity::try_new(
+                scope,
+                8,
+                format!("write-cache-physical-{physical_index_id}"),
+                physical_index_id,
+                NonZeroU64::MIN,
+                1,
+                crate::index_lifecycle::IndexElementKind::Node,
+                VectorDimension::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn planned_writes_dirty_exactly_the_resident_rows_of_their_namespace() {
+        use crate::encoding::v2::keys::indexes::vector::{
+            VectorIndexMetadataKey, VectorLayer0NeighborsKey, VectorSimHashKey,
+            VectorUpperNeighborsKey, VectorUpperVectorKey,
+        };
+        use crate::encoding::v2::keys::{DataKey, DataKeyKind};
+
+        let db = slatedb::Db::builder(
+            "write-cache-planned-rows",
+            Arc::new(slatedb::object_store::memory::InMemory::new()),
+        )
+        .build()
+        .await
+        .unwrap();
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let recorder = crate::search::vector::VectorWriteRecorder::new();
+        let write = recorder.bind(&transaction);
+        let checkpoint = write.checkpoint();
+        let key = |key: VectorKey| {
+            DataKey::Data {
+                scope: DataScope::LegacyUnscoped,
+                kind: DataKeyKind::Vector(key),
+            }
+            .to_bytes()
+        };
+        write
+            .put(key(VectorKey::SimHash(VectorSimHashKey::new(80, 1))), b"s")
+            .unwrap();
+        write
+            .delete(key(VectorKey::UpperVector(VectorUpperVectorKey::new(
+                80, 2,
+            ))))
+            .unwrap();
+        write
+            .put(
+                key(VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(
+                    80, 3, 4,
+                ))),
+                b"n",
+            )
+            .unwrap();
+        write
+            .put(
+                key(VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(
+                    80, 5,
+                ))),
+                b"l",
+            )
+            .unwrap();
+        write
+            .put(
+                key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(80))),
+                b"m",
+            )
+            .unwrap();
+        write
+            .put(key(VectorKey::SimHash(VectorSimHashKey::new(81, 6))), b"o")
+            .unwrap();
+        let plan = write.plan_since(checkpoint).unwrap();
+
+        let writes = VectorCacheWriteSet::default();
+        writes
+            .record_planned(&physical_handle(DataScope::LegacyUnscoped, 80), &plan)
+            .unwrap();
+        let [entry] = &writes.entries()[..] else {
+            panic!("one namespace was recorded");
+        };
+        let rows = entry.dirty_rows().expect("recorded rows are evicted");
+        let mut nodes = rows.dirty_nodes();
+        nodes.sort_unstable();
+        assert_eq!(nodes, [1, 2], "SimHash and upper-vector rows");
+        assert_eq!(rows.dirty_upper_neighbors(), [(3, 4)]);
+
+        let tenant = DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(1));
+        assert!(
+            matches!(
+                VectorCacheWriteSet::default().record_planned(&physical_handle(tenant, 80), &plan),
+                Err(HelixDbError::InvariantViolation(_))
+            ),
+            "a write outside the handle's scope fails closed"
+        );
+        let checkpoint = write.checkpoint();
+        write.put(b"not a vector key", b"x").unwrap();
+        assert!(matches!(
+            VectorCacheWriteSet::default().record_planned(
+                &physical_handle(DataScope::LegacyUnscoped, 80),
+                &write.plan_since(checkpoint).unwrap()
+            ),
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+        drop(transaction);
+        db.close().await.unwrap();
+    }
 
     /// One writer with a commit-fenced registry whose resident store caches nodes 7 and 8.
     struct FencedWriter {
@@ -396,10 +549,7 @@ mod tests {
 
     impl FencedWriter {
         async fn open(name: &str) -> Self {
-            let gate = Arc::new(GatedWalStore {
-                inner: InMemory::new(),
-                uploads: watch::Sender::new(WalUploads::Open),
-            });
+            let gate = Arc::new(GatedWalStore::new());
             let db = slatedb::Db::builder(name, Arc::clone(&gate) as Arc<dyn ObjectStore>)
                 .build()
                 .await

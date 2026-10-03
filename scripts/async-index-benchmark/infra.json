@@ -1,0 +1,548 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Isolated async indexing comparison only. No application deployment changes. S3 evidence is retained on deletion.",
+  "Parameters": {
+    "ImageId": {
+      "Type": "AWS::EC2::Image::Id",
+      "Description": "Explicit pinned Ubuntu 24.04 AMD64 AMI; do not resolve a moving alias during comparisons."
+    },
+    "AvailabilityZone": {
+      "Type": "AWS::EC2::AvailabilityZone::Name",
+      "Default": "us-east-1a"
+    }
+  },
+  "Resources": {
+    "Network": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.248.0.0/24",
+        "EnableDnsSupport": true,
+        "EnableDnsHostnames": true,
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-network"
+            }
+          }
+        ]
+      }
+    },
+    "Gateway": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-gateway"
+            }
+          }
+        ]
+      }
+    },
+    "Attachment": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "InternetGatewayId": {
+          "Ref": "Gateway"
+        }
+      }
+    },
+    "Subnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "CidrBlock": "10.248.0.0/24",
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZone"
+        },
+        "MapPublicIpOnLaunch": true,
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-subnet"
+            }
+          }
+        ]
+      }
+    },
+    "Routes": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-routes"
+            }
+          }
+        ]
+      }
+    },
+    "InternetRoute": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "Attachment",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "Routes"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "Gateway"
+        }
+      }
+    },
+    "SubnetRoutes": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "Routes"
+        },
+        "SubnetId": {
+          "Ref": "Subnet"
+        }
+      }
+    },
+    "S3Endpoint": {
+      "Type": "AWS::EC2::VPCEndpoint",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "ServiceName": {
+          "Fn::Sub": "com.amazonaws.${AWS::Region}.s3"
+        },
+        "VpcEndpointType": "Gateway",
+        "RouteTableIds": [
+          {
+            "Ref": "Routes"
+          }
+        ]
+      }
+    },
+    "SecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Benchmark nodes only; management through SSM",
+        "VpcId": {
+          "Ref": "Network"
+        },
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-nodes"
+            }
+          }
+        ]
+      }
+    },
+    "QueryIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "SecurityGroup"
+        },
+        "SourceSecurityGroupId": {
+          "Ref": "SecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 8080,
+        "ToPort": 8081
+      }
+    },
+    "Data": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-data"
+            }
+          }
+        ],
+        "MetricsConfigurations": [
+          {
+            "Id": "AllBenchmarkRequests"
+          },
+          {
+            "Id": "BenchmarkDatabaseRequests",
+            "Prefix": "runs/"
+          },
+          {
+            "Id": "SeedDatabaseRequests",
+            "Prefix": "seeds/"
+          }
+        ]
+      }
+    },
+    "DataPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "Data"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Data",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${Data.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+          }
+        ],
+        "Policies": [
+          {
+            "PolicyName": "BenchmarkBucketOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                    "s3:ListBucketMultipartUploads"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "Data",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:ListMultipartUploadParts"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${Data.Arn}/*"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-role"
+            }
+          }
+        ]
+      }
+    },
+    "Profile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [
+          {
+            "Ref": "Role"
+          }
+        ]
+      }
+    },
+    "Writer": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "InternetRoute",
+        "SubnetRoutes",
+        "S3Endpoint"
+      ],
+      "Properties": {
+        "InstanceType": "r7i.4xlarge",
+        "SubnetId": {
+          "Ref": "Subnet"
+        },
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-writer"
+            }
+          }
+        ],
+        "LaunchTemplate": {
+          "LaunchTemplateId": {
+            "Ref": "NodeTemplate"
+          },
+          "Version": {
+            "Fn::GetAtt": [
+              "NodeTemplate",
+              "LatestVersionNumber"
+            ]
+          }
+        }
+      }
+    },
+    "Reader": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "InternetRoute",
+        "SubnetRoutes",
+        "S3Endpoint"
+      ],
+      "Properties": {
+        "InstanceType": "r7i.4xlarge",
+        "SubnetId": {
+          "Ref": "Subnet"
+        },
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-reader"
+            }
+          }
+        ],
+        "LaunchTemplate": {
+          "LaunchTemplateId": {
+            "Ref": "NodeTemplate"
+          },
+          "Version": {
+            "Fn::GetAtt": [
+              "NodeTemplate",
+              "LatestVersionNumber"
+            ]
+          }
+        }
+      }
+    },
+    "Load": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "InternetRoute",
+        "SubnetRoutes",
+        "S3Endpoint"
+      ],
+      "Properties": {
+        "InstanceType": "c7i.4xlarge",
+        "SubnetId": {
+          "Ref": "Subnet"
+        },
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "async-index-benchmark"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}-load"
+            }
+          }
+        ],
+        "LaunchTemplate": {
+          "LaunchTemplateId": {
+            "Ref": "NodeTemplate"
+          },
+          "Version": {
+            "Fn::GetAtt": [
+              "NodeTemplate",
+              "LatestVersionNumber"
+            ]
+          }
+        }
+      }
+    },
+    "NodeTemplate": {
+      "Type": "AWS::EC2::LaunchTemplate",
+      "Properties": {
+        "LaunchTemplateData": {
+          "ImageId": {
+            "Ref": "ImageId"
+          },
+          "SecurityGroupIds": [
+            {
+              "Ref": "SecurityGroup"
+            }
+          ],
+          "MetadataOptions": {
+            "HttpTokens": "required",
+            "HttpPutResponseHopLimit": 2
+          },
+          "BlockDeviceMappings": [
+            {
+              "DeviceName": "/dev/sda1",
+              "Ebs": {
+                "VolumeSize": 500,
+                "VolumeType": "gp3",
+                "Iops": 12000,
+                "Throughput": 500,
+                "Encrypted": true,
+                "DeleteOnTermination": true
+              }
+            }
+          ],
+          "IamInstanceProfile": {
+            "Name": {
+              "Ref": "Profile"
+            }
+          }
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "Bucket": {
+      "Value": {
+        "Ref": "Data"
+      }
+    },
+    "Writer": {
+      "Value": {
+        "Ref": "Writer"
+      }
+    },
+    "Reader": {
+      "Value": {
+        "Ref": "Reader"
+      }
+    },
+    "Load": {
+      "Value": {
+        "Ref": "Load"
+      }
+    },
+    "WriterPrivateIp": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Writer",
+          "PrivateIp"
+        ]
+      }
+    },
+    "ReaderPrivateIp": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Reader",
+          "PrivateIp"
+        ]
+      }
+    },
+    "LoadPrivateIp": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Load",
+          "PrivateIp"
+        ]
+      }
+    }
+  }
+}

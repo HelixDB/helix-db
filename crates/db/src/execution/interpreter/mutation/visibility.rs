@@ -1,9 +1,10 @@
 //! Exact deferred-index visibility requirements for executable operations.
 //!
-//! Graph rows are staged eagerly in the request transaction. Topology,
-//! secondary, vector, and text maintenance may be retained in family-local
-//! runtimes, so only operations that consume one of those physical families
-//! request its flush.
+//! Graph rows are staged eagerly in the request transaction. Topology and
+//! secondary maintenance may be retained in family-local runtimes, so only
+//! operations that consume one of those physical families request its flush.
+//! Vector and text maintenance is queued, never staged physically; searches
+//! overlay the transaction's own queued state directly and need no flush.
 
 use helix_planner::exec;
 
@@ -12,8 +13,6 @@ use helix_planner::exec;
 pub(super) enum DeferredMutationFamily {
     Topology,
     Secondary,
-    Vector,
-    Text,
 }
 
 /// Closed set of deferred families required before one executable operation.
@@ -22,12 +21,10 @@ pub(in crate::execution::interpreter) struct RequiredMutationVisibility(u8);
 
 impl RequiredMutationVisibility {
     const SECONDARY: u8 = 1 << 0;
-    const VECTOR: u8 = 1 << 1;
-    const TEXT: u8 = 1 << 2;
-    const TOPOLOGY: u8 = 1 << 3;
+    const TOPOLOGY: u8 = 1 << 1;
 
     const NONE: Self = Self(0);
-    const ALL: Self = Self(Self::TOPOLOGY | Self::SECONDARY | Self::VECTOR | Self::TEXT);
+    const ALL: Self = Self(Self::TOPOLOGY | Self::SECONDARY);
     /// A secondary read that may also read a label bitmap: an index
     /// membership, or an equality whose null or unencodable value is answered
     /// by the label rows outside the equality lane.
@@ -37,8 +34,6 @@ impl RequiredMutationVisibility {
         match family {
             DeferredMutationFamily::Topology => Self(Self::TOPOLOGY),
             DeferredMutationFamily::Secondary => Self(Self::SECONDARY),
-            DeferredMutationFamily::Vector => Self(Self::VECTOR),
-            DeferredMutationFamily::Text => Self(Self::TEXT),
         }
     }
 
@@ -65,12 +60,6 @@ pub(in crate::execution::interpreter) fn required_for(
 ) -> RequiredMutationVisibility {
     match op {
         exec::ExecOp::Access { plan } => required_for_access(plan),
-        exec::ExecOp::VectorSearch { .. } => {
-            RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
-        }
-        exec::ExecOp::TextSearch { .. } => {
-            RequiredMutationVisibility::one(DeferredMutationFamily::Text)
-        }
         exec::ExecOp::Count { .. }
         | exec::ExecOp::KvRead(_)
         | exec::ExecOp::Reserved { .. }
@@ -120,7 +109,9 @@ pub(in crate::execution::interpreter) fn required_for(
             .fold(RequiredMutationVisibility::NONE, |mask, step| {
                 RequiredMutationVisibility(mask.0 | required_for(&step.op).0)
             }),
-        exec::ExecOp::Filter { .. }
+        exec::ExecOp::VectorSearch { .. }
+        | exec::ExecOp::TextSearch { .. }
+        | exec::ExecOp::Filter { .. }
         | exec::ExecOp::Limit { .. }
         | exec::ExecOp::Skip { .. }
         | exec::ExecOp::Range { .. }
@@ -151,13 +142,9 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
             | exec::ExecNodeAccessPlan::AuthoritativeScan {
                 predicate: exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. },
             } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
-            exec::ExecNodeAccessPlan::VectorSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
-            }
-            exec::ExecNodeAccessPlan::TextSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Text)
-            }
-            exec::ExecNodeAccessPlan::Empty
+            exec::ExecNodeAccessPlan::VectorSearch { .. }
+            | exec::ExecNodeAccessPlan::TextSearch { .. }
+            | exec::ExecNodeAccessPlan::Empty
             | exec::ExecNodeAccessPlan::FromParam { .. }
             | exec::ExecNodeAccessPlan::FromVar { .. }
             | exec::ExecNodeAccessPlan::AllScan
@@ -179,13 +166,9 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
             | exec::ExecEdgeAccessPlan::AuthoritativeScan {
                 predicate: exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { .. },
             } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
-            exec::ExecEdgeAccessPlan::VectorSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
-            }
-            exec::ExecEdgeAccessPlan::TextSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Text)
-            }
-            exec::ExecEdgeAccessPlan::Empty
+            exec::ExecEdgeAccessPlan::VectorSearch { .. }
+            | exec::ExecEdgeAccessPlan::TextSearch { .. }
+            | exec::ExecEdgeAccessPlan::Empty
             | exec::ExecEdgeAccessPlan::FromParam { .. }
             | exec::ExecEdgeAccessPlan::FromVar { .. }
             | exec::ExecEdgeAccessPlan::AllScan
@@ -224,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn search_accesses_require_only_their_physical_family() {
+    fn secondary_accesses_flush_secondary_and_searches_flush_nothing() {
         let secondary = exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::exact_equality(
@@ -241,8 +224,7 @@ mod tests {
         };
         let required = required_for(&secondary);
         assert!(required.contains(DeferredMutationFamily::Secondary));
-        assert!(!required.contains(DeferredMutationFamily::Vector));
-        assert!(!required.contains(DeferredMutationFamily::Text));
+        assert!(!required.contains(DeferredMutationFamily::Topology));
 
         let vector = required_for(&exec::ExecOp::VectorSearch {
             plan: Box::new(helix_planner::ir::RestrictedVectorSearchPlan::Nodes {
@@ -261,9 +243,8 @@ mod tests {
                 ),
             }),
         });
-        assert!(!vector.contains(DeferredMutationFamily::Secondary));
-        assert!(vector.contains(DeferredMutationFamily::Vector));
-        assert!(!vector.contains(DeferredMutationFamily::Text));
+        // Searches overlay transaction-local queued state instead of flushing.
+        assert_eq!(vector, RequiredMutationVisibility::NONE);
     }
 
     #[test]
@@ -297,8 +278,6 @@ mod tests {
 
         assert!(required.contains(DeferredMutationFamily::Secondary));
         assert!(required.contains(DeferredMutationFamily::Topology));
-        assert!(!required.contains(DeferredMutationFamily::Vector));
-        assert!(!required.contains(DeferredMutationFamily::Text));
         assert_eq!(
             required_for(&exec::ExecOp::Filter {
                 predicate: plan.predicate().clone(),
@@ -315,8 +294,6 @@ mod tests {
         for family in [
             DeferredMutationFamily::Topology,
             DeferredMutationFamily::Secondary,
-            DeferredMutationFamily::Vector,
-            DeferredMutationFamily::Text,
         ] {
             assert!(required.contains(family));
         }

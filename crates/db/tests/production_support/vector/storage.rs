@@ -1926,7 +1926,9 @@ async fn run_row_contracts() {
         sources_by_layer: BTreeMap::new(),
         locator_keys: Vec::new(),
     };
-    assert!(writes.delete_reverse_sources(&foreign_reverse).is_err());
+    assert!(writes
+        .delete_reverse_sources(&foreign_reverse, |_, _| false)
+        .is_err());
     let foreign_cleanup = VectorCleanupRow {
         keyspace: foreign.clone(),
         physical_key: foreign.key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
@@ -1935,7 +1937,13 @@ async fn run_row_contracts() {
         input_bytes: 1,
     };
     assert!(writes.delete_cleanup_row(&foreign_cleanup).is_err());
-    writes.delete_reverse_sources(&reverse).unwrap();
+    // An owned locator outlives the cleanup; the rest go.
+    writes
+        .delete_reverse_sources(&reverse, |layer, source| (layer, source) == (2, 1))
+        .unwrap();
+    let remaining = writes.reverse_sources_for_target(9).await.unwrap();
+    assert_eq!(remaining.sources_at(2), &[1]);
+    assert!(remaining.sources_at(1).is_empty());
     writes.delete_entry_candidate_sorted(2, 1).unwrap();
     writes.delete_entry_candidate_node(1).unwrap();
     writes.delete_entry_candidate_node(2).unwrap();
