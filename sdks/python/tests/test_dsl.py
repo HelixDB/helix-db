@@ -36,6 +36,7 @@ from helixdb import (
     bytes_,
     define_params,
     g,
+    i64,
     param,
     parse_index_ddl_receipt,
     parse_index_operation_status,
@@ -263,6 +264,27 @@ class DslAstTests(unittest.TestCase):
             {"array": {"array": "f64"}},
         )
         self.assertEqual(PropertyValue.string("x").as_str(), "x")
+        i64_min = -(1 << 63)
+        i64_max = (1 << 63) - 1
+        for value in (i64_min, i64_max):
+            self.assertEqual(parsed(PropertyValue.i64(value)), {"i64": value})
+            self.assertEqual(parsed(PropertyValue.from_value(i64(value))), {"i64": value})
+            self.assertEqual(QueryValue.i64(value), value)
+        for value in (i64_min - 1, i64_max + 1):
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                i64(value)
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                PropertyValue.i64(value)
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                PropertyValue.i64_array([value])
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                QueryValue.i64(value)
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                QueryRequest.read(read_batch()).with_typed_parameter(
+                    "value", QueryParamType.i64(), value
+                )
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                read_batch().to_query_json(define_params({"value": param.i64()}), {"value": value})
         self.assertEqual(
             DateTime.parse_rfc3339("1969-12-31T23:59:59.999-00:00").to_rfc3339(),
             "1969-12-31T23:59:59.999Z",
