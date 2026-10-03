@@ -13,5 +13,5 @@ pub use property::Property;
 pub use row::decode_properties;
 pub(crate) use row::{
     datetime_millis_to_rfc3339, encode_index_partition_value, encode_properties,
-    sortable_i64_index_string,
+    sortable_f64_index_string, sortable_i64_index_string,
 };
