@@ -21,6 +21,11 @@
 //! [`damaged_graphs_never_gain_a_self_link`] start from rows that link their
 //! own node, as damage from released versions can leave them, and pin that
 //! every operation still plans and none links a node to itself.
+//!
+//! [`an_entry_point_naming_the_inserting_node_never_roots_its_insert`] and
+//! [`insert_traversals_never_reach_the_inserting_node`] pin each traversal
+//! guard against the inserting node, whose item an insert stages first: one
+//! through stale metadata, one per guard.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -969,4 +974,139 @@ async fn damaged_graphs_never_gain_a_self_link() {
         damaged_run::<Euclidean>(0, planner).await;
         damaged_run::<Cosine>(0, planner).await;
     }
+}
+
+/// Commits metadata naming [`GHOST`], which has no item, as the entry point,
+/// as a stale entry can, then inserts [`GHOST`] at layer 0.
+async fn stale_entry_point_run<D: Distance>() {
+    let mut rng = StdRng::seed_from_u64(2);
+    let name = format!("stale-entry-point-{}", D::name());
+    let (db, index) = create::<D>(&name).await;
+    let mut points = build(&db, &index, &mut rng, 60).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    let mut metadata = index.get_metadata(&measured).await.unwrap().unwrap();
+    assert!(metadata.max_layer > 0, "{name}: the build has upper layers");
+    metadata.entry_point = Some(GHOST);
+    index.update_metadata(&measured, &metadata).await.unwrap();
+    txn.commit().await.unwrap();
+
+    // The item the insert stages makes the entry point look live, so no
+    // repair replaces it before the traversals start there.
+    let point = random_point(&mut rng);
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    index
+        .stage_upsert_at_layer(&measured, GHOST, &point, 0)
+        .await
+        .unwrap_or_else(|error| panic!("{name}: inserting {GHOST}: {error}"));
+    txn.commit().await.unwrap();
+    points.insert(GHOST, point);
+    let graph = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+    assert_eq!(self_links(&graph), BTreeSet::new(), "{name}");
+    assert!(
+        graph
+            .links
+            .iter()
+            .any(|(layer, source, _)| (*layer, *source) == (0, GHOST)),
+        "{name}: {GHOST} gains neighbors"
+    );
+    graph.assert_valid(&points.keys().copied().collect(), &name);
+}
+
+/// Metadata naming the inserting node as its entry point, which the item the
+/// insert stages makes look live, never roots that insert's beam at the node:
+/// it links real neighbors and never itself.
+#[tokio::test]
+async fn an_entry_point_naming_the_inserting_node_never_roots_its_insert() {
+    stale_entry_point_run::<Euclidean>().await;
+    stale_entry_point_run::<Cosine>().await;
+}
+
+/// Runs each traversal an insert starts with on a built graph, once for
+/// another inserting node, which reaches `target`, and once for `target`.
+async fn inserting_node_run<D: Distance>() {
+    let mut rng = StdRng::seed_from_u64(3);
+    let name = format!("inserting-node-{}", D::name());
+    let (db, index) = create::<D>(&name).await;
+    build(&db, &index, &mut rng, 60).await;
+    let graph = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    let mut cache = MutationOpCache::<D>::default();
+
+    // An upper-layer link the greedy descent toward its target's own item
+    // follows when another node inserts.
+    let mut reached = None;
+    for (layer, source, target) in graph.links.iter().copied().filter(|link| link.0 > 0) {
+        let query = index
+            .get_item_for_layer_cached(&measured, 0, target, &mut cache)
+            .await
+            .unwrap()
+            .unwrap();
+        let descended = index
+            .search_layer_greedy_for_mutation(&measured, &query, source, layer, GHOST, &mut cache)
+            .await
+            .unwrap();
+        if descended == target {
+            reached = Some((layer, source, target, query));
+            break;
+        }
+    }
+    let Some((layer, source, target, query)) = reached else {
+        panic!("{name}: a greedy descent reaches a linked node");
+    };
+    assert_ne!(
+        index
+            .search_layer_greedy_for_mutation(&measured, &query, source, layer, target, &mut cache)
+            .await
+            .unwrap(),
+        target,
+        "{name}: the descent never moves to the inserting node"
+    );
+
+    // An entry point naming the inserting node never roots its beam.
+    let root = async |entry_point, inserting_node_id, cache: &mut MutationOpCache<D>| {
+        index
+            .resolve_beam_entry_point_for_insert(
+                &measured,
+                entry_point,
+                0,
+                inserting_node_id,
+                cache,
+            )
+            .await
+            .unwrap()
+            .map(|(node, _)| node)
+    };
+    assert_eq!(root(target, GHOST, &mut cache).await, Some(target));
+    assert_ne!(
+        root(target, target, &mut cache).await,
+        Some(target),
+        "{name}: the inserting node is never its own root"
+    );
+
+    // Nor does the best entry candidate, which replaces a missing entry
+    // point: it is the only replacement tried.
+    let (best, _) = index
+        .find_best_entry_candidate(&measured)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root(GHOST, GHOST + 1, &mut cache).await, Some(best));
+    assert_eq!(
+        root(GHOST, best, &mut cache).await,
+        None,
+        "{name}: the best candidate is never the root of its own insert"
+    );
+}
+
+/// No traversal an insert starts reaches the inserting node, whose item the
+/// insert stages first: the greedy upper-layer descent never moves to it
+/// even when a row links it, and neither an entry point naming it nor the
+/// best entry candidate being it roots the beam.
+#[tokio::test]
+async fn insert_traversals_never_reach_the_inserting_node() {
+    inserting_node_run::<Euclidean>().await;
+    inserting_node_run::<Cosine>().await;
 }
