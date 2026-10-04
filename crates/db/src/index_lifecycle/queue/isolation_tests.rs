@@ -272,6 +272,63 @@ async fn a_vector_entity_that_fails_to_plan_is_held_back_alone() {
     db.close().await.unwrap();
 }
 
+/// A failure after other entities of the batch planned holds back the
+/// failing entity, not the batch's first: the attempt commits nothing, and
+/// the entities planned before it publish from the next attempt.
+#[tokio::test]
+async fn a_vector_entity_failing_after_planned_ones_is_the_one_held_back() {
+    let db = open(
+        "isolate-vector-position",
+        Arc::new(InMemory::new()),
+        queued(tuning()),
+    )
+    .await;
+    install_vector(&db, None).await;
+    let failing = add_doc(&db, vec![0.0, 0.0], "doc").await.unwrap();
+    let target = target(&db, QueueFamily::Vector).await;
+    settle(&db, target).await;
+    let first = add_doc(&db, vec![1.0, 0.0], "doc").await.unwrap();
+    let second = add_doc(&db, vec![2.0, 0.0], "doc").await.unwrap();
+    set(&db, failing, "embedding", vec![5.0_f32, 5.0].into()).await;
+    assert_eq!(
+        queued_ids(&db, QueueFamily::Vector).await,
+        [first, second, failing],
+        "one batch plans the update after both inserts"
+    );
+    let corrupt = newest(&db, QueueFamily::Vector, failing).await;
+    inject(&db, corrupt, Some(InjectedPlanningFailure::Corrupt));
+    assert_eq!(
+        publisher(&db).publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    assert_eq!(held(&db), [failing]);
+    assert_eq!(
+        queued_ids(&db, QueueFamily::Vector).await,
+        [first, second, failing],
+        "the failed attempt commits nothing"
+    );
+    assert_eq!(
+        settle(&db, target).await,
+        [
+            PublicationOutcome::Published {
+                operations: 2,
+                entities: 2
+            },
+            PublicationOutcome::Stalled,
+        ]
+    );
+    assert_eq!(held(&db), [failing]);
+    assert_eq!(queued_ids(&db, QueueFamily::Vector).await, [failing]);
+    assert_eq!(published_nearest(&db, [1.0, 0.0]).await, Some(first));
+    assert_eq!(published_nearest(&db, [2.0, 0.0]).await, Some(second));
+    assert_eq!(
+        published_nearest(&db, [0.0, 0.0]).await,
+        Some(failing),
+        "the held update is not published"
+    );
+    db.close().await.unwrap();
+}
+
 /// A text epoch fails as a whole, so its entity ceiling halves until the
 /// failing entity publishes alone and is held back; every other entity
 /// publishes, and a newer write to it publishes it.
