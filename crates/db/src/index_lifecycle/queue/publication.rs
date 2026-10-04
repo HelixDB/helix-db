@@ -1035,10 +1035,9 @@ impl QueuePublisher {
             .collect::<std::result::Result<Vec<_>, _>>()
         {
             Ok(effects) => effects,
+            // A hold drops the queue (see `Self::isolate`).
             Err((failed, error)) => {
-                let outcome = self.isolate(target, std::slice::from_ref(failed), &error);
-                self.store.retained().retain(target, stored, &[]);
-                return Ok(outcome);
+                return Ok(self.isolate(target, std::slice::from_ref(failed), &error));
             }
         };
         #[cfg(test)]
@@ -1099,12 +1098,12 @@ impl QueuePublisher {
             Ok(StagedEffects::Failed { position, error })
                 if FailureKind::of(&error) == FailureKind::Deterministic =>
             {
-                let outcome =
-                    self.isolate(target, std::slice::from_ref(&selection[position]), &error);
-                // Nothing committed: the next selection, without the held
-                // entity, reuses the queue.
-                self.store.retained().retain(target, stored, &[]);
-                return Ok(outcome);
+                // A hold drops the queue (see `Self::isolate`).
+                return Ok(self.isolate(
+                    target,
+                    std::slice::from_ref(&selection[position]),
+                    &error,
+                ));
             }
             // Planning proved the transaction cannot commit.
             Ok(StagedEffects::Failed { error, .. }) | Err(error)
@@ -1430,12 +1429,19 @@ impl QueuePublisher {
     /// repaired. The rotation moves past it, so the rest of its generation
     /// keeps publishing; from the second entity in a row that fails without a
     /// publication between, the next attempt backs off instead (see
-    /// `TargetSchedule::failed_holds`). Nothing is acknowledged or dropped,
+    /// `TargetSchedule::failed_holds`). Nothing is acknowledged or discarded,
     /// and nothing durable records the hold: a restarted publisher plans the
     /// entity again and holds it back again if it still fails. A text epoch
     /// is planned as a whole, so its failure does not name an entity; a
     /// failed epoch of several entities halves the text entity ceiling
     /// instead, until a failing epoch is one entity.
+    ///
+    /// The caller drops its queue after a hold, as after any blocked
+    /// operation ([`super::storage::RetainedQueues`]), so the next attempt
+    /// reads storage and sees every newer write, including one that repairs a
+    /// held entity. Retaining it would let held entities whose retries keep
+    /// falling due keep every attempt on that queue, so no newer write would
+    /// ever publish.
     fn isolate(
         &self,
         target: QueueTarget,
@@ -1593,10 +1599,9 @@ impl QueuePublisher {
             .collect::<std::result::Result<Vec<_>, _>>()
         {
             Ok(effects) => effects,
+            // A hold drops the queue (see `Self::isolate`).
             Err((failed, error)) => {
-                let outcome = self.isolate(target, std::slice::from_ref(failed), &error);
-                self.store.retained().retain(target, stored, &[]);
-                return Ok(outcome);
+                return Ok(self.isolate(target, std::slice::from_ref(failed), &error));
             }
         };
         #[cfg(test)]
@@ -1647,9 +1652,11 @@ impl QueuePublisher {
             }
             Err(error) if FailureKind::of(&error) == FailureKind::Deterministic => {
                 let outcome = self.isolate(target, &selection, &error);
-                // Nothing committed: the next, narrower epoch reuses the
-                // queue.
-                self.store.retained().retain(target, stored, &[]);
+                if outcome == PublicationOutcome::Trimmed {
+                    // Nothing committed: the next, narrower epoch reuses the
+                    // queue. A hold drops it (see `Self::isolate`).
+                    self.store.retained().retain(target, stored, &[]);
+                }
                 return Ok(outcome);
             }
             Err(error) => return Err(error),

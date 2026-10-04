@@ -480,6 +480,105 @@ async fn consecutive_planning_failures_back_off() {
     db.close().await.unwrap();
 }
 
+/// Entities that keep failing to plan never keep publication on a queue read
+/// before newer writes. Past twelve of them, the 5 s backoffs between their
+/// holds outlast the 60 s retry wait, so each retry is due again when the
+/// rotation returns to it and no attempt stalls. Each hold reads the queue
+/// again, so new writes, and one that repairs a held entity, publish within
+/// two rotations, and every other held operation stays queued.
+#[tokio::test]
+async fn writes_publish_while_many_failed_entities_keep_retrying() {
+    let db = open(
+        "isolate-many-retrying",
+        Arc::new(InMemory::new()),
+        queued(tuning()),
+    )
+    .await;
+    install_vector(&db, None).await;
+    let mut failing = Vec::new();
+    for x in 0..16_u8 {
+        failing.push(add_doc(&db, vec![f32::from(x), 0.0], "doc").await.unwrap());
+    }
+    let target = target(&db, QueueFamily::Vector).await;
+    settle(&db, target).await;
+    for id in &failing {
+        set(&db, *id, "embedding", vec![50.0_f32, 50.0].into()).await;
+        let corrupt = newest(&db, QueueFamily::Vector, *id).await;
+        inject(&db, corrupt, Some(InjectedPlanningFailure::Corrupt));
+    }
+    let mut holds = vec![PublicationOutcome::Blocked; failing.len()];
+    holds.push(PublicationOutcome::Stalled);
+    assert_eq!(settle(&db, target).await, holds);
+    // Every retry is due whenever the rotation reaches it, from this attempt
+    // on, whose queue predates the writes below.
+    publisher(&db).make_failed_retries_due();
+    assert_eq!(
+        publisher(&db).publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    let repaired = failing[8];
+    set(&db, repaired, "embedding", vec![60.0_f32, 60.0].into()).await;
+    let inserted = [
+        add_doc(&db, vec![100.0, 0.0], "doc").await.unwrap(),
+        add_doc(&db, vec![101.0, 0.0], "doc").await.unwrap(),
+    ];
+    let still_failing = failing
+        .iter()
+        .copied()
+        .filter(|id| *id != repaired)
+        .collect::<Vec<_>>();
+
+    // A publication that drains the rotation's cursor entity restarts the
+    // rotation at the queue's head, so the repair and the inserts' batch
+    // each publish within two rotations of the held entities.
+    let mut outcomes = Vec::new();
+    while queued_ids(&db, QueueFamily::Vector).await != still_failing {
+        assert!(
+            outcomes.len() < 2 * failing.len(),
+            "newer writes did not publish within two rotations: {outcomes:?}"
+        );
+        publisher(&db).make_failed_retries_due();
+        outcomes.push(publisher(&db).publish_once(target).await.unwrap());
+    }
+    assert!(
+        outcomes.iter().all(|outcome| matches!(
+            outcome,
+            PublicationOutcome::Blocked | PublicationOutcome::Published { .. }
+        )),
+        "{outcomes:?}"
+    );
+    for published in [
+        PublicationOutcome::Published {
+            operations: 2,
+            entities: 1,
+        },
+        PublicationOutcome::Published {
+            operations: 2,
+            entities: 2,
+        },
+    ] {
+        assert!(
+            outcomes.contains(&published),
+            "the repair and the inserts publish: {outcomes:?}"
+        );
+    }
+    assert_eq!(
+        held(&db).into_iter().collect::<HashSet<_>>(),
+        still_failing.iter().copied().collect::<HashSet<_>>(),
+        "every other entity stays held"
+    );
+    assert_eq!(published_nearest(&db, [60.0, 60.0]).await, Some(repaired));
+    assert_eq!(
+        published_nearest(&db, [100.0, 0.0]).await,
+        Some(inserted[0])
+    );
+    assert_eq!(
+        published_nearest(&db, [101.0, 0.0]).await,
+        Some(inserted[1])
+    );
+    db.close().await.unwrap();
+}
+
 /// A text epoch fails as a whole, so its entity ceiling halves until the
 /// failing entity publishes alone and is held back; every other entity
 /// publishes, and a newer write to it publishes it.
