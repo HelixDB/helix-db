@@ -16,6 +16,11 @@
 //! [`links_released_versions_left_without_locators_outlive_their_target`]
 //! starts from links committed without a locator, as released versions
 //! write them, and pins that no operation here repairs them.
+//!
+//! [`a_committed_self_link_never_fails_its_node`] and
+//! [`damaged_graphs_never_gain_a_self_link`] start from rows that link their
+//! own node, as damage from released versions can leave them, and pin that
+//! every operation still plans and none links a node to itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -515,6 +520,43 @@ async fn one_off_caches_at_their_bound_keep_one_locator_per_link() {
     );
 }
 
+/// Every link from a node to itself.
+fn self_links(graph: &Graph) -> BTreeSet<Link> {
+    graph
+        .links
+        .iter()
+        .filter(|(_, source, target)| source == target)
+        .copied()
+        .collect()
+}
+
+/// Commits `node`'s row at `layer` in `graph` linking `node` too, as damage
+/// from released versions can leave a row: a self-link without a locator.
+async fn commit_self_link<D: Distance>(
+    db: &slatedb::Db,
+    index: &VectorIndex<D>,
+    graph: &Graph,
+    layer: u16,
+    node: NodeId,
+) {
+    let neighbors = graph
+        .links
+        .iter()
+        .filter(|(row_layer, source, _)| (*row_layer, *source) == (layer, node))
+        .map(|(_, _, target)| *target)
+        .chain([node])
+        .collect::<Vec<_>>();
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    let rows = VectorWriteRows::new(&measured, index.row_keyspace());
+    match layer {
+        0 => rows.put_layer0_neighbors(node, &neighbors),
+        layer => rows.put_upper_neighbors(layer, node, &neighbors),
+    }
+    .unwrap();
+    txn.commit().await.unwrap();
+}
+
 /// Commits `links` without their locators, as released versions left them.
 async fn commit_without_locators<D: Distance>(
     db: &slatedb::Db,
@@ -647,15 +689,15 @@ async fn released_unlocated_run<D: Distance>() {
     commit_without_locators(&db, &index, &released).await;
     let unlocated = unlocated.union(&released).copied().collect::<BTreeSet<_>>();
     // The re-embedding's delete misses each one-way source, so its insert
-    // searches through one back to the node and links the node to itself.
-    let error = re_embed(&db, &index, &moved, &mut points, target)
+    // searches through one back to the node, which it skips.
+    re_embed(&db, &index, &moved, &mut points, target)
         .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&format!("neighbor set contains its owner {target}")),
-        "{name}: re-embedding {target}: {error}"
+        .unwrap_or_else(|error| panic!("{name}: re-embedding {target}: {error}"));
+    let re_embedded = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+    assert_eq!(
+        self_links(&re_embedded),
+        BTreeSet::new(),
+        "{name}: re-embedded {target}"
     );
 
     let mut session = VectorBuildSession::<D>::new(NonZeroU64::new(1 << 20).unwrap());
@@ -716,12 +758,215 @@ async fn released_unlocated_run<D: Distance>() {
 /// value changed, so each link the insert restored kept no locator. A delete
 /// finds a link's source only through that locator or the node's own rows, so
 /// nothing here repairs such a link. Once the node stops linking back, nothing
-/// reaches the link: re-embedding the node fails, as its insert searches
-/// through the link back to the node and links the node to itself, and deleting
-/// the node leaves the link naming a node without an item, which fails searches
-/// that reach it. Every other link and locator stays exact.
+/// reaches the link: re-embedding the node searches through the link back to
+/// the node, which the insert skips rather than linking the node to itself,
+/// and deleting the node leaves the link naming a node without an item, which
+/// fails searches that reach it. Every other link and locator stays exact.
 #[tokio::test]
 async fn links_released_versions_left_without_locators_outlive_their_target() {
     released_unlocated_run::<Euclidean>().await;
     released_unlocated_run::<Cosine>().await;
+}
+
+/// Self-links in every row of a node with upper-layer rows, then an insert
+/// that searches through it, a re-embedding of it, and its delete.
+async fn self_linked_node_run<D: Distance>() {
+    let mut rng = StdRng::seed_from_u64(1);
+    let name = format!("self-linked-node-{}", D::name());
+    let (db, index) = create::<D>(&name).await;
+    let mut points = build(&db, &index, &mut rng, 60).await;
+    let built = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+    let node = built
+        .rows
+        .iter()
+        .rev()
+        .map(|(_, node)| *node)
+        .next()
+        .unwrap();
+    let damaged = built
+        .rows
+        .iter()
+        .filter(|(_, row)| *row == node)
+        .map(|(layer, row)| (*layer, *row, *row))
+        .collect::<BTreeSet<_>>();
+    assert!(damaged.len() > 1, "{name}: {node} has upper-layer rows");
+    for (layer, _, _) in &damaged {
+        commit_self_link(&db, &index, &built, *layer, node).await;
+    }
+    let graph = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+    assert_eq!(self_links(&graph), damaged, "{name}: damage committed");
+    let live = points.keys().copied().collect::<BTreeSet<_>>();
+    graph.assert_faults(&live, &damaged, &BTreeSet::new(), &name);
+
+    // An insert at the node's own point loads every one of its rows.
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    let layer = damaged.iter().map(|(layer, _, _)| *layer).max().unwrap();
+    index
+        .stage_upsert_at_layer(&measured, 61, &points[&node], layer)
+        .await
+        .unwrap_or_else(|error| panic!("{name}: inserting beside {node}: {error}"));
+    txn.commit().await.unwrap();
+    points.insert(61, points[&node]);
+    let inserted = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+    assert!(
+        self_links(&inserted).is_subset(&damaged),
+        "{name}: the insert links no node to itself"
+    );
+
+    re_embed(&db, &index, &inserted, &mut points, node)
+        .await
+        .unwrap_or_else(|error| panic!("{name}: re-embedding {node}: {error}"));
+    let moved = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+    // A row the re-embedding stages unchanged keeps its stored self-link.
+    let kept = self_links(&moved);
+    assert!(kept.is_subset(&damaged), "{name}: re-embedded {node}");
+    let live = points.keys().copied().collect::<BTreeSet<_>>();
+    moved.assert_faults(&live, &kept, &BTreeSet::new(), &name);
+
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    index
+        .stage_delete(&measured, node)
+        .await
+        .unwrap_or_else(|error| panic!("{name}: deleting {node}: {error}"));
+    txn.commit().await.unwrap();
+    points.remove(&node);
+    check(
+        &db,
+        &index,
+        &points,
+        &mut rng,
+        &format!("{name}: deleted {node}"),
+    )
+    .await;
+}
+
+/// A node whose rows link it, as damage from released versions can leave
+/// them, still plans: an insert searching through it, its re-embedding, and
+/// its delete each succeed, none links a node to itself, and the delete
+/// removes every self-linked row with the node.
+#[tokio::test]
+async fn a_committed_self_link_never_fails_its_node() {
+    self_linked_node_run::<Euclidean>().await;
+    self_linked_node_run::<Cosine>().await;
+}
+
+/// Before each operation, commits a self-link into a random row and drops
+/// the locators of every link to a random live node, as released versions
+/// can leave them, then deletes or moves a node through `planner`, mostly
+/// one of the two just damaged. A deleted node an operation picks is
+/// inserted again instead. Every operation plans, and the self-links after
+/// it are among those before it.
+async fn damaged_run<D: Distance>(seed: u64, planner: Planner) {
+    const NODES: NodeId = 100;
+    const OPS: usize = 40;
+    let mut rng = StdRng::seed_from_u64(seed);
+    let name = format!("self-link-damage-{}-{planner:?}-{seed}", D::name());
+    let (db, index) = create::<D>(&name).await;
+    let mut points = build(&db, &index, &mut rng, NODES).await;
+    let mut session = VectorBuildSession::<D>::new(NonZeroU64::new(1 << 20).unwrap());
+    for op in 0..OPS {
+        let graph = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+        let rows = graph.rows.iter().copied().collect::<Vec<_>>();
+        let (layer, self_linked) = rows[rng.random_range(0..rows.len())];
+        commit_self_link(&db, &index, &graph, layer, self_linked).await;
+        let live = points.keys().copied().collect::<Vec<_>>();
+        let unlocated = live[rng.random_range(0..live.len())];
+        commit_without_locators(
+            &db,
+            &index,
+            &graph
+                .links
+                .iter()
+                .filter(|(_, _, target)| *target == unlocated)
+                .copied()
+                .collect(),
+        )
+        .await;
+        let before = self_links(&Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await);
+
+        let node = match rng.random_range(0..4_u8) {
+            0 => self_linked,
+            1 | 2 => unlocated,
+            _ => rng.random_range(1..=NODES),
+        };
+        let current = points.get(&node).copied();
+        let delete = current.is_some() && rng.random_range(0..3_u8) == 0;
+        let point = loop {
+            let point = random_point(&mut rng);
+            if Some(point) != current {
+                break point;
+            }
+        };
+        let layer = random_layer(&mut rng);
+        let context = format!(
+            "{name}: op {op} ({} {node}, self-link at ({layer}, {self_linked}), \
+             unlocated links to {unlocated})",
+            if delete { "delete" } else { "upsert" }
+        );
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&txn);
+        match (planner, delete) {
+            (Planner::Session, true) => {
+                index
+                    .stage_delete_with_build_session(&measured, node, &mut session)
+                    .await
+            }
+            (Planner::Session, false) => {
+                index
+                    .stage_upsert_at_layer_with_session(
+                        &measured,
+                        node,
+                        &point,
+                        layer,
+                        &mut session,
+                    )
+                    .await
+            }
+            (Planner::OneOff, true) => index.stage_delete(&measured, node).await,
+            (Planner::OneOff, false) => {
+                index
+                    .stage_upsert_at_layer(&measured, node, &point, layer)
+                    .await
+            }
+        }
+        .unwrap_or_else(|error| panic!("{context}: {error}"));
+        if matches!(planner, Planner::Session) {
+            session.flush_all(&measured).unwrap();
+            session.enforce_limits(&measured).unwrap();
+            session.admit_entity();
+        }
+        txn.commit().await.unwrap();
+        if delete {
+            points.remove(&node);
+        } else {
+            points.insert(node, point);
+        }
+        let after = Graph::read(&index, db.snapshot().await.unwrap().as_ref()).await;
+        let created = self_links(&after)
+            .difference(&before)
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(created.is_empty(), "{context}: new self-links {created:?}");
+        assert!(
+            !delete || after.rows.iter().all(|(_, row)| *row != node),
+            "{context}: the delete removes every row of the node"
+        );
+        assert_eq!(
+            after.items,
+            points.keys().copied().collect::<BTreeSet<_>>(),
+            "{context}: items"
+        );
+    }
+}
+
+/// Random deletes and moves over a graph that keeps gaining self-links and
+/// links without locators always plan and never link a node to itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn damaged_graphs_never_gain_a_self_link() {
+    for planner in [Planner::Session, Planner::OneOff] {
+        damaged_run::<Euclidean>(0, planner).await;
+        damaged_run::<Cosine>(0, planner).await;
+    }
 }
