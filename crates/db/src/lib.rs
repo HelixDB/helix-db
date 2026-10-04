@@ -4630,7 +4630,8 @@ mod tests {
             "managed-bootstrap",
             "managed-failover",
         ] {
-            let token = ProcessLocalDatabaseToken::new(format!("reject-next-version-{role}")).unwrap();
+            let token =
+                ProcessLocalDatabaseToken::new(format!("reject-next-version-{role}")).unwrap();
             let source = || HelixDbSource::InMemoryToken {
                 token: token.clone(),
             };

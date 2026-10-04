@@ -63,11 +63,13 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
 async fn publish_current_version(db: &Db) -> Result<()> {
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let marker_key = global_key(GlobalKey::StorageVersion);
-    let marker = transaction.get(&marker_key).await?.ok_or_else(|| {
-        HelixDbError::MigrationRequired {
-            reason: "V2 storage marker disappeared after writer preflight".to_string(),
-        }
-    })?;
+    let marker =
+        transaction
+            .get(&marker_key)
+            .await?
+            .ok_or_else(|| HelixDbError::MigrationRequired {
+                reason: "V2 storage marker disappeared after writer preflight".to_string(),
+            })?;
     let IndexV2MetadataValue::StorageVersion(version) =
         metadata_or_migration_required(&marker, "storage marker")?
     else {
