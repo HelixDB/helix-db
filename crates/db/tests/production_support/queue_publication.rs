@@ -7,7 +7,7 @@
 //! fixture's indexes and is then reopened explicitly over the same store.
 //! Graph writes enqueue every operation through the production producer.
 //! Failure contracts stage one unobserved acknowledgement, corrupt one queue
-//! value, rewrite one namespace's metadata through the current codecs, hold
+//! value, rewrite or delete one namespace's metadata through the current codecs, hold
 //! the planning budget while a catalog change commits, fail WAL uploads, or
 //! fence the writer with a newer one; none introduces a row family or
 //! encoding.
@@ -951,9 +951,10 @@ enum Change {
     Insert([f32; 2]),
 }
 
-/// Proves publication fails closed, writing nothing, when a namespace's
-/// metadata disagrees with its definition or is missing, for both removals
-/// and upserts, and publishes once the metadata is restored.
+/// Proves publication fails closed when a namespace's metadata disagrees with
+/// its definition or is missing, for both removals and upserts: it writes
+/// nothing and holds back only the entity it planned, which a publisher
+/// restarted after the metadata is restored publishes.
 async fn inconsistent_namespace_metadata_fails_closed() {
     let db = open_explicit(
         "queue-publication-metadata",
@@ -1032,26 +1033,45 @@ async fn inconsistent_namespace_metadata_fails_closed() {
             publisher
                 .publish_once(target)
                 .await
-                .expect("inconsistent metadata retries"),
-            PublicationOutcome::Retry
+                .expect("inconsistent metadata holds its entity back"),
+            PublicationOutcome::Blocked
         );
         assert_eq!(
-            load(&publisher.metrics().error_retries),
+            load(&publisher.metrics().blocked_attempts),
             u64::try_from(errors + 1).expect("phase count fits u64"),
-            "inconsistent metadata is an error, not a conflict"
+            "inconsistent metadata fails planning, not storage"
         );
+        assert_eq!(load(&publisher.metrics().error_retries), 0);
+        assert_eq!(publisher.blocked_entity_count(), 1);
         assert_eq!(all_keys(&db).await, keys, "a failed attempt writes nothing");
         storage
             .put(&key, &original)
             .await
             .expect("metadata restores");
-        assert!(matches!(
+        assert_eq!(
             publisher
+                .publish_once(target)
+                .await
+                .expect("a held entity waits"),
+            PublicationOutcome::Stalled,
+            "only a write or a restart plans a held entity again"
+        );
+        let restarted = publisher_with_limits(&db, publisher.limits, publisher.text.limits);
+        assert!(matches!(
+            restarted
                 .publish_once(target)
                 .await
                 .expect("restored metadata publishes"),
             PublicationOutcome::Published { .. }
         ));
+        assert_eq!(
+            publisher
+                .publish_once(target)
+                .await
+                .expect("the drained queue reads empty"),
+            PublicationOutcome::Empty
+        );
+        assert_eq!(publisher.blocked_entity_count(), 0);
     }
     db.close().await.expect("metadata writer closes");
 }

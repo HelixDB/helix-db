@@ -86,10 +86,12 @@ pub struct IndexOperationQueueStats {
     /// Publication commits with an unknown outcome.
     pub uncertain_commits: u64,
     /// Attempts retried with fewer entities or operations after exceeding an
-    /// output budget.
+    /// output budget, or with fewer text entities after planning a text epoch
+    /// failed deterministically.
     pub output_retries: u64,
-    /// Attempts where one operation's effect and acknowledgement alone
-    /// exceeded an output budget, holding its entity back.
+    /// Attempts that held an entity back: one operation's effect and
+    /// acknowledgement alone exceeded an output budget, or planning the
+    /// entity failed deterministically.
     pub blocked_attempts: u64,
     /// Entities held back right now (a gauge, unlike the publication
     /// counters): see [`crate::HelixDB::blocked_index_entities`].
@@ -136,7 +138,8 @@ pub struct IndexOperationQueueStats {
     /// Attempts that must rediscover and retry: commit conflicts, uncertain
     /// commits, retryable errors, and ownership changes after classification.
     pub publication_retries: u64,
-    /// Retries caused by a retryable storage or decoding error.
+    /// Retries caused by an error: a transient one, such as storage I/O, or a
+    /// deterministic one that no single entity's planning raised.
     pub publication_error_retries: u64,
     /// Attempts deferred because a hidden build owns the generation.
     pub deferred_attempts: u64,
@@ -144,7 +147,9 @@ pub struct IndexOperationQueueStats {
 
 /// One entity whose queued vector/text work is held back because one of its
 /// operations alone can never fit a publication under the current limits,
-/// for example after they were lowered.
+/// for example after they were lowered, or because planning its change fails
+/// deterministically, for example on damaged index rows or a corrupt queued
+/// payload.
 ///
 /// It blocks only its own publication: the rest of its generation keeps
 /// publishing. Its operations stay queued, so strong searches keep serving
@@ -162,9 +167,12 @@ pub struct IndexOperationQueueStats {
 /// the entity within their budget can.
 ///
 /// A rewrite or delete repairs it only once one publication fits the change
-/// from its published state: removing a document published under larger
-/// limits, or relinking a deleted vector's neighbors, can exceed the lowered
-/// limits too. Raising the limits again lets it publish.
+/// from its published state and planning that change succeeds: removing a
+/// document published under larger limits, or relinking a deleted vector's
+/// neighbors, can exceed the lowered limits too. Raising the limits again
+/// lets it publish. An entity held back after its planning failed is planned
+/// again only on a later write to it or once the writer restarts, so after
+/// repairing what failed, write it again or restart the writer.
 ///
 /// Its queued text still counts toward the pending text a strong text search
 /// may analyze in its partition (one text publication's analysis budget),
@@ -244,6 +252,8 @@ impl QueueTarget {
 
 #[cfg(test)]
 mod codec_storage_tests;
+#[cfg(test)]
+mod isolation_tests;
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
