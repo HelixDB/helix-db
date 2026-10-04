@@ -447,13 +447,23 @@ async fn consecutive_planning_failures_back_off() {
         NextTarget::Ready(target),
         "one failure holds back only its entity"
     );
+    let attempted = Instant::now();
     assert_eq!(
         scheduler.publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
     );
-    let NextTarget::Delayed(retry) = scheduler.next_target(&none, Instant::now()) else {
+    let returned = Instant::now();
+    // Judged as of an instant before the attempt rescheduled, so the backoff
+    // has not passed however slowly the attempt ran.
+    let NextTarget::Delayed(retry) = scheduler.next_target(&none, attempted) else {
         panic!("a second failure in a row backs off");
     };
+    // Twice the 10 ms retry delay, from when the attempt rescheduled.
+    let backoff = Duration::from_millis(20);
+    assert!(
+        (attempted + backoff..=returned + backoff).contains(&retry),
+        "the second failure in a row backs off by {backoff:?}"
+    );
     assert_eq!(
         scheduler.next_target(&none, retry),
         NextTarget::Ready(target)
