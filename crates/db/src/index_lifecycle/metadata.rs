@@ -7,7 +7,12 @@ use super::{
 };
 
 /// Canonical V2 index format number written by this implementation.
-pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0004;
+///
+/// Version 5 marks stores that may hold asynchronous index-operation queues
+/// (`0x14`). It re-encodes nothing: a version-4 store is upgraded by rewriting
+/// only this marker, which fences binaries that support at most version 4 out
+/// of stores whose queued index work they would ignore.
+pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0005;
 
 /// Decoded non-zero index storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -16,6 +21,10 @@ pub(crate) struct IndexStorageVersion(u16);
 impl IndexStorageVersion {
     pub(crate) const CURRENT: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
     pub(crate) const MAX_SUPPORTED: Self = Self::CURRENT;
+    /// First version with equality bitmaps and the V4 cleanup marker. Older
+    /// stores need the equality-bitmap migration; this and later versions
+    /// share one physical layout.
+    pub(crate) const EQUALITY_BITMAPS: Self = Self(0x0004);
 
     pub(crate) fn new(value: u16) -> Result<Self, crate::encoding::error::EncodingError> {
         if value == 0 {

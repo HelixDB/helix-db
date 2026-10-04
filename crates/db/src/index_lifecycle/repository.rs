@@ -226,11 +226,13 @@ fn validate_bootstrap_values(
             reason: "V2 allocator record contains the wrong value kind".to_string(),
         });
     }
-    match version.get() {
-        0x0002 | 0x0003 => Ok(ValidatedReaderBootstrap::LegacyEqualityUnion),
-        0x0004 => Ok(ValidatedReaderBootstrap::Current),
-        _ => unreachable!("unsupported storage versions returned before compatibility dispatch"),
-    }
+    // Versions from EQUALITY_BITMAPS through MAX_SUPPORTED share one layout, so a
+    // current reader also serves a version-4 store its writer has not upgraded yet.
+    Ok(if version < IndexStorageVersion::EQUALITY_BITMAPS {
+        ValidatedReaderBootstrap::LegacyEqualityUnion
+    } else {
+        ValidatedReaderBootstrap::Current
+    })
 }
 
 /// Loads and key/value-cross-validates every canonical record for one scope.
@@ -1144,7 +1146,8 @@ mod tests {
 
     #[test]
     fn storage_versions_with_v4_equality_are_current() {
-        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0004);
+        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0005);
+        assert_eq!(IndexStorageVersion::EQUALITY_BITMAPS.get(), 0x0004);
         let logical = encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
             LogicalIndexIdWatermark {
                 next_id: IndexId::initial(),
@@ -1161,6 +1164,15 @@ mod tests {
         assert_eq!(
             validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
                 .expect("storage with V4 equality encoding is accepted"),
+            ValidatedReaderBootstrap::Current
+        );
+        // A writer that has not yet upgraded a version-4 store leaves it readable.
+        let version_four = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+            IndexStorageVersion::EQUALITY_BITMAPS,
+        ));
+        assert_eq!(
+            validate_bootstrap_values(&version_four, Some(&logical), Some(&vector))
+                .expect("version four shares the current layout"),
             ValidatedReaderBootstrap::Current
         );
         for legacy in [0x0002, 0x0003] {
@@ -1230,8 +1242,8 @@ mod tests {
         assert!(matches!(
             validate_bootstrap_values(&marker, None, None),
             Err(HelixDbError::UnsupportedIndexStorageVersion {
-                found: 0x0005,
-                supported: 0x0004,
+                found: 0x0006,
+                supported: 0x0005,
             })
         ));
     }
@@ -1276,7 +1288,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_writer_preflight_preserves_every_byte() {
-        for rejected_state in ["malformed", "partial", "v1", "v5"] {
+        for rejected_state in ["malformed", "partial", "v1", "v6"] {
             let db = Db::builder(
                 format!("writer-preflight-preserves-{rejected_state}"),
                 Arc::new(InMemory::new()),
@@ -1318,8 +1330,8 @@ mod tests {
                 "v1" => {
                     put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0001).unwrap()).await;
                 }
-                "v5" => {
-                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0005).unwrap()).await;
+                "v6" => {
+                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0006).unwrap()).await;
                 }
                 _ => unreachable!(),
             }

@@ -4619,7 +4619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn experimental_version_five_is_rejected_without_downgrade() {
+    async fn storage_version_after_max_supported_is_rejected_without_downgrade() {
         use crate::encoding::v2::{keys, values};
         use crate::index_lifecycle::{IndexStorageVersion, IndexV2MetadataValue};
 
@@ -4630,7 +4630,7 @@ mod tests {
             "managed-bootstrap",
             "managed-failover",
         ] {
-            let token = ProcessLocalDatabaseToken::new(format!("reject-v5-{role}")).unwrap();
+            let token = ProcessLocalDatabaseToken::new(format!("reject-next-version-{role}")).unwrap();
             let source = || HelixDbSource::InMemoryToken {
                 token: token.clone(),
             };
@@ -4640,7 +4640,7 @@ mod tests {
             }
             .to_bytes();
             let marker = values::encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-                IndexStorageVersion::new(5).unwrap(),
+                IndexStorageVersion::new(IndexStorageVersion::MAX_SUPPORTED.get() + 1).unwrap(),
             ));
             writer.inner_db().put(&key, marker.clone()).await.unwrap();
             writer.inner_db().flush().await.unwrap();
@@ -4665,7 +4665,7 @@ mod tests {
                 _ => unreachable!("all startup roles are listed above"),
             };
             let Err(error) = result else {
-                panic!("{role} accepted version five");
+                panic!("{role} accepted a version after the supported maximum");
             };
             if role == "managed-bootstrap" {
                 // Bootstrap is only valid for a pristine store, regardless of its version.
@@ -4684,8 +4684,8 @@ mod tests {
                     matches!(
                         error,
                         HelixDbError::UnsupportedIndexStorageVersion {
-                            found: 5,
-                            supported: 4,
+                            found: 6,
+                            supported: 5,
                         }
                     ),
                     "{role}: {error}"
@@ -4703,6 +4703,101 @@ mod tests {
             );
             raw.close().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn version_four_store_upgrades_by_rewriting_only_its_marker() {
+        use crate::encoding::v2::{keys, values};
+        use crate::index_lifecycle::{IndexStorageVersion, IndexV2MetadataValue};
+
+        async fn raw_rows(token: &ProcessLocalDatabaseToken) -> Vec<(bytes::Bytes, bytes::Bytes)> {
+            let raw = DbReader::builder(token.database().to_string(), token.object_store())
+                .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
+                .build()
+                .await
+                .unwrap();
+            let mut rows = raw.scan(..).await.unwrap();
+            let mut collected = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                collected.push((row.key, row.value));
+            }
+            raw.close().await.unwrap();
+            collected
+        }
+
+        let token = ProcessLocalDatabaseToken::new("upgrade-version-four").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let key = keys::ManagedIndexKey::Global {
+            kind: keys::GlobalKey::StorageVersion,
+        }
+        .to_bytes();
+        let marker = |version: IndexStorageVersion| {
+            values::encode_metadata_value(&IndexV2MetadataValue::StorageVersion(version))
+        };
+
+        // A store as the last version-4 release leaves it: fully initialized,
+        // with the V4 cleanup and tenant-envelope markers set.
+        let writer = HelixDB::open(source()).await.unwrap();
+        writer
+            .inner_db()
+            .put(&key, marker(IndexStorageVersion::EQUALITY_BITMAPS))
+            .await
+            .unwrap();
+        writer.inner_db().flush().await.unwrap();
+        writer.close().await.unwrap();
+        let before = raw_rows(&token).await;
+
+        // Readers serve it before its writer upgrades.
+        let reader = HelixDB::open_reader(source()).await.unwrap();
+        reader.close().await.unwrap();
+
+        // Recovery-only managed failover never migrates.
+        let Err(error) = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(10).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        else {
+            panic!("managed failover upgraded a version-four store");
+        };
+        assert!(
+            matches!(
+                error,
+                HelixDbError::WriterMigrationRequired {
+                    requirement: crate::error::WriterMigrationRequirement::StorageVersion {
+                        found: 4,
+                        target: 5,
+                    },
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(raw_rows(&token).await, before, "failover changed storage");
+
+        // An embedded writer publishes the current marker and nothing else.
+        let writer = HelixDB::open(source()).await.unwrap();
+        writer.close().await.unwrap();
+        let after = raw_rows(&token).await;
+        let expected = before
+            .iter()
+            .map(|(row_key, value)| {
+                if row_key.as_ref() == key.as_ref() {
+                    (row_key.clone(), marker(IndexStorageVersion::CURRENT))
+                } else {
+                    (row_key.clone(), value.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after, expected);
+
+        // Reopening a current store rewrites nothing.
+        let writer = HelixDB::open(source()).await.unwrap();
+        writer.close().await.unwrap();
+        assert_eq!(raw_rows(&token).await, after);
     }
 
     #[tokio::test]
@@ -4940,7 +5035,7 @@ mod tests {
             HelixDbError::WriterMigrationRequired {
                 requirement: crate::error::WriterMigrationRequirement::StorageVersion {
                     found: 2,
-                    target: 4,
+                    target: 5,
                 },
             }
         ));

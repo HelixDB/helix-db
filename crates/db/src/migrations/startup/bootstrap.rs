@@ -15,8 +15,18 @@ use crate::index_lifecycle::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriterBootstrapPlan {
     Initialize,
+    /// Versions before equality bitmaps: the equality-bitmap migration
+    /// publishes the current version itself.
     MigrateToCurrent,
-    CleanupCurrent,
+    /// Equality-bitmap layouts older than current: rewrite only the marker.
+    PublishCurrentVersion(CurrentBootstrap),
+    Current(CurrentBootstrap),
+}
+
+/// What a store at the current layout still needs after its marker is current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurrentBootstrap {
+    Cleanup,
     Ready,
 }
 
@@ -25,16 +35,67 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
     let plan = preflight_writer_bootstrap(db).await?;
     super::super::tenant::envelope::migrate_all_tenant_keys(db).await?;
 
-    match plan {
-        WriterBootstrapPlan::Initialize => initialize_writer_bootstrap(db).await,
+    let current = match plan {
+        WriterBootstrapPlan::Initialize => return initialize_writer_bootstrap(db).await,
         WriterBootstrapPlan::MigrateToCurrent => {
-            super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await
+            return super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await;
         }
-        WriterBootstrapPlan::CleanupCurrent => {
+        WriterBootstrapPlan::PublishCurrentVersion(current) => {
+            publish_current_version(db).await?;
+            current
+        }
+        WriterBootstrapPlan::Current(current) => current,
+    };
+    match current {
+        CurrentBootstrap::Cleanup => {
             super::super::indexes::equality_bitmap::cleanup_v3_nonunique_equality_rows(db).await
         }
-        WriterBootstrapPlan::Ready => Ok(()),
+        CurrentBootstrap::Ready => Ok(()),
     }
+}
+
+/// Moves an equality-bitmap store's marker to the current version.
+///
+/// Nothing else is rewritten: every version from
+/// [`IndexStorageVersion::EQUALITY_BITMAPS`] shares one physical layout. A
+/// crash before the commit leaves the older marker, which the next open
+/// publishes again; a store already at the current version is left alone.
+async fn publish_current_version(db: &Db) -> Result<()> {
+    let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    let marker_key = global_key(GlobalKey::StorageVersion);
+    let marker = transaction.get(&marker_key).await?.ok_or_else(|| {
+        HelixDbError::MigrationRequired {
+            reason: "V2 storage marker disappeared after writer preflight".to_string(),
+        }
+    })?;
+    let IndexV2MetadataValue::StorageVersion(version) =
+        metadata_or_migration_required(&marker, "storage marker")?
+    else {
+        return Err(HelixDbError::MigrationRequired {
+            reason: "V2 storage marker contains the wrong value kind".to_string(),
+        });
+    };
+    if version == IndexStorageVersion::CURRENT {
+        transaction.rollback();
+        return Ok(());
+    }
+    if !(IndexStorageVersion::EQUALITY_BITMAPS..IndexStorageVersion::CURRENT).contains(&version) {
+        transaction.rollback();
+        return Err(HelixDbError::MigrationRequired {
+            reason: format!(
+                "index storage version {} changed after writer preflight",
+                version.get()
+            ),
+        });
+    }
+    transaction.put(
+        marker_key,
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+            IndexStorageVersion::CURRENT,
+        )),
+    )?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 /// Initializes a pristine managed database without entering a migration path.
@@ -86,7 +147,7 @@ pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
     validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
     if version < IndexStorageVersion::CURRENT {
         transaction.rollback();
-        if cleanup_ready {
+        if version < IndexStorageVersion::EQUALITY_BITMAPS && cleanup_ready {
             return Err(HelixDbError::MigrationRequired {
                 reason: format!(
                     "index storage V4 cleanup is marked complete beside storage version {}",
@@ -168,7 +229,7 @@ async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
         });
     };
     validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
-    if version < IndexStorageVersion::CURRENT && cleanup_ready {
+    if version < IndexStorageVersion::EQUALITY_BITMAPS && cleanup_ready {
         return Err(HelixDbError::MigrationRequired {
             reason: format!(
                 "index storage V4 cleanup is marked complete beside storage version {}",
@@ -178,12 +239,18 @@ async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
     }
     transaction.rollback();
 
-    Ok(if version < IndexStorageVersion::CURRENT {
-        WriterBootstrapPlan::MigrateToCurrent
-    } else if cleanup_ready && tenant_envelope_ready {
-        WriterBootstrapPlan::Ready
+    if version < IndexStorageVersion::EQUALITY_BITMAPS {
+        return Ok(WriterBootstrapPlan::MigrateToCurrent);
+    }
+    let current = if cleanup_ready && tenant_envelope_ready {
+        CurrentBootstrap::Ready
     } else {
-        WriterBootstrapPlan::CleanupCurrent
+        CurrentBootstrap::Cleanup
+    };
+    Ok(if version < IndexStorageVersion::CURRENT {
+        WriterBootstrapPlan::PublishCurrentVersion(current)
+    } else {
+        WriterBootstrapPlan::Current(current)
     })
 }
 

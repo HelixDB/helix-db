@@ -216,6 +216,19 @@ or earlier can fail or use more resources after the upgrade:
 - Without `HELIX_DISK_CACHE_BYTES`, the 8 GiB default must fit the cache's
   filesystem.
 
+#### Index storage version 5
+
+Images with asynchronous index publication upgrade a database's index storage
+version from 4 to 5 the first time a writer opens it. The upgrade rewrites only
+the version marker; no index is rebuilt. After it, v0.0.9 and earlier refuse to
+open the database, so:
+
+- Upgrade readers before the writer; current readers serve both versions.
+- Never start a v0.0.9-or-earlier writer against an upgraded database, and exit
+  an embedded process that gets `unsupported_index_storage_version` rather than
+  keeping it running.
+- Take a backup before upgrading if you may need to roll back.
+
 ## Test
 
 After loading a native image, run the full packaging and runtime suite:
