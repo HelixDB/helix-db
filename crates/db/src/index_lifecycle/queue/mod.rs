@@ -170,9 +170,17 @@ pub struct IndexOperationQueueStats {
 /// from its published state and planning that change succeeds: removing a
 /// document published under larger limits, or relinking a deleted vector's
 /// neighbors, can exceed the lowered limits too. Raising the limits again
-/// lets it publish. An entity held back after its planning failed is planned
-/// again only on a later write to it or once the writer restarts, so after
-/// repairing what failed, write it again or restart the writer.
+/// lets it publish. An entity held back after its planning failed is also
+/// planned again about once a minute without a write, so it publishes on its
+/// own once what failed is repaired, for example restored metadata; a held
+/// delete is never written again, and this is what publishes it.
+///
+/// Its queued operations, and each later write to it, keep counting toward
+/// its index's retained-byte limit until it publishes, a limit the whole
+/// index shares. An entity written over and over while its planning keeps
+/// failing, for example on damaged index rows of its own, therefore fills
+/// that limit, and then writes to every entity of the index fail with
+/// `index_backpressure`. Stop writing it until it publishes.
 ///
 /// Its queued text still counts toward the pending text a strong text search
 /// may analyze in its partition (one text publication's analysis budget),

@@ -9,9 +9,11 @@
 //!
 //! [`PublicationHooks::planning_failures`]: super::publication::test_hooks::PublicationHooks
 
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use helix_ast::{
     batch, graph::NodeRef, query::QueryRequest, query::SearchConsistency, traversal,
@@ -22,11 +24,13 @@ use slatedb::object_store::ObjectStore;
 
 use super::overlay_tests::{text_search, vector_search, write};
 use super::publication::test_hooks::InjectedPlanningFailure;
-use super::publication::{FailureKind, PublicationOutcome};
+use super::publication::{FailureKind, NextTarget, PublicationOutcome, QueuePublisher};
 use super::publication_tests::{install_vector, publisher};
-use super::tests::{add_doc, install_vector_and_text, open, queue, queued, target};
+use super::tests::{
+    add_doc, install_vector_and_text, open, publisher_with_limits, queue, queued, target,
+};
 use super::QueueTarget;
-use crate::config::{IndexOperationQueueTuning, TextIndexDefinition};
+use crate::config::{DbConfig, IndexOperationQueueTuning, TextIndexDefinition};
 use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
 use crate::error::HelixDbError;
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
@@ -88,7 +92,15 @@ async fn newest(db: &HelixDB, family: QueueFamily, id: u64) -> QueuedOperationId
 }
 
 fn inject(db: &HelixDB, operation: QueuedOperationId, failure: Option<InjectedPlanningFailure>) {
-    let mut failures = publisher(db).hooks().planning_failures.lock();
+    inject_into(publisher(db), operation, failure);
+}
+
+fn inject_into(
+    publisher: &QueuePublisher,
+    operation: QueuedOperationId,
+    failure: Option<InjectedPlanningFailure>,
+) {
+    let mut failures = publisher.hooks().planning_failures.lock();
     match failure {
         Some(failure) => failures.insert(operation, failure),
         None => failures.remove(&operation),
@@ -326,6 +338,145 @@ async fn a_vector_entity_failing_after_planned_ones_is_the_one_held_back() {
         Some(failing),
         "the held update is not published"
     );
+    db.close().await.unwrap();
+}
+
+/// An entity whose planning failed is planned again once its retry is due,
+/// without a write: a stalled generation waits only until that retry, an
+/// entity that still fails is held back again, and one whose failure was
+/// repaired publishes.
+#[tokio::test]
+async fn a_failed_entity_is_planned_again_once_its_retry_is_due() {
+    let db = open("isolate-retry", Arc::new(InMemory::new()), queued(tuning())).await;
+    install_vector(&db, None).await;
+    let failing = add_doc(&db, vec![1.0, 0.0], "doc").await.unwrap();
+    let target = target(&db, QueueFamily::Vector).await;
+    settle(&db, target).await;
+    // The writer's own publisher never schedules in tests; one with the same
+    // limits does.
+    let defaults = DbConfig::new().search_index_backfill();
+    let scheduler = publisher_with_limits(&db, defaults.batch(), defaults.active_text_mutation());
+    set(&db, failing, "embedding", vec![5.0_f32, 5.0].into()).await;
+    let corrupt = newest(&db, QueueFamily::Vector, failing).await;
+    inject_into(&scheduler, corrupt, Some(InjectedPlanningFailure::Corrupt));
+    let blocked =
+        |scheduler: &QueuePublisher| scheduler.metrics().blocked_attempts.load(Ordering::Relaxed);
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    let stalled = Instant::now();
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Stalled,
+        "the retry is not due yet"
+    );
+    let none = HashSet::new();
+    let NextTarget::Delayed(deadline) = scheduler.next_target(&none, stalled) else {
+        panic!("a held entity waits for its retry");
+    };
+    assert!(
+        deadline < stalled + Duration::from_secs(60),
+        "the stall ends when the retry is due, not a full wait after the stall"
+    );
+    assert_eq!(
+        scheduler.next_target(&none, deadline),
+        NextTarget::Ready(target)
+    );
+
+    // Still failing when due: planned once more and held back again.
+    scheduler.make_failed_retries_due();
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    assert_eq!(blocked(&scheduler), 2);
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Stalled
+    );
+    assert_eq!(blocked(&scheduler), 2, "a failed retry waits for the next");
+
+    // Once what failed is repaired, the due retry publishes it.
+    inject_into(&scheduler, corrupt, None);
+    scheduler.make_failed_retries_due();
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 1,
+            entities: 1
+        }
+    );
+    assert!(scheduler.blocked_entities().is_empty());
+    assert!(queued_ids(&db, QueueFamily::Vector).await.is_empty());
+    assert_eq!(published_nearest(&db, [5.0, 5.0]).await, Some(failing));
+    db.close().await.unwrap();
+}
+
+/// A second entity failing to plan with no publication between suggests a
+/// failure that is not the entities' own, such as a partition's missing
+/// metadata, so the next attempt backs off instead of holding back the queue
+/// one immediate attempt at a time; a publication ends the backoff.
+#[tokio::test]
+async fn consecutive_planning_failures_back_off() {
+    let db = open(
+        "isolate-backoff",
+        Arc::new(InMemory::new()),
+        queued(tuning()),
+    )
+    .await;
+    install_vector(&db, None).await;
+    let mut ids = Vec::new();
+    for x in 0..3_u8 {
+        ids.push(add_doc(&db, vec![f32::from(x), 0.0], "doc").await.unwrap());
+    }
+    let target = target(&db, QueueFamily::Vector).await;
+    let defaults = DbConfig::new().search_index_backfill();
+    let scheduler = publisher_with_limits(&db, defaults.batch(), defaults.active_text_mutation());
+    for id in &ids[..2] {
+        let corrupt = newest(&db, QueueFamily::Vector, *id).await;
+        inject_into(&scheduler, corrupt, Some(InjectedPlanningFailure::Corrupt));
+    }
+    let none = HashSet::new();
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    assert_eq!(
+        scheduler.next_target(&none, Instant::now()),
+        NextTarget::Ready(target),
+        "one failure holds back only its entity"
+    );
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Blocked
+    );
+    let NextTarget::Delayed(retry) = scheduler.next_target(&none, Instant::now()) else {
+        panic!("a second failure in a row backs off");
+    };
+    assert_eq!(
+        scheduler.next_target(&none, retry),
+        NextTarget::Ready(target)
+    );
+    assert_eq!(
+        scheduler.publish_once(target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 1,
+            entities: 1
+        }
+    );
+    assert_eq!(
+        scheduler.next_target(&none, Instant::now()),
+        NextTarget::Ready(target),
+        "a publication ends the backoff"
+    );
+    let mut blocked = scheduler
+        .blocked_entities()
+        .into_iter()
+        .map(|(_, entity)| entity.id.get())
+        .collect::<Vec<_>>();
+    blocked.sort_unstable();
+    assert_eq!(blocked, ids[..2]);
     db.close().await.unwrap();
 }
 

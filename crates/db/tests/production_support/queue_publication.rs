@@ -555,6 +555,31 @@ async fn selection_and_collapse_boundaries() {
         )),
         [(second, 1, 0)]
     );
+    // An entity that failed to plan waits like a blocked one until its retry
+    // is due, then is repaired alone at full width without a newer operation.
+    let failed = |retry| {
+        HashMap::from([(
+            vector[0].entity(),
+            HeldEntity::Failed {
+                through: vector[1].id(),
+                retry,
+            },
+        )])
+    };
+    assert_eq!(
+        shape(&select(
+            2,
+            &failed(Instant::now() + MAX_STALLED_WAIT),
+            all,
+            all,
+            u64::MAX
+        )),
+        [(second, 1, 0)]
+    );
+    assert_eq!(
+        shape(&select(2, &failed(Instant::now()), all, all, u64::MAX)),
+        [(first, 2, 0)]
+    );
 
     assert!(matches!(
         collapse_vector(&SelectedEntity {
@@ -953,8 +978,8 @@ enum Change {
 
 /// Proves publication fails closed when a namespace's metadata disagrees with
 /// its definition or is missing, for both removals and upserts: it writes
-/// nothing and holds back only the entity it planned, which a publisher
-/// restarted after the metadata is restored publishes.
+/// nothing and holds back only the entity it planned, whose retry publishes
+/// it without another write once the metadata is restored.
 async fn inconsistent_namespace_metadata_fails_closed() {
     let db = open_explicit(
         "queue-publication-metadata",
@@ -1054,11 +1079,11 @@ async fn inconsistent_namespace_metadata_fails_closed() {
                 .await
                 .expect("a held entity waits"),
             PublicationOutcome::Stalled,
-            "only a write or a restart plans a held entity again"
+            "a held entity waits for a write or its retry"
         );
-        let restarted = publisher_with_limits(&db, publisher.limits, publisher.text.limits);
+        publisher.make_failed_retries_due();
         assert!(matches!(
-            restarted
+            publisher
                 .publish_once(target)
                 .await
                 .expect("restored metadata publishes"),

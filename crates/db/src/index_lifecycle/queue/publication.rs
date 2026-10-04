@@ -26,8 +26,9 @@
 //!    acknowledgement: vectors through the build planner
 //!    ([`crate::index_lifecycle::vector::publication`]), text as one epoch.
 //!    When planning fails, [`FailureKind`] decides: an entity whose planning
-//!    fails deterministically is held back like one that cannot fit, and the
-//!    rest publish from the next attempt; anything else retries the batch.
+//!    fails deterministically is held back like one that cannot fit, but is
+//!    also retried on a timer, and the rest publish from the next attempt;
+//!    anything else retries the batch.
 //! 7. Stage one acknowledgement naming exactly the published IDs.
 //! 8. Commit through the vector cache's commit fence, release accounting and
 //!    retain the rest of the queue, then retire emptied partition caches and
@@ -83,10 +84,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// long that work waits once it becomes publishable.
 const MAX_DEFERRED_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest a [`PublicationOutcome::Stalled`] generation waits without new
-/// work. Only a new operation can give it a publishable entity, and one
-/// makes it eligible at once; this bounds how long a retirement, which only
-/// an attempt discovers, leaves its held operations charged before they are
-/// discarded.
+/// work, and how long an entity whose planning failed waits before it is
+/// planned again ([`HeldEntity::Failed`]). A new operation, or a failed
+/// entity's due retry, makes a stalled generation eligible at once; this
+/// bounds how long a retirement, which only an attempt discovers, leaves its
+/// held operations charged before they are discarded, and how soon a failed
+/// entity publishes once what failed is repaired.
 const MAX_STALLED_WAIT: Duration = Duration::from_secs(60);
 /// Most operation IDs one discard transaction acknowledges (about a 1 MiB
 /// map operand); the operand and output bounds may lower it further.
@@ -112,8 +115,10 @@ pub(crate) enum PublicationOutcome {
     Trimmed,
     /// One operation's effect and acknowledgement cannot fit an output budget,
     /// or planning one entity failed deterministically, so its entity is held
-    /// back until a later operation supersedes it; retry immediately with the
-    /// generation's other entities.
+    /// back until a later operation supersedes it (or, after a failure, until
+    /// its retry is due); retry immediately with the generation's other
+    /// entities, or after backoff once two entities in a row failed to plan
+    /// without a publication between them.
     Blocked,
     /// Every queued entity is held back after blocking; nothing was attempted.
     /// The generation waits for a new operation rather than retrying on a
@@ -164,6 +169,12 @@ struct TargetSchedule {
     eligibility: Eligibility,
     /// Consecutive attempts without progress.
     failures: u32,
+    /// Entities held back after failing to plan since the generation last
+    /// published. A failure outside one entity's input, such as a partition's
+    /// missing metadata, fails every entity in turn, so from the second such
+    /// hold on, the next attempt backs off rather than holding back the whole
+    /// queue one immediate attempt at a time.
+    failed_holds: u32,
     /// Entities held back because a lone operation of theirs could not fit a
     /// publication or failed to plan, or draining after their repair. Process
     /// memory only: a restarted publisher rediscovers blocked entities by
@@ -209,12 +220,26 @@ struct TargetSchedule {
 /// last one is acknowledged. Strong searches overlay every queued operation
 /// and never observe it; eventual searches that do not reach the entity
 /// within their budget can.
+///
+/// An entity whose planning failed is also repaired, at full width, once its
+/// retry is due, without a newer operation: what failed may be repaired by
+/// then, for example restored metadata, and a held delete is never written
+/// again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeldEntity {
     /// Skipped until an operation newer than `through` is queued.
     Waiting {
         /// Newest operation of the entity known not to publish.
         through: QueuedOperationId,
+    },
+    /// Planning failed deterministically ([`QueuePublisher::isolate`]):
+    /// skipped until an operation newer than `through` is queued, or until
+    /// `retry`.
+    Failed {
+        /// Newest operation of the entity known not to publish.
+        through: QueuedOperationId,
+        /// When the same operations are planned again.
+        retry: Instant,
     },
     /// Published its newest selected state, but operations past the last one
     /// acknowledged, `through`, are still queued: repaired again at full
@@ -237,24 +262,26 @@ pub(crate) enum HeldEntity {
 
 impl HeldEntity {
     /// Operations the entity's next repair takes from `queued`, its queued
-    /// operations in order, or `None` while it waits for a newer operation.
-    fn repair_width(self, queued: &[&QueuedOperation]) -> Option<usize> {
-        match self {
-            Self::Waiting { through } | Self::Draining { through } => {
-                let known = queued
-                    .iter()
-                    .position(|operation| operation.id() == through)
-                    .map_or(0, |position| position + 1);
-                (queued.len() > known).then_some(queued.len())
-            }
-            Self::Repairing { width, .. } => Some(width.get().min(queued.len())),
-        }
+    /// operations in order, or `None` while it waits for a newer operation
+    /// or, after failing to plan, for its retry to be due at `now`.
+    fn repair_width(self, queued: &[&QueuedOperation], now: Instant) -> Option<usize> {
+        let (through, due) = match self {
+            Self::Repairing { width, .. } => return Some(width.get().min(queued.len())),
+            Self::Waiting { through } | Self::Draining { through } => (through, false),
+            Self::Failed { through, retry } => (through, retry <= now),
+        };
+        let known = queued
+            .iter()
+            .position(|operation| operation.id() == through)
+            .map_or(0, |position| position + 1);
+        (due || queued.len() > known).then_some(queued.len())
     }
 
-    /// Whether the entity is held back because a state of it could not fit.
+    /// Whether the entity is held back because a state of it could not fit
+    /// or failed to plan.
     const fn is_blocked(self) -> bool {
         match self {
-            Self::Waiting { .. } | Self::Repairing { .. } => true,
+            Self::Waiting { .. } | Self::Failed { .. } | Self::Repairing { .. } => true,
             Self::Draining { .. } => false,
         }
     }
@@ -271,6 +298,7 @@ impl TargetSchedule {
             last_vector_commit: None,
             eligibility: Eligibility::Now,
             failures: 0,
+            failed_holds: 0,
             held: HashMap::new(),
         }
     }
@@ -704,6 +732,7 @@ impl QueuePublisher {
         match outcome {
             PublicationOutcome::Published { .. } => {
                 schedule.failures = 0;
+                schedule.failed_holds = 0;
                 schedule.eligibility = Eligibility::Now;
                 schedule.entity_limit = schedule.entity_limit.saturating_mul(2).min(default_limit);
                 schedule.operation_limit = schedule
@@ -713,6 +742,7 @@ impl QueuePublisher {
             // A retired generation never publishes again.
             PublicationOutcome::Discarded { .. } => {
                 schedule.failures = 0;
+                schedule.failed_holds = 0;
                 schedule.eligibility = Eligibility::Now;
                 schedule.held.clear();
             }
@@ -720,18 +750,34 @@ impl QueuePublisher {
                 schedules.remove(&target);
             }
             // Holding back a blocked entity is progress: the generation's
-            // other entities can publish at once.
+            // other entities can publish at once. A second entity failing to
+            // plan with no publication between suggests the failure is not
+            // the entities' own, so the next one waits (see `failed_holds`).
+            PublicationOutcome::Blocked if schedule.failed_holds > 1 => {
+                let backoff = RETRY_DELAY
+                    .saturating_mul(1_u32 << (schedule.failed_holds - 1).min(9))
+                    .min(MAX_BACKOFF);
+                schedule.eligibility = Eligibility::After(Instant::now() + backoff);
+            }
             PublicationOutcome::Trimmed | PublicationOutcome::Blocked => {
                 schedule.eligibility = Eligibility::Now;
             }
-            // Only a write can give a held-back entity a repair, so polling
-            // would reread and decode the queue for nothing.
+            // Only a write, or a failed entity's due retry, can give a
+            // held-back entity a repair, so polling would reread and decode
+            // the queue for nothing.
             PublicationOutcome::Stalled => {
                 schedule.failures = schedule.failures.saturating_add(1);
-                schedule.eligibility = Eligibility::NewWork {
-                    admitted,
-                    deadline: Instant::now() + MAX_STALLED_WAIT,
-                };
+                let deadline = schedule
+                    .held
+                    .values()
+                    .filter_map(|hold| match hold {
+                        HeldEntity::Failed { retry, .. } => Some(*retry),
+                        HeldEntity::Waiting { .. }
+                        | HeldEntity::Draining { .. }
+                        | HeldEntity::Repairing { .. } => None,
+                    })
+                    .fold(Instant::now() + MAX_STALLED_WAIT, Instant::min);
+                schedule.eligibility = Eligibility::NewWork { admitted, deadline };
             }
             PublicationOutcome::Empty
             | PublicationOutcome::Deferred
@@ -1240,6 +1286,26 @@ impl QueuePublisher {
             .collect()
     }
 
+    /// Makes every entity held back after failing to plan due for its retry,
+    /// as if [`MAX_STALLED_WAIT`] had passed.
+    #[cfg(any(
+        test,
+        all(feature = "production-coverage", feature = "index-lifecycle-testing")
+    ))]
+    pub(crate) fn make_failed_retries_due(&self) {
+        let now = Instant::now();
+        self.schedules
+            .lock()
+            .values_mut()
+            .flat_map(|schedule| schedule.held.values_mut())
+            .for_each(|hold| {
+                let HeldEntity::Failed { retry, .. } = hold else {
+                    return;
+                };
+                *retry = now;
+            });
+    }
+
     /// Shrinks the next selection of `target` after `selection`'s exact
     /// output crossed a budget before anything was published.
     ///
@@ -1278,7 +1344,9 @@ impl QueuePublisher {
             (Some((only, hold)), _) => {
                 let taken = only.taken().collect::<Vec<_>>();
                 let (through, tried) = match hold {
-                    HeldEntity::Waiting { through } => {
+                    // A failed entity that now plans but cannot fit is
+                    // blocked like any other.
+                    HeldEntity::Waiting { through } | HeldEntity::Failed { through, .. } => {
                         (through, taken.last().map_or(through, |last| last.id()))
                     }
                     // A draining entity already serves a state newer than
@@ -1354,16 +1422,20 @@ impl QueuePublisher {
     /// Narrows `target`'s next attempt toward the entity of `failed`, a
     /// selection whose planning failed deterministically with `error`.
     ///
-    /// A failed selection of one entity holds it back as [`HeldEntity`]
-    /// describes: it waits for an operation newer than every state of it
-    /// known not to publish, which a later write supplies and its repair then
-    /// plans, and the rotation moves past it, so the rest of its generation
-    /// keeps publishing. Nothing is acknowledged or dropped, and nothing
-    /// durable records the hold: a restarted publisher plans the entity again
-    /// and holds it back again if it still fails. A text epoch is planned as
-    /// a whole, so its failure does not name an entity; a failed epoch of
-    /// several entities halves the text entity ceiling instead, until a
-    /// failing epoch is one entity.
+    /// A failed selection of one entity holds it back as
+    /// [`HeldEntity::Failed`]: it waits for an operation newer than every
+    /// state of it known not to publish, which a later write supplies and its
+    /// repair then plans, or for its retry [`MAX_STALLED_WAIT`] from now,
+    /// which plans the same operations again in case what failed was
+    /// repaired. The rotation moves past it, so the rest of its generation
+    /// keeps publishing; from the second entity in a row that fails without a
+    /// publication between, the next attempt backs off instead (see
+    /// `TargetSchedule::failed_holds`). Nothing is acknowledged or dropped,
+    /// and nothing durable records the hold: a restarted publisher plans the
+    /// entity again and holds it back again if it still fails. A text epoch
+    /// is planned as a whole, so its failure does not name an entity; a
+    /// failed epoch of several entities halves the text entity ceiling
+    /// instead, until a failing epoch is one entity.
     fn isolate(
         &self,
         target: QueueTarget,
@@ -1384,16 +1456,26 @@ impl QueuePublisher {
         // first attempt already found not to fit.
         let through = match schedule.held.get(&only.entity) {
             Some(HeldEntity::Repairing { tried, .. }) => *tried,
-            Some(HeldEntity::Waiting { .. } | HeldEntity::Draining { .. }) | None => only
+            Some(
+                HeldEntity::Waiting { .. }
+                | HeldEntity::Failed { .. }
+                | HeldEntity::Draining { .. },
+            )
+            | None => only
                 .taken()
                 .last()
                 .expect("a selected entity has operations")
                 .id(),
         };
-        schedule
-            .held
-            .insert(only.entity, HeldEntity::Waiting { through });
+        schedule.held.insert(
+            only.entity,
+            HeldEntity::Failed {
+                through,
+                retry: Instant::now() + MAX_STALLED_WAIT,
+            },
+        );
         schedule.cursor = Some(only.entity);
+        schedule.failed_holds = schedule.failed_holds.saturating_add(1);
         self.metrics
             .blocked_attempts
             .fetch_add(1, Ordering::Relaxed);
@@ -1403,8 +1485,9 @@ impl QueuePublisher {
             entity = ?only.entity,
             index_id = target.index_id.get(),
             generation = target.generation.get(),
+            retry_after_secs = MAX_STALLED_WAIT.as_secs(),
             "planning a queued index operation failed deterministically; its entity is held \
-             back until a later write supersedes it"
+             back until a later write supersedes it or its retry is due"
         );
         PublicationOutcome::Blocked
     }
@@ -1727,9 +1810,10 @@ impl<'a> SelectedEntity<'a> {
 /// acknowledged; the rest are `superseding`. When the rotation reaches it
 /// after other entities, the batch ends there: the next batch starts after
 /// this one's last published entity, so the rotation never carries past a
-/// repair, however the rest of its generation is written. The result is
-/// empty only when every queued entity is held back without a repair to
-/// try.
+/// repair, however the rest of its generation is written. A failed entity's
+/// retry is due once its instant has passed when the selection runs. The
+/// result is empty only when every queued entity is held back without a
+/// repair to try.
 pub(crate) fn select_batch<'a>(
     operations: &'a [QueuedOperation],
     after: Option<IndexEntity>,
@@ -1754,6 +1838,7 @@ pub(crate) fn select_batch<'a>(
         .and_then(|entity| order.iter().position(|candidate| *candidate == entity))
         .map_or(0, |position| position + 1);
     let max_operations = max_operations.min(max_acknowledged).get();
+    let now = Instant::now();
     let mut selected = Vec::new();
     let mut input_bytes = 0_u64;
     let mut selected_operations = 0_usize;
@@ -1762,7 +1847,10 @@ pub(crate) fn select_batch<'a>(
             break;
         }
         let mut queued = grouped.remove(&entity).unwrap_or_default();
-        match held.get(&entity).map(|hold| hold.repair_width(&queued)) {
+        match held
+            .get(&entity)
+            .map(|hold| hold.repair_width(&queued, now))
+        {
             Some(None) => continue,
             Some(Some(_)) if !selected.is_empty() => break,
             Some(Some(width)) => {
