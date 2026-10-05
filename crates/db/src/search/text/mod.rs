@@ -1420,6 +1420,11 @@ fn register_analyzers(index: &Index, default_analyzer: TextAnalyzerKind) {
     );
 }
 
+/// Tantivy analyzer registered under the stable [`TextAnalyzerKind`] name.
+///
+/// Indexes built before combining marks stayed inside `standard` and
+/// `standard_stem_en` keep the old terms until operators rebuild them.
+/// See the text indexes guide.
 pub(crate) fn build_text_analyzer(kind: TextAnalyzerKind) -> TextAnalyzer {
     match kind {
         TextAnalyzerKind::Standard => TextAnalyzer::builder(UnicodeSimpleTokenizer::default())

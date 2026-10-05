@@ -192,6 +192,27 @@ for both modes, searches in write batches, and `index_backpressure`.
 The server caps the effective result count of a whole-index search at 800.
 Prefiltered searches have their own [limits](/database/helix-db/query-guides/prefiltering#result-limits).
 
+## Analyzers
+
+A text index uses one preset. `standard` is the default. `standard` and
+`standard_stem_en` split on whitespace and punctuation, lowercase each token, and
+keep Unicode combining marks, ZWJ, and ZWNJ inside the token, so an Indic word such
+as क्या is one term. `standard_stem_en` also applies an English stemmer.
+`whitespace_lowercase` splits only on whitespace and then lowercases.
+
+<Warning>
+After upgrading past the change that keeps combining marks inside `standard` and
+`standard_stem_en` tokens, rebuild every text index that uses one of those analyzers
+and contains non-ASCII or Indic text. Until the rebuild finishes, a query tokenizes
+क्या as one term while an older split still stores क and या, so the query misses the
+word. Drop the index with `dropIndex` and create it again; creation backfills the
+new terms from the graph. Reopening the database or compacting splits leaves the
+stored terms in place. The persisted analyzer name stays `standard` or
+`standard_stem_en`, so the upgrade does not start a rebuild on its own. ASCII-only
+text produces the same tokens as before, and `whitespace_lowercase` indexes are
+unchanged.
+</Warning>
+
 ## Indexed values
 
 - Store searchable text in a top-level `String` or `StringArray` property.
