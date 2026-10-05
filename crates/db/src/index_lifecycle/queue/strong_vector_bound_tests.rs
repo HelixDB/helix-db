@@ -10,12 +10,14 @@ use helix_ast::{
     graph::NodeRef,
     query::{QueryRequest, SearchConsistency},
     traversal,
-    value::PropertyInput,
+    value::{PropertyInput, PropertyValue},
 };
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
-use super::overlay_tests::{add, delete, drain, hits, text_search, update, vector_search, write};
+use super::overlay_tests::{
+    add, delete, drain, hits, install, text_search, update, vector_search, write,
+};
 use super::tests::{install_vector_and_text, open, queue, queued, target};
 use crate::config::IndexOperationQueueTuning;
 use crate::encoding::v2::values::indexes::operation_queue::QueueFamily;
@@ -289,5 +291,257 @@ async fn write_batch_searches_see_their_own_changes_and_exempt_them_from_the_bou
     drain(&db, target(&db, QueueFamily::Vector).await).await;
     let result = write(&db, || insert_and_search_each(&[7.0, 8.0], committed)).await;
     assert_eq!(hits(&result, "search1").len(), 6);
+    db.close().await.unwrap();
+}
+
+/// Inserts one document with only an embedding, so only the vector index
+/// queues work.
+async fn add_vector(db: &HelixDB, embedding: [f32; 2]) -> crate::Result<u64> {
+    let result = Box::pin(
+        db.query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![("embedding", PropertyInput::from(embedding.to_vec()))],
+                    ),
+                )
+                .returning(["created"]),
+        )),
+    )
+    .await?;
+    Ok(result["created"][0]["$id"].as_u64().unwrap())
+}
+
+fn assert_retained_backpressure(error: &HelixDbError) {
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::RetainedBytes,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+/// By default the bound is the retained-byte ceiling and follows it, so
+/// writes reach retained-byte backpressure before strong vector searches
+/// fail: admission charges every operation, superseded ones included, and a
+/// search charges only each entity's latest. Work admitted under a higher
+/// ceiling fails strong vector searches once a reopen lowers the ceiling
+/// below it, until publication; an explicit bound stays put whatever the
+/// ceiling.
+#[tokio::test]
+async fn by_default_writes_reach_backpressure_before_strong_vector_searches() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "strong-vector-bound-default";
+    let db = open(
+        name,
+        Arc::clone(&store),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install_vector_and_text(&db).await;
+    let mut ids = Vec::new();
+    for position in [1.0, 2.0, 3.0] {
+        ids.push(add_vector(&db, [position, 0.0]).await.unwrap());
+    }
+    // Superseded operations: admission charges them, the bound does not.
+    for position in [0.5, 0.25] {
+        write(&db, || {
+            QueryRequest::write(
+                batch::write_batch().var_as(
+                    "updated",
+                    traversal::g()
+                        .n(NodeRef::from(ids[0]))
+                        .set_property("embedding", vec![position, 0.0]),
+                ),
+            )
+        })
+        .await;
+    }
+    let retained = db.index_operation_queue_stats().retained_bytes;
+    let latest = latest_vector_bytes(&db).await;
+    assert!(retained > latest, "superseded operations are admitted");
+    db.close().await.unwrap();
+
+    let ceiling = |bytes: u64| {
+        IndexOperationQueueTuning::default()
+            .with_max_retained_bytes(NonZeroU64::new(bytes).unwrap())
+            .unwrap()
+    };
+    let strong_ids = |result: &serde_json::Value| {
+        hits(result, "hits")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    };
+
+    // The ceiling the backlog fills: the next write fails, strong searches
+    // answer exactly.
+    assert_eq!(
+        ceiling(retained)
+            .strong_vector_search_max_pending_bytes()
+            .get(),
+        retained
+    );
+    let db = open(name, Arc::clone(&store), queued(ceiling(retained))).await;
+    assert_retained_backpressure(
+        &add_vector(&db, [9.0, 0.0])
+            .await
+            .expect_err("the backlog fills the ceiling"),
+    );
+    let result = Box::pin(db.query(strong_vector_request(10))).await.unwrap();
+    assert_eq!(strong_ids(&result), ids);
+    db.close().await.unwrap();
+
+    // A reopen lowers the ceiling below the latest work: the default bound
+    // follows it, writes still fail first, eventual searches answer.
+    let lowered = ceiling(latest - 1);
+    let db = open(name, Arc::clone(&store), queued(lowered)).await;
+    assert_retained_backpressure(
+        &add_vector(&db, [9.0, 0.0])
+            .await
+            .expect_err("past the lowered ceiling"),
+    );
+    assert_past_bound(
+        &Box::pin(db.query(strong_vector_request(10)))
+            .await
+            .expect_err("work admitted past the lowered ceiling"),
+        latest,
+        latest - 1,
+    );
+    assert_eq!(
+        vector_search(&db, [0.0, 0.0], 10, None, SearchConsistency::Eventual)
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        ids
+    );
+    db.close().await.unwrap();
+
+    // An explicit bound does not follow the ceiling.
+    let db = open(
+        name,
+        Arc::clone(&store),
+        queued(
+            lowered.with_strong_vector_search_max_pending_bytes(NonZeroU64::new(latest).unwrap()),
+        ),
+    )
+    .await;
+    let result = Box::pin(db.query(strong_vector_request(10))).await.unwrap();
+    assert_eq!(strong_ids(&result), ids);
+    db.close().await.unwrap();
+
+    // Publication clears the lowered default bound.
+    let db = open(name, Arc::clone(&store), queued(lowered)).await;
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    let result = Box::pin(db.query(strong_vector_request(10))).await.unwrap();
+    assert_eq!(strong_ids(&result), ids);
+    db.close().await.unwrap();
+}
+
+/// The bound charges every tenant partition of the searched index, as
+/// admission does: one tenant's backlog past it fails strong vector searches
+/// of a tenant with nothing pending, whole-partition and prefiltered, while
+/// eventual searches of either keep answering.
+#[tokio::test]
+async fn the_bound_charges_every_tenant_partition_of_its_index() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "strong-vector-bound-tenants";
+    let db = open(
+        name,
+        Arc::clone(&store),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&db, Some("tenant")).await;
+    let quiet = add(&db, [0.0, 0.0], "alpha", Some("quiet")).await;
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    let mut crowded = Vec::new();
+    for position in [1.0, 2.0, 3.0] {
+        crowded.push(add(&db, [position, 0.0], "alpha", Some("crowded")).await);
+    }
+    let bytes = latest_vector_bytes(&db).await;
+    db.close().await.unwrap();
+
+    let search = |tenant: &str, prefiltered: bool| {
+        let source = if prefiltered {
+            traversal::g().n(NodeRef::from(vec![quiet])).vector_search(
+                "Doc",
+                "embedding",
+                vec![0.0, 0.0],
+                10,
+                Some(PropertyValue::from(tenant)),
+            )
+        } else {
+            traversal::g().vector_search_nodes(
+                "Doc",
+                "embedding",
+                vec![0.0, 0.0],
+                10,
+                Some(PropertyValue::from(tenant)),
+            )
+        };
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as("hits", source)
+                .returning(["hits"]),
+        )
+    };
+    let found = |result: serde_json::Value| {
+        hits(&result, "hits")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    };
+
+    let db = open(name, Arc::clone(&store), bounded(bytes - 1)).await;
+    for request in [
+        search("quiet", false),
+        search("quiet", true),
+        search("crowded", false),
+    ] {
+        assert_past_bound(
+            &Box::pin(db.query(request))
+                .await
+                .expect_err("another tenant's backlog counts"),
+            bytes,
+            bytes - 1,
+        );
+    }
+    assert_eq!(
+        vector_search(
+            &db,
+            [0.0, 0.0],
+            10,
+            Some("quiet"),
+            SearchConsistency::Eventual
+        )
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>(),
+        [quiet]
+    );
+    db.close().await.unwrap();
+
+    let db = open(name, Arc::clone(&store), bounded(bytes)).await;
+    assert_eq!(
+        found(Box::pin(db.query(search("quiet", false))).await.unwrap()),
+        [quiet]
+    );
+    assert_eq!(
+        found(Box::pin(db.query(search("quiet", true))).await.unwrap()),
+        [quiet]
+    );
+    assert_eq!(
+        found(Box::pin(db.query(search("crowded", false))).await.unwrap()),
+        crowded
+    );
     db.close().await.unwrap();
 }

@@ -1196,10 +1196,9 @@ async fn strong_vector_searches_past_their_bound_fail_until_publication() {
         pending - 1
     );
     assert_eq!(
-        IndexOperationQueueTuning::default()
-            .strong_vector_search_max_pending_bytes()
-            .get(),
-        IndexOperationQueueTuning::DEFAULT_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES
+        IndexOperationQueueTuning::default().strong_vector_search_max_pending_bytes(),
+        IndexOperationQueueTuning::default().max_retained_bytes(),
+        "by default the bound is the retained-byte ceiling"
     );
     let db = Arc::new(open(name, &store, tuning, LifecycleTestScheduling::Explicit).await);
     let error = db
