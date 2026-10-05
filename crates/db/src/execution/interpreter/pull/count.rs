@@ -21,6 +21,75 @@ enum Program<'a> {
     OrderedDistinct(Box<Self>),
 }
 
+/// The row path's ordered intersection of a node range `driver` with node
+/// bitmap filters, or `None` for any other intersection.
+///
+/// It streams the range in index order and tests every filter before a row is
+/// verified against its record, so a window stops early and only matching
+/// rows are read.
+fn node_ordered_intersection(
+    driver: &exec::ExecCountCursorPlan,
+    rest: &ir::AtLeast<exec::ExecCountCursorPlan, 1>,
+) -> Option<exec::ExecAccessPlan> {
+    let exec::ExecCountCursorPlan::NodeRange(range) = driver else {
+        return None;
+    };
+    let filters = rest
+        .iter()
+        .map(|child| {
+            let exec::ExecCountCursorPlan::NodeBitmap(bitmap) = child else {
+                return None;
+            };
+            Some(exec::ExecNodeSecondarySetPlan::Bitmap(bitmap.clone()))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(exec::ExecAccessPlan::Node(
+        exec::ExecNodeAccessPlan::SecondarySet {
+            set: exec::ExecNodeSecondarySetPlan::OrderedIntersect {
+                driver: exec::ExecNodeSecondaryRangePlan {
+                    index: range.index.clone(),
+                    key: range.key.clone(),
+                    range: range.range.clone(),
+                    iteration: ir::RangeScanIteration::Forward,
+                },
+                filters: ir::AtLeast::try_from_vec(filters)?,
+            },
+        },
+    ))
+}
+
+/// The edge counterpart of [`node_ordered_intersection`].
+fn edge_ordered_intersection(
+    driver: &exec::ExecCountCursorPlan,
+    rest: &ir::AtLeast<exec::ExecCountCursorPlan, 1>,
+) -> Option<exec::ExecAccessPlan> {
+    let exec::ExecCountCursorPlan::EdgeRange(range) = driver else {
+        return None;
+    };
+    let filters = rest
+        .iter()
+        .map(|child| {
+            let exec::ExecCountCursorPlan::EdgeBitmap(bitmap) = child else {
+                return None;
+            };
+            Some(exec::ExecEdgeSecondarySetPlan::Bitmap(bitmap.clone()))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(exec::ExecAccessPlan::Edge(
+        exec::ExecEdgeAccessPlan::SecondarySet {
+            set: exec::ExecEdgeSecondarySetPlan::OrderedIntersect {
+                driver: exec::ExecEdgeSecondaryRangePlan {
+                    index: range.index.clone(),
+                    key: range.key.clone(),
+                    range: range.range.clone(),
+                    iteration: ir::RangeScanIteration::Forward,
+                },
+                filters: ir::AtLeast::try_from_vec(filters)?,
+            },
+        },
+    ))
+}
+
 impl<'a> Program<'a> {
     fn new(plan: &'a exec::ExecCountCursorPlan) -> Self {
         use exec::ExecCountCursorPlan as C;
@@ -134,18 +203,31 @@ impl<'a> Program<'a> {
                 input: Box::new(Self::new(input)),
                 window,
             },
-            // A set of ID leaves of one element kind is one leaf counted on
-            // ID bitmaps; other sets combine their child rows.
-            C::Union { .. } | C::Intersect { .. } if count::id_set_keyspace(plan).is_some() => {
-                Self::Leaf(plan)
+            C::Union { driver, rest } | C::Intersect { driver, rest } => {
+                let intersect = matches!(plan, C::Intersect { .. });
+                // A range-driven intersection keeps the range's order, as the
+                // row path does, so a window over it keeps the query's rows.
+                // Otherwise a set of ID leaves of one element kind is one leaf
+                // counted on ID bitmaps, and other sets combine child rows.
+                match intersect
+                    .then(|| node_ordered_intersection(driver, rest))
+                    .flatten()
+                    .or_else(|| {
+                        intersect
+                            .then(|| edge_ordered_intersection(driver, rest))
+                            .flatten()
+                    }) {
+                    Some(access) => source(access),
+                    None if count::id_set_keyspace(plan).is_some() => Self::Leaf(plan),
+                    None => Self::Set {
+                        inputs: std::iter::once(driver.as_ref())
+                            .chain(rest.as_ref())
+                            .map(Self::new)
+                            .collect(),
+                        intersect,
+                    },
+                }
             }
-            C::Union { driver, rest } | C::Intersect { driver, rest } => Self::Set {
-                inputs: std::iter::once(driver.as_ref())
-                    .chain(rest.as_ref())
-                    .map(Self::new)
-                    .collect(),
-                intersect: matches!(plan, C::Intersect { .. }),
-            },
             C::NodeRange(plan) => source(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::RangeIndex {
                     index: plan.index.clone(),

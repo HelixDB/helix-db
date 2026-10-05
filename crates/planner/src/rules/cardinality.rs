@@ -1062,12 +1062,32 @@ fn count_plan_cursor(
             lookup: plan.lookup,
             verification: plan.verification,
         }),
-        exec::ExecCountPlan::NodeRange(plan) => {
-            Ok(exec::ExecCountCursorPlan::NodeRange(plan.driver))
-        }
-        exec::ExecCountPlan::EdgeRange(plan) => {
-            Ok(exec::ExecCountCursorPlan::EdgeRange(plan.driver))
-        }
+        // A range cursor streams only its driver, so an ordered
+        // intersection's bitmap filters join it in one intersection cursor,
+        // which the executor streams in range order; dropping them would
+        // count every range match.
+        exec::ExecCountPlan::NodeRange(plan) => Ok(match plan.membership {
+            exec::ExecNodeRangeMembershipPlan::All => {
+                exec::ExecCountCursorPlan::NodeRange(plan.driver)
+            }
+            exec::ExecNodeRangeMembershipPlan::BitmapFilters(filters) => {
+                exec::ExecCountCursorPlan::Intersect {
+                    driver: Box::new(exec::ExecCountCursorPlan::NodeRange(plan.driver)),
+                    rest: filters.map(exec::ExecCountCursorPlan::NodeBitmap),
+                }
+            }
+        }),
+        exec::ExecCountPlan::EdgeRange(plan) => Ok(match plan.membership {
+            exec::ExecEdgeRangeMembershipPlan::All => {
+                exec::ExecCountCursorPlan::EdgeRange(plan.driver)
+            }
+            exec::ExecEdgeRangeMembershipPlan::BitmapFilters(filters) => {
+                exec::ExecCountCursorPlan::Intersect {
+                    driver: Box::new(exec::ExecCountCursorPlan::EdgeRange(plan.driver)),
+                    rest: filters.map(exec::ExecCountCursorPlan::EdgeBitmap),
+                }
+            }
+        }),
         exec::ExecCountPlan::NodeAuthoritativeScan(plan) => Ok(
             exec::ExecCountCursorPlan::NodeAuthoritativeScan(plan.predicate),
         ),
@@ -4581,6 +4601,88 @@ mod tests {
             window: exec::ExecCountWindowPlan::identity(),
         })
         .is_err());
+    }
+
+    /// A range count plan with bitmap filters becomes a cursor intersecting
+    /// the range driver with every filter, which the executor streams in range
+    /// order; an unfiltered range keeps its bare range cursor. Dropping the
+    /// filters would count every range match.
+    #[test]
+    fn filtered_range_count_cursors_keep_every_filter() {
+        let node_driver = exec::ExecNodeVerifiedRangeScanPlan {
+            index: catalog::NodeRangeIndexMeta::try_new("node-range").unwrap(),
+            key: catalog::ScopedPropertyDirectionKey::try_new(
+                "User",
+                "age",
+                RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+            range: ir::IndexRange::All,
+        };
+        let node = |membership| {
+            exec::ExecCountPlan::NodeRange(exec::ExecNodeRangeCountPlan {
+                driver: node_driver.clone(),
+                membership,
+                window: exec::ExecCountWindowPlan::identity(),
+            })
+        };
+        assert_eq!(
+            count_plan_cursor(node(exec::ExecNodeRangeMembershipPlan::All)).unwrap(),
+            exec::ExecCountCursorPlan::NodeRange(node_driver.clone())
+        );
+        assert_eq!(
+            count_plan_cursor(node(exec::ExecNodeRangeMembershipPlan::BitmapFilters(
+                ir::AtLeast::try_from_vec(vec![
+                    exec_node_point("active"),
+                    exec_node_point("pending"),
+                ])
+                .unwrap(),
+            )))
+            .unwrap(),
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::NodeRange(node_driver)),
+                rest: ir::AtLeast::try_from_vec(vec![
+                    exec::ExecCountCursorPlan::NodeBitmap(exec_node_point("active")),
+                    exec::ExecCountCursorPlan::NodeBitmap(exec_node_point("pending")),
+                ])
+                .unwrap(),
+            }
+        );
+
+        let edge_driver = exec::ExecEdgeVerifiedRangeScanPlan {
+            index: catalog::EdgeRangeIndexMeta::try_new("edge-range").unwrap(),
+            key: catalog::ScopedPropertyDirectionKey::try_new(
+                "LIKES",
+                "age",
+                RangeIndexDirection::Desc,
+            )
+            .unwrap(),
+            range: ir::IndexRange::All,
+        };
+        let edge = |membership| {
+            exec::ExecCountPlan::EdgeRange(exec::ExecEdgeRangeCountPlan {
+                driver: edge_driver.clone(),
+                membership,
+                window: exec::ExecCountWindowPlan::identity(),
+            })
+        };
+        assert_eq!(
+            count_plan_cursor(edge(exec::ExecEdgeRangeMembershipPlan::All)).unwrap(),
+            exec::ExecCountCursorPlan::EdgeRange(edge_driver.clone())
+        );
+        assert_eq!(
+            count_plan_cursor(edge(exec::ExecEdgeRangeMembershipPlan::BitmapFilters(
+                ir::AtLeast::try_from_vec(vec![exec_edge_point("active")]).unwrap(),
+            )))
+            .unwrap(),
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::EdgeRange(edge_driver)),
+                rest: ir::AtLeast::try_from_vec(vec![exec::ExecCountCursorPlan::EdgeBitmap(
+                    exec_edge_point("active"),
+                )])
+                .unwrap(),
+            }
+        );
     }
 
     #[test]
