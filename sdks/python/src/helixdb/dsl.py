@@ -176,6 +176,17 @@ def _int_to_json(value: int) -> int:
     return value
 
 
+_I64_MIN = -(1 << 63)
+_I64_MAX = (1 << 63) - 1
+
+
+def _i64_to_json(value: int) -> int:
+    integer = _int_to_json(value)
+    if not _I64_MIN <= integer <= _I64_MAX:
+        raise TypeError("integer outside signed 64-bit range")
+    return integer
+
+
 def _finite_float(value: float, *, name: str = "float") -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"expected {name}, got {value!r}")
@@ -270,7 +281,7 @@ class DateTimeLiteral:
 
 
 def i64(value: int) -> I64Literal:
-    return I64Literal(_int_to_json(value))
+    return I64Literal(_i64_to_json(value))
 
 
 def f32(value: float) -> F32Literal:
@@ -311,7 +322,7 @@ class PropertyValue:
 
     @classmethod
     def i64(cls, value: int) -> "PropertyValue":
-        return cls("I64", _int_to_json(value))
+        return cls("I64", _i64_to_json(value))
 
     @classmethod
     def date_time(cls, value: DateTime | int) -> "PropertyValue":
@@ -349,7 +360,7 @@ class PropertyValue:
 
     @classmethod
     def i64_array(cls, values: Iterable[int]) -> "PropertyValue":
-        return cls("I64Array", [_int_to_json(value) for value in values])
+        return cls("I64Array", [_i64_to_json(value) for value in values])
 
     @classmethod
     def f64_array(cls, values: Iterable[float]) -> "PropertyValue":
@@ -3727,7 +3738,7 @@ def _convert_param_value(schema: ParamSchema, value: Any, path: str) -> JsonValu
             raise TypeError(f"parameter '{path}' must be boolean")
         return value
     if schema.kind == "I64":
-        return _int_to_json(value)
+        return _i64_to_json(value)
     if schema.kind == "F64":
         return _finite_float(value)
     if schema.kind == "F32":
@@ -3826,7 +3837,7 @@ class _QueryValueNamespace:
         return bool(value)
 
     def i64(self, value: int) -> JsonValue:
-        return _int_to_json(value)
+        return _i64_to_json(value)
 
     def f64(self, value: float) -> JsonValue:
         return _finite_float(value)
@@ -3884,7 +3895,7 @@ def _normalize_typed_query_value(
             raise TypeError(f"parameter '{path}' must be boolean")
         return value
     if parameter_type.variant == "I64":
-        return _int_to_json(value)
+        return _i64_to_json(value)
     if parameter_type.variant == "F64":
         return _finite_float(value)
     if parameter_type.variant == "F32":
