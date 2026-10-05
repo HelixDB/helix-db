@@ -188,9 +188,9 @@ in its index exactly, so its CPU time grows with that work. It fails with a retr
 `index_backpressure` error (`pending_vector_bytes`) instead when that work exceeds
 512 MiB: each changed node or edge counts once, at its latest unpublished vector (4
 bytes per dimension) plus a few dozen bytes. That is about 170,000 pending
-768-dimension vectors, far more than a write load of hundreds of writes per second
-queues while an index builds. Self-hosted servers can change the bound with
-`HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES`. Within it the search stays exact.
+768-dimension vectors, or about 87,000 of 1,536 dimensions. Self-hosted servers can change
+the bound with `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES`. Within it the search
+stays exact.
 
 - A write batch's own changes never count toward it.
 - An `eventual` vector search never fails this way. It includes up to 128 MiB of
