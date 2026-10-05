@@ -2219,4 +2219,38 @@ async fn counts_over_range_intersections_apply_every_filter() {
             "{predicate:?}"
         );
     }
+    // Rank order is not ID order, so a window before a filter keeps the rows
+    // the range returns first. Each count equals the rows the same traversal
+    // returns, for selective and non-selective filters alike.
+    for predicate in [
+        Predicate::and(vec![Predicate::lt("rank", 30), Predicate::eq("tier", 1)]),
+        Predicate::and(vec![Predicate::gte("rank", 0), Predicate::neq("uid", -1)]),
+        Predicate::and(vec![Predicate::gte("rank", 0), Predicate::eq("tier", 0)]),
+    ] {
+        let source = || traversal::g().n_with_label_where("User", predicate.clone());
+        let late = || Predicate::gte("uid", 150);
+        let shapes = [
+            ("limit", source().limit(10).where_(late())),
+            ("skip", source().skip(40).where_(late())),
+            ("range", source().range(5, 25).where_(late())),
+            ("dedup_limit", source().dedup().limit(10).where_(late())),
+        ];
+        for (shape, traversal) in shapes {
+            let response = db
+                .query(QueryRequest::read(
+                    batch::read_batch()
+                        .var_as("count", traversal.clone().count())
+                        .var_as("ids", traversal.id())
+                        .returning(["count", "ids"]),
+                ))
+                .await
+                .expect("windowed count succeeds");
+            let rows = response["ids"].as_array().expect("ids are an array").len();
+            assert_eq!(
+                response["count"],
+                serde_json::json!(rows),
+                "{shape} over {predicate:?}"
+            );
+        }
+    }
 }
