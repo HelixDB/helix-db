@@ -271,6 +271,8 @@ mod layout_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
+mod open_measurement_tests;
+#[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]
 mod planning_session_tests;
