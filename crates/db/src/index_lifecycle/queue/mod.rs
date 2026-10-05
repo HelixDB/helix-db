@@ -277,6 +277,8 @@ mod planning_session_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod soak_tests;
 #[cfg(test)]
 mod stats_tests;

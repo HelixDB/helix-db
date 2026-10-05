@@ -1,0 +1,889 @@
+//! Startup backlog loading: one forward pass, one queue in memory at a time.
+//!
+//! Every test compares the ledger a load builds with the one the previous
+//! load built from the same storage, which fully decoded each scope's queues
+//! into one list before charging them ([`reference`]): streaming must change
+//! memory and seeks only, never charges, members, admissions, or outcomes.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use bytes::Bytes;
+use futures::stream::BoxStream;
+use helix_ast::index::IndexSpec;
+use helix_ast::query::QueryRequest;
+use helix_ast::{batch, traversal};
+use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::{
+    path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    Result as ObjectStoreResult,
+};
+use slatedb::{Db, DbReadOps, IsolationLevel};
+
+use super::backlog::{BacklogLimits, IndexOperationBacklog};
+use super::codec_storage_tests::{compact_l0, manual_compaction_settings};
+use super::lifecycle_tests::{config, create, drop_index, vector_spec, wait_terminal};
+use super::overlay_tests::{add, delete, update};
+use super::publication::PublicationOutcome;
+use super::publication_tests::batch_limits;
+use super::recovery::{discover_scopes, load_backlog, LoadedQueueSummary};
+use super::storage::{discovery_range, QueueStore};
+use super::tests::{open, publisher_with_limits, queue, target};
+use super::QueueTarget;
+use crate::config::{DbConfig, QueueLayout};
+use crate::encoding::v2::keys::scope::{DataScope, TenantId, TENANT_KEY_PREFIX};
+use crate::encoding::v2::keys::{IndexEntity, ManagedIndexKey, RecordKind, ScopedKey};
+use crate::encoding::v2::values::indexes::operation_queue::{
+    OperationQueue, QueueFamily, QueueOperand, QueueRow, QueuedOperation, QueuedOperationId,
+    QueuedPayload, QueuedTextPayload, QueuedTextReplacement, QueuedVectorPayload,
+    QueuedVectorReplacement,
+};
+use crate::error::HelixDbError;
+use crate::index_lifecycle::work::TextPartition;
+use crate::index_lifecycle::worker::IndexWorkerWakeHandle;
+use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
+use crate::merge_operator::HelixMergeOperator;
+use crate::HelixDB;
+
+const PATH: &str = "queue-recovery";
+
+fn ledger() -> Arc<IndexOperationBacklog> {
+    IndexOperationBacklog::new(
+        BacklogLimits {
+            max_retained_bytes: u64::MAX,
+            max_members: u64::MAX,
+        },
+        IndexWorkerWakeHandle::default(),
+    )
+}
+
+fn tenant(id: u128) -> DataScope {
+    DataScope::Tenant(TenantId::from_u128(id))
+}
+
+fn queue_target(scope: DataScope, index: u64, generation: u64) -> QueueTarget {
+    QueueTarget::new(
+        scope,
+        IndexId::new(index).unwrap(),
+        IndexGenerationId::new(generation).unwrap(),
+    )
+}
+
+fn node(id: u64) -> IndexEntity {
+    IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(id),
+    }
+}
+
+fn text(entity: u64, body: &str) -> QueuedOperation {
+    QueuedOperation::new(
+        QueuedOperationId::generate(),
+        node(entity),
+        QueuedPayload::Text(QueuedTextPayload {
+            replacement: Some(QueuedTextReplacement::new(
+                TextPartition::Unpartitioned,
+                Arc::from(body),
+            )),
+        }),
+    )
+}
+
+fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
+    QueuedOperation::new(
+        QueuedOperationId::generate(),
+        node(entity),
+        QueuedPayload::Vector(QueuedVectorPayload {
+            previous: None,
+            replacement: Some(
+                QueuedVectorReplacement::try_new(
+                    TextPartition::Unpartitioned,
+                    Arc::from(components),
+                )
+                .unwrap(),
+            ),
+        }),
+    )
+}
+
+/// The ledger the previous load built from `reader`: each scope's queues
+/// fully decoded into one list, then charged in key order.
+async fn reference(
+    reader: &(impl DbReadOps + Sync),
+    layout: QueueLayout,
+) -> (Arc<IndexOperationBacklog>, LoadedQueueSummary) {
+    let backlog = ledger();
+    let mut summary = LoadedQueueSummary::default();
+    let own = match layout {
+        QueueLayout::Map => RecordKind::IndexOperationQueue,
+        QueueLayout::Rows => RecordKind::IndexOperationRow,
+    };
+    for scope in discover_scopes(reader).await.unwrap() {
+        let prefix = ManagedIndexKey::data_prefix(scope, ScopedKey::logical_prefix(own));
+        let mut rows = reader.scan_prefix(&prefix, ..).await.unwrap();
+        let mut queues: Vec<(QueueTarget, Vec<QueuedOperation>)> = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let (target, operations) =
+                match (layout, ManagedIndexKey::parse_data_from_slice(&row.key)) {
+                    (
+                        QueueLayout::Map,
+                        Ok(ManagedIndexKey::Data {
+                            kind: ScopedKey::IndexOperationQueue(key),
+                            ..
+                        }),
+                    ) => (
+                        QueueTarget::new(scope, key.index_id, key.generation),
+                        OperationQueue::decode(&row.value)
+                            .unwrap()
+                            .into_operations(),
+                    ),
+                    (
+                        QueueLayout::Rows,
+                        Ok(ManagedIndexKey::Data {
+                            kind: ScopedKey::IndexOperationRow(key),
+                            ..
+                        }),
+                    ) => (
+                        QueueTarget::new(scope, key.index_id, key.generation),
+                        vec![QueueRow::decode(&row.value).unwrap().1],
+                    ),
+                    (_, _) => panic!("the reference reads only its layout's queue keys"),
+                };
+            match queues.last_mut() {
+                Some((last, retained)) if *last == target => retained.extend(operations),
+                Some(_) | None => queues.push((target, operations)),
+            }
+        }
+        for (target, operations) in queues {
+            summary.queues += 1;
+            summary.operations += operations.len() as u64;
+            backlog.load_durable(
+                target,
+                operations.iter().map(|operation| {
+                    (
+                        operation.id(),
+                        operation.entity(),
+                        operation.retained_bytes(),
+                    )
+                }),
+            );
+        }
+    }
+    (backlog, summary)
+}
+
+/// Asserts that two ledgers hold the same charges, members, admission
+/// order, and outcomes.
+fn assert_same_ledger(actual: &IndexOperationBacklog, expected: &IndexOperationBacklog) {
+    assert_eq!(actual.charges(), expected.charges(), "charges");
+    assert_eq!(
+        actual.outstanding_admissions(),
+        expected.outstanding_admissions(),
+        "targets and their admission order"
+    );
+    assert_eq!(actual.totals(), expected.totals(), "usage and outcomes");
+}
+
+/// Loads `reader` into a fresh ledger and asserts it equals the reference.
+async fn assert_loads_like_the_reference(
+    reader: &(impl DbReadOps + Sync),
+    layout: QueueLayout,
+) -> (Arc<IndexOperationBacklog>, LoadedQueueSummary) {
+    let (expected, expected_summary) = reference(reader, layout).await;
+    let backlog = ledger();
+    let summary = load_backlog(reader, &QueueStore::new(layout, u64::MAX, 0), &backlog)
+        .await
+        .unwrap();
+    assert_eq!(summary, expected_summary);
+    assert_same_ledger(&backlog, &expected);
+    (backlog, summary)
+}
+
+async fn raw_db(store: Arc<dyn ObjectStore>) -> Db {
+    Db::builder(PATH, store)
+        .with_settings(manual_compaction_settings())
+        .with_merge_operator(Arc::new(HelixMergeOperator::new()))
+        .with_db_cache_disabled()
+        .build()
+        .await
+        .unwrap()
+}
+
+async fn flush(db: &Db) {
+    db.flush_with_options(slatedb::config::FlushOptions {
+        flush_type: slatedb::config::FlushType::MemTable,
+    })
+    .await
+    .unwrap();
+}
+
+async fn enqueue(
+    db: &Db,
+    queues: &QueueStore,
+    target: QueueTarget,
+    operations: &[QueuedOperation],
+) {
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    queues
+        .stage_enqueue(
+            &transaction,
+            target,
+            QueueOperand::enqueue(operations).unwrap(),
+            operations,
+        )
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// Acknowledges the first `count` operations of `target`'s queue.
+async fn acknowledge(db: &Db, queues: &QueueStore, target: QueueTarget, count: usize) {
+    let stored = queues.read(db, target).await.unwrap().unwrap();
+    let ids = stored
+        .operations()
+        .take(count)
+        .map(QueuedOperation::id)
+        .collect::<Vec<_>>();
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    queues
+        .stage_acknowledge(&transaction, target, &stored, &ids)
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// Writes keys of `scope` that sort just below and just above its queue
+/// range, plus graph-like keys before and after its index records, none of
+/// which a load may read as a queue.
+async fn surround(db: &Db, scope: DataScope) {
+    let mut prefix = Vec::new();
+    scope.encode_key_prefix(&mut prefix);
+    let range = discovery_range(scope);
+    let mut below = range.start.to_vec();
+    *below.last_mut().unwrap() -= 1;
+    below.extend_from_slice(&[0xFF; 4]);
+    for key in [
+        [prefix.as_slice(), &[0x01, 0x02]].concat(),
+        below,
+        range.end.to_vec(),
+        [range.end.as_ref(), &[0x00]].concat(),
+        [prefix.as_slice(), &[0x07, 0x01]].concat(),
+    ] {
+        db.put(key, b"not a queue").await.unwrap();
+    }
+}
+
+/// Every key and value in `db`.
+async fn snapshot(db: &Db) -> BTreeMap<Bytes, Bytes> {
+    let mut rows = db.scan(..).await.unwrap();
+    let mut all = BTreeMap::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        all.insert(row.key, row.value);
+    }
+    all
+}
+
+/// Scopes in key order with a queue: tenants 7 and 8 are adjacent, and the
+/// last tenant ID has no successor to seek to.
+fn queued_scopes() -> [DataScope; 5] {
+    [
+        DataScope::LegacyUnscoped,
+        tenant(0),
+        tenant(7),
+        tenant(8),
+        tenant(u128::MAX),
+    ]
+}
+
+/// Map-layout queues across scopes, generations, families, and storage
+/// tiers (a compacted run, L0, and the memtable), with partial and full
+/// acknowledgements, between keys a load must skip.
+async fn map_fixture(db: &Db, admin: &slatedb::admin::Admin) -> BTreeSet<QueueTarget> {
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let mut expected = BTreeSet::new();
+    for scope in queued_scopes().into_iter().chain((100..140).map(tenant)) {
+        surround(db, scope).await;
+    }
+    for (ordinal, scope) in queued_scopes().into_iter().enumerate() {
+        let base = ordinal as u64 * 100;
+        // Compacted: a text queue and two generations of one vector index.
+        enqueue(
+            db,
+            &queues,
+            queue_target(scope, 1, 1),
+            &[text(base, "a"), text(base + 1, "b")],
+        )
+        .await;
+        enqueue(
+            db,
+            &queues,
+            queue_target(scope, 2, 1),
+            &[vector(base, &[1.0, 2.0])],
+        )
+        .await;
+        enqueue(
+            db,
+            &queues,
+            queue_target(scope, 2, 2),
+            &[vector(base + 1, &[3.0, 4.0])],
+        )
+        .await;
+    }
+    flush(db).await;
+    compact_l0(admin, 0).await;
+    for (ordinal, scope) in queued_scopes().into_iter().enumerate() {
+        let base = ordinal as u64 * 100;
+        // L0: more work above the compacted base, and a queue that drains.
+        enqueue(
+            db,
+            &queues,
+            queue_target(scope, 1, 1),
+            &[text(base, "a2"), text(base + 2, "c")],
+        )
+        .await;
+        enqueue(
+            db,
+            &queues,
+            queue_target(scope, 3, 1),
+            &[text(base, "drained")],
+        )
+        .await;
+    }
+    flush(db).await;
+    for (ordinal, scope) in queued_scopes().into_iter().enumerate() {
+        let base = ordinal as u64 * 100;
+        // Memtable: partial and full acknowledgements, and fresh work.
+        acknowledge(db, &queues, queue_target(scope, 1, 1), 3).await;
+        acknowledge(db, &queues, queue_target(scope, 3, 1), 1).await;
+        enqueue(
+            db,
+            &queues,
+            queue_target(scope, 2, 2),
+            &[vector(base + 1, &[5.0, 6.0])],
+        )
+        .await;
+        expected.extend([
+            queue_target(scope, 1, 1),
+            queue_target(scope, 2, 1),
+            queue_target(scope, 2, 2),
+        ]);
+    }
+    expected
+}
+
+#[tokio::test]
+async fn one_pass_charges_exactly_what_full_decodes_charged_across_scopes_and_tiers() {
+    let store = Arc::new(InMemory::new());
+    let db = raw_db(store.clone()).await;
+    let admin = slatedb::admin::Admin::builder(PATH, store.clone()).build();
+    let expected = map_fixture(&db, &admin).await;
+
+    let (backlog, summary) = assert_loads_like_the_reference(&db, QueueLayout::Map).await;
+    assert_eq!(
+        backlog
+            .outstanding_targets()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        expected,
+        "every queue with work and no drained one"
+    );
+    // Per scope: text queue 1 keeps 1 of 4, vector generations 1 and 2 keep
+    // 1 and 2.
+    assert_eq!(
+        summary,
+        LoadedQueueSummary {
+            queues: 3 * 5,
+            operations: 4 * 5,
+        }
+    );
+    assert_eq!(backlog.totals().outcomes.discovered, 4 * 5);
+    db.close().await.unwrap();
+
+    // A writer reopened over the same storage, whatever replayed, loads the
+    // same ledger again.
+    let db = raw_db(store).await;
+    let (reopened, _) = assert_loads_like_the_reference(&db, QueueLayout::Map).await;
+    assert_same_ledger(&reopened, &backlog);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_row_layout_groups_each_generation_and_resumes_its_sequence() {
+    let store = Arc::new(InMemory::new());
+    let db = raw_db(store.clone()).await;
+    let writer = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let scopes = [DataScope::LegacyUnscoped, tenant(5), tenant(6)];
+    for scope in scopes.into_iter().chain([tenant(4), tenant(9)]) {
+        surround(&db, scope).await;
+    }
+    // Interleaved commits: one generation's rows are contiguous by key only.
+    for round in 0..3_u64 {
+        for scope in scopes {
+            enqueue(&db, &writer, queue_target(scope, 1, 1), &[text(round, "t")]).await;
+            enqueue(&db, &writer, queue_target(scope, 1, 2), &[text(round, "u")]).await;
+            enqueue(
+                &db,
+                &writer,
+                queue_target(scope, 2, 1),
+                &[vector(round, &[1.0])],
+            )
+            .await;
+        }
+        flush(&db).await;
+    }
+    acknowledge(&db, &writer, queue_target(tenant(5), 1, 1), 2).await;
+    acknowledge(&db, &writer, queue_target(tenant(6), 2, 1), 3).await;
+
+    let (expected, expected_summary) = reference(&db, QueueLayout::Rows).await;
+    let loaded = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let backlog = ledger();
+    let summary = load_backlog(&db, &loaded, &backlog).await.unwrap();
+    assert_eq!(summary, expected_summary);
+    assert_eq!(
+        summary,
+        LoadedQueueSummary {
+            queues: 3 * 3 - 1,
+            operations: 3 * 3 * 3 - 2 - 3,
+        }
+    );
+    assert_same_ledger(&backlog, &expected);
+
+    // The loaded store allocates past every retained row's sequence.
+    let sequences = |all: BTreeMap<Bytes, Bytes>| {
+        all.into_keys()
+            .filter_map(|key| match ManagedIndexKey::parse_data_from_slice(&key) {
+                Ok(ManagedIndexKey::Data {
+                    kind: ScopedKey::IndexOperationRow(row),
+                    ..
+                }) => Some(row.sequence),
+                Ok(_) | Err(_) => None,
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let before = sequences(snapshot(&db).await);
+    enqueue(
+        &db,
+        &loaded,
+        queue_target(tenant(5), 1, 1),
+        &[text(9, "after")],
+    )
+    .await;
+    let after = sequences(snapshot(&db).await);
+    let added = after.difference(&before).copied().collect::<Vec<_>>();
+    assert_eq!(added.len(), 1);
+    assert!(added[0] > *before.last().unwrap());
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_queue_of_the_other_layout_fails_closed_in_every_scope() {
+    for (writer, reader) in [
+        (QueueLayout::Rows, QueueLayout::Map),
+        (QueueLayout::Map, QueueLayout::Rows),
+    ] {
+        for scope in [DataScope::LegacyUnscoped, tenant(3), tenant(u128::MAX)] {
+            let db = raw_db(Arc::new(InMemory::new())).await;
+            let own = QueueStore::new(reader, u64::MAX, 0);
+            // This layout's queues load in every other scope first.
+            for other in [DataScope::LegacyUnscoped, tenant(2), tenant(4)] {
+                if other != scope {
+                    enqueue(&db, &own, queue_target(other, 1, 1), &[text(1, "own")]).await;
+                }
+            }
+            let foreign = QueueStore::new(writer, u64::MAX, 0);
+            enqueue(
+                &db,
+                &foreign,
+                queue_target(scope, 1, 1),
+                &[text(1, "foreign")],
+            )
+            .await;
+            let Err(HelixDbError::Config(message)) =
+                load_backlog(&db, &QueueStore::new(reader, u64::MAX, 0), &ledger()).await
+            else {
+                panic!("{reader:?} must refuse {writer:?} queues in {scope:?}");
+            };
+            assert!(
+                message.contains(&format!("layout other than {reader:?}")),
+                "{message}"
+            );
+            db.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn corrupt_keys_values_and_envelopes_fail_closed() {
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let scope = tenant(0x51);
+    let target = queue_target(scope, 1, 1);
+    // A corrupt payload behind valid framing: a stored value no merge
+    // validated, as after bit rot in a resolved value.
+    let mut nan = vec![0x01, 0x01, 0x00, 0x01, 0x01, 0x01];
+    nan.extend_from_slice(&f32::NAN.to_bits().to_be_bytes());
+    let mut value = vec![0x01, 0x14, 0x01, 0x00, 0x01, 0x01];
+    value.extend_from_slice(&1_u128.to_be_bytes());
+    value.push(u8::try_from(nan.len()).unwrap());
+    value.extend_from_slice(&nan);
+    // The same operation ID twice in one value.
+    let operation = text(1, "twice");
+    let once = QueueOperand::enqueue(std::slice::from_ref(&operation)).unwrap();
+    let record = &once.bytes()[5..];
+    let duplicate = [&[0x01_u8, 0x14, 0x02, 0x00, 0x02][..], record, record].concat();
+    let mut truncated = target.key().to_vec();
+    truncated.pop();
+    for (name, key, value, expected) in [
+        ("payload", target.key().to_vec(), value, "not finite"),
+        ("duplicate", target.key().to_vec(), duplicate, "twice"),
+        (
+            "foreign key",
+            truncated,
+            once.bytes().to_vec(),
+            "operation queue prefix holds another key",
+        ),
+        (
+            "envelope",
+            vec![TENANT_KEY_PREFIX, 0x01],
+            b"x".to_vec(),
+            "tenant discovery encountered an invalid envelope",
+        ),
+    ] {
+        let db = raw_db(Arc::new(InMemory::new())).await;
+        enqueue(
+            &db,
+            &queues,
+            queue_target(DataScope::LegacyUnscoped, 1, 1),
+            &[text(1, "ok")],
+        )
+        .await;
+        db.put(&key, &value).await.unwrap();
+        let error = load_backlog(&db, &queues, &ledger()).await.expect_err(name);
+        assert!(error.to_string().contains(expected), "{name}: {error}");
+        db.close().await.unwrap();
+    }
+}
+
+/// Object store that fails the `remaining`-th SST read once armed.
+#[derive(Debug)]
+struct FailingSstReads {
+    inner: Arc<InMemory>,
+    armed: AtomicBool,
+    remaining: AtomicUsize,
+}
+
+impl std::fmt::Display for FailingSstReads {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("failing-sst-reads")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for FailingSstReads {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> ObjectStoreResult<PutResult> {
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
+        let sst = location.as_ref().ends_with(".sst") && !location.as_ref().contains("/wal/");
+        if sst
+            && self.armed.load(Ordering::SeqCst)
+            && self.remaining.fetch_sub(1, Ordering::SeqCst) == 0
+        {
+            self.armed.store(false, Ordering::SeqCst);
+            return Err(slatedb::object_store::Error::NotImplemented {
+                operation: "an injected crash".to_string(),
+                implementer: self.to_string(),
+            });
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, ObjectStoreResult<Path>>,
+    ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> ObjectStoreResult<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// A load is read-only, so a writer that dies at any storage read of it
+/// reopens to the same ledger and storage.
+#[tokio::test]
+async fn a_load_interrupted_at_any_read_reloads_the_same_ledger() {
+    let memory = Arc::new(InMemory::new());
+    let db = raw_db(memory.clone()).await;
+    let admin = slatedb::admin::Admin::builder(PATH, memory.clone()).build();
+    map_fixture(&db, &admin).await;
+    flush(&db).await;
+    let (expected, _) = reference(&db, QueueLayout::Map).await;
+    let stored = snapshot(&db).await;
+    db.close().await.unwrap();
+
+    let store = Arc::new(FailingSstReads {
+        inner: memory,
+        armed: AtomicBool::new(false),
+        remaining: AtomicUsize::new(0),
+    });
+    let mut interrupted = 0;
+    for read in 0.. {
+        let db = raw_db(store.clone()).await;
+        store.remaining.store(read, Ordering::SeqCst);
+        store.armed.store(true, Ordering::SeqCst);
+        let partial = ledger();
+        let result = load_backlog(
+            &db,
+            &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+            &partial,
+        )
+        .await;
+        let crashed = !store.armed.swap(false, Ordering::SeqCst);
+        // The writer dies with whatever it charged, however its storage
+        // handle closes; the next one starts over.
+        drop(partial);
+        drop(db.close().await);
+        let db = raw_db(store.clone()).await;
+        let backlog = ledger();
+        load_backlog(
+            &db,
+            &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+            &backlog,
+        )
+        .await
+        .unwrap();
+        assert_same_ledger(&backlog, &expected);
+        assert_eq!(snapshot(&db).await, stored, "a load writes nothing");
+        db.close().await.unwrap();
+        if !crashed {
+            result.expect("an uninterrupted load succeeds");
+            break;
+        }
+        assert!(result.is_err(), "read {read} was injected");
+        interrupted += 1;
+    }
+    assert!(interrupted > 5, "the load read storage {interrupted} times");
+}
+
+/// Opens a scoped index through the query boundary and waits for its build.
+async fn create_scoped(db: &HelixDB, scope: DataScope, spec: IndexSpec) {
+    let receipt = db
+        .query_scoped(
+            QueryRequest::write(
+                batch::write_batch()
+                    .var_as("created", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["created"]),
+            ),
+            scope,
+        )
+        .await
+        .unwrap();
+    let operation = receipt["created"]["operation_id"]
+        .as_str()
+        .or_else(|| receipt["created"][0]["operation_id"].as_str())
+        .unwrap_or_else(|| panic!("create accepted a build: {receipt}"))
+        .to_string();
+    for _ in 0..12_000 {
+        let status = db
+            .query_scoped(
+                QueryRequest::read(
+                    batch::read_batch()
+                        .var_as(
+                            "status",
+                            traversal::g().get_index_operation(operation.as_str()),
+                        )
+                        .returning(["status"]),
+                ),
+                scope,
+            )
+            .await
+            .unwrap();
+        match status["status"]["status"].as_str() {
+            Some("succeeded") => return,
+            Some("queued" | "running") => {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await
+            }
+            other => panic!("scoped build did not succeed: {other:?} {status}"),
+        }
+    }
+    panic!("scoped build stalled");
+}
+
+async fn scoped_add(db: &HelixDB, scope: DataScope, embedding: [f32; 2]) {
+    db.query_scoped(
+        QueryRequest::write(batch::write_batch().var_as(
+            "created",
+            traversal::g().add_n(
+                "Doc",
+                vec![(
+                    "embedding",
+                    helix_ast::value::PropertyInput::from(embedding.to_vec()),
+                )],
+            ),
+        )),
+        scope,
+    )
+    .await
+    .unwrap();
+}
+
+/// A reopened writer charges exactly what the previous load charged from the
+/// same storage, and exactly what the closed writer held: partially
+/// published queues, a dropped index's queue, and tenant queues with and
+/// without a canonical record.
+#[tokio::test]
+async fn a_reopened_writer_reloads_its_ledger_exactly() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open("recovery-writer", Arc::clone(&store), config()).await;
+    let text_spec = IndexSpec::node_text("Doc", "body", None::<&str>);
+    for spec in [vector_spec(), text_spec.clone()] {
+        let operation = create(&db, spec).await;
+        assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    }
+    let vector_target = target(&db, QueueFamily::Vector).await;
+    let text_target = target(&db, QueueFamily::Text).await;
+    let mut ids = Vec::new();
+    for index in 0..6_u8 {
+        let tenant_value = if index % 2 == 0 { "a" } else { "b" };
+        ids.push(
+            add(
+                &db,
+                [f32::from(index), 1.0],
+                &format!("doc {index}"),
+                Some(tenant_value),
+            )
+            .await,
+        );
+    }
+    update(&db, ids[1], [9.0, 9.0], "rewritten").await;
+    delete(&db, ids[2]).await;
+    // Publish one vector operation, so its queue reloads partially acknowledged.
+    let first = queue(&db, QueueFamily::Vector).await.unwrap().operations()[0].retained_bytes();
+    let narrow = publisher_with_limits(
+        &db,
+        batch_limits(first, 32_768),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
+    let outcome = narrow.publish_once(vector_target).await.unwrap();
+    assert!(
+        matches!(outcome, PublicationOutcome::Published { operations: 1, .. }),
+        "{outcome:?}"
+    );
+    // Dropping the text index leaves its queued work to discard.
+    let dropped = drop_index(&db, text_spec).await.unwrap();
+    assert_eq!(wait_terminal(&db, &dropped).await, "succeeded");
+    // A tenant index with a canonical record, and a tenant queue without one.
+    let scoped = tenant(0x51);
+    create_scoped(
+        &db,
+        scoped,
+        IndexSpec::node_vector(
+            "Doc",
+            "embedding",
+            std::num::NonZeroUsize::new(2).unwrap(),
+            helix_ast::index::VectorDistanceMetric::Euclidean,
+            None::<&str>,
+        ),
+    )
+    .await;
+    for index in 0..3_u8 {
+        scoped_add(&db, scoped, [f32::from(index), 2.0]).await;
+    }
+    let orphan = queue_target(tenant(0x52), 999, 1);
+    enqueue(
+        &db.inner_db(),
+        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        orphan,
+        &[vector(1, &[1.0, 1.0]), vector(2, &[2.0, 2.0])],
+    )
+    .await;
+
+    let backlog = db.index_operation_backlog();
+    let targets = backlog.outstanding_targets();
+    assert!(targets.contains(&vector_target) && targets.contains(&text_target));
+    assert!(targets.iter().any(|target| target.scope == scoped));
+    let usage = targets
+        .iter()
+        .filter(|target| **target != orphan)
+        .map(|target| (*target, backlog.usage(target.scope, target.index_id)))
+        .collect::<Vec<_>>();
+    let pending = db.index_operation_queue_stats().pending_operations;
+    db.close().await.unwrap();
+
+    let db = open("recovery-writer", Arc::clone(&store), config()).await;
+    let (expected, _) = reference(db.inner_db().as_ref(), QueueLayout::Map).await;
+    let reloaded = db.index_operation_backlog();
+    assert_same_ledger(reloaded, &expected);
+    let mut with_orphan = targets.clone();
+    with_orphan.push(orphan);
+    with_orphan.sort_unstable();
+    with_orphan.dedup();
+    assert_eq!(reloaded.outstanding_targets(), with_orphan);
+    for (target, before) in usage {
+        assert_eq!(
+            reloaded.usage(target.scope, target.index_id),
+            before,
+            "{target:?} reloads the usage it held"
+        );
+    }
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(stats.pending_operations, pending + 2);
+    assert_eq!(stats.discovered_operations, stats.pending_operations);
+
+    // Everything reloaded drains: live queues publish, the dropped index's
+    // and the orphan's are discarded.
+    let publisher = db.index_queue_publisher().unwrap();
+    for target in reloaded.outstanding_targets() {
+        for _ in 0..100 {
+            match publisher.publish_once(target).await.unwrap() {
+                PublicationOutcome::Empty => break,
+                PublicationOutcome::Published { .. }
+                | PublicationOutcome::Discarded { .. }
+                | PublicationOutcome::Trimmed => {}
+                outcome @ (PublicationOutcome::Deferred
+                | PublicationOutcome::Retry
+                | PublicationOutcome::Blocked
+                | PublicationOutcome::Stalled) => panic!("{target:?} stalled: {outcome:?}"),
+            }
+        }
+    }
+    assert!(reloaded.outstanding_targets().is_empty());
+    assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
+    db.close().await.unwrap();
+}

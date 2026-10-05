@@ -399,7 +399,7 @@ async fn submit_compaction(
     .expect("compaction commits its manifest");
 }
 
-async fn compact_l0(admin: &slatedb::admin::Admin, destination: u32) {
+pub(super) async fn compact_l0(admin: &slatedb::admin::Admin, destination: u32) {
     let manifest = admin.read_manifest(None).await.unwrap().unwrap();
     submit_compaction(
         admin,
@@ -441,7 +441,7 @@ async fn compacted_ids(store: &Arc<InMemory>) -> Vec<u128> {
 
 /// Settings under which only submitted compactions run, so a test decides
 /// exactly which base stays hidden below upper sorted runs.
-fn manual_compaction_settings() -> config::Settings {
+pub(super) fn manual_compaction_settings() -> config::Settings {
     config::Settings {
         flush_interval: Some(Duration::from_millis(1)),
         manifest_poll_interval: Duration::from_millis(10),

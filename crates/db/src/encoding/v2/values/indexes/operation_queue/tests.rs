@@ -421,16 +421,25 @@ fn malformed_values_are_errors_not_empty_queues() {
             OperationQueue::decode(&bytes).is_err(),
             "{name} must not decode"
         );
+        assert!(
+            OperationFrame::decode_queue(&bytes).is_err(),
+            "{name} must not frame"
+        );
     }
 
     // Resolved readers reject unresolved transformations.
-    assert!(OperationQueue::decode(&raw_value(QueueFamily::Text, &[1], &[])).is_err());
-    assert!(OperationQueue::decode(&raw_value(
-        QueueFamily::Text,
-        &[],
-        &[(InsertMode::Set, 1, body.clone())]
-    ))
-    .is_err());
+    for unresolved in [
+        raw_value(QueueFamily::Text, &[1], &[]),
+        raw_value(
+            QueueFamily::Text,
+            &[],
+            &[(InsertMode::Set, 1, body.clone())],
+        ),
+        raw_value(QueueFamily::Text, &[], &[]),
+    ] {
+        assert!(OperationQueue::decode(&unresolved).is_err());
+        assert!(OperationFrame::decode_queue(&unresolved).is_err());
+    }
     // Mixed families never merge.
     let vector = raw_value(
         QueueFamily::Vector,
@@ -1307,6 +1316,92 @@ proptest! {
     }
 }
 
+fn partition_strategy() -> impl Strategy<Value = TextPartition> {
+    prop_oneof![
+        Just(TextPartition::Unpartitioned),
+        proptest::collection::vec(any::<u8>(), 1..4).prop_map(|bytes| tenant(&bytes)),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Frames are exactly the identity, entity, and retained bytes of a full
+    /// decode, for every payload shape and every resolved queue.
+    #[test]
+    fn frames_match_full_decodes_of_arbitrary_queues(
+        vector in any::<bool>(),
+        operations in proptest::collection::vec(
+            (
+                any::<bool>(),
+                any::<u64>(),
+                proptest::option::of(partition_strategy()),
+                proptest::option::of((
+                    partition_strategy(),
+                    proptest::collection::vec(-1.0e6_f32..1.0e6, 1..6),
+                )),
+                proptest::option::of((partition_strategy(), ".{0,12}")),
+            ),
+            1..24,
+        ),
+    ) {
+        let operations = operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, (edge, entity, previous, vector_replacement, text_replacement))| {
+                let payload = if vector {
+                    QueuedPayload::Vector(QueuedVectorPayload {
+                        previous,
+                        replacement: vector_replacement.map(|(partition, components)| {
+                            QueuedVectorReplacement::try_new(partition, Arc::from(components))
+                                .unwrap()
+                        }),
+                    })
+                } else {
+                    QueuedPayload::Text(QueuedTextPayload {
+                        replacement: text_replacement.map(|(partition, text)| {
+                            QueuedTextReplacement::new(partition, Arc::from(text.as_str()))
+                        }),
+                    })
+                };
+                QueuedOperation::new(
+                    id(index as u128 + 1),
+                    IndexEntity {
+                        kind: if edge { IndexElementKind::Edge } else { IndexElementKind::Node },
+                        id: IndexEntityId::new(entity),
+                    },
+                    payload,
+                )
+            })
+            .collect::<Vec<_>>();
+        // One operand per operation, so one entity may repeat across them.
+        let operands = operations
+            .iter()
+            .map(|operation| {
+                QueueOperand::enqueue(std::slice::from_ref(operation))
+                    .unwrap()
+                    .bytes()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let QueueMergeResult::Value(value) = merge_with_base(None, &operands).unwrap() else {
+            panic!("a non-empty queue resolves to a value");
+        };
+        let decoded = OperationQueue::decode(&value).unwrap();
+        prop_assert_eq!(
+            OperationFrame::decode_queue(&value).unwrap(),
+            (decoded.family(), decoded.operations().iter().map(frame).collect::<Vec<_>>())
+        );
+        for operation in &operations {
+            prop_assert_eq!(
+                OperationFrame::decode_row(&QueueRow::encode(decoded.family(), operation))
+                    .unwrap(),
+                (decoded.family(), frame(operation))
+            );
+        }
+    }
+}
+
 #[test]
 fn queue_keys_round_trip_for_every_scope() {
     for scope in [
@@ -1393,10 +1488,116 @@ fn malformed_rows_are_errors() {
         ),
     ] {
         assert!(QueueRow::decode(&bytes).is_err(), "{case} must not decode");
+        assert!(
+            OperationFrame::decode_row(&bytes).is_err(),
+            "{case} must not frame"
+        );
     }
     // A merge-layout value is never accepted as a row.
     let map_value = QueueOperand::enqueue(&[text_operation(9, 5, Some("row"))]).unwrap();
     assert!(QueueRow::decode(map_value.bytes()).is_err());
+    assert!(OperationFrame::decode_row(map_value.bytes()).is_err());
+    // Nor a row as a map-layout value.
+    assert!(OperationFrame::decode_queue(&valid).is_err());
+}
+
+fn frame(operation: &QueuedOperation) -> OperationFrame {
+    OperationFrame {
+        id: operation.id(),
+        entity: operation.entity(),
+        retained_bytes: operation.retained_bytes(),
+    }
+}
+
+#[test]
+fn frames_match_full_decodes_of_every_payload_shape() {
+    let vectors = vec![
+        vector_operation(
+            1,
+            7,
+            None,
+            Some((TextPartition::Unpartitioned, vec![0.25; 1536])),
+        ),
+        vector_operation(2, 9, None, None),
+        vector_operation(
+            3,
+            u64::MAX,
+            Some(tenant(b"old")),
+            Some((tenant(b"new"), vec![-0.0, f32::MIN])),
+        ),
+        vector_operation(4, 7, Some(TextPartition::Unpartitioned), None),
+    ];
+    let texts = vec![
+        text_operation(5, 0, None),
+        text_operation(6, 300, Some("h\u{e9}llo")),
+        text_operation(7, 0, Some("")),
+    ];
+    for (family, operations) in [(QueueFamily::Vector, vectors), (QueueFamily::Text, texts)] {
+        let operand = QueueOperand::enqueue(&operations[..2]).unwrap();
+        let later = QueueOperand::enqueue(&operations[2..]).unwrap();
+        let QueueMergeResult::Value(value) =
+            merge_with_base(None, &[operand.bytes().clone(), later.bytes().clone()]).unwrap()
+        else {
+            panic!("a non-empty queue resolves to a value");
+        };
+        let decoded = OperationQueue::decode(&value).unwrap();
+        assert_eq!(
+            OperationFrame::decode_queue(&value).unwrap(),
+            (
+                family,
+                decoded.operations().iter().map(frame).collect::<Vec<_>>()
+            )
+        );
+        for operation in &operations {
+            assert_eq!(
+                OperationFrame::decode_row(&QueueRow::encode(family, operation)).unwrap(),
+                (family, frame(operation))
+            );
+        }
+    }
+    // The sizes the type's documentation shows.
+    let (_, frames) = OperationFrame::decode_queue(
+        QueueOperand::enqueue(&[
+            vector_operation(
+                1,
+                7,
+                None,
+                Some((TextPartition::Unpartitioned, vec![0.25; 1536])),
+            ),
+            vector_operation(2, 9, None, None),
+        ])
+        .unwrap()
+        .bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| (frame.entity.id.get(), frame.retained_bytes))
+            .collect::<Vec<_>>(),
+        [(7, 6_170), (9, 22)]
+    );
+}
+
+#[test]
+fn frames_validate_payloads_in_place() {
+    // Only the payload is corrupt: framing and entity are intact.
+    let mut nan = vec![0x01, 0x01, 0x00, 0x01, 0x01, 0x01];
+    nan.put_u32(f32::NAN.to_bits());
+    let value = raw_value(QueueFamily::Vector, &[], &[(InsertMode::IfAbsent, 1, nan)]);
+    assert!(OperationQueue::decode(&value).is_err());
+    assert!(OperationFrame::decode_queue(&value).is_err());
+    let invalid_utf8 = vec![0x01, 0x01, 0x01, 0x01, 0x02, 0xC3, 0x28];
+    let value = raw_value(
+        QueueFamily::Text,
+        &[],
+        &[
+            (InsertMode::IfAbsent, 1, text_body(1, "valid")),
+            (InsertMode::IfAbsent, 2, invalid_utf8),
+        ],
+    );
+    assert!(OperationQueue::decode(&value).is_err());
+    assert!(OperationFrame::decode_queue(&value).is_err());
 }
 
 #[test]

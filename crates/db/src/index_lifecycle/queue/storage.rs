@@ -27,8 +27,8 @@ use crate::encoding::v2::keys::{
     IndexEntity, IndexOperationRowKey, ManagedIndexKey, RecordKind, ScopedKey,
 };
 use crate::encoding::v2::values::indexes::operation_queue::{
-    LatestOperations, OperationQueue, QueueFamily, QueueOperand, QueueRow, QueuedOperation,
-    QueuedOperationId, QueuedPayload,
+    LatestOperations, OperationFrame, OperationQueue, QueueFamily, QueueOperand, QueueRow,
+    QueuedOperation, QueuedOperationId, QueuedPayload,
 };
 use crate::error::{HelixDbError, Result};
 
@@ -680,76 +680,144 @@ impl QueueStore {
             .unwrap_or(NonZeroUsize::MIN)
     }
 
-    /// Discovers every queue in `scope` for startup accounting.
-    ///
-    /// Rows of the other layout mean the database was written with a
-    /// different layout, which fails closed rather than orphaning work.
-    pub(crate) async fn discover(
-        &self,
-        read: &(impl DbReadOps + Sync),
-        scope: DataScope,
-    ) -> Result<Vec<(QueueTarget, OperationQueue)>> {
-        require_scope_layout(read, self.layout, scope).await?;
-        let own = match self.layout {
-            QueueLayout::Map => RecordKind::IndexOperationQueue,
-            QueueLayout::Rows => RecordKind::IndexOperationRow,
-        };
-        let prefix = ManagedIndexKey::data_prefix(scope, ScopedKey::logical_prefix(own));
-        let mut scan = read.scan_prefix(&prefix, ..).await?;
-        let mut queues = Vec::new();
-        // Row keys sort by (index, generation, sequence), so one generation's
-        // rows are contiguous and already in enqueue order.
-        let mut pending: Option<(QueueTarget, QueueFamily, Vec<QueuedOperation>)> = None;
-        while let Some(row) = scan.next().await? {
-            match ManagedIndexKey::parse_data_from_slice(&row.key) {
-                Ok(ManagedIndexKey::Data {
-                    scope: key_scope,
-                    kind: ScopedKey::IndexOperationQueue(key),
-                }) if key_scope == scope => queues.push((
-                    QueueTarget::new(scope, key.index_id, key.generation),
-                    OperationQueue::decode(&row.value)?,
-                )),
-                Ok(ManagedIndexKey::Data {
-                    scope: key_scope,
-                    kind: ScopedKey::IndexOperationRow(key),
-                }) if key_scope == scope => {
-                    self.next_sequence
-                        .fetch_max(key.sequence.saturating_add(1), Ordering::Relaxed);
-                    let target = QueueTarget::new(scope, key.index_id, key.generation);
-                    let (family, operation) = QueueRow::decode(&row.value)?;
-                    match pending.as_mut() {
-                        Some((current, current_family, operations)) if *current == target => {
-                            if *current_family != family {
-                                return Err(HelixDbError::IndexCatalogCorruption(format!(
-                                    "operation rows for index {} mix families",
-                                    target.index_id.get()
-                                )));
-                            }
-                            operations.push(operation);
-                        }
-                        Some(_) | None => {
-                            queues.extend(finish_rows(pending.take()));
-                            pending = Some((target, family, vec![operation]));
-                        }
-                    }
-                }
-                Ok(_) | Err(_) => {
-                    return Err(HelixDbError::IndexCatalogCorruption(
-                        "operation queue prefix holds another key".to_string(),
-                    ));
-                }
-            }
+    /// Groups the rows of [`discovery_range`]s, read in key order, into
+    /// generation queues for startup accounting.
+    pub(crate) const fn discovery(&self) -> QueueDiscovery<'_> {
+        QueueDiscovery {
+            store: self,
+            pending: None,
         }
-        queues.extend(finish_rows(pending));
-        Ok(queues)
+    }
+}
+
+/// Every queue key of `scope` in either layout.
+///
+/// The layouts' record kinds are adjacent, so one scan of this range both
+/// finds this layout's queues and fails closed on the other's, without a
+/// separate probe.
+pub(crate) fn discovery_range(scope: DataScope) -> std::ops::Range<Bytes> {
+    const _: () = assert!(
+        RecordKind::IndexOperationRow.as_u8() == RecordKind::IndexOperationQueue.as_u8() + 1,
+        "both queue layouts form one contiguous key range"
+    );
+    let start = ManagedIndexKey::data_prefix(
+        scope,
+        ScopedKey::logical_prefix(RecordKind::IndexOperationQueue),
+    );
+    let mut end = ManagedIndexKey::data_prefix(
+        scope,
+        ScopedKey::logical_prefix(RecordKind::IndexOperationRow),
+    )
+    .to_vec();
+    *end.last_mut().expect("a logical prefix ends with its kind") += 1;
+    start..Bytes::from(end)
+}
+
+/// One generation queue found at startup, as its operations' frames in
+/// storage order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveredQueue {
+    pub(crate) target: QueueTarget,
+    pub(crate) family: QueueFamily,
+    /// Never empty.
+    pub(crate) frames: Vec<OperationFrame>,
+}
+
+/// Turns the rows of [`discovery_range`]s into generation queues as a scan
+/// yields them, so startup holds one queue at a time rather than all of a
+/// scope's.
+///
+/// # Contract
+///
+/// Rows must arrive in key order: each map-layout row is a whole queue, and
+/// one generation's row-layout rows are contiguous and already in enqueue
+/// order, so a row-layout queue completes when the next generation's first
+/// row arrives or at [`Self::finish`]. A row of the other layout fails
+/// closed with [`HelixDbError::Config`], since the publisher and search
+/// overlays would never see its operations; any other key, a queue that
+/// does not decode, and one generation's rows of two families are
+/// [`HelixDbError::IndexCatalogCorruption`] or encoding errors.
+///
+/// ```text
+/// map  rows: [q(1,1)] [q(2,1)]              -> push: q(1,1), q(2,1); finish: -
+/// rows rows: [r(1,1,0)] [r(1,1,1)] [r(2,1,2)] -> push: -, -, q(1,1); finish: q(2,1)
+/// ```
+#[derive(Debug)]
+pub(crate) struct QueueDiscovery<'a> {
+    store: &'a QueueStore,
+    /// The row-layout generation whose rows are still arriving.
+    pending: Option<DiscoveredQueue>,
+}
+
+impl QueueDiscovery<'_> {
+    /// Accepts the next row of a discovery range and returns the queue it
+    /// completes, if any.
+    pub(crate) fn push(&mut self, key: &[u8], value: &[u8]) -> Result<Option<DiscoveredQueue>> {
+        let Ok(ManagedIndexKey::Data { scope, kind }) = ManagedIndexKey::parse_data_from_slice(key)
+        else {
+            return Err(HelixDbError::IndexCatalogCorruption(
+                "operation queue prefix holds another key".to_string(),
+            ));
+        };
+        match (self.store.layout, kind) {
+            (QueueLayout::Map, ScopedKey::IndexOperationQueue(key)) => {
+                let (family, frames) = OperationFrame::decode_queue(value)?;
+                Ok(Some(DiscoveredQueue {
+                    target: QueueTarget::new(scope, key.index_id, key.generation),
+                    family,
+                    frames,
+                }))
+            }
+            (QueueLayout::Rows, ScopedKey::IndexOperationRow(key)) => {
+                self.store
+                    .next_sequence
+                    .fetch_max(key.sequence.saturating_add(1), Ordering::Relaxed);
+                let target = QueueTarget::new(scope, key.index_id, key.generation);
+                let (family, frame) = OperationFrame::decode_row(value)?;
+                let Some(pending) = self
+                    .pending
+                    .as_mut()
+                    .filter(|pending| pending.target == target)
+                else {
+                    return Ok(self.pending.replace(DiscoveredQueue {
+                        target,
+                        family,
+                        frames: vec![frame],
+                    }));
+                };
+                if pending.family != family {
+                    return Err(HelixDbError::IndexCatalogCorruption(format!(
+                        "operation rows for index {} mix families",
+                        target.index_id.get()
+                    )));
+                }
+                pending.frames.push(frame);
+                Ok(None)
+            }
+            (layout, ScopedKey::IndexOperationQueue(_) | ScopedKey::IndexOperationRow(_)) => {
+                Err(HelixDbError::Config(format!(
+                    "index operation queues were written with a layout other than {layout:?}"
+                )))
+            }
+            (_, _) => Err(HelixDbError::IndexCatalogCorruption(
+                "operation queue prefix holds another key".to_string(),
+            )),
+        }
+    }
+
+    /// Returns the last queue once every row was pushed.
+    pub(crate) fn finish(self) -> Option<DiscoveredQueue> {
+        self.pending
     }
 }
 
 /// Fails closed when `scope` holds queues written with a layout other than
 /// `layout`.
 ///
-/// Recovery, publication, and search overlays read one layout only, so the
-/// other layout's operations would otherwise be silently invisible.
+/// Search overlays read one layout only, so the other layout's operations
+/// would otherwise be silently invisible to a reader. Writers check the
+/// layout while discovering queues instead.
+#[cfg(any(test, feature = "async-index-benchmark"))]
 pub(crate) async fn require_scope_layout(
     read: &(impl DbReadOps + Sync),
     layout: QueueLayout,
@@ -766,14 +834,6 @@ pub(crate) async fn require_scope_layout(
         )));
     }
     Ok(())
-}
-
-/// Closes one generation's contiguous rows into a queue.
-fn finish_rows(
-    rows: Option<(QueueTarget, QueueFamily, Vec<QueuedOperation>)>,
-) -> Option<(QueueTarget, OperationQueue)> {
-    let (target, family, operations) = rows?;
-    OperationQueue::from_rows(family, operations).map(|queue| (target, queue))
 }
 
 /// Prefix of every row of one generation queue (row layout).

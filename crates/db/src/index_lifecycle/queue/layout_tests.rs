@@ -12,7 +12,9 @@ use helix_ast::query::SearchConsistency;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
+use super::backlog::{BacklogLimits, IndexOperationBacklog};
 use super::overlay_tests::{add, delete, drain, text_search, update, vector_search};
+use super::recovery::load_backlog;
 use super::storage::QueueStore;
 use super::tests::{install_vector_and_text, open, queued, target};
 use super::QueueTarget;
@@ -26,6 +28,7 @@ use crate::encoding::v2::values::indexes::operation_queue::{
     QueuedTextPayload, QueuedVectorPayload,
 };
 use crate::error::HelixDbError;
+use crate::index_lifecycle::worker::IndexWorkerWakeHandle;
 use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
 use crate::HelixDB;
 
@@ -417,8 +420,15 @@ async fn corrupt_row_queues_fail_closed() {
         store.read(storage.as_ref(), text).await,
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
+    let backlog = IndexOperationBacklog::new(
+        BacklogLimits {
+            max_retained_bytes: u64::MAX,
+            max_members: u64::MAX,
+        },
+        IndexWorkerWakeHandle::default(),
+    );
     assert!(matches!(
-        store.discover(storage.as_ref(), text.scope).await,
+        load_backlog(storage.as_ref(), &store, &backlog).await,
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
 
@@ -433,7 +443,7 @@ async fn corrupt_row_queues_fail_closed() {
         .await
         .unwrap();
     assert!(matches!(
-        store.discover(storage.as_ref(), text.scope).await,
+        load_backlog(storage.as_ref(), &store, &backlog).await,
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
     db.close().await.unwrap();
