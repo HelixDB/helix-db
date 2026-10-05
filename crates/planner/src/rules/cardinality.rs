@@ -1055,24 +1055,31 @@ fn count_plan_cursor(
             lookup: plan.lookup,
             verification: plan.verification,
         }),
-        // A range cursor streams only its driver, so bitmap filters of an
-        // ordered intersection would be dropped from the counted rows.
-        exec::ExecCountPlan::NodeRange(plan) => match plan.membership {
+        // A range cursor streams only its driver, so an ordered
+        // intersection's bitmap filters join it as an ID-set intersection;
+        // dropping them would count every range match.
+        exec::ExecCountPlan::NodeRange(plan) => Ok(match plan.membership {
             exec::ExecNodeRangeMembershipPlan::All => {
-                Ok(exec::ExecCountCursorPlan::NodeRange(plan.driver))
+                exec::ExecCountCursorPlan::NodeRange(plan.driver)
             }
-            exec::ExecNodeRangeMembershipPlan::BitmapFilters(_) => {
-                Err(rejection("filtered_range_count_is_not_a_row_cursor"))
+            exec::ExecNodeRangeMembershipPlan::BitmapFilters(filters) => {
+                exec::ExecCountCursorPlan::Intersect {
+                    driver: Box::new(exec::ExecCountCursorPlan::NodeRange(plan.driver)),
+                    rest: filters.map(exec::ExecCountCursorPlan::NodeBitmap),
+                }
             }
-        },
-        exec::ExecCountPlan::EdgeRange(plan) => match plan.membership {
+        }),
+        exec::ExecCountPlan::EdgeRange(plan) => Ok(match plan.membership {
             exec::ExecEdgeRangeMembershipPlan::All => {
-                Ok(exec::ExecCountCursorPlan::EdgeRange(plan.driver))
+                exec::ExecCountCursorPlan::EdgeRange(plan.driver)
             }
-            exec::ExecEdgeRangeMembershipPlan::BitmapFilters(_) => {
-                Err(rejection("filtered_range_count_is_not_a_row_cursor"))
+            exec::ExecEdgeRangeMembershipPlan::BitmapFilters(filters) => {
+                exec::ExecCountCursorPlan::Intersect {
+                    driver: Box::new(exec::ExecCountCursorPlan::EdgeRange(plan.driver)),
+                    rest: filters.map(exec::ExecCountCursorPlan::EdgeBitmap),
+                }
             }
-        },
+        }),
         exec::ExecCountPlan::NodeAuthoritativeScan(plan) => Ok(
             exec::ExecCountCursorPlan::NodeAuthoritativeScan(plan.predicate),
         ),
