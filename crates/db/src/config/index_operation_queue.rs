@@ -35,6 +35,21 @@
 //! assert_eq!(overhead, 576);
 //! assert_eq!(1_000_000_000 / overhead, 1_736_111);
 //!
+//! // A smaller retained-byte ceiling could not admit even the smallest
+//! // operation, so every queued write would fail.
+//! let smallest = IndexOperationQueueTuning::MIN_RETAINED_BYTES;
+//! assert_eq!(smallest, overhead + 21);
+//! assert!(IndexOperationQueueTuning::default()
+//!     .with_max_retained_bytes(NonZeroU64::new(smallest).unwrap())
+//!     .is_ok());
+//! assert_eq!(
+//!     IndexOperationQueueTuning::default()
+//!         .with_max_retained_bytes(NonZeroU64::new(smallest - 1).unwrap()),
+//!     Err(IndexOperationQueueTuningError::RetainedBytesBelowOneOperation {
+//!         requested: smallest - 1,
+//!     })
+//! );
+//!
 //! // A larger retained-byte ceiling could let one queue value outgrow the
 //! // longest value storage can encode.
 //! let largest = IndexOperationQueueTuning::MAX_RETAINED_BYTES;
@@ -60,6 +75,7 @@ const DEFAULT_MAX_OPERAND_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_RECOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const EVENTUAL_SEARCH_SOURCE_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const _: () = assert!(DEFAULT_MAX_RETAINED_BYTES <= IndexOperationQueueTuning::MAX_RETAINED_BYTES);
+const _: () = assert!(DEFAULT_MAX_RETAINED_BYTES >= IndexOperationQueueTuning::MIN_RETAINED_BYTES);
 
 /// Invalid queue policy rejected before a database opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +85,13 @@ pub enum IndexOperationQueueTuningError {
     /// The retained-byte ceiling exceeds
     /// [`IndexOperationQueueTuning::MAX_RETAINED_BYTES`].
     RetainedBytesAboveQueueValueLimit {
+        /// The rejected ceiling.
+        requested: u64,
+    },
+    /// The retained-byte ceiling is below
+    /// [`IndexOperationQueueTuning::MIN_RETAINED_BYTES`], so it could not
+    /// admit even the smallest operation.
+    RetainedBytesBelowOneOperation {
         /// The rejected ceiling.
         requested: u64,
     },
@@ -85,6 +108,12 @@ impl core::fmt::Display for IndexOperationQueueTuningError {
                 "index operation queue max retained bytes {requested} exceed the queue value \
                  limit {}",
                 IndexOperationQueueTuning::MAX_RETAINED_BYTES
+            ),
+            Self::RetainedBytesBelowOneOperation { requested } => write!(
+                formatter,
+                "index operation queue max retained bytes {requested} are below the charge of \
+                 the smallest operation {}",
+                IndexOperationQueueTuning::MIN_RETAINED_BYTES
             ),
         }
     }
@@ -170,6 +199,14 @@ impl IndexOperationQueueTuning {
     pub const OPERATION_OVERHEAD_BYTES: u64 =
         crate::index_lifecycle::queue::backlog::OPERATION_OVERHEAD_BYTES;
 
+    /// Smallest retained-byte ceiling: the charge of the smallest operation,
+    /// a deletion of an entity whose ID encodes in one byte. Every queued
+    /// operation is charged at least this much, so a lower ceiling would
+    /// reject every queued write.
+    pub const MIN_RETAINED_BYTES: u64 = crate::index_lifecycle::queue::backlog::charged_bytes(
+        crate::encoding::v2::values::indexes::operation_queue::MIN_RETAINED_RECORD_LEN as u64,
+    );
+
     /// Returns the retained-operation byte ceiling per logical index: each
     /// queued operation counts its encoded size plus
     /// [`Self::OPERATION_OVERHEAD_BYTES`].
@@ -209,12 +246,20 @@ impl IndexOperationQueueTuning {
         self
     }
 
-    /// Replaces the retained-operation byte ceiling; a ceiling above
-    /// [`Self::MAX_RETAINED_BYTES`] is rejected.
+    /// Replaces the retained-operation byte ceiling; a ceiling below
+    /// [`Self::MIN_RETAINED_BYTES`] or above [`Self::MAX_RETAINED_BYTES`] is
+    /// rejected.
     pub const fn with_max_retained_bytes(
         mut self,
         bytes: NonZeroU64,
     ) -> Result<Self, IndexOperationQueueTuningError> {
+        if bytes.get() < Self::MIN_RETAINED_BYTES {
+            return Err(
+                IndexOperationQueueTuningError::RetainedBytesBelowOneOperation {
+                    requested: bytes.get(),
+                },
+            );
+        }
         if bytes.get() > Self::MAX_RETAINED_BYTES {
             return Err(
                 IndexOperationQueueTuningError::RetainedBytesAboveQueueValueLimit {

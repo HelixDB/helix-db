@@ -93,7 +93,7 @@ const OPERATION_TOKEN_BIT: u128 = 1 << 127;
 /// length, and a text deletion of an entity whose ID is one varint byte
 /// (entity kind, ID, absent replacement). A vector deletion adds an absent
 /// previous partition.
-const MIN_RETAINED_RECORD_LEN: usize = MODE_LEN + OPERATION_ID_LEN + 1 + 3;
+pub(crate) const MIN_RETAINED_RECORD_LEN: usize = MODE_LEN + OPERATION_ID_LEN + 1 + 3;
 /// Upper bound on the bytes of a value that are not records: the header and
 /// both counts.
 const MAX_VALUE_FRAMING_LEN: usize = HEADER_LEN + 2 * MAX_VARINT_LEN;

@@ -157,6 +157,37 @@ fn queue_tuning_lag_histogram_and_merge_counters_are_public_contracts() {
             largest + 1
         )
     );
+    // Every operation is charged at least the smallest one's charge, so a
+    // lower ceiling could admit nothing.
+    let smallest = IndexOperationQueueTuning::MIN_RETAINED_BYTES;
+    assert_eq!(
+        smallest,
+        IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES + 21
+    );
+    assert_eq!(
+        tuning
+            .with_max_retained_bytes(nonzero(smallest))
+            .expect("the smallest ceiling is valid")
+            .max_retained_bytes()
+            .get(),
+        smallest
+    );
+    for requested in [1, smallest - 1] {
+        let error = tuning
+            .with_max_retained_bytes(nonzero(requested))
+            .expect_err("a ceiling below one operation's charge admits nothing");
+        assert_eq!(
+            error,
+            IndexOperationQueueTuningError::RetainedBytesBelowOneOperation { requested }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "index operation queue max retained bytes {requested} are below the charge of \
+                 the smallest operation {smallest}"
+            )
+        );
+    }
     assert_eq!(
         DbConfig::new()
             .with_index_operation_queue_tuning(tuning)

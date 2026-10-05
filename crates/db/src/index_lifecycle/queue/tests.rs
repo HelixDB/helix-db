@@ -633,6 +633,114 @@ async fn byte_backpressure_accepts_the_limit_and_rejects_one_byte_more() {
     db.close().await.unwrap();
 }
 
+/// The smallest accepted retained-byte ceiling is exactly the charge of the
+/// smallest real operation, a text deletion of a node whose ID encodes in
+/// one byte: it admits one such deletion and nothing larger.
+#[tokio::test]
+async fn smallest_ceiling_admits_exactly_one_smallest_operation() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open(
+        "queue-smallest-ceiling",
+        Arc::clone(&store),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install_text(&db).await;
+    let mut ids = Vec::new();
+    for body in ["a", "b"] {
+        let created = db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "created",
+                        traversal::g()
+                            .add_n("Doc", vec![("body", PropertyInput::from(body.to_string()))]),
+                    )
+                    .returning(["created"]),
+            ))
+            .await
+            .unwrap();
+        ids.push(
+            created["created"][0]["$id"]
+                .as_u64()
+                .expect("created node id"),
+        );
+    }
+    assert!(ids.iter().all(|id| *id < 128), "{ids:?} encode in one byte");
+    let text_target = target(&db, QueueFamily::Text).await;
+    assert_eq!(
+        release_within_operand_bound(&db, text_target, QueueFamily::Text).await,
+        2
+    );
+    db.close().await.unwrap();
+
+    let smallest = IndexOperationQueueTuning::MIN_RETAINED_BYTES;
+    let tuning = IndexOperationQueueTuning::default()
+        .with_max_retained_bytes(NonZeroU64::new(smallest).unwrap())
+        .unwrap();
+    let reopened = open("queue-smallest-ceiling", store, queued(tuning)).await;
+    // A one-letter insertion encodes at least three bytes more than the
+    // smallest deletion (more once a reopened writer allocates IDs past one
+    // varint byte), so on its own it exceeds the ceiling and can never
+    // commit.
+    let error = add_text(&reopened, "c")
+        .await
+        .expect_err("an insertion exceeds the smallest ceiling");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexOperationBatchTooLarge {
+                resource: IndexOperationBatchResource::RetainedBytes,
+                observed,
+                limit,
+                ..
+            } if observed >= smallest + 3 && limit == smallest
+        ),
+        "{error:?}"
+    );
+    reopened
+        .query(QueryRequest::write(batch::write_batch().var_as(
+            "dropped",
+            traversal::g().n(NodeRef::from(ids[0])).drop(),
+        )))
+        .await
+        .expect("the smallest operation fills the smallest ceiling exactly");
+    let deletions = queue(&reopened, QueueFamily::Text)
+        .await
+        .unwrap()
+        .into_operations();
+    assert_eq!(deletions.len(), 1);
+    assert_eq!(
+        super::backlog::charged_bytes(deletions[0].retained_bytes()),
+        smallest
+    );
+    let usage = reopened
+        .index_operation_backlog()
+        .usage(DataScope::LegacyUnscoped, text_target.index_id);
+    assert_eq!((usage.retained_bytes, usage.operations), (smallest, 1));
+    let error = reopened
+        .query(QueryRequest::write(batch::write_batch().var_as(
+            "dropped",
+            traversal::g().n(NodeRef::from(ids[1])).drop(),
+        )))
+        .await
+        .expect_err("a second deletion waits for the first to publish");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::RetainedBytes,
+                requested,
+                limit,
+                ..
+            } if requested == 2 * smallest && limit == smallest
+        ),
+        "{error:?}"
+    );
+    assert_eq!(node_count(&reopened).await, 1);
+    reopened.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn oversized_operands_fail_before_commit_without_leaking_capacity() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
