@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.7` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.9` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -78,6 +78,8 @@ helix start persistent
 ```
 
 Disk mode starts a SeaweedFS S3 sidecar, creates the `helix-db` bucket, and stores data in a Helix-managed Docker/Podman volume named `helix-<project>-<instance>-seaweedfs-data`. `helix stop` removes the containers but keeps the volume. `helix prune <instance>` removes the volume and deletes the persisted local data.
+
+Disk mode and S3 storage also get a `helix-<project>-<instance>-cache` volume for the server's disk cache, with a 64 MiB budget in disk mode and 1 GiB for an S3 bucket. `helix stop` keeps it and `helix prune <instance>` removes it.
 
 ## Migrate MinIO disk data
 
@@ -152,7 +154,7 @@ helix start staging
 helix status
 ```
 
-Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume.
+Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
 
 ## Inspecting logs
 
@@ -169,7 +171,7 @@ helix logs dev --follow      # stream
 |------|---------|
 | Stop one instance | `helix stop <instance>` |
 | Restart one instance | `helix restart <instance>` |
-| Remove containers, workspace state, and disk-mode volume for one instance | `helix prune <instance>` |
+| Remove containers, workspace state, and Helix-managed volumes for one instance | `helix prune <instance>` |
 | Remove everything Helix-owned, for every local instance | `helix prune --all` (`--yes` in non-TTY) |
 | Permanently delete an instance from `helix.toml` | `helix delete <instance>` (`--yes` in non-TTY) |
 

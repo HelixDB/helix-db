@@ -69,6 +69,15 @@ impl<'a> Program<'a> {
                     param: param.clone(),
                 },
             )),
+            C::NodeUniqueBatch { index, key, values } => source(exec::ExecAccessPlan::Node(
+                exec::ExecNodeAccessPlan::SecondarySet {
+                    set: exec::ExecNodeSecondarySetPlan::UniqueUnion {
+                        index: index.clone(),
+                        key: key.clone(),
+                        values: values.clone(),
+                    },
+                },
+            )),
             C::NodeDynamicMembership { index, key, values } => source(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::DynamicMembership {
                     index: index.clone(),
@@ -125,6 +134,11 @@ impl<'a> Program<'a> {
                 input: Box::new(Self::new(input)),
                 window,
             },
+            // A set of ID leaves of one element kind is one leaf counted on
+            // ID bitmaps; other sets combine their child rows.
+            C::Union { .. } | C::Intersect { .. } if count::id_set_keyspace(plan).is_some() => {
+                Self::Leaf(plan)
+            }
             C::Union { driver, rest } | C::Intersect { driver, rest } => Self::Set {
                 inputs: std::iter::once(driver.as_ref())
                     .chain(rest.as_ref())

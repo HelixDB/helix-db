@@ -156,13 +156,15 @@ impl<'db> ExecutionContext<'db> {
                 ..Default::default()
             });
         }
+        let batch_reads = self.db.batch_reads();
         let values = match (
             self.active_write_tx(),
             self.request_read_view(),
             self.db.storage(),
         ) {
-            (Some(active), _, _) => active.txn.multi_get(keys).await?,
-            (None, Some(view), _) => view.multi_get(keys).await?,
+            (Some(active), _, _) => batch_reads.multi_get(&active.txn, keys).await?,
+            (None, Some(view), _) => batch_reads.multi_get(view, keys).await?,
+            // Live handles are not one view, so tests read them with one call.
             #[cfg(test)]
             (None, None, HelixStorage::Reader(reader)) => reader.multi_get(keys).await?,
             #[cfg(test)]

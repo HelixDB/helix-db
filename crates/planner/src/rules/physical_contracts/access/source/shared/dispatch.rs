@@ -27,6 +27,7 @@ where
             key,
             kind,
             semantics,
+            indexed_values,
         } => leaf::equality_index_contract(
             leaf::EqualityIndexContractInput {
                 access,
@@ -37,6 +38,7 @@ where
                 label_cardinality: F::label_cardinality(stats, &key.label),
                 kind,
                 semantics,
+                indexed_values,
             },
             storage,
         ),
@@ -74,6 +76,18 @@ where
         family::AccessSourceParts::ScanThenFilter { source, residual } => {
             let child = access_contract::<F>(source, storage, stats);
             filter::scan_then_filter_contract(child, residual, storage)
+        }
+        family::AccessSourceParts::BranchResidualUnion(branches) => {
+            sets::branch_residual_union_contract(
+                element,
+                branches
+                    .into_iter()
+                    .map(|(source, residual)| {
+                        (access_contract::<F>(source, storage, stats), residual)
+                    })
+                    .collect(),
+                storage,
+            )
         }
     }
 }

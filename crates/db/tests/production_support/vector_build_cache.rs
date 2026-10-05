@@ -324,7 +324,7 @@ pub(crate) async fn run() {
             SearchIndexBackfillLimits::default().batch(),
             IndexLifecycleScanTuning::default(),
             Arc::new(vector::SimHasherRegistry::default()),
-            vector::VectorBatchReads::Single,
+            crate::batch_reads::BatchReads::Single,
             &cache,
         )
         .await,
@@ -342,7 +342,7 @@ pub(crate) async fn run() {
         SearchIndexBackfillLimits::default().batch(),
         IndexLifecycleScanTuning::default(),
         Arc::new(vector::SimHasherRegistry::default()),
-        vector::VectorBatchReads::Single,
+        crate::batch_reads::BatchReads::Single,
         &cache,
     )
     .await

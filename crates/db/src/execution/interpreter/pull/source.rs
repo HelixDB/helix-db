@@ -5,6 +5,15 @@ use access::kv;
 use bytes::Bytes;
 use helix_planner::properties;
 
+/// Most unverified IDs checked for existence per `multi_get`.
+const RECORD_BATCH_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
+
+/// Factor by which each existence check of a source with no access-local
+/// limit reads more IDs than the last, from one up to [`RECORD_BATCH_ROWS`]:
+/// a consumer that stops after a few rows reads a few records, and a long
+/// read still reaches full batches after three checks (1, 8, 64, 256).
+const EXISTENCE_BATCH_GROWTH: usize = 8;
+
 pub(super) enum Plan<'a> {
     Prepared,
     Access(&'a exec::ExecAccessPlan),
@@ -35,10 +44,17 @@ impl Iterator for Ids {
 
 enum State {
     Unopened,
+    /// IDs to emit. Unverified IDs are checked for existence in batches of
+    /// at most [`RECORD_BATCH_ROWS`]; `pending` holds the rest of the last
+    /// batch in order, each with whether its element exists. Without an
+    /// access-local limit, `batch` IDs are checked next, a number that grows
+    /// by [`EXISTENCE_BATCH_GROWTH`] with every check.
     Ids {
         ids: Ids,
         keyspace: exec::ElementKeyspace,
         verified: bool,
+        pending: std::collections::VecDeque<(u64, bool)>,
+        batch: usize,
     },
     Scan {
         iter: slatedb::DbIterator,
@@ -65,6 +81,8 @@ impl<'a> Source<'a> {
                 ids: Ids::Bitmap(Box::new(ids.into_iter())),
                 keyspace,
                 verified,
+                pending: std::collections::VecDeque::new(),
+                batch: 1,
             },
             remaining: Demand::All,
         }
@@ -77,6 +95,8 @@ impl<'a> Source<'a> {
                 ids: Ids::Values(ids.into_iter()),
                 keyspace,
                 verified,
+                pending: std::collections::VecDeque::new(),
+                batch: 1,
             },
             remaining: Demand::All,
         }
@@ -122,11 +142,7 @@ impl<'a> Source<'a> {
             ElementKeyspace as K, ExecAccessPlan as A, ExecEdgeAccessPlan as E,
             ExecNodeAccessPlan as N,
         };
-        let ids = |ids: Vec<u64>, keyspace, verified| State::Ids {
-            ids: Ids::Values(ids.into_iter()),
-            keyspace,
-            verified,
-        };
+        let ids = |ids: Vec<u64>, keyspace, verified| Self::ids(ids, keyspace, verified).state;
         let bitmap_ids = |ids, keyspace, verified| Self::bitmap(ids, keyspace, verified).state;
         match self.plan {
             Plan::Prepared => unreachable!("prepared IDs already have source state"),
@@ -148,6 +164,52 @@ impl<'a> Source<'a> {
                 false,
             )),
             Plan::Access(A::Node(
+                N::AuthoritativeScan {
+                    predicate: exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                }
+                | N::SecondarySet {
+                    set:
+                        exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                        ),
+                },
+            )) => Ok(bitmap_ids(
+                crate::query_resources::bitmap::Bitmap::retain_legacy(
+                    ctx.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        None,
+                    )
+                    .await?,
+                    ctx.row_memory.as_ref(),
+                )?,
+                K::NodeProperty,
+                true,
+            )),
+            Plan::Access(A::Edge(
+                E::AuthoritativeScan {
+                    predicate: exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                }
+                | E::SecondarySet {
+                    set:
+                        exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                        ),
+                },
+            )) => Ok(bitmap_ids(
+                crate::query_resources::bitmap::Bitmap::retain_legacy(
+                    ctx.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        None,
+                    )
+                    .await?,
+                    ctx.row_memory.as_ref(),
+                )?,
+                K::EdgeEndpoints,
+                true,
+            )),
+            Plan::Access(A::Node(
                 N::AllScan
                 | N::AuthoritativeScan { .. }
                 | N::SecondarySet {
@@ -161,6 +223,9 @@ impl<'a> Source<'a> {
                     set: exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(_),
                 },
             )) => Self::scan(ctx, K::EdgeEndpoints).await,
+            // Deletes remove label memberships in the same transaction, so a
+            // label bitmap holds only live elements, as counts and index
+            // memberships already rely on.
             Plan::Access(A::Node(N::LabelScan { label })) => Ok(bitmap_ids(
                 ctx.lookup_equality_index_set(
                     "$label",
@@ -168,12 +233,12 @@ impl<'a> Source<'a> {
                 )
                 .await?,
                 K::NodeProperty,
-                false,
+                true,
             )),
             Plan::Access(A::Edge(E::LabelScan { label })) => Ok(bitmap_ids(
                 ctx.lookup_global_edge_label_index(label.as_ref()).await?,
                 K::EdgeEndpoints,
-                false,
+                true,
             )),
             Plan::Access(A::Node(N::Bitmap { bitmap })) => Ok(bitmap_ids(
                 ctx.node_bitmap(bitmap, access::PARALLEL_INDEX_READS)
@@ -233,6 +298,8 @@ impl<'a> Source<'a> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?,
                     K::NodeProperty,
@@ -246,6 +313,8 @@ impl<'a> Source<'a> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?,
                     K::EdgeEndpoints,
@@ -414,11 +483,7 @@ impl<'a> Source<'a> {
                     properties::PositiveUsize::new(limit.get()),
                 )
                 .await?;
-            return Ok(State::Ids {
-                ids: Ids::Values(ids.into_iter()),
-                keyspace,
-                verified: true,
-            });
+            return Ok(Self::ids(ids, keyspace, true).state);
         }
         Ok(State::Range {
             cursor: Box::new(
@@ -474,10 +539,57 @@ impl<'a> Source<'a> {
                     ids,
                     keyspace,
                     verified,
+                    pending,
+                    batch,
                 } => {
-                    let Some(id) = ids.next() else {
-                        self.state = State::Done;
-                        continue;
+                    let (id, exists) = match (*verified, pending.pop_front()) {
+                        (true, _) => {
+                            let Some(id) = ids.next() else {
+                                self.state = State::Done;
+                                continue;
+                            };
+                            (id, true)
+                        }
+                        (false, Some(checked)) => checked,
+                        (false, None) => {
+                            // Check the next batch, no longer than the
+                            // access-local limit still allows, or growing
+                            // from one ID when the demand is unknown.
+                            let wanted = match self.remaining {
+                                Demand::Take(remaining) => remaining.get().min(RECORD_BATCH_ROWS),
+                                Demand::All | Demand::Done => {
+                                    let wanted = *batch;
+                                    *batch = wanted
+                                        .saturating_mul(EXISTENCE_BATCH_GROWTH)
+                                        .min(RECORD_BATCH_ROWS);
+                                    wanted
+                                }
+                            };
+                            let batch = ids.by_ref().take(wanted).collect::<Vec<_>>();
+                            if batch.is_empty() {
+                                self.state = State::Done;
+                                continue;
+                            }
+                            let keys = batch
+                                .iter()
+                                .map(|id| {
+                                    kv::physical_element_key(
+                                        ctx.tenant_scope,
+                                        &exec::KvKey::from_id(*keyspace, *id),
+                                    )
+                                    .2
+                                })
+                                .collect::<Vec<_>>();
+                            pending.extend(
+                                batch.into_iter().zip(
+                                    Box::pin(ctx.multi_get_raw(&keys))
+                                        .await?
+                                        .into_iter()
+                                        .map(|record| record.is_some()),
+                                ),
+                            );
+                            continue;
+                        }
                     };
                     #[cfg(test)]
                     ctx.pull_work
@@ -485,15 +597,8 @@ impl<'a> Source<'a> {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // An access-local limit applies at its original ID boundary.
                     self.remaining.consume();
-                    if !*verified {
-                        let key = exec::KvKey::from_id(*keyspace, id);
-                        if ctx
-                            .get_raw(&kv::physical_element_key(ctx.tenant_scope, &key).2)
-                            .await?
-                            .is_none()
-                        {
-                            continue;
-                        }
+                    if !exists {
+                        continue;
                     }
                     ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
@@ -523,33 +628,31 @@ impl<'a> Source<'a> {
                     ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
             };
+            // Null equality opens as verified label rows; only a predicate
+            // scan evaluates each row here.
             let accepted = match self.plan {
                 Plan::Access(exec::ExecAccessPlan::Node(
-                    exec::ExecNodeAccessPlan::AuthoritativeScan { predicate }
+                    exec::ExecNodeAccessPlan::AuthoritativeScan {
+                        predicate: exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                    }
                     | exec::ExecNodeAccessPlan::SecondarySet {
-                        set: exec::ExecNodeSecondarySetPlan::AuthoritativeScan(predicate),
+                        set:
+                            exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                                exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                            ),
                     },
-                )) => match predicate {
-                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                        ctx.scoped_null_matches(&row, key).await?
+                ))
+                | Plan::Access(exec::ExecAccessPlan::Edge(
+                    exec::ExecEdgeAccessPlan::AuthoritativeScan {
+                        predicate: exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
                     }
-                    exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                        ctx.eval_predicate_plan(&row, predicate).await?
-                    }
-                },
-                Plan::Access(exec::ExecAccessPlan::Edge(
-                    exec::ExecEdgeAccessPlan::AuthoritativeScan { predicate }
                     | exec::ExecEdgeAccessPlan::SecondarySet {
-                        set: exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(predicate),
+                        set:
+                            exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
+                                exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
+                            ),
                     },
-                )) => match predicate {
-                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                        ctx.scoped_null_matches(&row, key).await?
-                    }
-                    exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                        ctx.eval_predicate_plan(&row, predicate).await?
-                    }
-                },
+                )) => ctx.eval_predicate_plan(&row, predicate).await?,
                 Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => true,
             };
             if !accepted {
@@ -567,6 +670,134 @@ impl<'a> Source<'a> {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn label_scan_rows_are_not_rechecked() {
+        let db = test_support::open_db("pull-label-scan-trust").await;
+        let mut nodes = Vec::new();
+        for _ in 0..5 {
+            nodes.push(test_support::add_node_with_properties(&db, "User", Vec::new()).await);
+        }
+        test_support::add_node_with_properties(&db, "Other", Vec::new()).await;
+        let mut edges = Vec::new();
+        for _ in 0..3 {
+            edges.push(
+                test_support::add_edge_with_properties(&db, nodes[0], nodes[1], "LINK", Vec::new())
+                    .await,
+            );
+        }
+        for (plan, expected) in [
+            (
+                exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::LabelScan {
+                    label: test_support::name("User"),
+                }),
+                nodes,
+            ),
+            (
+                exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::LabelScan {
+                    label: test_support::name("LINK"),
+                }),
+                edges,
+            ),
+        ] {
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.enable_request_read_view().await.unwrap();
+            let mut source = Source::new(&ctx, Plan::Access(&plan)).unwrap();
+            let mut actual = Vec::new();
+            while let Some(value) = source.next(&mut ctx).await.unwrap() {
+                actual.extend(
+                    ctx.stream_rows(value, "test")
+                        .unwrap()
+                        .into_iter()
+                        .map(|row| row.current.unwrap().id()),
+                );
+            }
+            assert_eq!(actual, expected);
+            // The label bitmap is trusted: no record is read to emit an ID.
+            let work = ctx.pull_work.snapshot();
+            assert_eq!(work.raw_gets, 0);
+            assert_eq!(work.multi_get_keys, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn unverified_ids_are_checked_in_record_batches() {
+        let db = test_support::open_db("pull-unverified-id-batches").await;
+        let mut existing = Vec::new();
+        for _ in 0..300 {
+            existing.push(test_support::add_node_with_properties(&db, "User", Vec::new()).await);
+        }
+        let missing = |n: u64| existing[existing.len() - 1] + 1_000 + n;
+        // Every third ID was never written, as if deleted.
+        let ids = existing
+            .iter()
+            .enumerate()
+            .flat_map(|(n, id)| {
+                core::iter::once(*id).chain((n % 3 == 0).then(|| missing(n as u64)))
+            })
+            .collect::<Vec<_>>();
+
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        let mut source = Source::ids(ids.clone(), exec::ElementKeyspace::NodeProperty, false);
+        let mut actual = Vec::new();
+        while let Some(value) = source.next(&mut ctx).await.unwrap() {
+            actual.extend(
+                ctx.stream_rows(value, "test")
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.current.unwrap().id()),
+            );
+        }
+        assert_eq!(actual, existing);
+        let work = ctx.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0);
+        assert_eq!(work.multi_get_keys, ids.len());
+        assert_eq!(work.source_visits, ids.len());
+
+        // With unknown demand the checks grow from one ID: a consumer that
+        // stops after one row reads one record, after two rows nine.
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        let mut source = Source::ids(ids.clone(), exec::ElementKeyspace::NodeProperty, false);
+        assert!(source.next(&mut ctx).await.unwrap().is_some());
+        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 1);
+        // The second ID is missing; the third exists.
+        assert!(source.next(&mut ctx).await.unwrap().is_some());
+        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 1 + 8);
+
+        // An access-local limit still applies at the ID boundary: the first
+        // three IDs are read, one of them missing, and nothing more.
+        let param = test_support::name("ids");
+        let limited = exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::FromParam {
+            param: param.clone(),
+        })
+        .limited_by(exec::ExecAccessLimit::Static(
+            properties::PositiveUsize::new(3).unwrap(),
+        ));
+        let mut ctx = ExecutionContext::new(
+            &db,
+            context::ParamBindings::default().with_value(
+                param,
+                helix_ast::value::PropertyValue::I64Array(
+                    ids.iter().map(|id| *id as i64).collect(),
+                ),
+            ),
+        );
+        ctx.enable_request_read_view().await.unwrap();
+        let mut source = Source::new(&ctx, Plan::Access(&limited)).unwrap();
+        let mut actual = Vec::new();
+        while let Some(value) = source.next(&mut ctx).await.unwrap() {
+            actual.extend(
+                ctx.stream_rows(value, "test")
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.current.unwrap().id()),
+            );
+        }
+        assert_eq!(actual, vec![existing[0], existing[1]]);
+        assert_eq!(ctx.pull_work.snapshot().multi_get_keys, 3);
+    }
 
     #[tokio::test]
     async fn bitmap_sources_keep_compressed_iterators_for_bounded_and_unknown_demand() {

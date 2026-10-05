@@ -30,6 +30,7 @@ async fn runtime_domains_fold_keys_and_retain_admission_through_iteration() {
                 &values,
                 ReaderStorageCompatibility::Current,
                 Some(&budget),
+                &|| Ok(()),
             )
             .await
             .unwrap();
@@ -61,7 +62,8 @@ async fn runtime_domains_fold_keys_and_retain_admission_through_iteration() {
             &handle,
             &values,
             ReaderStorageCompatibility::Current,
-            Some(&budget)
+            Some(&budget),
+            &|| Ok(())
         ));
         let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
         let (result, allocation) = crate::allocation_testing::observe(|| {
@@ -132,6 +134,7 @@ async fn runtime_unique_hits_verify_graph_and_native_null_preserves_missing_valu
                 &values,
                 compatibility,
                 Some(&budget),
+                &|| Ok(()),
             )
             .await
             .unwrap();
@@ -147,7 +150,7 @@ async fn runtime_unique_hits_verify_graph_and_native_null_preserves_missing_valu
                 }
             );
             for value in [PropertyValue::Object(Default::default()), PropertyValue::String("x".repeat(crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN))] {
-                assert!(lookup_active_equality_generations_admitted(&db, &handle, &[value], compatibility, Some(&budget)).await.is_err());
+                assert!(lookup_active_equality_generations_admitted(&db, &handle, &[value], compatibility, Some(&budget), &|| Ok(())).await.is_err());
                 assert_eq!(budget.available(), 1024 * 1024);
             }
         }
@@ -182,7 +185,8 @@ async fn runtime_unique_hits_verify_graph_and_native_null_preserves_missing_valu
                         &handle,
                         &[PropertyValue::String("a".into())],
                         ReaderStorageCompatibility::Current,
-                        Some(&budget)
+                        Some(&budget),
+                        &|| Ok(())
                     )
                     .await,
                     Err(HelixDbError::IndexCatalogCorruption(_))
@@ -296,6 +300,7 @@ async fn folded_numeric_keys_and_null_scans_stay_inside_the_authorized_tenant() 
                 &values,
                 ReaderStorageCompatibility::Current,
                 Some(&budget),
+                &|| Ok(()),
             )
             .await
             .unwrap();
@@ -346,7 +351,8 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
                     PropertyValue::String("b".into())
                 ],
                 ReaderStorageCompatibility::Current,
-                Some(&budget)
+                Some(&budget),
+                &|| Ok(())
             )
             .await,
             Err(HelixDbError::QueryMemoryLimitExceeded)
@@ -365,6 +371,7 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
         ],
         ReaderStorageCompatibility::Current,
         Some(&budget),
+        &|| Ok(()),
     )
     .await
     .unwrap();
@@ -397,7 +404,8 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
             &handle,
             &values,
             ReaderStorageCompatibility::Current,
-            Some(&budget)
+            Some(&budget),
+            &|| Ok(())
         )
         .await
         .is_err());
@@ -426,7 +434,8 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
             &handle,
             &[PropertyValue::Null],
             ReaderStorageCompatibility::Current,
-            Some(&small)
+            Some(&small),
+            &|| Ok(())
         )
         .await,
         Err(HelixDbError::QueryMemoryLimitExceeded)
@@ -441,7 +450,8 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
         &handle,
         &[PropertyValue::Null],
         ReaderStorageCompatibility::Current,
-        Some(&budget)
+        Some(&budget),
+        &|| Ok(())
     )
     .await
     .is_err());
@@ -548,6 +558,7 @@ async fn pending_and_failed_storage_reads_release_prepared_keys_and_domain_state
                 &values,
                 ReaderStorageCompatibility::Current,
                 Some(&budget),
+                &|| Ok(()),
             ));
             let polled = futures::poll!(future.as_mut());
             if fail {
@@ -603,6 +614,7 @@ async fn a_cached_null_scan_yields_for_request_cancellation_and_releases_its_sta
         &values,
         ReaderStorageCompatibility::Current,
         Some(&budget),
+        &|| Ok(()),
     )));
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
@@ -662,7 +674,8 @@ async fn invalid_serving_handles_fail_before_reading_and_release_domain_admissio
                 &handle,
                 std::slice::from_ref(&value),
                 ReaderStorageCompatibility::Current,
-                Some(&budget)
+                Some(&budget),
+                &|| Ok(())
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(_))

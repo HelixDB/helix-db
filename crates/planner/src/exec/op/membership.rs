@@ -31,9 +31,9 @@ pub enum ExecNodeMembershipSet {
 /// Interpreter contract for a node index membership filter.
 ///
 /// * The first node row that needs deciding resolves the set once through
-///   the request-authorized Active catalog, reusing the set of an equal plan
-///   already resolved in the request. Streams without node rows never
-///   resolve it.
+///   the request-authorized Active catalog, reusing an equal set already
+///   resolved in the request, whatever the predicate and residual of the
+///   plan that resolved it. Streams without node rows never resolve it.
 /// * A node in the set evaluates `residual` only, and is kept without
 ///   reading its record when there is none.
 /// * A `label` node outside an [`ExecNodeMembershipSet::Index`] set is

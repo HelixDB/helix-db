@@ -28,6 +28,10 @@ impl RequiredMutationVisibility {
 
     const NONE: Self = Self(0);
     const ALL: Self = Self(Self::TOPOLOGY | Self::SECONDARY | Self::VECTOR | Self::TEXT);
+    /// A secondary read that may also read a label bitmap: an index
+    /// membership, or an equality whose null or unencodable value is answered
+    /// by the label rows outside the equality lane.
+    const SECONDARY_WITH_LABELS: Self = Self(Self::SECONDARY | Self::TOPOLOGY);
 
     const fn one(family: DeferredMutationFamily) -> Self {
         match family {
@@ -76,10 +80,7 @@ pub(in crate::execution::interpreter) fn required_for(
             RequiredMutationVisibility::one(DeferredMutationFamily::Topology)
         }
         // Membership reads the secondary set and the node-label bitmap.
-        exec::ExecOp::IndexMembership { .. } => RequiredMutationVisibility(
-            RequiredMutationVisibility::one(DeferredMutationFamily::Secondary).0
-                | RequiredMutationVisibility::one(DeferredMutationFamily::Topology).0,
-        ),
+        exec::ExecOp::IndexMembership { .. } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
         exec::ExecOp::Branch { plan } => {
             let subplan = |plan: &exec::ExecutableSubplan| {
                 plan.steps()
@@ -179,12 +180,15 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
         exec::ExecAccessPlan::Node(plan) => match plan {
             exec::ExecNodeAccessPlan::Bitmap { .. }
             | exec::ExecNodeAccessPlan::Unique { .. }
-            | exec::ExecNodeAccessPlan::DynamicEquality { .. }
-            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
-            | exec::ExecNodeAccessPlan::RangeIndex { .. }
-            | exec::ExecNodeAccessPlan::SecondarySet { .. } => {
+            | exec::ExecNodeAccessPlan::RangeIndex { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Secondary)
             }
+            exec::ExecNodeAccessPlan::DynamicEquality { .. }
+            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
+            | exec::ExecNodeAccessPlan::SecondarySet { .. }
+            | exec::ExecNodeAccessPlan::AuthoritativeScan {
+                predicate: exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. },
+            } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
             exec::ExecNodeAccessPlan::VectorSearch { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
             }
@@ -204,12 +208,15 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
         },
         exec::ExecAccessPlan::Edge(plan) => match plan {
             exec::ExecEdgeAccessPlan::Bitmap { .. }
-            | exec::ExecEdgeAccessPlan::DynamicEquality { .. }
-            | exec::ExecEdgeAccessPlan::DynamicMembership { .. }
-            | exec::ExecEdgeAccessPlan::RangeIndex { .. }
-            | exec::ExecEdgeAccessPlan::SecondarySet { .. } => {
+            | exec::ExecEdgeAccessPlan::RangeIndex { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Secondary)
             }
+            exec::ExecEdgeAccessPlan::DynamicEquality { .. }
+            | exec::ExecEdgeAccessPlan::DynamicMembership { .. }
+            | exec::ExecEdgeAccessPlan::SecondarySet { .. }
+            | exec::ExecEdgeAccessPlan::AuthoritativeScan {
+                predicate: exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { .. },
+            } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
             exec::ExecEdgeAccessPlan::VectorSearch { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
             }

@@ -29,9 +29,11 @@ impl optimizer::OptimizerRule for RootPipelineImplementationRule {
         let logical::LogicalExpr::RootPipeline(pipeline) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
-        if crate::rules::membership_rewrite(input.expr, input.indexes, input.planner_limits)
-            .is_some()
-        {
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
             return optimizer::RuleResult::NotApplicable;
         }
         let (pipeline, delivered, cost) =

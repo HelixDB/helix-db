@@ -181,9 +181,10 @@ pub(crate) use cache::commit::{commit_fenced, VectorCacheWriteSet};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::hydration::production_contracts::run as run_hydration_contracts;
 pub(crate) use cache::hydration::{
-    hydrate_active_generations, VectorCacheHydrationBudget, VectorCacheHydrationOutcome,
-    VectorCacheSnapshotSource,
+    active_vector_targets, hydrate_active_generations, VectorCacheHydrationBudget,
+    VectorCacheHydrationOutcome, VectorCacheSnapshotSource,
 };
+pub(crate) use cache::part_warm::{warm_object_store_parts, VectorPartWarmSummary};
 pub(crate) use cache::reader_refresh::run_reader_refreshes;
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
@@ -269,7 +270,7 @@ pub(crate) use storage::transaction::{
 pub(crate) use storage::{
     CanonicalVectorDirectoryBackfillOutcome, LegacyVectorValidationMode,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
-    SimHashDirectoryValidationOutcome, VectorBatchReads, VectorCleanupRow,
+    SimHashDirectoryValidationOutcome, VectorCleanupRow,
 };
 pub(crate) use vector_values::metadata::{VectorIndexConfig, VectorIndexMetadata};
 

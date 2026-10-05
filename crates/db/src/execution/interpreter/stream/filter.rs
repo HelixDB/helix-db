@@ -8,10 +8,11 @@
 //! Index membership decides nodes from a set read from indexes and evaluates
 //! a predicate only for rows the set cannot decide, plus the residual
 //! conjuncts of nodes in the set. There is no row-count threshold: the first
-//! node row that needs a decision resolves the set, once per request state,
-//! and a resolved set is reused by later executions of the same plan in the
-//! request, such as branch bodies that run once per parent row. Streams
-//! without node rows never resolve it.
+//! node row that needs a decision resolves the set, and a resolved set is
+//! reused by later executions in the request of any plan with the same set,
+//! such as branch and `ForEach` bodies, until something it depends on may
+//! have changed (see [`PreparedMemberships`](super::PreparedMemberships)).
+//! Streams without node rows never resolve it.
 
 use std::sync::Arc;
 
@@ -43,55 +44,6 @@ pub(in crate::execution::interpreter) enum PreparedIndexMembership {
     },
     /// Indexes cannot serve this execution; every row evaluates the predicate.
     PerRow,
-}
-
-/// Memberships resolved in one request state, reused by later executions.
-///
-/// Branch bodies run their pipeline once per parent row and `ForEach` bodies
-/// once per item, so the same plan can resolve many times per request. The
-/// resolved set depends only on the plan, the request snapshot, and its
-/// parameters, so an entry stays exact until one of them changes: every
-/// mutation, index DDL, and `ForEach` parameter frame clears the cache first.
-/// Entries hold at most one set per distinct plan in the request. A plan that
-/// is not equal to itself, because a predicate constant is NaN, is never
-/// stored and resolves on every execution instead.
-///
-/// Cost: since a membership resolves on its first node row, with no per-row
-/// prefix for short streams, a statement after a mutation and a `ForEach`
-/// body re-read the whole set, plus the label bitmap of an `Evaluate` policy,
-/// once per mutation or frame that reaches a node row. A `ForEach` over `F`
-/// items therefore reads `F` label-sized sets, not `F` few-row batches. The
-/// cache is also per step context, so parallel steps each resolve their own
-/// copy. Keeping entries across frames and mutations that leave a plan's
-/// inputs unchanged is tracked separately.
-#[derive(Debug, Default)]
-pub(in crate::execution::interpreter) struct PreparedMemberships(
-    Vec<(
-        exec::ExecNodeIndexMembershipPlan,
-        Arc<PreparedIndexMembership>,
-    )>,
-);
-
-impl PreparedMemberships {
-    /// Forget every resolved set before the state they were read from changes.
-    pub(in crate::execution::interpreter) fn clear(&mut self) {
-        self.0.clear();
-    }
-
-    fn get(
-        &self,
-        plan: &exec::ExecNodeIndexMembershipPlan,
-    ) -> Option<Arc<PreparedIndexMembership>> {
-        self.0
-            .iter()
-            .find(|(cached, _)| cached == plan)
-            .map(|(_, prepared)| Arc::clone(prepared))
-    }
-
-    #[cfg(test)]
-    pub(in crate::execution::interpreter) fn len(&self) -> usize {
-        self.0.len()
-    }
 }
 
 /// Decision for nodes outside the membership set.
@@ -208,30 +160,20 @@ impl<'db> ExecutionContext<'db> {
             .map(ExecutionValue::Stream)
     }
 
-    /// Resolve `plan` at most once per request state.
+    /// Resolve `plan`, reusing a set resolved earlier in the request.
     ///
-    /// See [`PreparedMemberships`] for when a resolved set is reused.
+    /// See [`PreparedMemberships`](super::PreparedMemberships) for when a
+    /// resolved set is reused.
     pub(in crate::execution::interpreter) async fn cached_index_membership(
         &mut self,
         plan: &exec::ExecNodeIndexMembershipPlan,
     ) -> Result<Arc<PreparedIndexMembership>> {
-        match self.prepared_memberships.get(plan) {
+        match self.prepared_memberships.get(&plan.set) {
             Some(prepared) => Ok(prepared),
             None => {
                 let prepared = Arc::new(self.prepare_index_membership(plan).await?);
-                // A lookup could never find an entry for a plan unequal to
-                // itself, so storing it would only hold its set until the
-                // request ends.
-                #[expect(
-                    clippy::eq_op,
-                    reason = "a NaN constant makes plan equality irreflexive"
-                )]
-                let reusable = plan == plan;
-                if reusable {
-                    self.prepared_memberships
-                        .0
-                        .push((plan.clone(), Arc::clone(&prepared)));
-                }
+                self.prepared_memberships
+                    .insert(&plan.set, Arc::clone(&prepared));
                 Ok(prepared)
             }
         }

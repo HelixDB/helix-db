@@ -1,17 +1,6 @@
 //! Batched unique owners retain admission through authoritative verification.
 use super::*;
 
-#[cfg(any(test, feature = "production-coverage"))]
-pub(crate) async fn lookup_active_unique_equality_batch(
-    reader: &(impl DbReadOps + Sync),
-    handle: &ActiveIndexHandle,
-    values: &[PropertyValue],
-) -> Result<roaring::RoaringTreemap> {
-    lookup_active_unique_equality_batch_admitted(reader, handle, values, None)
-        .await
-        .map(bitmap::Bitmap::into_unbudgeted)
-}
-
 pub(crate) async fn lookup_active_unique_equality_batch_admitted(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,

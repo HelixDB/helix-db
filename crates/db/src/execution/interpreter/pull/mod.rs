@@ -74,6 +74,13 @@ enum Node<'a> {
         inputs: std::vec::IntoIter<Cursor<'a>>,
         current: Option<Box<Cursor<'a>>>,
     },
+    /// A union emitted in ascending element order. Its inputs need not be
+    /// ordered (a range scan delivers value order), so all of them are read
+    /// before the first row.
+    OrderedUnion {
+        inputs: Option<Vec<Cursor<'a>>>,
+        rows: std::vec::IntoIter<ExecutionRow>,
+    },
     Intersect {
         driver: Box<Cursor<'a>>,
         rest: Option<Vec<Cursor<'a>>>,

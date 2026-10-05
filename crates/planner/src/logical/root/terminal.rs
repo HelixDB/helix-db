@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use super::{RootPipeline, RootStream};
-use crate::logical::{AccessStream, StreamVariableWriteOp};
+use crate::logical::{AccessPipeline, AccessStream, StreamVariableWriteOp};
 use crate::properties;
 use crate::{context, ir};
 
@@ -24,14 +24,37 @@ pub struct StreamCardinality {
 
 impl StreamCardinality {
     /// Build a cardinality terminal.
+    ///
+    /// A counted access pipeline that saves its stream (`.as()`, `.store()`)
+    /// splits at the first variable write: the operators before it stay with
+    /// the access, so its filters are still index-served, and the write and
+    /// everything after it run over that stream.
     pub fn new(input: RootStream) -> Self {
         let input = match input {
             RootStream::Access(AccessStream::Pipeline(pipeline))
                 if pipeline.effect() == properties::EffectKind::Barrier =>
             {
-                let input = RootStream::Access(AccessStream::Path(pipeline.access().clone()));
+                let barrier = pipeline
+                    .ops()
+                    .iter()
+                    .position(|op| op.effect() == properties::EffectKind::Barrier)
+                    .expect("a barrier pipeline holds a barrier operator");
+                let (prefix, rest) = pipeline.ops().split_at(barrier);
+                let prefix = ir::AtLeast::<_, 1>::try_from_vec(prefix.to_vec())
+                    .and_then(|prefix| AccessPipeline::new(pipeline.access().clone(), prefix));
+                let (input, ops) = match prefix {
+                    Some(prefix) => (
+                        RootStream::Access(AccessStream::Pipeline(prefix)),
+                        ir::AtLeast::try_from_vec(rest.to_vec())
+                            .expect("the barrier operator starts the rest"),
+                    ),
+                    None => (
+                        RootStream::Access(AccessStream::Path(pipeline.access().clone())),
+                        pipeline.ops_at_least().clone(),
+                    ),
+                };
                 RootStream::Pipeline(Box::new(
-                    RootPipeline::new(input, pipeline.ops_at_least().clone())
+                    RootPipeline::new(input, ops)
                         .expect("a validated access pipeline is a valid root pipeline"),
                 ))
             }

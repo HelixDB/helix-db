@@ -19,6 +19,14 @@ pub(super) fn hard_cardinality_upper_bound(source: &EdgeAccessPlan) -> Option<us
             plan.hard_cardinality_upper_bound()
                 .map(|upper| sum.saturating_add(upper))
         }),
+        EdgeAccessPlan::BranchResidualUnion(branches) => {
+            branches.as_ref().iter().try_fold(0usize, |sum, branch| {
+                branch
+                    .source()
+                    .hard_cardinality_upper_bound()
+                    .map(|upper| sum.saturating_add(upper))
+            })
+        }
         EdgeAccessPlan::FromParam { .. }
         | EdgeAccessPlan::FromVar { .. }
         | EdgeAccessPlan::AllScan
@@ -34,6 +42,12 @@ pub(super) fn common_label(source: &EdgeAccessPlan) -> Option<&ir::NonEmptyStrin
         EdgeAccessPlan::Intersect(plans) | EdgeAccessPlan::Union(plans) => {
             super::super::common_source_label(plans.iter().map(EdgeAccessSourcePlan::common_label))
         }
+        EdgeAccessPlan::BranchResidualUnion(branches) => super::super::common_source_label(
+            branches
+                .as_ref()
+                .iter()
+                .map(|branch| branch.source().common_label()),
+        ),
         plan => plan.direct_label(),
     }
 }
@@ -53,7 +67,8 @@ pub(super) fn secondary_set_eligible(source: &EdgeAccessPlan) -> bool {
         | EdgeAccessPlan::LabelScan { .. }
         | EdgeAccessPlan::VectorSearch { .. }
         | EdgeAccessPlan::TextSearch { .. }
-        | EdgeAccessPlan::ScanThenFilter { .. } => false,
+        | EdgeAccessPlan::ScanThenFilter { .. }
+        | EdgeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
@@ -85,7 +100,8 @@ pub(super) fn set_canonicalization_candidate(source: &EdgeAccessPlan) -> bool {
         | EdgeAccessPlan::RangeIndex { .. }
         | EdgeAccessPlan::VectorSearch { .. }
         | EdgeAccessPlan::TextSearch { .. }
-        | EdgeAccessPlan::ScanThenFilter { .. } => false,
+        | EdgeAccessPlan::ScanThenFilter { .. }
+        | EdgeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
@@ -108,7 +124,8 @@ pub(super) fn set_subsumption_candidate(source: &EdgeAccessPlan) -> bool {
         | EdgeAccessPlan::RangeIndex { .. }
         | EdgeAccessPlan::VectorSearch { .. }
         | EdgeAccessPlan::TextSearch { .. }
-        | EdgeAccessPlan::ScanThenFilter { .. } => false,
+        | EdgeAccessPlan::ScanThenFilter { .. }
+        | EdgeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 

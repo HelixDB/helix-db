@@ -119,6 +119,38 @@ pub(super) fn range_bound_literal(
     }
 }
 
+/// Whether `predicate` orders a property against a literal no stored value
+/// compares with: a range bound of no range domain (null, bool, NaN, bytes,
+/// arrays, objects), or a `BETWEEN` whose literal bounds share no domain.
+///
+/// Comparison is defined only within the numeric, datetime and string
+/// domains, so such a predicate is false for every row.
+pub(super) fn incomparable_range_literal(predicate: &Predicate) -> bool {
+    let unorderable = |left: &Expr, right: &Expr| match (left, right) {
+        (Expr::Property(_), Expr::Constant(value)) | (Expr::Constant(value), Expr::Property(_)) => {
+            RangeIndexLiteral::try_from_property_value(value.clone()).is_none()
+        }
+        _ => false,
+    };
+    match predicate {
+        Predicate::Gt { left, right }
+        | Predicate::Gte { left, right }
+        | Predicate::Lt { left, right }
+        | Predicate::Lte { left, right }
+        | Predicate::Compare {
+            left,
+            op: CompareOp::Gt | CompareOp::Gte | CompareOp::Lt | CompareOp::Lte,
+            right,
+        } => unorderable(left, right),
+        Predicate::Between {
+            value: Expr::Property(_),
+            min: Expr::Constant(min),
+            max: Expr::Constant(max),
+        } => super::values::property_value_ordering(min, max).is_none(),
+        _ => false,
+    }
+}
+
 pub(super) fn between_literal_bounds(
     predicate: &Predicate,
 ) -> Option<(String, LiteralBound, LiteralBound)> {

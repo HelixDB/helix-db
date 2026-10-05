@@ -1,4 +1,4 @@
-//! Residual-free node access source contract.
+//! Node access source contract: any node access except `ScanThenFilter`.
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -7,12 +7,13 @@ use crate::ir;
 
 use super::{analysis, NodeAccessPlan};
 
-/// Residual-free node candidate source.
+/// Node candidate source that is not a `ScanThenFilter`.
 ///
 /// `ScanThenFilter` wraps a candidate source with a residual predicate. Allowing
 /// another `ScanThenFilter` in that source position would make the residual
 /// layering ambiguous, so this wrapper validates the boundary for direct
-/// construction and deserialization.
+/// construction and deserialization. A `BranchResidualUnion` is accepted: its
+/// residuals apply only to its own index-only branches.
 ///
 /// ```
 /// use helix_ast::expr::Predicate;
@@ -35,7 +36,7 @@ pub struct NodeAccessSourcePlan {
 }
 
 impl NodeAccessSourcePlan {
-    /// Build a source plan, rejecting residual filter wrappers.
+    /// Build a source plan, rejecting `ScanThenFilter` wrappers.
     pub fn new(plan: NodeAccessPlan) -> Option<Self> {
         match plan {
             NodeAccessPlan::ScanThenFilter { .. } => None,

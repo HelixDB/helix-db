@@ -16,7 +16,7 @@ mod secondary_set;
 
 pub(in crate::execution::interpreter) use search::SearchReadLimit;
 pub(in crate::execution::interpreter) use secondary_set::{
-    intersection, union, SharedIndexReads, PARALLEL_INDEX_READS,
+    intersection, union, LabelVerifiedLeaf, SharedIndexReads, PARALLEL_INDEX_READS,
 };
 
 #[cfg(any(test, feature = "production-coverage"))]

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use futures::{FutureExt as _, StreamExt as _};
 use helix_planner::ir;
 
 use super::super::*;
@@ -15,30 +16,66 @@ use crate::encoding::v2::values;
 use crate::query_resources::adjacency;
 use crate::query_resources::bitmap;
 
+/// Parents one expansion window reads before dropping them: a record batch.
+const EXPANSION_WINDOW_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
+
 impl<'db> ExecutionContext<'db> {
+    /// Expands every input row, in parent order and each parent's neighbour
+    /// order.
+    ///
+    /// Parents' neighbour reads overlap, up to the request's shared index-read
+    /// budget, so a cold scope of many parents waits for a few reads in turn
+    /// rather than one per parent. Each parent keeps its own point reads:
+    /// adjacency values are merge operands, which SlateDB resolves one key at
+    /// a time even inside a multi-get. Parents are taken a record batch at a
+    /// time and dropped once expanded, so the input is freed as the output
+    /// grows. The first failing parent in order fails the expansion.
     pub(in crate::execution::interpreter) async fn expand(
         &self,
         input: ExecutionValue,
         plan: &ir::ExpandPlan,
     ) -> Result<ExecutionValue> {
-        let rows = self.stream_rows(input, "expand")?;
+        let this = self;
+        let mut rows = this.stream_rows(input, "expand")?.into_iter();
         let label = match plan.output {
             ir::ExpandOutput::Nodes => None,
-            ir::ExpandOutput::Edges => self.edge_output_label(&plan.label).await?,
+            ir::ExpandOutput::Edges => this.edge_output_label(&plan.label).await?,
         };
+        let label = label.as_ref();
         let mut expanded = Vec::new();
-        for row in rows {
-            for id in Box::pin(self.expansion_ids(&row, plan, label.as_ref())).await? {
-                self.check_execution_deadline()?;
-                let mut next = row.clone();
-                next.set_current(match plan.output {
-                    ir::ExpandOutput::Nodes => ElementRef::Node(id),
-                    ir::ExpandOutput::Edges => ElementRef::Edge(id),
-                });
-                expanded.push(next);
+        loop {
+            let window = rows
+                .by_ref()
+                .take(EXPANSION_WINDOW_ROWS)
+                .collect::<Vec<_>>();
+            if window.is_empty() {
+                return Ok(ExecutionValue::Stream(expanded));
+            }
+            let mut parents = this.read_children(
+                window.iter().collect(),
+                super::PARALLEL_INDEX_READS,
+                |row, _| {
+                    async move {
+                        this.expansion_ids(row, plan, label)
+                            .await
+                            .map(|ids| (row, ids))
+                    }
+                    .boxed()
+                },
+            );
+            while let Some(parent) = parents.next().await {
+                let (row, ids) = parent?;
+                for id in ids {
+                    this.check_execution_deadline()?;
+                    let mut next = row.clone();
+                    next.set_current(match plan.output {
+                        ir::ExpandOutput::Nodes => ElementRef::Node(id),
+                        ir::ExpandOutput::Edges => ElementRef::Edge(id),
+                    });
+                    expanded.push(next);
+                }
             }
         }
-        Ok(ExecutionValue::Stream(expanded))
     }
 
     /// Neighborhood candidates for a graph-pattern expansion. Label-neighbor

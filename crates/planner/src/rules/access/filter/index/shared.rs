@@ -7,7 +7,7 @@ use super::super::atoms::{
 use super::super::labels::access_filter_label;
 use super::contracts::{
     AccessFilterIndexApplication, AccessFilterIndexRejection, IndexedSourceCombination,
-    MissingAccessIndex, PartialIndexFilterApplication, PartialIndexFilterRejection,
+    MissingAccessIndex, PartialIndexFilterRejection,
 };
 use crate::{analysis, catalog, context, ir};
 
@@ -41,8 +41,11 @@ pub(super) trait AccessFilterIndexFamily {
     fn union_source(sources: Vec<Self::Source>) -> Self::Source;
     fn intersection_source(sources: Vec<Self::Source>) -> Self::Source;
     fn is_broad_source(source: &Self::Source) -> bool;
-    /// Whether `source` reads at most one element, as a unique equality does.
-    fn is_single_source(source: &Self::Source) -> bool;
+    /// Union of index-only branch sets, each filtered by its own residual,
+    /// or `None` when the branches do not satisfy that contract.
+    fn branch_residual_union(
+        branches: Vec<(Self::Source, Option<ir::PredicatePlan>)>,
+    ) -> Option<Self::Source>;
     fn intersect_pair(left: Self::Source, right: Self::Source) -> Self::Source;
 }
 
@@ -75,145 +78,6 @@ where
         }
     }
 }
-
-pub(super) fn partial_index_filter<F>(
-    path: &F::Path,
-    predicate: &helix_ast::expr::Predicate,
-    predicate_label: &analysis::FeasibleLabelScope,
-    indexes: &catalog::IndexCatalogSnapshot,
-    planner_limits: &context::PlannerLimits,
-) -> PartialIndexFilterApplication<F::Source>
-where
-    F: AccessFilterIndexFamily,
-{
-    let Some(label) = access_filter_label(
-        F::source_common_label(F::path_source(path)),
-        predicate_label,
-    ) else {
-        return PartialIndexFilterApplication::NotApplicable(PartialIndexFilterRejection::NoLabel);
-    };
-    let split =
-        match conjunct_index_split::<F>(predicate, &label, indexes, planner_limits, |_, _| true) {
-            Ok(split) => split,
-            Err(reason) => return PartialIndexFilterApplication::NotApplicable(reason),
-        };
-    let source = match combine_indexed_filter_source::<F>(F::path_source(path), split.source) {
-        IndexedSourceCombination::Rewritten(source) => source,
-        IndexedSourceCombination::Unchanged if split.residual.is_empty() => {
-            return PartialIndexFilterApplication::NotApplicable(
-                PartialIndexFilterRejection::SourceUnchanged,
-            );
-        }
-        IndexedSourceCombination::Unchanged => F::path_source(path).clone(),
-    };
-
-    PartialIndexFilterApplication::Rewritten {
-        source,
-        residual: conjunction_plan(split.residual),
-    }
-}
-
-/// Enumerate one equality seed per conjunct, never predicate subsets. Only
-/// broad sources can seed this exploration: residuals on the resulting narrow
-/// accesses must not recursively enumerate more combinations.
-pub(super) fn visit_equality_seed_filters<F>(
-    path: &F::Path,
-    predicate: &helix_ast::expr::Predicate,
-    predicate_label: &analysis::FeasibleLabelScope,
-    indexes: &catalog::IndexCatalogSnapshot,
-    planner_limits: &context::PlannerLimits,
-    mut emit: impl FnMut(F::Source, ir::PredicatePlan),
-) where
-    F: AccessFilterIndexFamily,
-{
-    if !F::is_broad_source(F::path_source(path)) {
-        return;
-    }
-    let Some(label) = access_filter_label(
-        F::source_common_label(F::path_source(path)),
-        predicate_label,
-    ) else {
-        return;
-    };
-    fn conjuncts<'a>(
-        predicate: &'a helix_ast::expr::Predicate,
-        terms: &mut Vec<&'a helix_ast::expr::Predicate>,
-    ) {
-        match predicate {
-            helix_ast::expr::Predicate::And { predicates } => {
-                for predicate in predicates {
-                    conjuncts(predicate, terms);
-                }
-            }
-            predicate => terms.push(predicate),
-        }
-    }
-    let mut terms = Vec::new();
-    conjuncts(predicate, &mut terms);
-    if terms.len() < 2 {
-        return;
-    }
-    let candidates = terms
-        .iter()
-        .enumerate()
-        .filter_map(|(position, predicate)| {
-            let AccessFilterIndexPlanMatch::Planned(AccessFilterIndexPlan::Conjunction(atoms)) =
-                super::index_plan(predicate, &label, planner_limits)
-            else {
-                return None;
-            };
-            let [atom @ AccessFilterIndexAtom::Equality {
-                domain: AccessEqualityDomain::One(_),
-                ..
-            }] = atoms.as_ref()
-            else {
-                return None;
-            };
-            let source = index_source_for_atom::<F>(&label, atom, indexes).ok()?;
-            Some((position, source))
-        })
-        .collect::<Vec<_>>();
-    // Up to the cap every distinct seed is priced, in written order. Past it,
-    // seeds that read at most one element are kept first, since no other seed
-    // can be narrower, and the rest follow in written order.
-    let priority = |(_, source): &&(usize, F::Source)| {
-        candidates.len() > MAX_EQUALITY_SEEDS && !F::is_single_source(source)
-    };
-    let mut ordered = candidates.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(priority);
-    let mut seeds = Vec::<&(usize, F::Source)>::new();
-    for candidate in ordered {
-        if seeds.len() == MAX_EQUALITY_SEEDS {
-            break;
-        }
-        // Repeated equalities read the same source; one seed covers them.
-        if seeds.iter().any(|(_, seed)| *seed == candidate.1) {
-            continue;
-        }
-        seeds.push(candidate);
-    }
-    seeds.sort_by_key(|(position, _)| *position);
-    for (seed, source) in seeds {
-        let residual = terms
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| index != seed)
-            .map(|(_, predicate)| (*predicate).clone())
-            .collect::<Vec<_>>();
-        emit(
-            source.clone(),
-            ir::PredicatePlan::new(helix_ast::expr::Predicate::and(residual))
-                .expect("conjuncts of a validated predicate remain valid"),
-        );
-    }
-}
-
-/// Equality seeds considered for one conjunction. Each seed carries the rest
-/// of the conjunction as its residual and is priced over it, so considering
-/// every one would cost work quadratic in the conjunction's width; past this
-/// many distinct seeds, single-element seeds and then the first in written
-/// order stand in for the rest.
-const MAX_EQUALITY_SEEDS: usize = 32;
 
 /// Index source for one feasible predicate under one proven label.
 ///
@@ -367,7 +231,9 @@ where
     match atom {
         AccessFilterIndexAtom::Equality { property, domain } => {
             let key = catalog::ScopedPropertyKey::new(label.clone(), property.clone());
-            let index = F::equality_index(indexes, &key).ok_or(MissingAccessIndex::Equality)?;
+            let Some(index) = F::equality_index(indexes, &key) else {
+                return range_point_source::<F>(label, property, domain, indexes);
+            };
             Ok(match domain {
                 AccessEqualityDomain::One(value) => F::equality_source(index, key, value.clone()),
                 AccessEqualityDomain::Many(values) => F::union_source(
@@ -376,6 +242,9 @@ where
                         .map(|value| F::equality_source(index.clone(), key.clone(), value.clone()))
                         .collect(),
                 ),
+                AccessEqualityDomain::Batch(values) => {
+                    F::equality_source(index, key, ir::IndexValue::LiteralSet(values.clone()))
+                }
                 AccessEqualityDomain::Runtime(values) => {
                     F::equality_source(index, key, ir::IndexValue::ParamSet(values.clone()))
                 }
@@ -396,6 +265,75 @@ where
         })
         .ok_or(MissingAccessIndex::Range),
     }
+}
+
+/// Equality answered by a range index on a property without an equality
+/// index: one inclusive point range per literal value, unioned for `IN`.
+///
+/// This is exact. A range scan verifies every candidate against the stored
+/// record, and range ordering agrees with equality on every value a range
+/// bound accepts (for example `I64(5)` and `F64(5.0)` are equal under both).
+///
+/// Only literals a range bound accepts (non-null, non-NaN numbers, datetimes,
+/// and strings) qualify. Parameters, parameter sets, and null, bool, bytes,
+/// or array literals stay residual: a range lane holds no null entries, so a
+/// null binding, which must match rows whose property is missing or null,
+/// would read an empty point range. Answering those needs a null lane
+/// (HEL-873) or runtime classification of the bound value.
+fn range_point_source<F>(
+    label: &ir::NonEmptyString,
+    property: &ir::NonEmptyString,
+    domain: &AccessEqualityDomain,
+    indexes: &catalog::IndexCatalogSnapshot,
+) -> Result<F::Source, MissingAccessIndex>
+where
+    F: AccessFilterIndexFamily,
+{
+    let literal_point = |literal: &ir::SecondaryIndexLiteral| {
+        ir::RangeIndexValue::literal(literal.as_property_value().clone()).map(|value| {
+            ir::IndexRange::Between(
+                ir::IndexBetweenRange::new(
+                    ir::IndexBound::Inclusive(value.clone()),
+                    ir::IndexBound::Inclusive(value),
+                )
+                .expect("a point range over one orderable literal is never inverted"),
+            )
+        })
+    };
+    let point = |value: &ir::IndexValue| match value {
+        ir::IndexValue::Literal(literal) => literal_point(literal),
+        ir::IndexValue::Param(_) | ir::IndexValue::ParamSet(_) | ir::IndexValue::LiteralSet(_) => {
+            None
+        }
+    };
+    let ranges = match domain {
+        AccessEqualityDomain::One(value) => vec![point(value)],
+        AccessEqualityDomain::Many(values) => values.iter().map(point).collect(),
+        AccessEqualityDomain::Batch(values) => values.iter().map(literal_point).collect(),
+        AccessEqualityDomain::Runtime(_) => vec![None],
+    }
+    .into_iter()
+    .collect::<Option<Vec<_>>>()
+    .ok_or(MissingAccessIndex::Equality)?;
+    let (index, key) = [
+        helix_ast::index::RangeIndexDirection::Asc,
+        helix_ast::index::RangeIndexDirection::Desc,
+    ]
+    .into_iter()
+    .find_map(|direction| {
+        let key =
+            catalog::ScopedPropertyDirectionKey::new(label.clone(), property.clone(), direction);
+        F::range_index(indexes, &key).map(|index| (index, key))
+    })
+    .ok_or(MissingAccessIndex::Equality)?;
+    let mut sources = ranges
+        .into_iter()
+        .map(|range| F::range_source(index.clone(), key.clone(), range))
+        .collect::<Vec<_>>();
+    Ok(match sources.len() {
+        1 => sources.pop().expect("one point range was checked"),
+        _ => F::union_source(sources),
+    })
 }
 
 pub(super) fn combine_indexed_filter_source<F>(

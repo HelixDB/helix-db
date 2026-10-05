@@ -69,7 +69,7 @@ async fn create_index(db: &HelixDB, scope: DataScope, spec: index::IndexSpec) {
     .unwrap();
 }
 
-fn node(
+pub(super) fn node(
     label: &str,
     uid: &str,
     kind: Option<&str>,
@@ -87,7 +87,7 @@ fn node(
     traversal::g().add_n(label, properties)
 }
 
-fn edge(
+pub(super) fn edge(
     from: &str,
     label: &str,
     to: &str,
@@ -145,7 +145,7 @@ fn seed() -> batch::WriteBatch {
 }
 
 /// `uid`s behind group `g3`'s items: a handful of node rows.
-fn narrow(predicate: expr::Predicate) -> traversal::Traversal<traversal::Terminal> {
+pub(super) fn narrow(predicate: expr::Predicate) -> traversal::Traversal<traversal::Terminal> {
     traversal::g()
         .n_with_label_where("Group", expr::Predicate::eq("uid", "g3"))
         .in_(Some("IN_GROUP"))
@@ -173,7 +173,7 @@ fn read_result(result: traversal::Traversal<traversal::Terminal>) -> batch::Read
 }
 
 /// `predicate` with its conjuncts scoped to the `Attribute` label.
-fn attribute(predicate: expr::Predicate) -> expr::Predicate {
+pub(super) fn attribute(predicate: expr::Predicate) -> expr::Predicate {
     // A nested conjunction would hide its conjuncts from the index split.
     let conjuncts = if let expr::Predicate::And { predicates } = &predicate {
         predicates.clone()
@@ -211,13 +211,13 @@ fn repeated(uids: &[&'static str], times: usize) -> Vec<&'static str> {
 
 /// Membership sets `db` resolved from secondary indexes. The per-row
 /// fallback keeps the same rows, so only this count shows a set was read.
-fn resolved(db: &HelixDB) -> usize {
+pub(super) fn resolved(db: &HelixDB) -> usize {
     db.inner
         .resolved_index_memberships
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-async fn seeded(name: &str, scope: DataScope, indexed: bool) -> HelixDB {
+pub(super) async fn seeded(name: &str, scope: DataScope, indexed: bool) -> HelixDB {
     let db = open(name).await;
     if indexed {
         create_index(
@@ -388,7 +388,7 @@ async fn post_expansion_membership_matches_the_per_row_filter_end_to_end() {
 }
 
 #[test]
-fn equality_seed_residual_with_post_expansion_membership_matches_the_per_row_filter() {
+fn indexed_source_intersection_with_post_expansion_membership_matches_the_per_row_filter() {
     // Directly executed plans and public queries in one future exceed the
     // default test stack in debug builds, so run on a dedicated stack.
     std::thread::Builder::new()
@@ -400,7 +400,7 @@ fn equality_seed_residual_with_post_expansion_membership_matches_the_per_row_fil
                 .build()
                 .expect("membership seed test runtime builds")
                 .block_on(
-                    equality_seed_residual_with_post_expansion_membership_matches_the_per_row_filter_contract(),
+                    indexed_source_intersection_with_post_expansion_membership_matches_the_per_row_filter_contract(),
                 );
         })
         .expect("membership seed test thread starts")
@@ -408,11 +408,11 @@ fn equality_seed_residual_with_post_expansion_membership_matches_the_per_row_fil
         .expect("membership seed test thread completes");
 }
 
-/// An `Item` conjunction seeded by one equality index keeps the other as a
-/// per-row residual ahead of the expansions, and the post-expansion filter
-/// planned as index membership returns the per-row filter's rows.
-async fn equality_seed_residual_with_post_expansion_membership_matches_the_per_row_filter_contract()
-{
+/// An `Item` conjunction of two indexed equalities intersects both sets ahead
+/// of the expansions, and the post-expansion filter planned as index
+/// membership returns the per-row filter's rows.
+async fn indexed_source_intersection_with_post_expansion_membership_matches_the_per_row_filter_contract(
+) {
     let scope = DataScope::LegacyUnscoped;
     let indexed = seeded("membership-e2e-seed-indexed", scope, true).await;
     for property in ["uid", "kind"] {
@@ -425,8 +425,7 @@ async fn equality_seed_residual_with_post_expansion_membership_matches_the_per_r
     }
     let unindexed = seeded("membership-e2e-seed-unindexed", scope, false).await;
     // `iw` and `ih` are both `hub` items, and `ih` links two B-valued
-    // attributes. Whichever `Item` equality seeds the source, its residual
-    // must drop the other hub.
+    // attributes. The `Item` intersection must drop the other hub.
     for db in [&indexed, &unindexed] {
         db.query_scoped(
             query::QueryRequest::write(
@@ -554,39 +553,49 @@ async fn equality_seed_residual_with_post_expansion_membership_matches_the_per_r
             assert_eq!(counted["result"], serde_json::json!(expected.len()));
         }
 
-        let seeded = planning::plan_read_batch(&values, &item_statistics).unwrap();
+        // Both `Item` conjuncts are index-served, so the source intersects
+        // the `uid` and `kind` sets and no conjunct is evaluated per row.
+        let intersected = planning::plan_read_batch(&values, &item_statistics).unwrap();
         assert!(
-            seeded.steps().iter().any(|step| matches!(
+            intersected.steps().iter().any(|step| matches!(
                 &step.op,
                 exec::ExecOp::Access { plan } if matches!(
                     plan.as_ref(),
-                    exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Bitmap {
-                        bitmap: exec::ExecNodeBitmapExpr::PointRead { key, .. },
-                    }) if key.property.as_ref() == "uid"
+                    exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::SecondarySet {
+                        set: exec::ExecNodeSecondarySetPlan::Intersect { driver, rest },
+                    }) if rest.len() == 1 && {
+                        let mut properties = std::iter::once(driver.as_ref())
+                            .chain(rest.iter())
+                            .filter_map(|child| {
+                                let exec::ExecNodeSecondarySetPlan::Bitmap(
+                                    exec::ExecNodeBitmapExpr::PointRead { key, .. },
+                                ) = child
+                                else {
+                                    return None;
+                                };
+                                Some(key.property.as_ref())
+                            })
+                            .collect::<Vec<_>>();
+                        properties.sort_unstable();
+                        properties == ["kind", "uid"]
+                    }
                 )
             )),
             "{:#?}",
-            seeded.steps()
+            intersected.steps()
         );
-        // A seed keeps every other conjunct inside one residual conjunction.
-        let residual = expr::Predicate::and(vec![expr::Predicate::eq("kind", kind)]);
-        let position = |matches: &dyn Fn(&exec::ExecOp) -> bool| {
-            seeded
+        assert!(
+            !intersected
                 .steps()
                 .iter()
-                .position(|step| matches(&step.op))
-                .unwrap_or_else(|| panic!("missing step: {:#?}", seeded.steps()))
-        };
-        let residual_position = position(
-            &|op| matches!(op, exec::ExecOp::Filter { predicate } if predicate.predicate() == &residual),
+                .any(|step| matches!(step.op, exec::ExecOp::Filter { .. })),
+            "{:#?}",
+            intersected.steps()
         );
-        let membership_position =
-            position(&|op| matches!(op, exec::ExecOp::IndexMembership { .. }));
-        assert!(residual_position < membership_position);
-        assert_eq!(membership_steps(&seeded), 1);
+        assert_eq!(membership_steps(&intersected), 1);
 
         let before = resolved(&indexed);
-        let rows = execute(seeded).await;
+        let rows = execute(intersected).await;
         assert_eq!(resolved(&indexed) - before, resolves, "{item} {kind}");
         assert_eq!(uids(&rows), expected, "{item} {kind}");
         let counted = execute(planning::plan_read_batch(&count, &item_statistics).unwrap()).await;

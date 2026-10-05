@@ -15,8 +15,8 @@ use crate::error::HelixDbError;
 use crate::search::vector::cache::registry::{VectorCacheReadGuard, VectorCacheRegistry};
 use crate::search::vector::{
     Distance, RestrictedVectorCandidates, SearchParams, SearchResult, SimHasherRegistry,
-    ValidatedVectorGenerationHandle, VectorBatchReads, VectorGenerationValidationError,
-    VectorIndex, VectorIndexMetadata,
+    ValidatedVectorGenerationHandle, VectorGenerationValidationError, VectorIndex,
+    VectorIndexMetadata,
 };
 
 /// Storage visibility evidence available to a vector read factory.
@@ -76,7 +76,7 @@ impl<D: Distance> ValidatedVectorReadIndex<D> {
     /// A factory-built reader issues one `multi_get` per batch; the caller
     /// opts into concurrent chunks only when its database has a SlateDB block
     /// cache that deduplicates their SST metadata reads.
-    pub(crate) fn with_batch_reads(mut self, batch_reads: VectorBatchReads) -> Self {
+    pub(crate) fn with_batch_reads(mut self, batch_reads: crate::batch_reads::BatchReads) -> Self {
         self.index = self.index.with_batch_reads(batch_reads);
         self
     }

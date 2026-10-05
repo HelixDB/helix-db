@@ -935,9 +935,31 @@ async fn unique_union_batches_owners_and_rejects_stale_graph_rows() {
                 ExecutionValue::Scalars(ids.into_iter().map(ExecutionScalar::NodeId).collect())
             );
             let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
-            assert_eq!(metrics.multi_get_calls, 1);
+            // One multi-get reads the owners and one verifies their records, never
+            // one get per owner.
+            assert_eq!(metrics.multi_get_calls, 2);
             assert_eq!(metrics.scans, 0);
             assert_eq!(metrics.graph_reads, 3);
+            // Six hundred values are three owner batches; only the two holding an
+            // owner need a verification batch.
+            let wide = core::iter::once("first".to_string())
+                .chain((0..598).map(|n| format!("missing-{n}")))
+                .chain(core::iter::once("second".to_string()))
+                .collect::<Vec<_>>();
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            let mut ids = vec![first, second];
+            ids.sort_unstable();
+            assert_eq!(
+                run_node_access(
+                    &db,
+                    plan(&wide.iter().map(String::as_str).collect::<Vec<_>>())
+                )
+                .await,
+                ExecutionValue::Scalars(ids.into_iter().map(ExecutionScalar::NodeId).collect())
+            );
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(metrics.multi_get_calls, 3 + 2);
+            assert_eq!(metrics.graph_reads, 2);
             assert_eq!(
                 run_node_access(&db, plan(&["missing", "absent"])).await,
                 ExecutionValue::Scalars(Vec::new())
@@ -1029,6 +1051,7 @@ async fn exact_null_and_nan_row_access_never_enter_bitmap_dispatch() {
 
             let mut expected = vec![explicit_null, absent];
             expected.sort_unstable();
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
             assert_eq!(
                 run_node_access(
                     &db,
@@ -1045,6 +1068,11 @@ async fn exact_null_and_nan_row_access_never_enter_bitmap_dispatch() {
                     expected.into_iter().map(ExecutionScalar::NodeId).collect()
                 )
             );
+            // No Active generation: the three `User` rows are the candidates, and
+            // the `Other` row is never read.
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(metrics.scans, 0);
+            assert_eq!(metrics.graph_reads, 3);
 
             crate::index_lifecycle::secondary::reset_equality_read_metrics();
             for nan in [PropertyValue::F32(f32::NAN), PropertyValue::F64(f64::NAN)] {
@@ -1071,58 +1099,75 @@ async fn exact_null_and_nan_row_access_never_enter_bitmap_dispatch() {
 
 #[tokio::test]
 async fn dynamic_equality_is_the_only_runtime_classifier_for_null_nan_and_indexed_values() {
-    let db = test_support::open_db("access-explicit-dynamic-equality").await;
-    let active = test_support::add_node_with_properties(
-        &db,
-        "User",
-        vec![("status", PropertyValue::from("active"))],
-    )
-    .await;
-    let null =
-        test_support::add_node_with_properties(&db, "User", vec![("status", PropertyValue::Null)])
+    crate::index_lifecycle::secondary::EqualityReadObserver::default()
+        .scope(async {
+            let db = test_support::open_db("access-explicit-dynamic-equality").await;
+            let active = test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::from("active"))],
+            )
             .await;
-    seed_active_secondary_generation(
-        &db,
-        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
-        60,
-        &[("active", active)],
-    )
-    .await;
-    let param = test_support::name("late_status");
-    let plan = exec::ExecNodeAccessPlan::DynamicEquality {
-        index: catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status")),
-        key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
-        param: param.clone(),
-    };
+            let null = test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::Null)],
+            )
+            .await;
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+                60,
+                &[("active", active)],
+            )
+            .await;
+            let param = test_support::name("late_status");
+            let plan = exec::ExecNodeAccessPlan::DynamicEquality {
+                index: catalog::NodeEqualityIndexMeta::new(test_support::name(
+                    "node_eq:User:status",
+                )),
+                key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+                param: param.clone(),
+            };
 
-    assert_eq!(
-        run_node_access_with_params(
-            &db,
-            plan.clone(),
-            context::ParamBindings::default()
-                .with_value(param.clone(), PropertyValue::from("active")),
-        )
-        .await,
-        ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(active)])
-    );
-    assert_eq!(
-        run_node_access_with_params(
-            &db,
-            plan.clone(),
-            context::ParamBindings::default().with_value(param.clone(), PropertyValue::Null),
-        )
-        .await,
-        ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(null)])
-    );
-    assert_eq!(
-        run_node_access_with_params(
-            &db,
-            plan,
-            context::ParamBindings::default().with_value(param, PropertyValue::F64(f64::NAN)),
-        )
-        .await,
-        ExecutionValue::Scalars(Vec::new())
-    );
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    plan.clone(),
+                    context::ParamBindings::default()
+                        .with_value(param.clone(), PropertyValue::from("active")),
+                )
+                .await,
+                ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(active)])
+            );
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    plan.clone(),
+                    context::ParamBindings::default()
+                        .with_value(param.clone(), PropertyValue::Null),
+                )
+                .await,
+                ExecutionValue::Scalars(vec![ExecutionScalar::NodeId(null)])
+            );
+            // A null binding reads the lane once and verifies only the label row
+            // outside it.
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(metrics.scans, 1);
+            assert_eq!(metrics.graph_reads, 1);
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    plan,
+                    context::ParamBindings::default()
+                        .with_value(param, PropertyValue::F64(f64::NAN)),
+                )
+                .await,
+                ExecutionValue::Scalars(Vec::new())
+            );
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -1254,6 +1299,471 @@ async fn dynamic_membership_batches_safe_values_and_falls_back_authoritatively()
             );
         })
         .await
+}
+
+#[tokio::test]
+async fn null_equality_reads_only_label_rows_outside_the_lane() {
+    crate::index_lifecycle::secondary::EqualityReadObserver::default()
+        .scope(async {
+            let db = test_support::open_db("access-null-equality-label-complement").await;
+            let mut active = Vec::new();
+            for _ in 0..6 {
+                active.push(
+                    test_support::add_node_with_properties(
+                        &db,
+                        "User",
+                        vec![("status", PropertyValue::from("active"))],
+                    )
+                    .await,
+                );
+            }
+            let explicit_null = test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::Null)],
+            )
+            .await;
+            let missing = test_support::add_node_with_properties(&db, "User", Vec::new()).await;
+            for _ in 0..5 {
+                test_support::add_node_with_properties(
+                    &db,
+                    "Other",
+                    vec![("status", PropertyValue::Null)],
+                )
+                .await;
+            }
+            let from = active[0];
+            let to = active[1];
+            let mut active_edges = Vec::new();
+            for _ in 0..3 {
+                active_edges.push(
+                    test_support::add_edge_with_properties(
+                        &db,
+                        from,
+                        to,
+                        "FOLLOWS",
+                        vec![("status", PropertyValue::from("active"))],
+                    )
+                    .await,
+                );
+            }
+            let null_edge = test_support::add_edge_with_properties(
+                &db,
+                from,
+                to,
+                "FOLLOWS",
+                vec![("status", PropertyValue::Null)],
+            )
+            .await;
+            for _ in 0..4 {
+                test_support::add_edge_with_properties(
+                    &db,
+                    from,
+                    to,
+                    "LIKES",
+                    vec![("status", PropertyValue::Null)],
+                )
+                .await;
+            }
+            let node_rows = active.iter().map(|id| ("active", *id)).collect::<Vec<_>>();
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+                70,
+                &node_rows,
+            )
+            .await;
+            let edge_rows = active_edges
+                .iter()
+                .map(|id| ("active", *id))
+                .collect::<Vec<_>>();
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::edge_equality("FOLLOWS", "status").unwrap(),
+                71,
+                &edge_rows,
+            )
+            .await;
+
+            let null = || {
+                ir::IndexValue::Literal(
+                    ir::SecondaryIndexLiteral::new(PropertyValue::Null).unwrap(),
+                )
+            };
+            let param = test_support::name("late_status");
+            let node_index =
+                catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status"));
+            let node_key = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+            let mut with_nulls = vec![explicit_null, missing];
+            with_nulls.sort_unstable();
+            let mut active_or_null = active
+                .iter()
+                .copied()
+                .chain(with_nulls.clone())
+                .collect::<Vec<_>>();
+            active_or_null.sort_unstable();
+            // A literal, a bound parameter (a `ForEach` field binds the same runtime
+            // equality), an `IN` list with null, and a parameter list with null.
+            let node_cases = [
+                (
+                    exec::ExecNodeAccessPlan::exact_equality(
+                        node_index.clone(),
+                        node_key.clone(),
+                        null(),
+                    ),
+                    context::ParamBindings::default(),
+                    with_nulls.clone(),
+                ),
+                (
+                    exec::ExecNodeAccessPlan::DynamicEquality {
+                        index: node_index.clone(),
+                        key: node_key.clone(),
+                        param: param.clone(),
+                    },
+                    context::ParamBindings::default()
+                        .with_value(param.clone(), PropertyValue::Null),
+                    with_nulls.clone(),
+                ),
+                (
+                    exec::ExecNodeAccessPlan::SecondarySet {
+                        set: exec::ExecNodeSecondarySetPlan::exact_equalities(
+                            node_index.clone(),
+                            node_key.clone(),
+                            ir::AtLeast::try_from_vec(vec![
+                                null(),
+                                ir::IndexValue::Literal(
+                                    ir::SecondaryIndexLiteral::new(PropertyValue::from("active"))
+                                        .unwrap(),
+                                ),
+                            ])
+                            .unwrap(),
+                        ),
+                    },
+                    context::ParamBindings::default(),
+                    active_or_null.clone(),
+                ),
+                (
+                    exec::ExecNodeAccessPlan::DynamicMembership {
+                        index: node_index.clone(),
+                        key: node_key.clone(),
+                        values: ir::RuntimeEqualitySet::new(
+                            param.clone(),
+                            std::num::NonZeroUsize::new(2).unwrap(),
+                        ),
+                    },
+                    context::ParamBindings::default().with_value(
+                        param.clone(),
+                        PropertyValue::Array(vec![
+                            PropertyValue::Null,
+                            PropertyValue::from("active"),
+                        ]),
+                    ),
+                    active_or_null,
+                ),
+            ];
+            for (plan, params, expected) in node_cases {
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                assert_eq!(
+                    run_node_access_with_params(&db, plan, params).await,
+                    ExecutionValue::Scalars(
+                        expected.into_iter().map(ExecutionScalar::NodeId).collect()
+                    )
+                );
+                let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+                // One lane scan, and only the two label rows outside it are read:
+                // never a row of another label.
+                assert_eq!(metrics.scans, 1);
+                assert_eq!(metrics.graph_reads, 2);
+            }
+
+            let edge_index =
+                catalog::EdgeEqualityIndexMeta::new(test_support::name("edge_eq:FOLLOWS:status"));
+            let edge_key = catalog::ScopedPropertyKey::try_new("FOLLOWS", "status").unwrap();
+            for (plan, params) in [
+                (
+                    exec::ExecEdgeAccessPlan::exact_equality(
+                        edge_index.clone(),
+                        edge_key.clone(),
+                        null(),
+                    ),
+                    context::ParamBindings::default(),
+                ),
+                (
+                    exec::ExecEdgeAccessPlan::DynamicEquality {
+                        index: edge_index,
+                        key: edge_key,
+                        param: param.clone(),
+                    },
+                    context::ParamBindings::default()
+                        .with_value(param.clone(), PropertyValue::Null),
+                ),
+            ] {
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                assert_eq!(
+                    run_edge_access_with_params(&db, plan, params).await,
+                    ExecutionValue::Scalars(vec![ExecutionScalar::EdgeId(null_edge)])
+                );
+                let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+                assert_eq!(metrics.scans, 1);
+                assert_eq!(metrics.graph_reads, 1);
+            }
+
+            // Without an Active generation every label row is a candidate, still
+            // never a row of another label.
+            let unindexed = test_support::open_db("access-null-equality-without-lane").await;
+            test_support::add_node_with_properties(
+                &unindexed,
+                "User",
+                vec![("status", PropertyValue::from("active"))],
+            )
+            .await;
+            let mut expected = vec![
+                test_support::add_node_with_properties(
+                    &unindexed,
+                    "User",
+                    vec![("status", PropertyValue::Null)],
+                )
+                .await,
+                test_support::add_node_with_properties(&unindexed, "User", Vec::new()).await,
+            ];
+            expected.sort_unstable();
+            test_support::add_node_with_properties(
+                &unindexed,
+                "Other",
+                vec![("status", PropertyValue::Null)],
+            )
+            .await;
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            assert_eq!(
+                run_node_access(
+                    &unindexed,
+                    exec::ExecNodeAccessPlan::exact_equality(node_index, node_key, null()),
+                )
+                .await,
+                ExecutionValue::Scalars(
+                    expected.into_iter().map(ExecutionScalar::NodeId).collect()
+                )
+            );
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(metrics.scans, 0);
+            assert_eq!(metrics.graph_reads, 3);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn unsupported_and_oversized_equality_values_return_verified_label_rows() {
+    crate::index_lifecycle::secondary::EqualityReadObserver::default()
+        .scope(async {
+            let db = test_support::open_db("access-unencodable-equality-values").await;
+            let active = test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::from("active"))],
+            )
+            .await;
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::Null)],
+            )
+            .await;
+            test_support::add_node_with_properties(&db, "Other", Vec::new()).await;
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+                72,
+                &[("active", active)],
+            )
+            .await;
+            let param = test_support::name("late_status");
+            let plan = exec::ExecNodeAccessPlan::DynamicEquality {
+                index: catalog::NodeEqualityIndexMeta::new(test_support::name(
+                    "node_eq:User:status",
+                )),
+                key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+                param: param.clone(),
+            };
+            for value in [
+        PropertyValue::Object(Default::default()),
+        PropertyValue::Array(vec![PropertyValue::I64(1)]),
+        PropertyValue::String("x".repeat(
+            crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN,
+        )),
+    ] {
+        crate::index_lifecycle::secondary::reset_equality_read_metrics();
+        // No stored row can hold a value no lane can encode, so the verified
+        // label rows outside the lane answer it: empty, and never an error.
+        assert_eq!(
+            run_node_access_with_params(
+                &db,
+                plan.clone(),
+                context::ParamBindings::default().with_value(param.clone(), value),
+            )
+            .await,
+            ExecutionValue::Scalars(Vec::new())
+        );
+        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+        assert_eq!(metrics.scans, 1);
+        assert_eq!(metrics.graph_reads, 1);
+    }
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn label_rows_outside_the_lane_stop_at_the_request_deadline() {
+    let db = test_support::open_db("access-null-equality-deadline").await;
+    let mut active = Vec::new();
+    for _ in 0..3 {
+        active.push(
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![("status", PropertyValue::from("active"))],
+            )
+            .await,
+        );
+    }
+    // More null rows than one record batch holds: verification reads two.
+    let mut nulls = Vec::new();
+    for _ in 0..helix_planner::cost::RECORD_BATCH_ROWS + 1 {
+        nulls.push(test_support::add_node_with_properties(&db, "User", Vec::new()).await);
+    }
+    let rows = active.iter().map(|id| ("active", *id)).collect::<Vec<_>>();
+    seed_active_secondary_generation(
+        &db,
+        SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+        74,
+        &rows,
+    )
+    .await;
+    let key = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+    let mut expired = 0;
+    for checks in 0.. {
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.fail_deadline_after(checks);
+        match ctx
+            .null_equality_rows(IndexElementKind::Node, &key, None)
+            .await
+        {
+            Err(HelixDbError::QueryDeadlineExceeded) => expired += 1,
+            Err(error) => panic!("unexpected error {error:?}"),
+            Ok(rows) => {
+                assert_eq!(rows, roaring::RoaringTreemap::from_iter(nulls));
+                break;
+            }
+        }
+    }
+    // The request deadline is checked before every lane row (the one `active`
+    // bitmap, then the end of the lane) and before every record batch (two,
+    // then the end of the candidates), so an expired request stops at each.
+    assert_eq!(expired, 5);
+}
+
+#[tokio::test]
+async fn runtime_lists_over_the_bound_use_chunked_multi_gets() {
+    crate::index_lifecycle::secondary::EqualityReadObserver::default()
+        .scope(async {
+            let db = test_support::open_db("access-runtime-lists-over-the-bound").await;
+            let mut matching = Vec::new();
+            for value in 0..10 {
+                matching.push(
+                    test_support::add_node_with_properties(
+                        &db,
+                        "User",
+                        vec![("status", PropertyValue::from(format!("s{value}")))],
+                    )
+                    .await,
+                );
+            }
+            let values = (0..1_000)
+                .map(|value| format!("s{value}"))
+                .collect::<Vec<_>>();
+            let rows = matching
+                .iter()
+                .enumerate()
+                .map(|(value, id)| (values[value].as_str(), *id))
+                .collect::<Vec<_>>();
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+                73,
+                &rows,
+            )
+            .await;
+            let index =
+                catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:status"));
+            let key = catalog::ScopedPropertyKey::try_new("User", "status").unwrap();
+            let expected = ExecutionValue::Scalars(
+                matching
+                    .iter()
+                    .copied()
+                    .map(ExecutionScalar::NodeId)
+                    .collect(),
+            );
+
+            // A runtime list of a thousand values is read as unions of at most 64
+            // values each: one multi-get per union, never a scan.
+            let param = test_support::name("statuses");
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    exec::ExecNodeAccessPlan::DynamicMembership {
+                        index: index.clone(),
+                        key: key.clone(),
+                        values: ir::RuntimeEqualitySet::new(
+                            param.clone(),
+                            std::num::NonZeroUsize::new(64).unwrap(),
+                        ),
+                    },
+                    context::ParamBindings::default()
+                        .with_value(param, PropertyValue::StringArray(values.clone())),
+                )
+                .await,
+                expected
+            );
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(metrics.multi_get_calls, 1_000_u64.div_ceil(64));
+            assert_eq!(metrics.scans, 0);
+            assert_eq!(metrics.graph_reads, 0);
+
+            // A literal list of the same size is one batched read, in multi-gets of
+            // one record batch each.
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            assert_eq!(
+                run_node_access(
+                    &db,
+                    exec::ExecNodeAccessPlan::exact_equality(
+                        index,
+                        key,
+                        ir::IndexValue::LiteralSet(
+                            ir::AtLeast::try_from_vec(
+                                values
+                                    .into_iter()
+                                    .map(|value| {
+                                        ir::SecondaryIndexLiteral::new(PropertyValue::from(value))
+                                            .unwrap()
+                                    })
+                                    .collect(),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                )
+                .await,
+                expected
+            );
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(
+                metrics.multi_get_calls,
+                1_000_u64.div_ceil(helix_planner::cost::RECORD_BATCH_ROWS)
+            );
+            assert_eq!(metrics.scans, 0);
+            assert_eq!(metrics.graph_reads, 0);
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -3992,6 +4502,322 @@ async fn set_errors_surface_in_plan_order_and_empty_children_do_not_short_circui
         );
     }
     context.close_request_read_view().unwrap();
+}
+
+#[tokio::test]
+async fn range_bounds_without_an_encoding_are_empty() {
+    let config = test_support::in_memory_config("access-range-unencodable-bounds")
+        .with_range_index("User", "score");
+    let db = test_support::open_db_with_config(config).await;
+    for score in [10, 20, 30] {
+        test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("score", PropertyValue::I64(score))],
+        )
+        .await;
+    }
+    let min = test_support::name("min_score");
+    let max = test_support::name("max_score");
+    let key = catalog::ScopedPropertyDirectionKey::try_new(
+        "User",
+        "score",
+        helix_ast::index::RangeIndexDirection::Asc,
+    )
+    .expect("valid key");
+    let plan = |range: ir::IndexRange, iteration| exec::ExecNodeAccessPlan::RangeIndex {
+        iteration,
+        index: catalog::NodeRangeIndexMeta::new(test_support::name("node_range:User:score:asc")),
+        key: key.clone(),
+        range,
+    };
+    let lower = ir::IndexRange::Lower {
+        lower: ir::IndexBound::Inclusive(ir::RangeIndexValue::Param(min.clone())),
+    };
+    // No stored value orders against null, bool or NaN, nor between bounds
+    // of different domains: every such range is empty, never an error.
+    for (low, high) in [
+        (PropertyValue::Null, PropertyValue::I64(40)),
+        (PropertyValue::Bool(true), PropertyValue::I64(40)),
+        (PropertyValue::F64(f64::NAN), PropertyValue::I64(40)),
+        (PropertyValue::I64(20), PropertyValue::from("z")),
+    ] {
+        let params = context::ParamBindings::default()
+            .with_value(min.clone(), low.clone())
+            .with_value(max.clone(), high);
+        for iteration in [
+            helix_planner::ir::RangeScanIteration::Forward,
+            helix_planner::ir::RangeScanIteration::Reverse,
+        ] {
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    plan(
+                        parameterized_i64_between(min.clone(), max.clone()),
+                        iteration
+                    ),
+                    params.clone(),
+                )
+                .await,
+                ExecutionValue::Scalars(Vec::new()),
+                "{low:?}"
+            );
+            assert_eq!(
+                run_limited_node_access_with_params(
+                    &db,
+                    plan(
+                        parameterized_i64_between(min.clone(), max.clone()),
+                        iteration
+                    ),
+                    2,
+                    params.clone(),
+                )
+                .await,
+                ExecutionValue::Scalars(Vec::new()),
+                "{low:?}"
+            );
+        }
+        if low.as_i64().is_none() {
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    plan(
+                        lower.clone(),
+                        helix_planner::ir::RangeScanIteration::Forward
+                    ),
+                    params,
+                )
+                .await,
+                ExecutionValue::Scalars(Vec::new()),
+                "{low:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn intersections_verify_label_rows_only_against_their_other_children() {
+    crate::index_lifecycle::secondary::EqualityReadObserver::default()
+        .scope(async {
+            // Null equality, and runtime equality or domains binding null, verify
+            // label records. Inside an intersection they read only the rows the
+            // other children keep: no label bitmap, no lane scan, and one record per
+            // kept row, however many label rows have the property null.
+            let db = test_support::open_db("access-null-intersections-verify-within").await;
+            let mut active = Vec::new();
+            for deleted_at in [
+                Some(PropertyValue::Null),
+                None,
+                Some(PropertyValue::from("2024")),
+                Some(PropertyValue::from("2025")),
+            ] {
+                active.push(
+                    test_support::add_node_with_properties(
+                        &db,
+                        "User",
+                        core::iter::once(("status", PropertyValue::from("active")))
+                            .chain(deleted_at.map(|value| ("deleted_at", value)))
+                            .collect(),
+                    )
+                    .await,
+                );
+            }
+            let mut paused = Vec::new();
+            for _ in 0..30 {
+                paused.push(
+                    test_support::add_node_with_properties(
+                        &db,
+                        "User",
+                        vec![("status", PropertyValue::from("paused"))],
+                    )
+                    .await,
+                );
+            }
+            let status_rows = active
+                .iter()
+                .map(|id| ("active", *id))
+                .chain(paused.iter().map(|id| ("paused", *id)))
+                .collect::<Vec<_>>();
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::node_equality("User", "status").unwrap(),
+                80,
+                &status_rows,
+            )
+            .await;
+            seed_active_secondary_generation(
+                &db,
+                SecondaryIndexDefinition::node_equality("User", "deleted_at").unwrap(),
+                81,
+                &[("2024", active[2]), ("2025", active[3])],
+            )
+            .await;
+
+            let index = |property: &str| {
+                catalog::NodeEqualityIndexMeta::new(test_support::name(&format!(
+                    "node_eq:User:{property}"
+                )))
+            };
+            let key =
+                |property: &str| catalog::ScopedPropertyKey::try_new("User", property).unwrap();
+            let active_status = || exec::ExecNodeBitmapExpr::PointRead {
+                index: exec::ExecNodeNonUniqueEqualityIndex::try_from(index("status")).unwrap(),
+                key: key("status"),
+                value: exec::ExecIndexedEqualityValue::try_from(
+                    ir::SecondaryIndexLiteral::new(PropertyValue::from("active")).unwrap(),
+                )
+                .unwrap(),
+            };
+            let param = test_support::name("deleted_at");
+            let values =
+                ir::RuntimeEqualitySet::new(param.clone(), std::num::NonZeroUsize::new(2).unwrap());
+            let null_param =
+                || context::ParamBindings::default().with_value(param.clone(), PropertyValue::Null);
+            let null_list = || {
+                context::ParamBindings::default().with_value(
+                    param.clone(),
+                    PropertyValue::Array(vec![PropertyValue::Null, PropertyValue::from("1999")]),
+                )
+            };
+            let mut expected = [active[0], active[1]];
+            expected.sort_unstable();
+
+            let row_cases = [
+                (
+                    exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                        exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                            key: key("deleted_at"),
+                        },
+                    ),
+                    context::ParamBindings::default(),
+                ),
+                (
+                    exec::ExecNodeSecondarySetPlan::DynamicEquality {
+                        index: index("deleted_at"),
+                        key: key("deleted_at"),
+                        param: param.clone(),
+                    },
+                    null_param(),
+                ),
+                (
+                    exec::ExecNodeSecondarySetPlan::DynamicMembership {
+                        index: index("deleted_at"),
+                        key: key("deleted_at"),
+                        values: values.clone(),
+                    },
+                    null_list(),
+                ),
+            ];
+            for (late, params) in row_cases {
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                assert_eq!(
+                    run_node_access_with_params(
+                        &db,
+                        exec::ExecNodeAccessPlan::SecondarySet {
+                            // The late leaf comes first; it is still read last.
+                            set: exec::ExecNodeSecondarySetPlan::Intersect {
+                                driver: Box::new(late),
+                                rest: ir::AtLeast::from_one(
+                                    exec::ExecNodeSecondarySetPlan::Bitmap(active_status(),)
+                                ),
+                            },
+                        },
+                        params,
+                    )
+                    .await,
+                    ExecutionValue::Scalars(
+                        expected
+                            .iter()
+                            .copied()
+                            .map(ExecutionScalar::NodeId)
+                            .collect()
+                    )
+                );
+                let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+                assert_eq!(metrics.scans, 0);
+                assert_eq!(metrics.graph_reads, active.len() as u64);
+            }
+
+            let count_cases = [
+                (
+                    exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                        exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                            key: key("deleted_at"),
+                        },
+                    ),
+                    context::ParamBindings::default(),
+                ),
+                (
+                    exec::ExecCountCursorPlan::NodeDynamicEquality {
+                        index: index("deleted_at"),
+                        key: key("deleted_at"),
+                        param: param.clone(),
+                    },
+                    null_param(),
+                ),
+                (
+                    exec::ExecCountCursorPlan::NodeDynamicMembership {
+                        index: index("deleted_at"),
+                        key: key("deleted_at"),
+                        values,
+                    },
+                    null_list(),
+                ),
+            ];
+            for (late, params) in count_cases {
+                let mut execution = ExecutionContext::new(&db, params);
+                execution.enable_request_read_view().await.unwrap();
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                assert_eq!(
+                    execution
+                        .pull_count_cardinality(
+                            &exec::ExecCountCursorPlan::Intersect {
+                                driver: Box::new(late),
+                                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeBitmap(
+                                    active_status(),
+                                )),
+                            },
+                            &mut None,
+                            0,
+                            None,
+                        )
+                        .await
+                        .unwrap(),
+                    expected.len()
+                );
+                let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+                assert_eq!(metrics.scans, 0);
+                assert_eq!(metrics.graph_reads, active.len() as u64);
+                execution.close_request_read_view().unwrap();
+            }
+
+            // Alone, a null runtime equality still reads the label rows outside the
+            // lane: one lane scan, every row without the property verified.
+            crate::index_lifecycle::secondary::reset_equality_read_metrics();
+            let mut alone = expected
+                .iter()
+                .copied()
+                .chain(paused.iter().copied())
+                .collect::<Vec<_>>();
+            alone.sort_unstable();
+            assert_eq!(
+                run_node_access_with_params(
+                    &db,
+                    exec::ExecNodeAccessPlan::DynamicEquality {
+                        index: index("deleted_at"),
+                        key: key("deleted_at"),
+                        param: param.clone(),
+                    },
+                    null_param(),
+                )
+                .await,
+                ExecutionValue::Scalars(alone.into_iter().map(ExecutionScalar::NodeId).collect())
+            );
+            let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+            assert_eq!(metrics.scans, 1);
+            assert_eq!(metrics.graph_reads, 2 + paused.len() as u64);
+        })
+        .await;
 }
 
 mod nested;

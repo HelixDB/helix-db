@@ -15,11 +15,11 @@ mod iteration;
 mod node;
 
 pub use self::{
-    edge::{EdgeAccessPlan, EdgeAccessSourcePlan},
+    edge::{EdgeAccessPlan, EdgeAccessSourcePlan, EdgeResidualBranch, EdgeResidualBranches},
     iteration::RangeScanIteration,
     node::{
         NodeAccessPlan, NodeAccessSourcePlan, NodeIndexMembershipError, NodeIndexMembershipPlan,
-        NodeMembershipOutsideLabel, NodeMembershipSet,
+        NodeMembershipOutsideLabel, NodeMembershipSet, NodeResidualBranch, NodeResidualBranches,
     },
 };
 

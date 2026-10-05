@@ -31,15 +31,23 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<ExecutionValue> {
         let frames = self.foreach_param_frames(param)?;
         let param_restore = RestoredParamBinding::remove(&mut self.params, param.clone());
+        // Membership sets are forgotten only when a binding they read
+        // changes: the body runs with the batch parameter unbound.
+        self.prepared_memberships
+            .forget_params(|name| name == param);
         let result = async {
             let mut last = None;
             for frame in frames {
                 self.check_execution_deadline()?;
                 let restore = frame.apply_to(&mut self.params);
-                // Membership sets resolved from the previous bindings may
-                // depend on the parameters this frame replaced.
-                self.prepared_memberships.clear();
+                // Sets resolved from the bindings this frame replaces cannot
+                // serve it,
+                self.prepared_memberships
+                    .forget_params(|name| restore.binds(name));
                 let iteration = self.execute_subplan(body).await;
+                // and sets resolved from its own bindings cannot outlive it.
+                self.prepared_memberships
+                    .forget_params(|name| restore.binds(name));
                 restore.restore(&mut self.params);
                 last = Some(iteration?);
             }
@@ -47,7 +55,9 @@ impl<'db> ExecutionContext<'db> {
         }
         .await;
         param_restore.restore(&mut self.params);
-        self.prepared_memberships.clear();
+        // Sets the body resolved while the batch parameter was unbound.
+        self.prepared_memberships
+            .forget_params(|name| name == param);
         result
     }
 
@@ -111,6 +121,11 @@ impl RestoredParamBinding {
 }
 
 impl ForEachParamRestore {
+    /// Whether this frame binds `name`.
+    fn binds(&self, name: &ir::NonEmptyString) -> bool {
+        self.0.iter().any(|binding| binding.name == *name)
+    }
+
     fn restore(self, params: &mut context::ParamBindings) {
         for binding in self.0.into_iter().rev() {
             binding.restore(params);

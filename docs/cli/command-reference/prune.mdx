@@ -35,6 +35,7 @@ helix prune [INSTANCE] [OPTIONS]
 
 - The container named `helix-<project>-<instance>`.
 - The disk-mode SeaweedFS sidecar, network, and persistent volume when present, plus any MinIO sidecar and volume left by an older CLI.
+- The disk-cache volume of a disk-mode or S3 instance.
 - The per-instance directory under `.helix/`.
 
 It never runs a broad `docker system prune` or `podman system prune`, and it never deletes remote S3

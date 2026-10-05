@@ -72,13 +72,29 @@ pub(crate) async fn lookup_active_equality_generation_admitted(
 /// Runtime domains fold equal physical keys. A singleton uses `get`; larger
 /// domains use one `multi_get`. Literal executable batches deliberately keep
 /// duplicates and always use their selected batch primitive.
+///
+/// An unbudgeted read is the native lookup,
+/// [`lookup_active_equality_generations_with_compatibility`], unchanged; only
+/// a request with a memory budget admits each read here.
 pub(crate) async fn lookup_active_equality_generations_admitted(
-    reader: &(impl DbReadOps + Sync),
+    reader: &(impl DbReadOps + Send + Sync),
     handle: &ActiveIndexHandle,
     values: &[PropertyValue],
     compatibility: ReaderStorageCompatibility,
     budget: Option<&query_resources::Budget>,
+    deadline: &(impl Fn() -> Result<()> + Sync),
 ) -> Result<bitmap::Bitmap> {
+    if budget.is_none() {
+        return lookup_active_equality_generations_with_compatibility(
+            reader,
+            handle,
+            values,
+            compatibility,
+            deadline,
+        )
+        .await
+        .and_then(|ids| bitmap::Bitmap::retain_legacy(ids, None));
+    }
     if values.is_empty() {
         return bitmap::Bitmap::empty(budget);
     }

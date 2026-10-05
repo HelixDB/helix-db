@@ -265,6 +265,11 @@ impl<'db> ExecutionContext<'db> {
             pending_catalog_freshness: runtime_context::PendingCatalogFreshness::Consumed,
             row_mode_max_rows: self.row_mode_max_rows,
             execution_control: self.execution_control.clone(),
+            // Parallel contexts run only parallel-isolated steps, and only
+            // without a write transaction. None of those resolves a membership
+            // (membership, count, branch, repeat, and `ForEach` steps run
+            // serially), so a shared snapshot of the parent's sets would never
+            // be read.
             prepared_memberships: super::stream::PreparedMemberships::default(),
             shared_index_reads: Arc::clone(&self.shared_index_reads),
             #[cfg(test)]
@@ -737,6 +742,64 @@ mod tests {
             ..read
         };
         assert!(!is_parallel_isolated_step(&barrier));
+    }
+
+    /// Parallel step contexts start with an empty membership cache, which is
+    /// free only while no step that resolves a membership runs in one.
+    #[test]
+    fn membership_resolving_steps_never_run_in_parallel_contexts() {
+        let body = || {
+            Box::new(test_support::subplan(
+                vec![test_support::step(1, Vec::new(), exec::ExecOp::Noop)],
+                1,
+            ))
+        };
+        let membership = exec::ExecNodeIndexMembershipPlan::from(
+            &ir::NodeIndexMembershipPlan::labels(
+                ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("$label", "Item")).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        for op in [
+            exec::ExecOp::IndexMembership {
+                plan: Box::new(membership.clone()),
+            },
+            exec::ExecOp::Count {
+                plan: Box::new(exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                    cursor: exec::ExecCountCursorPlan::IndexMembership {
+                        input: Box::new(exec::ExecCountCursorPlan::NodeRuntimeInput(
+                            exec::ExecRuntimeInputPlan::Param(named("ids")),
+                        )),
+                        plan: Box::new(membership),
+                    },
+                    window: exec::ExecCountWindowPlan::identity(),
+                })),
+            },
+            exec::ExecOp::Branch {
+                plan: exec::ExecBranchPlan::Optional(body()),
+            },
+            exec::ExecOp::Repeat {
+                plan: exec::ExecRepeatPlan {
+                    body: body(),
+                    stop: ir::RepeatStopPlan::MaxDepthOnly,
+                    emit: ir::RepeatEmitPlan::None,
+                    max_depth: std::num::NonZeroUsize::new(2).unwrap(),
+                },
+            },
+            exec::ExecOp::ForEach {
+                param: named("items"),
+                body: body(),
+            },
+            exec::ExecOp::Mutation {
+                plan: exec::ExecMutationPlan::Drop,
+            },
+        ] {
+            assert!(
+                !is_parallel_isolated_step(&test_support::step(1, Vec::new(), op.clone())),
+                "{op:?}"
+            );
+        }
     }
 
     /// A stage naming a step the plan lacks is an invariant violation, and

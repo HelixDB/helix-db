@@ -24,20 +24,19 @@ fn ranked_rows_are_equal_only_at_the_same_rank() {
     assert!(ranked(2, 1) < ranked(1, 0));
 }
 
-/// A WITH predicate over a binding the projection drops cannot follow the
-/// projection, so it filters rows before ORDER BY and LIMIT rank them. A null
-/// predicate drops its row as false does.
+/// A windowed WITH ranks its rows by ORDER BY and LIMIT, then its predicate,
+/// over the bindings it projects, filters the ranked rows.
 #[tokio::test]
-async fn ranked_windows_filter_by_dropped_bindings_before_ranking() {
+async fn ranked_windows_filter_projected_bindings_after_ranking() {
     let db = test_support::open_db("top-k-dropped-binding-predicate").await;
     for (text, expected) in [
         (
-            "UNWIND [3,1,2,5,4] AS x WITH x AS y ORDER BY y LIMIT 2 WHERE x > 2 RETURN y",
-            json!([[3], [4]]),
+            "UNWIND [3,1,2,5,4] AS x WITH x AS y ORDER BY y LIMIT 2 WHERE y > 1 RETURN y",
+            json!([[2]]),
         ),
         (
-            "UNWIND [3,null,2,5,4] AS x WITH coalesce(x,0) AS y ORDER BY y DESC LIMIT 2 WHERE x < 5 RETURN y",
-            json!([[4], [3]]),
+            "UNWIND [3,null,2,5,4] AS x WITH coalesce(x,0) AS y ORDER BY y DESC LIMIT 2 WHERE y < 5 RETURN y",
+            json!([[4]]),
         ),
     ] {
         let query = helix_cypher::compile(text).unwrap();

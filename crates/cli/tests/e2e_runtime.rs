@@ -122,7 +122,7 @@ fn assert_e2e_count_is_one(output: &str) {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.7"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.9"]
 fn local_runtime_lifecycle_and_query_smoke() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -243,7 +243,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.7 plus SeaweedFS"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.9 plus SeaweedFS"]
 fn disk_runtime_persists_data_across_stop_and_start() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -320,6 +320,15 @@ fn disk_runtime_persists_data_across_stop_and_start() {
         .args(["stop", "dev"])
         .assert()
         .success();
+    // The server caches disk mode's SeaweedFS on disk too, on a volume that
+    // stop keeps and prune removes.
+    let cache_volume = format!(
+        "helix-{}-dev-cache",
+        project.file_name().unwrap().to_str().unwrap()
+    );
+    assert!(docker(&["volume", "inspect", &cache_volume])
+        .status
+        .success());
 
     fixture
         .command()
@@ -345,6 +354,9 @@ fn disk_runtime_persists_data_across_stop_and_start() {
         .args(["prune", "dev", "--yes"])
         .assert()
         .success();
+    assert!(!docker(&["volume", "inspect", &cache_volume])
+        .status
+        .success());
 }
 
 fn docker(args: &[&str]) -> std::process::Output {
@@ -358,7 +370,7 @@ fn docker(args: &[&str]) -> std::process::Output {
 /// instance network and its data volume behind. Start must detach the old
 /// sidecar so stop can still remove the network, and prune must delete both.
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.7 plus SeaweedFS"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.9 plus SeaweedFS"]
 fn disk_runtime_replaces_a_legacy_minio_sidecar() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -435,7 +447,11 @@ fn disk_runtime_replaces_a_legacy_minio_sidecar() {
         .args(["prune", "dev", "--yes"])
         .assert()
         .success();
-    for volume in [legacy_volume, format!("{base}-seaweedfs-data")] {
+    for volume in [
+        legacy_volume,
+        format!("{base}-seaweedfs-data"),
+        format!("{base}-cache"),
+    ] {
         assert!(
             !docker(&["volume", "inspect", &volume]).status.success(),
             "{volume}"

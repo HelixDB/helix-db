@@ -26,6 +26,13 @@ pub(in crate::execution::interpreter::stream) fn merge_streams(
     match mode {
         exec::ExecMergeMode::Concat => streams.into_iter().flatten().collect(),
         exec::ExecMergeMode::Union => distinct_rows(streams.into_iter().flatten().collect()),
+        exec::ExecMergeMode::OrderedUnion => {
+            // Union rows are distinct by element, so the stable sort only
+            // restores ascending element order.
+            let mut rows = distinct_rows(streams.into_iter().flatten().collect());
+            rows.sort_by(|left, right| left.current.cmp(&right.current));
+            rows
+        }
         exec::ExecMergeMode::Intersect => {
             let Some((first, rest)) = streams.split_first() else {
                 return Vec::new();

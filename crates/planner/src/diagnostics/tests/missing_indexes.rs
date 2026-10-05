@@ -159,20 +159,16 @@ fn matching_catalog_indexes_suppress_recommendations_in_both_range_directions() 
 
 #[test]
 fn wrong_kind_element_label_or_property_does_not_suppress_a_recommendation() {
+    let username = || {
+        catalog::ScopedPropertyDirectionKey::try_new("User", "username", RangeIndexDirection::Asc)
+            .unwrap()
+    };
     let indexes = catalog::IndexCatalogSnapshot::default()
-        .with_node_range(
-            catalog::ScopedPropertyDirectionKey::try_new(
-                "User",
-                "username",
-                RangeIndexDirection::Asc,
-            )
-            .unwrap(),
-        )
         .with_edge_eq(catalog::ScopedPropertyKey::try_new("User", "username").unwrap())
         .with_node_eq(catalog::ScopedPropertyKey::try_new("Account", "username").unwrap())
         .with_node_eq(catalog::ScopedPropertyKey::try_new("User", "email").unwrap());
     let ctx = context::PlannerContext {
-        indexes,
+        indexes: indexes.clone(),
         ..context::PlannerContext::default()
     };
     let output = plan(
@@ -185,6 +181,35 @@ fn wrong_kind_element_label_or_property_does_not_suppress_a_recommendation() {
         missing_indexes(&output)[0].index_kind,
         diagnostics::SecondaryIndexKind::Equality
     );
+
+    // An equality index cannot answer a range predicate.
+    let ctx = context::PlannerContext {
+        indexes: indexes
+            .clone()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("User", "username").unwrap()),
+        ..context::PlannerContext::default()
+    };
+    let output = plan(
+        g().n_with_label_where("User", Predicate::gte("username", "a")),
+        &ctx,
+    );
+    assert_eq!(missing_indexes(&output).len(), 1);
+    assert_eq!(
+        missing_indexes(&output)[0].index_kind,
+        diagnostics::SecondaryIndexKind::Range
+    );
+
+    // A range index answers a literal equality with a point range, so it
+    // needs no equality index.
+    let ctx = context::PlannerContext {
+        indexes: indexes.with_node_range(username()),
+        ..context::PlannerContext::default()
+    };
+    assert!(missing_indexes(&plan(
+        g().n_with_label_where("User", Predicate::eq("username", "alice")),
+        &ctx,
+    ))
+    .is_empty());
 }
 
 #[test]

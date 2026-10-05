@@ -360,3 +360,85 @@ pub(crate) fn access_steps_matching(
         })
         .count()
 }
+
+/// Properties of every equality leaf the first access intersects, sorted, or
+/// `None` unless that access is a node or edge set intersection. A leaf no
+/// single equality lane reads is reported as `"?"`.
+pub(crate) fn intersected_equality_properties(plan: &ExecutablePlan) -> Option<Vec<String>> {
+    fn node_bitmap(bitmap: &crate::exec::ExecNodeBitmapExpr, out: &mut Vec<String>) {
+        match bitmap {
+            crate::exec::ExecNodeBitmapExpr::PointRead { key, .. }
+            | crate::exec::ExecNodeBitmapExpr::BatchedUnionRead { key, .. } => {
+                out.push(key.property.to_string())
+            }
+            crate::exec::ExecNodeBitmapExpr::Union { .. } => out.push("?".to_string()),
+            crate::exec::ExecNodeBitmapExpr::Intersect { driver, rest } => {
+                std::iter::once(driver.as_ref())
+                    .chain(rest.iter())
+                    .for_each(|child| node_bitmap(child, out))
+            }
+        }
+    }
+    fn edge_bitmap(bitmap: &crate::exec::ExecEdgeBitmapExpr, out: &mut Vec<String>) {
+        match bitmap {
+            crate::exec::ExecEdgeBitmapExpr::PointRead { key, .. }
+            | crate::exec::ExecEdgeBitmapExpr::BatchedUnionRead { key, .. } => {
+                out.push(key.property.to_string())
+            }
+            crate::exec::ExecEdgeBitmapExpr::Union { .. } => out.push("?".to_string()),
+            crate::exec::ExecEdgeBitmapExpr::Intersect { driver, rest } => {
+                std::iter::once(driver.as_ref())
+                    .chain(rest.iter())
+                    .for_each(|child| edge_bitmap(child, out))
+            }
+        }
+    }
+    let mut out = Vec::new();
+    match unwrapped_first_exec_access(plan) {
+        ExecAccessPlan::Node(ExecNodeAccessPlan::SecondarySet {
+            set: crate::exec::ExecNodeSecondarySetPlan::Intersect { driver, rest },
+        }) => std::iter::once(driver.as_ref())
+            .chain(rest.iter())
+            .for_each(|child| match child {
+                crate::exec::ExecNodeSecondarySetPlan::Bitmap(bitmap) => {
+                    node_bitmap(bitmap, &mut out)
+                }
+                _ => out.push("?".to_string()),
+            }),
+        ExecAccessPlan::Node(
+            ExecNodeAccessPlan::SecondarySet {
+                set:
+                    crate::exec::ExecNodeSecondarySetPlan::Bitmap(
+                        bitmap @ crate::exec::ExecNodeBitmapExpr::Intersect { .. },
+                    ),
+            }
+            | ExecNodeAccessPlan::Bitmap {
+                bitmap: bitmap @ crate::exec::ExecNodeBitmapExpr::Intersect { .. },
+            },
+        ) => node_bitmap(bitmap, &mut out),
+        ExecAccessPlan::Edge(ExecEdgeAccessPlan::SecondarySet {
+            set: crate::exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest },
+        }) => std::iter::once(driver.as_ref())
+            .chain(rest.iter())
+            .for_each(|child| match child {
+                crate::exec::ExecEdgeSecondarySetPlan::Bitmap(bitmap) => {
+                    edge_bitmap(bitmap, &mut out)
+                }
+                _ => out.push("?".to_string()),
+            }),
+        ExecAccessPlan::Edge(
+            ExecEdgeAccessPlan::SecondarySet {
+                set:
+                    crate::exec::ExecEdgeSecondarySetPlan::Bitmap(
+                        bitmap @ crate::exec::ExecEdgeBitmapExpr::Intersect { .. },
+                    ),
+            }
+            | ExecEdgeAccessPlan::Bitmap {
+                bitmap: bitmap @ crate::exec::ExecEdgeBitmapExpr::Intersect { .. },
+            },
+        ) => edge_bitmap(bitmap, &mut out),
+        _ => return None,
+    }
+    out.sort_unstable();
+    Some(out)
+}

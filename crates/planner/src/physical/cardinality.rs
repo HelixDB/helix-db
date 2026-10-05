@@ -156,7 +156,8 @@ fn cursor_family(cursor: &exec::ExecCountCursorPlan) -> PhysicalCardinality {
         exec::ExecCountCursorPlan::InputRows => PhysicalCardinality::InputRows,
         exec::ExecCountCursorPlan::NodeBitmap(bitmap) => node_bitmap_family(bitmap),
         exec::ExecCountCursorPlan::EdgeBitmap(bitmap) => edge_bitmap_family(bitmap),
-        exec::ExecCountCursorPlan::NodeUnique { .. } => PhysicalCardinality::UniqueVerified,
+        exec::ExecCountCursorPlan::NodeUnique { .. }
+        | exec::ExecCountCursorPlan::NodeUniqueBatch { .. } => PhysicalCardinality::UniqueVerified,
         exec::ExecCountCursorPlan::NodeRange(_) | exec::ExecCountCursorPlan::EdgeRange(_) => {
             PhysicalCardinality::VerifiedRange
         }

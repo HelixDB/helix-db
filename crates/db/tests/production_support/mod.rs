@@ -483,6 +483,11 @@ pub async fn interpreter_request_mode_and_isolated_mutation_contracts() {
         .await;
 }
 
+/// Proves membership retention decisions the public planner cannot reach.
+pub async fn interpreter_membership_retention_contracts() {
+    crate::execution::interpreter::production_contracts::run_membership_retention_contracts().await;
+}
+
 /// Proves index status stays on the open graph write and does not publish it.
 pub async fn interpreter_get_operation_keeps_open_graph_write() {
     crate::execution::interpreter::production_contracts::run_get_operation_keeps_open_graph_write()

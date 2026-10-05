@@ -444,15 +444,18 @@ fn plan_accesses(
                     let Some(domain) = analysis::literal_equality_domain(values) else {
                         continue;
                     };
-                    let values = match &domain {
-                        analysis::EqualityIndexDomain::One(value) => std::slice::from_ref(value),
-                        analysis::EqualityIndexDomain::Many(values) => values.as_ref(),
-                        analysis::EqualityIndexDomain::Empty
-                        | analysis::EqualityIndexDomain::RuntimeSet(_) => &[],
+                    let exceeds_index_key = match &domain {
+                        analysis::EqualityIndexDomain::One(ir::IndexValue::Literal(value)) => {
+                            value.may_exceed_index_key()
+                        }
+                        analysis::EqualityIndexDomain::Many(values) => values
+                            .iter()
+                            .any(ir::SecondaryIndexLiteral::may_exceed_index_key),
+                        analysis::EqualityIndexDomain::One(_)
+                        | analysis::EqualityIndexDomain::Empty
+                        | analysis::EqualityIndexDomain::RuntimeSet(_) => false,
                     };
-                    if values.iter().any(|value| {
-                        matches!(value, ir::IndexValue::Literal(value) if value.may_exceed_index_key())
-                    }) {
+                    if exceeds_index_key {
                         continue;
                     }
                     let equality = |value| ir::NodeAccessPlan::EqualityIndex {
@@ -472,7 +475,7 @@ fn plan_accesses(
                                         .into_iter()
                                         .map(|value| {
                                             ir::NodeAccessSourcePlan::from_unfiltered(equality(
-                                                value,
+                                                ir::IndexValue::Literal(value),
                                             ))
                                         })
                                         .collect(),

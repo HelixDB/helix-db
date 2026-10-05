@@ -188,6 +188,18 @@ fn step<'b, 'a: 'b>(
                     exec::ElementKeyspace::EdgeEndpoints,
                     false,
                 )),
+                exec::ExecCountCursorPlan::Union { .. }
+                | exec::ExecCountCursorPlan::Intersect { .. } => {
+                    let (ids, keyspace) = ctx.count_id_set(plan).await?;
+                    Some(source::Source::bitmap(
+                        crate::query_resources::bitmap::Bitmap::retain_legacy(
+                            ids,
+                            ctx.row_memory.as_ref(),
+                        )?,
+                        keyspace,
+                        true,
+                    ))
+                }
                 exec::ExecCountCursorPlan::NodeLabelBitmap(label) => Some(source::Source::bitmap(
                     ctx.lookup_equality_index_set(
                         "$label",
@@ -207,6 +219,7 @@ fn step<'b, 'a: 'b>(
                 | exec::ExecCountCursorPlan::NodeBitmap(_)
                 | exec::ExecCountCursorPlan::EdgeBitmap(_)
                 | exec::ExecCountCursorPlan::NodeUnique { .. }
+                | exec::ExecCountCursorPlan::NodeUniqueBatch { .. }
                 | exec::ExecCountCursorPlan::NodeRange(_)
                 | exec::ExecCountCursorPlan::EdgeRange(_)
                 | exec::ExecCountCursorPlan::NodeAuthoritativeScan(_)
@@ -222,8 +235,6 @@ fn step<'b, 'a: 'b>(
                 | exec::ExecCountCursorPlan::EdgeDynamicEquality { .. }
                 | exec::ExecCountCursorPlan::NodeDynamicMembership { .. }
                 | exec::ExecCountCursorPlan::EdgeDynamicMembership { .. }
-                | exec::ExecCountCursorPlan::Union { .. }
-                | exec::ExecCountCursorPlan::Intersect { .. }
                 | exec::ExecCountCursorPlan::Filter { .. }
                 | exec::ExecCountCursorPlan::IndexMembership { .. }
                 | exec::ExecCountCursorPlan::Window { .. }
@@ -352,6 +363,19 @@ fn step<'b, 'a: 'b>(
                 }
                 *current = None;
             }
+        }),
+        Node::OrderedUnion { inputs, rows } => Box::pin(async move {
+            if let Some(inputs) = inputs.take() {
+                let mut values = Vec::with_capacity(inputs.len());
+                for mut input in inputs {
+                    values.push(input.drain(ctx).await?);
+                }
+                let merged = ctx.merge_values(values, exec::ExecMergeMode::OrderedUnion)?;
+                *rows = ctx.stream_rows(merged, "ordered union")?.into_iter();
+            }
+            Ok(Step::Item(
+                rows.next().map(|row| ExecutionValue::Stream(vec![row])),
+            ))
         }),
         Node::Intersect {
             driver,

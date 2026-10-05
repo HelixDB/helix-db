@@ -6,10 +6,11 @@
 //! serves with one [`logical::StreamPipelineOp::IndexMembership`] step, whose
 //! fused residual keeps the conjuncts the set cannot decide. Streams of
 //! unknown element kind qualify too, because the operator evaluates edge and
-//! element-free rows exactly like the filter. A leading filter over a
-//! label-less node source (point IDs, a parameter, a variable, or an all-node
-//! scan) whose predicate names no label qualifies as well, because the
-//! source-index rule declines it for want of a label; so does the same filter
+//! element-free rows exactly like the filter. A leading filter the
+//! source-index rule declines qualifies as well: over a label-less node
+//! source (point IDs, a parameter, a variable, or an all-node scan) whose
+//! predicate names no label, or over a parameter or variable source, whose
+//! repeated IDs an index intersection would collapse. So does the same filter
 //! as a lone [`logical::AccessFilter`]. Root wrappers inline their streams, so
 //! the rule also rewrites the pipelines inside them.
 //!
@@ -67,11 +68,13 @@ pub(in crate::rules) fn membership_rewrite(
     indexes: &catalog::IndexCatalogSnapshot,
     planner_limits: &context::PlannerLimits,
 ) -> Option<logical::LogicalExpr> {
-    Rewrite {
-        indexes,
-        planner_limits,
-    }
-    .expr(expr)
+    super::rewrite_stream_expr(
+        expr,
+        &Rewrite {
+            indexes,
+            planner_limits,
+        },
+    )
 }
 
 struct Rewrite<'a> {
@@ -79,87 +82,12 @@ struct Rewrite<'a> {
     planner_limits: &'a context::PlannerLimits,
 }
 
-impl Rewrite<'_> {
-    fn expr(&self, expr: &logical::LogicalExpr) -> Option<logical::LogicalExpr> {
-        match expr {
-            logical::LogicalExpr::AccessFilter(filter) => self
-                .access_filter(filter)
-                .map(logical::LogicalExpr::AccessPipeline),
-            logical::LogicalExpr::AccessPipeline(pipeline) => self
-                .access_pipeline(pipeline)
-                .map(logical::LogicalExpr::AccessPipeline),
-            logical::LogicalExpr::RootPipeline(pipeline) => self
-                .root_pipeline(pipeline)
-                .map(logical::LogicalExpr::RootPipeline),
-            logical::LogicalExpr::StreamReserved(reserved) => {
-                self.root_stream(reserved.input()).map(|input| {
-                    logical::LogicalExpr::StreamReserved(logical::StreamReserved::new(
-                        input,
-                        reserved.op().clone(),
-                    ))
-                })
-            }
-            logical::LogicalExpr::StreamCardinality(cardinality) => {
-                self.root_stream(cardinality.input()).map(|input| {
-                    logical::LogicalExpr::StreamCardinality(
-                        logical::StreamCardinality::new(input).with_planning_bindings(
-                            cardinality.params().clone(),
-                            cardinality.late_bound_params().clone(),
-                        ),
-                    )
-                })
-            }
-            logical::LogicalExpr::StreamProject(project) => {
-                self.root_stream(project.input()).map(|input| {
-                    logical::LogicalExpr::StreamProject(logical::StreamProject::new(
-                        input,
-                        project.projection().clone(),
-                    ))
-                })
-            }
-            logical::LogicalExpr::StreamAggregate(aggregate) => {
-                self.root_stream(aggregate.input()).map(|input| {
-                    logical::LogicalExpr::StreamAggregate(logical::StreamAggregate::new(
-                        input,
-                        aggregate.aggregate().clone(),
-                    ))
-                })
-            }
-            logical::LogicalExpr::StreamVariableWrite(write) => {
-                self.root_stream(write.input()).map(|input| {
-                    logical::LogicalExpr::StreamVariableWrite(logical::StreamVariableWrite::new(
-                        input,
-                        write.op().clone(),
-                    ))
-                })
-            }
-            _ => None,
-        }
-    }
-
-    fn root_stream(&self, stream: &logical::RootStream) -> Option<logical::RootStream> {
-        match stream {
-            logical::RootStream::Access(logical::AccessStream::Filter(filter)) => {
-                self.access_filter(filter).map(|pipeline| {
-                    logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline))
-                })
-            }
-            logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline)) => {
-                self.access_pipeline(pipeline).map(|pipeline| {
-                    logical::RootStream::Access(logical::AccessStream::Pipeline(pipeline))
-                })
-            }
-            logical::RootStream::Pipeline(pipeline) => self
-                .root_pipeline(pipeline)
-                .map(|pipeline| logical::RootStream::Pipeline(Box::new(pipeline))),
-            _ => None,
-        }
-    }
-
-    /// A lone filter over a label-less node source, which the source-index
-    /// rule declines, becomes a membership pipeline over the same source.
-    fn access_filter(&self, filter: &logical::AccessFilter) -> Option<logical::AccessPipeline> {
-        if !label_less_node_filter(filter.access(), filter.predicate()) {
+impl super::StreamFilterRewrite for Rewrite<'_> {
+    /// A lone filter the source-index rule declines (over a node source that
+    /// may repeat elements, or a label-less one with an unscoped predicate)
+    /// becomes a membership pipeline over the same source.
+    fn access_filter(&self, filter: &logical::AccessFilter) -> Option<logical::AccessStream> {
+        if !declined_leading_node_filter(filter.access(), filter.predicate()) {
             return None;
         }
         let plan = index_membership_filter(filter.predicate(), self.indexes, self.planner_limits)?;
@@ -169,18 +97,15 @@ impl Rewrite<'_> {
                 plan: Box::new(plan),
             }),
         )
+        .map(logical::AccessStream::Pipeline)
     }
 
-    /// A leading filter over a labeled source belongs to the source-index
-    /// rule, so candidates start after it. Over a label-less node source that
-    /// rule declines an unscoped leading filter, so it is a candidate too.
-    fn access_pipeline(
-        &self,
-        pipeline: &logical::AccessPipeline,
-    ) -> Option<logical::AccessPipeline> {
+    /// A leading filter belongs to the source-index rule, so candidates start
+    /// after it, unless that rule declines it (see the lone filter above).
+    fn access_pipeline(&self, pipeline: &logical::AccessPipeline) -> Option<logical::AccessStream> {
         let first_candidate = match pipeline.ops() {
             [logical::StreamPipelineOp::Filter { predicate }, ..]
-                if label_less_node_filter(pipeline.access(), predicate) =>
+                if declined_leading_node_filter(pipeline.access(), predicate) =>
             {
                 0
             }
@@ -192,24 +117,20 @@ impl Rewrite<'_> {
             first_candidate,
         )?;
         logical::AccessPipeline::new(pipeline.access().clone(), ops)
+            .map(logical::AccessStream::Pipeline)
     }
 
     /// A root pipeline follows a complete root stream, so its first filter is
-    /// already behind that stream's source. Its own operators and its input
-    /// stream are rewritten together.
-    fn root_pipeline(&self, pipeline: &logical::RootPipeline) -> Option<logical::RootPipeline> {
-        match (
-            self.ops(root_stream_element(pipeline.input()), pipeline.ops(), 0),
-            self.root_stream(pipeline.input()),
-        ) {
-            (None, None) => None,
-            (ops, input) => logical::RootPipeline::new(
-                input.unwrap_or_else(|| pipeline.input().clone()),
-                ops.unwrap_or_else(|| pipeline.ops_at_least().clone()),
-            ),
-        }
+    /// already behind that stream's source.
+    fn root_pipeline_ops(
+        &self,
+        pipeline: &logical::RootPipeline,
+    ) -> Option<crate::ir::AtLeast<logical::StreamPipelineOp, 1>> {
+        self.ops(root_stream_element(pipeline.input()), pipeline.ops(), 0)
     }
+}
 
+impl Rewrite<'_> {
     /// Replace every eligible filter at or after `first_candidate`, keeping
     /// every other operator in place. A filter is eligible when its rows are
     /// not known to be edges and [`index_membership_filter`] serves its
@@ -255,22 +176,27 @@ impl Rewrite<'_> {
     }
 }
 
-/// Whether `access` is a non-empty node source without a common label and
-/// `predicate` names no label: exactly the leading filters the source-index
-/// rule declines for want of a label.
-fn label_less_node_filter(
+/// Whether a leading `predicate` filter over the non-empty node source
+/// `access` is one the source-index rule declines: the source may repeat
+/// elements, which an index intersection would collapse, or it has no common
+/// label and `predicate` names none.
+fn declined_leading_node_filter(
     access: &logical::AccessPath,
     predicate: &crate::ir::PredicatePlan,
 ) -> bool {
-    matches!(access, logical::AccessPath::Node(path) if path.common_label().is_none())
-        && !access.is_direct_empty()
-        && matches!(
-            analysis::prune_statically_impossible_branches(predicate.as_ref()),
-            Ok(analysis::PrunedPredicate::Feasible {
-                label: analysis::FeasibleLabelScope::Unscoped,
-                ..
-            })
-        )
+    let logical::AccessPath::Node(path) = access else {
+        return false;
+    };
+    !access.is_direct_empty()
+        && (access.may_repeat_elements()
+            || (path.common_label().is_none()
+                && matches!(
+                    analysis::prune_statically_impossible_branches(predicate.as_ref()),
+                    Ok(analysis::PrunedPredicate::Feasible {
+                        label: analysis::FeasibleLabelScope::Unscoped,
+                        ..
+                    })
+                )))
 }
 
 /// Element family known to flow out of a root stream, if any.

@@ -377,8 +377,9 @@ fn graph_scans_charge_rows_at_empty_small_and_saturating_estimates() {
         let rows = EstimatedRows::rows(count);
         let label = profile.label_scan(rows);
         let elements = profile.element_scan(rows);
-        assert_eq!(label.object_reads, count.saturating_add(1));
-        assert_eq!(label.authoritative_graph_reads, count);
+        // A label scan reads its bitmap and trusts it: no graph row per ID.
+        assert_eq!(label.object_reads, 1);
+        assert_eq!(label.authoritative_graph_reads, 0);
         assert_eq!(label.range_nexts, 0);
         assert_eq!(elements.object_reads, count);
         assert_eq!(elements.authoritative_graph_reads, count);
@@ -463,5 +464,49 @@ fn membership_price_reads_its_set_probes_rows_and_residual_matches_only() {
                 previous = Some(key);
             }
         }
+    }
+}
+
+#[test]
+fn parallel_reads_charges_one_child_serially_and_many_by_critical_path() {
+    let profile = StorageCostProfile {
+        max_parallel_kv_reads: PositiveUsize::at_least_one(2),
+        ..StorageCostProfile::default()
+    };
+    let lookup = |rows| profile.bitmap_equality_lookup(EstimatedRows::rows(rows));
+    let (small, large) = (lookup(10), lookup(2_000));
+
+    assert_eq!(profile.parallel_reads(&[]), CostVector::ZERO);
+    assert_eq!(
+        profile.parallel_reads(&[CostVector::ZERO]),
+        CostVector::ZERO
+    );
+    // One child is read alone, without scheduling a task.
+    assert_eq!(profile.parallel_reads(&[large]), large);
+    assert_eq!(
+        profile.parallel_reads(&[large, CostVector::ZERO]),
+        large,
+        "an empty set reads nothing"
+    );
+
+    // Many children pay the slowest read plus one task per concurrent read,
+    // and still count every read, whatever their order.
+    for children in [[small, large, small], [large, small, small]] {
+        let both = profile.parallel_reads(&children);
+        let serial = children
+            .iter()
+            .copied()
+            .fold(CostVector::ZERO, CostVector::serial);
+        assert_eq!(
+            both.latency,
+            large
+                .latency
+                .saturating_add(profile.task_overhead.saturating_mul(2))
+        );
+        assert!(both.latency < serial.latency);
+        assert_eq!(both.object_reads, serial.object_reads);
+        assert_eq!(both.cpu_units, serial.cpu_units);
+        // The width is bounded by the storage profile's concurrency.
+        assert_eq!(both.parallel_width, 2);
     }
 }

@@ -88,7 +88,8 @@ impl<'a> TryFrom<&'a ir::EdgeAccessPlan> for SimpleEdgeAccessLeaf<'a> {
             ir::EdgeAccessPlan::PointIds { .. }
             | ir::EdgeAccessPlan::Intersect(_)
             | ir::EdgeAccessPlan::Union(_)
-            | ir::EdgeAccessPlan::ScanThenFilter { .. } => {
+            | ir::EdgeAccessPlan::ScanThenFilter { .. }
+            | ir::EdgeAccessPlan::BranchResidualUnion(_) => {
                 Err(ExecPlanError::UnsupportedSimpleAccessLeaf {
                     element: properties::ElementKind::Edge,
                 })

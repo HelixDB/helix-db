@@ -11,7 +11,9 @@ use slatedb::{Db, IsolationLevel};
 use super::*;
 use crate::config::{SecondaryIndexDefinition, VectorIndexDefinition};
 use crate::encoding::v2::keys::indexes::vector::{
-    VectorKey, VectorMemoryPrefixKey, VectorUpperVectorKey,
+    VectorEntryCandidateNodeKey, VectorItemKey, VectorKey, VectorLayer0NeighborsKey,
+    VectorMemoryPrefixKey, VectorReverseEdgeKey, VectorSimHashDirectoryKey, VectorSimHashKey,
+    VectorUpperVectorKey,
 };
 use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
@@ -22,11 +24,13 @@ use crate::encoding::v2::values::{encode_partition_mapping, encode_secondary_ent
 use crate::index_lifecycle::work::{
     SecondaryEntryValue, VectorPartitionMappingValue, VectorTenantPartition,
 };
+use crate::index_lifecycle::ValidatedVectorIndexDefinition;
 use crate::index_lifecycle::{
     IndexEntityId, IndexGenerationId, IndexId, IndexOperationId, IndexRecordV2, IndexRevision,
     IndexStateTransition, PhysicalGeneration, ValidatedDynamicIndexDefinition,
     VectorGenerationDescriptor, VectorPhysicalIndexId,
 };
+use crate::search::vector::storage::PartWarm;
 use crate::search::vector::VectorDistanceMetric;
 
 use futures::stream::BoxStream;
@@ -136,6 +140,23 @@ fn active_vector(
     physical_index_id: u64,
     partitioned: bool,
 ) -> (ActiveIndexHandle, ValidatedVectorGenerationHandle) {
+    active_vector_described(
+        scope,
+        index_id,
+        physical_index_id,
+        partitioned,
+        VectorGenerationDescriptor::for_definition,
+    )
+}
+
+/// [`active_vector`] with the generation descriptor `describe` derives.
+fn active_vector_described(
+    scope: DataScope,
+    index_id: u64,
+    physical_index_id: u64,
+    partitioned: bool,
+    describe: fn(&ValidatedVectorIndexDefinition) -> VectorGenerationDescriptor,
+) -> (ActiveIndexHandle, ValidatedVectorGenerationHandle) {
     let mut definition = VectorIndexDefinition::new_node(
         "Document",
         "embedding",
@@ -160,7 +181,7 @@ fn active_vector(
     } else {
         VectorPhysicalLayout::Unpartitioned { physical_index_id }
     };
-    let descriptor = VectorGenerationDescriptor::for_definition(vector);
+    let descriptor = describe(vector);
     let record = IndexRecordV2::building(
         IndexId::new(index_id).expect("hydration index ID is non-zero"),
         definition,
@@ -1332,7 +1353,304 @@ async fn run_reader_refresh_contracts() {
     assert!(*initial.borrow());
 }
 
+/// Reader that records the options of every scan and can fail one of them.
+struct ScanRecorder<'a> {
+    inner: &'a Db,
+    /// The 1-based scan that fails, if any.
+    failing_scan: Option<usize>,
+    scans: std::sync::Mutex<Vec<(bool, usize, usize)>>,
+}
+
+impl<'a> ScanRecorder<'a> {
+    fn new(inner: &'a Db, failing_scan: Option<usize>) -> Self {
+        Self {
+            inner,
+            failing_scan,
+            scans: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl slatedb::DbReadOps for ScanRecorder<'_> {
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &slatedb::config::ReadOptions,
+    ) -> std::result::Result<Option<Bytes>, slatedb::Error> {
+        self.inner.get_with_options(key, options).await
+    }
+
+    async fn multi_get_with_options<K>(
+        &self,
+        keys: &[K],
+        options: &slatedb::config::ReadOptions,
+    ) -> std::result::Result<Vec<Option<Bytes>>, slatedb::Error>
+    where
+        K: AsRef<[u8]> + Send + Sync,
+    {
+        self.inner.multi_get_with_options(keys, options).await
+    }
+
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &slatedb::config::ReadOptions,
+    ) -> std::result::Result<Option<slatedb::KeyValue>, slatedb::Error> {
+        self.inner.get_key_value_with_options(key, options).await
+    }
+
+    async fn scan_with_options<T>(
+        &self,
+        range: T,
+        options: &slatedb::config::ScanOptions,
+    ) -> std::result::Result<slatedb::DbIterator, slatedb::Error>
+    where
+        T: slatedb::ByteRangeBounds + Send,
+    {
+        let scan = {
+            let mut scans = self.scans.lock().unwrap();
+            scans.push((
+                options.cache_blocks,
+                options.read_ahead_bytes,
+                options.max_fetch_tasks,
+            ));
+            scans.len()
+        };
+        match self.failing_scan == Some(scan) {
+            true => Err(slatedb::Error::unavailable(format!(
+                "injected failure on scan {scan}"
+            ))),
+            false => self.inner.scan_with_options(range, options).await,
+        }
+    }
+}
+
+/// Proves the object-store warm reads exactly one target's hot lane, payloads
+/// and, for a directory generation, SimHash directory; charges each range's
+/// bytes rounded up to whole parts; scans with part-sized read-ahead, one
+/// fetch task and no block caching; stops at its budget across targets in
+/// order; and charges and skips a target it cannot finish.
+async fn run_part_warm_contracts() {
+    let scope = DataScope::LegacyUnscoped;
+    let db = raw_db("vector-part-warm-contract").await;
+    let (_, first) = active_vector(scope, 1, 11, false);
+    let (_, second) = active_vector(scope, 2, 12, false);
+    let (_, legacy) = active_vector_described(
+        scope,
+        4,
+        11,
+        false,
+        VectorGenerationDescriptor::legacy_for_definition,
+    );
+    assert!(first.has_simhash_directory());
+    assert!(!legacy.has_simhash_directory());
+    let key = |scope: DataScope, key: VectorKey| {
+        GraphKey::Data {
+            scope,
+            kind: DataKeyKind::Vector(key),
+        }
+        .to_bytes()
+    };
+    // Physical index 11's hot lane, payloads and directory rows.
+    let hot = (1..=40u64)
+        .flat_map(|node| {
+            [
+                (
+                    key(
+                        scope,
+                        VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(11, node)),
+                    ),
+                    vec![7u8; 32],
+                ),
+                (
+                    key(scope, VectorKey::SimHash(VectorSimHashKey::new(11, node))),
+                    vec![5u8; 8],
+                ),
+            ]
+        })
+        .chain([(upper_vector_key(scope, 11, 1), vec![6u8; 12])])
+        .collect::<Vec<_>>();
+    let payloads = (1..=40u64)
+        .map(|node| {
+            (
+                key(
+                    scope,
+                    VectorKey::Vector(VectorItemKey::new(11, node.rotate_left(17), node)),
+                ),
+                vec![9u8; 64],
+            )
+        })
+        .collect::<Vec<_>>();
+    let directory = (1..=5u64)
+        .map(|node| {
+            (
+                key(
+                    scope,
+                    VectorKey::SimHashDirectory(VectorSimHashDirectoryKey::new(11, node, node)),
+                ),
+                vec![1u8; 8],
+            )
+        })
+        .collect::<Vec<_>>();
+    // Rows a warm of index 11 must not read: other row families, index 12
+    // and another scope.
+    let ignored = [
+        key(
+            scope,
+            VectorKey::EntryCandidateNode(VectorEntryCandidateNodeKey::new(11, 1)),
+        ),
+        key(
+            scope,
+            VectorKey::ReverseEdge(VectorReverseEdgeKey::new(11, 1, 0, 2)),
+        ),
+        key(
+            DataScope::Tenant(TenantId::from_u128(7)),
+            VectorKey::Vector(VectorItemKey::new(11, 1, 1)),
+        ),
+    ];
+    let second_rows = [key(scope, VectorKey::Vector(VectorItemKey::new(12, 1, 1)))];
+    let mut batch = slatedb::WriteBatch::new();
+    hot.iter()
+        .chain(&payloads)
+        .chain(&directory)
+        .for_each(|(key, value)| batch.put(key, value));
+    ignored
+        .iter()
+        .chain(&second_rows)
+        .for_each(|key| batch.put(key, vec![3u8; 16]));
+    db.write(batch).await.expect("warm fixture rows commit");
+
+    let bytes = |rows: &[(Bytes, Vec<u8>)]| {
+        rows.iter()
+            .map(|(key, value)| (key.len() + value.len()) as u64)
+            .sum::<u64>()
+    };
+    let (hot_bytes, payload_bytes) = (bytes(&hot), bytes(&payloads));
+    let first_bytes = hot_bytes + payload_bytes + bytes(&directory);
+    let second_bytes = (second_rows[0].len() + 16) as u64;
+    // One-byte parts charge exact row bytes.
+    let warm = |targets: Vec<ValidatedVectorGenerationHandle>, budget: u64| {
+        let db = &db;
+        async move { crate::search::vector::warm_object_store_parts(db, &targets, 1, budget).await }
+    };
+
+    let summary = warm(vec![first.clone()], u64::MAX).await;
+    assert_eq!(summary.read, PartWarm::Complete(first_bytes));
+    assert_eq!((summary.warmed_targets, summary.failed_targets), (1, 0));
+    // A generation without a directory skips its directory rows.
+    assert_eq!(
+        warm(vec![legacy.clone()], u64::MAX).await.read,
+        PartWarm::Complete(hot_bytes + payload_bytes)
+    );
+
+    // Each range is charged at least its whole parts, and every scan reads
+    // one part ahead with one fetch task and no block caching.
+    let recorder = ScanRecorder::new(&db, None);
+    let summary = crate::search::vector::warm_object_store_parts(
+        &recorder,
+        std::slice::from_ref(&first),
+        4096,
+        u64::MAX,
+    )
+    .await;
+    assert_eq!(summary.read, PartWarm::Complete(3 * 4096));
+    assert_eq!(*recorder.scans.lock().unwrap(), vec![(false, 4096, 1); 3]);
+
+    // A range is admitted only when its whole parts fit, so the charge never
+    // passes the budget: each of the three ranges here fits in one part.
+    for (budget, warmed) in [
+        (0, PartWarm::BudgetExhausted(0)),
+        (4095, PartWarm::BudgetExhausted(0)),
+        (4096, PartWarm::BudgetExhausted(4096)),
+        (4096 + 2048, PartWarm::BudgetExhausted(4096)),
+        (2 * 4096 - 1, PartWarm::BudgetExhausted(4096)),
+        (2 * 4096, PartWarm::BudgetExhausted(2 * 4096)),
+        (3 * 4096 - 1, PartWarm::BudgetExhausted(2 * 4096)),
+        (3 * 4096, PartWarm::Complete(3 * 4096)),
+    ] {
+        let summary = crate::search::vector::warm_object_store_parts(
+            &db,
+            std::slice::from_ref(&first),
+            4096,
+            budget,
+        )
+        .await;
+        assert_eq!(summary.read, warmed, "budget {budget}");
+    }
+
+    // A budget stops before the row that would pass it, never after.
+    for budget in [0, 1, first_bytes / 2, first_bytes - 1] {
+        let summary = warm(vec![first.clone()], budget).await;
+        let PartWarm::BudgetExhausted(read) = summary.read else {
+            panic!("budget {budget} of {first_bytes} bytes must stop the warm");
+        };
+        assert!(
+            read <= budget && budget - read < 32 + 64 + 64,
+            "{read} of {budget}"
+        );
+    }
+    assert_eq!(
+        warm(vec![first.clone()], first_bytes).await.read,
+        PartWarm::Complete(first_bytes)
+    );
+
+    // Targets are charged in order against one budget.
+    let summary = warm(vec![first.clone(), second.clone()], u64::MAX).await;
+    assert_eq!(summary.read, PartWarm::Complete(first_bytes + second_bytes));
+    assert_eq!(summary.warmed_targets, 2);
+    let summary = warm(vec![first.clone(), second.clone()], first_bytes).await;
+    assert_eq!(summary.read, PartWarm::BudgetExhausted(first_bytes));
+    assert_eq!(summary.warmed_targets, 2);
+    let summary = warm(vec![second.clone(), first.clone()], second_bytes).await;
+    assert_eq!(summary.read, PartWarm::BudgetExhausted(second_bytes));
+
+    // An index with no rows reads nothing. A target whose payload scan fails
+    // is skipped but charged the hot lane it already read, and the next
+    // target is warmed within what is left.
+    let (_, empty) = active_vector(scope, 3, 13, false);
+    assert_eq!(
+        warm(vec![empty.clone()], u64::MAX).await.read,
+        PartWarm::Complete(0)
+    );
+    let failing = ScanRecorder::new(&db, Some(2));
+    let summary = crate::search::vector::warm_object_store_parts(
+        &failing,
+        &[first.clone(), second.clone()],
+        1,
+        u64::MAX,
+    )
+    .await;
+    assert_eq!(summary.read, PartWarm::Complete(hot_bytes + second_bytes));
+    assert_eq!((summary.warmed_targets, summary.failed_targets), (1, 1));
+    let failing = ScanRecorder::new(&db, Some(2));
+    let summary = crate::search::vector::warm_object_store_parts(
+        &failing,
+        &[first.clone(), second],
+        1,
+        hot_bytes,
+    )
+    .await;
+    assert_eq!(summary.read, PartWarm::BudgetExhausted(hot_bytes));
+    assert_eq!((summary.warmed_targets, summary.failed_targets), (0, 1));
+    let unreadable = crate::search::vector::read_fault_production_support::FaultingRead::new(
+        &db,
+        crate::search::vector::read_fault_production_support::ReadFault::Scan,
+    );
+    let summary = crate::search::vector::warm_object_store_parts(
+        &unreadable,
+        &[first, empty],
+        4096,
+        u64::MAX,
+    )
+    .await;
+    assert_eq!(summary.read, PartWarm::Complete(0));
+    assert_eq!((summary.warmed_targets, summary.failed_targets), (0, 2));
+    db.close().await.expect("warm fixture closes");
+}
+
 pub(crate) async fn run() {
+    run_part_warm_contracts().await;
     run_idle_refresh_contracts().await;
     run_empty_contracts().await;
     run_refresh_and_budget_contracts().await;

@@ -5,17 +5,9 @@ use crate::encoding::v2::values::property::equality_index_value as equality;
 use crate::query_resources::{self, bitmap};
 
 mod unique;
-#[cfg(any(test, feature = "production-coverage"))]
-pub(crate) use unique::lookup_active_unique_equality_batch;
 pub(crate) use unique::lookup_active_unique_equality_batch_admitted;
 
 mod dynamic;
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
-pub(super) use dynamic::lookup_active_equality_generation_admitted;
 pub(crate) use dynamic::lookup_active_equality_generations_admitted;
 
 mod ordered;
@@ -64,7 +56,6 @@ pub(crate) async fn lookup_active_equality_point_literal(
     .await
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_equality_point_literal_with_compatibility(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -187,8 +178,10 @@ pub(crate) async fn lookup_active_equality_point_admitted(
 
 /// Executes one planner-selected literal bitmap multi-get.
 ///
-/// Duplicate physical keys are preserved and the primitive always issues one
-/// `multi_get`; executable validation owns the at-least-two invariant.
+/// Duplicate physical keys are preserved and the primitive issues one
+/// `multi_get` per [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, so a
+/// literal set of any size holds one batch of bitmaps at a time; executable
+/// validation owns the at-least-two invariant.
 #[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_equality_literal_batch(
     reader: &(impl DbReadOps + Sync),
@@ -341,27 +334,31 @@ async fn lookup_equality_keys_admitted(
             .transpose()?;
         return bitmap::Bitmap::decode(&bytes, budget);
     }
-    #[cfg(any(test, feature = "production-coverage"))]
-    record(ReadKind::MultiGet);
-    if let Some(budget) = budget {
-        budget.record_reads(query_resources::StorageReadUsage {
-            multi_get_batches: 1,
-            multi_get_keys: keys.len(),
-            ..Default::default()
-        });
-    }
-    let values = reader.multi_get(&keys).await?;
-    let _raw = budget
-        .map(|budget| {
-            budget.reserve(values.iter().flatten().fold(
-                values.capacity().saturating_mul(size_of::<Option<Bytes>>()),
-                |total, bytes| total.saturating_add(bytes.len()),
-            ))
-        })
-        .transpose()?;
+    // One batch of bitmaps is held at a time, so a literal set of any size
+    // reads them `RECORD_BATCH_ROWS` keys per multi-get.
     let mut owners = bitmap::Bitmap::empty(budget)?;
-    for bytes in values.into_iter().flatten() {
-        owners = owners.union(bitmap::Bitmap::decode(&bytes, budget)?)?;
+    for keys in keys.chunks(helix_planner::cost::RECORD_BATCH_ROWS as usize) {
+        #[cfg(any(test, feature = "production-coverage"))]
+        record(ReadKind::MultiGet);
+        if let Some(budget) = budget {
+            budget.record_reads(query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            });
+        }
+        let values = reader.multi_get(keys).await?;
+        let _raw = budget
+            .map(|budget| {
+                budget.reserve(values.iter().flatten().fold(
+                    values.capacity().saturating_mul(size_of::<Option<Bytes>>()),
+                    |total, bytes| total.saturating_add(bytes.len()),
+                ))
+            })
+            .transpose()?;
+        for bytes in values.into_iter().flatten() {
+            owners = owners.union(bitmap::Bitmap::decode(&bytes, budget)?)?;
+        }
     }
     Ok(owners)
 }
@@ -1431,6 +1428,168 @@ mod tests {
     }
 
     struct FailingRows;
+
+    #[tokio::test]
+    async fn legacy_equality_union_null_candidates_include_v3_entries() {
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                let db = super::super::tests::test_db("secondary-legacy-null-candidates").await;
+                let handle = super::super::tests::active_read_handle(
+                    &db,
+                    crate::config::SecondaryIndexDefinition::node_equality("User", "email")
+                        .unwrap(),
+                )
+                .await;
+                // Entities 1 and 2 are held only by deployed V3 entries, 3 by a V4
+                // bitmap; 4 and 5 carry the label and no lane entry.
+                put_v3_equality_entry(&db, &handle, "shared", 1).await;
+                put_v3_equality_entry(&db, &handle, "other", 2).await;
+                put_v4_equality_bitmap(&db, &handle, "shared", [3]).await;
+                db.put(
+                    DataKey::Data {
+                        scope: handle.scope(),
+                        kind: DataKeyKind::PropertyIndex(
+                            crate::encoding::indexes::PropertyIndexKey::Equality(
+                                crate::encoding::indexes::equality::EqualityIndexKey::new(
+                                    crate::encoding::indexes::hash_property_name("$label"),
+                                    crate::encoding::indexes::hash_property_value("User"),
+                                ),
+                            ),
+                        ),
+                    }
+                    .to_bytes(),
+                    crate::search::encode_roaring_treemap(&roaring::RoaringTreemap::from_iter(
+                        1..=5,
+                    )),
+                )
+                .await
+                .unwrap();
+                let label = UnindexedLabel {
+                    scope: handle.scope(),
+                    kind: IndexElementKind::Node,
+                    label: "User",
+                    property: "email",
+                };
+
+                for reads in [LabelLaneReads::Concurrent, LabelLaneReads::Sequential] {
+                    reset_equality_read_metrics();
+                    assert_eq!(
+                        unindexed_label_rows(
+                            &db,
+                            label,
+                            Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                            None,
+                            reads,
+                            &|| Ok(()),
+                        )
+                        .await
+                        .unwrap(),
+                        roaring::RoaringTreemap::from_iter([4, 5])
+                    );
+                    // The V4 bitmaps and the V3 entries are one scan each.
+                    assert_eq!(equality_read_metrics().scans, 2);
+                }
+                assert_eq!(
+                    unindexed_label_rows(
+                        &db,
+                        label,
+                        Some((&handle, ReaderStorageCompatibility::Current)),
+                        None,
+                        LabelLaneReads::Concurrent,
+                        &|| Ok(()),
+                    )
+                    .await
+                    .unwrap(),
+                    roaring::RoaringTreemap::from_iter([1, 2, 4, 5])
+                );
+                // A wide `within` narrows the label rows outside the lane.
+                let wide =
+                    roaring::RoaringTreemap::from_iter(2..=DIRECT_UNINDEXED_VERIFICATION_ROWS + 2);
+                assert_eq!(
+                    unindexed_label_rows(
+                        &db,
+                        label,
+                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        Some(&wide),
+                        LabelLaneReads::Concurrent,
+                        &|| Ok(()),
+                    )
+                    .await
+                    .unwrap(),
+                    roaring::RoaringTreemap::from_iter([4, 5])
+                );
+                // A small `within` is every candidate as it is: neither the label
+                // nor the lane is read, and verification drops what does not match.
+                reset_equality_read_metrics();
+                let small = roaring::RoaringTreemap::from_iter([2, 4, 9]);
+                assert_eq!(
+                    unindexed_label_rows(
+                        &db,
+                        label,
+                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        Some(&small),
+                        LabelLaneReads::Concurrent,
+                        &|| Ok(()),
+                    )
+                    .await
+                    .unwrap(),
+                    small
+                );
+                assert_eq!(
+                    equality_read_metrics(),
+                    SecondaryEqualityReadMetrics::default()
+                );
+                assert_eq!(
+                    unindexed_label_rows(
+                        &db,
+                        label,
+                        None,
+                        None,
+                        LabelLaneReads::Concurrent,
+                        &|| Ok(()),
+                    )
+                    .await
+                    .unwrap(),
+                    roaring::RoaringTreemap::from_iter(1..=5)
+                );
+
+                // An expired request stops the lane scan before its first row, and
+                // verification before its next record batch.
+                let expired = || Err(crate::HelixDbError::QueryDeadlineExceeded);
+                assert!(matches!(
+                    unindexed_label_rows(
+                        &db,
+                        label,
+                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        None,
+                        LabelLaneReads::Sequential,
+                        &expired,
+                    )
+                    .await,
+                    Err(crate::HelixDbError::QueryDeadlineExceeded)
+                ));
+                let checks = core::sync::atomic::AtomicUsize::new(0);
+                let one_batch = || match checks.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                {
+                    0 => Ok(()),
+                    _ => Err(crate::HelixDbError::QueryDeadlineExceeded),
+                };
+                reset_equality_read_metrics();
+                let three_batches = roaring::RoaringTreemap::from_iter(
+                    1..=2 * helix_planner::cost::RECORD_BATCH_ROWS + 1,
+                );
+                assert!(matches!(
+                    verified_unindexed_rows(&db, label, three_batches, |_| true, &one_batch).await,
+                    Err(crate::HelixDbError::QueryDeadlineExceeded)
+                ));
+                assert_eq!(
+                    equality_read_metrics().graph_reads,
+                    helix_planner::cost::RECORD_BATCH_ROWS
+                );
+                db.close().await.unwrap();
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn legacy_equality_reads_union_v3_entries_and_v4_bitmaps_without_duplicates() {

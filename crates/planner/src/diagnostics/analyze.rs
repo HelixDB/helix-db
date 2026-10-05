@@ -170,7 +170,7 @@ impl<'a> Analyzer<'a> {
                 self.statistics.explicit_sorts = self.statistics.explicit_sorts.saturating_add(1);
             }
             exec::ExecOp::Merge {
-                mode: exec::ExecMergeMode::Union,
+                mode: exec::ExecMergeMode::Union | exec::ExecMergeMode::OrderedUnion,
             } => self.statistics.unions = self.statistics.unions.saturating_add(1),
             exec::ExecOp::Merge {
                 mode: exec::ExecMergeMode::Intersect,
@@ -875,7 +875,10 @@ fn lineage_for_step(
                 .collect(),
         }),
         exec::ExecOp::Merge {
-            mode: exec::ExecMergeMode::Union | exec::ExecMergeMode::Intersect,
+            mode:
+                exec::ExecMergeMode::Union
+                | exec::ExecMergeMode::OrderedUnion
+                | exec::ExecMergeMode::Intersect,
         } => combine_lineages(
             step.dependencies
                 .iter()

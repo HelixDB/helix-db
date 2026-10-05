@@ -65,6 +65,10 @@ pub(super) fn selected_node_access_match(
         | (ir::NodeAccessPlan::AllScan, physical::PhysicalAccess::Kv(_)) => {
             SelectedAccessShapeMatch::Matched
         }
+        (
+            ir::NodeAccessPlan::BranchResidualUnion(_),
+            physical::PhysicalAccess::BranchResidualUnion,
+        ) => SelectedAccessShapeMatch::Matched,
         (ir::NodeAccessPlan::ScanThenFilter { .. }, _) => SelectedAccessShapeMatch::NotMatched(
             SelectedAccessShapeMismatch::ResidualFilterRequiresPipeline,
         ),
@@ -80,7 +84,8 @@ pub(super) fn selected_node_access_match(
             | ir::NodeAccessPlan::VectorSearch { .. }
             | ir::NodeAccessPlan::TextSearch { .. }
             | ir::NodeAccessPlan::Intersect(_)
-            | ir::NodeAccessPlan::Union(_),
+            | ir::NodeAccessPlan::Union(_)
+            | ir::NodeAccessPlan::BranchResidualUnion(_),
             _,
         ) => SelectedAccessShapeMatch::NotMatched(
             SelectedAccessShapeMismatch::PhysicalAccessFamilyMismatch,

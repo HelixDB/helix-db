@@ -1,7 +1,9 @@
 use super::*;
 
+/// Literal domains drop repeats under query equality, keeping each first
+/// representative with its own width, in written order, whatever their size.
 #[test]
-fn large_index_domains_preserve_native_widths_validation_and_first_order() {
+fn large_index_domains_keep_first_representatives_validation_and_order() {
     let leaves = vec![
         PropertyValue::Null,
         PropertyValue::Bool(true),
@@ -37,10 +39,15 @@ fn large_index_domains_preserve_native_widths_validation_and_first_order() {
                 .cloned()
                 .map(|value| SecondaryIndexLiteral::new(value).unwrap())
                 .fold(Vec::new(), |mut unique, value| {
+                    let identity =
+                        crate::analysis::scalar::property_value_identity(value.as_property_value());
                     if value.semantics()
                         != crate::ir::LiteralEqualityIndexValueSemantics::NonReflexive
                         && !unique.iter().any(|existing: &SecondaryIndexLiteral| {
-                            existing.as_property_value() == value.as_property_value()
+                            identity.is_some()
+                                && crate::analysis::scalar::property_value_identity(
+                                    existing.as_property_value(),
+                                ) == identity
                         })
                     {
                         unique.push(value);
@@ -50,15 +57,7 @@ fn large_index_domains_preserve_native_widths_validation_and_first_order() {
             let actual = match literal_equality_set(&PropertyValue::Array(input)).unwrap() {
                 EqualityIndexDomain::Empty => Vec::new(),
                 EqualityIndexDomain::One(IndexValue::Literal(value)) => vec![value],
-                EqualityIndexDomain::Many(values) => values
-                    .iter()
-                    .map(|value| {
-                        let IndexValue::Literal(value) = value else {
-                            panic!("literal domain")
-                        };
-                        value.clone()
-                    })
-                    .collect(),
+                EqualityIndexDomain::Many(values) => values.as_ref().to_vec(),
                 _ => panic!("literal domains cannot contain runtime parameters"),
             };
             assert_eq!(actual, expected);

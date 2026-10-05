@@ -11,6 +11,7 @@ mod value;
 pub(super) use candidate::has_candidate;
 
 pub(crate) use equality::{
-    equality_atom, literal_equality_domain, EqualityIndexAtom, EqualityIndexDomain,
+    distinct_equality_literals, equality_atom, literal_equality_domain, EqualityIndexAtom,
+    EqualityIndexDomain,
 };
 pub(crate) use range::{range_atom, RangeIndexAtom};

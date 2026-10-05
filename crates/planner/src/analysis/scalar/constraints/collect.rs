@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use helix_ast::expr::{Expr, Predicate};
 
 use super::super::extract::{
-    between_literal_bounds, equality_literal, inequality_literal, literal_in_values,
-    nullability_constraint, range_bound_literal, BoundKind,
+    between_literal_bounds, equality_literal, incomparable_range_literal, inequality_literal,
+    literal_in_values, nullability_constraint, range_bound_literal, BoundKind,
 };
 use super::super::truth::static_predicate_value;
 use super::super::values::literal_collection_is_empty;
@@ -56,7 +56,7 @@ fn add_atomic_constraint(
     predicate: &Predicate,
     constraints: &mut BTreeMap<String, ScalarPropertyConstraint>,
 ) -> bool {
-    if is_in_empty_literal_collection(predicate) {
+    if is_in_empty_literal_collection(predicate) || incomparable_range_literal(predicate) {
         return true;
     }
     if let Some((property, nullability)) = nullability_constraint(predicate) {

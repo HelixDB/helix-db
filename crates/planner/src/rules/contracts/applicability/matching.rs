@@ -4,7 +4,7 @@
 //! module keeps the expression dispatch separate from the applicability enum
 //! and from the candidate predicate helpers.
 
-use super::{candidates, RuleApplicability, STREAM_MEMBERSHIP_KINDS};
+use super::{candidates, RuleApplicability, REQUIRED_STREAM_FILTER_KINDS};
 use crate::logical;
 
 impl RuleApplicability {
@@ -130,7 +130,9 @@ impl RuleApplicability {
                 logical::LogicalExpr::AccessPath(access) => kinds.contains(access.source_kind()),
                 _ => false,
             },
-            Self::StreamMembershipCandidate => STREAM_MEMBERSHIP_KINDS.contains(&expr.kind()),
+            Self::StreamMembershipCandidate | Self::StreamSourceIndexCandidate => {
+                REQUIRED_STREAM_FILTER_KINDS.contains(&expr.kind())
+            }
         }
     }
 }

@@ -3,6 +3,7 @@
 mod adjacency;
 mod contracts;
 mod edge;
+mod footprint;
 mod index_context;
 mod node;
 mod observations;
@@ -16,6 +17,7 @@ pub(super) mod visibility;
 
 use super::*;
 
+pub(super) use footprint::{LabelWrites, NodeIndexWrites};
 pub(super) use index_context::MutationIndexContext;
 pub(super) use rows::DeletionTargets;
 

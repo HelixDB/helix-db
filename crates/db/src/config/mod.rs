@@ -17,7 +17,7 @@ pub use cache::{
     CacheConfig, CacheMode, CacheWarmMode, FtsHybridCacheConfig, FtsMemoryCacheConfig,
     FtsWarmConfig, ObjectStoreWarmLevel, SimHasherCacheSettings, SlateHybridCacheConfig,
     SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateRuntimeConfig, SlateWarmConfig,
-    VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
+    VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings, VectorPartWarm,
     DEFAULT_VECTOR_MEMORY_BUDGET_BYTES,
 };
 pub use db::{

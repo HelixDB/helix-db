@@ -52,6 +52,16 @@ const LOCAL_S3_SECRET_KEY: &str = "helix-local-secret";
 const LOCAL_S3_BUCKET: &str = "helix-db";
 const LOCAL_S3_REGION: &str = "us-east-1";
 const LOCAL_DB_PATH: &str = "db/";
+/// Directory the Helix image keeps its disk cache in. The server always
+/// caches S3-compatible storage there, including disk mode's SeaweedFS.
+const CACHE_DIR: &str = "/var/cache/helix";
+/// Disk-cache budget in disk mode: the server's minimum, because SeaweedFS
+/// already keeps the data on this machine and a larger cache only copies it.
+const DISK_MODE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+/// Disk-cache budget for an S3 bucket: room for a development working set
+/// that needs about 8,200 open files, instead of the server's 8 GiB default,
+/// which needs 26,600 and fails startup where it does not fit.
+const S3_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const TEST_CONTAINER_RUNTIME_BIN_ENV: &str = "HELIX_TEST_CONTAINER_RUNTIME_BIN";
 
 #[derive(Debug, Clone)]
@@ -96,6 +106,21 @@ struct DiskRuntimeResources {
 enum ContainerEnv {
     Literal(&'static str, String),
     Host(&'static str),
+}
+
+/// How the Helix container reaches its storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HelixStorage {
+    /// In-memory storage needs nothing.
+    Memory,
+    /// S3-compatible storage: disk mode's SeaweedFS sidecar, reached on its
+    /// `network`, or a bucket. The server caches it on disk in
+    /// `cache_volume`, which outlives the container until prune.
+    ObjectStore {
+        network: Option<String>,
+        cache_volume: String,
+        env: Vec<ContainerEnv>,
+    },
 }
 
 impl LocalRuntime {
@@ -334,30 +359,15 @@ impl LocalRuntime {
 
         let name = self.container_name(instance_name);
         let _ = self.remove_container(&name);
-        let (network, mut env) = match seaweedfs_image {
-            Some(seaweedfs_image) => {
-                let resources = self.start_disk_dependencies(instance_name, &seaweedfs_image)?;
-                (Some(resources.network), disk_env())
-            }
-            None => {
-                let _ = self.remove_disk_resources(instance_name, false);
-                let env = if config.storage.is_s3() {
-                    s3_env(&config)?
-                } else {
-                    Vec::new()
-                };
-                (None, env)
-            }
-        };
-        env.extend(telemetry_env());
+        let storage = self.prepare_storage(instance_name, &config, seaweedfs_image)?;
 
         let args = helix_run_args(
             &name,
             &image,
             config.port,
             true,
-            network.as_deref(),
-            &env,
+            &storage,
+            &telemetry_env(),
             &self.instance_identity(instance_name),
         );
         let output = self
@@ -384,29 +394,14 @@ impl LocalRuntime {
 
         let name = self.container_name(instance_name);
         let _ = self.remove_container(&name);
-        let (network, mut env) = match seaweedfs_image {
-            Some(seaweedfs_image) => {
-                let resources = self.start_disk_dependencies(instance_name, &seaweedfs_image)?;
-                (Some(resources.network), disk_env())
-            }
-            None => {
-                let _ = self.remove_disk_resources(instance_name, false);
-                let env = if config.storage.is_s3() {
-                    s3_env(&config)?
-                } else {
-                    Vec::new()
-                };
-                (None, env)
-            }
-        };
-        env.extend(telemetry_env());
+        let storage = self.prepare_storage(instance_name, &config, seaweedfs_image)?;
         let args = helix_run_args(
             &name,
             &image,
             config.port,
             false,
-            network.as_deref(),
-            &env,
+            &storage,
+            &telemetry_env(),
             &self.instance_identity(instance_name),
         );
 
@@ -579,7 +574,8 @@ impl LocalRuntime {
         let name = self.container_name(instance_name);
         let removed_helix = self.remove_container(&name)?;
         let removed_disk_resources = self.remove_disk_resources(instance_name, true)?;
-        Ok(removed_helix || removed_disk_resources)
+        let removed_cache = self.remove_volume(&self.cache_volume(instance_name))?;
+        Ok(removed_helix || removed_disk_resources || removed_cache)
     }
 
     pub fn run_command(&self, args: &[&str]) -> Result<Output> {
@@ -589,6 +585,44 @@ impl LocalRuntime {
                 self.runtime.binary(),
                 args.join(" ")
             )
+        })
+    }
+
+    /// Volume holding the server's disk cache for S3-backed storage. Stop
+    /// keeps it, so the next start reads recently used data locally; prune
+    /// removes it.
+    fn cache_volume(&self, instance_name: &str) -> String {
+        format!("{}-cache", self.container_name(instance_name))
+    }
+
+    /// Starts what the Helix container's storage needs: disk mode's
+    /// SeaweedFS sidecar and, for any S3-backed storage, the disk-cache
+    /// volume. Any other storage removes disk mode's containers and network.
+    fn prepare_storage(
+        &self,
+        instance_name: &str,
+        config: &LocalInstanceConfig,
+        seaweedfs_image: Option<String>,
+    ) -> Result<HelixStorage> {
+        let (network, env) = match seaweedfs_image {
+            Some(seaweedfs_image) => {
+                let resources = self.start_disk_dependencies(instance_name, &seaweedfs_image)?;
+                (Some(resources.network), disk_env())
+            }
+            None => {
+                let _ = self.remove_disk_resources(instance_name, false);
+                if !config.storage.is_s3() {
+                    return Ok(HelixStorage::Memory);
+                }
+                (None, s3_env(config)?)
+            }
+        };
+        let cache_volume = self.cache_volume(instance_name);
+        self.ensure_volume(&cache_volume, &self.instance_identity(instance_name))?;
+        Ok(HelixStorage::ObjectStore {
+            network,
+            cache_volume,
+            env,
         })
     }
 
@@ -1268,12 +1302,13 @@ fn daemon_not_running_error_for(
         .with_hint(runtime_unavailable_hint_for(os, runtime, docker_backend))
 }
 
+/// `env` follows the storage's own environment.
 fn helix_run_args(
     name: &str,
     image: &str,
     port: u16,
     detached: bool,
-    network: Option<&str>,
+    storage: &HelixStorage,
     env: &[ContainerEnv],
     identity: &str,
 ) -> Vec<String> {
@@ -1297,8 +1332,19 @@ fn helix_run_args(
         format!("{IDENTITY_LABEL}={identity}"),
     ]);
 
-    if let Some(network) = network {
-        args.extend(["--network".to_string(), network.to_string()]);
+    if let HelixStorage::ObjectStore {
+        network,
+        cache_volume,
+        env: storage_env,
+    } = storage
+    {
+        if let Some(network) = network {
+            args.extend(["--network".to_string(), network.clone()]);
+        }
+        args.extend(["-v".to_string(), format!("{cache_volume}:{CACHE_DIR}")]);
+        for env in storage_env {
+            args.extend(["-e".to_string(), env.to_docker_arg()]);
+        }
     }
     for env in env {
         args.extend(["-e".to_string(), env.to_docker_arg()]);
@@ -1398,6 +1444,10 @@ fn disk_env() -> Vec<ContainerEnv> {
             format!("http://{SEAWEEDFS_NETWORK_ALIAS}:{SEAWEEDFS_S3_PORT}"),
         ),
         ContainerEnv::Literal("AWS_ALLOW_HTTP", "true".to_string()),
+        // The directory is the server's S3 default, but v0.0.8 and earlier
+        // cache on disk only when it is set and reject a budget without it.
+        ContainerEnv::Literal("HELIX_DISK_CACHE_DIR", CACHE_DIR.to_string()),
+        ContainerEnv::Literal("HELIX_DISK_CACHE_BYTES", DISK_MODE_CACHE_BYTES.to_string()),
     ]
 }
 
@@ -1410,6 +1460,8 @@ fn s3_env(config: &LocalInstanceConfig) -> Result<Vec<ContainerEnv>> {
         ContainerEnv::Literal("S3_BUCKET", s3.bucket.clone()),
         ContainerEnv::Literal("S3_REGION", s3.region.clone()),
         ContainerEnv::Literal("DB_PATH", s3.normalized_prefix()),
+        ContainerEnv::Literal("HELIX_DISK_CACHE_DIR", CACHE_DIR.to_string()),
+        ContainerEnv::Literal("HELIX_DISK_CACHE_BYTES", S3_CACHE_BYTES.to_string()),
     ];
     if let Some(endpoint_url) = &s3.endpoint_url {
         env.push(ContainerEnv::Literal("AWS_ENDPOINT", endpoint_url.clone()));
@@ -1854,10 +1906,10 @@ mod tests {
     fn memory_helix_args_match_existing_run_shape() {
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.9",
             9090,
             true,
-            None,
+            &HelixStorage::Memory,
             &[],
             "4:demo/dev",
         );
@@ -1875,7 +1927,7 @@ mod tests {
                 "9090:8080",
                 "--label",
                 "helixdb.identity=4:demo/dev",
-                "ghcr.io/helixdb/helixdb:v0.0.7",
+                "ghcr.io/helixdb/helixdb:v0.0.9",
             ]
             .into_iter()
             .map(String::from)
@@ -1886,13 +1938,21 @@ mod tests {
     #[test]
     fn disk_helix_args_include_network_and_s3_env() {
         let resources = disk_resources();
+        let storage = HelixStorage::ObjectStore {
+            network: Some(resources.network),
+            cache_volume: runtime_for("demo").cache_volume("dev"),
+            env: disk_env(),
+        };
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.9",
             8080,
             true,
-            Some(&resources.network),
-            &disk_env(),
+            &storage,
+            &[ContainerEnv::Literal(
+                "HELIX_TELEMETRY_LEVEL",
+                "off".to_string(),
+            )],
             "4:demo/dev",
         );
 
@@ -1904,6 +1964,24 @@ mod tests {
         assert!(args.contains(&"AWS_SECRET_ACCESS_KEY=helix-local-secret".to_string()));
         assert!(args.contains(&"AWS_ENDPOINT=http://seaweedfs:8333".to_string()));
         assert!(args.contains(&"AWS_ALLOW_HTTP=true".to_string()));
+        // SeaweedFS keeps the data on this machine, so the disk cache in
+        // front of it gets the server's minimum budget, on its own volume.
+        assert!(has_pair(
+            &args,
+            "-v",
+            "helix-demo-dev-cache:/var/cache/helix"
+        ));
+        assert!(has_pair(
+            &args,
+            "-e",
+            "HELIX_DISK_CACHE_DIR=/var/cache/helix"
+        ));
+        assert!(has_pair(&args, "-e", "HELIX_DISK_CACHE_BYTES=67108864"));
+        assert!(has_pair(&args, "-e", "HELIX_TELEMETRY_LEVEL=off"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("ghcr.io/helixdb/helixdb:v0.0.9")
+        );
     }
 
     /// Helix resolves its S3 endpoint host as one DNS label, and resolvers
@@ -1919,13 +1997,18 @@ mod tests {
             "{}",
             resources.seaweedfs_container
         );
+        let storage = HelixStorage::ObjectStore {
+            network: Some(resources.network.clone()),
+            cache_volume: runtime_for("My Helix Project").cache_volume("production"),
+            env: disk_env(),
+        };
         let args = helix_run_args(
             "helix-my-helix-project-production",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.9",
             8080,
             true,
-            Some(&resources.network),
-            &disk_env(),
+            &storage,
+            &[],
             "16:My Helix Project/production",
         );
 
@@ -1964,14 +2047,18 @@ mod tests {
             }),
             ..LocalInstanceConfig::default()
         };
-        let env = s3_env(&config).unwrap();
+        let storage = HelixStorage::ObjectStore {
+            network: None,
+            cache_volume: runtime_for("demo").cache_volume("dev"),
+            env: s3_env(&config).unwrap(),
+        };
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.7",
+            "ghcr.io/helixdb/helixdb:v0.0.9",
             8080,
             true,
-            None,
-            &env,
+            &storage,
+            &[],
             "4:demo/dev",
         );
 
@@ -1981,6 +2068,19 @@ mod tests {
         assert!(args.contains(&"DB_PATH=tenant-a/".to_string()));
         assert!(args.contains(&"AWS_ENDPOINT=https://s3.example.com".to_string()));
         assert!(!args.contains(&"AWS_ALLOW_HTTP=true".to_string()));
+        // A bucket gets a 1 GiB development cache instead of the server's
+        // 8 GiB default.
+        assert!(has_pair(
+            &args,
+            "-v",
+            "helix-demo-dev-cache:/var/cache/helix"
+        ));
+        assert!(has_pair(
+            &args,
+            "-e",
+            "HELIX_DISK_CACHE_DIR=/var/cache/helix"
+        ));
+        assert!(has_pair(&args, "-e", "HELIX_DISK_CACHE_BYTES=1073741824"));
     }
 
     #[test]

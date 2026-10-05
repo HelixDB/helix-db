@@ -1,14 +1,20 @@
 //! Access cardinality inference.
 
-use crate::ir;
+use crate::{catalog, ir};
 
 pub(in crate::exec) fn node_access_hard_upper_bound(plan: &ir::NodeAccessPlan) -> Option<usize> {
     match plan {
         ir::NodeAccessPlan::Empty => Some(0),
         ir::NodeAccessPlan::PointIds { ids } => Some(ids.as_ref().len()),
-        ir::NodeAccessPlan::EqualityIndex { index, value, .. } => {
-            value.semantics().hard_upper_bound(index.uniqueness)
-        }
+        ir::NodeAccessPlan::EqualityIndex {
+            index:
+                catalog::NodeEqualityIndexMeta {
+                    uniqueness: catalog::IndexUniqueness::Unique,
+                    ..
+                },
+            value,
+            ..
+        } => value.unique_hard_upper_bound(),
         ir::NodeAccessPlan::VectorSearch { k, .. } | ir::NodeAccessPlan::TextSearch { k, .. } => {
             search_limit_hard_upper_bound(k)
         }
@@ -20,10 +26,16 @@ pub(in crate::exec) fn node_access_hard_upper_bound(plan: &ir::NodeAccessPlan) -
             node_access_hard_upper_bound(plan).map(|upper| sum.saturating_add(upper))
         }),
         ir::NodeAccessPlan::ScanThenFilter { source, .. } => node_access_hard_upper_bound(source),
+        ir::NodeAccessPlan::BranchResidualUnion(branches) => {
+            branches.as_ref().iter().try_fold(0usize, |sum, branch| {
+                node_access_hard_upper_bound(branch.source()).map(|upper| sum.saturating_add(upper))
+            })
+        }
         ir::NodeAccessPlan::FromParam { .. }
         | ir::NodeAccessPlan::FromVar { .. }
         | ir::NodeAccessPlan::AllScan
         | ir::NodeAccessPlan::LabelScan { .. }
+        | ir::NodeAccessPlan::EqualityIndex { .. }
         | ir::NodeAccessPlan::RangeIndex { .. } => None,
     }
 }
@@ -43,6 +55,11 @@ pub(in crate::exec) fn edge_access_hard_upper_bound(plan: &ir::EdgeAccessPlan) -
             edge_access_hard_upper_bound(plan).map(|upper| sum.saturating_add(upper))
         }),
         ir::EdgeAccessPlan::ScanThenFilter { source, .. } => edge_access_hard_upper_bound(source),
+        ir::EdgeAccessPlan::BranchResidualUnion(branches) => {
+            branches.as_ref().iter().try_fold(0usize, |sum, branch| {
+                edge_access_hard_upper_bound(branch.source()).map(|upper| sum.saturating_add(upper))
+            })
+        }
         ir::EdgeAccessPlan::FromParam { .. }
         | ir::EdgeAccessPlan::FromVar { .. }
         | ir::EdgeAccessPlan::AllScan
@@ -66,7 +83,8 @@ pub(super) fn node_access_exact_cardinality(plan: &ir::NodeAccessPlan) -> Option
         | ir::NodeAccessPlan::TextSearch { .. }
         | ir::NodeAccessPlan::Intersect(_)
         | ir::NodeAccessPlan::Union(_)
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 
@@ -84,7 +102,8 @@ pub(super) fn edge_access_exact_cardinality(plan: &ir::EdgeAccessPlan) -> Option
         | ir::EdgeAccessPlan::TextSearch { .. }
         | ir::EdgeAccessPlan::Intersect(_)
         | ir::EdgeAccessPlan::Union(_)
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 

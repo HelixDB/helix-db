@@ -118,7 +118,7 @@ impl ObjectStore for CountingStore {
 }
 
 /// SplitMix64: deterministic, dependency-free fixture randomness.
-pub struct Rng(u64);
+pub struct Rng(pub u64);
 
 impl Rng {
     fn next_u64(&mut self) -> u64 {
@@ -129,11 +129,11 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    fn unit(&mut self) -> f64 {
+    pub fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn below(&mut self, bound: usize) -> usize {
+    pub fn below(&mut self, bound: usize) -> usize {
         (self.next_u64() % bound as u64) as usize
     }
 
@@ -386,6 +386,10 @@ pub async fn create_indexes(
         "kind" => batch.var_as(
             "kind",
             g().create_index_if_not_exists(IndexSpec::node_equality("Attribute", "kind")),
+        ),
+        "item_owner" => batch.var_as(
+            "item_owner",
+            g().create_index_if_not_exists(IndexSpec::node_equality("Item", "owner")),
         ),
         other => panic!("unknown index {other}"),
     });
@@ -683,8 +687,13 @@ pub fn shapes(query: &[f32]) -> Vec<Shape> {
 }
 
 pub fn query_vectors(count: usize, dimension: usize) -> Vec<Vec<f32>> {
+    query_vectors_seeded(count, dimension, 9_001)
+}
+
+/// Kind-B query vectors, half of them near the target group, from `seed`.
+pub fn query_vectors_seeded(count: usize, dimension: usize, seed: u64) -> Vec<Vec<f32>> {
     let fixture = Fixture::new(dimension);
-    let mut rng = Rng(9_001);
+    let mut rng = Rng(seed);
     (0..count)
         .map(|index| {
             let group = match index % 2 {

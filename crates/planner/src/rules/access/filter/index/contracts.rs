@@ -44,4 +44,8 @@ pub(super) enum PartialIndexFilterRejection {
     NotConjunction,
     NoIndexedConjunct,
     SourceUnchanged,
+    /// Several branches keep residuals but cannot form a branch-residual
+    /// union: the filtered source is already narrow, or a branch set is not
+    /// index-only.
+    ResidualBranchesUnrepresentable,
 }

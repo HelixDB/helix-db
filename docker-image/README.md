@@ -4,7 +4,7 @@ This directory owns the build and test surface for the standalone HelixDB image.
 
 The canonical image repository is `ghcr.io/helixdb/helixdb`. The scripts require an explicit platform and image tag so local and CI runs exercise the same artifact.
 
-The published release is `ghcr.io/helixdb/helixdb:v0.0.5`, available for Linux amd64
+The published release is `ghcr.io/helixdb/helixdb:v0.0.9`, available for Linux amd64
 and arm64. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
 for release-image commands. The `local-amd64` and `local-arm64` tags below refer
 to images built from your checkout.
@@ -15,7 +15,7 @@ to images built from your checkout.
 - HTTP listens on `0.0.0.0:8080`; internal gRPC listens on `127.0.0.1:8081` and is not exposed.
 - `GET /healthz`, `GET /readyz`, and `POST /v2/query` are the supported container probes and query endpoint.
 - Storage is in memory unless local-disk or S3-compatible configuration is supplied.
-- `/var/lib/helix` (data) and `/var/cache/helix` (optional disk cache) are owned by the runtime user, so new named volumes mounted there are writable.
+- `/var/lib/helix` (data) and `/var/cache/helix` (disk cache, always used with S3 storage) are owned by the runtime user, so new named volumes mounted there are writable.
 - Docker sends `SIGTERM`; the server drains both listeners and closes storage before exiting.
 
 ## Build
@@ -72,34 +72,43 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` only for a trusted plain-HTTP endpoint. |
 | `DB_PATH` | Logical database prefix inside the selected store; defaults to `db/`. |
 
-`HELIX_DATA_DIR` and `S3_BUCKET` are mutually exclusive. Credentials are runtime-only and are never baked into the image.
+`HELIX_DATA_DIR` and `S3_BUCKET` are mutually exclusive. Credentials are runtime-only and are never baked into the image. S3 storage always caches on local disk; see [Disk cache](#disk-cache).
 
 Leave both variables unset for memory storage. Bind mounts and existing volumes
 must be writable by the container's `65532:65532` user and group.
 
 ### Disk cache
 
-By default the server caches SlateDB blocks and full-text splits in memory only,
-so every cold read goes to the object store. Set `HELIX_DISK_CACHE_DIR` with S3 or
-`HELIX_DATA_DIR` storage to add memory-plus-disk caches on local disk, ideally
-NVMe. It needs v0.0.7 or later; v0.0.6 and earlier ignore these variables.
+With S3 storage the server always caches SlateDB blocks, object-store SST parts and
+full-text splits in memory and on local disk, ideally NVMe, in `/var/cache/helix`
+unless `HELIX_DISK_CACHE_DIR` names another directory. There is no memory-only S3
+mode: vector indexes on S3 need the disk tier, because once the HNSW graph
+outgrows the memory cache every graph hop that misses it is a serial S3 GET. With
+`HELIX_DATA_DIR` storage the disk cache is optional; set `HELIX_DISK_CACHE_DIR` to
+enable it. Images up to v0.0.8 cache S3 in memory only unless `HELIX_DISK_CACHE_DIR`
+is set, and v0.0.6 and earlier ignore every cache variable.
+
+Mount a volume at `/var/cache/helix` so the cache survives restarts and container
+replacement; a restarted server then reads recently used data from local disk
+instead of the object store. Without a volume the cache lives in the container's
+writable layer and every new container starts with an empty cache.
 
 ```bash
 sudo mkdir -p /data/helix-cache
 sudo chown 65532:65532 /data/helix-cache
 docker run --rm -p 8080:8080 \
   -e S3_BUCKET=my-bucket -e S3_REGION=us-east-1 \
-  -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
   ghcr.io/helixdb/helixdb:local-amd64
 ```
 
 A named volume (`--mount type=volume,source=helixdb-cache,target=/var/cache/helix`)
-needs no `chown`. The cache survives restarts, so a restarted server reads recently
-used data from local disk instead of the object store. Use one cache directory per
-running server and per database: changing `DB_PATH` on the same directory leaves the
-old database's full-text cache behind.
+needs no `chown`. When running as another user or outside the image, set
+`HELIX_DISK_CACHE_DIR` to a directory that user can write. With a read-only root
+filesystem, mount a writable volume (for example a tmpfs or `emptyDir`) at the cache
+directory. Use one cache directory per running server and per database: changing
+`DB_PATH` on the same directory leaves the old database's full-text cache behind.
 
 Changing `HELIX_DISK_CACHE_BYTES` usually changes the block cache's block size, and
 then the whole block tier (`slate/`) is discarded at startup and refills from the
@@ -117,27 +126,39 @@ until the next admission. A split larger than the whole share is never copied.
 After a restart, the first search to use each split in `fts/` reads and checksums
 the whole split, up to 64 MiB, before it answers.
 
+Once storage opens, the server warms the cache in the background: the index, filter
+and stats blocks of the newest SSTs go into `slate/`, and with S3 the search rows of
+every Active vector index go into `object-store/`, reading at most half that tier.
+Neither warm delays startup or `/readyz`; queries that arrive first read through to
+the object store as usual. Set `HELIX_DISK_CACHE_WARM=off` to skip both, for example
+to avoid the startup reads from S3; every tier then fills only as queries read.
+
 On a miss the object-store tier fetches and keeps a whole part of an SST: 4 MiB, or
 less for budgets under 2 GiB so that the tier always holds at least 256 parts. Budget
 at least twice the data the server reads often. Once that data outgrows half the
 budget, parts keep evicting each other and cold reads fetch more from the object
 store than memory-only caches would.
 
-The budget must also fit on the cache's filesystem. At startup the server logs a
-warning when `HELIX_DISK_CACHE_BYTES` exceeds the free space there plus what the
-cache already occupies: the cache can then fill the filesystem, and if
-`HELIX_DATA_DIR` shares it, durable writes fail too.
+The budget must also fit on the cache's filesystem: its free space plus what the
+cache already occupies. When `HELIX_DISK_CACHE_BYTES` is unset and the 8 GiB
+default does not fit, startup fails naming the variable; set a budget that fits or
+mount a larger volume. Without a volume the cache shares the filesystem of the
+container runtime's writable layers, so an unchecked default could fill it. A
+budget that is set and does not fit only logs a warning at startup: the cache can
+then fill the filesystem, and if `HELIX_DATA_DIR` shares it, durable writes fail
+too.
 
 | Variable | Purpose |
 | --- | --- |
-| `HELIX_DISK_CACHE_DIR` | Enables the disk cache in this directory, creating it and its `slate/`, `object-store/` and `fts/` subdirectories if needed; unset keeps memory-only caches. Rejected with memory storage. |
-| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 32 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). With S3, `object-store/` also keeps the SSTs the server writes; with `HELIX_DATA_DIR` those are already on local disk, so it keeps only SSTs the server reads. |
+| `HELIX_DISK_CACHE_DIR` | Disk cache directory, created with its `slate/`, `object-store/` and `fts/` subdirectories if needed. With S3 it defaults to `/var/cache/helix`. With `HELIX_DATA_DIR`, setting it enables the disk cache and leaving it unset keeps memory-only caches. Rejected with memory storage. |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB. Half goes to object-store SST parts (`object-store/`), 3/8 to the SlateDB block cache (`slate/`), and the rest to full-text splits (`fts/`). With S3, `object-store/` also keeps the SSTs the server writes; with `HELIX_DATA_DIR` those are already on local disk, so it keeps only SSTs the server reads. |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the SlateDB block cache in bytes; defaults to 640 MiB, the memory-only default. |
+| `HELIX_DISK_CACHE_WARM` | `on` (the default) or `off`, in any case: whether the server warms the disk cache in the background at startup. Rejected with memory storage, and with `HELIX_DATA_DIR` unless `HELIX_DISK_CACHE_DIR` is set. |
 
 Size the container's memory for more than `HELIX_DISK_CACHE_MEMORY_BYTES`: the block
 cache also indexes everything in `slate/` in memory. Once `slate/` fills, that index
-takes roughly 2–9 MiB of RAM per GiB of `HELIX_DISK_CACHE_BYTES`, about 70–280 MiB
-at the 32 GiB default and 2–9 GiB at 1 TiB. A restart rebuilds it from disk before
+takes roughly 2–9 MiB of RAM per GiB of `HELIX_DISK_CACHE_BYTES`, about 20–70 MiB
+at the 8 GiB default and 2–9 GiB at 1 TiB. A restart rebuilds it from disk before
 the server listens, briefly using about twice as much memory.
 
 The block cache holds one file open per partition: its 3/8 share divided by a
@@ -147,16 +168,34 @@ at the default budget and never more than 34,792; open full-text split files com
 on top. The server raises its soft open-file limit to the hard limit at startup. If
 the hard limit is below the minimum, startup fails naming `HELIX_DISK_CACHE_BYTES`;
 raise the hard limit with `--ulimit nofile=65536:65536`. Lowering the budget is not
-a reliable fix, since the file count does not fall steadily with it. Run natively on
-macOS, the limit is also capped by `sysctl kern.maxfilesperproc`.
+a reliable fix above about 3 GiB, where the file count does not fall steadily with
+it; budgets of 1 GiB or less need about 8,200 or fewer. Run natively on macOS, the
+limit is also capped by `sysctl kern.maxfilesperproc`.
 
 Startup also fails with a message naming the variable when a size is not a positive
-integer (including non-UTF-8 text) or is out of range, a size is set without
-`HELIX_DISK_CACHE_DIR`, the directory or a tier subdirectory cannot be created or
-written, the directory cannot be locked (some network and FUSE filesystems do not
-support locks), or another running server already uses the directory. A server holds
-a lock on `.helix-cache.lock` in the directory until its storage closes, so stop the
+integer (including non-UTF-8 text) or is out of range, `HELIX_DISK_CACHE_WARM` is
+neither `on` nor `off`, a cache variable is set with `HELIX_DATA_DIR` but without
+`HELIX_DISK_CACHE_DIR`, the default budget does not
+fit, the directory or a tier subdirectory cannot be created or written, the
+directory cannot be locked (some network and FUSE filesystems do not support
+locks), or another running server already uses the directory. A server holds a
+lock on `.helix-cache.lock` in the directory until its storage closes, so stop the
 old container before starting its replacement on the same cache.
+
+#### Upgrading S3 deployments from v0.0.8 and earlier
+
+S3 storage used no local disk before, so an S3 container that started with v0.0.8
+or earlier can fail or use more resources after the upgrade:
+
+- The hard open-file limit must be at least 26,600 at the default budget. Budgets
+  of 1 GiB or less need about 8,200 or fewer.
+- RSS grows by the block cache's index, about 20–70 MiB at the default budget and
+  twice that briefly after a restart; size memory limits for it.
+- The cache directory must be writable. Mount a volume there with a read-only root
+  filesystem, and set `HELIX_DISK_CACHE_DIR` when running as a user other than
+  `65532` (for example on platforms that assign arbitrary UIDs).
+- Without `HELIX_DISK_CACHE_BYTES`, the 8 GiB default must fit the cache's
+  filesystem.
 
 ## Test
 
@@ -183,10 +222,16 @@ and the winner's body stored. A passing race cannot prove the store atomic, but
 a store that checks the condition and then writes without a lock is likely to
 fail it. The probe runs against SeaweedFS directly and through the
 request-logging proxy Helix uses. The stage then seeds a vector index, reopens
-flushed data, and checks that three idle refresh intervals produce no
-vector-data SST GETs (catalog polling is measured separately) while search
+flushed data, and checks that three idle refresh intervals fetch no uncached
+vector-data SST ranges (catalog polling is measured separately) while search
 remains correct before and after a write. A test-only nginx proxy logs each
-S3 request's method, path, and `Range` header for that check.
+S3 request's method, path, and `Range` header for that check. Helix keeps its
+disk cache on tmpfs there, with a 1 GiB budget, so each container starts with
+a cold cache: reopened data must come from SeaweedFS, and hydration after the
+restart reaches the trace. A range read again is served from the warm cache and
+never reaches the trace, so this stage cannot see an idle refresh that
+re-hydrates cached data; the DB contract `run_idle_refresh_contracts`, which
+runs without the object-store cache, guards that.
 
 | Dependency | Pinned reference |
 | --- | --- |

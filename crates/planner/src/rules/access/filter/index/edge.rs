@@ -1,7 +1,6 @@
 //! Edge access-filter index derivation.
 
 use super::contracts::AccessFilterIndexApplication;
-use super::contracts::PartialIndexFilterApplication;
 use super::shared;
 use crate::{analysis, catalog, context, ir, logical};
 
@@ -13,22 +12,6 @@ pub(super) fn index_filter(
     planner_limits: &context::PlannerLimits,
 ) -> AccessFilterIndexApplication<logical::EdgeAccessPath> {
     shared::index_filter::<EdgeIndexFamily>(
-        path,
-        predicate,
-        predicate_label,
-        indexes,
-        planner_limits,
-    )
-}
-
-pub(super) fn partial_index_filter(
-    path: &logical::EdgeAccessPath,
-    predicate: &helix_ast::expr::Predicate,
-    predicate_label: &analysis::FeasibleLabelScope,
-    indexes: &catalog::IndexCatalogSnapshot,
-    planner_limits: &context::PlannerLimits,
-) -> PartialIndexFilterApplication<ir::EdgeAccessSourcePlan> {
-    shared::partial_index_filter::<EdgeIndexFamily>(
         path,
         predicate,
         predicate_label,
@@ -115,9 +98,16 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
         )
     }
 
-    /// Edge equality indexes are never unique.
-    fn is_single_source(_source: &Self::Source) -> bool {
-        false
+    fn branch_residual_union(
+        branches: Vec<(Self::Source, Option<ir::PredicatePlan>)>,
+    ) -> Option<Self::Source> {
+        ir::EdgeAccessPlan::branch_residual_union(
+            branches
+                .into_iter()
+                .map(|(source, residual)| ir::EdgeResidualBranch::new(source, residual))
+                .collect(),
+        )
+        .map(ir::EdgeAccessSourcePlan::from_unfiltered)
     }
 
     fn intersect_pair(left: Self::Source, right: Self::Source) -> Self::Source {

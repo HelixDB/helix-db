@@ -130,6 +130,26 @@ async fn disk_runtime_commands_cover_resource_reuse_status_cleanup_and_errors() 
     assert!(!log.contains("quay.io/minio"), "{log}");
     assert!(log.contains("logs -f"));
     assert!(log.contains("network inspect"));
+    // Disk mode is S3 storage too, so the server caches it on disk, on its
+    // own volume with the minimum budget: SeaweedFS already keeps the data
+    // on this machine.
+    assert!(log.contains(&format!(
+        "volume create --label helixdb.identity=20:disk-command-project/dev {container}-cache"
+    )));
+    assert!(
+        log.contains(&format!("-v {container}-cache:/var/cache/helix ")),
+        "{log}"
+    );
+    assert!(
+        log.contains(
+            "-e HELIX_DISK_CACHE_DIR=/var/cache/helix -e HELIX_DISK_CACHE_BYTES=67108864 "
+        ),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!("volume rm {container}-cache")),
+        "{log}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -219,7 +239,7 @@ async fn legacy_minio_sidecars_are_removed_and_their_data_is_kept_until_prune() 
     );
     assert!(
         !log.contains("volume rm"),
-        "stop must keep both volumes: {log}"
+        "stop must keep every volume, the disk cache's too: {log}"
     );
 
     fixture
@@ -238,6 +258,7 @@ async fn legacy_minio_sidecars_are_removed_and_their_data_is_kept_until_prune() 
         log.contains(&format!("volume rm {base}-minio-data\n")),
         "{log}"
     );
+    assert!(log.contains(&format!("volume rm {base}-cache\n")), "{log}");
 }
 
 #[test]
@@ -902,7 +923,7 @@ async fn configured_policy_applies_to_foreground_and_dependency_failures_preserv
                 result.failure();
             }
             let log = fixture.runtime_log();
-            assert!(log.contains("pull ghcr.io/helixdb/helixdb:v0.0.7"));
+            assert!(log.contains("pull ghcr.io/helixdb/helixdb:v0.0.9"));
             assert!(log.contains(&format!("pull {SEAWEEDFS_IMAGE}")));
             if !failed_image.is_empty() {
                 assert!(

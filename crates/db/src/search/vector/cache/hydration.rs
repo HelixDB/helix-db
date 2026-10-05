@@ -152,100 +152,7 @@ pub(crate) async fn hydrate_active_generations(
     };
     let mut outcome = VectorCacheHydrationOutcome::Settled;
     let inventory = source.snapshot().await?;
-    let mut targets = Vec::new();
-    let mut physical_ids = HashSet::new();
-    for active in active {
-        let ActiveIndexHandle::Vector {
-            scope: active_scope,
-            index_id,
-            generation,
-            layout,
-            ..
-        } = &active
-        else {
-            continue;
-        };
-        if *active_scope != scope {
-            return Err(HelixDbError::InvariantViolation(
-                "vector cache hydration received an Active generation from another scope"
-                    .to_string(),
-            ));
-        }
-        match layout {
-            VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
-                if !physical_ids.insert(physical_index_id.get()) {
-                    return Err(HelixDbError::IndexCatalogCorruption(
-                        "two Active vector generations in one scope own the same physical index ID"
-                            .to_string(),
-                    ));
-                }
-                targets.push(
-                    ValidatedVectorGenerationHandle::try_from_active_current(
-                        &active,
-                        *physical_index_id,
-                    )
-                    .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))?,
-                );
-            }
-            VectorPhysicalLayout::Partitioned => {
-                let prefix = IndexKey::data_prefix(
-                    scope,
-                    ScopedKey::generation_prefix(
-                        RecordKind::VectorPartitionMapping,
-                        *index_id,
-                        *generation,
-                    ),
-                );
-                let mut mappings = inventory.scan_prefix(prefix, ..).await?;
-                while let Some(row) = mappings.next().await? {
-                    let IndexKey::Data {
-                        kind: ScopedKey::VectorPartitionMapping(mapping_key),
-                        ..
-                    } = IndexKey::parse_from_slice(scope, &row.key)?
-                    else {
-                        return Err(HelixDbError::IndexCatalogCorruption(
-                            "vector partition prefix yielded another key kind".to_string(),
-                        ));
-                    };
-                    let mapping = decode_partition_mapping(&row.value)?;
-                    if mapping_key.index_id != *index_id
-                        || mapping_key.generation != *generation
-                        || mapping.index_id != *index_id
-                        || mapping.generation != *generation
-                        || mapping_key.partition != mapping.partition.fingerprint()
-                    {
-                        return Err(HelixDbError::IndexCatalogCorruption(
-                            "vector partition mapping key and value disagree".to_string(),
-                        ));
-                    }
-                    if !physical_ids.insert(mapping.physical_index_id.get()) {
-                        return Err(HelixDbError::IndexCatalogCorruption(
-                            "two Active vector partitions in one scope own the same physical index ID"
-                                .to_string(),
-                        ));
-                    }
-                    targets.push(
-                        ValidatedVectorGenerationHandle::try_from_active_current(
-                            &active,
-                            mapping.physical_index_id,
-                        )
-                        .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))?,
-                    );
-                }
-            }
-        }
-    }
-
-    targets.sort_unstable_by_key(|handle| {
-        let identity = handle.identity();
-        (
-            identity.scope(),
-            identity.index_id().get(),
-            identity.generation().get(),
-            identity.physical_index_id().get(),
-            identity.record_revision().get(),
-        )
-    });
+    let targets = active_vector_targets(inventory.as_ref(), scope, active).await?;
     let Ok(target_count) = u64::try_from(targets.len()) else {
         return Err(HelixDbError::InvariantViolation(
             "vector cache hydration target count exceeds u64".to_string(),
@@ -392,6 +299,117 @@ pub(crate) async fn hydrate_active_generations(
         }
     }
     Ok(outcome)
+}
+
+/// Validated handles for every physical namespace owned by `scope`'s Active
+/// vector generations, in a deterministic order.
+///
+/// Partition mappings come from `inventory`, one stable view, and are
+/// cross-checked against their keys. Another scope's generation, a mapping
+/// that disagrees with its key, or two generations owning one physical index
+/// ID are corruption.
+pub(crate) async fn active_vector_targets<R>(
+    inventory: &R,
+    scope: DataScope,
+    active: Vec<ActiveIndexHandle>,
+) -> Result<Vec<ValidatedVectorGenerationHandle>>
+where
+    R: slatedb::DbReadOps + Sync + ?Sized,
+{
+    let mut targets = Vec::new();
+    let mut physical_ids = HashSet::new();
+    for active in active {
+        let ActiveIndexHandle::Vector {
+            scope: active_scope,
+            index_id,
+            generation,
+            layout,
+            ..
+        } = &active
+        else {
+            continue;
+        };
+        if *active_scope != scope {
+            return Err(HelixDbError::InvariantViolation(
+                "vector targets received an Active generation from another scope".to_string(),
+            ));
+        }
+        match layout {
+            VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
+                if !physical_ids.insert(physical_index_id.get()) {
+                    return Err(HelixDbError::IndexCatalogCorruption(
+                        "two Active vector generations in one scope own the same physical index ID"
+                            .to_string(),
+                    ));
+                }
+                targets.push(
+                    ValidatedVectorGenerationHandle::try_from_active_current(
+                        &active,
+                        *physical_index_id,
+                    )
+                    .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))?,
+                );
+            }
+            VectorPhysicalLayout::Partitioned => {
+                let prefix = IndexKey::data_prefix(
+                    scope,
+                    ScopedKey::generation_prefix(
+                        RecordKind::VectorPartitionMapping,
+                        *index_id,
+                        *generation,
+                    ),
+                );
+                let mut mappings = inventory.scan_prefix(prefix, ..).await?;
+                while let Some(row) = mappings.next().await? {
+                    let IndexKey::Data {
+                        kind: ScopedKey::VectorPartitionMapping(mapping_key),
+                        ..
+                    } = IndexKey::parse_from_slice(scope, &row.key)?
+                    else {
+                        return Err(HelixDbError::IndexCatalogCorruption(
+                            "vector partition prefix yielded another key kind".to_string(),
+                        ));
+                    };
+                    let mapping = decode_partition_mapping(&row.value)?;
+                    if mapping_key.index_id != *index_id
+                        || mapping_key.generation != *generation
+                        || mapping.index_id != *index_id
+                        || mapping.generation != *generation
+                        || mapping_key.partition != mapping.partition.fingerprint()
+                    {
+                        return Err(HelixDbError::IndexCatalogCorruption(
+                            "vector partition mapping key and value disagree".to_string(),
+                        ));
+                    }
+                    if !physical_ids.insert(mapping.physical_index_id.get()) {
+                        return Err(HelixDbError::IndexCatalogCorruption(
+                            "two Active vector partitions in one scope own the same physical index ID"
+                                .to_string(),
+                        ));
+                    }
+                    targets.push(
+                        ValidatedVectorGenerationHandle::try_from_active_current(
+                            &active,
+                            mapping.physical_index_id,
+                        )
+                        .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))?,
+                    );
+                }
+            }
+        }
+    }
+
+    targets.sort_unstable_by_key(|handle| {
+        let identity = handle.identity();
+        (
+            identity.scope(),
+            identity.index_id().get(),
+            identity.generation().get(),
+            identity.physical_index_id().get(),
+            identity.record_revision().get(),
+        )
+    });
+    Ok(targets)
 }
 
 #[cfg(any(test, feature = "production-coverage"))]

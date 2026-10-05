@@ -77,7 +77,9 @@ pub(super) const fn classify_node(source: &ir::NodeAccessPlan) -> AccessSourceKi
             AccessSourceKind::Search
         }
         ir::NodeAccessPlan::Intersect(_) => AccessSourceKind::Intersection,
-        ir::NodeAccessPlan::Union(_) => AccessSourceKind::Union,
+        ir::NodeAccessPlan::Union(_) | ir::NodeAccessPlan::BranchResidualUnion(_) => {
+            AccessSourceKind::Union
+        }
         ir::NodeAccessPlan::ScanThenFilter { .. } => AccessSourceKind::Scan,
     }
 }
@@ -98,7 +100,9 @@ pub(super) const fn classify_edge(source: &ir::EdgeAccessPlan) -> AccessSourceKi
             AccessSourceKind::Search
         }
         ir::EdgeAccessPlan::Intersect(_) => AccessSourceKind::Intersection,
-        ir::EdgeAccessPlan::Union(_) => AccessSourceKind::Union,
+        ir::EdgeAccessPlan::Union(_) | ir::EdgeAccessPlan::BranchResidualUnion(_) => {
+            AccessSourceKind::Union
+        }
         ir::EdgeAccessPlan::ScanThenFilter { .. } => AccessSourceKind::Scan,
     }
 }

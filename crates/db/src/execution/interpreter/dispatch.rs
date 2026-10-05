@@ -49,7 +49,13 @@ impl<'db> ExecutionContext<'db> {
         input: ExecutionValue,
     ) -> futures::future::BoxFuture<'a, Result<ExecutionValue>> {
         Box::pin(async move {
-            let value = self.operation(op, input).await?;
+            // A failed operation may have staged writes it never reported to
+            // the membership cache, or, when a deadline dropped a body, left
+            // `ForEach` bindings mid-frame.
+            let value = self
+                .operation(op, input)
+                .await
+                .inspect_err(|_| self.prepared_memberships.clear())?;
             self.enforce_row_mode_cap(row_mode::op_name(op), &value)?;
             Ok(value)
         })

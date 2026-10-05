@@ -65,6 +65,10 @@ pub(super) fn selected_edge_access_match(
         | (ir::EdgeAccessPlan::AllScan, physical::PhysicalAccess::Kv(_)) => {
             SelectedAccessShapeMatch::Matched
         }
+        (
+            ir::EdgeAccessPlan::BranchResidualUnion(_),
+            physical::PhysicalAccess::BranchResidualUnion,
+        ) => SelectedAccessShapeMatch::Matched,
         (ir::EdgeAccessPlan::ScanThenFilter { .. }, _) => SelectedAccessShapeMatch::NotMatched(
             SelectedAccessShapeMismatch::ResidualFilterRequiresPipeline,
         ),
@@ -80,7 +84,8 @@ pub(super) fn selected_edge_access_match(
             | ir::EdgeAccessPlan::VectorSearch { .. }
             | ir::EdgeAccessPlan::TextSearch { .. }
             | ir::EdgeAccessPlan::Intersect(_)
-            | ir::EdgeAccessPlan::Union(_),
+            | ir::EdgeAccessPlan::Union(_)
+            | ir::EdgeAccessPlan::BranchResidualUnion(_),
             _,
         ) => SelectedAccessShapeMatch::NotMatched(
             SelectedAccessShapeMismatch::PhysicalAccessFamilyMismatch,

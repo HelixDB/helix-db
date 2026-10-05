@@ -18,7 +18,8 @@ pub(super) fn access_key_locality_from_node_access(
         | ir::NodeAccessPlan::PointIds { .. }
         | ir::NodeAccessPlan::Intersect(_)
         | ir::NodeAccessPlan::Union(_)
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => properties::KeyLocality::Unknown,
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => properties::KeyLocality::Unknown,
     }
 }
 
@@ -38,6 +39,7 @@ pub(super) fn access_key_locality_from_edge_access(
         | ir::EdgeAccessPlan::PointIds { .. }
         | ir::EdgeAccessPlan::Intersect(_)
         | ir::EdgeAccessPlan::Union(_)
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => properties::KeyLocality::Unknown,
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => properties::KeyLocality::Unknown,
     }
 }
