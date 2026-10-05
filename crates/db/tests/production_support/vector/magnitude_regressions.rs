@@ -9,7 +9,6 @@ use bytes::Bytes;
 use slatedb::object_store::memory::InMemory;
 use slatedb::{Db, DbReadOps, IsolationLevel};
 
-use super::cache::store::VectorMemoryDirtyRows;
 use super::distance::{Cosine, Distance, Euclidean, Manhattan};
 use super::hnsw::mutation::VectorInsertContract;
 use super::magnitude_oracle;
@@ -422,8 +421,7 @@ async fn exercise_mutation_rejection<D: Distance>(
     let outside = magnitude_oracle::next_up(limit);
     insert_committed(&db, &base_index, 99, &[limit, -limit]).await;
     let before = namespace_rows(&db, base_index.row_keyspace()).await;
-    let dirty = Arc::new(VectorMemoryDirtyRows::default());
-    let index = VectorIndex::<D>::new(base_index.name()).with_write_dirty_rows(Arc::clone(&dirty));
+    let index = VectorIndex::<D>::new(base_index.name());
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let result = index.insert(&transaction, 1, &[outside, 0.0]).await;
     let staged = namespace_rows(&transaction, index.row_keyspace()).await;
@@ -443,11 +441,6 @@ async fn exercise_mutation_rejection<D: Distance>(
             "{name} fresh insert staged vector rows before magnitude rejection"
         ));
     }
-    if dirty.is_node_dirty(1) {
-        failures.push(format!(
-            "{name} fresh insert dirtied transaction-local cache state"
-        ));
-    }
     if durable_after != before {
         failures.push(format!(
             "{name} fresh insert changed durable rows after rollback"
@@ -456,8 +449,7 @@ async fn exercise_mutation_rejection<D: Distance>(
 
     insert_committed(&db, &base_index, 2, &[0.25, -0.25]).await;
     let before = namespace_rows(&db, base_index.row_keyspace()).await;
-    let dirty = Arc::new(VectorMemoryDirtyRows::default());
-    let index = VectorIndex::<D>::new(base_index.name()).with_write_dirty_rows(Arc::clone(&dirty));
+    let index = VectorIndex::<D>::new(base_index.name());
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let measured = MeasuredVectorTransaction::new(&transaction);
     let result = index
@@ -485,9 +477,6 @@ async fn exercise_mutation_rejection<D: Distance>(
             "{name} upsert staged writes before magnitude rejection"
         ));
     }
-    if dirty.is_node_dirty(2) {
-        failures.push(format!("{name} upsert dirtied cache state"));
-    }
     if durable_after != before {
         failures.push(format!("{name} upsert changed durable rows after rollback"));
     }
@@ -496,7 +485,7 @@ async fn exercise_mutation_rejection<D: Distance>(
     failures
 }
 
-/// Requires insert and upsert to reject before any row or cache mutation.
+/// Requires insert and upsert to reject before any row mutation.
 pub(crate) async fn run_mutation_contracts() {
     let mut failures = exercise_mutation_rejection::<Euclidean>(
         "production-vector-magnitude-euclidean-mutation",

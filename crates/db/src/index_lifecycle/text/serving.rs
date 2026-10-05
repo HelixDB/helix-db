@@ -140,6 +140,26 @@ impl ActiveTextEntityState {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static MANIFEST_ROOT_LOADS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
+}
+
+/// Runs `future`, counting the manifest roots it loads.
+///
+/// Every physical text search loads its partition root first, so a count of
+/// zero shows that `future` ran none.
+#[cfg(test)]
+pub(crate) async fn observe_manifest_root_loads<F: std::future::Future>(
+    future: F,
+) -> (F::Output, usize) {
+    let loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let output = MANIFEST_ROOT_LOADS
+        .scope(std::sync::Arc::clone(&loads), future)
+        .await;
+    (output, loads.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Loads the exact partition root authorized by an Active text handle.
 ///
 /// A missing tenant partition is an empty result. An unpartitioned Active
@@ -150,6 +170,10 @@ pub(crate) async fn load_active_manifest_root(
     authority: &ActiveTextServingAuthority,
     partition: &work::TextPartition,
 ) -> Result<Option<ValidatedActiveTextManifestRoot>> {
+    #[cfg(test)]
+    let _ = MANIFEST_ROOT_LOADS.try_with(|loads| {
+        loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
     let definition = authority.definition();
     let partition_mode_matches = matches!(
         (definition.tenant_property(), partition),

@@ -5,6 +5,7 @@ pub(crate) mod db;
 mod definition_differences;
 mod host_memory;
 mod index_lifecycle_throughput;
+mod index_operation_queue;
 pub(crate) mod indexes;
 mod migrations;
 pub(crate) mod runtime_catalog;
@@ -25,6 +26,9 @@ pub use definition_differences::{DefinitionDifference, NonEmptyDefinitionDiffere
 pub use index_lifecycle_throughput::{
     IndexLifecycleConcurrency, IndexLifecycleScanTuning, IndexLifecycleThroughputTuning,
     IndexLifecycleThroughputTuningError,
+};
+pub use index_operation_queue::{
+    IndexOperationQueueTuning, IndexOperationQueueTuningError, QueueLayout,
 };
 pub(crate) use indexes::RuntimeIndexCatalog;
 pub use indexes::{

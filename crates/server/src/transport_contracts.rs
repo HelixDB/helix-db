@@ -412,7 +412,7 @@ async fn active_text_limits_preserve_the_shared_code_message_and_input_classific
             })
         };
         let code = helix_ast::error_code::QueryErrorCode::ActiveTextMutationLimitExceeded.as_str();
-        let message = format!("db error: Active text mutation exceeds {resource}: observed 513, limit 512. This is a hard mutation-batch limit; reduce the number or size of mutations.");
+        let message = format!("db error: Active text mutation exceeds {resource}: observed 513, limit 512. This is a hard per-document limit; shorten the indexed text.");
         let response = http::service_error_response(error());
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(!response.headers().contains_key("retry-after"));
@@ -658,6 +658,73 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
             retryable: None,
             grpc_code: tonic::Code::Aborted,
             code: "transaction_conflict",
+        },
+        Case {
+            class: QueryFailureClass::Backpressure,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    resource: db::error::IndexBackpressureResource::PendingMembers,
+                    requested: 250_001,
+                    limit: 250_000,
+                })
+            },
+            http_status: StatusCode::TOO_MANY_REQUESTS,
+            retryable: Some(true),
+            grpc_code: tonic::Code::ResourceExhausted,
+            code: "index_backpressure",
+        },
+        // A strong search, in a read request too, is rejected the same way.
+        Case {
+            class: QueryFailureClass::Backpressure,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    resource: db::error::IndexBackpressureResource::SuppressedSearchResults,
+                    requested: 810,
+                    limit: 800,
+                })
+            },
+            http_status: StatusCode::TOO_MANY_REQUESTS,
+            retryable: Some(true),
+            grpc_code: tonic::Code::ResourceExhausted,
+            code: "index_backpressure",
+        },
+        Case {
+            class: QueryFailureClass::InvalidRequest,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexOperationBatchTooLarge {
+                    index_id: 4,
+                    resource: db::error::IndexOperationBatchResource::OperandBytes,
+                    observed: 9 * 1024 * 1024,
+                    limit: 8 * 1024 * 1024,
+                })
+            },
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "index_operation_batch_too_large",
+        },
+        // Waiting cannot clear a blocked build's saturation, so it is not
+        // retryable backpressure.
+        Case {
+            class: QueryFailureClass::Execution,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBuildBlocked {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    operation_id: "0b6f4c1e-5d0a-4a43-9e57-3f2d1c0b9a87".to_string(),
+                    resource: db::error::IndexBackpressureResource::PendingMembers,
+                    requested: 250_001,
+                    limit: 250_000,
+                })
+            },
+            http_status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: None,
+            grpc_code: tonic::Code::Internal,
+            code: "index_build_blocked",
         },
         Case {
             class: QueryFailureClass::InvalidRequest,
@@ -952,6 +1019,7 @@ async fn transport_readiness_reports_direct_text_storage_as_ready() {
     assert_eq!(liveness_json["ready"], true);
     assert_eq!(liveness_json["index_runtime"], "ready");
     assert_eq!(liveness_json.get("text_index_runtime"), None);
+    assert_eq!(liveness_json["blocked_index_entity_count"], 0);
 
     let readiness = router
         .clone()
@@ -1002,6 +1070,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
         let health = client.health(HealthRequest {}).await.unwrap().into_inner();
         assert!(health.ready);
         assert_eq!(health.index_runtime, "ready");
+        assert_eq!(health.blocked_index_entity_count, 0);
     }
 
     let mut expired = tonic::Request::new(QueryJsonRequest {
@@ -1110,4 +1179,206 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
 
     read_transport.close().await.unwrap();
     writer.close().await.unwrap();
+}
+
+/// `count` space-separated distinct terms tagged `tag`.
+fn distinct_terms(tag: &str, count: usize) -> String {
+    (0..count)
+        .map(|index| format!("{tag}x{index}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Returns the operation ID named anywhere in a DDL receipt.
+fn operation_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => object
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| object.values().find_map(operation_id)),
+        serde_json::Value::Array(values) => values.iter().find_map(operation_id),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => None,
+    }
+}
+
+/// Writes `request`, retrying transaction conflicts with the index worker.
+async fn write_retrying(db: &HelixDB, request: impl Fn() -> QueryRequest) -> serde_json::Value {
+    for _ in 0..100 {
+        match db.query(request()).await {
+            Ok(result) => return result,
+            Err(error) if error.is_transaction_conflict() => {}
+            Err(error) => panic!("write failed: {error}"),
+        }
+    }
+    panic!("write kept conflicting")
+}
+
+/// Waits up to a minute for `ready`.
+async fn wait_until(why: &str, mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(why);
+}
+
+/// Health responses over both transports count the entities the index worker
+/// holds back, here a document indexed under doubled limits that no
+/// publication under today's limits can replace with the one queued for it,
+/// without naming any: the health routes are unauthenticated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_counts_the_index_entities_the_worker_holds_back() {
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    let defaults = db::config::SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    let doubled = db::config::SearchIndexBackfillLimits::try_new(
+        db::config::SearchIndexBatchLimits::try_new(
+            batch.max_entities(),
+            batch.max_input_bytes(),
+            NonZeroU64::new(2 * batch.max_output_operations().get()).unwrap(),
+            NonZeroU64::new(2 * batch.max_output_bytes().get()).unwrap(),
+            batch.max_single_vector_output_bytes(),
+        )
+        .unwrap(),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        defaults.text_compaction(),
+    )
+    .unwrap();
+    let db = HelixDB::open_with_object_store_and_config(
+        "health-blocked",
+        Arc::clone(&store),
+        db::DbConfig::new().with_search_index_backfill_limits(doubled),
+    )
+    .await
+    .unwrap();
+    // The document is published from the queue, not scanned by the build.
+    let receipt = write_retrying(&db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "index",
+                    traversal::g().create_index_if_not_exists(IndexSpec::node_text(
+                        "Doc",
+                        "body",
+                        None::<&str>,
+                    )),
+                )
+                .returning(["index"]),
+        )
+    })
+    .await;
+    let operation = operation_id(&receipt).expect("the index build was accepted");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = db
+                .query(QueryRequest::read(
+                    batch::read_batch()
+                        .var_as("status", traversal::g().get_index_operation(&operation))
+                        .returning(["status"]),
+                ))
+                .await
+                .unwrap();
+            match status["status"]["status"].as_str() {
+                Some("succeeded") => break,
+                Some("queued" | "running") => tokio::time::sleep(Duration::from_millis(10)).await,
+                other => panic!("the build did not succeed: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the index activates");
+    let created = write_retrying(&db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![(
+                            "body",
+                            helix_ast::value::PropertyInput::from(distinct_terms("old", 24_000)),
+                        )],
+                    ),
+                )
+                .returning(["created"]),
+        )
+    })
+    .await;
+    let id = created["created"][0]["$id"].as_u64().unwrap();
+    wait_until("the document publishes under doubled limits", || {
+        db.index_operation_queue_stats().pending_operations == 0
+    })
+    .await;
+    db.close().await.unwrap();
+
+    let db = Arc::new(
+        HelixDB::open_with_object_store_and_config("health-blocked", store, db::DbConfig::new())
+            .await
+            .unwrap(),
+    );
+    write_retrying(&db, || {
+        QueryRequest::write(
+            batch::write_batch().var_as(
+                "updated",
+                traversal::g()
+                    .n(helix_ast::graph::NodeRef::from(id))
+                    .set_property("body", distinct_terms("new", 10_000)),
+            ),
+        )
+    })
+    .await;
+    wait_until("the worker holds the replacement back", || {
+        !db.blocked_index_entities().is_empty()
+    })
+    .await;
+    let blocked = db.blocked_index_entities();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(
+        (blocked[0].kind, blocked[0].id.get()),
+        (db::index_lifecycle::IndexElementKind::Node, id)
+    );
+    assert_eq!(db.blocked_index_entity_count(), 1);
+
+    let response = http::router(ServerState::new(Arc::clone(&db), None))
+        .oneshot(HttpRequest::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let health: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4_096).await.unwrap()).unwrap();
+    assert_eq!(health["blocked_index_entity_count"], 1);
+    assert_eq!(
+        health
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "blocked_index_entity_count",
+            "index_runtime",
+            "mode",
+            "ready"
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>(),
+        "health names no tenant or entity"
+    );
+
+    let mut grpc = GrpcAdapter::start(Arc::clone(&db)).await;
+    let health = grpc
+        .client
+        .health(HealthRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(health.blocked_index_entity_count, 1);
+    grpc.close().await.unwrap();
 }

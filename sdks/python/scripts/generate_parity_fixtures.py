@@ -947,9 +947,9 @@ def main() -> None:
         remaining_read_contract(),
         remaining_write_contract(),
     ]
-    if len(runtime_fixtures) != 233:
+    if len(runtime_fixtures) != 234:
         raise RuntimeError(
-            f"generated {len(runtime_fixtures)} runtime fixtures, expected 233"
+            f"generated {len(runtime_fixtures)} runtime fixtures, expected 234"
         )
     if len(json_only_fixtures) != 15:
         raise RuntimeError(

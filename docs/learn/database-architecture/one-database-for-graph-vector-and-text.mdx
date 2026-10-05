@@ -158,8 +158,12 @@ ACID transaction per request:
   membership, ranking, then top k, so a result outside the candidate set is never
   returned.
 - **Freshness.** On Helix Cloud, readers see new commits after a snapshot refresh;
-  writer-only reads give read-after-write. A newly created index backfills existing
-  data asynchronously and becomes visible only after validation and atomic activation.
+  writer-only reads give read-after-write. An index worker publishes vector and text
+  index updates shortly after each write commits, and searches include committed but
+  unpublished writes unless a read opts into
+  [eventual search consistency](/database/helix-db/query-guides/search-consistency).
+  A newly created index backfills existing data asynchronously and becomes visible
+  only after validation and atomic activation.
 - **Application-side pieces.** The application computes embeddings and fuses vector
   and BM25 results. HelixDB has no built-in rank fusion or reranking.
 

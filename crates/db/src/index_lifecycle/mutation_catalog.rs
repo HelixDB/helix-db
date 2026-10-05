@@ -238,27 +238,6 @@ impl MutationRouteCatalog {
         }
     }
 
-    /// Selects label-scoped targets for a coalesced original/final row pair.
-    pub(crate) fn targets_for_states(
-        &self,
-        element_kind: super::IndexElementKind,
-        before: &[crate::encoding::v2::values::property::Property],
-        after: &[crate::encoding::v2::values::property::Property],
-    ) -> RoutedMutationTargets<'_> {
-        let before_label = graph_label(before);
-        let after_label = graph_label(after);
-        if before_label == after_label {
-            return self.targets_for_label(element_kind, after_label);
-        }
-        let before = self.label_targets(element_kind, before_label);
-        let after = self.label_targets(element_kind, after_label);
-        match (before, after) {
-            (None, None) => RoutedMutationTargets::None,
-            (Some(targets), None) | (None, Some(targets)) => RoutedMutationTargets::One(targets),
-            (Some(first), Some(second)) => RoutedMutationTargets::Two(first, second),
-        }
-    }
-
     fn targets_for_label(
         &self,
         element_kind: super::IndexElementKind,

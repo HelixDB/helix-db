@@ -253,22 +253,76 @@ impl<'db> ExecutionContext<'db> {
         k: usize,
         scope: search::text::TextSearchScope,
     ) -> Result<Vec<search::text::TextSearchHit>> {
+        self.search_text_manifest_with_statistics(
+            manifest,
+            query,
+            k,
+            scope,
+            None,
+            search::text::SplitDemand::Record,
+        )
+        .await
+    }
+
+    /// Searches persisted splits, optionally scoring with overlay-adjusted
+    /// statistics instead of the persisted corpus statistics. `demand` says
+    /// whether the search counts as a use of its splits.
+    pub(in crate::execution::interpreter::access::search) async fn search_text_manifest_with_statistics(
+        &self,
+        manifest: &ResolvedTextManifestRoot<'_>,
+        query: &str,
+        k: usize,
+        scope: search::text::TextSearchScope,
+        statistics: Option<&crate::index_lifecycle::text::statistics::TextBm25Statistics>,
+        demand: search::text::SplitDemand,
+    ) -> Result<Vec<search::text::TextSearchHit>> {
         if let Some(active) = self.active_write_tx() {
-            return search_text_manifest_in_view(self, &active.txn, manifest, query, k, scope)
-                .await;
+            return search_text_manifest_in_view(
+                self,
+                &active.txn,
+                manifest,
+                query,
+                k,
+                scope,
+                statistics,
+                demand,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
-            return search_text_manifest_in_view(self, view, manifest, query, k, scope).await;
+            return search_text_manifest_in_view(
+                self, view, manifest, query, k, scope, statistics, demand,
+            )
+            .await;
         }
         #[cfg(test)]
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    search_text_manifest_in_view(self, reader.as_ref(), manifest, query, k, scope)
-                        .await
+                    search_text_manifest_in_view(
+                        self,
+                        reader.as_ref(),
+                        manifest,
+                        query,
+                        k,
+                        scope,
+                        statistics,
+                        demand,
+                    )
+                    .await
                 }
                 HelixStorage::Writer(writer) => {
-                    search_text_manifest_in_view(self, writer.db(), manifest, query, k, scope).await
+                    search_text_manifest_in_view(
+                        self,
+                        writer.db(),
+                        manifest,
+                        query,
+                        k,
+                        scope,
+                        statistics,
+                        demand,
+                    )
+                    .await
                 }
             }
         }
@@ -294,6 +348,10 @@ async fn load_text_root_in_view<'generation>(
 }
 
 /// Searches a checked root through bounded page/blob/state batches.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one manifest search binds its view, root, query, statistics, and split demand"
+)]
 async fn search_text_manifest_in_view(
     context: &ExecutionContext<'_>,
     reader: &(impl DbReadOps + Send + Sync),
@@ -301,30 +359,35 @@ async fn search_text_manifest_in_view(
     query: &str,
     k: usize,
     scope: search::text::TextSearchScope,
+    overlaid: Option<&crate::index_lifecycle::text::statistics::TextBm25Statistics>,
+    demand: search::text::SplitDemand,
 ) -> Result<Vec<search::text::TextSearchHit>> {
     let generation = manifest.generation;
     let root = &manifest.root;
     let definition = generation.physical().definition();
-    let statistics = match crate::index_lifecycle::text::statistics::load_query_statistics(
-        reader,
-        generation.physical().scope(),
-        root.index_id(),
-        root.generation(),
-        root.partition(),
-        definition.analyzer(),
-        query,
-    )
-    .await?
-    {
-        crate::index_lifecycle::text::statistics::LoadedTextQueryStatistics::EmptyQuery => {
-            return Ok(Vec::new());
-        }
-        crate::index_lifecycle::text::statistics::LoadedTextQueryStatistics::EmptyCorpus => {
-            return Ok(Vec::new());
-        }
-        crate::index_lifecycle::text::statistics::LoadedTextQueryStatistics::Ready(statistics) => {
-            statistics
-        }
+    let statistics = match overlaid {
+        Some(statistics) => statistics.clone(),
+        None => match crate::index_lifecycle::text::statistics::load_query_statistics(
+            reader,
+            generation.physical().scope(),
+            root.index_id(),
+            root.generation(),
+            root.partition(),
+            definition.analyzer(),
+            query,
+        )
+        .await?
+        {
+            crate::index_lifecycle::text::statistics::LoadedTextQueryStatistics::EmptyQuery => {
+                return Ok(Vec::new());
+            }
+            crate::index_lifecycle::text::statistics::LoadedTextQueryStatistics::EmptyCorpus => {
+                return Ok(Vec::new());
+            }
+            crate::index_lifecycle::text::statistics::LoadedTextQueryStatistics::Ready(
+                statistics,
+            ) => statistics,
+        },
     };
     const PAGE_READ_CONCURRENCY: usize = 4;
     let loaded_pages = futures::stream::iter(0..root.page_count())
@@ -403,7 +466,7 @@ async fn search_text_manifest_in_view(
         root,
         &generation_manifest,
         &statistics,
-        search::text::TextSearchRequest::new(query, k, scope),
+        search::text::TextSearchRequest::new(query, k, scope).with_split_demand(demand),
     )
     .await
 }

@@ -217,6 +217,13 @@ To rank only the nodes or edges a traversal reaches, such as documents a user ma
 access, search within the traversal instead of the whole index. See
 [Prefiltered search](/database/helix-db/query-guides/prefiltering#vector-prefiltering).
 
+## Search consistency
+
+By default, searches include committed writes that the index worker has not published
+into the index yet. A read request can opt into `eventual` search, which bounds that
+work per search. See [Search consistency](/database/helix-db/query-guides/search-consistency)
+for both modes, searches in write batches, and `index_backpressure`.
+
 ## Result limits
 
 The server caps the effective result count of a whole-index search at 800. A narrower
@@ -226,6 +233,9 @@ bound from the surrounding plan can lower it. Prefiltered searches have their ow
 ## Operational notes
 
 - Creation returns before the backfill necessarily finishes.
+- Writes made while an index builds are queued and published after it activates;
+  strong searches include them as soon as the index is active. Until then they count
+  toward [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - Malformed source vectors can block the operation.
 - A new generation remains hidden until validation and activation succeed.
 - Dropping an index is also a durable lifecycle operation.

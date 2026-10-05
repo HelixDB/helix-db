@@ -146,12 +146,12 @@ pub(in crate::search::vector) struct SimHashReadStats {
 
 /// Complete resident-memory capability attached to one vector-index handle.
 ///
-/// Each variant encodes one valid ownership mode. A handle cannot independently
-/// combine a resident snapshot, dirty tracking, and pending commit fences. This
-/// keeps managed snapshot lookup and transaction-local write tracking mutually
-/// explicit without changing any persisted row or in-memory payload format.
+/// Each variant encodes one valid ownership mode: a handle either reads
+/// nothing shared, or combines a resident snapshot with its pending commit
+/// fences. Writers are always uncached; a transaction's dirty rows are
+/// recorded from its planned writes ([`super::commit::VectorCacheWriteSet`]).
 pub(crate) enum VectorMemoryAccess {
-    /// No shared resident store or transaction-local dirty tracker is attached.
+    /// No shared resident store is attached.
     Uncached,
     /// A managed reader combines immutable lookup with commit-window fences.
     ReadSnapshot {
@@ -159,11 +159,6 @@ pub(crate) enum VectorMemoryAccess {
         store: Arc<VectorMemoryStore>,
         /// Rows currently committing in another retained write set.
         pending: Arc<VectorMemoryPendingDirtyRows>,
-    },
-    /// A managed write tracks dirty rows without consulting a resident store.
-    WriteTracking {
-        /// Transaction-local rows fenced at commit and discarded on abort.
-        dirty: Arc<VectorMemoryDirtyRows>,
     },
 }
 
@@ -181,16 +176,11 @@ impl VectorMemoryAccess {
         Self::ReadSnapshot { store, pending }
     }
 
-    /// Constructs a write handle that tracks dirty rows without a resident store.
-    pub(crate) fn write_tracking(dirty: Arc<VectorMemoryDirtyRows>) -> Self {
-        Self::WriteTracking { dirty }
-    }
-
     /// Returns the resident store available to this handle, when one exists.
     pub(crate) const fn store(&self) -> Option<&Arc<VectorMemoryStore>> {
         match self {
             Self::ReadSnapshot { store, .. } => Some(store),
-            Self::Uncached | Self::WriteTracking { .. } => None,
+            Self::Uncached => None,
         }
     }
 
@@ -198,7 +188,6 @@ impl VectorMemoryAccess {
     pub(crate) fn is_node_dirty(&self, node_id: NodeId) -> bool {
         match self {
             Self::ReadSnapshot { pending, .. } => pending.is_node_dirty(node_id),
-            Self::WriteTracking { dirty } => dirty.is_node_dirty(node_id),
             Self::Uncached => false,
         }
     }
@@ -207,24 +196,7 @@ impl VectorMemoryAccess {
     pub(crate) fn is_upper_neighbors_dirty(&self, layer: u16, node_id: NodeId) -> bool {
         match self {
             Self::ReadSnapshot { pending, .. } => pending.is_upper_neighbors_dirty(layer, node_id),
-            Self::WriteTracking { dirty } => dirty.is_upper_neighbors_dirty(layer, node_id),
             Self::Uncached => false,
-        }
-    }
-
-    /// Marks a node unsafe for shared lookup in the current write transaction.
-    pub(crate) fn mark_node_dirty(&self, node_id: NodeId) {
-        match self {
-            Self::WriteTracking { dirty } => dirty.mark_node_dirty(node_id),
-            Self::Uncached | Self::ReadSnapshot { .. } => {}
-        }
-    }
-
-    /// Marks one upper-neighbor row unsafe for shared lookup in the current write.
-    pub(crate) fn mark_upper_neighbors_dirty(&self, layer: u16, node_id: NodeId) {
-        match self {
-            Self::WriteTracking { dirty } => dirty.mark_upper_neighbors_dirty(layer, node_id),
-            Self::Uncached | Self::ReadSnapshot { .. } => {}
         }
     }
 
@@ -444,15 +416,6 @@ impl VectorMemoryDirtyRows {
 
     pub(crate) fn mark_upper_neighbors_dirty(&self, layer: u16, node_id: NodeId) {
         self.dirty_upper_neighbors.insert((layer, node_id));
-    }
-
-    pub(crate) fn is_node_dirty(&self, node_id: NodeId) -> bool {
-        self.dirty_nodes.contains(&node_id)
-    }
-
-    pub(crate) fn is_upper_neighbors_dirty(&self, layer: u16, node_id: NodeId) -> bool {
-        self.dirty_nodes.contains(&node_id)
-            || self.dirty_upper_neighbors.contains(&(layer, node_id))
     }
 
     pub(crate) fn dirty_nodes(&self) -> Vec<NodeId> {
@@ -986,42 +949,20 @@ mod tests {
         assert!(!access.is_upper_neighbors_dirty(2, 7));
     }
 
-    /// Proves managed reads and writes carry only their respective fence state.
+    /// Proves managed reads carry their pending commit fences.
     #[test]
-    fn memory_access_tracks_write_local_and_read_pending_dirty_rows() {
+    fn memory_access_reads_pending_dirty_rows() {
         let store = Arc::new(VectorMemoryStore::new(DataScope::LegacyUnscoped, 42, 10));
-        let dirty = Arc::new(VectorMemoryDirtyRows::default());
         let pending = Arc::new(VectorMemoryPendingDirtyRows::new());
         let pending_source = VectorMemoryDirtyRows::default();
         pending_source.mark_upper_neighbors_dirty(3, 11);
         let _pending_guard = pending.acquire(&pending_source);
-
-        let local_access = VectorMemoryAccess::write_tracking(Arc::clone(&dirty));
-        local_access.mark_node_dirty(7);
-        local_access.mark_upper_neighbors_dirty(2, 9);
-        assert!(local_access.store().is_none());
-        assert!(local_access.is_node_dirty(7));
-        assert!(local_access.is_upper_neighbors_dirty(2, 9));
 
         let pending_access = VectorMemoryAccess::read_snapshot(Arc::clone(&store), pending);
         assert!(pending_access
             .store()
             .is_some_and(|attached| Arc::ptr_eq(attached, &store)));
         assert!(pending_access.is_upper_neighbors_dirty(3, 11));
-    }
-
-    /// Proves writes can fence rows even before a resident store is published.
-    #[test]
-    fn memory_access_write_tracking_has_dirty_state_without_store() {
-        let dirty = Arc::new(VectorMemoryDirtyRows::default());
-        let access = VectorMemoryAccess::write_tracking(Arc::clone(&dirty));
-
-        access.mark_node_dirty(7);
-        access.mark_upper_neighbors_dirty(2, 9);
-
-        assert!(access.store().is_none());
-        assert!(access.is_node_dirty(7));
-        assert!(access.is_upper_neighbors_dirty(2, 9));
     }
 
     /// Opens an isolated in-memory SlateDB for hydration tests.
@@ -1325,17 +1266,12 @@ mod tests {
         let rows = VectorMemoryDirtyRows::default();
 
         assert!(rows.is_empty());
-        assert!(!rows.is_node_dirty(7));
-        assert!(!rows.is_upper_neighbors_dirty(2, 7));
 
         rows.mark_upper_neighbors_dirty(2, 7);
         assert!(!rows.is_empty());
-        assert!(rows.is_upper_neighbors_dirty(2, 7));
-        assert!(!rows.is_upper_neighbors_dirty(3, 7));
+        assert!(rows.dirty_nodes().is_empty());
 
         rows.mark_node_dirty(9);
-        assert!(rows.is_node_dirty(9));
-        assert!(rows.is_upper_neighbors_dirty(1, 9));
         assert_eq!(rows.dirty_nodes(), vec![9]);
         assert_eq!(rows.dirty_upper_neighbors(), vec![(2, 7)]);
     }

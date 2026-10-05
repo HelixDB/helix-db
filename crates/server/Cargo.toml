@@ -3,6 +3,10 @@ name = "server"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Benchmark images only: explicit writer/reader role and periodic JSON samples.
+async-index-benchmark = ["db/async-index-benchmark"]
+
 [dependencies]
 db = { path = "../db" }
 helix-ast = { path = "../ast" }

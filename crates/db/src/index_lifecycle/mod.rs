@@ -43,6 +43,7 @@ pub(crate) mod mutation_catalog;
 mod operation;
 pub(crate) mod outbox;
 mod public;
+pub(crate) mod queue;
 pub(crate) mod repository;
 mod scope_gate;
 pub(crate) mod secondary;

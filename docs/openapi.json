@@ -404,7 +404,7 @@
         }
       },
       "RateLimited": {
-        "description": "The Helix Cloud gateway rate limit was exceeded.",
+        "description": "The Helix Cloud gateway rate limit was exceeded, or the database rejected a request with `index_backpressure`: a write because a vector or text index already retains its maximum unpublished work, or a whole-index strong search whose answer lies behind more than 800 unpublished changes (eventual and prefiltered searches are never rejected this way), or a strong text search that would analyze more unpublished text than one text publication may (64 MiB of analysis by default; eventual searches are never rejected this way). Backpressure rejects the whole request (writes before commit) and is marked `retryable`.",
         "headers": {
           "Retry-After": {
             "description": "Delay before retrying, when supplied by the gateway.",
@@ -485,6 +485,15 @@
           },
           "parameter_types": {
             "$ref": "#/components/schemas/QueryParameterTypes"
+          },
+          "search_consistency": {
+            "type": "string",
+            "enum": [
+              "strong",
+              "eventual"
+            ],
+            "default": "strong",
+            "description": "Visibility of committed vector/text changes the index worker has not published yet. `strong` searches every committed change; `eventual` overlays a bounded budget of unpublished changes per search and may omit the rest until publication."
           }
         },
         "dependentRequired": {
@@ -519,6 +528,10 @@
           },
           "parameter_types": {
             "$ref": "#/components/schemas/QueryParameterTypes"
+          },
+          "search_consistency": {
+            "const": "strong",
+            "description": "Write batches always search strongly and see their own uncommitted changes."
           }
         },
         "dependentRequired": {
@@ -839,7 +852,8 @@
         "required": [
           "ready",
           "mode",
-          "index_runtime"
+          "index_runtime",
+          "blocked_index_entity_count"
         ],
         "properties": {
           "ready": {
@@ -852,13 +866,19 @@
           "index_runtime": {
             "type": "string",
             "description": "Stable index-runtime readiness code."
+          },
+          "blocked_index_entity_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Nodes and edges whose queued vector or text index work the index worker holds back because it can never fit a publication under the current limits, typically after the limits were lowered. Only the count: the writer logs an error naming each one when it is held back. Always 0 on a reader. Rebuilt after a restart as publication reaches them again."
           }
         },
         "additionalProperties": false,
         "example": {
           "ready": true,
           "mode": "writer",
-          "index_runtime": "ready"
+          "index_runtime": "ready",
+          "blocked_index_entity_count": 0
         }
       }
     }

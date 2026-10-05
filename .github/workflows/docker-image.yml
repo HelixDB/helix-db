@@ -86,6 +86,28 @@ jobs:
       - name: Shell syntax
         run: bash -n docker-image/build.sh docker-image/test.sh docker-image/tests/*.sh
 
+  benchmark-feature:
+    name: Async index benchmark feature
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The test profile also lints the cfg(test) unit tests of both crates.
+      - name: Clippy
+        run: >-
+          cargo clippy --locked -p db -p server --lib --bins --profile test
+          --features server/async-index-benchmark -- -D warnings
+      - name: Benchmark unit tests
+        run: >-
+          cargo test --locked -p db -p server --lib
+          --features server/async-index-benchmark benchmark::
+      - name: Benchmark doctests
+        run: cargo test --locked -p server --doc --features async-index-benchmark benchmark
+
   image:
     name: Image (${{ matrix.architecture }})
     strategy:

@@ -2,13 +2,12 @@
 //!
 //! The context holds the shared scope permit for the full graph transaction,
 //! canonical secondary/vector/text generation work selected in that snapshot,
-//! and vector cache writes. The permit prevents an exclusive
-//! activation/cleanup checkpoint from crossing the mutation commit boundary;
-//! vector cache writes remain publish-after-commit state.
+//! and the complete vector/text operations the transaction enqueues at
+//! commit. The permit prevents an exclusive activation/cleanup checkpoint from
+//! crossing the mutation commit boundary. Vector and text maintenance never
+//! touches physical index rows here; the publication worker applies it later.
 
-use std::sync::Arc;
-
-use crate::search::vector;
+use crate::index_lifecycle::queue::producer::{QueuedMutationCollector, StagedQueueWrites};
 
 /// Index state that is valid for exactly one graph mutation transaction.
 #[derive(Debug)]
@@ -21,10 +20,8 @@ pub(crate) struct MutationIndexContext {
     text: crate::index_lifecycle::text::mutation::TextMutationSet,
     routes: crate::index_lifecycle::mutation_catalog::MutationRouteCatalog,
     topology_runtime: super::topology::TopologyMutationRuntime,
-    active_text_runtime: crate::index_lifecycle::text::active_runtime::ActiveTextMutationRuntime,
-    active_vector_runtime: vector::ActiveVectorMutationRuntime,
-    vector_cache_writes: vector::VectorCacheWriteSet,
-    text_compaction_staged: bool,
+    /// Complete vector/text operations staged at commit.
+    queued: QueuedMutationCollector,
     /// Node index footprint of transitions not yet reported to the request's
     /// membership cache.
     node_index_writes: super::NodeIndexWrites,
@@ -37,18 +34,14 @@ pub(crate) struct PreparedMutationIndexContext {
     _secondary: crate::index_lifecycle::secondary::SecondaryMutationSet,
     _vector: crate::index_lifecycle::vector::VectorMutationSet,
     _text: crate::index_lifecycle::text::mutation::TextMutationSet,
-    vector_cache_writes: vector::VectorCacheWriteSet,
-    text_compaction_staged: bool,
 }
 
 impl MutationIndexContext {
-    /// Creates transaction-local generation and cache tracking.
+    /// Creates transaction-local generation and queue tracking.
     pub(crate) fn new(
         scope_permit: crate::index_lifecycle::IndexScopeMutationPermit,
         loaded: crate::index_lifecycle::mutation_catalog::MutationIndexCatalog,
-        simhasher_registry: Arc<vector::SimHasherRegistry>,
-        batch_reads: crate::batch_reads::BatchReads,
-        vector_retained_payload_limit: std::num::NonZeroU64,
+        scope: crate::encoding::v2::keys::scope::DataScope,
     ) -> Self {
         let (active, secondary, vector, text, routes) = loaded.into_components();
         Self {
@@ -61,23 +54,14 @@ impl MutationIndexContext {
             text,
             routes,
             topology_runtime: super::topology::TopologyMutationRuntime::default(),
-            active_text_runtime:
-                crate::index_lifecycle::text::active_runtime::ActiveTextMutationRuntime::new(),
-            active_vector_runtime: vector::ActiveVectorMutationRuntime::new(
-                vector_retained_payload_limit,
-            ),
-            vector_cache_writes: vector::VectorCacheWriteSet::new(simhasher_registry)
-                .with_batch_reads(batch_reads),
-            text_compaction_staged: false,
+            queued: QueuedMutationCollector::new(scope),
             node_index_writes: super::NodeIndexWrites::default(),
         }
     }
 
     /// Creates an uncoordinated empty V2 context for focused configured-index tests.
     #[cfg(test)]
-    pub(crate) fn for_configured_index_test(
-        simhasher_registry: Arc<vector::SimHasherRegistry>,
-    ) -> Self {
+    pub(crate) fn for_configured_index_test() -> Self {
         Self {
             _scope_permit: None,
             active: crate::index_lifecycle::mutation_catalog::ActiveMutationCatalog::default(),
@@ -88,22 +72,11 @@ impl MutationIndexContext {
             text: crate::index_lifecycle::text::mutation::TextMutationSet::empty(),
             routes: crate::index_lifecycle::mutation_catalog::MutationRouteCatalog::default(),
             topology_runtime: super::topology::TopologyMutationRuntime::default(),
-            active_text_runtime:
-                crate::index_lifecycle::text::active_runtime::ActiveTextMutationRuntime::new(),
-            active_vector_runtime: vector::ActiveVectorMutationRuntime::new(
-                std::num::NonZeroU64::new(8 * 1024 * 1024)
-                    .expect("the focused-test vector payload limit is non-zero"),
+            queued: QueuedMutationCollector::new(
+                crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             ),
-            vector_cache_writes: vector::VectorCacheWriteSet::new(simhasher_registry),
-            text_compaction_staged: false,
             node_index_writes: super::NodeIndexWrites::default(),
         }
-    }
-
-    /// Returns vector rows dirtied by the transaction, grouped by generation.
-    #[cfg(test)]
-    pub(crate) const fn vector_cache_writes(&self) -> &vector::VectorCacheWriteSet {
-        &self.vector_cache_writes
     }
 
     /// Returns exact Active capabilities loaded with the graph transaction.
@@ -120,40 +93,37 @@ impl MutationIndexContext {
         self.active.handle(identity)
     }
 
-    /// Counts graph entities retained by the current Active text epoch.
-    #[cfg(test)]
-    pub(crate) fn pending_active_text_entities(&self) -> usize {
-        self.active_text_runtime.pending_entity_count()
-    }
-
     /// Routes one complete graph transition through every configured family.
     ///
     /// Every node index and `$label` bitmap change passes through here, so
     /// the transition's node index footprint is recorded for the request's
-    /// membership cache before any family sees it.
-    pub(crate) async fn maintain_graph_indexes(
+    /// membership cache before any family sees it. Secondary maintenance is
+    /// collected for staging; vector/text work becomes complete queued
+    /// operations and reads no index state.
+    pub(crate) fn maintain_graph_indexes(
         &mut self,
-        transaction: &slatedb::DbTransaction,
         graph: crate::index_lifecycle::graph_mutation::GraphMutationTransition,
-        text_limits: crate::config::ActiveTextMutationLimits,
     ) -> Result<(), crate::HelixDbError> {
         self.node_index_writes.record(&graph);
         let routes = self.routes.targets_for(&graph);
         self.secondary_runtime
             .collect(graph.scope(), &self.secondary, &routes, &graph)?;
-        crate::index_lifecycle::vector::maintain_routed_entity_with_runtime(
-            transaction,
-            graph.scope(),
-            &self.vector,
-            &routes,
-            &mut self.active_vector_runtime,
-            &self.vector_cache_writes,
-            &graph,
-        )
-        .await?;
-        let text_relevant = self.text.routed_transition_relevant(&routes, &graph)?;
-        self.active_text_runtime
-            .collect_routed(graph, text_relevant, text_limits)
+        self.queued
+            .collect(&self.vector, &self.text, &routes, &graph)
+    }
+
+    /// Returns queued vector/text work staged by this transaction.
+    pub(crate) const fn queued_mutations(&self) -> &QueuedMutationCollector {
+        &self.queued
+    }
+
+    /// Builds this transaction's immutable queue operands and charges.
+    pub(crate) fn finalize_queued(
+        &self,
+        max_operand_bytes: u64,
+        text_limits: crate::config::ActiveTextMutationLimits,
+    ) -> Result<StagedQueueWrites, crate::HelixDbError> {
+        self.queued.finalize(max_operand_bytes, text_limits)
     }
 
     /// Takes the node index footprint recorded since the last call.
@@ -213,90 +183,6 @@ impl MutationIndexContext {
             .await
     }
 
-    /// Flushes Active vector rows before a non-mutation operation reads the transaction.
-    pub(crate) async fn flush_active_vectors(
-        &mut self,
-        transaction: &slatedb::DbTransaction,
-    ) -> Result<(), crate::HelixDbError> {
-        self.active_vector_runtime.flush(transaction).await
-    }
-
-    /// Drains one Active text epoch before a transaction-visible read.
-    pub(crate) async fn flush_active_text(
-        &mut self,
-        transaction: &slatedb::DbTransaction,
-        limits: crate::config::ActiveTextMutationLimits,
-        object_store: &Arc<dyn slatedb::object_store::ObjectStore>,
-        database: &str,
-    ) -> Result<(), crate::HelixDbError> {
-        let outcome = self
-            .active_text_runtime
-            .flush(
-                transaction,
-                &self.text,
-                &self.routes,
-                limits,
-                object_store,
-                database,
-            )
-            .await?;
-        self.text_compaction_staged |= outcome.compaction_staged();
-        Ok(())
-    }
-
-    /// Flushes the final Active text epoch and seals its runtime.
-    pub(crate) async fn prepare_active_text(
-        &mut self,
-        transaction: &slatedb::DbTransaction,
-        limits: crate::config::ActiveTextMutationLimits,
-        object_store: &Arc<dyn slatedb::object_store::ObjectStore>,
-        database: &str,
-    ) -> Result<(), crate::HelixDbError> {
-        let outcome = self
-            .active_text_runtime
-            .prepare(
-                transaction,
-                &self.text,
-                &self.routes,
-                limits,
-                object_store,
-                database,
-            )
-            .await?;
-        self.text_compaction_staged |= outcome.compaction_staged();
-        Ok(())
-    }
-
-    /// Seals Active vector state after its final deterministic flush.
-    pub(crate) async fn prepare_active_vectors(
-        &mut self,
-        transaction: &slatedb::DbTransaction,
-    ) -> Result<(), crate::HelixDbError> {
-        self.active_vector_runtime.prepare(transaction).await
-    }
-
-    /// Stages a descriptor-proven Active vector directly for interpreter barrier tests.
-    #[cfg(test)]
-    pub(crate) async fn stage_active_vector_for_test(
-        &mut self,
-        transaction: &slatedb::DbTransaction,
-        generation: &vector::ValidatedVectorGenerationHandle,
-        entity_id: u64,
-        value: &[f32],
-        create: bool,
-    ) -> Result<(), crate::HelixDbError> {
-        self.active_vector_runtime
-            .upsert(
-                transaction,
-                generation,
-                &self.vector_cache_writes,
-                entity_id,
-                value,
-                create,
-            )
-            .await
-    }
-
     /// Consumes the sealed runtime and transfers all state to the commit boundary.
     pub(crate) fn into_prepared(self) -> Result<PreparedMutationIndexContext, crate::HelixDbError> {
         let Self {
@@ -308,15 +194,10 @@ impl MutationIndexContext {
             text,
             routes: _,
             topology_runtime,
-            active_text_runtime,
-            active_vector_runtime,
-            vector_cache_writes,
-            text_compaction_staged,
+            queued: _,
             node_index_writes: _,
         } = self;
         topology_runtime.consume_prepared()?;
-        active_vector_runtime.consume_prepared()?;
-        active_text_runtime.consume_prepared()?;
         secondary_runtime.consume_prepared()?;
         Ok(PreparedMutationIndexContext {
             _scope_permit,
@@ -324,8 +205,6 @@ impl MutationIndexContext {
             _secondary: secondary,
             _vector: vector,
             _text: text,
-            vector_cache_writes,
-            text_compaction_staged,
         })
     }
 
@@ -347,16 +226,6 @@ impl MutationIndexContext {
 }
 
 impl PreparedMutationIndexContext {
-    /// Returns the exact vector cache effects guarded by this commit state.
-    pub(crate) const fn vector_cache_writes(&self) -> &vector::VectorCacheWriteSet {
-        &self.vector_cache_writes
-    }
-
-    /// Returns whether a successful commit should wake Active text compaction.
-    pub(crate) const fn text_compaction_staged(&self) -> bool {
-        self.text_compaction_staged
-    }
-
     /// Reclassifies a failed storage commit against the retained generation set.
     pub(crate) async fn classify_commit_error(
         &self,
@@ -399,8 +268,7 @@ mod tests {
     #[tokio::test]
     async fn backend_commit_errors_are_preserved_when_generations_are_current() {
         let db = test_support::open_db("mutation-index-context-non-transaction-error").await;
-        let mut context =
-            MutationIndexContext::for_configured_index_test(Arc::clone(db.simhasher_registry()));
+        let mut context = MutationIndexContext::for_configured_index_test();
 
         let inner = db.inner_db();
         let error = context

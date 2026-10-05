@@ -1,0 +1,238 @@
+---
+title: "Search consistency"
+description: "Choose whether vector and text searches include unpublished index work, and handle index backpressure"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+A write to an indexed vector or text property commits its index work as a durable
+queued operation, and the index worker publishes it into the index shortly afterwards.
+Search consistency sets how a read request's vector and text searches treat work that
+is committed but not yet published. It applies to whole-index and
+[prefiltered](/database/helix-db/query-guides/prefiltering) searches.
+
+| `search_consistency` | Behavior |
+| --- | --- |
+| `strong` (default) | Every write committed in the request's snapshot is searchable, including unpublished work. |
+| `eventual` | Each search includes up to 128 MiB of unpublished work, oldest first, and a text search analyzes at most as much of it as one text publication may (64 MiB of analysis by default). The rest is served as last published until the index worker publishes it. |
+
+Because the rest is served as last published, an `eventual` search, whole-index or
+prefiltered, can return a node or edge that has since moved to another tenant, changed
+label, or lost the indexed property, until the index worker publishes that change. A
+`strong` search never returns one. Search `strong` when every result must match the
+search's current tenant, label, and property.
+
+## Request eventual search
+
+<Note>
+The SDK options on this page ship in the SDK releases after Rust `helix-db` 3.0.0,
+TypeScript `@helix-db/helix-db` 3.2.0, Go v0.3.1, and Python `helix-db` 0.3.4. Those
+versions cannot set search consistency; send `search_consistency` in a direct HTTP
+request instead.
+</Note>
+
+This read returns the ten `Doc` nodes closest to the query vector and bounds the
+unpublished work each search includes:
+
+<CodeGroup>
+
+```rust Rust
+let request = QueryRequest::read(
+    read_batch()
+        .var_as(
+            "hits",
+            g().vector_search_nodes("Doc", "embedding", vec![0.1, 0.8, 0.2], 10, None)
+                .value_map(Some(vec!["$id", "title", "$distance"])),
+        )
+        .returning(["hits"]),
+)
+.with_query_name("similar_docs")
+.with_search_consistency(SearchConsistency::Eventual)?;
+```
+
+```ts TypeScript
+import { SearchConsistency, g, readBatch } from "@helix-db/helix-db";
+
+const request = readBatch()
+  .varAs(
+    "hits",
+    g()
+      .vectorSearchNodes("Doc", "embedding", [0.1, 0.8, 0.2], 10, null)
+      .valueMap(["$id", "title", "$distance"]),
+  )
+  .returning(["hits"])
+  .toQueryRequest({
+    queryName: "similar_docs",
+    searchConsistency: SearchConsistency.Eventual,
+  });
+```
+
+```go Go
+request := helix.ReadQuery("similar_docs").
+	WithSearchConsistency(helix.SearchConsistencyEventual).
+	VarAs(
+		"hits",
+		helix.G().
+			VectorSearchNodes("Doc", "embedding", []float32{0.1, 0.8, 0.2}, 10).
+			ValueMap("$id", "title", "$distance"),
+	).
+	Returning("hits")
+```
+
+```python Python
+from helixdb import SearchConsistency, g, read_batch
+
+request = (
+    read_batch()
+    .var_as(
+        "hits",
+        g()
+        .vector_search_nodes("Doc", "embedding", [0.1, 0.8, 0.2], 10)
+        .value_map(["$id", "title", "$distance"]),
+    )
+    .returning(["hits"])
+    .to_query_request(
+        query_name="similar_docs",
+        search_consistency=SearchConsistency.EVENTUAL,
+    )
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "similar_docs",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "hits",
+          "root": {
+            "value_map": {
+              "input": {
+                "vector_search_nodes": {
+                  "label": "Doc",
+                  "property": "embedding",
+                  "query_vector": { "value": { "f32_array": [0.1, 0.8, 0.2] } },
+                  "k": { "literal": 10 }
+                }
+              },
+              "properties": ["$id", "title", "$distance"]
+            }
+          }
+        }
+      }],
+      "returns": ["hits"]
+    }
+  },
+  "search_consistency": "eventual"
+}
+```
+
+</CodeGroup>
+
+Omitting the option, or setting `strong`, sends no `search_consistency` field. The
+option covers every vector and text search in the request.
+
+## Searches in write batches
+
+Write batches always search strongly and see their own uncommitted changes, so
+`eventual` is rejected for write requests.
+
+A write batch that searches a vector or text index fails with a retryable
+`transaction_conflict` if another write to that index commits first, or if the index
+worker publishes queued work into it first. Search-then-write logic therefore stays
+serializable. Under a sustained publication backlog, such batches may need several
+retries.
+
+## Searches behind unpublished changes
+
+A whole-index `strong` search whose answer lies behind more than 800 results with
+committed but unpublished changes, for example right after a bulk delete near the
+query, fails with a retryable `index_backpressure` error. It does not scan further or
+answer without those changes, and it succeeds once that work is published.
+
+- A write batch's own changes never count toward this limit. A later search in the
+  same batch scans past every result the batch changed.
+- An `eventual` search in the same position never fails. It includes only the oldest
+  800 changed entities and serves the rest as last published.
+- Prefiltered searches are not limited this way. They drop the published rows of
+  changed candidates up front and keep only their own
+  [result limits](/database/helix-db/query-guides/prefiltering#result-limits).
+
+A `strong` text search, whole-index or prefiltered, also fails with a retryable
+`index_backpressure` error (`pending_text_analysis_bytes`) when analyzing the
+unpublished text in its partition would exceed the analysis budget of one text
+publication: the text compaction input limit, 64 MiB by default. The search analyzes
+every unpublished document in its partition to keep BM25 statistics exact, and each
+document is charged as the index worker charges it: its bytes plus about 280 bytes per
+indexed word. Text of many short words therefore reaches the limit with far less text,
+for example about 1 MB of ordinary English. The index worker may need several
+publications to bring the backlog back under it. Within the limit the search stays exact.
+
+- A write batch's own documents are charged first. A write batch whose own documents
+  exceed the limit fails with the non-retryable `index_operation_batch_too_large`
+  (`pending_text_analysis_bytes`), since no publication clears them; split it.
+- An `eventual` text search in the same position never fails. It analyzes only the
+  oldest unpublished documents within the limit and serves the rest as last published.
+- Documents the index worker holds back never publish, and they still count. Only
+  lowering the text limits below documents already admitted creates them. While their
+  text alone exceeds the limit, `strong` text searches of their partition keep failing.
+  Raise the limits again, or search `eventual`. Rewriting or deleting such a document
+  also clears it once replacing or removing its published version fits the lowered
+  limits, which a document published under much larger limits may never do.
+
+## Index backpressure
+
+By default, each index retains at most 1,000,000,000 bytes or 250,000 pending
+entities of unpublished work. A write that would push an index past either limit fails
+before commit with `index_backpressure`: HTTP 429 with `retryable: true` and no
+`Retry-After` header, or gRPC `ResourceExhausted`. Nothing from the rejected request
+commits. Retry the unchanged request with bounded backoff and jitter; it succeeds once
+the index worker has published enough of the backlog, or, while the index is building,
+once the index activates.
+
+A single write that exceeds either limit on its own, or stages more than 8 MiB of
+queued work for one index, can never be admitted, nor can a text search in a write
+batch whose own documents exceed one publication's analysis budget. Either fails with
+the non-retryable `index_operation_batch_too_large` error (HTTP 400) instead; split it
+into smaller writes. See the
+[query error reference](/database/helix-db/query-guides/error-handling) for both codes.
+
+## Index builds
+
+Writes made while an index builds are queued and published after it activates. Strong
+searches include them as soon as the index is active.
+
+Writes queued during a build count toward the index's
+[backpressure limits](#index-backpressure) and nothing publishes them before
+activation, so a heavy write load during a long build can fail with
+`index_backpressure` until the build activates. Bounded retries may run out first;
+throttle writes to an index while it builds.
+
+A blocked build does not activate until you retry or abort it, so waiting cannot
+clear its limits. A write that would exceed them fails with the non-retryable
+`index_build_blocked` error, which names the blocked operation. A write to an entity
+that already has pending work adds no pending entity, so only the byte limit can refuse
+it. The exception is a write to only the entity the blocker names: its first write is
+admitted even past the limits, and so is deleting the entity or clearing its indexed
+property. If that first write does not clear the blocker, delete the entity, then
+retry the build.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Vector indexes" icon="vector-square" href="/database/helix-db/query-guides/vector-indexes">
+    Create the index and run nearest-neighbor search.
+  </Card>
+  <Card title="Text indexes" icon="align-left" href="/database/helix-db/query-guides/text-indexes">
+    Rank string properties with BM25 keyword search.
+  </Card>
+  <Card title="Prefiltered search" icon="filter" href="/database/helix-db/query-guides/prefiltering">
+    Rank only the nodes or edges a traversal reaches.
+  </Card>
+  <Card title="Guarantees" icon="shield-check" href="/database/helix-cloud/operate/guarantees">
+    Review isolation and read-after-write behavior.
+  </Card>
+</CardGroup>

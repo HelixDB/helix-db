@@ -1,5 +1,4 @@
-//! Request-scoped vector read and write access boundaries.
+//! Request-scoped vector read access boundaries.
 
 pub(super) mod read;
 pub(super) mod read_view;
-pub(super) mod write;

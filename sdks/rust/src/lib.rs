@@ -340,9 +340,32 @@ impl HelixError {
         error.retryable()
     }
 
-    /// Return true only when a remote error explicitly says it is retryable.
+    /// Return true when the failure is explicitly retryable.
+    ///
+    /// Remote failures are retryable only when the server says so. Embedded
+    /// `index_backpressure` failures are retryable because the whole request
+    /// was rejected without effect: a write before commit, or a strong search.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::RemoteError(error) if error.is_retryable())
+        match self {
+            Self::RemoteError(error) => error.is_retryable(),
+            #[cfg(feature = "embedded")]
+            Self::EmbeddedError { .. } => self.is_index_backpressure(),
+            Self::ReqwestError(_)
+            | Self::SerializationError(_)
+            | Self::InvalidURL(_)
+            | Self::InvalidRequest { .. } => false,
+        }
+    }
+
+    /// Return whether asynchronous vector/text index work rejected the request.
+    ///
+    /// Either a write was rejected before commit because the index backlog is
+    /// full, or a strong search's answer lies behind more than 800 unpublished
+    /// changes; eventual searches are never rejected this way. The whole
+    /// request was rejected (HTTP 429, gRPC resource-exhausted); retry it
+    /// unchanged after a backoff.
+    pub fn is_index_backpressure(&self) -> bool {
+        self.error_code() == Some(QueryErrorCode::IndexBackpressure.as_str())
     }
 
     /// Return structured server details for a remote error.
@@ -1664,6 +1687,37 @@ mod client_tests {
             assert_eq!(error.is_conflict(), status == 409);
             assert_eq!(error.is_rate_limited(), status == 429);
         }
+    }
+
+    #[tokio::test]
+    async fn index_backpressure_is_retryable_rate_limiting() {
+        let body = r#"{"error":"index_backpressure","msg":"index backpressure","retryable":true}"#;
+        let error = request_remote_error(429, body).await;
+
+        assert_eq!(error.remote_code(), Some("index_backpressure"));
+        assert!(error.is_rate_limited());
+        assert!(error.is_retryable());
+        assert!(error.is_index_backpressure());
+        assert!(!error.is_conflict());
+    }
+
+    #[test]
+    fn search_consistency_serializes_only_when_eventual() {
+        let strong = QueryRequest::read(read_batch());
+        assert!(!strong
+            .to_json_string()
+            .unwrap()
+            .contains("search_consistency"));
+        let eventual = QueryRequest::read(read_batch())
+            .with_search_consistency(SearchConsistency::Eventual)
+            .unwrap();
+        assert!(eventual
+            .to_json_string()
+            .unwrap()
+            .contains(r#""search_consistency":"eventual""#));
+        assert!(QueryRequest::write(write_batch())
+            .with_search_consistency(SearchConsistency::Eventual)
+            .is_err());
     }
 
     #[tokio::test]

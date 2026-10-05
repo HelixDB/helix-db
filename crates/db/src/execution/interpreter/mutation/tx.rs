@@ -114,18 +114,7 @@ impl<'db> ExecutionContext<'db> {
         self.check_execution_deadline()?;
         Ok((
             transaction,
-            MutationIndexContext::new(
-                scope_permit,
-                mutation_catalog,
-                std::sync::Arc::clone(self.db.simhasher_registry()),
-                self.db.batch_reads(),
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .batch()
-                    .max_input_bytes(),
-            ),
+            MutationIndexContext::new(scope_permit, mutation_catalog, self.tenant_scope),
         ))
     }
 
@@ -194,19 +183,6 @@ impl<'db> ExecutionContext<'db> {
         if required.is_empty() || !self.request_write_scope.is_active() {
             return Ok(());
         }
-        let text_resources = required
-            .contains(super::visibility::DeferredMutationFamily::Text)
-            .then(|| {
-                (
-                    std::sync::Arc::clone(self.db.object_store()),
-                    self.db.path().to_string(),
-                    self.db
-                        .config()
-                        .db()
-                        .search_index_backfill()
-                        .active_text_mutation(),
-                )
-            });
         let RequestWriteScopeState::Active(active) = &mut self.request_write_scope else {
             return Ok(());
         };
@@ -215,21 +191,6 @@ impl<'db> ExecutionContext<'db> {
         }
         if required.contains(super::visibility::DeferredMutationFamily::Secondary) {
             active.index_context.flush_secondary(&active.txn).await?;
-        }
-        if required.contains(super::visibility::DeferredMutationFamily::Vector) {
-            active
-                .index_context
-                .flush_active_vectors(&active.txn)
-                .await?;
-        }
-        if required.contains(super::visibility::DeferredMutationFamily::Text) {
-            let Some((object_store, database, text_limits)) = text_resources else {
-                unreachable!("text visibility carries its flush resources")
-            };
-            active
-                .index_context
-                .flush_active_text(&active.txn, text_limits, &object_store, &database)
-                .await?;
         }
         Ok(())
     }
@@ -244,81 +205,65 @@ impl<'db> ExecutionContext<'db> {
             .await
     }
 
-    /// Commits storage before publishing deferred cache effects.
+    /// Commits graph rows, staged index rows, and queued vector/text
+    /// operations in one durable transaction.
     ///
-    /// Active index finalization stages all remaining transaction-owned rows.
+    /// Queued capacity is reserved for every touched index before commit and
+    /// finalized only from the commit outcome; the index worker is woken after
+    /// a durable enqueue.
     pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
         active.index_context.prepare_topology(&active.txn).await?;
         active.index_context.prepare_secondary(&active.txn).await?;
-        active
-            .index_context
-            .prepare_active_text(
-                &active.txn,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-                self.db.object_store(),
-                self.db.path(),
-            )
-            .await?;
-        active
-            .index_context
-            .prepare_active_vectors(&active.txn)
-            .await?;
+        let staged_queue = active.index_context.finalize_queued(
+            self.db.index_operand_limit(),
+            self.db.active_text_mutation_limits(),
+        )?;
         let ActiveWriteTx { txn, index_context } = active;
         let prepared_index_context = index_context.into_prepared()?;
-        let vector_cache_effects = prepared_index_context.vector_cache_writes().entries();
-        let text_compaction_staged = prepared_index_context.text_compaction_staged();
-        let pending_vector_cache = vector_cache_effects
-            .iter()
-            .filter_map(|write| self.db.vector_cache_registry().prepare_commit(write))
-            .collect::<Vec<_>>();
-        let vector_cache_retirements = vector_cache_effects
-            .iter()
-            .filter_map(|write| write.retirement().cloned())
-            .collect::<Vec<_>>();
-        let fenced = !pending_vector_cache.is_empty();
-        let committed = match crate::search::vector::commit_fenced(txn, pending_vector_cache).await
-        {
-            Ok(committed) => committed,
+        // Reserve every touched index atomically, then stage one blind
+        // operand per queue key in the same transaction as the graph change.
+        let mut reservation = if staged_queue.is_empty() {
+            None
+        } else {
+            let reservation = staged_queue
+                .reserve(self.db.index_operation_backlog(), &txn)
+                .await?;
+            for staged in staged_queue.operands {
+                self.db.index_queue_store().stage_enqueue(
+                    &txn,
+                    staged.target,
+                    staged.operand,
+                    &staged.operations,
+                )?;
+            }
+            Some(reservation)
+        };
+        if let Some(reservation) = reservation.as_mut() {
+            reservation.begin_commit();
+        }
+        match txn.commit().await {
+            Ok(_) => {}
             Err(error) => {
+                // Only a definite conflict proves nothing committed; any other
+                // failure keeps the capacity charged until reconciliation.
+                if let Some(reservation) = reservation {
+                    if error.kind() == slatedb::ErrorKind::Transaction {
+                        reservation.aborted();
+                    } else {
+                        reservation.uncertain();
+                    }
+                }
                 return Err(prepared_index_context
                     .classify_commit_error(self.writer()?.db(), error)
                     .await);
             }
         };
-        if fenced && committed.is_none() {
-            return Err(HelixDbError::InvariantViolation(
-                "dirty vector cache rows committed without a storage sequence".to_string(),
-            ));
+        let queued_committed = reservation.is_some();
+        if let Some(reservation) = reservation {
+            reservation.committed();
         }
-        self.apply_vector_cache_retirements(vector_cache_retirements)
-            .await?;
-        if text_compaction_staged {
+        if queued_committed {
             self.db.wake_index_worker().await;
-        }
-        Ok(())
-    }
-
-    /// Closes exact empty-partition caches only after durable graph commit.
-    async fn apply_vector_cache_retirements(
-        &self,
-        retirements: Vec<crate::search::vector::ValidatedVectorGenerationHandle>,
-    ) -> Result<()> {
-        for handle in retirements {
-            self.db.vector_cache_registry().retire(&handle).await;
-            if !self
-                .db
-                .vector_cache_registry()
-                .forget_validated_closed(&handle)
-            {
-                return Err(HelixDbError::InvariantViolation(
-                    "committed vector partition cache retirement did not close its exact entry"
-                        .to_string(),
-                ));
-            }
         }
         Ok(())
     }
@@ -326,7 +271,7 @@ impl<'db> ExecutionContext<'db> {
 
 #[cfg(test)]
 mod additional_tests {
-    use std::num::NonZeroU64;
+
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -335,43 +280,6 @@ mod additional_tests {
 
     use super::super::super::test_support;
     use super::*;
-
-    /// Builds one descriptor identity for transaction/cache boundary tests.
-    fn cache_handle() -> crate::search::vector::ValidatedVectorGenerationHandle {
-        crate::search::vector::ValidatedVectorGenerationHandle::create_current::<
-            crate::search::vector::distance::Cosine,
-        >(
-            crate::search::vector::VectorGenerationIdentity::try_new(
-                crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-                6,
-                "transaction-cache-generation".to_string(),
-                60,
-                NonZeroU64::MIN,
-                1,
-                crate::index_lifecycle::IndexElementKind::Node,
-                crate::search::vector::VectorDimension::try_new(2).unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    }
-
-    /// Installs one ready cache row and returns its retained store.
-    fn ready_store(
-        db: &crate::HelixDB,
-        handle: &crate::search::vector::ValidatedVectorGenerationHandle,
-    ) -> Arc<crate::search::vector::VectorMemoryStore> {
-        let store = Arc::new(crate::search::vector::VectorMemoryStore::new(
-            crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-            handle.physical_index_id(),
-            0,
-        ));
-        store.insert_upper_vector(7, Bytes::from_static(b"cached"));
-        let (entry, owns_hydration) = db.vector_cache_registry().entry_for(handle);
-        assert!(owns_hydration);
-        assert!(entry.finish_hydration(Arc::clone(&store)));
-        store
-    }
 
     /// Writes one typed row so the request has a real SlateDB commit sequence.
     fn stage_storage_write(active: &ActiveWriteTx, value: &'static [u8]) {
@@ -663,25 +571,6 @@ mod additional_tests {
     }
 
     #[tokio::test]
-    async fn successful_commit_evicts_exact_dirty_generation_after_storage_commit() {
-        let db = test_support::open_db("mutation-vector-cache-commit").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
-        context.enable_request_write_scope().await.unwrap();
-        let active = context.active_write_tx().unwrap();
-        active
-            .index_context
-            .vector_cache_writes()
-            .dirty_rows_for(&handle)
-            .mark_node_dirty(7);
-        stage_storage_write(active, b"commit");
-
-        context.commit_request_write_scope().await.unwrap();
-        assert!(store.get_upper_vector(7).is_none());
-    }
-
-    #[tokio::test]
     async fn commit_and_cache_finalization_are_not_cancelled_after_commit_boundary() {
         let db = test_support::open_db("mutation-deadline-after-commit-start").await;
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
@@ -710,52 +599,13 @@ mod additional_tests {
     }
 
     #[tokio::test]
-    async fn dirty_cache_rows_require_a_committed_storage_sequence() {
-        let db = test_support::open_db("mutation-vector-cache-missing-sequence").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
+    async fn abort_discards_staged_storage() {
+        let db = test_support::open_db("mutation-request-abort").await;
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
         context.enable_request_write_scope().await.unwrap();
-        context
-            .active_write_tx()
-            .unwrap()
-            .index_context
-            .vector_cache_writes()
-            .dirty_rows_for(&handle)
-            .mark_node_dirty(7);
-
-        let error = context.commit_request_write_scope().await.unwrap_err();
-        assert!(matches!(
-            error,
-            HelixDbError::InvariantViolation(message)
-                if message.contains("dirty vector cache rows committed without a storage sequence")
-        ));
-        assert!(store.get_upper_vector(7).is_some());
-        let guard = db
-            .vector_cache_registry()
-            .resident_guard_for(&handle)
-            .unwrap();
-        assert!(!guard.pending_dirty().is_node_dirty(7));
-    }
-
-    #[tokio::test]
-    async fn abort_drops_vector_write_set_without_cache_eviction() {
-        let db = test_support::open_db("mutation-vector-cache-abort").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
-        context.enable_request_write_scope().await.unwrap();
-        context
-            .active_write_tx()
-            .unwrap()
-            .index_context
-            .vector_cache_writes()
-            .dirty_rows_for(&handle)
-            .mark_node_dirty(7);
         stage_storage_write(context.active_write_tx().unwrap(), b"aborted");
 
         context.abort_request_write_scope();
-        assert!(store.get_upper_vector(7).is_some());
         let key = crate::encoding::keys::DataKey::Data {
             scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
             kind: crate::encoding::keys::DataKeyKind::NodeProperty(
@@ -767,18 +617,11 @@ mod additional_tests {
     }
 
     #[tokio::test]
-    async fn dropped_request_context_rolls_back_staged_storage_and_cache_state() {
+    async fn dropped_request_context_rolls_back_staged_storage() {
         let db = test_support::open_db("mutation-request-context-drop").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
         context.enable_request_write_scope().await.unwrap();
         let active = context.active_write_tx().unwrap();
-        active
-            .index_context
-            .vector_cache_writes()
-            .dirty_rows_for(&handle)
-            .mark_node_dirty(7);
         stage_storage_write(active, b"cancelled");
 
         drop(context);
@@ -791,147 +634,6 @@ mod additional_tests {
         }
         .to_bytes();
         assert!(db.inner_db().get(key).await.unwrap().is_none());
-        assert!(store.get_upper_vector(7).is_some());
-        let guard = db
-            .vector_cache_registry()
-            .resident_guard_for(&handle)
-            .unwrap();
-        assert!(!guard.pending_dirty().is_node_dirty(7));
-    }
-
-    #[tokio::test]
-    async fn commit_conflict_releases_pending_rows_without_cache_eviction() {
-        let db = test_support::open_db("mutation-vector-cache-conflict").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
-        context.enable_request_write_scope().await.unwrap();
-        let active = context.active_write_tx().unwrap();
-        active
-            .index_context
-            .vector_cache_writes()
-            .dirty_rows_for(&handle)
-            .mark_node_dirty(7);
-        stage_storage_write(active, b"request");
-
-        let competing = db
-            .inner_db()
-            .begin(slatedb::IsolationLevel::Snapshot)
-            .await
-            .unwrap();
-        let key = crate::encoding::v2::keys::DataKey::Data {
-            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v2::keys::NodePropertyKey::new(99),
-            ),
-        }
-        .to_bytes();
-        competing
-            .put(&key, Bytes::from_static(b"competing"))
-            .unwrap();
-        competing.commit().await.unwrap();
-
-        let error = context.commit_request_write_scope().await.unwrap_err();
-        assert!(error.is_transaction_conflict());
-        assert!(store.get_upper_vector(7).is_some());
-        let guard = db
-            .vector_cache_registry()
-            .resident_guard_for(&handle)
-            .unwrap();
-        assert!(!guard.pending_dirty().is_node_dirty(7));
-        assert_eq!(
-            db.inner_db().get(key).await.unwrap(),
-            Some(Bytes::from_static(b"competing"))
-        );
-    }
-
-    #[tokio::test]
-    async fn successful_commit_retires_and_forgets_exact_vector_cache_generation() {
-        let db = test_support::open_db("mutation-vector-cache-retirement-commit").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
-        context.enable_request_write_scope().await.unwrap();
-        let active = context.active_write_tx().unwrap();
-        active
-            .index_context
-            .vector_cache_writes()
-            .retire_after_commit(&handle);
-        stage_storage_write(active, b"retire");
-
-        context.commit_request_write_scope().await.unwrap();
-        assert!(store.get_upper_vector(7).is_none());
-        assert!(db
-            .vector_cache_registry()
-            .resident_guard_for(&handle)
-            .is_err());
-        let (_, owns_hydration) = db.vector_cache_registry().entry_for(&handle);
-        assert!(owns_hydration, "committed retirement forgets its tombstone");
-        db.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn abort_discards_vector_cache_retirement() {
-        let db = test_support::open_db("mutation-vector-cache-retirement-abort").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
-        context.enable_request_write_scope().await.unwrap();
-        context
-            .active_write_tx()
-            .unwrap()
-            .index_context
-            .vector_cache_writes()
-            .retire_after_commit(&handle);
-
-        context.abort_request_write_scope();
-        assert!(store.get_upper_vector(7).is_some());
-        assert!(db
-            .vector_cache_registry()
-            .resident_guard_for(&handle)
-            .is_ok());
-        db.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn commit_conflict_discards_vector_cache_retirement() {
-        let db = test_support::open_db("mutation-vector-cache-retirement-conflict").await;
-        let handle = cache_handle();
-        let store = ready_store(&db, &handle);
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
-        context.enable_request_write_scope().await.unwrap();
-        let active = context.active_write_tx().unwrap();
-        active
-            .index_context
-            .vector_cache_writes()
-            .retire_after_commit(&handle);
-        stage_storage_write(active, b"retirement-request");
-
-        let competing = db
-            .inner_db()
-            .begin(slatedb::IsolationLevel::Snapshot)
-            .await
-            .unwrap();
-        let key = crate::encoding::v2::keys::DataKey::Data {
-            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v2::keys::NodePropertyKey::new(99),
-            ),
-        }
-        .to_bytes();
-        competing
-            .put(key, Bytes::from_static(b"retirement-competing"))
-            .unwrap();
-        competing.commit().await.unwrap();
-
-        let error = context.commit_request_write_scope().await.unwrap_err();
-        assert!(error.is_transaction_conflict());
-        assert!(store.get_upper_vector(7).is_some());
-        assert!(db
-            .vector_cache_registry()
-            .resident_guard_for(&handle)
-            .is_ok());
-        db.close().await.unwrap();
     }
 
     #[tokio::test]

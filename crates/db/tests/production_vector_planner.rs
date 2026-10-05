@@ -1414,14 +1414,17 @@ async fn public_dynamic_vector_ddl_backfills_existing_nodes() {
 
 /// Proves bounded output batches and a tiny build cache still converge.
 ///
-/// The build first blocks on a one-byte input budget while later documents
-/// record build deltas. Retried under a small output-operation budget, both
-/// source-scan and catch-up steps end on an entity whose planned writes no
-/// longer fit; that entity is discarded from the retained planning cache and
-/// replanned by the next step. The 8 KiB cache budget evicts retained rows
-/// between entities throughout the build.
+/// The build first blocks on a one-byte input budget. The 16 documents written
+/// while it is blocked lie past its scan bound, so they go only to the building
+/// generation's queue, where publication defers them. Retried under a small
+/// output-operation budget, source-scan steps end on an entity whose planned
+/// writes no longer fit; that entity is discarded from the retained planning
+/// cache and replanned by the next step. The 8 KiB cache budget evicts retained
+/// rows between entities throughout the build. After activation the queued
+/// documents publish under the same 256-operation budget, and once the queue
+/// is empty every search answers from published rows alone.
 #[tokio::test]
-async fn public_vector_backfill_splits_scan_and_catch_up_batches_under_small_budgets() {
+async fn public_vector_backfill_splits_scan_and_publishes_queued_writes_under_small_budgets() {
     let token = ProcessLocalDatabaseToken::new("production-vector-bounded-backfill-batches")
         .expect("fixture token is valid");
     let defaults = SearchIndexBackfillLimits::default();
@@ -1483,7 +1486,7 @@ async fn public_vector_backfill_splits_scan_and_catch_up_batches_under_small_bud
         node_ids.push(created_node_id(
             db.execute(&document(offset), context::ParamBindings::default())
                 .await
-                .expect("delta fixture node commits during the blocked build"),
+                .expect("queued fixture node commits during the blocked build"),
         ));
     }
     db.close().await.expect("blocking writer closes");
@@ -1501,6 +1504,25 @@ async fn public_vector_backfill_splits_scan_and_catch_up_batches_under_small_bud
     db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
         .await
         .expect("the completed build is visible through a refreshed planner catalog");
+    let stats = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let stats = db.index_operation_queue_stats();
+            if stats.pending_operations == 0 && stats.uncertain_operations == 0 {
+                return stats;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the writes queued during the build publish after activation");
+    assert!(
+        stats.published_operations >= 16,
+        "every queued document was published, got {stats:?}"
+    );
+    assert_eq!(
+        stats.blocked_attempts, 0,
+        "each queued document fits the 256-operation output budget"
+    );
 
     for (query, expected) in [
         (vec![1.0, 0.0], node_ids[0]),

@@ -289,7 +289,18 @@ impl TextMachine {
     }
 
     /// Cross-checks all settled text rows against the current model membership.
+    ///
+    /// Graph writes enqueue text operations that the index worker publishes
+    /// asynchronously, so rows settle once no queued operation remains.
     async fn assert_steady_rows(&self) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while self.db.index_operation_queue_stats().pending_operations != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "queued text operations did not publish"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         db::production_coverage::index_lifecycle_text_steady_state_contracts(
             &self.db,
             self.model.entities.len(),
