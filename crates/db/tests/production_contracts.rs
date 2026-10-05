@@ -11567,8 +11567,15 @@ async fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served
 /// union branch, for node and edge sources. Each expected count is the
 /// brute-force count over the seeded `User` nodes and `Link` edges. A
 /// window over the intersection keeps the range's order, as its rows do.
-#[tokio::test]
-async fn counts_over_range_intersections_apply_every_filter() {
+#[test]
+fn counts_over_range_intersections_apply_every_filter() {
+    run_high_stack_contract(
+        "range-intersection-counts",
+        counts_over_range_intersections_apply_every_filter_contract,
+    );
+}
+
+async fn counts_over_range_intersections_apply_every_filter_contract() {
     const USERS: i64 = 300;
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-range-intersection-counts".to_owned(),
