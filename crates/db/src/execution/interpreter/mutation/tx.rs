@@ -8,7 +8,11 @@
 //! Membership sets resolved in the request transaction stay cached across its
 //! writes: each operation forgets only the sets whose node index footprint
 //! its writes reached. Opening, committing, or aborting the transaction, and
-//! isolated mutation scopes, forget every set.
+//! isolated mutation scopes, forget every set. Committed pending search sets
+//! ([`super::super::access::PendingSets`]) stay exact across every write of
+//! the transaction and are forgotten at those same points.
+
+use std::sync::Arc;
 
 use slatedb::{DbTransaction, IsolationLevel};
 
@@ -45,6 +49,7 @@ impl<'db> ExecutionContext<'db> {
         let (txn, index_context) = self.begin_write_tx().await?;
         // Sets read before the transaction came from another snapshot.
         self.prepared_memberships.clear();
+        self.pending_sets = Arc::default();
         self.request_write_scope =
             RequestWriteScopeState::Active(Box::new(ActiveWriteTx { txn, index_context }));
         Ok(())
@@ -53,6 +58,7 @@ impl<'db> ExecutionContext<'db> {
     /// Drops any active transaction to abort the write request.
     pub(in crate::execution::interpreter) fn abort_request_write_scope(&mut self) {
         self.prepared_memberships.clear();
+        self.pending_sets = Arc::default();
         self.request_write_scope = RequestWriteScopeState::Disabled;
     }
 
@@ -62,6 +68,7 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<()> {
         // Later reads use another snapshot.
         self.prepared_memberships.clear();
+        self.pending_sets = Arc::default();
         let state = std::mem::replace(
             &mut self.request_write_scope,
             RequestWriteScopeState::Disabled,
@@ -168,6 +175,7 @@ impl<'db> ExecutionContext<'db> {
         }
 
         self.prepared_memberships.clear();
+        self.pending_sets = Arc::default();
         self.commit_write_tx(ActiveWriteTx {
             txn: scope.txn,
             index_context: scope.index_context,

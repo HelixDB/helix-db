@@ -214,7 +214,8 @@ impl<'db> ExecutionContext<'db> {
     /// reruns with a smaller selection, as
     /// [`PendingSelection::yield_to_suppression_limit`] decides.
     /// Pending vectors pass the same traversal restriction, tenant partition,
-    /// and metric as physical rows, and both sources merge by
+    /// and metric as physical rows, are scored exactly on the blocking pool
+    /// ([`score_pending_vectors`]), and both sources merge by
     /// `(distance, entity id)`.
     ///
     /// [`PendingSelection::yield_to_suppression_limit`]: super::pending::PendingSelection::yield_to_suppression_limit
@@ -252,8 +253,16 @@ impl<'db> ExecutionContext<'db> {
             };
         };
         loop {
-            let mut pending_scored =
-                score_pending_vectors::<D>(definition, tenant_value, query, candidates, &pending)?;
+            let mut pending_scored = score_pending_vectors::<D>(
+                &self.execution_control,
+                definition,
+                tenant_value,
+                query,
+                k,
+                candidates,
+                &pending,
+            )
+            .await?;
             let physical = match generation.as_ref() {
                 super::generation::VectorSearchAuthority::AbsentManagedPartition => None,
                 super::generation::VectorSearchAuthority::Managed(handle) => Some((
@@ -469,7 +478,7 @@ impl<'db> ExecutionContext<'db> {
         let partition = handle.partition();
         let authority = handle.physical();
         let overlay = pending
-            .entities
+            .entities()
             .iter()
             .map(|pending| (pending.entity, pending.text_in(partition)))
             .collect::<Vec<_>>();
@@ -686,12 +695,26 @@ where
     }
 }
 
-/// Scores selected pending vectors in the searched partition that pass the
-/// traversal restriction.
-fn score_pending_vectors<D: crate::search::vector::Distance>(
+/// Pending vectors one exact scoring step scores between cancellation checks.
+const PENDING_SCORE_CHUNK: usize = 4_096;
+
+/// Scores, on the blocking pool, the selected pending vectors in the searched
+/// partition that pass the traversal restriction, and keeps the `k` best by
+/// `(distance, entity id)`, best first.
+///
+/// No other pending vector can rank among the `k` results, and the `k` best
+/// settle a physical result exactly as every pending vector would: settling
+/// only asks whether at least `k` results rank ahead of it (see
+/// [`settle_physical`]). Selection keeps memory and sorting at `k`; the
+/// scoring itself still grows with the pending entities and their dimension,
+/// which the strong vector bound and the eventual budget cap. Scoring stops
+/// between chunks once the request stops awaiting it.
+async fn score_pending_vectors<D: crate::search::vector::Distance>(
+    control: &crate::execution_control::ExecutionControl,
     definition: &crate::config::VectorIndexDefinition,
     tenant_value: Option<&crate::encoding::property::property_value::PropertyValue>,
     query: &[f32],
+    k: usize,
     candidates: Option<&RestrictedVectorCandidates>,
     pending: &super::pending::PendingSelection,
 ) -> Result<Vec<crate::search::vector::SearchResult>> {
@@ -712,21 +735,52 @@ fn score_pending_vectors<D: crate::search::vector::Distance>(
     };
     let dimension = crate::search::vector::VectorDimension::try_new(definition.dimension())
         .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
-    crate::search::vector::score_exact_in_memory::<D>(
-        query,
-        dimension,
-        pending.entities.iter().filter_map(|pending| {
-            let Some((pending_partition, super::pending::PendingValue::Vector(vector))) =
-                &pending.latest
-            else {
-                return None;
-            };
-            let id = pending.entity.id.get();
-            (*pending_partition == partition
-                && candidates.is_none_or(|candidates| candidates.contains(id)))
-            .then_some((id, &vector[..]))
-        }),
-    )
+    let entities = pending.entities().clone();
+    let candidates = candidates.cloned();
+    let query = query.to_vec();
+    super::blocking::run_blocking(control, move |probe| {
+        let rank = |left: &crate::search::vector::SearchResult,
+                    right: &crate::search::vector::SearchResult| {
+            left.score()
+                .cmp(&right.score())
+                .then_with(|| left.entity_id().cmp(&right.entity_id()))
+        };
+        let scored = entities
+            .iter()
+            .filter_map(|pending| {
+                let Some((pending_partition, super::pending::PendingValue::Vector(vector))) =
+                    &pending.latest
+                else {
+                    return None;
+                };
+                let id = pending.entity.id.get();
+                (*pending_partition == partition
+                    && candidates
+                        .as_ref()
+                        .is_none_or(|candidates| candidates.contains(id)))
+                .then_some((id, &vector[..]))
+            })
+            .collect::<Vec<_>>();
+        let mut best = scored.chunks(PENDING_SCORE_CHUNK).try_fold(
+            Vec::with_capacity(k.saturating_add(PENDING_SCORE_CHUNK).min(scored.len())),
+            |mut best, chunk| {
+                probe.check()?;
+                best.extend(crate::search::vector::score_exact_in_memory::<D>(
+                    &query,
+                    dimension,
+                    chunk.iter().copied(),
+                )?);
+                if best.len() > k {
+                    best.select_nth_unstable_by(k, rank);
+                    best.truncate(k);
+                }
+                Ok::<_, HelixDbError>(best)
+            },
+        )?;
+        best.sort_unstable_by(rank);
+        Ok(best)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -734,6 +788,164 @@ mod tests {
     use roaring::RoaringTreemap;
 
     use super::*;
+    use crate::encoding::v2::keys::IndexEntity;
+    use crate::index_lifecycle::work::TextPartition;
+    use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
+
+    /// `count` pending nodes; node `id` sits at `(id % 97, 0)`, so distances
+    /// tie across many IDs. Every seventh is deleted and every eleventh moved
+    /// to another tenant partition.
+    fn pending_nodes(count: u64) -> super::super::pending::PendingSelection {
+        let other = TextPartition::try_tenant_value(
+            crate::encoding::v2::values::property::encode_index_partition_value(
+                &crate::encoding::property::property_value::PropertyValue::from("t"),
+            ),
+        )
+        .unwrap();
+        super::super::pending::PendingSelection::strong_for_tests(
+            crate::index_lifecycle::queue::QueueTarget::new(
+                crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                IndexId::new(1).unwrap(),
+                IndexGenerationId::new(1).unwrap(),
+            ),
+            (0..count)
+                .map(|id| super::super::pending::PendingEntity {
+                    entity: IndexEntity {
+                        kind: IndexElementKind::Node,
+                        id: IndexEntityId::new(id),
+                    },
+                    latest: (id % 7 != 0).then(|| {
+                        (
+                            if id % 11 == 0 {
+                                other.clone()
+                            } else {
+                                TextPartition::Unpartitioned
+                            },
+                            super::super::pending::PendingValue::Vector(std::sync::Arc::from([
+                                (id % 97) as f32,
+                                0.0,
+                            ])),
+                        )
+                    }),
+                })
+                .collect(),
+        )
+    }
+
+    /// The `k` best of every eligible pending node, scored in one pass.
+    fn brute_force(
+        selection: &super::super::pending::PendingSelection,
+        k: usize,
+        candidates: Option<&RestrictedVectorCandidates>,
+    ) -> Vec<crate::search::vector::SearchResult> {
+        let mut all = crate::search::vector::score_exact_in_memory::<Euclidean>(
+            &[0.0, 0.0],
+            crate::search::vector::VectorDimension::try_new(2).unwrap(),
+            selection.entities().iter().filter_map(|pending| {
+                let Some((
+                    TextPartition::Unpartitioned,
+                    super::super::pending::PendingValue::Vector(vector),
+                )) = &pending.latest
+                else {
+                    return None;
+                };
+                let id = pending.entity.id.get();
+                candidates
+                    .is_none_or(|candidates| candidates.contains(id))
+                    .then_some((id, &vector[..]))
+            }),
+        )
+        .unwrap();
+        all.truncate(k);
+        all
+    }
+
+    /// Keeping the `k` best across scoring chunks returns exactly what
+    /// scoring every pending vector at once and truncating returns, ties
+    /// broken by entity ID, with partitions, deletions, and a traversal
+    /// restriction applied.
+    #[tokio::test]
+    async fn pending_scoring_keeps_exactly_the_k_best_across_chunks() {
+        let definition = crate::config::VectorIndexDefinition::new_node(
+            "Doc",
+            "embedding",
+            2,
+            VectorDistanceMetric::Euclidean,
+        )
+        .unwrap();
+        let control = crate::execution_control::ExecutionControl::unlimited();
+        let count = 3 * PENDING_SCORE_CHUNK as u64 + 17;
+        let selection = pending_nodes(count);
+        let restricted =
+            RestrictedVectorCandidates::from_ids((0..count).filter(|id| id % 3 != 0)).unwrap();
+        for candidates in [None, Some(&restricted)] {
+            for k in [1, 2, 96, 800, PENDING_SCORE_CHUNK + 1, count as usize] {
+                let scored = score_pending_vectors::<Euclidean>(
+                    &control,
+                    &definition,
+                    None,
+                    &[0.0, 0.0],
+                    k,
+                    candidates,
+                    &selection,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    scored,
+                    brute_force(&selection, k, candidates),
+                    "k {k}, restricted {}",
+                    candidates.is_some()
+                );
+            }
+        }
+
+        // A tenant search scores only its own partition; a null tenant
+        // scores nothing.
+        let tenant = definition.clone().with_tenant_property("tenant").unwrap();
+        let value = crate::encoding::property::property_value::PropertyValue::from("t");
+        let scored = score_pending_vectors::<Euclidean>(
+            &control,
+            &tenant,
+            Some(&value),
+            &[0.0, 0.0],
+            usize::MAX,
+            None,
+            &selection,
+        )
+        .await
+        .unwrap();
+        assert!(!scored.is_empty());
+        assert!(scored
+            .iter()
+            .all(|result| result.entity_id() % 11 == 0 && result.entity_id() % 7 != 0));
+        assert!(score_pending_vectors::<Euclidean>(
+            &control,
+            &tenant,
+            None,
+            &[0.0, 0.0],
+            10,
+            None,
+            &selection,
+        )
+        .await
+        .unwrap()
+        .is_empty());
+
+        // An expired request scores nothing.
+        let error = score_pending_vectors::<Euclidean>(
+            &crate::execution_control::ExecutionControl::from_timeout(std::time::Duration::ZERO),
+            &definition,
+            None,
+            &[0.0, 0.0],
+            10,
+            None,
+            &selection,
+        )
+        .await
+        .expect_err("an expired request stops");
+        assert!(matches!(error, HelixDbError::QueryDeadlineExceeded));
+    }
 
     /// Settles `k` results over the physical results `1..=physical`, in rank
     /// order, with the `local` subset of `superseded` changed by the searching
