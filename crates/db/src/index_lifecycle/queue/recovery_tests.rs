@@ -35,6 +35,7 @@ use super::QueueTarget;
 use crate::config::{DbConfig, QueueLayout};
 use crate::encoding::v2::keys::scope::{DataScope, TenantId, TENANT_KEY_PREFIX};
 use crate::encoding::v2::keys::{IndexEntity, ManagedIndexKey, RecordKind, ScopedKey};
+use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::indexes::operation_queue::{
     OperationQueue, QueueFamily, QueueOperand, QueueRow, QueuedOperation, QueuedOperationId,
     QueuedPayload, QueuedTextPayload, QueuedTextReplacement, QueuedVectorPayload,
@@ -43,7 +44,9 @@ use crate::encoding::v2::values::indexes::operation_queue::{
 use crate::error::HelixDbError;
 use crate::index_lifecycle::work::TextPartition;
 use crate::index_lifecycle::worker::IndexWorkerWakeHandle;
-use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
+use crate::index_lifecycle::{
+    IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, ValidatedDynamicIndexDefinition,
+};
 use crate::merge_operator::HelixMergeOperator;
 use crate::HelixDB;
 
@@ -1028,4 +1031,191 @@ async fn a_reopened_writer_reloads_its_ledger_exactly() {
     assert!(reloaded.outstanding_targets().is_empty());
     assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
     db.close().await.unwrap();
+}
+
+const OWNERS: &str = "recovery-owners";
+
+/// The key of the canonical record in `scope` whose definition `owner`
+/// accepts, and the queue target it names.
+async fn scoped_owner(
+    db: &HelixDB,
+    scope: DataScope,
+    owner: fn(&ValidatedDynamicIndexDefinition) -> bool,
+) -> (Bytes, QueueTarget) {
+    let prefix =
+        ManagedIndexKey::data_prefix(scope, ScopedKey::logical_prefix(RecordKind::IndexRecord));
+    let storage = db.inner_db();
+    let mut rows = storage.scan_prefix(&prefix, ..).await.unwrap();
+    while let Some(row) = rows.next().await.unwrap() {
+        let record = decode_index_record(&row.value).unwrap();
+        if owner(record.definition()) {
+            return (
+                row.key,
+                QueueTarget::new(scope, record.index_id(), record.state().generation()),
+            );
+        }
+    }
+    panic!("{scope:?} holds the owner");
+}
+
+/// A closed writer whose load reads three scopes' index records in order:
+/// the legacy scope (an owned vector queue), tenant 0x41 (an orphan queue
+/// after its own indexes' keys), and tenant 0x42 (no queue). Both tenants
+/// hold a vector and a secondary index with no queue of their own.
+async fn owner_fixture() -> InMemory {
+    let fixture = InMemory::new();
+    let db = open(OWNERS, Arc::new(fixture.clone()), config()).await;
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    add(&db, [1.0, 1.0], "legacy", Some("a")).await;
+    for scope in [tenant(0x41), tenant(0x42)] {
+        create_scoped(
+            &db,
+            scope,
+            IndexSpec::node_vector(
+                "Doc",
+                "embedding",
+                std::num::NonZeroUsize::new(2).unwrap(),
+                helix_ast::index::VectorDistanceMetric::Euclidean,
+                None::<&str>,
+            ),
+        )
+        .await;
+        create_scoped(&db, scope, IndexSpec::node_equality("Doc", "status")).await;
+    }
+    enqueue(
+        &db.inner_db(),
+        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        queue_target(tenant(0x41), 999, 1),
+        &[vector(1, &[1.0, 1.0])],
+    )
+    .await;
+    db.close().await.unwrap();
+    fixture
+}
+
+fn is_vector(definition: &ValidatedDynamicIndexDefinition) -> bool {
+    matches!(definition, ValidatedDynamicIndexDefinition::Vector(_))
+}
+
+fn is_secondary(definition: &ValidatedDynamicIndexDefinition) -> bool {
+    matches!(definition, ValidatedDynamicIndexDefinition::Secondary(_))
+}
+
+/// Each queue is validated against its own scope's records, whichever scope
+/// yielded the queue before it. Index IDs are global, so checking a tenant
+/// queue against the legacy scope's records, or another tenant's, misses
+/// its index and skips validation: a tenant queue owned by a secondary
+/// index, or holding another family or element kind than its owner, fails
+/// the open closed after either.
+#[tokio::test]
+async fn a_misowned_tenant_queue_fails_the_open_after_other_scopes_queues() {
+    let fixture = owner_fixture().await;
+    let control = open(OWNERS, Arc::new(fixture.fork()), config()).await;
+    let loaded = control.index_operation_backlog().outstanding_targets();
+    assert!(loaded.contains(&queue_target(tenant(0x41), 999, 1)));
+    assert!(loaded
+        .iter()
+        .any(|target| target.scope == DataScope::LegacyUnscoped));
+    control.close().await.unwrap();
+
+    let edge = QueuedOperation::new(
+        QueuedOperationId::generate(),
+        IndexEntity {
+            kind: IndexElementKind::Edge,
+            id: IndexEntityId::new(1),
+        },
+        vector(1, &[1.0, 1.0]).payload().clone(),
+    );
+    // Tenant 0x41's queue sorts before its orphan, so it follows the legacy
+    // scope's records; tenant 0x42's follows tenant 0x41's.
+    for scope in [tenant(0x41), tenant(0x42)] {
+        for (owner, operation, expected) in [
+            (
+                is_secondary as fn(&ValidatedDynamicIndexDefinition) -> bool,
+                vector(1, &[1.0, 1.0]),
+                "owns an operation queue",
+            ),
+            (
+                is_vector,
+                text(1, "another family"),
+                "does not match its canonical definition",
+            ),
+            (
+                is_vector,
+                edge.clone(),
+                "does not match its canonical definition",
+            ),
+        ] {
+            let store: Arc<dyn ObjectStore> = Arc::new(fixture.fork());
+            let db = open(OWNERS, Arc::clone(&store), config()).await;
+            let (_, target) = scoped_owner(&db, scope, owner).await;
+            assert!(target.index_id.get() < 999, "{target:?} sorts before the orphan");
+            enqueue(
+                &db.inner_db(),
+                &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+                target,
+                &[operation],
+            )
+            .await;
+            db.close().await.unwrap();
+            let Err(error) = HelixDB::open_with_object_store_and_config(OWNERS, store, config())
+                .await
+            else {
+                panic!("{scope:?}: the writer opened over a misowned queue ({expected})");
+            };
+            assert!(
+                matches!(&error, HelixDbError::IndexCatalogCorruption(message) if message.contains(expected)),
+                "{scope:?}: {error}"
+            );
+        }
+    }
+}
+
+/// A scope's index records are read at open only once it yields a queue:
+/// a corrupt record fails the open in a tenant with a queue, while in a
+/// tenant without one it fails only that tenant's own requests, never the
+/// open or other scopes.
+#[tokio::test]
+async fn a_corrupt_record_fails_the_open_only_in_a_scope_with_a_queue() {
+    let fixture = owner_fixture().await;
+    for (scope, has_queue) in [(tenant(0x41), true), (tenant(0x42), false)] {
+        let store: Arc<dyn ObjectStore> = Arc::new(fixture.fork());
+        let db = open(OWNERS, Arc::clone(&store), config()).await;
+        let (key, _) = scoped_owner(&db, scope, is_secondary).await;
+        db.inner_db().put(key, b"not a record").await.unwrap();
+        db.close().await.unwrap();
+        match (
+            HelixDB::open_with_object_store_and_config(OWNERS, store, config()).await,
+            has_queue,
+        ) {
+            (Err(error), true) => {
+                assert!(matches!(error, HelixDbError::Encoding(_)), "{error}");
+            }
+            (Ok(db), false) => {
+                let write = |scope| {
+                    db.query_scoped(
+                        QueryRequest::write(batch::write_batch().var_as(
+                            "created",
+                            traversal::g().add_n(
+                                "Doc",
+                                vec![(
+                                    "status",
+                                    helix_ast::value::PropertyInput::from("new".to_string()),
+                                )],
+                            ),
+                        )),
+                        scope,
+                    )
+                };
+                let error = write(scope).await.unwrap_err();
+                assert!(matches!(error, HelixDbError::Encoding(_)), "{error}");
+                write(tenant(0x41)).await.unwrap();
+                write(DataScope::LegacyUnscoped).await.unwrap();
+                db.close().await.unwrap();
+            }
+            (Ok(_), true) => panic!("{scope:?}: the writer opened over a corrupt owner"),
+            (Err(error), false) => panic!("{scope:?}: a queueless scope failed the open: {error}"),
+        }
+    }
 }
