@@ -261,6 +261,8 @@ impl QueueTarget {
 #[cfg(test)]
 mod codec_storage_tests;
 #[cfg(test)]
+mod drain_tests;
+#[cfg(test)]
 mod isolation_tests;
 #[cfg(test)]
 mod layout_tests;
