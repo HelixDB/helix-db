@@ -11738,6 +11738,234 @@ async fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served
     }
 }
 
+/// A count over a range-driven intersection applies every filter of the
+/// intersection, not only its range driver, alone, after `dedup`, and in a
+/// union branch, for node and edge sources. Each expected count is the
+/// brute-force count over the seeded `User` nodes and `Link` edges. A
+/// window over the intersection keeps the range's order, as its rows do.
+///
+/// The contract's future holds every query shape across its awaits, so it
+/// runs on a high-stack thread like the other large contracts here.
+#[test]
+fn counts_over_range_intersections_apply_every_filter() {
+    run_high_stack_contract(
+        "range-intersection-counts",
+        counts_over_range_intersections_apply_every_filter_contract,
+    );
+}
+
+async fn counts_over_range_intersections_apply_every_filter_contract() {
+    const USERS: i64 = 300;
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-range-intersection-counts".to_owned(),
+    })
+    .await
+    .expect("count fixture opens");
+    let properties = |n: i64, range: &'static str| {
+        vec![
+            ("uid", PropertyInput::from(n)),
+            (range, PropertyInput::from(n % 60)),
+            ("tier", PropertyInput::from(n % 3)),
+            ("name", PropertyInput::from(format!("name{}", n % 10))),
+        ]
+    };
+    let users = (0..USERS).fold(batch::write_batch(), |write, n| {
+        write.var_as(
+            &format!("u{n}"),
+            traversal::g().add_n("User", properties(n, "rank")),
+        )
+    });
+    let seed = (0..USERS).fold(users, |write, n| {
+        write.var_as(
+            &format!("l{n}"),
+            traversal::g().n(NodeRef::var(format!("u{n}"))).add_e(
+                "Link",
+                NodeRef::var(format!("u{}", (n + 1) % USERS)),
+                properties(n, "weight"),
+            ),
+        )
+    });
+    db.query(QueryRequest::write(seed.returning(Vec::<String>::new())))
+        .await
+        .expect("users and links are committed");
+    for spec in [
+        index::IndexSpec::node_range("User", "rank"),
+        index::IndexSpec::node_equality("User", "tier"),
+        index::IndexSpec::node_unique_equality("User", "uid"),
+        index::IndexSpec::node_equality("User", "name"),
+        index::IndexSpec::edge_range_desc("Link", "weight"),
+        index::IndexSpec::edge_equality("Link", "tier"),
+        index::IndexSpec::edge_equality("Link", "name"),
+    ] {
+        let receipt = db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["operation"]),
+            ))
+            .await
+            .expect("count fixture index is accepted");
+        let Some(operation_id) = receipt["operation"]["operation_id"].as_str() else {
+            panic!("accepted count fixture index has an operation ID: {receipt}");
+        };
+        await_index_operation_success(&db, operation_id, "count fixture index").await;
+    }
+    let nodes = |predicate: Predicate| {
+        let source = || traversal::g().n_with_label_where("User", predicate.clone());
+        (source().count(), source().dedup().count())
+    };
+    let edges = |predicate: Predicate| {
+        let source = || traversal::g().e_with_label_where("Link", predicate.clone());
+        (source().count(), source().dedup().count())
+    };
+    let expected = |keep: &dyn Fn(i64) -> bool| (0..USERS).filter(|n| keep(*n)).count();
+    let (mut actual_counts, mut expected_counts) = (Vec::new(), Vec::new());
+    for (label, (count, distinct), count_expected) in [
+        (
+            "nodes: range with equality and residual filters",
+            nodes(Predicate::and(vec![
+                Predicate::lt("rank", 30),
+                Predicate::eq("tier", 1),
+                Predicate::neq("uid", 1),
+            ])),
+            expected(&|n| n % 60 < 30 && n % 3 == 1 && n != 1),
+        ),
+        (
+            "nodes: range intersection in a union branch",
+            nodes(Predicate::or(vec![
+                Predicate::eq("uid", 5),
+                Predicate::and(vec![Predicate::eq("tier", 1), Predicate::lt("rank", 30)]),
+            ])),
+            expected(&|n| n == 5 || (n % 3 == 1 && n % 60 < 30)),
+        ),
+        (
+            "nodes: unbounded range with an equality filter",
+            nodes(Predicate::and(vec![
+                Predicate::gte("rank", 0),
+                Predicate::eq("name", "name5"),
+            ])),
+            expected(&|n| n % 10 == 5),
+        ),
+        (
+            "edges: range with equality and residual filters",
+            edges(Predicate::and(vec![
+                Predicate::lt("weight", 30),
+                Predicate::eq("tier", 1),
+                Predicate::neq("name", "name1"),
+            ])),
+            expected(&|n| n % 60 < 30 && n % 3 == 1 && n % 10 != 1),
+        ),
+        (
+            "edges: range intersection in a union branch",
+            edges(Predicate::or(vec![
+                Predicate::eq("name", "name5"),
+                Predicate::and(vec![Predicate::eq("tier", 1), Predicate::lt("weight", 30)]),
+            ])),
+            expected(&|n| n % 10 == 5 || (n % 3 == 1 && n % 60 < 30)),
+        ),
+        (
+            "edges: unbounded range with an equality filter",
+            edges(Predicate::and(vec![
+                Predicate::gte("weight", 0),
+                Predicate::eq("name", "name5"),
+            ])),
+            expected(&|n| n % 10 == 5),
+        ),
+    ] {
+        let response = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as("count", count)
+                    .var_as("distinct", distinct)
+                    .returning(["count", "distinct"]),
+            ))
+            .await
+            .expect("count succeeds");
+        actual_counts.push((label, response));
+        expected_counts.push((
+            label,
+            serde_json::json!({ "count": count_expected, "distinct": count_expected }),
+        ));
+    }
+    // Compared together so a failure names every miscounted shape at once.
+    assert_eq!(actual_counts, expected_counts);
+
+    // Range order is not ID order, so a window before a later filter keeps
+    // the rows the range yields first. Each windowed count equals the number
+    // of rows the same traversal returns, for selective filters and for
+    // filters that keep every range row, over the ascending node index and
+    // the descending edge index.
+    let late = || Predicate::gte("uid", 150);
+    let mut windows = Vec::new();
+    for (label, source) in [
+        (
+            "nodes: selective filter",
+            traversal::g().n_with_label_where(
+                "User",
+                Predicate::and(vec![Predicate::lt("rank", 30), Predicate::eq("tier", 1)]),
+            ),
+        ),
+        (
+            "nodes: filter keeping every range row",
+            traversal::g().n_with_label_where(
+                "User",
+                Predicate::and(vec![Predicate::gte("rank", 0), Predicate::neq("uid", -1)]),
+            ),
+        ),
+    ] {
+        for (shape, windowed) in [
+            ("limit", source.clone().limit(10).where_(late())),
+            ("skip", source.clone().skip(40).where_(late())),
+            ("range", source.clone().range(5, 25).where_(late())),
+            (
+                "dedup then limit",
+                source.clone().dedup().limit(10).where_(late()),
+            ),
+        ] {
+            windows.push((label, shape, windowed.clone().count(), windowed.id()));
+        }
+    }
+    let edges = traversal::g().e_with_label_where(
+        "Link",
+        Predicate::and(vec![Predicate::lt("weight", 30), Predicate::eq("tier", 1)]),
+    );
+    for (shape, windowed) in [
+        ("limit", edges.clone().limit(10).where_(late())),
+        ("skip", edges.clone().skip(40).where_(late())),
+        ("range", edges.clone().range(5, 25).where_(late())),
+        (
+            "dedup then limit",
+            edges.clone().dedup().limit(10).where_(late()),
+        ),
+    ] {
+        windows.push((
+            "edges: selective filter",
+            shape,
+            windowed.clone().count(),
+            windowed.id(),
+        ));
+    }
+    let (mut windowed_counts, mut windowed_rows) = (Vec::new(), Vec::new());
+    for (label, shape, count, ids) in windows {
+        let response = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as("count", count)
+                    .var_as("ids", ids)
+                    .returning(["count", "ids"]),
+            ))
+            .await
+            .expect("windowed count succeeds");
+        let Some(rows) = response["ids"].as_array() else {
+            panic!("windowed rows are an array: {response}");
+        };
+        windowed_counts.push((label, shape, response["count"].clone()));
+        windowed_rows.push((label, shape, serde_json::json!(rows.len())));
+    }
+    assert_eq!(windowed_counts, windowed_rows);
+    db.close().await.expect("count fixture closes");
+}
+
 mod vector_object_store_warm {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
