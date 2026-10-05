@@ -114,9 +114,14 @@ pub enum TextElementType {
 /// Supported Tantivy analyzer presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TextAnalyzerKind {
-    /// Simple tokenization with lowercase normalization.
+    /// Alphanumeric tokenization with lowercase normalization.
+    ///
+    /// Unicode combining marks and ZWJ/ZWNJ stay inside the token, so Indic
+    /// conjuncts are not split on virama or nukta. Punctuation still splits tokens.
     Standard,
-    /// Simple tokenization with lowercase normalization and English stemming.
+    /// Alphanumeric tokenization with lowercase normalization and English stemming.
+    ///
+    /// Uses the same token boundaries as [`Self::Standard`].
     StandardStemEn,
     /// Whitespace tokenization with lowercase normalization.
     WhitespaceLowercase,

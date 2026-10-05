@@ -11625,7 +11625,10 @@ nodes (entities) and edges (relationships):
 - A text index provides BM25-ranked search over a top-level string or string-array
   property of a node label or an edge label. Results are ordered by BM25 score, then ID.
 - Each index uses one of three analyzers: `standard`, `standard_stem_en`, or
-  `whitespace_lowercase`. Term positions are optional.
+  `whitespace_lowercase`. `standard` and `standard_stem_en` split on whitespace
+  and punctuation, and they keep Unicode combining marks inside the token, so a
+  Devanagari word such as क्या is one term rather than a break at the virama.
+  Term positions are optional.
 - Text indexes can be partitioned by tenant, which keeps a separate index per tenant
   value.
 - [Prefiltered search](/learn/vector-search/filtered-vector-search) ranks only the nodes

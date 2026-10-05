@@ -26,9 +26,10 @@ use tantivy::merge_policy::NoMergePolicy;
 use tantivy::query::{BooleanQuery, Occur, TermQuery};
 use tantivy::schema::{IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions};
 use tantivy::tokenizer::{
-    Language, LowerCaser, PreTokenizedString, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
-    WhitespaceTokenizer, MAX_TOKEN_LEN,
+    Language, LowerCaser, PreTokenizedString, Stemmer, TextAnalyzer, Token, WhitespaceTokenizer,
+    MAX_TOKEN_LEN,
 };
+pub use unicode_simple::UnicodeSimpleTokenizer;
 use tantivy::{Index, IndexReader, IndexSettings, ReloadPolicy, TantivyDocument, Term};
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
@@ -71,6 +72,8 @@ mod prefilter_benchmark;
 mod restricted;
 mod split;
 mod storage_directory;
+mod unicode_marks;
+mod unicode_simple;
 mod warmup;
 
 use bundle_storage::{CachedSplitStorage, ObjectStoreSplitBundleStorage};
@@ -1419,13 +1422,15 @@ fn register_analyzers(index: &Index, default_analyzer: TextAnalyzerKind) {
 
 pub(crate) fn build_text_analyzer(kind: TextAnalyzerKind) -> TextAnalyzer {
     match kind {
-        TextAnalyzerKind::Standard => TextAnalyzer::builder(SimpleTokenizer::default())
+        TextAnalyzerKind::Standard => TextAnalyzer::builder(UnicodeSimpleTokenizer::default())
             .filter(LowerCaser)
             .build(),
-        TextAnalyzerKind::StandardStemEn => TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(LowerCaser)
-            .filter(Stemmer::new(Language::English))
-            .build(),
+        TextAnalyzerKind::StandardStemEn => {
+            TextAnalyzer::builder(UnicodeSimpleTokenizer::default())
+                .filter(LowerCaser)
+                .filter(Stemmer::new(Language::English))
+                .build()
+        }
         TextAnalyzerKind::WhitespaceLowercase => {
             TextAnalyzer::builder(WhitespaceTokenizer::default())
                 .filter(LowerCaser)
