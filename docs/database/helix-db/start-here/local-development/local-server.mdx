@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The `ghcr.io/helixdb/helixdb:v0.0.9` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.10` image runs the standalone HelixDB server.
 It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
@@ -46,8 +46,14 @@ helix start dev             # add --disk to persist this instance
 
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
-For an existing project, set `tag = "v0.0.9"` in its `[local.dev]` block in
+For an existing project, set `tag = "v0.0.10"` in its `[local.dev]` block in
 `helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
+
+<Warning>
+The first time v0.0.10 opens a persisted database, it upgrades the index storage
+version, and v0.0.9 and earlier then refuse to open that database. Back up the data
+before changing the tag if you may need to roll back.
+</Warning>
 
 ```bash
 helix query dev \
@@ -106,7 +112,7 @@ Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 ```bash
 docker run --rm --name helixdb \
   -p 6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.9
+  ghcr.io/helixdb/helixdb:v0.0.10
 ```
 
 The standalone server exposes liveness and readiness checks:
@@ -132,7 +138,7 @@ docker run --rm --name helixdb \
   -p 6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
-  ghcr.io/helixdb/helixdb:v0.0.9
+  ghcr.io/helixdb/helixdb:v0.0.10
 ```
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
@@ -191,7 +197,7 @@ services:
       retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.9
+    image: ghcr.io/helixdb/helixdb:v0.0.10
     restart: unless-stopped
     depends_on:
       seaweedfs:
@@ -285,7 +291,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.9
+  ghcr.io/helixdb/helixdb:v0.0.10
 ```
 
 In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
