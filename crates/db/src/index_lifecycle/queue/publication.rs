@@ -34,7 +34,8 @@
 //!    retain the rest of the queue, then retire emptied partition caches and
 //!    retain the vector planning session for the target's next attempt: in a
 //!    fair share of the planning budget while the target has work left, in
-//!    spare budget once drained.
+//!    spare budget once drained. A drained target's schedule is dropped,
+//!    keeping only its latest vector commit among the most recently drained.
 //!
 //! Only this attempt acknowledges its generation's queue: callers never run
 //! two attempts for one generation at once (the worker skips in-flight
@@ -46,7 +47,7 @@
 //! Every step after the read costs work proportional to its batch, so a
 //! backlog drains in time linear in its size.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -65,7 +66,9 @@ use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::vector::publication::{
     stage_active_effects, QueuedVectorEffect, StagedEffects,
 };
-use crate::index_lifecycle::vector::{PublicationBacklog, VectorBuildCache};
+use crate::index_lifecycle::vector::{
+    PublicationBacklog, VectorBuildCache, MAX_RETAINED_PUBLICATIONS,
+};
 use crate::index_lifecycle::{
     ActiveIndexHandle, IndexGenerationPublicationPermit, IndexRecordV2, IndexScopeGates,
     IndexStateV2,
@@ -367,7 +370,18 @@ pub(crate) struct QueuePublisher {
     vector: VectorPublicationResources,
     limits: SearchIndexBatchLimits,
     text: TextPublicationResources,
+    /// Schedules of targets with outstanding work, or whose last attempt
+    /// left some: a target's schedule is removed once an attempt finds it
+    /// drained.
     schedules: Mutex<HashMap<QueueTarget, TargetSchedule>>,
+    /// Latest vector commit of the most recently drained targets, newest
+    /// last: a drained target's planning session waits, in spare budget, for
+    /// a trickle of later writes, and is reused only at that commit. The
+    /// planning cache retains at most [`MAX_RETAINED_PUBLICATIONS`] sessions,
+    /// so a target drained before as many others drained is assumed to have
+    /// lost its session; forgetting a commit only makes the next attempt
+    /// plan cold.
+    drained_commits: Mutex<VecDeque<(QueueTarget, NonZeroU64)>>,
     cursor: Mutex<Option<QueueTarget>>,
     /// Targets with an attempt running: an attempt is its queue's only
     /// acknowledger, and reconciliation and discard rely on that.
@@ -566,6 +580,7 @@ impl QueuePublisher {
             limits,
             text,
             schedules: Mutex::new(HashMap::new()),
+            drained_commits: Mutex::new(VecDeque::new()),
             cursor: Mutex::new(None),
             attempts: Mutex::new(HashSet::new()),
             vector_commits: AtomicU64::new(0),
@@ -727,11 +742,33 @@ impl QueuePublisher {
         outcome: PublicationOutcome,
         admitted: Option<Admission>,
     ) {
+        let charged = self.backlog.has_charges(target);
         // Charged work that reads empty is not visible yet, for example a
         // reservation whose commit is still in flight: it waits like a hidden
         // build instead of being dispatched again at once.
-        let unsettled = outcome == PublicationOutcome::Empty && self.backlog.has_charges(target);
+        let unsettled = outcome == PublicationOutcome::Empty && charged;
+        // A target this attempt drained is not scheduled again until new
+        // work arrives, so nothing of its schedule is needed but its latest
+        // vector commit, which a retained planning session may still match.
+        let drained = !charged
+            && matches!(
+                outcome,
+                PublicationOutcome::Published { .. } | PublicationOutcome::Discarded { .. }
+            );
         let mut schedules = self.schedules.lock();
+        if drained {
+            let commit = schedules
+                .remove(&target)
+                .and_then(|schedule| schedule.last_vector_commit);
+            drop(schedules);
+            let mut commits = self.drained_commits.lock();
+            commits.retain(|(previous, _)| *previous != target);
+            commits.extend(commit.map(|commit| (target, commit)));
+            if commits.len() > MAX_RETAINED_PUBLICATIONS {
+                commits.pop_front();
+            }
+            return;
+        }
         let default_limit = self.limits.max_entities().get();
         let schedule = schedules
             .entry(target)
@@ -1307,13 +1344,29 @@ impl QueuePublisher {
 }
 
 impl QueuePublisher {
-    /// Returns `target`'s schedule, or a new one's.
+    /// Returns `target`'s schedule, or a new one's, which resumes from the
+    /// target's latest vector commit if it drained recently.
     fn schedule(&self, target: QueueTarget) -> TargetSchedule {
-        self.schedules
-            .lock()
-            .get(&target)
-            .cloned()
-            .unwrap_or_else(|| TargetSchedule::new(self.limits.max_entities().get()))
+        let live = self.schedules.lock().get(&target).cloned();
+        live.unwrap_or_else(|| TargetSchedule {
+            last_vector_commit: self
+                .drained_commits
+                .lock()
+                .iter()
+                .find(|(drained, _)| *drained == target)
+                .map(|(_, commit)| *commit),
+            ..TargetSchedule::new(self.limits.max_entities().get())
+        })
+    }
+
+    /// Returns how many targets have a schedule, and how many drained
+    /// targets' latest vector commits are remembered.
+    #[cfg(test)]
+    pub(crate) fn scheduled_targets(&self) -> (usize, usize) {
+        (
+            self.schedules.lock().len(),
+            self.drained_commits.lock().len(),
+        )
     }
 
     /// Returns how many entities are held back after blocking, without
