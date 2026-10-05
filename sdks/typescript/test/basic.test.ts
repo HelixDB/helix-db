@@ -20,6 +20,7 @@ import {
   RepeatConfig,
   ShortestPathDirection,
   SourcePredicate,
+  StreamBound,
   VectorDistanceMetric,
   WhenThen,
   bytes,
@@ -118,6 +119,14 @@ for (const value of [-1, 1.5, 256, "7", true]) {
 }
 assert.deepEqual(parsed(PropertyInput.param("limit")), { expr: { param: "limit" } });
 assert.deepEqual(parsed(NodeRef.param("node_ids")), { param: "node_ids" });
+assert.deepEqual(parsed(StreamBound.literal(0)), { literal: 0 });
+assert.deepEqual(parsed(StreamBound.literal(BigInt(Number.MAX_SAFE_INTEGER))), {
+  literal: Number.MAX_SAFE_INTEGER,
+});
+for (const value of [-1, -1n, -9_007_199_254_740_993n]) {
+  assert.throws(() => StreamBound.literal(value), TypeError);
+}
+assert.throws(() => StreamBound.literal(BigInt(Number.MAX_SAFE_INTEGER) + 1n), TypeError);
 assert.deepEqual(parsed(QueryParamType.array(QueryParamType.array(QueryParamType.f64()))), { array: { array: "f64" } });
 assert.equal(Object.isFrozen(param.array(param.string())), true);
 assert.equal(Object.isFrozen(QueryParamType.array(QueryParamType.string())), true);
