@@ -328,10 +328,13 @@ impl QueuedOperation {
         &self.payload
     }
 
-    /// Returns the exact bytes this operation retains in a resolved queue.
+    /// Returns the exact bytes this operation retains in a resolved queue:
+    /// mode, identity, body length, entity, and the complete payload,
+    /// including deletions.
     ///
-    /// Accounting charges this size: mode, identity, body length, entity, and
-    /// the complete payload, including deletions.
+    /// Admission charges more than this size: pass it to
+    /// [`crate::index_lifecycle::queue::backlog::charged_bytes`], which adds
+    /// the fixed per-operation overhead, rather than charging it directly.
     pub(crate) fn retained_bytes(&self) -> u64 {
         retained_len(body_encoded_len(self))
     }

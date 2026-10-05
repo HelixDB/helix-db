@@ -78,7 +78,9 @@ impl core::fmt::Display for WriterMigrationRequirement {
 /// Retained queued-operation resource whose admission limit would be exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexBackpressureResource {
-    /// Encoded bytes of every retained operation, including deletions.
+    /// Charged bytes of every retained operation, including deletions: each
+    /// counts its encoded size plus
+    /// [`crate::config::IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`].
     RetainedBytes,
     /// Distinct entity/generation members with one or more outstanding operations.
     PendingMembers,
@@ -109,8 +111,9 @@ pub enum IndexOperationBatchResource {
     /// Encoded bytes of one queue key's operand, bounded by the
     /// write-ahead-log entry limit.
     OperandBytes,
-    /// Encoded bytes of every staged operation, bounded by the per-index
-    /// retained-byte limit.
+    /// Charged bytes of every staged operation, bounded by the per-index
+    /// retained-byte limit: each counts its encoded size plus
+    /// [`crate::config::IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`].
     RetainedBytes,
     /// Distinct entity/generation members staged, bounded by the per-index
     /// pending-member limit.
