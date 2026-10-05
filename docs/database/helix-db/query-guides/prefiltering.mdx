@@ -470,7 +470,9 @@ removed the value.
   unpublished document, and a prefiltered vector search fails the same way when
   its index holds more
   [unpublished vector work](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes)
-  than a `strong` search may score.
+  than a `strong` search may score. That work counts every tenant partition of the
+  index, so with a lowered bound another tenant's backlog can fail the search even
+  when its own candidates have nothing unpublished.
 - `eventual` does this for the oldest unpublished work within its per-search budget and
   ranks the remaining candidates by their last published values until publication.
 

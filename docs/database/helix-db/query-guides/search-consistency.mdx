@@ -184,14 +184,23 @@ publications to bring the backlog back under it. Within the limit the search sta
   limits, which a document published under much larger limits may never do.
 
 A `strong` vector search, whole-index or prefiltered, scores every unpublished vector
-in its index exactly, so its CPU time grows with that work. It fails with a retryable
-`index_backpressure` error (`pending_vector_bytes`) instead when that work exceeds
-512 MiB: each changed node or edge counts once, at its latest unpublished vector (4
-bytes per dimension) plus a few dozen bytes. That is about 170,000 pending
-768-dimension vectors, or about 87,000 of 1,536 dimensions. Self-hosted servers can change
-the bound with `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES`. Within it the search
-stays exact.
+in its index exactly, so its CPU time grows with that work. Each changed node or edge
+counts once, at its latest unpublished vector (4 bytes per dimension) plus a few dozen
+bytes. By default a search may score as much as its index may retain, the
+[retained-byte limit](#index-backpressure) of 1,000,000,000 bytes: about 160,000
+pending vectors of 1,536 dimensions. That limit also counts every superseded change, so
+writes fail with `index_backpressure` before such searches do. Only lowering the limit
+below work already admitted, or a blocked build's repair write admitted past it, leaves
+more behind a search. A search behind more than its bound fails with a retryable
+`index_backpressure` error (`pending_vector_bytes`) until the index worker publishes
+enough of it. Self-hosted servers can set a lower bound, which caps the CPU
+time of each search, with `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES`. Within the
+bound the search stays exact.
 
+- The bound counts unpublished vectors in every tenant partition of the index, as the
+  retained-byte limit does. With a lowered bound, one tenant's backlog also fails other
+  tenants' `strong` vector searches, including prefiltered ones whose own candidates
+  have nothing unpublished.
 - A write batch's own changes never count toward it.
 - An `eventual` vector search never fails this way. It includes up to 128 MiB of
   unpublished work, oldest first, and serves the rest as last published.

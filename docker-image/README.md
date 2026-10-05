@@ -74,8 +74,10 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 
 `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` sets the most unpublished vector work,
 in bytes, that one `strong` vector search scores exactly before it fails with the
-retryable `index_backpressure` (`pending_vector_bytes`); it defaults to 536870912
-(512 MiB) with any storage. Startup fails naming it when it is not a positive integer.
+retryable `index_backpressure` (`pending_vector_bytes`). It defaults to each index's
+retained-byte limit (1000000000) with any storage, so writes reach backpressure first;
+set it lower to cap the CPU time of each strong vector search. The bound counts every
+tenant partition of an index. Startup fails naming it when it is not a positive integer.
 
 ### Benchmark images
 
