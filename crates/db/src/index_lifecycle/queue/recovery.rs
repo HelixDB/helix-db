@@ -8,8 +8,9 @@
 //! record that still names its generation; a scope's records are read only
 //! once it yields a queue. Tenant scopes have no registry, so one iterator
 //! over the tenant keyspace seeks from each tenant's queue range to the
-//! next tenant's: a tenant costs at most one seek besides its own queue rows,
-//! which is linear in the number of tenant scopes that contain any rows.
+//! next tenant's: a tenant costs at most two seeks besides its own queue
+//! rows, which is linear in the number of tenant scopes that contain any
+//! rows.
 
 use std::collections::HashMap;
 
@@ -108,22 +109,23 @@ pub(crate) async fn load_backlog(
     let mut discovery = store.discovery();
     let mut owners = None;
     let mut summary = LoadedQueueSummary::default();
-    let mut rows = reader
+    let mut legacy = reader
         .scan(discovery_range(DataScope::LegacyUnscoped))
         .await?;
-    while let Some(row) = rows.next().await? {
+    while let Some(row) = legacy.next().await? {
         let Some(queue) = discovery.push(&row.key, &row.value)? else {
             continue;
         };
         load_queue(reader, backlog, &mut owners, &mut summary, queue).await?;
     }
-    let mut rows = reader
+    drop(legacy);
+    let mut tenants = reader
         .scan(
             discovery_range(DataScope::Tenant(TenantId::from_u128(0))).start
                 ..Bytes::from_static(&[TENANT_KEY_PREFIX + 1]),
         )
         .await?;
-    while let Some(row) = next_tenant_queue_row(&mut rows).await? {
+    while let Some(row) = next_tenant_queue_row(&mut tenants).await? {
         let Some(queue) = discovery.push(&row.key, &row.value)? else {
             continue;
         };
@@ -141,7 +143,7 @@ pub(crate) async fn load_backlog(
 ///
 /// Only ever seeks forward: a row before its tenant's range seeks into that
 /// range, and a row past it seeks to the next tenant's range, so a tenant
-/// without queues costs at most one seek however many rows it holds.
+/// costs at most two seeks however many rows it holds outside its queues.
 async fn next_tenant_queue_row(rows: &mut DbIterator) -> Result<Option<KeyValue>> {
     while let Some(row) = rows.next().await? {
         let Some((tenant, _)) = DataScope::strip_tenant_envelope(&row.key) else {
