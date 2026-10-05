@@ -1150,7 +1150,10 @@ async fn a_misowned_tenant_queue_fails_the_open_after_other_scopes_queues() {
             let store: Arc<dyn ObjectStore> = Arc::new(fixture.fork());
             let db = open(OWNERS, Arc::clone(&store), config()).await;
             let (_, target) = scoped_owner(&db, scope, owner).await;
-            assert!(target.index_id.get() < 999, "{target:?} sorts before the orphan");
+            assert!(
+                target.index_id.get() < 999,
+                "{target:?} sorts before the orphan"
+            );
             enqueue(
                 &db.inner_db(),
                 &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
@@ -1159,8 +1162,8 @@ async fn a_misowned_tenant_queue_fails_the_open_after_other_scopes_queues() {
             )
             .await;
             db.close().await.unwrap();
-            let Err(error) = HelixDB::open_with_object_store_and_config(OWNERS, store, config())
-                .await
+            let Err(error) =
+                HelixDB::open_with_object_store_and_config(OWNERS, store, config()).await
             else {
                 panic!("{scope:?}: the writer opened over a misowned queue ({expected})");
             };
