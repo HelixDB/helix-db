@@ -71,6 +71,13 @@ async fn tenant_scopes_queue_publish_and_recover_independently() {
     Box::pin(db::production_coverage::index_operation_queue_tenant_scope_contracts()).await;
 }
 
+/// Proves a reopened writer discovers queues across the whole tenant
+/// keyspace, from the first tenant ID to the last.
+#[tokio::test]
+async fn writer_open_discovers_queues_across_the_tenant_keyspace() {
+    Box::pin(db::production_coverage::index_operation_queue_scope_walk_contracts()).await;
+}
+
 /// Proves a writer refuses queues its catalog cannot own or read.
 #[tokio::test]
 async fn writer_open_fails_closed_on_unowned_queues() {

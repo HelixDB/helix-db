@@ -377,6 +377,123 @@ async fn map_fixture(db: &Db, admin: &slatedb::admin::Admin) -> BTreeSet<QueueTa
     expected
 }
 
+#[test]
+fn a_discovery_range_holds_exactly_one_scopes_queue_keys_of_both_layouts() {
+    let queue_key = |scope, index, generation| queue_target(scope, index, generation).key();
+    let row_key = |scope, index, generation, sequence| {
+        ManagedIndexKey::Data {
+            scope,
+            kind: ScopedKey::IndexOperationRow(crate::encoding::v2::keys::IndexOperationRowKey {
+                index_id: IndexId::new(index).unwrap(),
+                generation: IndexGenerationId::new(generation).unwrap(),
+                sequence,
+            }),
+        }
+        .to_bytes()
+    };
+    let record_key = |scope: DataScope, kind: RecordKind| {
+        ManagedIndexKey::data_prefix(scope, ScopedKey::logical_prefix(kind))
+    };
+    let scopes = [
+        DataScope::LegacyUnscoped,
+        tenant(0),
+        tenant(1),
+        tenant(u128::MAX - 1),
+        tenant(u128::MAX),
+    ];
+    for scope in scopes {
+        let range = discovery_range(scope);
+        for key in [
+            queue_key(scope, 1, 1),
+            queue_key(scope, u64::MAX, u64::MAX),
+            row_key(scope, 1, 1, 0),
+            row_key(scope, u64::MAX, u64::MAX, u64::MAX),
+        ] {
+            assert!(range.contains(&key), "{scope:?} holds {key:?}");
+        }
+        for kind in [RecordKind::IndexRecord, RecordKind::SecondaryEqualityBitmap] {
+            assert!(!range.contains(&record_key(scope, kind)), "{scope:?} {kind:?}");
+        }
+        for other in scopes.into_iter().filter(|other| *other != scope) {
+            assert!(!range.contains(&queue_key(other, 1, 1)), "{scope:?} {other:?}");
+            assert!(
+                !range.contains(&row_key(other, u64::MAX, u64::MAX, u64::MAX)),
+                "{scope:?} {other:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn discovery_completes_map_queues_per_row_and_row_queues_per_generation() {
+    let first = queue_target(tenant(3), 1, 1);
+    let second = queue_target(tenant(3), 2, 1);
+    let operations = [text(1, "a"), text(2, "b")];
+    let frames = |operations: &[QueuedOperation]| {
+        operations
+            .iter()
+            .map(|operation| crate::encoding::v2::values::indexes::operation_queue::OperationFrame {
+                id: operation.id(),
+                entity: operation.entity(),
+                retained_bytes: operation.retained_bytes(),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Map layout: every row is a whole queue.
+    let map = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let mut discovery = map.discovery();
+    for target in [first, second] {
+        let value = QueueOperand::enqueue(&operations).unwrap();
+        let queue = discovery
+            .push(&target.key(), value.bytes())
+            .unwrap()
+            .expect("a map row is a whole queue");
+        assert_eq!(
+            (queue.target, queue.family, queue.frames),
+            (target, QueueFamily::Text, frames(&operations[..]))
+        );
+    }
+    assert_eq!(discovery.finish(), None);
+
+    // Row layout: a generation completes when the next one's first row arrives.
+    let rows = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let mut discovery = rows.discovery();
+    let row = |target: QueueTarget, sequence| {
+        ManagedIndexKey::Data {
+            scope: target.scope,
+            kind: ScopedKey::IndexOperationRow(crate::encoding::v2::keys::IndexOperationRowKey {
+                index_id: target.index_id,
+                generation: target.generation,
+                sequence,
+            }),
+        }
+        .to_bytes()
+    };
+    let encoded = |operation| QueueRow::encode(QueueFamily::Text, operation);
+    assert_eq!(discovery.push(&row(first, 0), &encoded(&operations[0])).unwrap(), None);
+    assert_eq!(discovery.push(&row(first, 1), &encoded(&operations[1])).unwrap(), None);
+    let completed = discovery
+        .push(&row(second, 2), &encoded(&operations[0]))
+        .unwrap()
+        .expect("the next generation completes the previous one");
+    assert_eq!(
+        (completed.target, completed.frames),
+        (first, frames(&operations[..]))
+    );
+    let last = discovery.finish().expect("finish completes the last generation");
+    assert_eq!((last.target, last.frames), (second, frames(&operations[..1])));
+
+    // One generation's rows must share a family.
+    let mut discovery = rows.discovery();
+    discovery.push(&row(first, 0), &encoded(&operations[0])).unwrap();
+    let vector_row = QueueRow::encode(QueueFamily::Vector, &vector(1, &[1.0]));
+    assert!(matches!(
+        discovery.push(&row(first, 1), &vector_row),
+        Err(HelixDbError::IndexCatalogCorruption(_))
+    ));
+}
+
 #[tokio::test]
 async fn one_pass_charges_exactly_what_full_decodes_charged_across_scopes_and_tiers() {
     let store = Arc::new(InMemory::new());
