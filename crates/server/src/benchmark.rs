@@ -192,6 +192,7 @@ mod tests {
             grpc_addr: "127.0.0.1:0".parse().unwrap(),
             db_path: "benchmark-sample".to_string(),
             storage: StorageConfig::Memory,
+            cypher: crate::CypherEndpoints::Disabled,
         };
         let Err(error) = open_database(Role::Reader, QueueLayout::Map, &config).await else {
             panic!("a memory reader cannot share the writer's storage");
@@ -292,6 +293,7 @@ mod tests {
                 root: root.path().to_path_buf(),
                 cache: crate::config::CacheConfig::Memory,
             },
+            cypher: crate::CypherEndpoints::Disabled,
         };
         let writer = open_database(Role::Writer, QueueLayout::Map, &config)
             .await

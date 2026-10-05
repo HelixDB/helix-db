@@ -866,6 +866,7 @@ async fn a_benchmark_writer_holds_its_hybrid_cache_directory_like_the_server() {
                 .unwrap(),
             )),
         },
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let benchmark = crate::benchmark::open_database(
         crate::benchmark::Role::Writer,
