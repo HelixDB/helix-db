@@ -38,7 +38,7 @@ use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::indexes::operation_queue as codec;
 use crate::error::HelixDbError;
 use crate::index_lifecycle::queue::backlog::{
-    BacklogLimits, BacklogReservation, IndexOperationBacklog, OperationCharge,
+    charged_bytes, BacklogLimits, BacklogReservation, IndexOperationBacklog, OperationCharge,
 };
 use crate::index_lifecycle::queue::publication::PublicationOutcome;
 use crate::index_lifecycle::queue::QueueTarget;
@@ -78,7 +78,7 @@ pub fn index_operation_queue_ledger_contracts() {
         target,
         entity: node(entity),
         id: codec::QueuedOperationId::generate(),
-        bytes,
+        encoded_bytes: bytes,
     };
     let invariant = |result: crate::error::Result<BacklogReservation>, expected: &str| {
         let Err(HelixDbError::InvariantViolation(message)) = &result else {
@@ -88,7 +88,7 @@ pub fn index_operation_queue_ledger_contracts() {
     };
     let backlog = IndexOperationBacklog::new(
         BacklogLimits {
-            max_retained_bytes: 1_000,
+            max_retained_bytes: 10_000,
             max_members: 10,
         },
         crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
@@ -120,7 +120,7 @@ pub fn index_operation_queue_ledger_contracts() {
 
     // Startup discovery charges each durable identity once.
     let durable = charge(target(1), 4, 25);
-    let loaded = [(durable.id, durable.entity, durable.bytes)];
+    let loaded = [(durable.id, durable.entity, durable.encoded_bytes)];
     backlog.load_durable(durable.target, loaded);
     backlog.load_durable(durable.target, loaded);
     assert_eq!(backlog.totals().usage.operations, 1);
@@ -154,7 +154,11 @@ pub fn index_operation_queue_ledger_contracts() {
     assert_eq!(backlog.finish_reconciliation(ticket, target(1), []), 0);
     assert!(backlog.has_uncertain(target(1)));
     assert_eq!(
-        backlog.finish_reconciliation(ticket, target(1), [(late.id, late.entity, late.bytes)]),
+        backlog.finish_reconciliation(
+            ticket,
+            target(1),
+            [(late.id, late.entity, late.encoded_bytes)]
+        ),
         0
     );
     assert!(!backlog.has_uncertain(target(1)));
@@ -219,7 +223,7 @@ pub async fn index_operation_queue_reconciliation_contracts() {
                 target,
                 entity: node(document),
                 id: codec::QueuedOperationId::generate(),
-                bytes: 64,
+                encoded_bytes: 64,
             }],
             &[],
         )
@@ -826,7 +830,7 @@ pub async fn index_operation_queue_scope_walk_contracts() {
             );
             let operation = vector_operation(ordinal as u64 + 1, [1.0, 2.0]);
             commit_operation(&db, target, &operation).await;
-            retained_bytes += operation.retained_bytes();
+            retained_bytes += charged_bytes(operation.retained_bytes());
             targets.insert(target);
         }
     }
@@ -1487,7 +1491,7 @@ async fn commit_reserved(
                 target,
                 entity: operation.entity(),
                 id: operation.id(),
-                bytes: operation.retained_bytes(),
+                encoded_bytes: operation.retained_bytes(),
             }],
             &[],
         )

@@ -4,6 +4,13 @@
 //! generations. They are never serialized, so changing them does not alter
 //! the persisted queue format.
 //!
+//! The retained-byte limit bounds memory, not just encoded size: every queued
+//! operation counts its encoded size plus
+//! [`IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`], so a backlog of
+//! many small operations, such as deletes, reaches it long before its encoded
+//! bytes would. The heap an index's backlog holds in admission accounting,
+//! one decoded copy, and one merge resolution stays within twice the limit.
+//!
 //! # Usage
 //!
 //! ```
@@ -21,6 +28,12 @@
 //! let config = DbConfig::new().with_index_operation_queue_tuning(tuning);
 //! assert_eq!(config.index_operation_queue(), tuning);
 //! assert_eq!(IndexOperationQueueTuning::default().max_members().get(), 250_000);
+//!
+//! // The default 1 GB limit holds at most this many queued operations,
+//! // however small each one encodes.
+//! let overhead = IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES;
+//! assert_eq!(overhead, 576);
+//! assert_eq!(1_000_000_000 / overhead, 1_736_111);
 //!
 //! // A larger retained-byte ceiling could let one queue value outgrow the
 //! // longest value storage can encode.
@@ -145,7 +158,21 @@ impl IndexOperationQueueTuning {
     pub const MAX_RETAINED_BYTES: u64 =
         crate::encoding::v2::values::indexes::operation_queue::MAX_RETAINED_BYTES;
 
-    /// Returns the retained-operation byte ceiling per logical index.
+    /// Fixed bytes every queued operation counts toward
+    /// [`Self::max_retained_bytes`] beyond its encoded size.
+    ///
+    /// It covers the process memory a retained operation costs whatever its
+    /// payload: its admission-ledger entry, its decoded form in a queue a
+    /// publisher holds, and its share of resolving its queue's merge
+    /// operands, measured at the allocator's real chunk sizes. Together with
+    /// the copies of its payload those hold, they stay within twice the
+    /// operation's charge for every operation shape.
+    pub const OPERATION_OVERHEAD_BYTES: u64 =
+        crate::index_lifecycle::queue::backlog::OPERATION_OVERHEAD_BYTES;
+
+    /// Returns the retained-operation byte ceiling per logical index: each
+    /// queued operation counts its encoded size plus
+    /// [`Self::OPERATION_OVERHEAD_BYTES`].
     pub const fn max_retained_bytes(self) -> NonZeroU64 {
         self.max_retained_bytes
     }

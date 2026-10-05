@@ -1,4 +1,5 @@
-//! Measured heap per retained index-queue operation.
+//! Measured heap per retained index-queue operation against its admission
+//! charge.
 //!
 //! Requires `production-coverage`. The binary installs a global allocator
 //! that charges each thread for its own allocations at glibc's chunk size
@@ -8,6 +9,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
+use db::config::IndexOperationQueueTuning;
 use db::production_coverage::{AllocationProbe, QueueMemorySample};
 
 thread_local! {
@@ -88,26 +90,63 @@ impl AllocationProbe for ThreadProbe {
     }
 }
 
-/// Reports the measured heap per retained operation of every queued shape.
+/// The heap one retained operation holds in the admission ledger, in one
+/// decoded copy of its queue, and in one resolution of its queue's merge
+/// operands stays within twice what it is charged, for every operation shape;
+/// the fixed overhead never charges more than the smallest operation costs.
 #[test]
-fn retained_operation_memory_per_shape() {
+fn retained_operation_memory_stays_within_twice_its_charge() {
+    let overhead = IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES;
     let samples = db::production_coverage::index_operation_queue_memory_samples(&ThreadProbe);
     println!(
-        "{:<24} {:>8} {:>8} {:>8} {:>10} {:>10}",
-        "shape", "encoded", "ledger", "decoded", "res/base", "res/ops"
+        "{:<24} {:>7} {:>7} {:>7} {:>7} {:>8} {:>7} {:>9} {:>10}",
+        "shape",
+        "encoded",
+        "charged",
+        "ledger",
+        "decoded",
+        "res/base",
+        "res/ops",
+        "heap/chg",
+        "heap/enc"
     );
-    for QueueMemorySample {
-        shape,
-        encoded,
-        ledger,
-        decoded,
-        resolution_over_base,
-        resolution_of_operands,
-    } in &samples
-    {
+    let heap = |sample: &QueueMemorySample| {
+        sample.ledger
+            + sample.decoded
+            + sample
+                .resolution_over_base
+                .max(sample.resolution_of_operands)
+    };
+    // Every shape is reported before any is checked, so one failure still
+    // shows the whole calibration.
+    for sample in &samples {
+        let QueueMemorySample {
+            shape,
+            encoded,
+            charged,
+            ledger,
+            decoded,
+            resolution_over_base,
+            resolution_of_operands,
+        } = *sample;
         println!(
-            "{shape:<24} {encoded:>8} {ledger:>8} {decoded:>8} {resolution_over_base:>10} \
-             {resolution_of_operands:>10}"
+            "{shape:<24} {encoded:>7} {charged:>7} {ledger:>7} {decoded:>7} \
+             {resolution_over_base:>8} {resolution_of_operands:>7} {:>9.2} {:>10.2}",
+            heap(sample) as f64 / charged as f64,
+            heap(sample) as f64 / encoded as f64,
+        );
+    }
+    for sample in &samples {
+        let shape = sample.shape;
+        assert_eq!(sample.charged, sample.encoded + overhead, "{shape}");
+        assert!(
+            heap(sample) <= 2 * sample.charged,
+            "{shape}: {} heap bytes for {sample:?}",
+            heap(sample)
+        );
+        assert!(
+            heap(sample) >= overhead,
+            "{shape}: the overhead exceeds what it covers"
         );
     }
 }

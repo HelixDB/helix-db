@@ -65,7 +65,9 @@ use super::{IndexGenerationId, IndexId};
 /// the lag histogram's count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct IndexOperationQueueStats {
-    /// Encoded bytes of committed operations not yet acknowledged.
+    /// Bytes retained operations count toward their indexes' retained-byte
+    /// limits: each operation not yet acknowledged counts its encoded size
+    /// plus [`crate::config::IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`].
     pub retained_bytes: u64,
     /// Distinct pending `(generation, entity)` members.
     pub pending_members: u64,

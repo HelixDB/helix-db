@@ -483,7 +483,7 @@ impl QueuedMutationCollector {
                     target: *target,
                     entity: operation.entity(),
                     id: operation.id(),
-                    bytes: operation.retained_bytes(),
+                    encoded_bytes: operation.retained_bytes(),
                 }));
             staged.operands.push(StagedQueueOperand {
                 target: *target,

@@ -348,7 +348,10 @@ async fn graph_rows_and_complete_operations_commit_together_without_physical_row
         .usage(DataScope::LegacyUnscoped, vector_target.index_id);
     assert_eq!(usage.operations, 1);
     assert_eq!(usage.members, 1);
-    assert_eq!(usage.retained_bytes, operation.retained_bytes());
+    assert_eq!(
+        usage.retained_bytes,
+        operation.retained_bytes() + super::backlog::OPERATION_OVERHEAD_BYTES
+    );
     db.close().await.unwrap();
 }
 
@@ -462,7 +465,8 @@ async fn one_transaction_collapses_but_committed_updates_stay_ordered() {
     let texts = queue(&db, QueueFamily::Text).await.unwrap();
     assert_eq!(text_of(texts.operations().last().unwrap().payload()), None);
     assert_eq!(texts.operations().len(), 4);
-    // Every retained operation still counts toward the byte limit.
+    // Every retained operation still counts toward the byte limit, each
+    // with the fixed overhead.
     let text_target = target(&db, QueueFamily::Text).await;
     let usage = db
         .index_operation_backlog()
@@ -474,7 +478,7 @@ async fn one_transaction_collapses_but_committed_updates_stay_ordered() {
         texts
             .operations()
             .iter()
-            .map(|operation| operation.retained_bytes())
+            .map(|operation| operation.retained_bytes() + super::backlog::OPERATION_OVERHEAD_BYTES)
             .sum::<u64>()
     );
     db.close().await.unwrap();
@@ -576,36 +580,55 @@ async fn a_write_over_the_member_limit_on_its_own_fails_without_retry() {
 
 #[tokio::test]
 async fn byte_backpressure_accepts_the_limit_and_rejects_one_byte_more() {
-    // Node IDs 0 and 1 with a one-character text each retain 24 bytes:
+    // Node IDs below 128 with a one-character text each encode in 24 bytes:
     // mode(1) + id(16) + body_len(1) + body(kind 1, id 1, some 1,
-    // partition 1, len 1, text 1).
+    // partition 1, len 1, text 1). Each is charged that plus the overhead.
+    const OVERHEAD: u64 = super::backlog::OPERATION_OVERHEAD_BYTES;
+    let limit = 2 * (24 + OVERHEAD);
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let tuning = IndexOperationQueueTuning::default()
-        .with_max_retained_bytes(NonZeroU64::new(48).unwrap())
+        .with_max_retained_bytes(NonZeroU64::new(limit).unwrap())
         .unwrap();
     let db = open("queue-bytes", store, queued(tuning)).await;
     install_text(&db).await;
     add_text(&db, "a").await.unwrap();
+    let error = add_text(&db, "bb")
+        .await
+        .expect_err("one byte above the limit");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::RetainedBytes,
+                requested,
+                limit: refused_at,
+                ..
+            } if requested == limit + 1 && refused_at == limit
+        ),
+        "{error:?}"
+    );
     add_text(&db, "b")
         .await
-        .expect("exactly 48 bytes is admitted");
+        .expect("exactly the limit is admitted");
     let text_target = target(&db, QueueFamily::Text).await;
     assert_eq!(
         db.index_operation_backlog()
             .usage(DataScope::LegacyUnscoped, text_target.index_id)
             .retained_bytes,
-        48
+        limit
     );
     let error = add_text(&db, "c").await.expect_err("above the byte limit");
-    assert!(matches!(
-        error,
-        HelixDbError::IndexBackpressure {
-            resource: IndexBackpressureResource::RetainedBytes,
-            requested: 72,
-            limit: 48,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::RetainedBytes,
+                requested,
+                ..
+            } if requested == limit + 24 + OVERHEAD
+        ),
+        "{error:?}"
+    );
     assert_eq!(node_count(&db).await, 2);
     db.close().await.unwrap();
 }
@@ -676,6 +699,113 @@ async fn reopening_rebuilds_exact_accounting_before_graph_writes() {
         .await
         .unwrap_err()
         .is_index_backpressure());
+    reopened.close().await.unwrap();
+}
+
+/// Inserts, a large document, updates, and deletes are each charged their
+/// encoded size plus the fixed overhead, and a reopened writer charges every
+/// durable operation exactly as live admission did, so the byte limit refuses
+/// at the same point across a restart.
+#[tokio::test]
+async fn reopening_charges_every_operation_exactly_as_live_admission_did() {
+    const OVERHEAD: u64 = super::backlog::OPERATION_OVERHEAD_BYTES;
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open(
+        "queue-restart-charges",
+        Arc::clone(&store),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install_vector_and_text(&db).await;
+    let small = add_doc(&db, vec![1.0, 0.0], "a").await.unwrap();
+    let large = add_doc(&db, vec![0.0, 1.0], &"word ".repeat(820))
+        .await
+        .unwrap();
+    db.query(QueryRequest::write(
+        batch::write_batch().var_as(
+            "updated",
+            traversal::g()
+                .n(NodeRef::from(small))
+                .set_property("embedding", vec![2.0_f32, 0.0])
+                .set_property("body", "a2".to_string()),
+        ),
+    ))
+    .await
+    .unwrap();
+    db.query(QueryRequest::write(batch::write_batch().var_as(
+        "dropped",
+        traversal::g().n(NodeRef::from(large)).drop(),
+    )))
+    .await
+    .unwrap();
+    let mut live = Vec::new();
+    for family in [QueueFamily::Vector, QueueFamily::Text] {
+        let index_id = target(&db, family).await.index_id;
+        let operations = queue(&db, family).await.unwrap().into_operations();
+        assert_eq!(
+            operations.len(),
+            4,
+            "{family:?}: two inserts, an update, a delete"
+        );
+        let usage = db
+            .index_operation_backlog()
+            .usage(DataScope::LegacyUnscoped, index_id);
+        assert_eq!(
+            usage.retained_bytes,
+            operations
+                .iter()
+                .map(|operation| operation.retained_bytes() + OVERHEAD)
+                .sum::<u64>(),
+            "{family:?}"
+        );
+        live.push((index_id, usage));
+    }
+    let total = live
+        .iter()
+        .map(|(_, usage)| usage.retained_bytes)
+        .sum::<u64>();
+    assert_eq!(db.index_operation_queue_stats().retained_bytes, total);
+    db.close().await.unwrap();
+
+    // Reopen with the text index exactly full: the reloaded charges refuse
+    // the next byte just as the live ones would have.
+    let text_usage = live[1].1.retained_bytes;
+    let tuning = IndexOperationQueueTuning::default()
+        .with_max_retained_bytes(NonZeroU64::new(text_usage).unwrap())
+        .unwrap();
+    let reopened = open("queue-restart-charges", store, queued(tuning)).await;
+    for (index_id, usage) in &live {
+        assert_eq!(
+            reopened
+                .index_operation_backlog()
+                .usage(DataScope::LegacyUnscoped, *index_id),
+            *usage
+        );
+    }
+    assert_eq!(reopened.index_operation_queue_stats().retained_bytes, total);
+    let error = reopened
+        .query(QueryRequest::write(
+            batch::write_batch().var_as(
+                "updated",
+                traversal::g()
+                    .n(NodeRef::from(small))
+                    .set_property("body", "a3".to_string()),
+            ),
+        ))
+        .await
+        .expect_err("the reloaded text backlog fills its limit");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::RetainedBytes,
+                requested,
+                limit,
+                ..
+            } if limit == text_usage && requested > text_usage + OVERHEAD
+        ),
+        "{error:?}"
+    );
     reopened.close().await.unwrap();
 }
 

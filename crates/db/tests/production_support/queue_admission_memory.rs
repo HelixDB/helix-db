@@ -1,9 +1,9 @@
 //! Measured process memory of retained index-queue operations.
 //!
-//! The admission ledger bounds each logical index's backlog in charged bytes.
-//! These samples measure, through the calling test binary's allocation
-//! probe, the heap a backlog of one operation shape actually holds per
-//! operation:
+//! The admission ledger bounds each logical index's backlog in charged bytes:
+//! each operation's encoded size plus a fixed overhead. These samples
+//! measure, through the calling test binary's allocation probe, the heap a
+//! backlog of one operation shape actually holds per operation:
 //!
 //! - `ledger`: the admission ledger after every operation is committed, each
 //!   on its own entity (one member per operation, the worst case);
@@ -26,7 +26,7 @@ use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue as codec;
 use crate::index_lifecycle::queue::backlog::{
-    BacklogLimits, IndexOperationBacklog, OperationCharge,
+    charged_bytes, BacklogLimits, IndexOperationBacklog, OperationCharge,
 };
 use crate::index_lifecycle::queue::storage::StoredQueue;
 use crate::index_lifecycle::queue::QueueTarget;
@@ -52,6 +52,8 @@ pub struct QueueMemorySample {
     pub shape: &'static str,
     /// Encoded record bytes of one operation.
     pub encoded: u64,
+    /// Bytes one operation counts toward its index's retained-byte limit.
+    pub charged: u64,
     /// Admission ledger bytes per operation.
     pub ledger: u64,
     /// Decoded queue bytes per operation.
@@ -61,6 +63,9 @@ pub struct QueueMemorySample {
     /// Peak resolution bytes per operation of single-operation operands.
     pub resolution_of_operands: u64,
 }
+
+/// Builds one sampled operation's payload.
+type PayloadFn = dyn Fn() -> codec::QueuedPayload;
 
 /// Backlog lengths just past the growth boundaries of `Vec` doubling and of
 /// hash tables at their 7/8 load factor, where per-operation memory peaks.
@@ -99,7 +104,7 @@ pub fn index_operation_queue_memory_samples(probe: &dyn AllocationProbe) -> Vec<
     };
     let short_text = text_insert("doc 1234567 g7 alpha shared");
     let long_text = text_insert(&"lorem ipsum ".repeat(342));
-    let shapes: Vec<(&'static str, Box<dyn Fn() -> codec::QueuedPayload>)> = vec![
+    let shapes: Vec<(&'static str, Box<PayloadFn>)> = vec![
         (
             "text delete",
             Box::new(|| codec::QueuedPayload::Text(codec::QueuedTextPayload { replacement: None })),
@@ -141,7 +146,7 @@ pub fn index_operation_queue_memory_samples(probe: &dyn AllocationProbe) -> Vec<
 fn sample(
     probe: &dyn AllocationProbe,
     shape: &'static str,
-    payload: &dyn Fn() -> codec::QueuedPayload,
+    payload: &PayloadFn,
 ) -> QueueMemorySample {
     let target = QueueTarget::new(
         DataScope::LegacyUnscoped,
@@ -151,6 +156,7 @@ fn sample(
     let mut measured = QueueMemorySample {
         shape,
         encoded: 0,
+        charged: 0,
         ledger: 0,
         decoded: 0,
         resolution_over_base: 0,
@@ -178,6 +184,7 @@ fn sample(
             "{shape}: every sampled operation encodes alike"
         );
         measured.encoded = encoded;
+        measured.charged = charged_bytes(encoded);
         let per_operation = |bytes: isize| {
             u64::try_from(bytes).expect("a retained structure holds memory") / length as u64
         };
@@ -197,7 +204,7 @@ fn sample(
                     target,
                     entity: operation.entity(),
                     id: operation.id(),
-                    bytes: operation.retained_bytes(),
+                    encoded_bytes: operation.retained_bytes(),
                 })
                 .collect::<Vec<_>>();
             let mut reservation = backlog.reserve(&charges, &[]).expect("unbounded ledger");

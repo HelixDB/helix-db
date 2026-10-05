@@ -318,12 +318,16 @@ async fn member_backpressure_rejects_whole_writes_until_publication_drains() {
 
 /// Retained bytes throttle like members; a write whose own operations or
 /// operand exceed a ceiling is rejected before commit without leaking
-/// capacity, and a reopened writer charges what is still durable.
+/// capacity, and a reopened writer charges what is still durable. Every
+/// operation counts its encoded size plus a fixed overhead.
 #[tokio::test]
 async fn byte_and_operand_limits_reject_writes_before_commit() {
     let store = fixture("queue-bytes", vec![text_definition()]).await;
+    // Two one-letter documents (about 24 encoded bytes each) fit; a third
+    // does not.
+    let limit = 60 + 2 * IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES;
     let tuning = IndexOperationQueueTuning::default()
-        .with_max_retained_bytes(nonzero(60))
+        .with_max_retained_bytes(nonzero(limit))
         .expect("a small retained-byte ceiling is valid");
     let db = open(
         "queue-bytes",
@@ -344,15 +348,16 @@ async fn byte_and_operand_limits_reject_writes_before_commit() {
             HelixDbError::IndexBackpressure {
                 resource: IndexBackpressureResource::RetainedBytes,
                 requested,
-                limit: 60,
+                limit: refused_at,
                 ..
-            } if requested > 60
+            } if requested > limit && refused_at == limit
         ),
         "{error}"
     );
     assert!(error.to_string().contains("retained_bytes"), "{error}");
+    let oversized = "x".repeat(usize::try_from(limit).expect("a small limit"));
     let error = db
-        .query(text_write(&[&"x".repeat(60)]))
+        .query(text_write(&[&oversized]))
         .await
         .expect_err("one document above the byte limit");
     assert!(
@@ -361,9 +366,9 @@ async fn byte_and_operand_limits_reject_writes_before_commit() {
             HelixDbError::IndexOperationBatchTooLarge {
                 resource: IndexOperationBatchResource::RetainedBytes,
                 observed,
-                limit: 60,
+                limit: refused_at,
                 ..
-            } if observed > 60
+            } if observed > limit && refused_at == limit
         ),
         "{error}"
     );

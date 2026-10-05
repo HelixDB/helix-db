@@ -444,10 +444,10 @@ impl Model {
         );
         prop_assert_eq!(stored.len().get(), self.view.len());
         prop_assert_eq!(
-            stored.retained_bytes(),
+            stored.charged_bytes(),
             self.view
                 .iter()
-                .map(QueuedOperation::retained_bytes)
+                .map(|operation| super::backlog::charged_bytes(operation.retained_bytes()))
                 .sum::<u64>()
         );
         let regrouped = regroup(&self.view);
