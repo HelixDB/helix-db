@@ -759,7 +759,13 @@ pub async fn index_operation_queue_scope_walk_contracts() {
         .chain([DataScope::Tenant(TenantId::from_u128(9))])
         .enumerate()
     {
-        Box::pin(scoped_insert(&db, scope, [1.0, ordinal as f32], "graph rows")).await;
+        Box::pin(scoped_insert(
+            &db,
+            scope,
+            [1.0, ordinal as f32],
+            "graph rows",
+        ))
+        .await;
     }
     let mut targets = BTreeSet::new();
     let mut retained_bytes = 0;

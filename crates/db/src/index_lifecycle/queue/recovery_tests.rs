@@ -412,10 +412,16 @@ fn a_discovery_range_holds_exactly_one_scopes_queue_keys_of_both_layouts() {
             assert!(range.contains(&key), "{scope:?} holds {key:?}");
         }
         for kind in [RecordKind::IndexRecord, RecordKind::SecondaryEqualityBitmap] {
-            assert!(!range.contains(&record_key(scope, kind)), "{scope:?} {kind:?}");
+            assert!(
+                !range.contains(&record_key(scope, kind)),
+                "{scope:?} {kind:?}"
+            );
         }
         for other in scopes.into_iter().filter(|other| *other != scope) {
-            assert!(!range.contains(&queue_key(other, 1, 1)), "{scope:?} {other:?}");
+            assert!(
+                !range.contains(&queue_key(other, 1, 1)),
+                "{scope:?} {other:?}"
+            );
             assert!(
                 !range.contains(&row_key(other, u64::MAX, u64::MAX, u64::MAX)),
                 "{scope:?} {other:?}"
@@ -432,10 +438,12 @@ fn discovery_completes_map_queues_per_row_and_row_queues_per_generation() {
     let frames = |operations: &[QueuedOperation]| {
         operations
             .iter()
-            .map(|operation| crate::encoding::v2::values::indexes::operation_queue::OperationFrame {
-                id: operation.id(),
-                entity: operation.entity(),
-                retained_bytes: operation.retained_bytes(),
+            .map(|operation| {
+                crate::encoding::v2::values::indexes::operation_queue::OperationFrame {
+                    id: operation.id(),
+                    entity: operation.entity(),
+                    retained_bytes: operation.retained_bytes(),
+                }
             })
             .collect::<Vec<_>>()
     };
@@ -471,8 +479,18 @@ fn discovery_completes_map_queues_per_row_and_row_queues_per_generation() {
         .to_bytes()
     };
     let encoded = |operation| QueueRow::encode(QueueFamily::Text, operation);
-    assert_eq!(discovery.push(&row(first, 0), &encoded(&operations[0])).unwrap(), None);
-    assert_eq!(discovery.push(&row(first, 1), &encoded(&operations[1])).unwrap(), None);
+    assert_eq!(
+        discovery
+            .push(&row(first, 0), &encoded(&operations[0]))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        discovery
+            .push(&row(first, 1), &encoded(&operations[1]))
+            .unwrap(),
+        None
+    );
     let completed = discovery
         .push(&row(second, 2), &encoded(&operations[0]))
         .unwrap()
@@ -481,12 +499,19 @@ fn discovery_completes_map_queues_per_row_and_row_queues_per_generation() {
         (completed.target, completed.frames),
         (first, frames(&operations[..]))
     );
-    let last = discovery.finish().expect("finish completes the last generation");
-    assert_eq!((last.target, last.frames), (second, frames(&operations[..1])));
+    let last = discovery
+        .finish()
+        .expect("finish completes the last generation");
+    assert_eq!(
+        (last.target, last.frames),
+        (second, frames(&operations[..1]))
+    );
 
     // One generation's rows must share a family.
     let mut discovery = rows.discovery();
-    discovery.push(&row(first, 0), &encoded(&operations[0])).unwrap();
+    discovery
+        .push(&row(first, 0), &encoded(&operations[0]))
+        .unwrap();
     let vector_row = QueueRow::encode(QueueFamily::Vector, &vector(1, &[1.0]));
     assert!(matches!(
         discovery.push(&row(first, 1), &vector_row),
