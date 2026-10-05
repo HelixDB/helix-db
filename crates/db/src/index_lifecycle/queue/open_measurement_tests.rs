@@ -2,8 +2,9 @@
 //!
 //! One process builds the fixture (`HELIX_BACKLOG_PHASE=build`); fresh
 //! processes then reopen it, so each reports its own peak RSS (Linux
-//! `VmHWM`): `open` opens a writer, `load` runs only the backlog load over a
-//! raw SlateDB handle. Run in release on a disk-backed directory:
+//! `VmHWM`): `open` opens a writer, compactor included, and `load` runs only
+//! the backlog load over a raw SlateDB handle with no compactor. Run in
+//! release on a disk-backed directory:
 //!
 //! ```text
 //! HELIX_BACKLOG_DIR=/work/backlog HELIX_BACKLOG_PHASE=build \
@@ -246,7 +247,12 @@ async fn measure_writer_open_over_a_large_backlog() {
             (0, stats.pending_operations, stats.retained_bytes)
         }
         "load" => {
+            // No compactor: its merges would add to the peak the load alone holds.
             let db = slatedb::Db::builder(NAME, store)
+                .with_settings(slatedb::config::Settings {
+                    compactor_options: None,
+                    ..Default::default()
+                })
                 .with_merge_operator(Arc::new(HelixMergeOperator::new()))
                 .build()
                 .await
