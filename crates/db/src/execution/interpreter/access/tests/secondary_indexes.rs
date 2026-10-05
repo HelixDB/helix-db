@@ -1650,7 +1650,10 @@ async fn label_rows_outside_the_lane_stop_at_the_request_deadline() {
             Err(HelixDbError::QueryDeadlineExceeded) => expired += 1,
             Err(error) => panic!("unexpected error {error:?}"),
             Ok(rows) => {
-                assert_eq!(rows, roaring::RoaringTreemap::from_iter(nulls));
+                assert_eq!(
+                    rows.into_unbudgeted(),
+                    roaring::RoaringTreemap::from_iter(nulls)
+                );
                 break;
             }
         }

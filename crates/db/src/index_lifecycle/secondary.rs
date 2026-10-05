@@ -82,7 +82,6 @@ use crate::index_lifecycle::{
 use super::IndexScopeGates;
 
 mod exact;
-use exact::lookup_active_equality_point_literal_with_compatibility;
 pub(crate) use exact::lookup_active_unique_equality_batch_admitted;
 #[cfg(all(feature = "production-coverage", not(test)))]
 pub(crate) use exact::run_production_contracts as run_exact_production_contracts;
@@ -2905,336 +2904,29 @@ pub(crate) async fn lookup_active_equality_generation(
     handle: &ActiveIndexHandle,
     value: &PropertyValue,
 ) -> Result<roaring::RoaringTreemap> {
-    lookup_active_equality_generation_with_compatibility(
+    exact::lookup_active_equality_generation_admitted(
         reader,
         handle,
         value,
         ReaderStorageCompatibility::Current,
+        None,
         &|| Ok(()),
     )
     .await
+    .map(crate::query_resources::bitmap::Bitmap::into_unbudgeted)
 }
 
-/// `deadline` fails once the caller's request may no longer read; it is
-/// checked between the reads of a value's label rows outside the lane.
-async fn lookup_active_equality_generation_with_compatibility(
-    reader: &(impl DbReadOps + Send + Sync),
-    handle: &ActiveIndexHandle,
-    value: &PropertyValue,
-    compatibility: ReaderStorageCompatibility,
-    deadline: &(impl Fn() -> Result<()> + Sync),
-) -> Result<roaring::RoaringTreemap> {
-    let Some(definition) = handle.secondary_definition() else {
-        return Err(corruption(
-            "secondary equality serving received a non-secondary Active handle",
-        ));
-    };
-    if !matches!(
-        definition,
-        ValidatedSecondaryIndexDefinition::NodeEquality { .. }
-            | ValidatedSecondaryIndexDefinition::EdgeEquality { .. }
-    ) {
-        return Err(corruption(
-            "secondary equality serving received a range definition",
-        ));
-    }
-
-    let canonical = match project_equality_value(value) {
-        EqualityValueProjection::Indexed(value) => CanonicalSecondaryValue::equality(value),
-        EqualityValueProjection::NonReflexive => return Ok(roaring::RoaringTreemap::new()),
-        // No lane entry holds null, and writes reject values a lane cannot
-        // encode, so only label rows outside the lane can equal these.
-        EqualityValueProjection::AuthoritativeNull
-        | EqualityValueProjection::Unsupported(_)
-        | EqualityValueProjection::Oversized { .. } => {
-            let label = UnindexedLabel {
-                scope: handle.scope(),
-                kind: definition.element_kind(),
-                label: definition.label().as_str(),
-                property: definition.property().as_str(),
-            };
-            // Callers without a request's read budget keep one read in
-            // flight.
-            let candidates = unindexed_label_rows(
-                reader,
-                label,
-                Some((handle, compatibility)),
-                None,
-                LabelLaneReads::Sequential,
-                deadline,
-            )
-            .await?;
-            return verified_unindexed_rows(
-                reader,
-                label,
-                candidates,
-                |stored| stored.unwrap_or(&PropertyValue::Null).eq_value(value),
-                deadline,
-            )
-            .await;
-        }
-    };
-    let lane = definition_lane(definition);
-    if lane.is_unique() {
-        let key = secondary_entry_key(
-            handle.scope(),
-            handle.index_id(),
-            handle.generation(),
-            definition,
-            canonical,
-            IndexEntityId::initial(),
-        )?;
-        record_equality_point_read();
-        let Some(bytes) = reader.get(key).await? else {
-            return Ok(roaring::RoaringTreemap::new());
-        };
-        let owner =
-            decode_secondary_entry_value(handle.index_id(), handle.generation(), lane, &bytes)?;
-        #[cfg(any(test, feature = "production-coverage"))]
-        record(ReadKind::Graph);
-        if !authoritative_equality_matches(reader, handle.scope(), definition, owner, value, None)
-            .await?
-        {
-            return Err(corruption(
-                "unique secondary equality owner differs from authoritative graph state",
-            ));
-        }
-        return Ok(roaring::RoaringTreemap::from_iter([owner.get()]));
-    }
-
-    lookup_active_equality_point_literal_with_compatibility(reader, handle, value, compatibility)
-        .await
-}
-
-/// Read unique owner keys in `multi_get`s of at most
-/// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, then verify each batch's
-/// owners against their authoritative rows with one more `multi_get` from the
-/// same request reader, so a list of any length costs two reads per batch,
-/// never one per owner. This does not change keys, values, or writes.
+/// Owners of `values` in one Active unique node equality generation, read
+/// unbudgeted (see [`exact::lookup_active_unique_equality_batch_admitted`]).
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_unique_equality_batch(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     values: &[PropertyValue],
 ) -> Result<roaring::RoaringTreemap> {
-    let Some(definition @ ValidatedSecondaryIndexDefinition::NodeEquality { unique: true, .. }) =
-        handle.secondary_definition()
-    else {
-        return Err(corruption(
-            "unique equality batch requires an Active unique node index",
-        ));
-    };
-    if values.len() < 2 {
-        return Err(corruption(
-            "unique equality batch requires at least two values",
-        ));
-    }
-    let keys = values
-        .iter()
-        .map(|value| {
-            let canonical = match project_equality_value(value) {
-                EqualityValueProjection::Indexed(value) => CanonicalSecondaryValue::equality(value),
-                EqualityValueProjection::Oversized {
-                    encoded_len,
-                    maximum,
-                } => {
-                    return Err(SecondaryIndexValueError::EncodedKeyTooLarge {
-                        encoded_len,
-                        maximum,
-                    }
-                    .into());
-                }
-                EqualityValueProjection::AuthoritativeNull
-                | EqualityValueProjection::NonReflexive
-                | EqualityValueProjection::Unsupported(_) => {
-                    return Err(corruption(
-                        "unique equality batch requires indexed literals",
-                    ));
-                }
-            };
-            secondary_entry_key(
-                handle.scope(),
-                handle.index_id(),
-                handle.generation(),
-                definition,
-                canonical,
-                IndexEntityId::initial(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    keys.iter().for_each(|_| record_equality_point_read());
-    let mut owners = roaring::RoaringTreemap::new();
-    for (keys, values) in keys
-        .chunks(helix_planner::cost::RECORD_BATCH_ROWS as usize)
-        .zip(values.chunks(helix_planner::cost::RECORD_BATCH_ROWS as usize))
-    {
-        #[cfg(any(test, feature = "production-coverage"))]
-        record(ReadKind::MultiGet);
-        let entries = reader.multi_get(keys).await?;
-        if entries.len() != values.len() {
-            return Err(corruption(
-                "unique equality multi-get returned the wrong number of entries",
-            ));
-        }
-        let found = entries
-            .into_iter()
-            .zip(values)
-            .filter_map(|(entry, value)| entry.map(|bytes| (bytes, value)))
-            .map(|(bytes, value)| {
-                decode_secondary_entry_value(
-                    handle.index_id(),
-                    handle.generation(),
-                    definition_lane(definition),
-                    &bytes,
-                )
-                .map(|owner| (owner, value))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if found.is_empty() {
-            continue;
-        }
-        found.iter().for_each(|_| record_equality_graph_read());
-        let records = found
-            .iter()
-            .map(|(owner, _)| {
-                authoritative_property_key(
-                    handle.scope(),
-                    IndexEntity {
-                        kind: definition.element_kind(),
-                        id: *owner,
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        #[cfg(any(test, feature = "production-coverage"))]
-        record(ReadKind::MultiGet);
-        let records = reader.multi_get(&records).await?;
-        if records.len() != found.len() {
-            return Err(corruption(
-                "unique equality verification multi-get returned the wrong number of records",
-            ));
-        }
-        for ((owner, value), record) in found.into_iter().zip(records) {
-            let matches = record
-                .map(|bytes| decode_properties(&bytes))
-                .transpose()?
-                .is_some_and(|properties| {
-                    properties_match_definition(definition, &properties)
-                        && properties
-                            .iter()
-                            .find(|property| property.name == definition.property().as_str())
-                            .is_some_and(|property| property.value.eq_value(value))
-                });
-            if !matches {
-                return Err(corruption(
-                    "unique equality owner disagrees with its authoritative node",
-                ));
-            }
-            owners.insert(owner.get());
-        }
-    }
-    Ok(owners)
-}
-
-/// Reads and unions equality values from one exact Active generation.
-///
-/// Non-unique indexed values read their V4 bitmap rows in `multi_get`s of at
-/// most [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, and unique indexed
-/// values their owners in verified batches of the same size. Null,
-/// non-reflexive and unencodable values, and every value of a reader that
-/// still unions deployed V3 entries, keep the single-value path, which
-/// checks `deadline` between its reads of label rows outside the lane.
-pub(crate) async fn lookup_active_equality_generations_with_compatibility(
-    reader: &(impl DbReadOps + Send + Sync),
-    handle: &ActiveIndexHandle,
-    values: &[PropertyValue],
-    compatibility: ReaderStorageCompatibility,
-    deadline: &(impl Fn() -> Result<()> + Sync),
-) -> Result<roaring::RoaringTreemap> {
-    const BATCH: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
-    let Some(definition) = handle.secondary_definition() else {
-        return Err(corruption(
-            "secondary equality batch serving received a non-secondary Active handle",
-        ));
-    };
-    let mut owners = roaring::RoaringTreemap::new();
-    let mut indexed = Vec::with_capacity(values.len());
-    for value in values {
-        match project_equality_value(value) {
-            EqualityValueProjection::Indexed(canonical)
-                if compatibility != ReaderStorageCompatibility::LegacyEqualityUnion =>
-            {
-                indexed.push((value, canonical));
-            }
-            EqualityValueProjection::Indexed(_)
-            | EqualityValueProjection::AuthoritativeNull
-            | EqualityValueProjection::NonReflexive
-            | EqualityValueProjection::Unsupported(_)
-            | EqualityValueProjection::Oversized { .. } => {
-                owners |= lookup_active_equality_generation_with_compatibility(
-                    reader,
-                    handle,
-                    value,
-                    compatibility,
-                    deadline,
-                )
-                .await?;
-            }
-        }
-    }
-    if !definition_uses_equality_bitmap(definition) {
-        for batch in indexed.chunks(BATCH) {
-            owners |= match batch {
-                [(value, _)] => {
-                    lookup_active_equality_generation_with_compatibility(
-                        reader,
-                        handle,
-                        value,
-                        compatibility,
-                        deadline,
-                    )
-                    .await?
-                }
-                batch => {
-                    let values = batch
-                        .iter()
-                        .map(|(value, _)| (*value).clone())
-                        .collect::<Vec<_>>();
-                    lookup_active_unique_equality_batch(reader, handle, &values).await?
-                }
-            };
-        }
-        return Ok(owners);
-    }
-    let mut keys = indexed
-        .into_iter()
-        .map(|(_, value)| {
-            secondary_entry_key(
-                handle.scope(),
-                handle.index_id(),
-                handle.generation(),
-                definition,
-                CanonicalSecondaryValue::equality(value),
-                IndexEntityId::initial(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    keys.sort_unstable();
-    keys.dedup();
-    keys.iter().for_each(|_| record_equality_point_read());
-    for batch in keys.chunks(BATCH) {
-        let rows = match batch {
-            [key] => vec![reader.get(key).await?],
-            batch => {
-                #[cfg(any(test, feature = "production-coverage"))]
-                record(ReadKind::MultiGet);
-                reader.multi_get(batch).await?
-            }
-        };
-        for bytes in rows.into_iter().flatten() {
-            owners |= SecondaryEqualityBitmapValue::decode(&bytes)?.into_ids();
-        }
-    }
-    Ok(owners)
+    exact::lookup_active_unique_equality_batch_admitted(reader, handle, values, None)
+        .await
+        .map(crate::query_resources::bitmap::Bitmap::into_unbudgeted)
 }
 
 /// One label-scoped property whose rows an equality lane may not hold.
@@ -3434,22 +3126,25 @@ async fn equality_lane_rows(
 /// Records are read in multi-gets of
 /// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, so memory stays bounded
 /// by one batch of records plus the result. `deadline` is checked before
-/// every batch, so an expired request stops reading records.
+/// every batch, so an expired request stops reading records. With a
+/// `budget`, each batch's raw records and the one record being decoded are
+/// admitted before they are read, and the result as it grows.
 pub(crate) async fn verified_unindexed_rows(
     reader: &(impl DbReadOps + Sync),
     label: UnindexedLabel<'_>,
     candidates: roaring::RoaringTreemap,
     accept: impl Fn(Option<&PropertyValue>) -> bool,
     deadline: &(impl Fn() -> Result<()> + Sync),
-) -> Result<roaring::RoaringTreemap> {
+    budget: Option<&crate::query_resources::Budget>,
+) -> Result<crate::query_resources::bitmap::Bitmap> {
     const BATCH: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
     let mut ids = candidates.into_iter();
-    let mut verified = roaring::RoaringTreemap::new();
+    let mut verified = crate::query_resources::bitmap::Builder::new(budget)?;
     loop {
         deadline()?;
         let batch = ids.by_ref().take(BATCH).collect::<Vec<_>>();
         if batch.is_empty() {
-            return Ok(verified);
+            return Ok(verified.finish());
         }
         #[cfg(any(test, feature = "production-coverage"))]
         batch.iter().for_each(|_| record(ReadKind::Graph));
@@ -3465,7 +3160,34 @@ pub(crate) async fn verified_unindexed_rows(
                 )
             })
             .collect::<Vec<_>>();
-        for (id, record) in batch.into_iter().zip(reader.multi_get(&keys).await?) {
+        if let Some(budget) = budget {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            });
+        }
+        let records = reader.multi_get(&keys).await?;
+        // Raw records stay held while one at a time is decoded, at the common
+        // hydration decoder bound of 32 bytes per raw byte.
+        let _records_memory = budget
+            .map(|budget| {
+                let records = records.iter().flatten();
+                budget.reserve(
+                    records
+                        .clone()
+                        .fold(0_usize, |bytes, record| bytes.saturating_add(record.len()))
+                        .saturating_add(
+                            records
+                                .map(Bytes::len)
+                                .max()
+                                .unwrap_or(0)
+                                .saturating_mul(32),
+                        ),
+                )
+            })
+            .transpose()?;
+        for (id, record) in batch.into_iter().zip(records) {
             let Some(record) = record else {
                 continue;
             };
@@ -3478,7 +3200,7 @@ pub(crate) async fn verified_unindexed_rows(
                 .find(|property| property.name == label.property)
                 .map(|property| &property.value);
             if carries_label && accept(value) {
-                verified.insert(id);
+                verified.insert(id)?;
             }
         }
     }

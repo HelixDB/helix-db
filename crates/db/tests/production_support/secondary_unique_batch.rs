@@ -16,12 +16,11 @@ enum ReadFault {
     None,
     MultiGet,
     ShortMultiGet,
-    Get,
-    PendingGet,
     /// Every multi-get after the first, which reads the owners' records,
-    /// fails or comes back short.
+    /// fails, comes back short, or never completes.
     RecordMultiGet,
     ShortRecordMultiGet,
+    PendingRecordMultiGet,
 }
 
 #[derive(Default)]
@@ -40,14 +39,6 @@ impl DbReadOps for Reader {
         _: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<Bytes>, slatedb::Error> {
         self.gets.fetch_add(1, Ordering::Relaxed);
-        if matches!(self.fault, ReadFault::Get) {
-            return Err(slatedb::Error::unavailable(
-                "injected row read failure".into(),
-            ));
-        }
-        if matches!(self.fault, ReadFault::PendingGet) {
-            std::future::pending::<()>().await;
-        }
         Ok(self.rows.get(key.as_ref()).cloned())
     }
 
@@ -57,6 +48,9 @@ impl DbReadOps for Reader {
         _: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Vec<Option<Bytes>>, slatedb::Error> {
         let records = self.batches.fetch_add(1, Ordering::Relaxed) > 0;
+        if records && matches!(self.fault, ReadFault::PendingRecordMultiGet) {
+            std::future::pending::<()>().await;
+        }
         match self.fault {
             ReadFault::MultiGet => Err(slatedb::Error::unavailable(
                 "injected owner read failure".into(),
@@ -69,8 +63,7 @@ impl DbReadOps for Reader {
             ReadFault::None
             | ReadFault::RecordMultiGet
             | ReadFault::ShortRecordMultiGet
-            | ReadFault::Get
-            | ReadFault::PendingGet => Ok(keys
+            | ReadFault::PendingRecordMultiGet => Ok(keys
                 .iter()
                 .map(|key| self.rows.get(key.as_ref()).cloned())
                 .collect()),
@@ -290,7 +283,7 @@ pub(crate) async fn run() {
             ReadFault::MultiGet | ReadFault::RecordMultiGet => {
                 assert!(error.to_string().contains("injected"))
             }
-            ReadFault::None | ReadFault::Get | ReadFault::PendingGet => {
+            ReadFault::None | ReadFault::PendingRecordMultiGet => {
                 unreachable!("only injected faults are tested here")
             }
         }
@@ -387,10 +380,11 @@ async fn admission_contracts() {
     );
     drop(cursor);
     assert_eq!(budget.available(), 1024 * 1024);
+    // One multi-get reads the owners and one verifies their records.
     let reads = budget.reads();
-    assert_eq!(reads.multi_get_batches, 1);
-    assert_eq!(reads.multi_get_keys, 2);
-    assert_eq!(reads.point_gets, 2);
+    assert_eq!(reads.multi_get_batches, 2);
+    assert_eq!(reads.multi_get_keys, 4);
+    assert_eq!(reads.point_gets, 0);
     assert_eq!(reads.scans, 0);
     let mut boundaries = std::collections::BTreeSet::new();
     for limit in 0..=peak {
@@ -428,20 +422,22 @@ async fn admission_contracts() {
         "raw owner rows are admitted before verification"
     );
     assert!(
-        boundaries.contains(&(1, 1)),
-        "first decoded row/output can be rejected"
+        boundaries.contains(&(2, 0)),
+        "verified records and owners can be rejected atomically"
     );
     assert!(
-        boundaries.contains(&(1, 2)),
-        "later verification can be rejected atomically"
+        boundaries.iter().all(|(_, gets)| *gets == 0),
+        "owners are never read one at a time"
     );
 
     for fault in [
         ReadFault::MultiGet,
         ReadFault::ShortMultiGet,
-        ReadFault::Get,
+        ReadFault::RecordMultiGet,
+        ReadFault::ShortRecordMultiGet,
     ] {
         reader.fault = fault;
+        reader.batches.store(0, Ordering::Relaxed);
         let budget = resources::Budget::new(1024 * 1024);
         assert!(lookup_active_unique_equality_batch_admitted(
             &reader,
@@ -453,7 +449,8 @@ async fn admission_contracts() {
         .is_err());
         assert_eq!(budget.available(), 1024 * 1024);
     }
-    reader.fault = ReadFault::PendingGet;
+    reader.fault = ReadFault::PendingRecordMultiGet;
+    reader.batches.store(0, Ordering::Relaxed);
     let budget = resources::Budget::new(1024 * 1024);
     let mut pending = Box::pin(lookup_active_unique_equality_batch_admitted(
         &reader,

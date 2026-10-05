@@ -78,7 +78,6 @@ impl<'db> ExecutionContext<'db> {
                         },
                         within,
                     )
-                    .map(|ids| bitmap::Bitmap::retain_legacy(ids?, self.row_memory.as_ref()))
                     .boxed(),
             }),
             self.row_memory.as_ref(),

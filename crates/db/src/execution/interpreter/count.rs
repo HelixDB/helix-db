@@ -1933,7 +1933,8 @@ impl<'db> ExecutionContext<'db> {
                         key,
                         None,
                     )
-                    .await?,
+                    .await?
+                    .into_unbudgeted(),
                     Existence::Proven,
                 ),
                 C::EdgeAuthoritativeScan(
@@ -1944,7 +1945,8 @@ impl<'db> ExecutionContext<'db> {
                         key,
                         None,
                     )
-                    .await?,
+                    .await?
+                    .into_unbudgeted(),
                     Existence::Proven,
                 ),
                 C::NodePointReads(ids) | C::EdgePointReads(ids) => {

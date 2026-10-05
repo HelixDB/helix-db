@@ -295,20 +295,16 @@ impl<'db> ExecutionContext<'db> {
             }
             let within = ids.as_deref();
             ids = Some(match leaf {
-                LabelVerifiedLeaf::Null(key) => bitmap::Bitmap::retain_legacy(
-                    self.null_equality_rows(kind, key, within).await?,
-                    self.row_memory.as_ref(),
-                )?,
-                LabelVerifiedLeaf::Equality(key, value) => bitmap::Bitmap::retain_legacy(
+                LabelVerifiedLeaf::Null(key) => self.null_equality_rows(kind, key, within).await?,
+                LabelVerifiedLeaf::Equality(key, value) => {
                     self.unindexed_label_rows(
                         kind,
                         key,
                         |stored| stored.unwrap_or(&PropertyValue::Null).eq_value(&value),
                         within,
                     )
-                    .await?,
-                    self.row_memory.as_ref(),
-                )?,
+                    .await?
+                }
                 LabelVerifiedLeaf::Membership(key, values) => {
                     self.dynamic_membership_ids(kind, key, values, reads, within)
                         .await?
@@ -562,7 +558,6 @@ impl<'db> ExecutionContext<'db> {
                 ) => self
                     .null_equality_rows(crate::index_lifecycle::IndexElementKind::Node, key, None)
                     .await
-                    .and_then(|ids| bitmap::Bitmap::retain_legacy(ids, self.row_memory.as_ref()))
                     .map(SecondaryIds::Unordered),
                 exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
                     exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
@@ -701,7 +696,6 @@ impl<'db> ExecutionContext<'db> {
                 ) => self
                     .null_equality_rows(crate::index_lifecycle::IndexElementKind::Edge, key, None)
                     .await
-                    .and_then(|ids| bitmap::Bitmap::retain_legacy(ids, self.row_memory.as_ref()))
                     .map(SecondaryIds::Unordered),
                 exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(
                     exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),

@@ -174,15 +174,8 @@ impl<'a> Source<'a> {
                         ),
                 },
             )) => Ok(bitmap_ids(
-                crate::query_resources::bitmap::Bitmap::retain_legacy(
-                    ctx.null_equality_rows(
-                        crate::index_lifecycle::IndexElementKind::Node,
-                        key,
-                        None,
-                    )
+                ctx.null_equality_rows(crate::index_lifecycle::IndexElementKind::Node, key, None)
                     .await?,
-                    ctx.row_memory.as_ref(),
-                )?,
                 K::NodeProperty,
                 true,
             )),
@@ -197,15 +190,8 @@ impl<'a> Source<'a> {
                         ),
                 },
             )) => Ok(bitmap_ids(
-                crate::query_resources::bitmap::Bitmap::retain_legacy(
-                    ctx.null_equality_rows(
-                        crate::index_lifecycle::IndexElementKind::Edge,
-                        key,
-                        None,
-                    )
+                ctx.null_equality_rows(crate::index_lifecycle::IndexElementKind::Edge, key, None)
                     .await?,
-                    ctx.row_memory.as_ref(),
-                )?,
                 K::EdgeEndpoints,
                 true,
             )),

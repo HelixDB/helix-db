@@ -8,6 +8,12 @@ mod unique;
 pub(crate) use unique::lookup_active_unique_equality_batch_admitted;
 
 mod dynamic;
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
+pub(super) use dynamic::lookup_active_equality_generation_admitted;
 pub(crate) use dynamic::lookup_active_equality_generations_admitted;
 
 mod ordered;
@@ -56,6 +62,7 @@ pub(crate) async fn lookup_active_equality_point_literal(
     .await
 }
 
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn lookup_active_equality_point_literal_with_compatibility(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -262,7 +269,7 @@ async fn lookup_equality_keys_admitted(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
     definition: &ValidatedSecondaryIndexDefinition,
-    values: &[PropertyValue],
+    values: &[impl std::borrow::Borrow<PropertyValue>],
     budget: Option<&query_resources::Budget>,
     primitive: EqualityRead,
 ) -> Result<bitmap::Bitmap> {
@@ -270,7 +277,7 @@ async fn lookup_equality_keys_admitted(
     let mut key_memory = budget.map(|budget| budget.reserve(key_bytes)).transpose()?;
     let mut keys = Vec::with_capacity(values.len());
     for value in values {
-        let prepared = match equality::prepare_equality_value(value) {
+        let prepared = match equality::prepare_equality_value(value.borrow()) {
             EqualityValueProjection::Indexed(value) => value,
             EqualityValueProjection::Oversized {
                 encoded_len,
@@ -319,35 +326,34 @@ async fn lookup_equality_keys_admitted(
         keys.dedup();
     }
     keys.iter().for_each(|_| record_equality_point_read());
-    if matches!(primitive, EqualityRead::DistinctSet) && keys.len() == 1 {
-        if let Some(budget) = budget {
-            budget.record_reads(query_resources::StorageReadUsage {
-                point_gets: 1,
-                ..Default::default()
-            });
-        }
-        let Some(bytes) = reader.get(&keys[0]).await? else {
-            return bitmap::Bitmap::empty(budget);
-        };
-        let _raw = budget
-            .map(|budget| budget.reserve(bytes.len()))
-            .transpose()?;
-        return bitmap::Bitmap::decode(&bytes, budget);
-    }
-    // One batch of bitmaps is held at a time, so a literal set of any size
-    // reads them `RECORD_BATCH_ROWS` keys per multi-get.
+    // One batch of bitmaps is held at a time, so a set of any size reads them
+    // `RECORD_BATCH_ROWS` keys per multi-get. A distinct set reads a lone
+    // key with one point read; a literal batch keeps its batch primitive.
     let mut owners = bitmap::Bitmap::empty(budget)?;
     for keys in keys.chunks(helix_planner::cost::RECORD_BATCH_ROWS as usize) {
-        #[cfg(any(test, feature = "production-coverage"))]
-        record(ReadKind::MultiGet);
-        if let Some(budget) = budget {
-            budget.record_reads(query_resources::StorageReadUsage {
-                multi_get_batches: 1,
-                multi_get_keys: keys.len(),
-                ..Default::default()
-            });
-        }
-        let values = reader.multi_get(keys).await?;
+        let values = match (primitive, keys) {
+            (EqualityRead::DistinctSet, [key]) => {
+                if let Some(budget) = budget {
+                    budget.record_reads(query_resources::StorageReadUsage {
+                        point_gets: 1,
+                        ..Default::default()
+                    });
+                }
+                vec![reader.get(key).await?]
+            }
+            (EqualityRead::DistinctSet | EqualityRead::LiteralBatch, keys) => {
+                #[cfg(any(test, feature = "production-coverage"))]
+                record(ReadKind::MultiGet);
+                if let Some(budget) = budget {
+                    budget.record_reads(query_resources::StorageReadUsage {
+                        multi_get_batches: 1,
+                        multi_get_keys: keys.len(),
+                        ..Default::default()
+                    });
+                }
+                reader.multi_get(keys).await?
+            }
+        };
         let _raw = budget
             .map(|budget| {
                 budget.reserve(values.iter().flatten().fold(
@@ -1579,7 +1585,8 @@ mod tests {
                     1..=2 * helix_planner::cost::RECORD_BATCH_ROWS + 1,
                 );
                 assert!(matches!(
-                    verified_unindexed_rows(&db, label, three_batches, |_| true, &one_batch).await,
+                    verified_unindexed_rows(&db, label, three_batches, |_| true, &one_batch, None)
+                        .await,
                     Err(crate::HelixDbError::QueryDeadlineExceeded)
                 ));
                 assert_eq!(

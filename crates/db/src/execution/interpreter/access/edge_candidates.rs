@@ -301,16 +301,22 @@ impl Cursor {
             // Pair keys are merge-backed until a last-run compaction resolves
             // them, and a multi-get restarts every merge it meets as a point
             // get. Concurrent point gets resolve each merge chain in one pass,
-            // as main's sequential reads did, and overlap storage misses.
+            // as main's sequential reads did, and overlap storage misses. The
+            // extra reads come from the request's shared allowance, so pair
+            // reads under concurrently expanded parents stay within its bound.
+            let extra = context
+                .shared_index_reads
+                .take(keys.len().clamp(1, super::PARALLEL_INDEX_READS.get()) - 1);
             let mut reads = Vec::with_capacity(keys.len());
             for key in &keys {
                 reads.push(context.get_raw(key));
             }
             self.values = futures::stream::iter(reads)
-                .buffered(super::PARALLEL_INDEX_READS.get())
+                .buffered(1 + extra.taken)
                 .try_collect::<Vec<_>>()
                 .await?
                 .into_iter();
+            drop(extra);
         }
         Ok((!output.ids.is_empty()).then_some((output, self)))
     }

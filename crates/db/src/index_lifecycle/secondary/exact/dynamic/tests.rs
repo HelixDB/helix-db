@@ -2,6 +2,40 @@ use super::*;
 use crate::encoding::v2::values::property::encode_properties;
 use crate::index_lifecycle::secondary::tests as fixture;
 
+/// Writes the label bitmap of `handle`'s label holding `ids`, as graph writes
+/// maintain it; null and unencodable lookups read only these label rows.
+async fn put_label_rows(
+    db: &slatedb::Db,
+    handle: &ActiveIndexHandle,
+    ids: impl IntoIterator<Item = u64>,
+) {
+    let definition = handle.secondary_definition().unwrap();
+    let label = definition.label().as_str();
+    let index = match definition.element_kind() {
+        IndexElementKind::Node => crate::encoding::indexes::PropertyIndexKey::Equality(
+            crate::encoding::indexes::equality::EqualityIndexKey::new(
+                crate::encoding::indexes::hash_property_name("$label"),
+                crate::encoding::indexes::hash_property_value(label),
+            ),
+        ),
+        IndexElementKind::Edge => crate::encoding::indexes::PropertyIndexKey::EdgeLabel(
+            crate::encoding::indexes::label::EdgeLabelKey::new(
+                crate::encoding::indexes::hash_property_value(label),
+            ),
+        ),
+    };
+    db.put(
+        crate::encoding::v2::keys::DataKey::Data {
+            scope: handle.scope(),
+            kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(index),
+        }
+        .to_bytes(),
+        crate::search::encode_roaring_treemap(&ids.into_iter().collect()),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn runtime_domains_fold_keys_and_retain_admission_through_iteration() {
     for definition in [
@@ -118,6 +152,7 @@ async fn runtime_unique_hits_verify_graph_and_native_null_preserves_missing_valu
             .await
             .unwrap();
         }
+        put_label_rows(&db, &handle, [1, 2, 9]).await;
         for compatibility in [
             ReaderStorageCompatibility::Current,
             ReaderStorageCompatibility::LegacyEqualityUnion,
@@ -140,7 +175,10 @@ async fn runtime_unique_hits_verify_graph_and_native_null_preserves_missing_valu
             .unwrap();
             assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![1, 2, 9]);
             assert_eq!(budget.available(), 1024 * 1024);
-            assert_eq!(budget.reads().scan_rows, 4);
+            // Null verifies only the label rows outside the lane, 1 and 2,
+            // with one record multi-get; the unrelated row 3 is never read.
+            assert_eq!(budget.reads().multi_get_keys, 2);
+            assert_eq!(budget.reads().scan_rows, 0);
             assert_eq!(
                 budget.reads().point_gets,
                 if definition_lane(definition).is_unique() {
@@ -149,8 +187,25 @@ async fn runtime_unique_hits_verify_graph_and_native_null_preserves_missing_valu
                     1
                 }
             );
-            for value in [PropertyValue::Object(Default::default()), PropertyValue::String("x".repeat(crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN))] {
-                assert!(lookup_active_equality_generations_admitted(&db, &handle, &[value], compatibility, Some(&budget), &|| Ok(())).await.is_err());
+            // Values no lane can encode match only label rows that hold them.
+            for value in [
+                PropertyValue::Object(Default::default()),
+                PropertyValue::String("x".repeat(
+                    crate::encoding::v2::values::property::equality_index_value::MAX_EQUALITY_CANONICAL_LEN,
+                )),
+            ] {
+                let ids = lookup_active_equality_generations_admitted(
+                    &db,
+                    &handle,
+                    &[value],
+                    compatibility,
+                    Some(&budget),
+                    &|| Ok(()),
+                )
+                .await
+                .unwrap();
+                assert!(ids.is_empty());
+                drop(ids);
                 assert_eq!(budget.available(), 1024 * 1024);
             }
         }
@@ -270,6 +325,7 @@ async fn folded_numeric_keys_and_null_scans_stay_inside_the_authorized_tenant() 
             .await
             .unwrap();
         }
+        put_label_rows(&db, &handle, [first, first + 1]).await;
         handles.push((handle, first));
     }
     for (handle, first) in handles {
@@ -287,8 +343,8 @@ async fn folded_numeric_keys_and_null_scans_stay_inside_the_authorized_tenant() 
                 vec![first, first + 1],
                 query_resources::StorageReadUsage {
                     point_gets: 1,
-                    scans: 1,
-                    scan_rows: 2,
+                    multi_get_batches: 1,
+                    multi_get_keys: 1,
                     ..Default::default()
                 },
             ),
@@ -378,20 +434,18 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
     assert_eq!(ids.len(), 40_000);
     drop(ids);
     assert_eq!(budget.available(), 1024 * 1024);
-    db.put(
-        secondary_entry_key(
-            handle.scope(),
-            handle.index_id(),
-            handle.generation(),
-            definition,
-            CanonicalSecondaryValue::equality_string("bad"),
-            IndexEntityId::initial(),
-        )
-        .unwrap(),
-        Bytes::from_static(b"invalid bitmap"),
+    let bad = secondary_entry_key(
+        handle.scope(),
+        handle.index_id(),
+        handle.generation(),
+        definition,
+        CanonicalSecondaryValue::equality_string("bad"),
+        IndexEntityId::initial(),
     )
-    .await
     .unwrap();
+    db.put(&bad, Bytes::from_static(b"invalid bitmap"))
+        .await
+        .unwrap();
     for values in [
         vec![PropertyValue::String("bad".into())],
         vec![
@@ -411,11 +465,14 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
         .is_err());
         assert_eq!(budget.available(), 1024 * 1024);
     }
+    // A null lookup scans the lane, which must decode; it then reads the
+    // label rows outside it.
+    db.delete(&bad).await.unwrap();
     let property_key = authoritative_property_key(
         handle.scope(),
         IndexEntity {
             kind: IndexElementKind::Node,
-            id: IndexEntityId::new(1),
+            id: IndexEntityId::new(30_000),
         },
     );
     db.put(
@@ -427,6 +484,8 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
     )
     .await
     .unwrap();
+    // Outside the lane, so a null lookup reads and admits its record.
+    put_label_rows(&db, &handle, [30_000]).await;
     let small = query_resources::Budget::new(8192);
     assert!(matches!(
         lookup_active_equality_generations_admitted(
@@ -440,7 +499,7 @@ async fn runtime_bitmap_decode_union_and_property_failures_release_all_admission
         .await,
         Err(HelixDbError::QueryMemoryLimitExceeded)
     ));
-    assert_eq!(small.reads().scan_rows, 1);
+    assert_eq!(small.reads().multi_get_keys, 1);
     assert_eq!(small.available(), 8192);
     db.put(&property_key, Bytes::from_static(b"invalid properties"))
         .await
@@ -576,73 +635,6 @@ async fn pending_and_failed_storage_reads_release_prepared_keys_and_domain_state
 }
 
 #[tokio::test]
-async fn a_cached_null_scan_yields_for_request_cancellation_and_releases_its_state() {
-    let db = fixture::test_db("dynamic-null-cooperative-cancel").await;
-    let handle = fixture::active_read_handle(
-        &db,
-        crate::config::SecondaryIndexDefinition::node_equality("User", "value").unwrap(),
-    )
-    .await;
-    let properties = encode_properties(&[Property::string("$label", "User")]);
-    let transaction = db
-        .begin(slatedb::IsolationLevel::SerializableSnapshot)
-        .await
-        .unwrap();
-    for id in 0..4096 {
-        transaction
-            .put(
-                authoritative_property_key(
-                    handle.scope(),
-                    IndexEntity {
-                        kind: IndexElementKind::Node,
-                        id: IndexEntityId::new(id),
-                    },
-                ),
-                properties.clone(),
-            )
-            .unwrap();
-    }
-    transaction.commit().await.unwrap();
-    let cancellation = crate::execution_control::ReaderRetirementCancellation::new();
-    let control = crate::execution_control::ExecutionControl::unlimited()
-        .with_reader_retirement_cancellation(cancellation.clone());
-    let budget = query_resources::Budget::new(64 * 1024);
-    let values = [PropertyValue::Null];
-    let mut read = Box::pin(control.run(lookup_active_equality_generations_admitted(
-        &db,
-        &handle,
-        &values,
-        ReaderStorageCompatibility::Current,
-        Some(&budget),
-        &|| Ok(()),
-    )));
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            assert!(
-                futures::poll!(read.as_mut()).is_pending(),
-                "the scan must yield before processing the entire graph"
-            );
-            if budget.reads().scan_rows >= 512 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(budget.reads().scan_rows, 512);
-    assert!(budget.available() < 64 * 1024);
-    cancellation.cancel();
-    assert!(matches!(
-        read.await,
-        Err(HelixDbError::QueryCancelledByReaderRetirement)
-    ));
-    assert_eq!(budget.reads().scan_rows, 512);
-    assert_eq!(budget.available(), 64 * 1024);
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn invalid_serving_handles_fail_before_reading_and_release_domain_admission() {
     let db = fixture::test_db("dynamic-equality-invalid-handles").await;
     let handles = [
@@ -662,7 +654,8 @@ async fn invalid_serving_handles_fail_before_reading_and_release_domain_admissio
                 &handle,
                 &value,
                 ReaderStorageCompatibility::Current,
-                Some(&budget)
+                Some(&budget),
+                &|| Ok(())
             )
             .await,
             Err(HelixDbError::IndexCatalogCorruption(_))

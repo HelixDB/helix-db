@@ -107,7 +107,7 @@ impl<'db> ExecutionContext<'db> {
         });
         let unindexed_ids = match unindexed.as_slice() {
             [] => None,
-            unindexed => Some(bitmap::Bitmap::retain_legacy(
+            unindexed => Some(
                 self.unindexed_label_rows(
                     element_kind,
                     key,
@@ -118,8 +118,7 @@ impl<'db> ExecutionContext<'db> {
                     None,
                 )
                 .await?,
-                self.row_memory.as_ref(),
-            )?),
+            ),
         };
         if indexed.is_empty() {
             return unindexed_ids
@@ -196,7 +195,7 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyKey,
         accept: impl Fn(Option<&DbPropertyValue>) -> bool,
         within: Option<&roaring::RoaringTreemap>,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         let identity = secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,
@@ -266,7 +265,7 @@ impl<'db> ExecutionContext<'db> {
         element_kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyKey,
         within: Option<&roaring::RoaringTreemap>,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         self.unindexed_label_rows(
             element_kind,
             key,
@@ -900,7 +899,7 @@ async fn unindexed_label_rows_in_view(
     label: crate::index_lifecycle::secondary::UnindexedLabel<'_>,
     accept: impl Fn(Option<&DbPropertyValue>) -> bool,
     within: Option<&roaring::RoaringTreemap>,
-) -> Result<roaring::RoaringTreemap> {
+) -> Result<bitmap::Bitmap> {
     let compatibility = context.request_read_view().map_or(
         crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         super::super::read_view::StableRequestReadView::storage_compatibility,
@@ -942,7 +941,12 @@ async fn unindexed_label_rows_in_view(
     .await?;
     drop(extra);
     crate::index_lifecycle::secondary::verified_unindexed_rows(
-        reader, label, candidates, accept, &deadline,
+        reader,
+        label,
+        candidates,
+        accept,
+        &deadline,
+        context.row_memory.as_ref(),
     )
     .await
 }
@@ -982,15 +986,6 @@ async fn lookup_managed_active_literal_batch(
     compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<bitmap::Bitmap> {
     if unique {
-        // An unbudgeted read is the native batch, which verifies each batch's
-        // owners with one record multi-get.
-        if budget.is_none() {
-            return crate::index_lifecycle::secondary::lookup_active_unique_equality_batch(
-                reader, active, values,
-            )
-            .await
-            .and_then(|ids| bitmap::Bitmap::retain_legacy(ids, None));
-        }
         return Box::pin(
             crate::index_lifecycle::secondary::lookup_active_unique_equality_batch_admitted(
                 reader, active, values, budget,
