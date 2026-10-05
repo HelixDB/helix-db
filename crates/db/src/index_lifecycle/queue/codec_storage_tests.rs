@@ -17,7 +17,7 @@ use slatedb::{
 
 use bytes::Bytes;
 
-use super::storage::QueueStore;
+use super::storage::{QueueStore, StoredQueue};
 use super::QueueTarget;
 use crate::config::QueueLayout;
 use crate::encoding::v2::keys::scope::{DataScope, TenantId};
@@ -59,6 +59,14 @@ fn ids_of(queue: Option<&OperationQueue>) -> Vec<u128> {
             .map(|operation| operation.id().get())
             .collect()
     })
+}
+
+/// IDs of a stored queue's outstanding operations, in storage order.
+fn stored_ids(stored: &StoredQueue) -> Vec<u128> {
+    stored
+        .operations()
+        .map(|operation| operation.id().get())
+        .collect()
 }
 
 const PATH: &str = "operation-queue-storage";
@@ -1046,7 +1054,7 @@ async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operation
 
     // A take releases its bytes for the next queue.
     let taken = retained.take(targets[0]).expect("the remainder was held");
-    assert_eq!(ids_of(Some(taken.queue())), vec![2]);
+    assert_eq!(stored_ids(&taken), vec![2]);
     assert_eq!(
         taken.encoded_bytes(),
         0,
@@ -1057,13 +1065,13 @@ async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operation
         "a take removes the queue"
     );
     let whole = retained.take(target).expect("the whole queue was held");
-    assert_eq!(ids_of(Some(whole.queue())), vec![1, 2]);
+    assert_eq!(stored_ids(&whole), vec![1, 2]);
     assert_eq!(retained.retained_bytes(), one);
     retained.retain(targets[1], stored().await, &[]);
     assert_eq!(retained.retained_bytes(), both + one);
     for (target, ids) in [(targets[1], vec![1, 2]), (targets[2], vec![2])] {
         let taken = retained.take(target).expect("the queue was held");
-        assert_eq!(ids_of(Some(taken.queue())), ids);
+        assert_eq!(stored_ids(&taken), ids);
     }
     assert_eq!(retained.retained_bytes(), 0);
     db.close().await.unwrap();

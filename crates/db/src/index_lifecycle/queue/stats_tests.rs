@@ -394,9 +394,7 @@ async fn retained_queues_stay_within_the_writer_budget_across_many_targets() {
                 .await
                 .unwrap()
                 .unwrap()
-                .queue()
                 .operations()
-                .iter()
                 .map(QueuedOperation::retained_bytes)
                 .sum::<u64>(),
         );

@@ -1151,9 +1151,7 @@ async fn queued_entities(db: &HelixDB) -> Vec<u64> {
         .unwrap()
         .map_or_else(Vec::new, |stored| {
             stored
-                .queue()
                 .operations()
-                .iter()
                 .map(|operation| operation.entity().id.get())
                 .collect()
         })

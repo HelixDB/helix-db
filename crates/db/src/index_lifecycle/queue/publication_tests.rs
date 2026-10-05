@@ -23,6 +23,7 @@ use super::overlay_tests::{delete, hits, vector_search, write};
 use super::publication::{
     select_batch, HeldEntity, NextTarget, PublicationOutcome, QueuePublisher,
 };
+use super::storage::StoredQueue;
 use super::tests::{
     add_doc, all_keys, open, publisher_with_limits, queue, queued, release_within_operand_bound,
     rows, target,
@@ -3273,7 +3274,8 @@ fn a_repair_is_reached_however_its_generation_is_rewritten() {
     let mut batches = Vec::new();
     for round in 0..8_u128 {
         let selected = select_batch(
-            &queue,
+            &StoredQueue::new(QueueFamily::Text, queue.clone(), HashMap::new(), 0)
+                .expect("the queue holds operations"),
             Some(cursor),
             &holds,
             512,

@@ -11,8 +11,10 @@
 //! writer opens fail closed on the other layout's queues, and so do reader
 //! opens in builds that can select it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
@@ -21,13 +23,16 @@ use slatedb::{DbReadOps, DbTransaction};
 
 use crate::config::QueueLayout;
 use crate::encoding::v2::keys::scope::DataScope;
-use crate::encoding::v2::keys::{IndexOperationRowKey, ManagedIndexKey, RecordKind, ScopedKey};
+use crate::encoding::v2::keys::{
+    IndexEntity, IndexOperationRowKey, ManagedIndexKey, RecordKind, ScopedKey,
+};
 use crate::encoding::v2::values::indexes::operation_queue::{
     LatestOperations, OperationQueue, QueueFamily, QueueOperand, QueueRow, QueuedOperation,
     QueuedOperationId, QueuedPayload,
 };
 use crate::error::{HelixDbError, Result};
 
+use super::backlog::Admission;
 use super::{OutputBudget, QueueTarget};
 
 /// Exact writes one acknowledgement stages in a publication transaction.
@@ -37,20 +42,156 @@ pub(crate) struct AcknowledgementOutput {
     pub(crate) bytes: u64,
 }
 
-/// One generation queue as read from storage.
+/// One generation queue as read from storage, grouped by entity.
+///
+/// Publication selects whole per-entity prefixes, visiting entities in the
+/// order of each one's oldest outstanding operation, and acknowledges exactly
+/// those prefixes. The queue therefore keeps each entity's operations as a
+/// chain through the read's storage order, and its entities ordered by their
+/// chains' oldest operations, both built once per read. Selecting a batch
+/// visits only the entities it reaches ([`Self::rotation`]) and an
+/// acknowledgement updates only the chains it names ([`Self::without`]), so
+/// draining a backlog through retained queues costs one decode of it plus
+/// work proportional to each batch, rather than a pass over the whole
+/// backlog per batch.
+///
+/// ```text
+/// read order   0:a1  1:b1  2:a2  3:c1  4:b2
+/// chains       a: 0 -> 2   b: 1 -> 4   c: 3
+/// order        {0: a, 1: b, 3: c}
+/// without(a1)  a: 2        order {1: b, 2: a, 3: c}
+/// ```
 #[derive(Debug)]
 pub(crate) struct StoredQueue {
-    queue: OperationQueue,
-    /// Row key of each operation (row layout only).
+    family: QueueFamily,
+    /// Every operation read, in storage order; `None` once acknowledged.
+    operations: Vec<Option<QueuedOperation>>,
+    /// Read position of the same entity's next operation, by read position;
+    /// an entity's newest operation points at itself.
+    next: Vec<usize>,
+    /// Each entity's outstanding operations; an entity is present only while
+    /// it has one.
+    chains: HashMap<IndexEntity, Chain>,
+    /// Every chained entity, by the read position of its oldest outstanding
+    /// operation.
+    order: BTreeMap<usize, IndexEntity>,
+    /// Every chained entity, by the ID of its oldest outstanding operation.
+    oldest: HashMap<QueuedOperationId, IndexEntity>,
+    /// Row key of each outstanding operation (row layout only).
     rows: HashMap<QueuedOperationId, Bytes>,
+    /// Retained bytes of the outstanding operations.
+    retained_bytes: u64,
+    /// Outstanding operations; never zero.
+    outstanding: NonZeroUsize,
     /// Stored key and value bytes read to materialize the queue.
     encoded_bytes: u64,
+    /// The target's latest admission observed before the read, if recorded.
+    admitted: Option<Admission>,
+}
+
+/// One entity's outstanding operations in a [`StoredQueue`].
+#[derive(Debug, Clone, Copy)]
+struct Chain {
+    /// Read position of the oldest.
+    oldest: usize,
+    /// Read position of the newest.
+    newest: usize,
+    len: NonZeroUsize,
 }
 
 impl StoredQueue {
-    /// Returns the decoded queue in enqueue order.
-    pub(crate) const fn queue(&self) -> &OperationQueue {
-        &self.queue
+    /// Groups `family`'s `operations`, in storage order, read with the row
+    /// keys `rows` (row layout only) from `encoded_bytes` stored bytes;
+    /// `None` for the empty queue.
+    pub(crate) fn new(
+        family: QueueFamily,
+        operations: Vec<QueuedOperation>,
+        rows: HashMap<QueuedOperationId, Bytes>,
+        encoded_bytes: u64,
+    ) -> Option<Self> {
+        let outstanding = NonZeroUsize::new(operations.len())?;
+        let mut next = (0..operations.len()).collect::<Vec<_>>();
+        let mut chains = HashMap::<IndexEntity, Chain>::new();
+        let mut order = BTreeMap::new();
+        let mut oldest = HashMap::new();
+        let mut retained_bytes = 0_u64;
+        for (position, operation) in operations.iter().enumerate() {
+            retained_bytes += operation.retained_bytes();
+            match chains.entry(operation.entity()) {
+                Entry::Occupied(mut chain) => {
+                    let chain = chain.get_mut();
+                    next[chain.newest] = position;
+                    chain.newest = position;
+                    chain.len = chain.len.saturating_add(1);
+                }
+                Entry::Vacant(chain) => {
+                    chain.insert(Chain {
+                        oldest: position,
+                        newest: position,
+                        len: NonZeroUsize::MIN,
+                    });
+                    order.insert(position, operation.entity());
+                    oldest.insert(operation.id(), operation.entity());
+                }
+            }
+        }
+        Some(Self {
+            family,
+            operations: operations.into_iter().map(Some).collect(),
+            next,
+            chains,
+            order,
+            oldest,
+            rows,
+            retained_bytes,
+            outstanding,
+            encoded_bytes,
+            admitted: None,
+        })
+    }
+
+    /// Records `admitted`, the target's latest admission observed before
+    /// this queue was read: an operation admitted later may be missing.
+    pub(crate) const fn observed_after(mut self, admitted: Option<Admission>) -> Self {
+        self.admitted = admitted;
+        self
+    }
+
+    /// Returns the latest admission [`Self::observed_after`] recorded.
+    pub(crate) const fn admitted(&self) -> Option<Admission> {
+        self.admitted
+    }
+
+    /// Returns the retained family.
+    pub(crate) const fn family(&self) -> QueueFamily {
+        self.family
+    }
+
+    /// Returns every outstanding operation in storage order.
+    pub(crate) fn operations(&self) -> impl Iterator<Item = &QueuedOperation> {
+        self.operations.iter().flatten()
+    }
+
+    /// Returns how many operations are outstanding.
+    #[cfg(test)]
+    pub(crate) const fn len(&self) -> NonZeroUsize {
+        self.outstanding
+    }
+
+    /// Returns how many entities have an outstanding operation.
+    pub(crate) fn entities(&self) -> usize {
+        self.chains.len()
+    }
+
+    /// Returns whether `entity` has an outstanding operation.
+    pub(crate) fn contains(&self, entity: IndexEntity) -> bool {
+        self.chains.contains_key(&entity)
+    }
+
+    /// Returns the retained bytes of every outstanding operation.
+    #[cfg(test)]
+    pub(crate) const fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
     }
 
     /// Returns the stored key and value bytes read to materialize the queue.
@@ -58,19 +199,125 @@ impl StoredQueue {
         self.encoded_bytes
     }
 
+    /// Returns every entity's outstanding operations once, in the order of
+    /// each entity's oldest outstanding operation, starting after `after`
+    /// and wrapping around to end at it; from the first entity when `after`
+    /// has no outstanding operation.
+    ///
+    /// Each entity it yields costs a lookup in the order, however many
+    /// entities or operations the queue holds.
+    pub(crate) fn rotation(
+        &self,
+        after: Option<IndexEntity>,
+    ) -> impl Iterator<Item = EntityOperations<'_>> {
+        let (first, second) = match after.and_then(|entity| self.chains.get(&entity)) {
+            Some(chain) => (
+                (Bound::Excluded(chain.oldest), Bound::Unbounded),
+                (Bound::Unbounded, Bound::Included(chain.oldest)),
+            ),
+            None => (
+                (Bound::Unbounded, Bound::Unbounded),
+                (Bound::Unbounded, Bound::Excluded(0)),
+            ),
+        };
+        self.order
+            .range(first)
+            .chain(self.order.range(second))
+            .map(|(_, entity)| EntityOperations {
+                queue: self,
+                entity: *entity,
+                chain: self.chains[entity],
+            })
+    }
+
     /// Returns what remains of this queue once `acknowledged` committed, or
     /// `None` when nothing remains; the remainder was read from no storage.
-    fn without(self, acknowledged: &[QueuedOperationId]) -> Option<Self> {
-        let acknowledged = acknowledged.iter().copied().collect::<HashSet<_>>();
-        let family = self.queue.family();
-        let mut operations = self.queue.into_operations();
-        operations.retain(|operation| !acknowledged.contains(&operation.id()));
-        let mut rows = self.rows;
-        rows.retain(|id, _| !acknowledged.contains(id));
-        OperationQueue::from_rows(family, operations).map(|queue| Self {
-            queue,
-            rows,
+    ///
+    /// Costs work proportional to `acknowledged`, never to the queue.
+    ///
+    /// # Panics
+    ///
+    /// Unless `acknowledged` names, entity by entity, each one's oldest
+    /// outstanding operations in order, as every publication and discard
+    /// acknowledges them.
+    fn without(mut self, acknowledged: &[QueuedOperationId]) -> Option<Self> {
+        for id in acknowledged {
+            let Some(entity) = self.oldest.remove(id) else {
+                panic!("an acknowledgement names each entity's oldest outstanding operations");
+            };
+            let Entry::Occupied(mut chain) = self.chains.entry(entity) else {
+                unreachable!("an entity with an oldest operation is chained");
+            };
+            let position = chain.get().oldest;
+            let operation = self.operations[position]
+                .take()
+                .expect("a chain names only outstanding operations");
+            debug_assert_eq!(operation.id(), *id);
+            self.order.remove(&position);
+            self.rows.remove(id);
+            self.retained_bytes -= operation.retained_bytes();
+            self.outstanding = NonZeroUsize::new(self.outstanding.get() - 1)?;
+            let Some(len) = NonZeroUsize::new(chain.get().len.get() - 1) else {
+                chain.remove();
+                continue;
+            };
+            let next = self.next[position];
+            let chain = chain.get_mut();
+            chain.oldest = next;
+            chain.len = len;
+            self.order.insert(next, entity);
+            self.oldest.insert(
+                self.operations[next]
+                    .as_ref()
+                    .expect("a chain names only outstanding operations")
+                    .id(),
+                entity,
+            );
+        }
+        Some(Self {
             encoded_bytes: 0,
+            ..self
+        })
+    }
+}
+
+/// One entity's outstanding operations in a [`StoredQueue`], oldest first.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntityOperations<'a> {
+    queue: &'a StoredQueue,
+    entity: IndexEntity,
+    chain: Chain,
+}
+
+impl<'a> EntityOperations<'a> {
+    /// Returns the entity.
+    pub(crate) const fn entity(&self) -> IndexEntity {
+        self.entity
+    }
+
+    /// Returns how many operations of the entity are outstanding.
+    pub(crate) const fn len(&self) -> NonZeroUsize {
+        self.chain.len
+    }
+
+    /// Returns the entity's newest outstanding operation.
+    pub(crate) fn newest(&self) -> &'a QueuedOperation {
+        self.queue.operations[self.chain.newest]
+            .as_ref()
+            .expect("a chain names only outstanding operations")
+    }
+
+    /// Returns the entity's outstanding operations, oldest first.
+    pub(crate) fn iter(self) -> impl Iterator<Item = &'a QueuedOperation> {
+        let queue = self.queue;
+        std::iter::successors(Some(self.chain.oldest), move |position| {
+            Some(queue.next[*position])
+        })
+        .take(self.chain.len.get())
+        .map(move |position| {
+            queue.operations[position]
+                .as_ref()
+                .expect("a chain names only outstanding operations")
         })
     }
 }
@@ -88,15 +335,18 @@ impl StoredQueue {
 /// follows every retained operation of its entity. An attempt therefore
 /// [takes](Self::take) its target's queue before it classifies the target
 /// and [retains](Self::retain) only what an outcome it knows the durable
-/// effect of left: the remainder after a commit that succeeded, or the
-/// whole queue after an attempt that provably committed nothing (a trimmed
-/// selection or a definite commit conflict). An outcome whose
-/// acknowledgement may or may not have committed, an error, a blocked
-/// operation, an ownership change, and a retired or hidden generation drop
-/// it. Newer work becomes visible once the retained operations are
-/// published and the next attempt reads storage again; a retained queue
-/// whose every entity is held back is dropped and read again in the same
-/// attempt, since only newer work can repair a held entity.
+/// effect of left: the remainder after a commit that succeeded, publishing
+/// or discarding, or the whole queue after an attempt that provably
+/// committed nothing (a trimmed selection, an entity held back, or a
+/// definite commit conflict). An outcome whose acknowledgement may or may
+/// not have committed, an error, an ownership change, and a hidden
+/// generation drop it; a retired generation discards from it. Newer work
+/// becomes visible once the retained operations are published and the next
+/// attempt reads storage again. A held-back entity is repaired only by newer
+/// work or a due retry, so a retained queue whose every entity is held back
+/// is read again in the same attempt when none has a repair to try, and one
+/// whose every entity waits for newer work or a retry is read again as soon
+/// as an operation was admitted since its read ([`StoredQueue::admitted`]).
 ///
 /// Every publisher of one writer shares one instance (it lives in the
 /// writer's [`QueueStore`]), so the take-then-retain discipline holds
@@ -151,12 +401,7 @@ impl RetainedQueues {
         let Some(remaining) = stored.without(acknowledged) else {
             return;
         };
-        let bytes = remaining
-            .queue
-            .operations()
-            .iter()
-            .map(QueuedOperation::retained_bytes)
-            .sum::<u64>();
+        let bytes = remaining.retained_bytes;
         let mut state = self.state.lock();
         assert!(
             !state.queues.contains_key(&target),
@@ -235,11 +480,13 @@ impl QueueStore {
                 let Some(value) = read.get(target.key()).await? else {
                     return Ok(None);
                 };
-                Ok(Some(StoredQueue {
-                    queue: OperationQueue::decode(&value)?,
-                    rows: HashMap::new(),
-                    encoded_bytes: (target.key().len() + value.len()) as u64,
-                }))
+                let queue = OperationQueue::decode(&value)?;
+                Ok(StoredQueue::new(
+                    queue.family(),
+                    queue.into_operations(),
+                    HashMap::new(),
+                    (target.key().len() + value.len()) as u64,
+                ))
             }
             QueueLayout::Rows => {
                 let prefix = row_prefix(target);
@@ -263,13 +510,7 @@ impl QueueStore {
                 let Some(family) = family else {
                     return Ok(None);
                 };
-                Ok(
-                    OperationQueue::from_rows(family, operations).map(|queue| StoredQueue {
-                        queue,
-                        rows,
-                        encoded_bytes,
-                    }),
-                )
+                Ok(StoredQueue::new(family, operations, rows, encoded_bytes))
             }
         }
     }
@@ -362,10 +603,9 @@ impl QueueStore {
     ) -> Result<()> {
         match self.layout {
             QueueLayout::Map => {
-                let (bytes, tokens) =
-                    QueueOperand::acknowledge(stored.queue.family(), ids.iter().copied())
-                        .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?
-                        .into_parts();
+                let (bytes, tokens) = QueueOperand::acknowledge(stored.family, ids.iter().copied())
+                    .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?
+                    .into_parts();
                 transaction.merge_disjoint_tokens(target.key(), tokens, bytes)?;
             }
             QueueLayout::Rows => {
@@ -392,7 +632,7 @@ impl QueueStore {
     ) -> Result<AcknowledgementOutput> {
         match self.layout {
             QueueLayout::Map => {
-                let operand = QueueOperand::acknowledge(stored.queue.family(), ids.iter().copied())
+                let operand = QueueOperand::acknowledge(stored.family, ids.iter().copied())
                     .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
                 Ok(AcknowledgementOutput {
                     operations: 1,
