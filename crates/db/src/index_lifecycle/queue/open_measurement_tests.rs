@@ -22,6 +22,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::StreamExt;
 use helix_ast::{batch, query::QueryRequest, traversal, value::PropertyInput};
 use slatedb::object_store::local::LocalFileSystem;
 use slatedb::object_store::ObjectStore;
@@ -166,12 +167,14 @@ async fn build(store: Arc<dyn ObjectStore>) {
             ));
         }
     }
-    for tenant in 0..setting("HELIX_BACKLOG_EMPTY_TENANTS", 2_000) {
-        node(DataScope::Tenant(TenantId::from_u128(
-            1_000_000 + u128::from(tenant),
-        )))
+    // Concurrent writes share WAL flushes, so many tenants build quickly.
+    futures::stream::iter(0..setting("HELIX_BACKLOG_EMPTY_TENANTS", 2_000))
+        .for_each_concurrent(64, |tenant| {
+            node(DataScope::Tenant(TenantId::from_u128(
+                1_000_000 + u128::from(tenant),
+            )))
+        })
         .await;
-    }
     let queues = QueueStore::new(QueueLayout::Map, db.index_operand_limit(), 0);
     let per_operand =
         usize::try_from((db.index_operand_limit() - 64) / vector_operation(1, 0).retained_bytes())
@@ -213,7 +216,8 @@ async fn build(store: Arc<dyn ObjectStore>) {
         .unwrap();
     db.close().await.unwrap();
     println!(
-        "BUILD operations={operations} elapsed_ms={}",
+        "BUILD operations={operations} empty_tenants={} elapsed_ms={}",
+        setting("HELIX_BACKLOG_EMPTY_TENANTS", 2_000),
         started.elapsed().as_millis()
     );
 }
