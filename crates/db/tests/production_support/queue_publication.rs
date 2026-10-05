@@ -7,7 +7,7 @@
 //! fixture's indexes and is then reopened explicitly over the same store.
 //! Graph writes enqueue every operation through the production producer.
 //! Failure contracts stage one unobserved acknowledgement, corrupt one queue
-//! value, rewrite one namespace's metadata through the current codecs, hold
+//! value, rewrite or delete one namespace's metadata through the current codecs, hold
 //! the planning budget while a catalog change commits, fail WAL uploads, or
 //! fence the writer with a newer one; none introduces a row family or
 //! encoding.
@@ -555,6 +555,31 @@ async fn selection_and_collapse_boundaries() {
         )),
         [(second, 1, 0)]
     );
+    // An entity that failed to plan waits like a blocked one until its retry
+    // is due, then is repaired alone at full width without a newer operation.
+    let failed = |retry| {
+        HashMap::from([(
+            vector[0].entity(),
+            HeldEntity::Failed {
+                through: vector[1].id(),
+                retry,
+            },
+        )])
+    };
+    assert_eq!(
+        shape(&select(
+            2,
+            &failed(Instant::now() + MAX_STALLED_WAIT),
+            all,
+            all,
+            u64::MAX
+        )),
+        [(second, 1, 0)]
+    );
+    assert_eq!(
+        shape(&select(2, &failed(Instant::now()), all, all, u64::MAX)),
+        [(first, 2, 0)]
+    );
 
     assert!(matches!(
         collapse_vector(&SelectedEntity {
@@ -951,9 +976,10 @@ enum Change {
     Insert([f32; 2]),
 }
 
-/// Proves publication fails closed, writing nothing, when a namespace's
-/// metadata disagrees with its definition or is missing, for both removals
-/// and upserts, and publishes once the metadata is restored.
+/// Proves publication fails closed when a namespace's metadata disagrees with
+/// its definition or is missing, for both removals and upserts: it writes
+/// nothing and holds back only the entity it planned, whose retry publishes
+/// it without another write once the metadata is restored.
 async fn inconsistent_namespace_metadata_fails_closed() {
     let db = open_explicit(
         "queue-publication-metadata",
@@ -1032,19 +1058,30 @@ async fn inconsistent_namespace_metadata_fails_closed() {
             publisher
                 .publish_once(target)
                 .await
-                .expect("inconsistent metadata retries"),
-            PublicationOutcome::Retry
+                .expect("inconsistent metadata holds its entity back"),
+            PublicationOutcome::Blocked
         );
         assert_eq!(
-            load(&publisher.metrics().error_retries),
+            load(&publisher.metrics().blocked_attempts),
             u64::try_from(errors + 1).expect("phase count fits u64"),
-            "inconsistent metadata is an error, not a conflict"
+            "inconsistent metadata fails planning, not storage"
         );
+        assert_eq!(load(&publisher.metrics().error_retries), 0);
+        assert_eq!(publisher.blocked_entity_count(), 1);
         assert_eq!(all_keys(&db).await, keys, "a failed attempt writes nothing");
         storage
             .put(&key, &original)
             .await
             .expect("metadata restores");
+        assert_eq!(
+            publisher
+                .publish_once(target)
+                .await
+                .expect("a held entity waits"),
+            PublicationOutcome::Stalled,
+            "a held entity waits for a write or its retry"
+        );
+        publisher.make_failed_retries_due();
         assert!(matches!(
             publisher
                 .publish_once(target)
@@ -1052,6 +1089,14 @@ async fn inconsistent_namespace_metadata_fails_closed() {
                 .expect("restored metadata publishes"),
             PublicationOutcome::Published { .. }
         ));
+        assert_eq!(
+            publisher
+                .publish_once(target)
+                .await
+                .expect("the drained queue reads empty"),
+            PublicationOutcome::Empty
+        );
+        assert_eq!(publisher.blocked_entity_count(), 0);
     }
     db.close().await.expect("metadata writer closes");
 }

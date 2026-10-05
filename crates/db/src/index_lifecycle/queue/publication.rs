@@ -25,6 +25,10 @@
 //! 6. Stage the longest prefix of entities whose exact output fits beside the
 //!    acknowledgement: vectors through the build planner
 //!    ([`crate::index_lifecycle::vector::publication`]), text as one epoch.
+//!    When planning fails, [`FailureKind`] decides: an entity whose planning
+//!    fails deterministically is held back like one that cannot fit, but is
+//!    also retried on a timer, and the rest publish from the next attempt;
+//!    anything else retries the batch.
 //! 7. Stage one acknowledgement naming exactly the published IDs.
 //! 8. Commit through the vector cache's commit fence, release accounting and
 //!    retain the rest of the queue, then retire emptied partition caches and
@@ -80,10 +84,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// long that work waits once it becomes publishable.
 const MAX_DEFERRED_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest a [`PublicationOutcome::Stalled`] generation waits without new
-/// work. Only a new operation can give it a publishable entity, and one
-/// makes it eligible at once; this bounds how long a retirement, which only
-/// an attempt discovers, leaves its held operations charged before they are
-/// discarded.
+/// work, and how long an entity whose planning failed waits before it is
+/// planned again ([`HeldEntity::Failed`]). A new operation, or a failed
+/// entity's due retry, makes a stalled generation eligible at once; this
+/// bounds how long a retirement, which only an attempt discovers, leaves its
+/// held operations charged before they are discarded, and how soon a failed
+/// entity publishes once what failed is repaired.
 const MAX_STALLED_WAIT: Duration = Duration::from_secs(60);
 /// Most operation IDs one discard transaction acknowledges (about a 1 MiB
 /// map operand); the operand and output bounds may lower it further.
@@ -103,12 +109,16 @@ pub(crate) enum PublicationOutcome {
     Deferred,
     /// A serializable conflict or uncertain commit; rediscover and retry.
     Retry,
-    /// Exact output crossed a budget before anything fit; retry immediately
-    /// with fewer text entities, or fewer operations.
+    /// Exact output crossed a budget before anything fit, or planning a text
+    /// epoch failed deterministically; retry immediately with fewer text
+    /// entities, or fewer operations.
     Trimmed,
     /// One operation's effect and acknowledgement cannot fit an output budget,
-    /// so its entity is held back until a later operation supersedes it;
-    /// retry immediately with the generation's other entities.
+    /// or planning one entity failed deterministically, so its entity is held
+    /// back until a later operation supersedes it (or, after a failure, until
+    /// its retry is due); retry immediately with the generation's other
+    /// entities, or after backoff once two entities in a row failed to plan
+    /// without a publication between them.
     Blocked,
     /// Every queued entity is held back after blocking; nothing was attempted.
     /// The generation waits for a new operation rather than retrying on a
@@ -159,16 +169,23 @@ struct TargetSchedule {
     eligibility: Eligibility,
     /// Consecutive attempts without progress.
     failures: u32,
+    /// Entities held back after failing to plan since the generation last
+    /// published. A failure outside one entity's input, such as a partition's
+    /// missing metadata, fails every entity in turn, so from the second such
+    /// hold on, the next attempt backs off rather than holding back the whole
+    /// queue one immediate attempt at a time.
+    failed_holds: u32,
     /// Entities held back because a lone operation of theirs could not fit a
-    /// publication, or draining after their repair. Process memory only: a
-    /// restarted publisher rediscovers blocked entities by blocking again,
-    /// and publishes a draining entity's remaining operations in regular
-    /// batches (see [`HeldEntity`]).
+    /// publication or failed to plan, or draining after their repair. Process
+    /// memory only: a restarted publisher rediscovers blocked entities by
+    /// blocking again, and publishes a draining entity's remaining operations
+    /// in regular batches (see [`HeldEntity`]).
     held: HashMap<IndexEntity, HeldEntity>,
 }
 
 /// One entity held back after one of its operations could not fit a
-/// publication.
+/// publication, or failed to plan deterministically
+/// ([`QueuePublisher::isolate`]).
 ///
 /// A held entity is selected only alone, as a repair, once the rotation
 /// reaches it ahead of every entity that is not held back; a batch the
@@ -203,12 +220,26 @@ struct TargetSchedule {
 /// last one is acknowledged. Strong searches overlay every queued operation
 /// and never observe it; eventual searches that do not reach the entity
 /// within their budget can.
+///
+/// An entity whose planning failed is also repaired, at full width, once its
+/// retry is due, without a newer operation: what failed may be repaired by
+/// then, for example restored metadata, and a held delete is never written
+/// again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeldEntity {
     /// Skipped until an operation newer than `through` is queued.
     Waiting {
         /// Newest operation of the entity known not to publish.
         through: QueuedOperationId,
+    },
+    /// Planning failed deterministically ([`QueuePublisher::isolate`]):
+    /// skipped until an operation newer than `through` is queued, or until
+    /// `retry`.
+    Failed {
+        /// Newest operation of the entity known not to publish.
+        through: QueuedOperationId,
+        /// When the same operations are planned again.
+        retry: Instant,
     },
     /// Published its newest selected state, but operations past the last one
     /// acknowledged, `through`, are still queued: repaired again at full
@@ -231,24 +262,26 @@ pub(crate) enum HeldEntity {
 
 impl HeldEntity {
     /// Operations the entity's next repair takes from `queued`, its queued
-    /// operations in order, or `None` while it waits for a newer operation.
-    fn repair_width(self, queued: &[&QueuedOperation]) -> Option<usize> {
-        match self {
-            Self::Waiting { through } | Self::Draining { through } => {
-                let known = queued
-                    .iter()
-                    .position(|operation| operation.id() == through)
-                    .map_or(0, |position| position + 1);
-                (queued.len() > known).then_some(queued.len())
-            }
-            Self::Repairing { width, .. } => Some(width.get().min(queued.len())),
-        }
+    /// operations in order, or `None` while it waits for a newer operation
+    /// or, after failing to plan, for its retry to be due at `now`.
+    fn repair_width(self, queued: &[&QueuedOperation], now: Instant) -> Option<usize> {
+        let (through, due) = match self {
+            Self::Repairing { width, .. } => return Some(width.get().min(queued.len())),
+            Self::Waiting { through } | Self::Draining { through } => (through, false),
+            Self::Failed { through, retry } => (through, retry <= now),
+        };
+        let known = queued
+            .iter()
+            .position(|operation| operation.id() == through)
+            .map_or(0, |position| position + 1);
+        (due || queued.len() > known).then_some(queued.len())
     }
 
-    /// Whether the entity is held back because a state of it could not fit.
+    /// Whether the entity is held back because a state of it could not fit
+    /// or failed to plan.
     const fn is_blocked(self) -> bool {
         match self {
-            Self::Waiting { .. } | Self::Repairing { .. } => true,
+            Self::Waiting { .. } | Self::Failed { .. } | Self::Repairing { .. } => true,
             Self::Draining { .. } => false,
         }
     }
@@ -265,6 +298,7 @@ impl TargetSchedule {
             last_vector_commit: None,
             eligibility: Eligibility::Now,
             failures: 0,
+            failed_holds: 0,
             held: HashMap::new(),
         }
     }
@@ -354,10 +388,22 @@ impl Drop for AttemptClaim<'_> {
 pub(crate) mod test_hooks {
     //! Deterministic interleaving and failure seams for publication tests.
 
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     use parking_lot::Mutex;
     use tokio::sync::oneshot;
+
+    use super::SelectedEntity;
+    use crate::encoding::v2::values::indexes::operation_queue::{
+        QueuedOperationId, QueuedVectorReplacement,
+    };
+    use crate::error::{HelixDbError, Result};
+    use crate::index_lifecycle::text::active_batch::QueuedTextEffect;
+    use crate::index_lifecycle::vector::publication::QueuedVectorEffect;
+    use crate::index_lifecycle::work::TextPartition;
+    use crate::index_lifecycle::IndexElementKind;
 
     /// Test-only controls installed on one publisher.
     #[derive(Debug, Default)]
@@ -380,6 +426,108 @@ pub(crate) mod test_hooks {
         /// Row-batch fetch policy of the last staged vector attempt's
         /// mutation indexes.
         pub(crate) batch_reads: Mutex<Option<crate::batch_reads::BatchReads>>,
+        /// Failures injected into planning an entity whose newest selected
+        /// operation is the key, so a newer operation supersedes one.
+        pub(crate) planning_failures: Mutex<HashMap<QueuedOperationId, InjectedPlanningFailure>>,
+    }
+
+    /// A failure injected into planning one entity.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum InjectedPlanningFailure {
+        /// The entity plans as a corrupt payload would, so planning fails the
+        /// same way on every attempt: a vector replacement of the wrong
+        /// dimension, or a text effect naming the other element kind.
+        Corrupt,
+        /// Planning the entity fails with an object-store error, as an
+        /// outage would.
+        Unavailable,
+    }
+
+    impl PublicationHooks {
+        /// The failure injected into planning each of `selection`'s
+        /// entities, in order.
+        pub(crate) fn planning_failures(
+            &self,
+            selection: &[SelectedEntity<'_>],
+        ) -> Vec<Option<InjectedPlanningFailure>> {
+            let failures = self.planning_failures.lock();
+            selection
+                .iter()
+                .map(|selected| {
+                    selected
+                        .taken()
+                        .last()
+                        .and_then(|newest| failures.get(&newest.id()).copied())
+                })
+                .collect()
+        }
+    }
+
+    /// Gives every effect `injected` corrupts a replacement of the wrong
+    /// dimension.
+    pub(crate) fn corrupt_vector_effects(
+        effects: Vec<QueuedVectorEffect>,
+        injected: &[Option<InjectedPlanningFailure>],
+    ) -> Vec<QueuedVectorEffect> {
+        effects
+            .into_iter()
+            .zip(injected)
+            .map(|(effect, injected)| match injected {
+                Some(InjectedPlanningFailure::Corrupt) => QueuedVectorEffect {
+                    replacement: Some(
+                        QueuedVectorReplacement::try_new(
+                            TextPartition::Unpartitioned,
+                            Arc::from([0.5_f32; 3]),
+                        )
+                        .expect("a finite vector is a valid replacement"),
+                    ),
+                    ..effect
+                },
+                Some(InjectedPlanningFailure::Unavailable) | None => effect,
+            })
+            .collect()
+    }
+
+    /// Names the other element kind in every effect `injected` corrupts.
+    pub(crate) fn corrupt_text_effects(
+        effects: Vec<QueuedTextEffect>,
+        injected: &[Option<InjectedPlanningFailure>],
+    ) -> Vec<QueuedTextEffect> {
+        effects
+            .into_iter()
+            .zip(injected)
+            .map(|(mut effect, injected)| {
+                if *injected == Some(InjectedPlanningFailure::Corrupt) {
+                    effect.entity.kind = match effect.entity.kind {
+                        IndexElementKind::Node => IndexElementKind::Edge,
+                        IndexElementKind::Edge => IndexElementKind::Node,
+                    };
+                }
+                effect
+            })
+            .collect()
+    }
+
+    /// Fails planning with an object-store error at the first entity
+    /// `injected` makes unavailable, if any.
+    pub(crate) fn fail_unavailable<T>(
+        planned: Result<T>,
+        injected: &[Option<InjectedPlanningFailure>],
+        failed: impl FnOnce(usize, HelixDbError) -> Result<T>,
+    ) -> Result<T> {
+        let Some(position) = injected
+            .iter()
+            .position(|injected| *injected == Some(InjectedPlanningFailure::Unavailable))
+        else {
+            return planned;
+        };
+        failed(
+            position,
+            HelixDbError::ObjectStore(slatedb::object_store::Error::Generic {
+                store: "injected",
+                source: "injected planning outage".into(),
+            }),
+        )
     }
 }
 
@@ -487,9 +635,11 @@ impl QueuePublisher {
     /// attempt is its queue's only acknowledger, and reconciliation and
     /// discard rely on that. A call while another attempt holds the target
     /// returns [`PublicationOutcome::Retry`] without reading the queue or
-    /// touching its schedule. Retryable storage outcomes are classified here;
-    /// only errors that make the writer unusable (closed or fenced storage)
-    /// are returned.
+    /// touching its schedule. Failures are classified by [`FailureKind`]: one
+    /// entity's deterministic planning failure holds that entity back within
+    /// the attempt, any other failure that leaves the writer usable retries
+    /// the generation after backoff, and only errors that make the writer
+    /// unusable (closed or fenced storage) are returned.
     pub(crate) async fn publish_once(&self, target: QueueTarget) -> Result<PublicationOutcome> {
         if !self.attempts.lock().insert(target) {
             return Ok(PublicationOutcome::Retry);
@@ -505,17 +655,22 @@ impl QueuePublisher {
         let started = Instant::now();
         let outcome = match self.try_publish(target).await {
             Ok(outcome) => outcome,
-            Err(error) if is_fatal(&error) => return Err(error),
-            Err(error) => {
-                self.metrics.error_retries.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    %error,
-                    index_id = target.index_id.get(),
-                    generation = target.generation.get(),
-                    "queued index publication failed; retrying after backoff"
-                );
-                PublicationOutcome::Retry
-            }
+            Err(error) => match FailureKind::of(&error) {
+                FailureKind::Fatal => return Err(error),
+                // A deterministic failure that no one entity's planning
+                // raised has no entity to hold back.
+                kind @ (FailureKind::Transient | FailureKind::Deterministic) => {
+                    self.metrics.error_retries.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        %error,
+                        ?kind,
+                        index_id = target.index_id.get(),
+                        generation = target.generation.get(),
+                        "queued index publication failed; retrying after backoff"
+                    );
+                    PublicationOutcome::Retry
+                }
+            },
         };
         self.metrics.attempts.fetch_add(1, Ordering::Relaxed);
         self.metrics.attempt_micros.fetch_add(
@@ -577,6 +732,7 @@ impl QueuePublisher {
         match outcome {
             PublicationOutcome::Published { .. } => {
                 schedule.failures = 0;
+                schedule.failed_holds = 0;
                 schedule.eligibility = Eligibility::Now;
                 schedule.entity_limit = schedule.entity_limit.saturating_mul(2).min(default_limit);
                 schedule.operation_limit = schedule
@@ -586,6 +742,7 @@ impl QueuePublisher {
             // A retired generation never publishes again.
             PublicationOutcome::Discarded { .. } => {
                 schedule.failures = 0;
+                schedule.failed_holds = 0;
                 schedule.eligibility = Eligibility::Now;
                 schedule.held.clear();
             }
@@ -593,18 +750,34 @@ impl QueuePublisher {
                 schedules.remove(&target);
             }
             // Holding back a blocked entity is progress: the generation's
-            // other entities can publish at once.
+            // other entities can publish at once. A second entity failing to
+            // plan with no publication between suggests the failure is not
+            // the entities' own, so the next one waits (see `failed_holds`).
+            PublicationOutcome::Blocked if schedule.failed_holds > 1 => {
+                let backoff = RETRY_DELAY
+                    .saturating_mul(1_u32 << (schedule.failed_holds - 1).min(9))
+                    .min(MAX_BACKOFF);
+                schedule.eligibility = Eligibility::After(Instant::now() + backoff);
+            }
             PublicationOutcome::Trimmed | PublicationOutcome::Blocked => {
                 schedule.eligibility = Eligibility::Now;
             }
-            // Only a write can give a held-back entity a repair, so polling
-            // would reread and decode the queue for nothing.
+            // Only a write, or a failed entity's due retry, can give a
+            // held-back entity a repair, so polling would reread and decode
+            // the queue for nothing.
             PublicationOutcome::Stalled => {
                 schedule.failures = schedule.failures.saturating_add(1);
-                schedule.eligibility = Eligibility::NewWork {
-                    admitted,
-                    deadline: Instant::now() + MAX_STALLED_WAIT,
-                };
+                let deadline = schedule
+                    .held
+                    .values()
+                    .filter_map(|hold| match hold {
+                        HeldEntity::Failed { retry, .. } => Some(*retry),
+                        HeldEntity::Waiting { .. }
+                        | HeldEntity::Draining { .. }
+                        | HeldEntity::Repairing { .. } => None,
+                    })
+                    .fold(Instant::now() + MAX_STALLED_WAIT, Instant::min);
+                schedule.eligibility = Eligibility::NewWork { admitted, deadline };
             }
             PublicationOutcome::Empty
             | PublicationOutcome::Deferred
@@ -734,7 +907,7 @@ impl QueuePublisher {
             }
             Err(error) => {
                 let error = HelixDbError::from_storage_commit(error);
-                if is_fatal(&error) {
+                if FailureKind::of(&error) == FailureKind::Fatal {
                     return Err(error);
                 }
                 self.metrics
@@ -854,10 +1027,23 @@ impl QueuePublisher {
                 let _ = release.await;
             }
         }
-        let effects = selection
+        // Collapsing reads only the decoded queue, so it fails the same way
+        // on every attempt.
+        let effects = match selection
             .iter()
-            .map(|selected| collapse_vector(selected))
-            .collect::<Result<Vec<_>>>()?;
+            .map(|selected| collapse_vector(selected).map_err(|error| (selected, error)))
+            .collect::<std::result::Result<Vec<_>, _>>()
+        {
+            Ok(effects) => effects,
+            // A hold drops the queue (see `Self::isolate`).
+            Err((failed, error)) => {
+                return Ok(self.isolate(target, std::slice::from_ref(failed), &error));
+            }
+        };
+        #[cfg(test)]
+        let injected = self.hooks.planning_failures(&selection);
+        #[cfg(test)]
+        let effects = test_hooks::corrupt_vector_effects(effects, &injected);
         // Admission reserves the whole selection's acknowledgement, which
         // bounds that of any prefix.
         let reserved = self.store.acknowledgement_output(
@@ -871,7 +1057,7 @@ impl QueuePublisher {
         let cache_writes = vector::VectorCacheWriteSet::default();
         let commit =
             NonZeroU64::MIN.saturating_add(self.vector_commits.fetch_add(1, Ordering::Relaxed));
-        let (staged, retained) = match stage_active_effects(
+        let staged = stage_active_effects(
             &self.db,
             &transaction,
             ownership,
@@ -884,8 +1070,12 @@ impl QueuePublisher {
             last_vector_commit,
             commit,
         )
-        .await
-        {
+        .await;
+        #[cfg(test)]
+        let staged = test_hooks::fail_unavailable(staged, &injected, |position, error| {
+            Ok(StagedEffects::Failed { position, error })
+        });
+        let (staged, retained) = match staged {
             Ok(StagedEffects::Prefix { staged, retained }) => (staged.get(), retained),
             Ok(StagedEffects::NoneFits) => {
                 let outcome = self.shrink(target, &selection, 0);
@@ -905,15 +1095,27 @@ impl QueuePublisher {
                 }
                 return Ok(outcome);
             }
+            Ok(StagedEffects::Failed { position, error })
+                if FailureKind::of(&error) == FailureKind::Deterministic =>
+            {
+                // A hold drops the queue (see `Self::isolate`).
+                return Ok(self.isolate(
+                    target,
+                    std::slice::from_ref(&selection[position]),
+                    &error,
+                ));
+            }
             // Planning proved the transaction cannot commit.
-            Err(error) if error.is_transaction_conflict() => {
+            Ok(StagedEffects::Failed { error, .. }) | Err(error)
+                if error.is_transaction_conflict() =>
+            {
                 self.metrics
                     .commit_conflicts
                     .fetch_add(1, Ordering::Relaxed);
                 self.store.retained().retain(target, stored, &[]);
                 return Ok(PublicationOutcome::Retry);
             }
-            Err(error) => return Err(error),
+            Ok(StagedEffects::Failed { error, .. }) | Err(error) => return Err(error),
         };
         // Exactly the staged prefix is acknowledged; later entities stay
         // queued for the next attempt.
@@ -971,7 +1173,7 @@ impl QueuePublisher {
             }
             Err(error) => {
                 let error = HelixDbError::from_storage_commit(error);
-                if is_fatal(&error) {
+                if FailureKind::of(&error) == FailureKind::Fatal {
                     return Err(error);
                 }
                 self.record_uncertain_commit(target, selection, &acknowledged);
@@ -1083,6 +1285,26 @@ impl QueuePublisher {
             .collect()
     }
 
+    /// Makes every entity held back after failing to plan due for its retry,
+    /// as if [`MAX_STALLED_WAIT`] had passed.
+    #[cfg(any(
+        test,
+        all(feature = "production-coverage", feature = "index-lifecycle-testing")
+    ))]
+    pub(crate) fn make_failed_retries_due(&self) {
+        let now = Instant::now();
+        self.schedules
+            .lock()
+            .values_mut()
+            .flat_map(|schedule| schedule.held.values_mut())
+            .for_each(|hold| {
+                let HeldEntity::Failed { retry, .. } = hold else {
+                    return;
+                };
+                *retry = now;
+            });
+    }
+
     /// Shrinks the next selection of `target` after `selection`'s exact
     /// output crossed a budget before anything was published.
     ///
@@ -1121,7 +1343,9 @@ impl QueuePublisher {
             (Some((only, hold)), _) => {
                 let taken = only.taken().collect::<Vec<_>>();
                 let (through, tried) = match hold {
-                    HeldEntity::Waiting { through } => {
+                    // A failed entity that now plans but cannot fit is
+                    // blocked like any other.
+                    HeldEntity::Waiting { through } | HeldEntity::Failed { through, .. } => {
                         (through, taken.last().map_or(through, |last| last.id()))
                     }
                     // A draining entity already serves a state newer than
@@ -1192,6 +1416,86 @@ impl QueuePublisher {
         }
         .fetch_add(1, Ordering::Relaxed);
         outcome
+    }
+
+    /// Narrows `target`'s next attempt toward the entity of `failed`, a
+    /// selection whose planning failed deterministically with `error`.
+    ///
+    /// A failed selection of one entity holds it back as
+    /// [`HeldEntity::Failed`]: it waits for an operation newer than every
+    /// state of it known not to publish, which a later write supplies and its
+    /// repair then plans, or for its retry [`MAX_STALLED_WAIT`] from now,
+    /// which plans the same operations again in case what failed was
+    /// repaired. The rotation moves past it, so the rest of its generation
+    /// keeps publishing; from the second entity in a row that fails without a
+    /// publication between, the next attempt backs off instead (see
+    /// `TargetSchedule::failed_holds`). Nothing is acknowledged or discarded,
+    /// and nothing durable records the hold: a restarted publisher plans the
+    /// entity again and holds it back again if it still fails. A text epoch
+    /// is planned as a whole, so its failure does not name an entity; a
+    /// failed epoch of several entities halves the text entity ceiling
+    /// instead, until a failing epoch is one entity.
+    ///
+    /// The caller drops its queue after a hold, as after any blocked
+    /// operation ([`super::storage::RetainedQueues`]), so the next attempt
+    /// reads storage and sees every newer write, including one that repairs a
+    /// held entity. Retaining it would let held entities whose retries keep
+    /// falling due keep every attempt on that queue, so no newer write would
+    /// ever publish.
+    fn isolate(
+        &self,
+        target: QueueTarget,
+        failed: &[SelectedEntity<'_>],
+        error: &HelixDbError,
+    ) -> PublicationOutcome {
+        let mut schedules = self.schedules.lock();
+        let schedule = schedules
+            .entry(target)
+            .or_insert_with(|| TargetSchedule::new(self.limits.max_entities().get()));
+        let [only] = failed else {
+            debug_assert!(failed.len() > 1, "an attempt selects at least one entity");
+            schedule.entity_limit = failed.len() / 2;
+            self.metrics.output_retries.fetch_add(1, Ordering::Relaxed);
+            return PublicationOutcome::Trimmed;
+        };
+        // A narrowed repair failing says nothing of the wider states its
+        // first attempt already found not to fit.
+        let through = match schedule.held.get(&only.entity) {
+            Some(HeldEntity::Repairing { tried, .. }) => *tried,
+            Some(
+                HeldEntity::Waiting { .. }
+                | HeldEntity::Failed { .. }
+                | HeldEntity::Draining { .. },
+            )
+            | None => only
+                .taken()
+                .last()
+                .expect("a selected entity has operations")
+                .id(),
+        };
+        schedule.held.insert(
+            only.entity,
+            HeldEntity::Failed {
+                through,
+                retry: Instant::now() + MAX_STALLED_WAIT,
+            },
+        );
+        schedule.cursor = Some(only.entity);
+        schedule.failed_holds = schedule.failed_holds.saturating_add(1);
+        self.metrics
+            .blocked_attempts
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::error!(
+            %error,
+            scope = ?target.scope,
+            entity = ?only.entity,
+            index_id = target.index_id.get(),
+            generation = target.generation.get(),
+            retry_after_secs = MAX_STALLED_WAIT.as_secs(),
+            "planning a queued index operation failed deterministically; its entity is held \
+             back until a later write supersedes it or its retry is due"
+        );
+        PublicationOutcome::Blocked
     }
 
     /// Records a publication commit of `selection` whose outcome is unknown.
@@ -1288,10 +1592,22 @@ impl QueuePublisher {
             // Ownership changed after classification; classify again.
             return Ok(PublicationOutcome::Retry);
         };
-        let effects = selection
+        // As for vectors, collapsing fails the same way on every attempt.
+        let effects = match selection
             .iter()
-            .map(collapse_text)
-            .collect::<Result<Vec<_>>>()?;
+            .map(|selected| collapse_text(selected).map_err(|error| (selected, error)))
+            .collect::<std::result::Result<Vec<_>, _>>()
+        {
+            Ok(effects) => effects,
+            // A hold drops the queue (see `Self::isolate`).
+            Err((failed, error)) => {
+                return Ok(self.isolate(target, std::slice::from_ref(failed), &error));
+            }
+        };
+        #[cfg(test)]
+        let injected = self.hooks.planning_failures(&selection);
+        #[cfg(test)]
+        let effects = test_hooks::corrupt_text_effects(effects, &injected);
         let acknowledged = selection
             .iter()
             .flat_map(|selected| selected.operations.iter().map(|operation| operation.id()))
@@ -1299,15 +1615,17 @@ impl QueuePublisher {
         let acknowledgement = self
             .store
             .acknowledgement_output(target, &stored, &acknowledged)?;
-        let prepared = match crate::index_lifecycle::text::active_batch::prepare_queued_text_epoch(
+        let prepared = crate::index_lifecycle::text::active_batch::prepare_queued_text_epoch(
             &transaction,
             &handle,
             effects,
             self.text.limits,
             acknowledgement,
         )
-        .await
-        {
+        .await;
+        #[cfg(test)]
+        let prepared = test_hooks::fail_unavailable(prepared, &injected, |_, error| Err(error));
+        let prepared = match prepared {
             Ok(prepared) => prepared,
             // Producers and builds admit every document to half of each
             // per-entity budget and bound its lone split within the split
@@ -1329,6 +1647,15 @@ impl QueuePublisher {
                         "one queued text operation exceeds the publication budget; its entity \
                          is held back until a later write supersedes it"
                     );
+                }
+                return Ok(outcome);
+            }
+            Err(error) if FailureKind::of(&error) == FailureKind::Deterministic => {
+                let outcome = self.isolate(target, &selection, &error);
+                if outcome == PublicationOutcome::Trimmed {
+                    // Nothing committed: the next, narrower epoch reuses the
+                    // queue. A hold drops it (see `Self::isolate`).
+                    self.store.retained().retain(target, stored, &[]);
                 }
                 return Ok(outcome);
             }
@@ -1375,7 +1702,7 @@ impl QueuePublisher {
             }
             Err(error) => {
                 let error = HelixDbError::from_storage_commit(error);
-                if is_fatal(&error) {
+                if FailureKind::of(&error) == FailureKind::Fatal {
                     return Err(error);
                 }
                 self.record_uncertain_commit(target, &selection, &acknowledged);
@@ -1490,9 +1817,10 @@ impl<'a> SelectedEntity<'a> {
 /// acknowledged; the rest are `superseding`. When the rotation reaches it
 /// after other entities, the batch ends there: the next batch starts after
 /// this one's last published entity, so the rotation never carries past a
-/// repair, however the rest of its generation is written. The result is
-/// empty only when every queued entity is held back without a repair to
-/// try.
+/// repair, however the rest of its generation is written. A failed entity's
+/// retry is due once its instant has passed when the selection runs. The
+/// result is empty only when every queued entity is held back without a
+/// repair to try.
 pub(crate) fn select_batch<'a>(
     operations: &'a [QueuedOperation],
     after: Option<IndexEntity>,
@@ -1517,6 +1845,7 @@ pub(crate) fn select_batch<'a>(
         .and_then(|entity| order.iter().position(|candidate| *candidate == entity))
         .map_or(0, |position| position + 1);
     let max_operations = max_operations.min(max_acknowledged).get();
+    let now = Instant::now();
     let mut selected = Vec::new();
     let mut input_bytes = 0_u64;
     let mut selected_operations = 0_usize;
@@ -1525,7 +1854,10 @@ pub(crate) fn select_batch<'a>(
             break;
         }
         let mut queued = grouped.remove(&entity).unwrap_or_default();
-        match held.get(&entity).map(|hold| hold.repair_width(&queued)) {
+        match held
+            .get(&entity)
+            .map(|hold| hold.repair_width(&queued, now))
+        {
             Some(None) => continue,
             Some(Some(_)) if !selected.is_empty() => break,
             Some(Some(width)) => {
@@ -1666,13 +1998,88 @@ async fn load_generation_record(
 #[path = "../../../tests/production_support/queue_publication.rs"]
 pub(crate) mod production_contracts;
 
-/// Errors after which this writer can no longer make durable progress.
-fn is_fatal(error: &HelixDbError) -> bool {
-    matches!(
-        error,
-        HelixDbError::DatabaseClosed | HelixDbError::WriterFencedCommitOutcomeUnknown
-    ) || matches!(
-        error,
-        HelixDbError::Storage(error) if matches!(error.kind(), slatedb::ErrorKind::Closed(_))
-    )
+/// What retrying a failed publication can change, which decides how the
+/// failure is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureKind {
+    /// The writer can make no further durable progress (closed or fenced
+    /// storage): the error is returned and publication stops.
+    Fatal,
+    /// Storage or object-store I/O, a conflict, a lifecycle race, or a
+    /// cancellation: the same batch may publish later, so the generation
+    /// backs off and retries it whole, holding nothing back.
+    Transient,
+    /// The input itself cannot be planned (corrupt or invariant-violating
+    /// state, or a payload its index rejects), so retrying the same input
+    /// fails the same way. An entity whose planning fails like this is held
+    /// back ([`QueuePublisher::isolate`]) while the rest of its generation
+    /// publishes; a failure outside one entity's planning has no entity to
+    /// hold back and retries like a transient one.
+    Deterministic,
+}
+
+impl FailureKind {
+    /// Classifies `error` by its variant, never its message. Every variant
+    /// is named, so a new one cannot go unclassified.
+    pub(crate) fn of(error: &HelixDbError) -> Self {
+        match error {
+            HelixDbError::DatabaseClosed | HelixDbError::WriterFencedCommitOutcomeUnknown => {
+                Self::Fatal
+            }
+            HelixDbError::Storage(error)
+                if matches!(error.kind(), slatedb::ErrorKind::Closed(_)) =>
+            {
+                Self::Fatal
+            }
+            HelixDbError::Storage(_)
+            | HelixDbError::ObjectStore(_)
+            | HelixDbError::TransactionConflict(_)
+            | HelixDbError::RequestReadViewChanged
+            | HelixDbError::QueryDeadlineExceeded
+            | HelixDbError::QueryCancelledByReaderRetirement
+            | HelixDbError::StaleIndexGeneration { .. }
+            | HelixDbError::IndexBusy { .. }
+            | HelixDbError::IndexBackpressure { .. }
+            | HelixDbError::IndexBuildBlocked { .. }
+            | HelixDbError::IdentifierAllocationFailed { .. } => Self::Transient,
+            HelixDbError::Encoding(_)
+            | HelixDbError::InvalidNodeId(_)
+            | HelixDbError::NodeNotFound(_)
+            | HelixDbError::EdgeNotFound { .. }
+            | HelixDbError::Config(_)
+            | HelixDbError::IndexLifecycleUnavailable { .. }
+            | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode
+            | HelixDbError::MigrationSteppingRequiresDisabledMode
+            | HelixDbError::ActiveTextMutationLimitExceeded { .. }
+            | HelixDbError::IndexOperationBatchTooLarge { .. }
+            | HelixDbError::InvalidIndexSourceData { .. }
+            | HelixDbError::InvalidIndexV2Model(_)
+            | HelixDbError::SecondaryIndexValue(_)
+            | HelixDbError::MigrationRequired { .. }
+            | HelixDbError::WriterMigrationRequired { .. }
+            | HelixDbError::UnsupportedIndexStorageVersion { .. }
+            | HelixDbError::IdentifierExhausted(_)
+            | HelixDbError::IndexCatalogCorruption(_)
+            | HelixDbError::InvalidVectorConfig(_)
+            | HelixDbError::InvalidVectorItem(_)
+            | HelixDbError::Query(_)
+            | HelixDbError::Planner(_)
+            | HelixDbError::InvalidQueryJson(_)
+            | HelixDbError::WriterModeRequired { .. }
+            | HelixDbError::ReaderModeRequired { .. }
+            | HelixDbError::IndexAlreadyExists(_)
+            | HelixDbError::IndexDefinitionConflict { .. }
+            | HelixDbError::IndexOperationNotFound { .. }
+            | HelixDbError::IndexOperationNotAbortable { .. }
+            | HelixDbError::IndexNotFound(_)
+            | HelixDbError::UniqueConstraintViolation { .. }
+            | HelixDbError::UnsupportedUniqueIndexValueType { .. }
+            | HelixDbError::InvalidDimension { .. }
+            | HelixDbError::InvalidVectorComponent { .. }
+            | HelixDbError::VectorComponentMagnitudeExceeded { .. }
+            | HelixDbError::ZeroNormCosineVector
+            | HelixDbError::LegacyZeroNormCosineVector { .. }
+            | HelixDbError::InvariantViolation(_) => Self::Deterministic,
+        }
+    }
 }

@@ -444,7 +444,14 @@ async fn run_neighbor_write_contracts(db: &Db) {
     let mut mutation_cache = MutationOpCache::<Cosine>::default();
     assert_eq!(
         index
-            .search_layer_greedy_for_mutation(&measured, &item, 999_999, 0, &mut mutation_cache,)
+            .search_layer_greedy_for_mutation(
+                &measured,
+                &item,
+                999_999,
+                0,
+                600,
+                &mut mutation_cache,
+            )
             .await
             .unwrap(),
         999_999
@@ -578,18 +585,46 @@ async fn run_neighbor_write_contracts(db: &Db) {
         .await
         .unwrap();
 
+    // A stored self-link, as damage leaves one, loads without it; a row over
+    // its degree still fails closed.
     let rows = VectorWriteRows::new(&measured, index.row_keyspace());
-    rows.put_layer0_neighbors(701, &[701]).unwrap();
+    rows.put_layer0_neighbors(701, &[2, 701]).unwrap();
+    let mut self_linked = MutationOpCache::<Cosine>::with_degree_limits(8, 4).unwrap();
+    assert_eq!(
+        index
+            .load_neighbors_for_mutation(&measured, 0, 701, &mut self_linked)
+            .await
+            .unwrap(),
+        [2]
+    );
+    rows.put_layer0_neighbors(702, &[702]).unwrap();
+    assert_eq!(
+        index
+            .prefetch_layer0_neighbors_for_mutation(&measured, &[702], &mut self_linked)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        self_linked
+            .neighbor(MutationOpCache::<Cosine>::node_row_id(0, 702))
+            .unwrap()
+            .current(),
+        &neighbors(702, Vec::new())
+    );
+
+    let over_degree = (1..=9).collect::<Vec<NodeId>>();
+    rows.put_layer0_neighbors(704, &over_degree).unwrap();
     let mut malformed_load = MutationOpCache::<Cosine>::with_degree_limits(8, 4).unwrap();
     assert!(index
-        .load_neighbors_for_mutation(&measured, 0, 701, &mut malformed_load)
+        .load_neighbors_for_mutation(&measured, 0, 704, &mut malformed_load)
         .await
         .is_err());
 
-    rows.put_layer0_neighbors(702, &[702]).unwrap();
+    rows.put_layer0_neighbors(705, &over_degree).unwrap();
     let mut malformed_prefetch = MutationOpCache::<Cosine>::with_degree_limits(8, 4).unwrap();
     assert!(index
-        .prefetch_layer0_neighbors_for_mutation(&measured, &[702], &mut malformed_prefetch)
+        .prefetch_layer0_neighbors_for_mutation(&measured, &[705], &mut malformed_prefetch)
         .await
         .is_err());
 

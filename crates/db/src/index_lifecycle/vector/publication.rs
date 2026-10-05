@@ -94,6 +94,13 @@ pub(crate) enum StagedEffects {
     /// Not even the first effect fits beside the reserved output; nothing was
     /// staged.
     NoneFits,
+    /// Planning the effect at `position` failed with `error`, so the caller
+    /// can tell which entity failed. Every earlier effect is staged and the
+    /// failed one may be partly planned, so the transaction must not commit.
+    Failed {
+        position: usize,
+        error: HelixDbError,
+    },
 }
 
 /// Plans `effects` in order and stages the longest prefix that fits `limits`
@@ -106,6 +113,9 @@ pub(crate) enum StagedEffects {
 /// Planning reuses the session retained after the target's commit numbered
 /// `latest_commit` when that is still the retained one, and offers its own
 /// session for retention at `commit`, the number this attempt's commit takes.
+///
+/// An error planning one effect is [`StagedEffects::Failed`]; an error before
+/// any effect is planned is returned.
 #[allow(
     clippy::too_many_arguments,
     reason = "publication binds the exact storage, generation, budget, planner resources, cache effects, and session checkpoints"
@@ -227,7 +237,7 @@ async fn stage_with_distance<D: Distance>(
         .checkout_publication::<D>(permit, reuse.as_ref(), limits.max_input_bytes())
         .await;
     let mut staged = 0_usize;
-    for effect in effects {
+    for (position, effect) in effects.iter().enumerate() {
         let next = effect
             .replacement
             .as_ref()
@@ -235,13 +245,7 @@ async fn stage_with_distance<D: Distance>(
                 partition: replacement.partition().clone(),
                 vector: replacement.vector().to_vec(),
             });
-        let EntityPlanOutcome::Admitted {
-            vector_writes,
-            single_vector_output_bytes,
-            lifecycle_operations,
-            lifecycle_bytes,
-            ..
-        } = plan_and_apply::<D>(
+        let planned = match plan_and_apply::<D>(
             &planning,
             &recorder,
             transaction,
@@ -255,7 +259,18 @@ async fn stage_with_distance<D: Distance>(
             &accounting,
             &mut session,
         )
-        .await?
+        .await
+        {
+            Ok(planned) => planned,
+            Err(error) => return Ok(StagedEffects::Failed { position, error }),
+        };
+        let EntityPlanOutcome::Admitted {
+            vector_writes,
+            single_vector_output_bytes,
+            lifecycle_operations,
+            lifecycle_bytes,
+            ..
+        } = planned
         else {
             session.discard_entity();
             break;
