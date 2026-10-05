@@ -443,26 +443,29 @@ mod tests {
                     *generation,
                 ))
                 .await;
-            let publication::StagedEffects::Prefix { staged, .. } =
-                publication::stage_active_effects(
-                    db,
-                    transaction,
-                    &permit,
-                    handle,
-                    &effects,
-                    SearchIndexBackfillLimits::default().batch(),
-                    AcknowledgementOutput {
-                        operations: 0,
-                        bytes: 0,
-                    },
-                    &resources,
-                    cache_writes,
-                    None,
-                    std::num::NonZeroU64::MIN,
-                )
-                .await?
-            else {
-                panic!("every effect fits the default budget");
+            let staged = match publication::stage_active_effects(
+                db,
+                transaction,
+                &permit,
+                handle,
+                &effects,
+                SearchIndexBackfillLimits::default().batch(),
+                AcknowledgementOutput {
+                    operations: 0,
+                    bytes: 0,
+                },
+                &resources,
+                cache_writes,
+                None,
+                std::num::NonZeroU64::MIN,
+            )
+            .await?
+            {
+                publication::StagedEffects::Prefix { staged, .. } => staged,
+                publication::StagedEffects::NoneFits => {
+                    panic!("every effect fits the default budget")
+                }
+                publication::StagedEffects::Failed { error, .. } => return Err(error),
             };
             assert_eq!(staged, expected);
         }

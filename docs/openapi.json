@@ -1101,7 +1101,7 @@
           "blocked_index_entity_count": {
             "type": "integer",
             "minimum": 0,
-            "description": "Nodes and edges whose queued vector or text index work the index worker holds back because it can never fit a publication under the current limits, typically after the limits were lowered. Only the count: the writer logs an error naming each one when it is held back. Always 0 on a reader. Rebuilt after a restart as publication reaches them again."
+            "description": "Nodes and edges whose queued vector or text index work the index worker holds back: either it can never fit a publication under the current limits, typically after the limits were lowered, or applying it fails the same way every time, for example on damaged index data. Only the count: the writer logs an error naming each one when it is held back. Always 0 on a reader. Rebuilt after a restart as publication reaches them again."
           }
         },
         "additionalProperties": false,

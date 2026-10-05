@@ -601,19 +601,19 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3720,
+    "line": 3738,
     "reason": "Only shrink_to evicts without a transaction, and it runs only on sessions the lifecycle driver retained. The driver retains a session only when it holds no unflushed rows, after flush_all has written every dirty neighbor for the step, so this arm cannot meet a dirty neighbor row.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3816,
+    "line": 3834,
     "reason": "This error value belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3819,
+    "line": 3837,
     "reason": "This closing edge belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },

@@ -3,9 +3,10 @@
 //! Persisted neighbor rows retain their deployed byte codecs. The vector core
 //! converts them into [`NeighborSet`] before mutation or difference work, so a
 //! set is always sorted, unique, self-free, and within its layer degree limit.
-//! Historical upper-layer rows may be ordered by distance rather than node ID;
-//! [`NeighborSet::try_from_deployed`] sorts that decoded compatibility input in
-//! memory without rewriting the row. New core state uses the strict canonical
+//! Historical upper-layer rows may be ordered by distance rather than node ID,
+//! and damaged rows may link their own node; [`NeighborSet::try_from_deployed`]
+//! sorts that decoded compatibility input and drops the self-link in memory
+//! without rewriting the row. New core state uses the strict canonical
 //! constructor and encodes through the unchanged existing codecs.
 
 use std::num::NonZeroUsize;
@@ -112,14 +113,20 @@ impl NeighborSet {
 
     /// Adapts a decoded deployed row into canonical runtime order.
     ///
-    /// Existing upper-neighbor rows may retain distance order. Sorting here is
-    /// runtime-only and preserves restart compatibility; duplicates, self-links,
-    /// and degree violations still fail closed as corrupt graph state.
+    /// Existing upper-neighbor rows may retain distance order, and a row
+    /// damaged by a released version may link its own node. Sorting and
+    /// dropping the self-link here are runtime-only: traversal never follows
+    /// a self-link, so the row means the same without it, and a mutation that
+    /// changes the row stores it self-free. Failing instead would fail every
+    /// mutation that loads the row, including the ones that would change it.
+    /// Duplicates and degree violations still fail closed as corrupt graph
+    /// state.
     pub(crate) fn try_from_deployed(
         owner: NodeId,
         degree_limit: NeighborDegreeLimit,
         mut nodes: Vec<NodeId>,
     ) -> Result<Self, NeighborSetError> {
+        nodes.retain(|node| *node != owner);
         nodes.sort_unstable();
         Self::try_from_canonical(owner, degree_limit, nodes)
     }
@@ -270,12 +277,27 @@ mod tests {
     }
 
     #[test]
-    fn deployed_adapter_canonicalizes_order_but_not_corruption() {
+    fn deployed_adapter_canonicalizes_order_and_self_links_but_not_corruption() {
         let set = NeighborSet::try_from_deployed(9, limit(3), vec![3, 1, 2]).unwrap();
         assert_eq!(set.as_slice(), &[1, 2, 3]);
+        // A full row that also links its owner fits once the self-link drops.
+        let set = NeighborSet::try_from_deployed(9, limit(3), vec![3, 9, 1, 2]).unwrap();
+        assert_eq!(set.as_slice(), &[1, 2, 3]);
+        assert!(!set.contains(9));
+        assert_eq!(
+            NeighborSet::try_from_deployed(9, limit(3), vec![9]).unwrap(),
+            NeighborSet::empty(9, limit(3))
+        );
         assert_eq!(
             NeighborSet::try_from_deployed(9, limit(3), vec![2, 1, 2]),
             Err(NeighborSetError::Duplicate(2))
+        );
+        assert_eq!(
+            NeighborSet::try_from_deployed(9, limit(3), vec![4, 3, 9, 1, 2]),
+            Err(NeighborSetError::DegreeExceeded {
+                limit: 3,
+                actual: 4
+            })
         );
     }
 

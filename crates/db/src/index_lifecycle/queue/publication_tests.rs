@@ -1554,27 +1554,32 @@ async fn an_active_namespace_without_metadata_fails_closed_and_writes_nothing() 
         )
         .await
         .unwrap();
-    add_doc(&db, vec![2.0, 2.0], "c").await.unwrap();
+    let inserted = add_doc(&db, vec![2.0, 2.0], "c").await.unwrap();
     let keys = all_keys(&db).await;
     let rows = unpartitioned_vector_rows(&db).await;
-    let errors = publisher(&db)
-        .metrics()
-        .error_retries
-        .load(Ordering::Relaxed);
 
     // Only a build creates a missing namespace, so publication never
-    // recreates it over rows search can no longer reach.
+    // recreates it over rows search can no longer reach: planning the insert
+    // fails, which holds it back.
     assert_eq!(
         publisher(&db).publish_once(target).await.unwrap(),
-        PublicationOutcome::Retry
+        PublicationOutcome::Blocked
+    );
+    assert_eq!(
+        publisher(&db)
+            .blocked_entities()
+            .into_iter()
+            .map(|(_, entity)| entity.id.get())
+            .collect::<Vec<_>>(),
+        [inserted]
     );
     assert_eq!(
         publisher(&db)
             .metrics()
             .error_retries
             .load(Ordering::Relaxed),
-        errors + 1,
-        "a missing namespace is an error, not a conflict"
+        0,
+        "a missing namespace fails planning, not storage"
     );
     assert_eq!(
         all_keys(&db).await,
@@ -1616,31 +1621,36 @@ async fn contradict_metadata(db: &HelixDB, physical_index_id: u64) {
 }
 
 /// Asserts `target`'s next attempt fails closed on the contradicting metadata
-/// of namespace `physical_index_id`: an error rather than a conflict, which
-/// writes nothing, leaves its one queued operation, and retains no planning
-/// session.
+/// of namespace `physical_index_id`: planning fails, holding back `entity`,
+/// whose one queued operation stays queued, and the attempt writes nothing
+/// and retains no planning session.
 async fn assert_contradicting_metadata_fails_closed(
     db: &HelixDB,
     target: QueueTarget,
     physical_index_id: u64,
+    entity: u64,
 ) {
     let keys = all_keys(db).await;
     let rows = physical_rows(db, physical_index_id).await;
-    let errors = publisher(db)
-        .metrics()
-        .error_retries
-        .load(Ordering::Relaxed);
     assert_eq!(
         publisher(db).publish_once(target).await.unwrap(),
-        PublicationOutcome::Retry
+        PublicationOutcome::Blocked
+    );
+    assert_eq!(
+        publisher(db)
+            .blocked_entities()
+            .into_iter()
+            .map(|(_, held)| held.id.get())
+            .collect::<Vec<_>>(),
+        [entity]
     );
     assert_eq!(
         publisher(db)
             .metrics()
             .error_retries
             .load(Ordering::Relaxed),
-        errors + 1,
-        "contradicting metadata is an error, not a conflict"
+        0,
+        "contradicting metadata fails planning, not storage"
     );
     assert_eq!(
         all_keys(db).await,
@@ -1688,12 +1698,13 @@ async fn an_upsert_into_contradicting_metadata_fails_closed_and_writes_nothing()
         PublicationOutcome::Published { .. }
     ));
     contradict_metadata(&db, physical_index_id.get()).await;
-    add_doc(&db, vec![2.0, 2.0], "c").await.unwrap();
+    let inserted = add_doc(&db, vec![2.0, 2.0], "c").await.unwrap();
     assert!(publisher(&db)
         .planning_cache()
         .retained_publication(target)
         .is_some());
-    assert_contradicting_metadata_fails_closed(&db, target, physical_index_id.get()).await;
+    assert_contradicting_metadata_fails_closed(&db, target, physical_index_id.get(), inserted)
+        .await;
     db.close().await.unwrap();
 }
 
@@ -1718,7 +1729,7 @@ async fn a_removal_from_contradicting_metadata_fails_closed_and_writes_nothing()
     // The partition keeps another entity, so only the removal reads its
     // metadata; no reclamation runs.
     super::overlay_tests::delete(&db, removed).await;
-    assert_contradicting_metadata_fails_closed(&db, target, partition).await;
+    assert_contradicting_metadata_fails_closed(&db, target, partition, removed).await;
     db.close().await.unwrap();
 }
 

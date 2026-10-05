@@ -449,10 +449,11 @@ async fn wait_published(db: &HelixDB) {
     }
 }
 
-/// Waits until automatic publication has failed more often than `before`.
-async fn wait_publication_failure(db: &HelixDB, before: u64) {
+/// Waits until automatic publication has held an entity back more often than
+/// `before`.
+async fn wait_publication_blocked(db: &HelixDB, before: u64) {
     let started = Instant::now();
-    while db.index_operation_queue_stats().publication_error_retries <= before {
+    while db.index_operation_queue_stats().blocked_attempts <= before {
         assert!(
             started.elapsed() < OPERATION_TIMEOUT,
             "queued publication was never attempted"
@@ -1343,15 +1344,29 @@ async fn active_node_insert_rejects_nonempty_root_without_corpus_statistics() {
         .migration_parity_v2_state()
         .await
         .expect("damaged node evidence reads");
-    let failures = db.index_operation_queue_stats().publication_error_retries;
+    let stats = db.index_operation_queue_stats();
     // Producers never read statistics; the damaged root fails closed when
-    // publication applies the queued insert.
-    insert_node(&db, "rejectednodeappendonly").await;
-    wait_publication_failure(&db, failures).await;
+    // publication plans the queued insert, a deterministic failure that holds
+    // the node back instead of retrying it.
+    let rejected = insert_node(&db, "rejectednodeappendonly").await;
+    wait_publication_blocked(&db, stats.blocked_attempts).await;
+    let held = db.index_operation_queue_stats();
     assert_eq!(
-        db.index_operation_queue_stats().pending_operations,
-        1,
-        "an operation that cannot be published is never acknowledged"
+        (
+            held.pending_operations,
+            held.blocked_entities,
+            held.publication_error_retries
+        ),
+        (1, 1, stats.publication_error_retries),
+        "an operation that cannot be published is held back, never acknowledged or retried"
+    );
+    assert_eq!(
+        db.blocked_index_entities()
+            .iter()
+            .map(|blocked| blocked.id.get())
+            .collect::<Vec<_>>(),
+        [rejected],
+        "only the damaged node is held back"
     );
     let mut after = db
         .migration_parity_v2_state()
@@ -1420,15 +1435,29 @@ async fn active_edge_insert_rejects_nonempty_root_without_corpus_statistics() {
         .migration_parity_v2_state()
         .await
         .expect("damaged edge evidence reads");
-    let failures = db.index_operation_queue_stats().publication_error_retries;
+    let stats = db.index_operation_queue_stats();
     // Producers never read statistics; the damaged root fails closed when
-    // publication applies the queued insert.
-    insert_edge(&db, from, to, "rejectededgeappendonly").await;
-    wait_publication_failure(&db, failures).await;
+    // publication plans the queued insert, a deterministic failure that holds
+    // the edge back instead of retrying it.
+    let rejected = insert_edge(&db, from, to, "rejectededgeappendonly").await;
+    wait_publication_blocked(&db, stats.blocked_attempts).await;
+    let held = db.index_operation_queue_stats();
     assert_eq!(
-        db.index_operation_queue_stats().pending_operations,
-        1,
-        "an operation that cannot be published is never acknowledged"
+        (
+            held.pending_operations,
+            held.blocked_entities,
+            held.publication_error_retries
+        ),
+        (1, 1, stats.publication_error_retries),
+        "an operation that cannot be published is held back, never acknowledged or retried"
+    );
+    assert_eq!(
+        db.blocked_index_entities()
+            .iter()
+            .map(|blocked| blocked.id.get())
+            .collect::<Vec<_>>(),
+        [rejected],
+        "only the damaged edge is held back"
     );
     let mut after = db
         .migration_parity_v2_state()

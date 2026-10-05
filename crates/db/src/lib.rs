@@ -3345,11 +3345,12 @@ impl HelixDB {
     /// publisher holds back, in ascending order.
     ///
     /// Each one has an operation that alone can never fit a publication under
-    /// the current limits; see [`BlockedIndexEntity`] for what that means for
-    /// writes and searches, including strong text searches that fail with
-    /// backpressure no publication clears. The list is the publisher's
-    /// process memory: it is empty on a reader and is rebuilt after a
-    /// restart as publication blocks again.
+    /// the current limits, or one whose planning failed deterministically;
+    /// see [`BlockedIndexEntity`] for what that means for writes and
+    /// searches, including strong text searches that fail with backpressure
+    /// no publication clears. The list is the publisher's process memory: it
+    /// is empty on a reader and is rebuilt after a restart as publication
+    /// blocks again.
     pub fn blocked_index_entities(&self) -> Vec<BlockedIndexEntity> {
         let Some(publisher) = &self.inner.index_queue_publisher else {
             return Vec::new();

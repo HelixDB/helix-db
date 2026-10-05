@@ -5670,6 +5670,15 @@ error naming each one when it is held back. Raise the limits again. Rewriting or
 deleting a document also clears it once replacing or removing its published version
 fits the lowered limits.
 
+The worker also holds back a single vector or text entry whose update fails the same
+way every time it is applied, for example on damaged index data, and keeps publishing
+the rest of the index. It counts under `blocked_index_entity_count` too, and the logged
+error names the entry and the failure. The worker retries the entry about once a
+minute, so it publishes on its own once the cause is fixed. Until then, every write to
+that entry stays queued and counts toward the index's limit on unpublished work, so
+writing it over and over can fill the limit and return `index_backpressure` for writes
+to the whole index. Stop writing the entry until it publishes.
+
 ## Request returns HTTP 429 (Helix Cloud)
 
 `rate_limited` means the shared request bucket for the Cloud database has no

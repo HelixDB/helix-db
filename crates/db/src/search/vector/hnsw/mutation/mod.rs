@@ -509,7 +509,9 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Missing items fall through to the writable candidate index and return an
     /// owned item, or `None` when insertion must continue with an empty candidate
-    /// set. Any candidate cleanup remains staged in the caller's measured
+    /// set. The inserting node is never a root, even when stale metadata names
+    /// it: its item is already staged, so it would be its own nearest neighbor.
+    /// Any candidate cleanup remains staged in the caller's measured
     /// transaction; this method never mutates a resident snapshot.
     pub(in crate::search::vector) async fn resolve_beam_entry_point_for_insert(
         &self,
@@ -519,9 +521,10 @@ impl<D: Distance> VectorIndex<D> {
         inserting_node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<Option<(NodeId, Item<'static, D>)>, HelixDbError> {
-        if let Some(item) = self
-            .get_item_for_layer_cached(txn, layer, entry_point, mutation_cache)
-            .await?
+        if entry_point != inserting_node_id
+            && let Some(item) = self
+                .get_item_for_layer_cached(txn, layer, entry_point, mutation_cache)
+                .await?
         {
             return Ok(Some((entry_point, item.as_ref().clone())));
         }
@@ -530,6 +533,7 @@ impl<D: Distance> VectorIndex<D> {
             .find_best_entry_candidate_cached(txn, mutation_cache)
             .await?
             && replacement_entry_point != entry_point
+            && replacement_entry_point != inserting_node_id
             && let Some(item) = self
                 .get_item_for_layer_cached(txn, layer, replacement_entry_point, mutation_cache)
                 .await?
@@ -886,6 +890,7 @@ impl<D: Distance> VectorIndex<D> {
                         item,
                         current_entry_point,
                         layer,
+                        node_id,
                         mutation_cache,
                     )
                     .await?;
@@ -974,6 +979,12 @@ impl<D: Distance> VectorIndex<D> {
     /// neighbor/item cache so staged rows are authoritative and speculative
     /// layer-0 reads remain bounded. Missing entry points are resolved through
     /// the write-side recovery contract before expansion begins.
+    ///
+    /// `inserting_node_id` is never a candidate. Its item is staged before the
+    /// search, and a row may still link it: a link released versions left
+    /// without a reverse locator outlives the node's delete (see
+    /// [`Self::stage_delete_with_metadata`]). Admitting it would select the
+    /// node as its own neighbor.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::search::vector) async fn search_layer_beam(
         &self,
@@ -1006,6 +1017,7 @@ impl<D: Distance> VectorIndex<D> {
         else {
             return Ok(Vec::new());
         };
+        visited.insert(inserting_node_id);
         let entry_distance = D::distance(query, &entry_item);
         candidates.push(Reverse(Candidate::try_new(
             resolved_entry_point,
@@ -1079,15 +1091,20 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Greedily descends through reusable item and neighbor cache state.
+    ///
+    /// Like [`Self::search_layer_beam`], it never moves to
+    /// `inserting_node_id`, whose item is already staged.
     async fn search_layer_greedy_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         query: &Item<'_, D>,
         entry_point: NodeId,
         layer: u16,
+        inserting_node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<NodeId, HelixDbError> {
         let mut visited = foldhash::HashSet::default();
+        visited.insert(inserting_node_id);
         let mut current = entry_point;
         let Some(current_item) = self
             .get_item_for_layer_cached(txn, layer, current, mutation_cache)
@@ -1713,9 +1730,10 @@ impl<D: Distance> VectorIndex<D> {
     /// link's locator or the node's own rows, so a link without a locator
     /// from a source the node does not link back survives the delete. A
     /// reinsertion of the node in the same cache then searches through it
-    /// back to the node and fails; otherwise the link dangles. Released
-    /// versions v3.1.0 through v3.4.2 (Docker images through v0.0.9) left links
-    /// without locators on re-embeddings, and nothing here repairs them.
+    /// back to the node, which the search skips, and the link names the node
+    /// again; otherwise the link dangles. Released versions v3.1.0 through
+    /// v3.4.2 (Docker images through v0.0.9) left links without locators on
+    /// re-embeddings, and nothing here repairs them.
     pub(in crate::search::vector) async fn stage_delete_with_metadata(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
