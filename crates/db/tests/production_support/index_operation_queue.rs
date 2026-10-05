@@ -728,6 +728,29 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
             vec![0x01],
             "Buffer too short",
         ),
+        (
+            "queue-duplicate-operation",
+            raw_target(1).key().to_vec(),
+            raw_value(
+                VECTOR,
+                &[],
+                &[
+                    (IF_ABSENT, 1, &vector_body([1.0, 2.0])),
+                    (IF_ABSENT, 1, &vector_body([3.0, 4.0])),
+                ],
+            ),
+            "inserts one operation ID twice",
+        ),
+        (
+            "queue-corrupt-payload",
+            raw_target(1).key().to_vec(),
+            raw_value(
+                VECTOR,
+                &[],
+                &[(IF_ABSENT, 1, &vector_body([1.0, f32::NAN]))],
+            ),
+            "not finite",
+        ),
     ] {
         let error = reopen_after(name, Vec::new(), |db| async move {
             db.inner_db()
@@ -746,9 +769,10 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
 ///
 /// Writer open finds tenant queues in one forward-seeking pass over the
 /// tenant keyspace. Queues in the first and last tenant IDs and in adjacent
-/// tenants, each beside graph rows that sort before them, are charged
-/// exactly once; a tenant holding only graph rows contributes nothing; and
-/// queues no canonical record owns reload to be discarded.
+/// tenants, between graph rows that sort before them and rows that sort
+/// after them, are charged exactly once; a tenant holding only graph rows
+/// contributes nothing; and queues no canonical record owns reload to be
+/// discarded.
 pub async fn index_operation_queue_scope_walk_contracts() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let name = "queue-scope-walk";
@@ -766,6 +790,16 @@ pub async fn index_operation_queue_scope_walk_contracts() {
             "graph rows",
         ))
         .await;
+    }
+    // Keys that sort after a tenant's queues, as a later record kind would.
+    for tenant in [8, u128::MAX] {
+        let mut key = Vec::new();
+        DataScope::Tenant(TenantId::from_u128(tenant)).encode_key_prefix(&mut key);
+        key.extend_from_slice(&[0x06, 0x16]);
+        db.inner_db()
+            .put(&key, b"after the queues")
+            .await
+            .expect("raw row writes");
     }
     let mut targets = BTreeSet::new();
     let mut retained_bytes = 0;
