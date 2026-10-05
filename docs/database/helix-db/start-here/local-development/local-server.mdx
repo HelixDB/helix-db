@@ -260,6 +260,7 @@ SeaweedFS 4.09 or later enforce both.
 | `AWS_SESSION_TOKEN` | Optional temporary-credential token |
 | `AWS_ENDPOINT` or `AWS_ENDPOINT_URL_S3` | Non-AWS S3 endpoint |
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
+| `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` | Most unpublished vector work, in bytes, one `strong` vector search scores before it fails with `index_backpressure`; defaults to 512 MiB. See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
 the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use

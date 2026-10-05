@@ -83,8 +83,9 @@ An HTTP 429 with `index_backpressure` comes from the database engine, not a rate
 Either a vector or text index already holds its maximum unpublished work, so the write
 was rejected before commit, or a whole-index `strong` search's answer lies behind more
 than 800 unpublished changes, or a `strong` text search would analyze more unpublished
-text than one text publication may (64 MiB of analysis by default). Nothing from the
-request took effect.
+text than one text publication may (64 MiB of analysis by default), or a `strong`
+vector search would score more unpublished vector work than its bound
+(`pending_vector_bytes`, 512 MiB by default). Nothing from the request took effect.
 
 Retry the unchanged request with bounded backoff and jitter; it succeeds once the index
 worker publishes the backlog, or, while the index is building, once it activates. Reads
