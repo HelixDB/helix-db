@@ -7,9 +7,15 @@
 //! cache stores each loaded row in one closed state ADT, so absence, cleanliness,
 //! the first storage snapshot, and the latest staged value cannot disagree
 //! across parallel collections.
+//!
+//! Flushing a cached row is the only way a neighbor row or its reverse
+//! locators reach the transaction: each flush stages the row's transition
+//! from the value the transaction holds to its current value, locators
+//! included. Inserts, deletes, relinks, and a delete followed by a reinsert
+//! of the same node therefore leave exactly one locator per link.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -40,29 +46,49 @@ use crate::search::vector::{
     VectorIndexState,
 };
 
-mod active;
-pub(crate) use active::ActiveVectorMutationRuntime;
-
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MIN_TARGETS: usize = 2;
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_MUTATION: usize = 8;
 pub(in crate::search::vector) const VECTOR_BUILD_ITEM_CACHE_LIMIT: usize = 4_096;
 pub(in crate::search::vector) const VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT: usize = 2_048;
 pub(in crate::search::vector) const VECTOR_BUILD_SIMHASH_CACHE_LIMIT: usize = 4_096;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Plans every upsert in scope through the full delete-and-reinsert path,
+    /// the unskipped reference replay tests compare against.
+    pub(crate) static REPLACE_REPLAYS: ();
+    /// Counts the entities [`VectorBuildSession::discard_entity`] discards in scope.
+    pub(crate) static DISCARDED_ENTITIES: std::cell::Cell<u64>;
+}
+
+/// Whether an upsert may keep a node that already holds its exact state.
+#[cfg(not(test))]
+const fn replays_may_skip() -> bool {
+    true
+}
+
+/// Whether an upsert may keep a node that already holds its exact state:
+/// outside a [`REPLACE_REPLAYS`] scope.
+#[cfg(test)]
+fn replays_may_skip() -> bool {
+    REPLACE_REPLAYS.try_with(|()| ()).is_err()
+}
+
 /// Bookkeeping charged against a build session budget per retained item.
 ///
-/// Each per-entry charge covers the entry's hash-map slot, its recency-index
-/// key, and the headers of its heap allocations (an item's shared decoded
-/// value and vector buffer, a neighbor row's one or two neighbor lists), with
-/// slack for partly filled hash tables and B-tree nodes, so a session's
+/// Each per-entry charge covers the entry's hash-map slot, the four
+/// recency-order entries its value may allocate, a dirty row's dirty-set key,
+/// and the headers of its heap allocations (an item's shared decoded value and
+/// vector buffer, a neighbor row's one or two neighbor lists), so a session's
 /// resident memory stays near its byte budget even for tiny payloads such as
 /// 8-byte SimHashes. A unit test pins every charge above the structural size
 /// of the types it covers.
-const VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES: usize = 192;
+const VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES: usize = 224;
 /// Bookkeeping charged against a build session budget per retained neighbor row.
-const VECTOR_BUILD_SESSION_NEIGHBOR_OVERHEAD_BYTES: usize = 256;
+const VECTOR_BUILD_SESSION_NEIGHBOR_OVERHEAD_BYTES: usize = 320;
 /// Bookkeeping charged against a build session budget per retained SimHash.
-const VECTOR_BUILD_SESSION_SIMHASH_OVERHEAD_BYTES: usize = 96;
+const VECTOR_BUILD_SESSION_SIMHASH_OVERHEAD_BYTES: usize = 104;
 /// Budget bytes that admit one retained entry of each class.
 ///
 /// Byte charges already bound realistic entries. Capping every class at one
@@ -75,8 +101,9 @@ const VECTOR_BUILD_SESSION_BACKGROUND_DROP_BYTES: usize = 16 * 1024 * 1024;
 ///
 /// Covers one generation namespace's cache struct and hash-map slot, its
 /// identity key and physical-name allocation, its eviction-index and dirty-set
-/// entries, and the smallest allocations of its per-kind maps and recency sets,
-/// so a build touching many small tenant partitions stays near its budget.
+/// entries, and the smallest allocations of its per-kind maps, recency orders,
+/// and dirty-row set, so a build touching many small tenant partitions stays
+/// near its budget.
 const VECTOR_BUILD_SESSION_NAMESPACE_OVERHEAD_BYTES: usize = 4_096;
 
 /// Aggregate observable behavior of one reusable vector build session.
@@ -191,7 +218,8 @@ impl FreshVectorBuildProof {
 /// Internal mutation contract selected by the public or generation façade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::search::vector) enum VectorInsertContract {
-    /// Remove an existing graph row before inserting its replacement.
+    /// Remove an existing graph row before inserting its replacement, unless
+    /// the row already holds exactly the replacement at its selected layer.
     Upsert,
     /// Insert after consuming lifecycle-owned proof that the target is fresh.
     ProvenFresh(FreshVectorBuildProof),
@@ -665,6 +693,16 @@ impl<D: Distance> VectorIndex<D> {
         result
     }
 
+    /// Inserts `node_id`, first deleting an existing node under
+    /// [`VectorInsertContract::Upsert`].
+    ///
+    /// An upsert that replays the node's exact state stages nothing. That
+    /// means the node holds `vector` byte for byte (`-0.0` never matches
+    /// `0.0`) and its entry-candidate row records `selected_layer`. Deleting
+    /// and reinserting it would restage the same item rows, so the node keeps
+    /// its links: no row or SimHash is written and no cache entry is
+    /// invalidated. A random layer (`None`) and a missing or corrupt
+    /// entry-candidate row always take the full path.
     #[allow(
         clippy::too_many_arguments,
         reason = "the mutation cache binds the exact contract, metadata, and flush ownership"
@@ -681,11 +719,20 @@ impl<D: Distance> VectorIndex<D> {
         flush_after: bool,
     ) -> Result<(), HelixDbError> {
         if matches!(contract, VectorInsertContract::Upsert)
-            && self
+            && let Some(existing) = self
                 .get_item_for_layer_cached(txn, 0, node_id, mutation_cache)
                 .await?
-                .is_some()
         {
+            if let Some(layer) = selected_layer
+                && replays_may_skip()
+                && existing.vector.as_bytes() == vector.values().as_bytes()
+                && VectorWriteRows::new(txn, self.row_keyspace())
+                    .entry_candidate_layer(node_id)
+                    .await?
+                    == EntryCandidateLayerRow::Present(layer)
+            {
+                return Ok(());
+            }
             let _ = self
                 .stage_delete_with_metadata(txn, node_id, metadata, mutation_cache)
                 .await?;
@@ -699,11 +746,9 @@ impl<D: Distance> VectorIndex<D> {
         let simhash_cache = self.simhash_cache(metadata.config.dimension)?;
         let simhash = simhash_cache.compute_and_cache_measured(txn, node_id, vector)?;
         mutation_cache.put_simhash(node_id, Some(simhash));
-        self.mark_memory_node_dirty(node_id);
 
         let node_layer =
             selected_layer.unwrap_or_else(|| self.select_mutation_layer(metadata.config.ml));
-        mutation_cache.invalidate_neighbors(node_id);
         let canonical_key = self.canonical_vector_key_from_simhash(node_id, simhash);
         let encoded_item = encode_item(&item);
         let encoded_item_bytes = encoded_item.len();
@@ -712,7 +757,6 @@ impl<D: Distance> VectorIndex<D> {
         if node_layer > 0 {
             rows.put_canonical_vector(&canonical_key, encoded_item.clone())?;
             rows.put_upper_vector(node_id, encoded_item)?;
-            self.mark_memory_node_dirty(node_id);
         } else {
             rows.put_canonical_vector(&canonical_key, encoded_item)?;
         }
@@ -941,7 +985,7 @@ impl<D: Distance> VectorIndex<D> {
         inserting_node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<Vec<Candidate>, HelixDbError> {
-        let mut visited = HashSet::new();
+        let mut visited = foldhash::HashSet::default();
         let mut candidates = BinaryHeap::new();
         let mut w = BinaryHeap::new();
         let mut remaining_layer0_neighbor_prefetch_budget = if layer == 0 {
@@ -1043,7 +1087,7 @@ impl<D: Distance> VectorIndex<D> {
         layer: u16,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<NodeId, HelixDbError> {
-        let mut visited = HashSet::new();
+        let mut visited = foldhash::HashSet::default();
         let mut current = entry_point;
         let Some(current_item) = self
             .get_item_for_layer_cached(txn, layer, current, mutation_cache)
@@ -1125,6 +1169,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages one canonical layer-0 neighbor row through typed storage.
+    #[cfg(test)]
     pub(in crate::search::vector) async fn store_neighbors_layer0(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1134,7 +1179,8 @@ impl<D: Distance> VectorIndex<D> {
         VectorWriteRows::new(txn, self.row_keyspace()).put_layer0_neighbors(node_id, neighbors)
     }
 
-    /// Stages one canonical upper-neighbor row and fences its shared-cache copy.
+    /// Stages one canonical upper-neighbor row through typed storage.
+    #[cfg(feature = "production-coverage")]
     pub(in crate::search::vector) fn store_upper_neighbors(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1143,9 +1189,7 @@ impl<D: Distance> VectorIndex<D> {
         neighbors: &[NodeId],
     ) -> Result<(), HelixDbError> {
         VectorWriteRows::new(txn, self.row_keyspace())
-            .put_upper_neighbors(layer, node_id, neighbors)?;
-        self.mark_memory_upper_neighbors_dirty(layer, node_id);
-        Ok(())
+            .put_upper_neighbors(layer, node_id, neighbors)
     }
 
     /// Computes the exact linear reverse-locator delta between canonical rows.
@@ -1158,24 +1202,52 @@ impl<D: Distance> VectorIndex<D> {
             .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))
     }
 
-    /// Stages only reverse-locator changes implied by a canonical row update.
-    pub(in crate::search::vector) fn update_reverse_edge_locator(
-        &self,
-        txn: &MeasuredVectorTransaction<'_>,
-        layer: u16,
-        source_node_id: NodeId,
-        old_neighbors: &NeighborSet,
-        new_neighbors: &NeighborSet,
+    /// Stages one cached row's transition from its baseline to its current
+    /// value: the only writer of neighbor rows and their reverse locators.
+    ///
+    /// The baseline is the value the transaction holds for the row (the value
+    /// first loaded, or the one its previous flush staged), and the
+    /// transaction holds the baseline's locators. So the transition deletes
+    /// the locators only the baseline links, puts those only the current
+    /// value links, and puts the row, or deletes it once its current value is
+    /// absent. A clean row, or one whose current value equals its baseline,
+    /// stages nothing.
+    fn stage_neighbor_row_transition(
+        rows: &VectorWriteRows<'_, '_>,
+        row: NeighborRowId,
+        cached: &CachedNeighbor,
+        degree_limit: NeighborDegreeLimit,
     ) -> Result<(), HelixDbError> {
-        let (removed, added) = Self::neighbor_deltas(old_neighbors, new_neighbors)?.into_parts();
-        let rows = VectorWriteRows::new(txn, self.row_keyspace());
+        let Some(baseline) = cached.original() else {
+            return Ok(());
+        };
+        let current = cached.current();
+        if baseline == current {
+            return Ok(());
+        }
+        let (layer, node_id) = row.storage_parts();
+        let empty = NeighborSet::empty(node_id, degree_limit);
+        let [baseline_links, current_links] = [baseline, current].map(|value| match value {
+            NeighborRowValue::KnownAbsent => &empty,
+            NeighborRowValue::Present(neighbors) => neighbors,
+        });
+        let (removed, added) = Self::neighbor_deltas(baseline_links, current_links)?.into_parts();
         for target_node_id in removed {
-            rows.delete_reverse_locator(target_node_id, layer, source_node_id)?;
+            rows.delete_reverse_locator(target_node_id, layer, node_id)?;
         }
         for target_node_id in added {
-            rows.put_reverse_locator(target_node_id, layer, source_node_id)?;
+            rows.put_reverse_locator(target_node_id, layer, node_id)?;
         }
-        Ok(())
+        match (layer, current) {
+            (0, NeighborRowValue::Present(neighbors)) => {
+                rows.put_layer0_neighbors(node_id, neighbors.as_slice())
+            }
+            (0, NeighborRowValue::KnownAbsent) => rows.delete_layer0_neighbors(node_id),
+            (layer, NeighborRowValue::Present(neighbors)) => {
+                rows.put_upper_neighbors(layer, node_id, neighbors.as_slice())
+            }
+            (layer, NeighborRowValue::KnownAbsent) => rows.delete_upper_neighbors(layer, node_id),
+        }
     }
 
     /// Loads every reverse source grouped by layer for deletion repair.
@@ -1334,10 +1406,13 @@ impl<D: Distance> VectorIndex<D> {
             .await
     }
 
-    /// Stages a freshly allocated row using the cache’s private absent-row proof.
+    /// Stages the row an insertion gives the inserting node at one layer.
     ///
-    /// The proof prevents an unloaded existing row from being misclassified as
-    /// absent; canonical validation still occurs before the cache is mutated.
+    /// A cached row is staged over, keeping the baseline its flush diffs
+    /// against: the row a preceding delete of the node staged absent, or
+    /// residue the transaction still holds. An unloaded row is new by the
+    /// insertion contract and staged through the cache’s private absent-row
+    /// proof. Canonical validation occurs before the cache is mutated.
     pub(in crate::search::vector) async fn stage_new_neighbors_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1347,12 +1422,17 @@ impl<D: Distance> VectorIndex<D> {
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<(), HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-        let proof = mutation_cache.prove_new_neighbor_row(row)?;
         neighbors.sort_unstable();
         let neighbors =
             NeighborSet::try_from_canonical(node_id, mutation_cache.degree_limit(layer), neighbors)
                 .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
-        mutation_cache.stage_new_neighbor(proof, NeighborRowValue::Present(neighbors));
+        let value = NeighborRowValue::Present(neighbors);
+        if mutation_cache.contains_neighbor(row) {
+            mutation_cache.stage_loaded_neighbor(row, value)?;
+        } else {
+            let proof = mutation_cache.prove_new_neighbor_row(row)?;
+            mutation_cache.stage_new_neighbor(proof, value);
+        }
         self.enforce_mutation_cache_bounds(txn, mutation_cache)
             .await
     }
@@ -1430,8 +1510,7 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Flushes one dirty row and transitions it only after all writes succeed.
     ///
-    /// Reverse locators are staged before the canonical neighbor row. If the
-    /// original and current values agree, no storage operation is emitted.
+    /// [`Self::stage_neighbor_row_transition`] stages the row and its locators.
     /// Successful callers may retain the row as clean or evict it atomically
     /// from the operation cache; any error preserves the exact dirty state.
     pub(in crate::search::vector) async fn flush_one_cached_neighbor(
@@ -1441,69 +1520,19 @@ impl<D: Distance> VectorIndex<D> {
         row: NeighborRowId,
         evict_after_flush: bool,
     ) -> Result<(), HelixDbError> {
-        self.flush_one_cached_neighbor_mode(txn, mutation_cache, row, evict_after_flush, true)
-            .await
-    }
-
-    /// Flushes an Active-session canonical row whose locator delta was staged at its entity boundary.
-    pub(in crate::search::vector) async fn flush_one_active_cached_neighbor(
-        &self,
-        txn: &MeasuredVectorTransaction<'_>,
-        mutation_cache: &mut MutationOpCache<D>,
-        row: NeighborRowId,
-        evict_after_flush: bool,
-    ) -> Result<(), HelixDbError> {
-        self.flush_one_cached_neighbor_mode(txn, mutation_cache, row, evict_after_flush, false)
-            .await
-    }
-
-    async fn flush_one_cached_neighbor_mode(
-        &self,
-        txn: &MeasuredVectorTransaction<'_>,
-        mutation_cache: &mut MutationOpCache<D>,
-        row: NeighborRowId,
-        evict_after_flush: bool,
-        stage_reverse_locators: bool,
-    ) -> Result<(), HelixDbError> {
-        let Some(cached) = mutation_cache.neighbor(row).cloned() else {
+        let Some(cached) = mutation_cache
+            .neighbor(row)
+            .filter(|cached| cached.is_dirty())
+        else {
             return Ok(());
         };
-        if !cached.is_dirty() {
-            return Ok(());
-        }
         let (layer, node_id) = row.storage_parts();
-        let NeighborRowValue::Present(current_neighbors) = cached.current() else {
-            return Err(HelixDbError::InvariantViolation(
-                "vector mutation cannot flush a deleted neighbor row".to_string(),
-            ));
-        };
-        let original = cached
-            .original()
-            .expect("dirty vector neighbor rows retain an original value");
-        let previous_neighbors = match original {
-            NeighborRowValue::KnownAbsent => {
-                NeighborSet::empty(node_id, mutation_cache.degree_limit(layer))
-            }
-            NeighborRowValue::Present(neighbors) => neighbors.clone(),
-        };
-
-        if original != cached.current() {
-            if stage_reverse_locators {
-                self.update_reverse_edge_locator(
-                    txn,
-                    layer,
-                    node_id,
-                    &previous_neighbors,
-                    current_neighbors,
-                )?;
-            }
-            if layer == 0 {
-                self.store_neighbors_layer0(txn, node_id, current_neighbors.as_slice())
-                    .await?;
-            } else {
-                self.store_upper_neighbors(txn, layer, node_id, current_neighbors.as_slice())?;
-            }
-        }
+        Self::stage_neighbor_row_transition(
+            &VectorWriteRows::new(txn, self.row_keyspace()),
+            row,
+            cached,
+            mutation_cache.degree_limit(layer),
+        )?;
 
         if evict_after_flush {
             mutation_cache.remove_neighbor(row);
@@ -1670,6 +1699,23 @@ impl<D: Distance> VectorIndex<D> {
         result
     }
 
+    /// Stages the deletion of `node_id` through `mutation_cache`, returning
+    /// whether it held an item.
+    ///
+    /// The node's neighbor rows are staged absent and every row naming it is
+    /// relinked in the cache, so the caller's flush writes each of those rows
+    /// with exactly its locator changes, even when a reinsertion in the same
+    /// cache restores a row. Only locators naming the node that no cached
+    /// row owns are deleted here. Item, SimHash, entry-candidate, and
+    /// metadata rows are staged directly.
+    ///
+    /// Requires one locator per link: a source is found only through its
+    /// link's locator or the node's own rows, so a link without a locator
+    /// from a source the node does not link back survives the delete. A
+    /// reinsertion of the node in the same cache then searches through it
+    /// back to the node and fails; otherwise the link dangles. Released
+    /// versions v3.1.0 through v3.4.2 (Docker images through v0.0.9) left links
+    /// without locators on re-embeddings, and nothing here repairs them.
     pub(in crate::search::vector) async fn stage_delete_with_metadata(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1696,32 +1742,45 @@ impl<D: Distance> VectorIndex<D> {
         let mut layers_to_process = (0..=node_max_layer).collect::<BTreeSet<_>>();
         layers_to_process.extend(reverse_sources.sources_by_layer().keys().copied());
 
-        let mut deleted_node_outgoing_by_layer = HashMap::<u16, Vec<NodeId>>::new();
+        // The node's own rows and every row naming it change only in the
+        // cache, whose flush stages each row with its locators. A locator
+        // deleted here instead would stay deleted when a relink, or the
+        // node's reinsertion, restores its row to the baseline: that row then
+        // flushes nothing and keeps the link without its locator.
         for layer in layers_to_process.iter().rev().copied() {
             let maximum_neighbors = if layer == 0 {
                 maximum_layer0_connections
             } else {
                 maximum_upper_connections
             };
-            let outgoing_neighbors = self
-                .delete_from_layer(
-                    txn,
-                    node_id,
-                    layer,
-                    maximum_neighbors,
-                    reverse_sources.sources_at(layer),
-                    mutation_cache,
-                )
+            self.delete_from_layer(
+                txn,
+                node_id,
+                layer,
+                maximum_neighbors,
+                reverse_sources.sources_at(layer),
+                mutation_cache,
+            )
+            .await?;
+            // Loading again restores the row should bounded eviction have
+            // flushed it since `delete_from_layer` read it.
+            self.load_neighbors_for_mutation(txn, layer, node_id, mutation_cache)
                 .await?;
-            deleted_node_outgoing_by_layer.insert(layer, outgoing_neighbors);
+            mutation_cache.stage_loaded_neighbor(
+                MutationOpCache::<D>::node_row_id(layer, node_id),
+                NeighborRowValue::KnownAbsent,
+            )?;
+            self.enforce_mutation_cache_bounds(txn, mutation_cache)
+                .await?;
         }
-
-        for (layer, neighbors) in deleted_node_outgoing_by_layer {
-            for target_node_id in neighbors {
-                rows.delete_reverse_locator(target_node_id, layer, node_id)?;
-            }
-        }
-        rows.delete_reverse_sources(&reverse_sources)?;
+        // `delete_from_layer` removed the node from every source row, so a
+        // source whose baseline still links it owns that locator until its
+        // flush. Every other locator naming the node is residue no flush
+        // owns: its source never linked the node, or an evicting flush
+        // already wrote the source without it.
+        rows.delete_reverse_sources(&reverse_sources, |layer, source| {
+            mutation_cache.baseline_links(MutationOpCache::<D>::node_row_id(layer, source), node_id)
+        })?;
 
         let (canonical_key, _) = self
             .resolve_canonical_vector_key_cached(
@@ -1738,25 +1797,13 @@ impl<D: Distance> VectorIndex<D> {
             rows.delete_canonical_vector(&canonical_key)?;
         }
 
-        rows.delete_layer0_neighbors(node_id)?;
-        for layer in 1..=node_max_layer {
-            rows.delete_upper_neighbors(layer, node_id)?;
-            self.mark_memory_upper_neighbors_dirty(layer, node_id);
-        }
-
         rows.delete_upper_vector(node_id)?;
-        self.mark_memory_node_dirty(node_id);
         rows.delete_simhash(node_id)?;
-        self.mark_memory_node_dirty(node_id);
         self.remove_entry_candidate(txn, node_id).await?;
         mutation_cache.invalidate_items(node_id);
         mutation_cache.invalidate_simhash(node_id);
         mutation_cache.put_simhash(node_id, None);
-        mutation_cache.invalidate_neighbors(node_id);
         for layer in layers_to_process {
-            let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-            mutation_cache.install_loaded_neighbor(row, NeighborRowValue::KnownAbsent);
-            mutation_cache.record_neighbor_change(row, NeighborRowValue::KnownAbsent);
             mutation_cache.put_item(layer, node_id, None, 0);
         }
 
@@ -1887,10 +1934,21 @@ impl<D: Distance> VectorIndex<D> {
                     .filter(|candidate| *candidate != node_id && *candidate != neighbor_id),
             );
         }
+        // A source without an item relinks nothing, so candidates are read
+        // only once some source can use them.
+        if self
+            .get_items_for_layer_cached_batch(txn, layer, &relink_sources, mutation_cache)
+            .await?
+            .is_empty()
+        {
+            return Ok(outgoing_neighbors);
+        }
+        let candidates = self
+            .load_relink_candidates(txn, layer, &candidates, mutation_cache)
+            .await?;
         for &neighbor_id in &relink_sources {
             self.relink_neighbor(
                 txn,
-                layer,
                 neighbor_id,
                 &candidates,
                 maximum_neighbors,
@@ -1899,6 +1957,47 @@ impl<D: Distance> VectorIndex<D> {
             .await?;
         }
         Ok(outgoing_neighbors)
+    }
+
+    /// Loads every relink candidate of one layer with a single batched read.
+    ///
+    /// Each deletion relinks ~M sources against the same candidates, so one
+    /// load replaces a cache lookup per source and candidate pair.
+    pub(in crate::search::vector) async fn load_relink_candidates(
+        &self,
+        txn: &MeasuredVectorTransaction<'_>,
+        layer: u16,
+        candidates: &HashSet<NodeId>,
+        mutation_cache: &mut MutationOpCache<D>,
+    ) -> Result<RelinkCandidates<D>, HelixDbError> {
+        let node_ids = candidates.iter().copied().collect::<Vec<_>>();
+        let mut loaded = self
+            .get_items_for_layer_cached_batch(txn, layer, &node_ids, mutation_cache)
+            .await?;
+        Ok(RelinkCandidates {
+            layer,
+            items: node_ids
+                .into_iter()
+                .map(|node_id| (node_id, loaded.remove(&node_id)))
+                .collect(),
+        })
+    }
+
+    /// Returns a candidate's hydrated item, reading through the mutation cache
+    /// only for nodes outside the candidate set.
+    async fn relink_item(
+        &self,
+        txn: &MeasuredVectorTransaction<'_>,
+        candidates: &RelinkCandidates<D>,
+        node_id: NodeId,
+        mutation_cache: &mut MutationOpCache<D>,
+    ) -> Result<Option<Arc<Item<'static, D>>>, HelixDbError> {
+        let Some(item) = candidates.items.get(&node_id) else {
+            return self
+                .get_item_for_layer_cached(txn, candidates.layer, node_id, mutation_cache)
+                .await;
+        };
+        Ok(item.clone())
     }
 
     /// Removes one reciprocal reference and stages the row only when changed.
@@ -1931,14 +2030,14 @@ impl<D: Distance> VectorIndex<D> {
     pub(in crate::search::vector) async fn relink_neighbor(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
-        layer: u16,
         neighbor_id: NodeId,
-        candidates: &HashSet<NodeId>,
+        candidates: &RelinkCandidates<D>,
         maximum_neighbors: usize,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<(), HelixDbError> {
+        let layer = candidates.layer;
         let Some(neighbor_item) = self
-            .get_item_for_layer_cached(txn, layer, neighbor_id, mutation_cache)
+            .relink_item(txn, candidates, neighbor_id, mutation_cache)
             .await?
         else {
             return Ok(());
@@ -1947,24 +2046,28 @@ impl<D: Distance> VectorIndex<D> {
             .load_neighbors_for_mutation(txn, layer, neighbor_id, mutation_cache)
             .await?;
         let mut current_neighbors = old_neighbors.clone();
-        let mut candidate_distances = Vec::new();
-        for &candidate_id in candidates {
-            if candidate_id == neighbor_id {
-                continue;
-            }
-            let Some(candidate_item) = self
-                .get_item_for_layer_cached(txn, layer, candidate_id, mutation_cache)
-                .await?
-            else {
-                continue;
-            };
-            candidate_distances.push(Candidate::try_new(
-                candidate_id,
-                D::distance(neighbor_item.as_ref(), candidate_item.as_ref()),
-            )?);
+        let mut nearest = candidates
+            .items
+            .iter()
+            .filter(|(candidate_id, _)| **candidate_id != neighbor_id)
+            .filter_map(|(candidate_id, item)| {
+                item.as_ref().map(|item| {
+                    Candidate::try_new(
+                        *candidate_id,
+                        D::distance(neighbor_item.as_ref(), item.as_ref()),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Candidates have distinct node IDs and `Candidate` orders by distance
+        // then node ID, so the partitioned prefix holds exactly the nearest
+        // `maximum_neighbors` a full sort would keep.
+        if nearest.len() > maximum_neighbors {
+            nearest.select_nth_unstable(maximum_neighbors);
+            nearest.truncate(maximum_neighbors);
         }
-        candidate_distances.sort();
-        for candidate in candidate_distances.iter().take(maximum_neighbors) {
+        nearest.sort_unstable();
+        for candidate in &nearest {
             if !current_neighbors.contains(&candidate.node_id) {
                 current_neighbors.push(candidate.node_id);
             }
@@ -1975,7 +2078,7 @@ impl<D: Distance> VectorIndex<D> {
             let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
             for &node_id in &current_neighbors {
                 let Some(item) = self
-                    .get_item_for_layer_cached(txn, layer, node_id, mutation_cache)
+                    .relink_item(txn, candidates, node_id, mutation_cache)
                     .await?
                 else {
                     continue;
@@ -2016,7 +2119,7 @@ impl<D: Distance> VectorIndex<D> {
             reverse_neighbors.push(neighbor_id);
             if reverse_neighbors.len() > maximum_neighbors {
                 let Some(reverse_item) = self
-                    .get_item_for_layer_cached(txn, layer, new_neighbor_id, mutation_cache)
+                    .relink_item(txn, candidates, new_neighbor_id, mutation_cache)
                     .await?
                 else {
                     self.stage_neighbors_vec_for_mutation(
@@ -2033,7 +2136,7 @@ impl<D: Distance> VectorIndex<D> {
                 let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
                 for &node_id in &reverse_neighbors {
                     let Some(item) = self
-                        .get_item_for_layer_cached(txn, layer, node_id, mutation_cache)
+                        .relink_item(txn, candidates, node_id, mutation_cache)
                         .await?
                     else {
                         continue;
@@ -2063,6 +2166,15 @@ impl<D: Distance> VectorIndex<D> {
         }
         Ok(())
     }
+}
+
+/// Relink candidates of one layer with their items, loaded once per deletion.
+///
+/// Every candidate maps to its item, or to `None` when it has no item at the
+/// layer, so a lookup of a candidate never reads again.
+pub(in crate::search::vector) struct RelinkCandidates<D: Distance> {
+    layer: u16,
+    items: HashMap<NodeId, Option<Arc<Item<'static, D>>>>,
 }
 
 /// Physical HNSW layer bound into one cached neighbor-row identity.
@@ -2266,11 +2378,212 @@ impl CachedNeighbor {
     }
 }
 
-/// Operation-local canonical neighbor and item state for one HNSW mutation.
+/// A cached value stamped with the touch that last used it.
+trait Touched {
+    /// Returns the touch that last used this value.
+    fn last_touch(&self) -> CacheSequence;
+
+    /// Stamps this value as used by `touch`.
+    fn set_last_touch(&mut self, touch: CacheSequence);
+}
+
+impl<D: Distance> Touched for CachedItem<D> {
+    fn last_touch(&self) -> CacheSequence {
+        self.last_touch
+    }
+
+    fn set_last_touch(&mut self, touch: CacheSequence) {
+        self.last_touch = touch;
+    }
+}
+
+impl Touched for CachedSimHash {
+    fn last_touch(&self) -> CacheSequence {
+        self.last_touch
+    }
+
+    fn set_last_touch(&mut self, touch: CacheSequence) {
+        self.last_touch = touch;
+    }
+}
+
+impl Touched for CachedNeighbor {
+    fn last_touch(&self) -> CacheSequence {
+        self.last_touch
+    }
+
+    fn set_last_touch(&mut self, touch: CacheSequence) {
+        self.last_touch = touch;
+    }
+}
+
+/// Cached values of one kind, ordered from least to most recently used.
 ///
-/// The cache validates layer limits once, retains the first pre-mutation
-/// snapshot for linear reverse-edge differences, and never changes persisted
-/// row codecs. Dirty entries are encoded only at the existing flush boundary.
+/// A touch appends `(touch, key)` to the order instead of moving the key's
+/// earlier entry, which goes stale: an entry is current exactly while its
+/// value still records `touch`. The order stays sorted by `(touch, key)`, its
+/// front stays current, and it holds at most two entries per value in an
+/// allocation of at most four per value (four while empty). So
+/// [`Self::oldest`] returns what the first element of an ordered set of
+/// current entries would, and a touch costs a hash update and an append,
+/// amortized, instead of an ordered-set removal and insertion. Stale entries
+/// leave the front as they reach it, and all at once when the order would
+/// outgrow either bound.
+#[derive(Debug)]
+struct RecencyMap<K, V> {
+    values: foldhash::HashMap<K, V>,
+    order: VecDeque<(CacheSequence, K)>,
+}
+
+impl<K, V> Default for RecencyMap<K, V> {
+    fn default() -> Self {
+        Self {
+            values: foldhash::HashMap::default(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
+    /// Returns a cached value without touching it.
+    fn get(&self, key: &K) -> Option<&V> {
+        self.values.get(key)
+    }
+
+    /// Returns whether `key` is cached.
+    fn contains_key(&self, key: &K) -> bool {
+        self.values.contains_key(key)
+    }
+
+    /// Returns the number of cached values.
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Returns every cached value in arbitrary order.
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.values.iter()
+    }
+
+    /// Returns the least recently used key and its touch.
+    fn oldest(&self) -> Option<(CacheSequence, K)> {
+        self.order.front().copied()
+    }
+
+    /// Returns every cached value from least to most recently used.
+    fn oldest_first(&self) -> impl Iterator<Item = (K, &V)> {
+        self.order.iter().filter_map(|&(touch, key)| {
+            self.values
+                .get(&key)
+                .filter(|value| value.last_touch() == touch)
+                .map(|value| (key, value))
+        })
+    }
+
+    /// Stamps the cached value of `key` with `touch` and returns it.
+    fn touch(&mut self, key: K, touch: CacheSequence) -> Option<&V> {
+        let value = self.values.get_mut(&key)?;
+        if value.last_touch() != touch {
+            value.set_last_touch(touch);
+            self.record(touch, key);
+        }
+        self.values.get(&key)
+    }
+
+    /// Caches `value` at the touch it records, returning the value it replaces.
+    ///
+    /// A replacement stamped with the replaced value's touch keeps its place.
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let touch = value.last_touch();
+        let replaced = self.values.insert(key, value);
+        if replaced
+            .as_ref()
+            .is_none_or(|replaced| replaced.last_touch() != touch)
+        {
+            self.record(touch, key);
+        }
+        replaced
+    }
+
+    /// Removes the cached value of `key`.
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let removed = self.values.remove(key)?;
+        self.settle(*key);
+        Some(removed)
+    }
+
+    /// Restamps every value with `renumbered`, which must keep their order.
+    fn renumber(&mut self, mut renumbered: impl FnMut(&K) -> CacheSequence) {
+        for (key, value) in &mut self.values {
+            value.set_last_touch(renumbered(key));
+        }
+        let mut order = self
+            .values
+            .iter()
+            .map(|(key, value)| (value.last_touch(), *key))
+            .collect::<Vec<_>>();
+        order.sort_unstable();
+        self.order = order.into();
+    }
+
+    /// Orders `key` as last used at `touch`, which its value already records.
+    fn record(&mut self, touch: CacheSequence, key: K) {
+        let entry = (touch, key);
+        // Touches grow within a namespace unless another namespace of its
+        // session renumbered the shared sequence; the order then still sorts.
+        match self.order.back() {
+            Some(newest) if *newest > entry => {
+                let position = self.order.partition_point(|queued| *queued < entry);
+                self.order.insert(position, entry);
+            }
+            _ => self.order.push_back(entry),
+        }
+        self.settle(key);
+    }
+
+    /// Restores the order's invariants after `key` was touched or removed.
+    ///
+    /// Only entries of `key` went stale, so a front of another key is current.
+    /// Compaction looks up each entry once, and only once stale entries
+    /// outnumber current ones or removals left the allocation above four
+    /// entries per value. It then shrinks an oversized allocation to twice the
+    /// values plus one, which the next compaction fits without growing. A
+    /// shrink needs about half the values removed, or a regrowth after as many
+    /// appends as values, so settling costs `O(1)` amortized.
+    fn settle(&mut self, key: K) {
+        let capacity_bound = self.values.len().max(1).saturating_mul(4);
+        if self.order.len() > self.values.len().saturating_mul(2)
+            || self.order.capacity() > capacity_bound
+        {
+            let values = &self.values;
+            self.order.retain(|(touch, key)| {
+                values
+                    .get(key)
+                    .is_some_and(|value| value.last_touch() == *touch)
+            });
+            if self.order.capacity() > capacity_bound {
+                self.order
+                    .shrink_to(self.values.len().saturating_mul(2).saturating_add(1));
+            }
+            return;
+        }
+        if self.order.front().is_none_or(|(_, oldest)| *oldest != key) {
+            return;
+        }
+        while let Some((touch, oldest)) = self.order.front() {
+            if self
+                .values
+                .get(oldest)
+                .is_some_and(|value| value.last_touch() == *touch)
+            {
+                return;
+            }
+            self.order.pop_front();
+        }
+    }
+}
+
+/// Entry whose recency one cache renumbering rewrites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MutationCacheTouchTarget {
     Item { layer: u16, node_id: NodeId },
@@ -2278,15 +2591,19 @@ enum MutationCacheTouchTarget {
     SimHash(NodeId),
 }
 
+/// Operation-local canonical neighbor and item state for one HNSW mutation.
+///
+/// The cache validates layer limits once, retains the first pre-mutation
+/// snapshot for linear reverse-edge differences, and never changes persisted
+/// row codecs. Dirty entries are encoded only at the existing flush boundary.
 #[derive(Debug)]
 pub(in crate::search::vector) struct MutationOpCache<D: Distance> {
-    neighbor_rows: HashMap<NeighborRowId, CachedNeighbor>,
-    clean_neighbor_recency: BTreeSet<(CacheSequence, NeighborRowId)>,
+    neighbor_rows: RecencyMap<NeighborRowId, CachedNeighbor>,
+    /// Dirty rows by recency. Flushing a row changes its state but keeps its
+    /// recency, so this stays an ordered set rather than an append order.
     dirty_neighbor_recency: BTreeSet<(CacheSequence, NeighborRowId)>,
-    items: HashMap<(u16, NodeId), CachedItem<D>>,
-    item_recency: BTreeSet<(CacheSequence, u16, NodeId)>,
-    simhashes: HashMap<NodeId, CachedSimHash>,
-    simhash_recency: BTreeSet<(CacheSequence, NodeId)>,
+    items: RecencyMap<(u16, NodeId), CachedItem<D>>,
+    simhashes: RecencyMap<NodeId, CachedSimHash>,
     retained_payload_bytes: usize,
     degree_limits: NeighborDegreeLimits,
     next_touch: CacheSequence,
@@ -2313,13 +2630,10 @@ impl<D: Distance> MutationOpCache<D> {
         upper: usize,
     ) -> Result<Self, HelixDbError> {
         Ok(Self {
-            neighbor_rows: HashMap::new(),
-            clean_neighbor_recency: BTreeSet::new(),
+            neighbor_rows: RecencyMap::default(),
             dirty_neighbor_recency: BTreeSet::new(),
-            items: HashMap::new(),
-            item_recency: BTreeSet::new(),
-            simhashes: HashMap::new(),
-            simhash_recency: BTreeSet::new(),
+            items: RecencyMap::default(),
+            simhashes: RecencyMap::default(),
             retained_payload_bytes: 0,
             degree_limits: NeighborDegreeLimits::try_new(layer0, upper)
                 .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?,
@@ -2414,34 +2728,6 @@ impl<D: Distance> MutationOpCache<D> {
         self.neighbor_rows.get(&row)
     }
 
-    fn remove_neighbor_recency(
-        &mut self,
-        row: NeighborRowId,
-        last_touch: CacheSequence,
-        dirty: bool,
-    ) {
-        let removed = if dirty {
-            self.dirty_neighbor_recency.remove(&(last_touch, row))
-        } else {
-            self.clean_neighbor_recency.remove(&(last_touch, row))
-        };
-        assert!(removed, "cached vector neighbor retains one recency entry");
-    }
-
-    fn insert_neighbor_recency(
-        &mut self,
-        row: NeighborRowId,
-        last_touch: CacheSequence,
-        dirty: bool,
-    ) {
-        let inserted = if dirty {
-            self.dirty_neighbor_recency.insert((last_touch, row))
-        } else {
-            self.clean_neighbor_recency.insert((last_touch, row))
-        };
-        assert!(inserted, "vector neighbor recency is unique");
-    }
-
     /// Returns and touches one authoritative neighbor row.
     pub(in crate::search::vector) fn touched_neighbor(
         &mut self,
@@ -2452,24 +2738,47 @@ impl<D: Distance> MutationOpCache<D> {
             return None;
         }
         self.stats.neighbor_hits = self.stats.neighbor_hits.saturating_add(1);
-        let (last_touch, dirty) = self
+        let touch = self.take_touch();
+        let cached = self
             .neighbor_rows
             .get(&row)
-            .map(|cached| (cached.last_touch(), cached.is_dirty()))
             .expect("contained vector neighbor row remains cached");
-        self.remove_neighbor_recency(row, last_touch, dirty);
-        let touch = self.take_touch();
-        self.neighbor_rows
-            .get_mut(&row)
-            .expect("contained vector neighbor row remains cached")
-            .last_touch = touch;
-        self.insert_neighbor_recency(row, touch, dirty);
-        self.neighbor_rows.get(&row)
+        if cached.is_dirty() {
+            assert!(
+                self.dirty_neighbor_recency
+                    .remove(&(cached.last_touch(), row)),
+                "dirty vector neighbor retains one recency entry"
+            );
+            assert!(
+                self.dirty_neighbor_recency.insert((touch, row)),
+                "vector neighbor recency is unique"
+            );
+        }
+        self.neighbor_rows.touch(row, touch)
     }
 
     /// Returns whether a row is loaded, independently of whether it exists.
     pub(in crate::search::vector) fn contains_neighbor(&self, row: NeighborRowId) -> bool {
         self.neighbor_rows.contains_key(&row)
+    }
+
+    /// Returns whether the loaded row's baseline links `target`: the value
+    /// the transaction holds for it until its next flush, whose locators the
+    /// transaction therefore holds too.
+    ///
+    /// The locator of such a link belongs to the row's pending transition.
+    /// An unloaded row reports `false`.
+    pub(in crate::search::vector) fn baseline_links(
+        &self,
+        row: NeighborRowId,
+        target: NodeId,
+    ) -> bool {
+        self.neighbor_rows.get(&row).is_some_and(|cached| {
+            matches!(
+                cached.original().unwrap_or(cached.current()),
+                NeighborRowValue::Present(neighbors) if neighbors.contains(target)
+            )
+        })
     }
 
     /// Installs one storage-proven row unless staging already owns it.
@@ -2489,7 +2798,6 @@ impl<D: Distance> MutationOpCache<D> {
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(row, cached).is_none());
         self.max_neighbor_layer = self.max_neighbor_layer.max(row.layer.number());
-        self.insert_neighbor_recency(row, touch, false);
         true
     }
 
@@ -2500,19 +2808,12 @@ impl<D: Distance> MutationOpCache<D> {
         value: NeighborRowValue,
     ) -> Result<(), HelixDbError> {
         let touch = self.take_touch();
-        let Some((last_touch, dirty)) = self
-            .neighbor_rows
-            .get(&row)
-            .map(|cached| (cached.last_touch(), cached.is_dirty()))
-        else {
+        let Some(previous) = self.neighbor_rows.get(&row) else {
             return Err(HelixDbError::InvariantViolation(
                 "cannot stage an unloaded vector neighbor row without new-row proof".to_string(),
             ));
         };
-        let previous = self
-            .neighbor_rows
-            .get(&row)
-            .expect("loaded vector neighbor remains cached while staging");
+        let (last_touch, dirty) = (previous.last_touch(), previous.is_dirty());
         let changed = previous.current() != &value;
         let boundary_original = previous.current().clone();
         let previous_payload = cached_neighbor_payload_bytes(row, previous)?;
@@ -2523,13 +2824,21 @@ impl<D: Distance> MutationOpCache<D> {
         staged.stage(value, touch);
         let staged_payload = cached_neighbor_payload_bytes(row, &staged)?;
         self.replace_retained_payload(previous_payload, staged_payload)?;
-        self.remove_neighbor_recency(row, last_touch, dirty);
+        if dirty {
+            assert!(
+                self.dirty_neighbor_recency.remove(&(last_touch, row)),
+                "dirty vector neighbor retains one recency entry"
+            );
+        }
+        assert!(
+            self.dirty_neighbor_recency.insert((touch, row)),
+            "vector neighbor recency is unique"
+        );
         let replaced = self
             .neighbor_rows
             .insert(row, staged)
             .expect("loaded vector neighbor remains cached while staging");
         debug_assert_eq!(replaced.last_touch(), last_touch);
-        self.insert_neighbor_recency(row, touch, true);
         Ok(())
     }
 
@@ -2562,7 +2871,10 @@ impl<D: Distance> MutationOpCache<D> {
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(proof.row, cached).is_none());
         self.max_neighbor_layer = self.max_neighbor_layer.max(proof.row.layer.number());
-        self.insert_neighbor_recency(proof.row, touch, true);
+        assert!(
+            self.dirty_neighbor_recency.insert((touch, proof.row)),
+            "vector neighbor recency is unique"
+        );
     }
 
     /// Removes one row after clean eviction or a successful evicting flush.
@@ -2579,23 +2891,26 @@ impl<D: Distance> MutationOpCache<D> {
             .neighbor_rows
             .remove(&row)
             .expect("selected vector neighbor remains cached while removing");
-        self.remove_neighbor_recency(row, removed.last_touch(), removed.is_dirty());
+        if removed.is_dirty() {
+            assert!(
+                self.dirty_neighbor_recency
+                    .remove(&(removed.last_touch(), row)),
+                "dirty vector neighbor retains one recency entry"
+            );
+        }
         Some(removed)
     }
 
     /// Marks one successfully flushed row clean while preserving global recency.
     pub(in crate::search::vector) fn mark_neighbor_flushed(&mut self, row: NeighborRowId) {
-        let Some((last_touch, true)) = self
+        let Some(previous) = self
             .neighbor_rows
             .get(&row)
-            .map(|cached| (cached.last_touch(), cached.is_dirty()))
+            .filter(|cached| cached.is_dirty())
         else {
             return;
         };
-        let previous = self
-            .neighbor_rows
-            .get(&row)
-            .expect("flushed vector neighbor remains cached");
+        let last_touch = previous.last_touch();
         let previous_payload = cached_neighbor_payload_bytes(row, previous)
             .expect("validated dirty vector neighbor has measurable payload");
         let mut flushed = previous.clone();
@@ -2604,13 +2919,15 @@ impl<D: Distance> MutationOpCache<D> {
             .expect("validated flushed vector neighbor has measurable payload");
         self.replace_retained_payload(previous_payload, flushed_payload)
             .expect("flushing a vector neighbor cannot overflow cache payload");
-        self.remove_neighbor_recency(row, last_touch, true);
+        assert!(
+            self.dirty_neighbor_recency.remove(&(last_touch, row)),
+            "dirty vector neighbor retains one recency entry"
+        );
         let replaced = self
             .neighbor_rows
             .insert(row, flushed)
             .expect("flushed vector neighbor remains cached");
         debug_assert!(replaced.is_dirty());
-        self.insert_neighbor_recency(row, last_touch, false);
     }
 
     /// Removes every layer-specific neighbor state for one entity.
@@ -2648,29 +2965,10 @@ impl<D: Distance> MutationOpCache<D> {
             return None;
         }
         self.stats.item_hits = self.stats.item_hits.saturating_add(1);
-        let last_touch = self
-            .items
-            .get(&key)
-            .expect("contained vector item remains cached")
-            .last_touch;
-        assert!(
-            self.item_recency.remove(&(last_touch, layer, node_id)),
-            "cached vector item retains one recency entry"
-        );
         let touch = self.take_touch();
-        let value = {
-            let cached = self
-                .items
-                .get_mut(&key)
-                .expect("contained vector item remains cached");
-            cached.last_touch = touch;
-            cached.value.clone()
-        };
-        assert!(
-            self.item_recency.insert((touch, layer, node_id)),
-            "vector item recency is unique"
-        );
-        Some(value)
+        self.items
+            .touch(key, touch)
+            .map(|cached| cached.value.clone())
     }
 
     /// Installs or replaces one decoded item state.
@@ -2689,24 +2987,13 @@ impl<D: Distance> MutationOpCache<D> {
             .expect("bounded vector item cache payload cannot overflow");
         let touch = self.take_touch();
         self.max_item_layer = self.max_item_layer.max(layer);
-        let replaced = self.items.insert(
+        self.items.insert(
             (layer, node_id),
             CachedItem {
                 value,
                 payload_bytes,
                 last_touch: touch,
             },
-        );
-        if let Some(replaced) = replaced {
-            assert!(
-                self.item_recency
-                    .remove(&(replaced.last_touch, layer, node_id)),
-                "replaced vector item retains one recency entry"
-            );
-        }
-        assert!(
-            self.item_recency.insert((touch, layer, node_id)),
-            "vector item recency is unique"
         );
     }
 
@@ -2722,20 +3009,11 @@ impl<D: Distance> MutationOpCache<D> {
 
     /// Removes the item entry paired with one evicted neighbor row.
     pub(in crate::search::vector) fn remove_item(&mut self, layer: u16, node_id: NodeId) {
-        let Some(cached) = self.items.get(&(layer, node_id)) else {
+        let Some(removed) = self.items.remove(&(layer, node_id)) else {
             return;
         };
-        self.replace_retained_payload(cached.payload_bytes, 0)
+        self.replace_retained_payload(removed.payload_bytes, 0)
             .expect("retained vector item payload covers every cached item");
-        let removed = self
-            .items
-            .remove(&(layer, node_id))
-            .expect("selected vector item remains cached while removing");
-        assert!(
-            self.item_recency
-                .remove(&(removed.last_touch, layer, node_id)),
-            "removed vector item retains one recency entry"
-        );
     }
 
     /// Returns the number of retained decoded item states.
@@ -2757,7 +3035,7 @@ impl<D: Distance> MutationOpCache<D> {
 
     /// Evicts the deterministic least-recently-used item in this namespace.
     pub(in crate::search::vector) fn evict_oldest_item(&mut self) -> bool {
-        let Some((_, layer, node_id)) = self.item_recency.first().copied() else {
+        let Some((_, (layer, node_id))) = self.items.oldest() else {
             return false;
         };
         self.remove_item(layer, node_id);
@@ -2775,29 +3053,10 @@ impl<D: Distance> MutationOpCache<D> {
             return None;
         }
         self.stats.simhash_hits = self.stats.simhash_hits.saturating_add(1);
-        let last_touch = self
-            .simhashes
-            .get(&node_id)
-            .expect("contained vector SimHash remains cached")
-            .last_touch;
-        assert!(
-            self.simhash_recency.remove(&(last_touch, node_id)),
-            "cached vector SimHash retains one recency entry"
-        );
         let touch = self.take_touch();
-        let value = {
-            let cached = self
-                .simhashes
-                .get_mut(&node_id)
-                .expect("contained vector SimHash remains cached");
-            cached.last_touch = touch;
-            cached.value
-        };
-        assert!(
-            self.simhash_recency.insert((touch, node_id)),
-            "vector SimHash recency is unique"
-        );
-        Some(value)
+        self.simhashes
+            .touch(node_id, touch)
+            .map(|cached| cached.value)
     }
 
     /// Installs or replaces one SimHash state.
@@ -2814,40 +3073,22 @@ impl<D: Distance> MutationOpCache<D> {
         self.replace_retained_payload(previous_payload, payload_bytes)
             .expect("bounded vector SimHash cache payload cannot overflow");
         let touch = self.take_touch();
-        let replaced = self.simhashes.insert(
+        self.simhashes.insert(
             node_id,
             CachedSimHash {
                 value,
                 last_touch: touch,
             },
         );
-        if let Some(replaced) = replaced {
-            assert!(
-                self.simhash_recency.remove(&(replaced.last_touch, node_id)),
-                "replaced vector SimHash retains one recency entry"
-            );
-        }
-        assert!(
-            self.simhash_recency.insert((touch, node_id)),
-            "vector SimHash recency is unique"
-        );
     }
 
     /// Invalidates one SimHash or negative lookup after mutation.
     pub(in crate::search::vector) fn invalidate_simhash(&mut self, node_id: NodeId) {
-        let Some(cached) = self.simhashes.get(&node_id) else {
+        let Some(removed) = self.simhashes.remove(&node_id) else {
             return;
         };
-        self.replace_retained_payload(simhash_payload_bytes(cached.value), 0)
+        self.replace_retained_payload(simhash_payload_bytes(removed.value), 0)
             .expect("retained vector SimHash payload covers every cached value");
-        let removed = self
-            .simhashes
-            .remove(&node_id)
-            .expect("selected vector SimHash remains cached while removing");
-        assert!(
-            self.simhash_recency.remove(&(removed.last_touch, node_id)),
-            "removed vector SimHash retains one recency entry"
-        );
     }
 
     /// Returns the number of retained SimHash states.
@@ -2857,7 +3098,7 @@ impl<D: Distance> MutationOpCache<D> {
 
     /// Evicts the deterministic least-recently-used SimHash in this namespace.
     pub(in crate::search::vector) fn evict_oldest_simhash(&mut self) -> bool {
-        let Some((_, node_id)) = self.simhash_recency.first().copied() else {
+        let Some((_, node_id)) = self.simhashes.oldest() else {
             return false;
         };
         self.invalidate_simhash(node_id);
@@ -2871,14 +3112,20 @@ impl<D: Distance> MutationOpCache<D> {
         Ok(self.retained_payload_bytes)
     }
 
-    /// Returns the oldest dirty row using one bounded cache scan.
+    /// Returns the least recently used dirty row.
     pub(in crate::search::vector) fn oldest_dirty_neighbor(&self) -> Option<NeighborRowId> {
         self.dirty_neighbor_recency.first().map(|(_, row)| *row)
     }
 
-    /// Returns the oldest clean row using one bounded cache scan.
+    /// Returns the least recently used clean row.
+    ///
+    /// Dirty rows used before it are skipped, so this costs `O(1)` whenever no
+    /// row is dirty, as when bounded eviction has flushed every dirty row.
     pub(in crate::search::vector) fn oldest_clean_neighbor(&self) -> Option<NeighborRowId> {
-        self.clean_neighbor_recency.first().map(|(_, row)| *row)
+        self.neighbor_rows
+            .oldest_first()
+            .find(|(_, cached)| !cached.is_dirty())
+            .map(|(row, _)| row)
     }
 
     /// Allocates the next recency value, renumbering the bounded cache on overflow.
@@ -2901,13 +3148,10 @@ impl<D: Distance> MutationOpCache<D> {
         let mut entries = self
             .items
             .iter()
-            .map(|((layer, node_id), cached)| {
+            .map(|(&(layer, node_id), cached)| {
                 (
                     cached.last_touch,
-                    MutationCacheTouchTarget::Item {
-                        layer: *layer,
-                        node_id: *node_id,
-                    },
+                    MutationCacheTouchTarget::Item { layer, node_id },
                 )
             })
             .chain(self.neighbor_rows.iter().map(|(row, cached)| {
@@ -2924,50 +3168,27 @@ impl<D: Distance> MutationOpCache<D> {
             }))
             .collect::<Vec<_>>();
         entries.sort_unstable();
-        self.item_recency.clear();
-        self.clean_neighbor_recency.clear();
-        self.dirty_neighbor_recency.clear();
-        self.simhash_recency.clear();
-        for (sequence, (_, target)) in entries.into_iter().enumerate() {
-            let touch = CacheSequence(
-                u64::try_from(sequence).expect("bounded vector mutation cache length fits in u64"),
-            );
-            match target {
-                MutationCacheTouchTarget::Item { layer, node_id } => {
-                    self.items
-                        .get_mut(&(layer, node_id))
-                        .expect("renumbered vector item still exists")
-                        .last_touch = touch;
-                    assert!(self.item_recency.insert((touch, layer, node_id)));
-                }
-                MutationCacheTouchTarget::Neighbor(row) => {
-                    let dirty = {
-                        let cached = self
-                            .neighbor_rows
-                            .get_mut(&row)
-                            .expect("renumbered vector neighbor still exists");
-                        cached.last_touch = touch;
-                        cached.is_dirty()
-                    };
-                    self.insert_neighbor_recency(row, touch, dirty);
-                }
-                MutationCacheTouchTarget::SimHash(node_id) => {
-                    self.simhashes
-                        .get_mut(&node_id)
-                        .expect("renumbered vector SimHash still exists")
-                        .last_touch = touch;
-                    assert!(self.simhash_recency.insert((touch, node_id)));
-                }
-            }
-        }
+        let renumbered = (0_u64..)
+            .map(CacheSequence)
+            .zip(entries)
+            .map(|(touch, (_, target))| (target, touch))
+            .collect::<BTreeMap<_, _>>();
+        self.items.renumber(|&(layer, node_id)| {
+            renumbered[&MutationCacheTouchTarget::Item { layer, node_id }]
+        });
+        self.neighbor_rows
+            .renumber(|row| renumbered[&MutationCacheTouchTarget::Neighbor(*row)]);
+        self.simhashes
+            .renumber(|node_id| renumbered[&MutationCacheTouchTarget::SimHash(*node_id)]);
+        self.dirty_neighbor_recency = self
+            .neighbor_rows
+            .iter()
+            .filter(|(_, cached)| cached.is_dirty())
+            .map(|(row, cached)| (cached.last_touch(), *row))
+            .collect();
         self.next_touch = CacheSequence(
-            u64::try_from(
-                self.items
-                    .len()
-                    .saturating_add(self.neighbor_rows.len())
-                    .saturating_add(self.simhashes.len()),
-            )
-            .expect("bounded vector mutation cache length fits in u64"),
+            u64::try_from(renumbered.len())
+                .expect("bounded vector mutation cache length fits in u64"),
         );
     }
 }
@@ -3160,20 +3381,17 @@ impl<D: Distance> VectorBuildSession<D> {
         cache: &MutationOpCache<D>,
     ) -> impl Iterator<Item = SessionEvictionOrder> {
         let item = cache
-            .item_recency
-            .first()
-            .map(|(touch, _, _)| (*touch, SessionCacheKind::Item));
+            .items
+            .oldest()
+            .map(|(touch, _)| (touch, SessionCacheKind::Item));
         let neighbor = cache
-            .clean_neighbor_recency
-            .first()
-            .into_iter()
-            .chain(cache.dirty_neighbor_recency.first())
-            .map(|(touch, _)| (*touch, SessionCacheKind::Neighbor))
-            .min();
+            .neighbor_rows
+            .oldest()
+            .map(|(touch, _)| (touch, SessionCacheKind::Neighbor));
         let simhash = cache
-            .simhash_recency
-            .first()
-            .map(|(touch, _)| (*touch, SessionCacheKind::SimHash));
+            .simhashes
+            .oldest()
+            .map(|(touch, _)| (touch, SessionCacheKind::SimHash));
         [item, neighbor, simhash]
             .into_iter()
             .flatten()
@@ -3332,6 +3550,8 @@ impl<D: Distance> VectorBuildSession<D> {
             !self.has_dirty_neighbors(),
             "vector build entity discard follows a complete flush"
         );
+        #[cfg(test)]
+        let _ = DISCARDED_ENTITIES.try_with(|discards| discards.set(discards.get() + 1));
         for (identity, changes) in core::mem::take(&mut self.entity_changes) {
             let Some(mut cache) = self.detach(&identity) else {
                 continue;
@@ -3475,9 +3695,9 @@ impl<D: Distance> VectorBuildSession<D> {
                 .expect("indexed vector build eviction victim is attached");
             let evicted = match victim.kind {
                 SessionCacheKind::Item => {
-                    let (_, layer, node_id) = *cache
-                        .item_recency
-                        .first()
+                    let (_, (layer, node_id)) = cache
+                        .items
+                        .oldest()
                         .expect("indexed vector item victim remains cached");
                     cache.remove_item(layer, node_id);
                     self.session_stats.item_evictions =
@@ -3485,12 +3705,9 @@ impl<D: Distance> VectorBuildSession<D> {
                     Ok(())
                 }
                 SessionCacheKind::Neighbor => {
-                    let (_, row) = *cache
-                        .clean_neighbor_recency
-                        .first()
-                        .into_iter()
-                        .chain(cache.dirty_neighbor_recency.first())
-                        .min()
+                    let (_, row) = cache
+                        .neighbor_rows
+                        .oldest()
                         .expect("indexed vector neighbor victim remains cached");
                     let dirty = cache.neighbor(row).is_some_and(CachedNeighbor::is_dirty);
                     let flushed = match (dirty, txn) {
@@ -3515,9 +3732,9 @@ impl<D: Distance> VectorBuildSession<D> {
                     })
                 }
                 SessionCacheKind::SimHash => {
-                    let (_, node_id) = *cache
-                        .simhash_recency
-                        .first()
+                    let (_, node_id) = cache
+                        .simhashes
+                        .oldest()
                         .expect("indexed vector SimHash victim remains cached");
                     cache.invalidate_simhash(node_id);
                     self.session_stats.simhash_evictions =
@@ -3532,10 +3749,10 @@ impl<D: Distance> VectorBuildSession<D> {
 
     /// Returns aggregate cache behavior for lifecycle-testing metrics.
     ///
-    /// Hidden-generation planning has always reported the maximum retained
-    /// payload after enforcing its global ceiling. Cache-local telemetry also
-    /// observes transient Active-mutation peaks, which must not change that
-    /// lifecycle contract, so [`Self::attach`] folds every other counter only.
+    /// Planning reports the maximum retained payload after enforcing the
+    /// session's global ceiling. Cache-local telemetry also observes transient
+    /// peaks within one entity, before that ceiling is enforced, so
+    /// [`Self::attach`] folds every other counter only.
     pub(crate) fn stats(&self) -> VectorBuildSessionStats {
         self.session_stats
     }
@@ -3669,55 +3886,29 @@ struct SessionEvictionOrder {
     identity: VectorGenerationIdentity,
 }
 
+/// Flushes one dirty row of a build-session namespace through
+/// [`VectorIndex::stage_neighbor_row_transition`], leaving it clean only once
+/// every write succeeded.
 fn flush_build_session_neighbor<D: Distance>(
     txn: &MeasuredVectorTransaction<'_>,
     identity: &VectorGenerationIdentity,
     cache: &mut MutationOpCache<D>,
     row: NeighborRowId,
 ) -> Result<(), HelixDbError> {
-    let Some(cached) = cache.neighbor(row).cloned() else {
+    let Some(cached) = cache.neighbor(row).filter(|cached| cached.is_dirty()) else {
         return Ok(());
     };
-    if !cached.is_dirty() {
-        return Ok(());
-    }
-    let (layer, node_id) = row.storage_parts();
-    let NeighborRowValue::Present(current) = cached.current() else {
-        return Err(HelixDbError::InvariantViolation(
-            "vector build session cannot flush a deleted neighbor row".to_string(),
-        ));
-    };
-    let original = cached
-        .original()
-        .expect("dirty vector build neighbors retain their original value");
-    let previous = match original {
-        NeighborRowValue::KnownAbsent => NeighborSet::empty(node_id, cache.degree_limit(layer)),
-        NeighborRowValue::Present(neighbors) => neighbors.clone(),
-    };
-    if original != cached.current() {
-        let keyspace = VectorRowKeyspace::from_allocated(
-            identity.physical_name().to_string(),
-            identity.physical_index_id(),
-            identity.scope(),
-        );
-        let rows = VectorWriteRows::new(txn, &keyspace);
-        let difference = match previous.difference(current) {
-            Ok(difference) => difference,
-            Err(error) => return Err(HelixDbError::InvariantViolation(error.to_string())),
-        };
-        let (removed, added) = difference.into_parts();
-        for target_node_id in removed {
-            rows.delete_reverse_locator(target_node_id, layer, node_id)?;
-        }
-        for target_node_id in added {
-            rows.put_reverse_locator(target_node_id, layer, node_id)?;
-        }
-        if layer == 0 {
-            rows.put_layer0_neighbors(node_id, current.as_slice())?;
-        } else {
-            rows.put_upper_neighbors(layer, node_id, current.as_slice())?;
-        }
-    }
+    let keyspace = VectorRowKeyspace::from_allocated(
+        identity.physical_name().to_string(),
+        identity.physical_index_id(),
+        identity.scope(),
+    );
+    VectorIndex::<D>::stage_neighbor_row_transition(
+        &VectorWriteRows::new(txn, &keyspace),
+        row,
+        cached,
+        cache.degree_limit(row.layer.number()),
+    )?;
     cache.mark_neighbor_flushed(row);
     Ok(())
 }
@@ -3765,6 +3956,11 @@ const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) ->
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
+mod locator_tests;
+#[cfg(test)]
+mod relink_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -3774,6 +3970,8 @@ mod tests {
     use slatedb::IsolationLevel;
 
     use super::*;
+    use crate::encoding::v2::keys::indexes::vector::{VectorEntryCandidateNodeKey, VectorKey};
+    use crate::search::vector::distance::Euclidean;
 
     fn session_identity(
         scope: crate::encoding::v2::keys::scope::DataScope,
@@ -3866,10 +4064,7 @@ mod tests {
         rows: &HashMap<NodeId, ReferenceNeighbor>,
     ) {
         assert_eq!(cache.neighbor_count(), rows.len());
-        assert_eq!(
-            cache.clean_neighbor_recency.len() + cache.dirty_neighbor_recency.len(),
-            rows.len()
-        );
+        assert_recency_is_consistent(cache);
         let expected_payload: usize = rows
             .values()
             .map(|cached| {
@@ -3910,6 +4105,57 @@ mod tests {
                 MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(0, node_id)
             })
         );
+        assert_eq!(
+            cache.neighbor_rows.oldest().map(|(_, row)| row),
+            rows.iter()
+                .min_by_key(|(node_id, cached)| (cached.last_touch, **node_id))
+                .map(|(node_id, _)| {
+                    MutationOpCache::<crate::search::vector::distance::Cosine>::node_row_id(
+                        0, *node_id,
+                    )
+                }),
+            "session eviction takes the least recent row, clean or dirty"
+        );
+    }
+
+    /// Asserts that every recency order of `cache` agrees with its values.
+    ///
+    /// Each order sorts, starts current, lists every value exactly once among
+    /// its current entries, and stays within its compaction and allocation
+    /// bounds; the dirty set holds exactly the dirty rows at their recency.
+    fn assert_recency_is_consistent<D: Distance>(cache: &MutationOpCache<D>) {
+        fn check<K: Copy + Ord + core::hash::Hash + core::fmt::Debug, V: Touched>(
+            map: &RecencyMap<K, V>,
+        ) {
+            assert!(map
+                .order
+                .iter()
+                .zip(map.order.iter().skip(1))
+                .all(|(older, newer)| older <= newer));
+            assert!(map.order.len() <= 2 * map.len());
+            assert!(map.order.capacity() <= 4 * map.len().max(1));
+            let current = map
+                .oldest_first()
+                .map(|(key, value)| (value.last_touch(), key))
+                .collect::<Vec<_>>();
+            let mut expected = map
+                .iter()
+                .map(|(key, value)| (value.last_touch(), *key))
+                .collect::<Vec<_>>();
+            expected.sort_unstable();
+            assert_eq!(current, expected);
+            assert_eq!(map.oldest(), expected.first().copied());
+        }
+        check(&cache.items);
+        check(&cache.neighbor_rows);
+        check(&cache.simhashes);
+        let dirty = cache
+            .neighbor_rows
+            .iter()
+            .filter(|(_, cached)| cached.is_dirty())
+            .map(|(row, cached)| (cached.last_touch(), *row))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(cache.dirty_neighbor_recency, dirty);
     }
 
     #[test]
@@ -4227,6 +4473,307 @@ mod tests {
         assert!(stats.simhash_hits() > 0);
     }
 
+    /// Nodes of the replay graph; [`replay_layer`] puts some on upper layers.
+    const REPLAY_NODES: NodeId = 24;
+
+    /// Distinct vector of replay-graph node `node_id`. Nodes 2, 7, 12, 17,
+    /// and 22 have a `0.0` first component.
+    fn replay_vector(node_id: NodeId) -> [f32; 2] {
+        [
+            (node_id % 5) as f32 - 2.0,
+            (node_id / 5) as f32 * 0.5 + 0.25,
+        ]
+    }
+
+    /// Layer of replay-graph node `node_id`.
+    const fn replay_layer(node_id: NodeId) -> u16 {
+        match node_id % 7 {
+            2 | 5 => 1,
+            4 => 2,
+            _ => 0,
+        }
+    }
+
+    /// Every committed row of `db`, by key.
+    async fn committed_rows(db: &slatedb::Db) -> BTreeMap<bytes::Bytes, bytes::Bytes> {
+        let mut rows = db.scan::<std::ops::RangeFull>(..).await.unwrap();
+        let mut committed = BTreeMap::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            committed.insert(row.key, row.value);
+        }
+        committed
+    }
+
+    /// Opens `name` with the replay graph committed through `session`.
+    async fn replay_graph(
+        name: &str,
+        session: &mut VectorBuildSession<Euclidean>,
+    ) -> (Arc<slatedb::Db>, VectorIndex<Euclidean>) {
+        let handle = crate::search::vector::ValidatedVectorGenerationHandle::create_current::<
+            Euclidean,
+        >(session_identity(
+            crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            91,
+        ))
+        .unwrap();
+        let index = VectorIndex::<Euclidean>::from_generation(&handle);
+        let db = session_test_db(name).await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&transaction);
+        index
+            .stage_create(
+                &measured,
+                crate::search::vector::VectorIndexConfig::new(
+                    handle.physical_name(),
+                    "embedding",
+                    2,
+                ),
+            )
+            .await
+            .unwrap();
+        for node_id in 0..REPLAY_NODES {
+            index
+                .stage_known_fresh_at_layer_with_session(
+                    &measured,
+                    node_id,
+                    &replay_vector(node_id),
+                    replay_layer(node_id),
+                    FreshVectorBuildProof::for_test(),
+                    session,
+                )
+                .await
+                .unwrap();
+            session.flush_all(&measured).unwrap();
+            session.admit_entity();
+        }
+        transaction.commit().await.unwrap();
+        (db, index)
+    }
+
+    fn replay_session() -> VectorBuildSession<Euclidean> {
+        VectorBuildSession::new(NonZeroU64::new(1 << 20).unwrap())
+    }
+
+    /// Replaying every node's exact vector at its layer, through the session
+    /// that built the graph, a cold session, and a one-off cache, attempts no
+    /// write and leaves the building session's entries as they were.
+    #[tokio::test]
+    async fn replayed_upserts_stage_no_row_and_leave_the_session_untouched() {
+        let mut session = replay_session();
+        let (db, index) = replay_graph("vector-replay-skip", &mut session).await;
+        let committed = committed_rows(&db).await;
+        let footprint = |session: &VectorBuildSession<Euclidean>| {
+            (
+                session.item_count(),
+                session.neighbor_count(),
+                session.simhash_count(),
+                session.retained_bytes().unwrap(),
+            )
+        };
+        let built = footprint(&session);
+        let mut cold = replay_session();
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&transaction);
+        // Any attempted write, even a blind delete, fails its upsert.
+        measured.fail_next_write();
+        for node_id in 0..REPLAY_NODES {
+            let (vector, layer) = (replay_vector(node_id), replay_layer(node_id));
+            index
+                .stage_upsert_at_layer_with_session(
+                    &measured,
+                    node_id,
+                    &vector,
+                    layer,
+                    &mut session,
+                )
+                .await
+                .unwrap();
+            index
+                .stage_upsert_at_layer_with_session(&measured, node_id, &vector, layer, &mut cold)
+                .await
+                .unwrap();
+            index
+                .stage_upsert_at_layer(&measured, node_id, &vector, layer)
+                .await
+                .unwrap();
+        }
+        session.flush_all(&measured).unwrap();
+        cold.flush_all(&measured).unwrap();
+
+        let measurement = measured.measurement().unwrap();
+        assert_eq!(
+            (measurement.operations(), measurement.encoded_bytes()),
+            (0, 0)
+        );
+        assert!(!session.has_dirty_neighbors());
+        assert_eq!(footprint(&session), built);
+        transaction.commit().await.unwrap();
+        assert_eq!(committed_rows(&db).await, committed);
+    }
+
+    /// An upsert that differs from the stored node in its vector bytes, even
+    /// only in the sign of a zero, or in its layer writes exactly what
+    /// deleting the node and then inserting the replacement writes: the path
+    /// every upsert took before replays were recognized.
+    #[tokio::test]
+    async fn upserts_that_change_the_node_write_what_delete_then_insert_writes() {
+        for (node_id, vector, layer) in [
+            // A new vector at the node's layer.
+            (9, [4.5, -1.5], replay_layer(9)),
+            // The node's vector one layer up.
+            (9, replay_vector(9), replay_layer(9) + 1),
+            // An upper-layer node's vector at layer zero.
+            (4, replay_vector(4), 0),
+            // `-0.0` where the node holds `0.0`.
+            (7, [-0.0, replay_vector(7)[1]], replay_layer(7)),
+        ] {
+            let mut upserted_session = replay_session();
+            let (upserted, index) =
+                replay_graph("vector-replay-changed", &mut upserted_session).await;
+            let mut replaced_session = replay_session();
+            let (replaced, _) =
+                replay_graph("vector-replay-reference", &mut replaced_session).await;
+            assert_eq!(
+                committed_rows(&upserted).await,
+                committed_rows(&replaced).await
+            );
+
+            let transaction = upserted.begin(IsolationLevel::Snapshot).await.unwrap();
+            let measured = MeasuredVectorTransaction::new(&transaction);
+            index
+                .stage_upsert_at_layer_with_session(
+                    &measured,
+                    node_id,
+                    &vector,
+                    layer,
+                    &mut upserted_session,
+                )
+                .await
+                .unwrap();
+            upserted_session.flush_all(&measured).unwrap();
+            assert!(measured.measurement().unwrap().operations() > 0);
+            transaction.commit().await.unwrap();
+
+            let transaction = replaced.begin(IsolationLevel::Snapshot).await.unwrap();
+            let measured = MeasuredVectorTransaction::new(&transaction);
+            index
+                .stage_delete_with_build_session(&measured, node_id, &mut replaced_session)
+                .await
+                .unwrap();
+            index
+                .stage_upsert_at_layer_with_session(
+                    &measured,
+                    node_id,
+                    &vector,
+                    layer,
+                    &mut replaced_session,
+                )
+                .await
+                .unwrap();
+            replaced_session.flush_all(&measured).unwrap();
+            transaction.commit().await.unwrap();
+
+            assert_eq!(
+                committed_rows(&upserted).await,
+                committed_rows(&replaced).await,
+                "node {node_id} upserted as {vector:?} at layer {layer}"
+            );
+            let stored = index.get_item(upserted.as_ref(), node_id).await.unwrap();
+            assert_eq!(
+                stored.unwrap().vector.as_bytes(),
+                UnalignedVector::<f32>::from_slice(&vector).as_bytes()
+            );
+        }
+    }
+
+    /// Without a selected layer, an upsert of the node's exact vector still
+    /// replaces it.
+    #[tokio::test]
+    async fn upserts_at_a_random_layer_always_replace_the_node() {
+        let mut session = replay_session();
+        let (db, index) = replay_graph("vector-replay-random-layer", &mut session).await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&transaction);
+        index
+            .insert_with_measured_transaction(
+                &measured,
+                9,
+                &replay_vector(9),
+                VectorInsertContract::Upsert,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(measured.measurement().unwrap().operations() > 0);
+    }
+
+    /// A replay whose entry-candidate row is missing or corrupt takes the
+    /// full path, which restores the row.
+    #[tokio::test]
+    async fn replays_without_a_valid_entry_candidate_row_restore_it() {
+        let node_id = 4;
+        for corrupt in [false, true] {
+            let mut session = replay_session();
+            let (db, index) = replay_graph("vector-replay-entry-candidate", &mut session).await;
+            let key = index.row_keyspace().key(VectorKey::EntryCandidateNode(
+                VectorEntryCandidateNodeKey::new(index.id(), node_id),
+            ));
+            let damage = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            if corrupt {
+                damage.put(&key, b"not a layer").unwrap();
+            } else {
+                damage.delete(&key).unwrap();
+            }
+            damage.commit().await.unwrap();
+
+            let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            let measured = MeasuredVectorTransaction::new(&transaction);
+            index
+                .stage_upsert_at_layer_with_session(
+                    &measured,
+                    node_id,
+                    &replay_vector(node_id),
+                    replay_layer(node_id),
+                    &mut session,
+                )
+                .await
+                .unwrap();
+            session.flush_all(&measured).unwrap();
+            assert!(measured.measurement().unwrap().operations() > 0);
+            assert_eq!(
+                VectorWriteRows::new(&measured, index.row_keyspace())
+                    .entry_candidate_layer(node_id)
+                    .await
+                    .unwrap(),
+                EntryCandidateLayerRow::Present(replay_layer(node_id))
+            );
+        }
+    }
+
+    /// Inside a [`REPLACE_REPLAYS`] scope, a replay takes the full path.
+    #[tokio::test]
+    async fn replays_inside_a_replace_scope_take_the_full_path() {
+        let mut session = replay_session();
+        let (db, index) = replay_graph("vector-replay-replace-scope", &mut session).await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&transaction);
+        REPLACE_REPLAYS
+            .scope(
+                (),
+                index.stage_upsert_at_layer_with_session(
+                    &measured,
+                    9,
+                    &replay_vector(9),
+                    replay_layer(9),
+                    &mut session,
+                ),
+            )
+            .await
+            .unwrap();
+        session.flush_all(&measured).unwrap();
+        assert!(measured.measurement().unwrap().operations() > 0);
+    }
+
     #[test]
     fn targeted_invalidation_removes_every_layer_of_exactly_one_node() {
         type Cache = MutationOpCache<crate::search::vector::distance::Cosine>;
@@ -4253,9 +4800,8 @@ mod tests {
             assert!(cache.contains_neighbor(Cache::node_row_id(layer, node_id)));
         }
         assert_eq!(cache.item_count(), 3);
-        assert_eq!(cache.item_recency.len(), 3);
         assert_eq!(cache.neighbor_count(), 3);
-        assert_eq!(cache.clean_neighbor_recency.len(), 3);
+        assert_recency_is_consistent(&cache);
         assert_eq!(cache.retained_payload_bytes().unwrap(), 3 * 8);
         assert_eq!(
             cache
@@ -4723,18 +5269,18 @@ mod tests {
             .caches
             .values()
             .flat_map(|cache| {
+                assert_recency_is_consistent(cache);
                 cache
-                    .item_recency
+                    .items
                     .iter()
-                    .map(|(touch, _, _)| *touch)
+                    .map(|(_, cached)| cached.last_touch)
                     .chain(
                         cache
-                            .clean_neighbor_recency
+                            .neighbor_rows
                             .iter()
-                            .chain(&cache.dirty_neighbor_recency)
-                            .map(|(touch, _)| *touch),
+                            .map(|(_, cached)| cached.last_touch()),
                     )
-                    .chain(cache.simhash_recency.iter().map(|(touch, _)| *touch))
+                    .chain(cache.simhashes.iter().map(|(_, cached)| cached.last_touch))
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(
@@ -4750,22 +5296,24 @@ mod tests {
         use core::mem::size_of;
 
         // A hash-map slot holds its key, its value, and one control byte, and a
-        // table is at most seven-eighths full. Every heap allocation carries at
-        // least a 16-byte allocator header.
+        // table is at most seven-eighths full. A recency order allocates at
+        // most four entries per value. Every heap allocation carries at least
+        // a 16-byte allocator header.
         const ALLOCATION_HEADER: usize = 16;
         let slot = |key: usize, value: usize| (key + value + 1) * 8 / 7;
         // An item shares one reference-counted decoded value and its vector buffer.
         let item = slot(size_of::<(u16, NodeId)>(), size_of::<CachedItem<Cosine>>())
-            + size_of::<(CacheSequence, u16, NodeId)>()
+            + 4 * size_of::<(CacheSequence, (u16, NodeId))>()
             + 2 * size_of::<usize>()
             + size_of::<Item<'static, Cosine>>()
             + 2 * ALLOCATION_HEADER;
-        // A dirty neighbor row holds its original and current neighbor lists.
+        // A dirty neighbor row holds its original and current neighbor lists
+        // and a dirty-set entry.
         let neighbor = slot(size_of::<NeighborRowId>(), size_of::<CachedNeighbor>())
-            + size_of::<(CacheSequence, NeighborRowId)>()
+            + 5 * size_of::<(CacheSequence, NeighborRowId)>()
             + 2 * ALLOCATION_HEADER;
         let simhash = slot(size_of::<NodeId>(), size_of::<CachedSimHash>())
-            + size_of::<(CacheSequence, NodeId)>();
+            + 4 * size_of::<(CacheSequence, NodeId)>();
         for (kind, needed, charged) in [
             ("item", item, VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES),
             (
@@ -4794,9 +5342,11 @@ mod tests {
 
         // A hash-map slot holds its key, its value, and one control byte, and a
         // table is at most seven-eighths full. The smallest table has four
-        // buckets plus a control group, and the smallest B-tree set one leaf.
+        // buckets plus a control group, the smallest recency order four
+        // entries, and the smallest B-tree set one leaf.
         let slot = |key: usize, value: usize| (key + value + 1) * 8 / 7;
         let table = |key: usize, value: usize| 4 * (key + value) + 4 + 16;
+        let order = |entry: usize| 4 * entry;
         let leaf = |key: usize| 16 + 11 * key;
         let identity = session_identity(DataScope::LegacyUnscoped, 1);
         let name = identity.physical_name().len();
@@ -4810,9 +5360,10 @@ mod tests {
             + table(size_of::<(u16, NodeId)>(), size_of::<CachedItem<Cosine>>())
             + table(size_of::<NeighborRowId>(), size_of::<CachedNeighbor>())
             + table(size_of::<NodeId>(), size_of::<CachedSimHash>())
-            + leaf(size_of::<(CacheSequence, u16, NodeId)>())
-            + 2 * leaf(size_of::<(CacheSequence, NeighborRowId)>())
-            + leaf(size_of::<(CacheSequence, NodeId)>());
+            + order(size_of::<(CacheSequence, (u16, NodeId))>())
+            + order(size_of::<(CacheSequence, NeighborRowId)>())
+            + leaf(size_of::<(CacheSequence, NeighborRowId)>())
+            + order(size_of::<(CacheSequence, NodeId)>());
         assert!(
             namespace <= VECTOR_BUILD_SESSION_NAMESPACE_OVERHEAD_BYTES,
             "a namespace needs {namespace} bookkeeping bytes"
@@ -5069,11 +5620,9 @@ mod tests {
                     );
                 }
             }
-            prop_assert_eq!(cache.item_recency.len(), items.len());
-            prop_assert_eq!(
-                cache.clean_neighbor_recency.len() + cache.dirty_neighbor_recency.len(),
-                rows.len()
-            );
+            prop_assert_eq!(cache.item_count(), items.len());
+            prop_assert_eq!(cache.neighbor_count(), rows.len());
+            assert_recency_is_consistent(&cache);
             prop_assert_eq!(cache.retained_payload_bytes().unwrap(), items.len());
         }
     }
@@ -5081,7 +5630,7 @@ mod tests {
     proptest! {
         #[test]
         fn random_neighbor_operations_match_the_reference_model(
-            operations in prop::collection::vec((0_u8..5, 1_u64..=4, 0_u8..=8), 0..128),
+            operations in prop::collection::vec((0_u8..6, 1_u64..=4, 0_u8..=8), 0..128),
         ) {
             let mut cache = MutationOpCache::<crate::search::vector::distance::Cosine>::default();
             let mut reference = HashMap::<NodeId, ReferenceNeighbor>::new();
@@ -5145,10 +5694,404 @@ mod tests {
                         }
                         Err(_) => prop_assert!(reference.contains_key(&node_id)),
                     },
-                    _ => unreachable!("generated operation is in the closed 0..5 range"),
+                    5 => {
+                        let touched = cache.touched_neighbor(row).map(CachedNeighbor::current);
+                        let expected = reference.get_mut(&node_id).map(|cached| {
+                            cached.last_touch = next_touch;
+                            next_touch += 1;
+                            &cached.current
+                        });
+                        prop_assert_eq!(touched, expected);
+                    }
+                    _ => unreachable!("generated operation is in the closed 0..6 range"),
                 }
                 assert_matches_reference(&cache, &reference);
             }
         }
+    }
+
+    /// One transition of a [`RecencyMap`] and its ordered-set model.
+    #[derive(Debug, Clone)]
+    enum RecencyOp {
+        /// Caches a key at a touch newer than every other.
+        Insert(NodeId),
+        /// Touches a key, if cached, at a touch newer than every other.
+        Touch(NodeId),
+        /// Caches a key at a touch older than every earlier one, as after
+        /// another namespace renumbered the session's sequence.
+        Older(NodeId),
+        Remove(NodeId),
+        Renumber,
+    }
+
+    fn recency_op() -> impl Strategy<Value = RecencyOp> {
+        prop_oneof![
+            (0_u64..24).prop_map(RecencyOp::Insert),
+            (0_u64..24).prop_map(RecencyOp::Touch),
+            (0_u64..24).prop_map(RecencyOp::Older),
+            (0_u64..24).prop_map(RecencyOp::Remove),
+            Just(RecencyOp::Renumber),
+        ]
+    }
+
+    proptest! {
+        /// The append order reports exactly what the ordered set it replaced
+        /// reported, and stays within its compaction and allocation bounds.
+        #[test]
+        fn recency_map_orders_values_like_an_ordered_set(
+            ops in prop::collection::vec(recency_op(), 0..400),
+        ) {
+            let mut map = RecencyMap::<NodeId, CachedSimHash>::default();
+            let mut model = BTreeMap::<NodeId, CacheSequence>::new();
+            let (mut newer, mut older) = (1_u64 << 40, (1_u64 << 40) - 1);
+            let simhash = |last_touch| CachedSimHash { value: None, last_touch };
+            for op in ops {
+                match op {
+                    RecencyOp::Insert(key) => {
+                        let touch = CacheSequence(newer);
+                        newer += 1;
+                        map.insert(key, simhash(touch));
+                        model.insert(key, touch);
+                    }
+                    RecencyOp::Touch(key) => {
+                        let touch = CacheSequence(newer);
+                        newer += 1;
+                        let touched = map.touch(key, touch).map(|cached| cached.last_touch);
+                        let expected = model.get_mut(&key).map(|last_touch| {
+                            *last_touch = touch;
+                            touch
+                        });
+                        prop_assert_eq!(touched, expected);
+                    }
+                    RecencyOp::Older(key) => {
+                        let touch = CacheSequence(older);
+                        older -= 1;
+                        map.insert(key, simhash(touch));
+                        model.insert(key, touch);
+                    }
+                    RecencyOp::Remove(key) => {
+                        prop_assert_eq!(map.remove(&key).is_some(), model.remove(&key).is_some());
+                    }
+                    RecencyOp::Renumber => {
+                        let mut ranked = model
+                            .iter()
+                            .map(|(key, touch)| (*touch, *key))
+                            .collect::<Vec<_>>();
+                        ranked.sort_unstable();
+                        model = (0_u64..)
+                            .map(CacheSequence)
+                            .zip(ranked)
+                            .map(|(touch, (_, key))| (key, touch))
+                            .collect();
+                        map.renumber(|key| model[key]);
+                    }
+                }
+                let expected = model
+                    .iter()
+                    .map(|(key, touch)| (*touch, *key))
+                    .collect::<BTreeSet<_>>();
+                prop_assert_eq!(map.oldest(), expected.first().copied());
+                prop_assert_eq!(
+                    map.oldest_first()
+                        .map(|(key, cached)| (cached.last_touch, key))
+                        .collect::<Vec<_>>(),
+                    expected.into_iter().collect::<Vec<_>>()
+                );
+                prop_assert_eq!(map.len(), model.len());
+                prop_assert!(map.order.len() <= 2 * map.len());
+                prop_assert!(map.order.capacity() <= 4 * map.len().max(1));
+            }
+        }
+    }
+
+    /// Random touches keep the order's allocation within four entries per
+    /// value without reallocating each compaction, and evicting to a tenth,
+    /// then to empty, shrinks it with the values while it keeps LRU order.
+    #[test]
+    fn recency_order_allocation_follows_its_values() {
+        let within_bound =
+            |map: &RecencyMap<NodeId, CachedSimHash>| map.order.capacity() <= 4 * map.len().max(1);
+        let simhash_limit = u64::try_from(VECTOR_BUILD_SIMHASH_CACHE_LIMIT).unwrap();
+        for values in [1, 3, 512, simhash_limit] {
+            let mut map = RecencyMap::<NodeId, CachedSimHash>::default();
+            let mut model = BTreeMap::<NodeId, CacheSequence>::new();
+            let mut sequence = 0_u64;
+            let mut stamp = || {
+                sequence += 1;
+                CacheSequence(sequence)
+            };
+            for node_id in 0..values {
+                let touch = stamp();
+                map.insert(
+                    node_id,
+                    CachedSimHash {
+                        value: None,
+                        last_touch: touch,
+                    },
+                );
+                model.insert(node_id, touch);
+                assert!(within_bound(&map));
+            }
+            let mut random = 0x9E37_79B9_7F4A_7C15_u64;
+            let mut capacity = map.order.capacity();
+            let mut reallocations = 0;
+            for _ in 0..16 * values {
+                random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let (node_id, touch) = ((random >> 33) % values, stamp());
+                assert!(map.touch(node_id, touch).is_some());
+                model.insert(node_id, touch);
+                assert!(within_bound(&map), "{values} values");
+                if map.order.capacity() != capacity {
+                    capacity = map.order.capacity();
+                    reallocations += 1;
+                }
+            }
+            assert!(
+                reallocations <= 4,
+                "{values} values reallocated {reallocations} times"
+            );
+            for retained in [(values / 10).max(1), 0] {
+                while map.len() as u64 > retained {
+                    let (touch, oldest) = map.oldest().unwrap();
+                    assert_eq!(model.remove(&oldest), Some(touch));
+                    assert!(map.remove(&oldest).is_some());
+                    assert!(
+                        within_bound(&map),
+                        "{values} values evicted to {}",
+                        map.len()
+                    );
+                }
+                let mut expected = model
+                    .iter()
+                    .map(|(node_id, touch)| (*touch, *node_id))
+                    .collect::<Vec<_>>();
+                expected.sort_unstable();
+                assert_eq!(
+                    map.oldest_first()
+                        .map(|(node_id, cached)| (cached.last_touch, node_id))
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+            assert!(map.order.is_empty());
+        }
+    }
+
+    #[test]
+    fn hits_and_replacements_defer_local_eviction() {
+        let mut cache = MutationOpCache::<crate::search::vector::distance::Cosine>::default();
+        for node_id in 1..=3 {
+            cache.put_item(0, node_id, None, 1);
+            cache.put_simhash(node_id, None);
+        }
+        assert!(matches!(cache.item(0, 1), Some(None)));
+        cache.put_item(0, 2, None, 1);
+        assert_eq!(cache.simhash(2), Some(None));
+        assert_eq!(cache.simhash(1), Some(None));
+        assert_recency_is_consistent(&cache);
+
+        let evicted_items = std::iter::from_fn(|| {
+            let (_, (_, node_id)) = cache.items.oldest()?;
+            assert!(cache.evict_oldest_item());
+            Some(node_id)
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(evicted_items, [3, 1, 2]);
+        let evicted_simhashes = std::iter::from_fn(|| {
+            let (_, node_id) = cache.simhashes.oldest()?;
+            assert!(cache.evict_oldest_simhash());
+            Some(node_id)
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(evicted_simhashes, [3, 2, 1]);
+        assert!(!cache.evict_oldest_item());
+        assert!(!cache.evict_oldest_simhash());
+        assert_eq!(cache.retained_payload_bytes().unwrap(), 0);
+        assert_eq!(
+            (cache.stats.item_evictions, cache.stats.simhash_evictions),
+            (3, 3)
+        );
+        assert!(cache.items.order.is_empty() && cache.simhashes.order.is_empty());
+    }
+
+    /// Hits, inserts, and staged rows across namespaces keep every entry
+    /// within the budget after each eviction, and every recency order within
+    /// its bound, while eviction flushes dirty rows it takes.
+    #[tokio::test]
+    async fn build_session_budget_holds_under_hit_and_insert_churn() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+        type Cache = MutationOpCache<Cosine>;
+
+        let db = session_test_db("vector-build-session-churn").await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&transaction);
+        let item = Arc::new(Item::<Cosine>::new(vec![1.0, 0.0]));
+        let budget = 3 * VECTOR_BUILD_SESSION_NAMESPACE_OVERHEAD_BYTES
+            + 48 * (VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES + 16);
+        let mut session = VectorBuildSession::<Cosine>::new(
+            NonZeroU64::new(u64::try_from(budget).unwrap()).unwrap(),
+        );
+        let mut random = 0x9E37_79B9_7F4A_7C15_u64;
+        for round in 0..300_u64 {
+            let identity = session_identity(DataScope::LegacyUnscoped, 300 + round % 3);
+            let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+            for _ in 0..64 {
+                random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let node_id = (random >> 33) % 96;
+                let row = Cache::node_row_id(0, node_id);
+                match random >> 60 {
+                    0..=8 => {
+                        if cache.item(0, node_id).is_none() {
+                            cache.put_item(0, node_id, Some(Arc::clone(&item)), 16);
+                        }
+                    }
+                    9..=11 => {
+                        if cache.simhash(node_id).is_none() {
+                            cache.put_simhash(node_id, None);
+                        }
+                    }
+                    12..=13 => {
+                        if cache.touched_neighbor(row).is_none() {
+                            cache.install_loaded_neighbor(row, NeighborRowValue::KnownAbsent);
+                        }
+                    }
+                    _ => {
+                        if cache.contains_neighbor(row) {
+                            cache
+                                .stage_loaded_neighbor(
+                                    row,
+                                    neighbors(node_id, vec![node_id + 100 + round]),
+                                )
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+            assert_recency_is_consistent(&cache);
+            session.restore_cache(identity, cache);
+            session.admit_entity();
+            session.enforce_limits(&measured).unwrap();
+            assert!(session.retained_bytes().unwrap() <= budget);
+            assert_session_bookkeeping(&session);
+        }
+        let stats = session.stats();
+        assert!(stats.item_hits() > 0 && stats.neighbor_hits() > 0 && stats.simhash_hits() > 0);
+        assert!(stats.item_evictions() > 0);
+        assert!(stats.neighbor_evictions() > 0);
+        assert!(stats.simhash_evictions() > 0);
+        assert!(stats.dirty_neighbor_flushes() > 0);
+    }
+
+    /// Eviction under pressure never drops a staged row: without a
+    /// transaction it refuses, and with one every evicted dirty row is
+    /// written before it leaves the cache.
+    #[tokio::test]
+    async fn dirty_rows_survive_eviction_pressure() {
+        use crate::encoding::v2::keys::scope::DataScope;
+        use crate::search::vector::distance::Cosine;
+        type Cache = MutationOpCache<Cosine>;
+
+        let identity = session_identity(DataScope::LegacyUnscoped, 310);
+        let staged = |node_id: NodeId| vec![node_id + 1_000, node_id + 2_000];
+        let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+        let mut cache = session.take_cache(&identity, 8, 4).unwrap();
+        for node_id in 0..64 {
+            let row = Cache::node_row_id(0, node_id);
+            let proof = cache.prove_new_neighbor_row(row).unwrap();
+            cache.stage_new_neighbor(proof, neighbors(node_id, staged(node_id)));
+            // Clean rows and hits interleave with the dirty rows' recency.
+            cache.install_loaded_neighbor(
+                Cache::node_row_id(0, node_id + 500),
+                NeighborRowValue::KnownAbsent,
+            );
+            if node_id % 3 == 0 {
+                assert!(cache
+                    .touched_neighbor(Cache::node_row_id(0, node_id / 2))
+                    .is_some());
+            }
+            cache.put_simhash(node_id, None);
+        }
+        session.restore_cache(identity.clone(), cache);
+        session.admit_entity();
+        let dirty_rows = |session: &VectorBuildSession<Cosine>| {
+            (0..64)
+                .filter(|node_id| {
+                    session
+                        .caches
+                        .get(&identity)
+                        .and_then(|cache| cache.neighbor(Cache::node_row_id(0, *node_id)))
+                        .is_some_and(CachedNeighbor::is_dirty)
+                })
+                .count()
+        };
+
+        assert!(matches!(
+            session.shrink_to(0),
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+        assert_eq!(
+            dirty_rows(&session),
+            64,
+            "a refused eviction keeps every dirty row"
+        );
+        assert_session_bookkeeping(&session);
+
+        let db = session_test_db("vector-build-session-dirty-pressure").await;
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&transaction);
+        let budget = VECTOR_BUILD_SESSION_NAMESPACE_OVERHEAD_BYTES
+            + 8 * (VECTOR_BUILD_SESSION_NEIGHBOR_OVERHEAD_BYTES + 64);
+        session.max_payload_bytes = budget;
+        session.enforce_limits(&measured).unwrap();
+        assert!(session.retained_bytes().unwrap() <= budget);
+        let kept = dirty_rows(&session);
+        assert!(kept < 64, "the budget evicted dirty rows");
+        assert_eq!(
+            session.stats().dirty_neighbor_flushes(),
+            u64::try_from(64 - kept).unwrap(),
+            "each evicted dirty row was flushed once"
+        );
+        assert_session_bookkeeping(&session);
+
+        let keyspace = VectorRowKeyspace::from_allocated(
+            identity.physical_name().to_string(),
+            identity.physical_index_id(),
+            identity.scope(),
+        );
+        let node_ids = (0..64).collect::<Vec<_>>();
+        let read_rows = || async {
+            VectorRows::new(&transaction, &keyspace)
+                .layer0_neighbor_rows(&node_ids)
+                .await
+                .unwrap()
+        };
+        for (node_id, written) in node_ids.iter().zip(read_rows().await) {
+            let row = Cache::node_row_id(0, *node_id);
+            match session
+                .caches
+                .get(&identity)
+                .and_then(|cache| cache.neighbor(row))
+            {
+                Some(cached) => {
+                    assert!(cached.is_dirty());
+                    assert_eq!(cached.current(), &neighbors(*node_id, staged(*node_id)));
+                    assert_eq!(written, None);
+                }
+                None => assert_eq!(written, Some(staged(*node_id))),
+            }
+        }
+
+        session.flush_all(&measured).unwrap();
+        assert_eq!(dirty_rows(&session), 0);
+        assert!(read_rows()
+            .await
+            .into_iter()
+            .zip(&node_ids)
+            .all(|(written, node_id)| written == Some(staged(*node_id))));
     }
 }

@@ -14,24 +14,31 @@ unique ownership checks, and real graph dependencies.
 
 ## Storage contract
 
-The current and maximum supported index storage version remain **4**. Canonical
+The current and maximum supported index storage version is **5**. Canonical
 values and the existing `HLXRBM2` / `HLXADJ2` membership-delta codecs are unchanged.
 WAL replay, partial merging, and compaction must retain support for those operands.
-No index rebuild or new storage migration is needed for this unreleased change.
+The membership deltas themselves need no index rebuild or storage migration.
 
 **Do not open a database containing these delta operands with a pre-delta binary.**
-Version 4 does not distinguish those binaries. Mixed-version operation and rollback
-to a binary without these decoders are not supported. This is an explicit
+Versions 4 and 5 do not distinguish those binaries. Mixed-version operation and
+rollback to a binary without these decoders are not supported. This is an explicit
 development-only compatibility boundary, not an automatic upgrade protocol.
 
-New databases initialize at version 4. Existing supported version-4 databases open
-without conversion. Experimental version-5 databases return the existing
+Version 5 marks stores that may hold asynchronous index-operation queues. It
+shares version 4's physical layout: an embedded or controlled-migration writer
+upgrades a version-4 store by rewriting only its storage marker, with no index
+rebuild. Current readers serve version 4 and 5, so upgrade readers before the
+writer. Recovery-only managed failover reports `WriterMigrationRequired` for a
+version-4 store instead of upgrading it. Binaries that support at most version 4
+refuse an upgraded store, so a rollback needs a backup taken before the upgrade.
+
+New databases initialize at version 5. Versions after 5 return the existing
 unsupported-version error on reader, embedded-writer, and managed-failover open;
 startup must not lower or remove their marker. Managed bootstrap still refuses
 any nonempty store before version dispatch. The
 retired activation key tag `0x0C` and value tag `0x08` are not reused. Malformed
-metadata checks, managed-writer fencing, and existing version-2/3 migrations to
-version 4 remain in place.
+metadata checks, managed-writer fencing, and existing version-2/3 equality
+migrations (which now publish version 5 directly) remain in place.
 
 The change does not alter cascade ordering, intermediate topology flushes,
 `drop_nodes`, token containers, or SlateDB.

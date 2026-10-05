@@ -59,6 +59,15 @@ impl ServerState {
         self.index_readiness
     }
 
+    /// How many entities the writer's index worker holds back: each has a
+    /// queued vector/text operation that can never fit a publication under
+    /// the current limits. Zero on a reader, and rebuilt after a restart as
+    /// publication blocks again. Health responses report only this count, so
+    /// unauthenticated probes never learn tenant or entity IDs.
+    pub fn blocked_index_entity_count(&self) -> u64 {
+        self.db.blocked_index_entity_count()
+    }
+
     /// Flush an acknowledged write before a transport acknowledges durability.
     pub async fn flush_writer(&self) -> Result<db::DatabaseSequence, db::error::HelixDbError> {
         self.db.flush_writer().await

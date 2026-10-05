@@ -271,6 +271,7 @@ impl<'db> ExecutionContext<'db> {
             // serially), so a shared snapshot of the parent's sets would never
             // be read.
             prepared_memberships: super::stream::PreparedMemberships::default(),
+            search_consistency: self.search_consistency,
             shared_index_reads: Arc::clone(&self.shared_index_reads),
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
@@ -631,9 +632,7 @@ mod tests {
         context.request_write_scope = runtime_context::RequestWriteScopeState::Active(Box::new(
             runtime_context::ActiveWriteTx {
                 txn,
-                index_context: mutation::MutationIndexContext::for_configured_index_test(
-                    std::sync::Arc::clone(db.simhasher_registry()),
-                ),
+                index_context: mutation::MutationIndexContext::for_configured_index_test(),
             },
         ));
 

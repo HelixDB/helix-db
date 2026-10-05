@@ -170,6 +170,7 @@ impl Tracker {
         Ok(temporary)
     }
 
+    #[cfg(test)]
     pub(super) fn mark_read<K: AsRef<[u8]>, I: IntoIterator<Item = K>>(
         &self,
         raw: &slatedb::DbTransaction,

@@ -940,15 +940,17 @@ where
     rows.put_layer0_neighbors(1, &[3]).unwrap();
     rows.put_layer0_neighbors(3, &[1]).unwrap();
     let mut relink_cache = MutationOpCache::<D>::with_degree_limits(4, 2).unwrap();
-    index
-        .relink_neighbor(
+    let candidates = index
+        .load_relink_candidates(
             &measured,
             0,
-            2,
             &std::collections::HashSet::from([1]),
-            1,
             &mut relink_cache,
         )
+        .await
+        .unwrap();
+    index
+        .relink_neighbor(&measured, 2, &candidates, 1, &mut relink_cache)
         .await
         .unwrap();
     index

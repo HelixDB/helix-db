@@ -28,4 +28,8 @@ message HealthResponse {
   string index_runtime = 3;
   reserved 4;
   reserved "text_index_runtime";
+  // Entities the index worker holds back because a queued operation of
+  // theirs can never fit a publication under the current limits. Only the
+  // count: the writer's logs name each one.
+  uint64 blocked_index_entity_count = 5;
 }

@@ -1913,7 +1913,9 @@ async fn delete_generation_rows(
                 | ScopedKey::VectorPartitionMapping(_)
                 | ScopedKey::TextCorpusStatistics(_)
                 | ScopedKey::TextTermStatistics(_)
-                | ScopedKey::TextStatisticsEntity(_) => {
+                | ScopedKey::TextStatisticsEntity(_)
+                | ScopedKey::IndexOperationQueue(_)
+                | ScopedKey::IndexOperationRow(_) => {
                     return Err(corruption(
                         "secondary cleanup cursor is outside its entry lanes",
                     ));
@@ -2063,7 +2065,9 @@ async fn delete_delta_and_applied_rows(
                         | RecordKind::TextCorpusStatistics
                         | RecordKind::TextTermStatistics
                         | RecordKind::TextStatisticsEntity
-                        | RecordKind::SecondaryEqualityBitmap => {
+                        | RecordKind::SecondaryEqualityBitmap
+                        | RecordKind::IndexOperationQueue
+                        | RecordKind::IndexOperationRow => {
                             unreachable!("cleanup loop admits only delta and applied rows")
                         }
                     };

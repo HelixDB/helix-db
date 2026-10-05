@@ -1,6 +1,7 @@
 //! Stored values for secondary, text, and vector indexes.
 
 pub(crate) mod equality;
+pub(crate) mod operation_queue;
 pub(crate) mod range;
 mod secondary_entry;
 pub(crate) mod text;

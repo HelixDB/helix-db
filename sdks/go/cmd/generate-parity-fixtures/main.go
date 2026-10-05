@@ -79,8 +79,8 @@ func run() error {
 		}
 	}
 
-	if runtimeCount != 233 {
-		return fmt.Errorf("generated %d runtime fixtures, expected 233", runtimeCount)
+	if runtimeCount != 234 {
+		return fmt.Errorf("generated %d runtime fixtures, expected 234", runtimeCount)
 	}
 	if jsonOnlyCount != 15 {
 		return fmt.Errorf("generated %d json-only fixtures, expected 15", jsonOnlyCount)
@@ -564,6 +564,17 @@ func runtimeFixtures() []fixture {
 		runtime(
 			"028-read-vector-search-edges",
 			read().VarAs("edge_vector_hits", helix.G().VectorSearchEdges("FOLLOWS", "embedding", []float32{1.0, 0.0}, 5).EdgeProperties()).Returning("edge_vector_hits"),
+		),
+		runtime(
+			"028a-read-eventual-search",
+			read().
+				WithSearchConsistency(helix.SearchConsistencyEventual).
+				VarAs("text_hits", helix.G().TextSearchNodes("ParityUser", "bio", "graph", 5).ValueMap("externalId", "bio", "$distance")).
+				VarAs("vector_hits", helix.G().VectorSearchNodes("ParityUser", "embedding", []float32{1.0, 0.0, 0.0}, 3).Project(
+					helix.ProjectPropAs("externalId", "externalId"),
+					helix.ProjectPropAs("$distance", "distance"),
+				)).
+				Returning("text_hits", "vector_hits"),
 		),
 		runtime(
 			"029-write-drop-temp-node",

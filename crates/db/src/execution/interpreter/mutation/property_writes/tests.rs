@@ -221,24 +221,6 @@ async fn pending_property_admission_precedes_backend_writes_and_survives_prepara
         .prepare_secondary(&scope.txn)
         .await
         .unwrap();
-    scope
-        .index_context
-        .prepare_active_text(
-            &scope.txn,
-            db.config()
-                .db()
-                .search_index_backfill()
-                .active_text_mutation(),
-            db.object_store(),
-            db.path(),
-        )
-        .await
-        .unwrap();
-    scope
-        .index_context
-        .prepare_active_vectors(&scope.txn)
-        .await
-        .unwrap();
     let before = budget.available();
     let prepared = scope.index_context.into_prepared().unwrap();
     assert_eq!(

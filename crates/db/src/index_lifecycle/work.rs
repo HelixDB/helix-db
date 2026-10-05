@@ -14,7 +14,8 @@ use super::{
     TextManifestRevision,
 };
 
-const MAX_LENGTH_DELIMITED_FIELD: usize = 16 * 1024 * 1024;
+/// Largest length-delimited field one stored V2 work value encodes.
+pub(crate) const MAX_LENGTH_DELIMITED_FIELD: usize = 16 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS: usize = u16::MAX as usize;
 const MAX_TEXT_TERM_LEN: usize = u16::MAX as usize - 5;
 
@@ -673,7 +674,8 @@ impl TextTermStatisticsValue {
 /// One entity's exact contribution to live corpus and term statistics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum TextStatisticsContribution {
-    /// A mutation removed an entity before a concurrent source scan reached it.
+    /// The entity has no indexed document: build reconciliation retired it,
+    /// or an Active publication removed its accounted document.
     Absent,
     /// The currently accounted document and its sorted unique terms.
     Present {

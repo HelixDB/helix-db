@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d" }
+slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d", optional = true }
+http-body = { version = "1", optional = true }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
 helix-cypher = { path = "../cypher" }
@@ -20,6 +22,7 @@ foyer = { version = "0.22.0", features = ["serde"] }
 
 # Data structures
 bytes = { version = "1", features = ["serde"] }
+foldhash = "0.2"
 range-cache = { version = "0.1.1", features = ["async"] }
 roaring = { version = "0.11", features = ["serde"] }
 
@@ -75,6 +78,8 @@ future-vector-codecs = []
 production-coverage = ["slatedb/wal_disable"]
 production-scale = ["production-coverage", "dep:memmap2"]
 fuzzing = []
+# Benchmark images only: object-store connector counters and SlateDB metrics.
+async-index-benchmark = ["dep:http-body", "dep:slatedb-common"]
 force-vector-scalar-kernel = []
 
 [lints]
@@ -140,11 +145,32 @@ required-features = [
 ]
 
 [[test]]
+name = "production_queue_publication"
+required-features = [
+    "production-coverage",
+    "index-lifecycle-testing",
+]
+
+[[test]]
 name = "production_text_lifecycle"
 required-features = ["production-coverage"]
 
 [[test]]
+name = "production_index_operation_queue"
+required-features = [
+    "production-coverage",
+    "index-lifecycle-testing",
+]
+
+[[test]]
 name = "production_text_correctness_regressions"
+required-features = [
+    "production-coverage",
+    "index-lifecycle-testing",
+]
+
+[[test]]
+name = "production_text_queue_contracts"
 required-features = [
     "production-coverage",
     "index-lifecycle-testing",

@@ -4,12 +4,13 @@
 //! their coalesced final state, composes BUILD/statistics effects, and prepares
 //! at most one optional immutable split for each generation partition.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
+use slatedb::DbTransaction;
 use tokio::sync::Semaphore;
 
 use crate::config::ActiveTextMutationLimits;
@@ -17,56 +18,12 @@ use crate::encoding::v2::keys as index_keys;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
-use crate::encoding::v2::values::property::Property;
 use crate::error::{HelixDbError, Result};
-use crate::index_lifecycle::graph_mutation::{CanonicalPropertyRow, GraphEntity};
 use crate::index_lifecycle::{self, work};
 
 use super::active_preflight::{ActiveTextMutationMeasurements, ActiveTextMutationUsage};
-use super::mutation;
 
 const TANTIVY_FOREGROUND_WRITER_BYTES: u64 = 15_000_000;
-
-/// One entity reduced to its original and final property-row states.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CoalescedActiveTextMutation {
-    pub(crate) scope: DataScope,
-    pub(crate) entity: GraphEntity,
-    pub(crate) original: Option<CanonicalPropertyRow>,
-    pub(crate) final_state: Option<CanonicalPropertyRow>,
-}
-
-impl CoalescedActiveTextMutation {
-    fn graph_key(&self) -> Bytes {
-        self.entity.property_key(self.scope)
-    }
-
-    fn original_properties(&self) -> &[Property] {
-        self.original
-            .as_ref()
-            .map_or(&[], CanonicalPropertyRow::properties)
-    }
-
-    fn final_properties(&self) -> &[Property] {
-        self.final_state
-            .as_ref()
-            .map_or(&[], CanonicalPropertyRow::properties)
-    }
-
-    pub(super) fn retained_input_bytes(&self) -> u64 {
-        let key_bytes = u64::try_from(self.graph_key().len()).unwrap_or(u64::MAX);
-        let original_bytes = self.original.as_ref().map_or(0, |row| {
-            u64::try_from(row.encoded_len()).unwrap_or(u64::MAX)
-        });
-        let final_bytes = self.final_state.as_ref().map_or(0, |row| {
-            u64::try_from(row.encoded_len()).unwrap_or(u64::MAX)
-        });
-        key_bytes
-            .saturating_mul(2)
-            .saturating_add(original_bytes)
-            .saturating_add(final_bytes)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct DestinationKey {
@@ -148,7 +105,6 @@ struct PreparedDestination {
 /// All text effects for one drained transaction flush epoch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedActiveTextEpoch {
-    build_deltas: Vec<mutation::PreparedTextBuildDeltas>,
     statistics: super::statistics::PreparedTextStatisticsBatch,
     destinations: Vec<PreparedDestination>,
     measurements: ActiveTextMutationMeasurements,
@@ -170,11 +126,6 @@ impl PreparedActiveTextEpoch {
             .filter(|destination| destination.payload.is_some())
             .count()
     }
-
-    /// Returns whether root/pointer work should wake compaction after commit.
-    pub(crate) const fn has_destination_work(&self) -> bool {
-        !self.destinations.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,128 +139,17 @@ struct AnalyzedActiveTextDocument {
     analyzed: crate::search::text::IndexedTextAnalysis,
 }
 
-/// Prepares a complete epoch without staging graph or index rows.
-pub(crate) async fn prepare_active_text_epoch(
-    transaction: &impl crate::transaction::Mutation,
-    mutations: &mutation::TextMutationSet,
-    routes: &index_lifecycle::mutation_catalog::MutationRouteCatalog,
-    graphs: Vec<CoalescedActiveTextMutation>,
+/// Prepares every destination and admits the complete epoch's measurements,
+/// counting the acknowledgement staged beside them as output.
+async fn finish_epoch(
+    transaction: &DbTransaction,
+    statistics: super::statistics::PreparedTextStatisticsBatch,
+    destinations: BTreeMap<DestinationKey, DestinationWork>,
+    entity_count: u64,
+    graph_input_bytes: u64,
+    acknowledgement: index_lifecycle::queue::storage::AcknowledgementOutput,
     limits: ActiveTextMutationLimits,
 ) -> Result<PreparedActiveTextEpoch> {
-    let entity_count = u64::try_from(graphs.len()).unwrap_or(u64::MAX);
-    if entity_count > u64::try_from(limits.max_entities().get()).unwrap_or(u64::MAX) {
-        return Err(HelixDbError::ActiveTextMutationLimitExceeded {
-            resource: crate::error::ActiveTextMutationResource::Entities,
-            observed: entity_count,
-            limit: u64::try_from(limits.max_entities().get()).unwrap_or(u64::MAX),
-        });
-    }
-
-    let mut active_handles = mutations
-        .active_handles()
-        .iter()
-        .filter(|handle| handle.text_definition().is_some())
-        .collect::<Vec<_>>();
-    active_handles.sort_by_key(|handle| (handle.index_id(), handle.generation()));
-    let mut identities = HashSet::with_capacity(active_handles.len());
-    for handle in &active_handles {
-        if !identities.insert((handle.scope(), handle.index_id(), handle.generation())) {
-            return Err(corruption(
-                "Active text epoch contains a duplicate canonical generation",
-            ));
-        }
-    }
-
-    let mut statistics = super::statistics::PreparedTextStatisticsBatch::default();
-    let mut build_deltas = Vec::with_capacity(graphs.len());
-    let mut destinations = BTreeMap::<DestinationKey, DestinationWork>::new();
-    let mut analysis_budget =
-        crate::search::text::TextAnalysisMemoryBudget::new(limits.max_input_bytes());
-    let mut graph_input_bytes = 0_u64;
-    for graph in &graphs {
-        validate_final_graph_state(transaction, graph).await?;
-        graph_input_bytes = graph_input_bytes.saturating_add(graph.retained_input_bytes());
-        let entity = graph.entity.index_entity();
-        let graph_routes = routes.targets_for_states(
-            entity.kind,
-            graph.original_properties(),
-            graph.final_properties(),
-        );
-        build_deltas.push(
-            mutation::prepare_text_build_deltas_in_batch(
-                transaction,
-                graph.scope,
-                mutations,
-                &graph_routes,
-                mutation::TextEntityMutation::new(
-                    entity.kind,
-                    entity.id.get(),
-                    graph.original_properties(),
-                    graph.final_properties(),
-                ),
-                &mut statistics,
-            )
-            .await?,
-        );
-
-        for ordinal in graph_routes.iter().filter_map(|target| match target {
-            index_lifecycle::mutation_catalog::MutationRouteTarget::TextActive(ordinal) => {
-                Some(ordinal)
-            }
-            index_lifecycle::mutation_catalog::MutationRouteTarget::Secondary(_)
-            | index_lifecycle::mutation_catalog::MutationRouteTarget::Vector(_)
-            | index_lifecycle::mutation_catalog::MutationRouteTarget::TextBuilding(_) => None,
-        }) {
-            let handle = mutations.active_handles().get(ordinal).ok_or_else(|| {
-                corruption("text mutation route named an Active target outside its catalog")
-            })?;
-            if handle.scope() != graph.scope {
-                return Err(corruption(
-                    "Active text generation scope disagrees with its graph mutation",
-                ));
-            }
-            let definition = handle
-                .text_definition()
-                .expect("the filtered Active handle is text-typed");
-            if definition.identity() != *handle.identity() {
-                return Err(corruption(
-                    "Active text handle definition disagrees with its canonical identity",
-                ));
-            }
-            if definition.element_kind() != entity.kind {
-                continue;
-            }
-            let before = active_document(definition, graph.original_properties())?;
-            let after = active_document(definition, graph.final_properties())?;
-            if before == after {
-                continue;
-            }
-            let before = before
-                .map(|document| analyze_document(definition, document, &mut analysis_budget))
-                .transpose()?;
-            let after = after
-                .map(|document| analyze_document(definition, document, &mut analysis_budget))
-                .transpose()?;
-            let before_contribution = contribution(definition, before.as_ref())?;
-            let after_contribution = contribution(definition, after.as_ref())?;
-            let transition = super::statistics::prepare_active_in_batch(
-                transaction,
-                &statistics,
-                super::statistics::ActiveTextStatisticsMutation::new(
-                    graph.scope,
-                    handle.index_id(),
-                    handle.generation(),
-                    entity,
-                    before_contribution,
-                    after_contribution,
-                ),
-            )
-            .await?;
-            statistics.push(transition)?;
-            group_effect(&mut destinations, handle, definition, entity, before, after)?;
-        }
-    }
-
     let build_budget_bytes = limits.max_input_bytes().get();
     let build_budget_permits = usize::try_from(build_budget_bytes.min(u32::MAX.into()))
         .expect("u32 byte budgets fit usize");
@@ -350,19 +190,6 @@ pub(crate) async fn prepare_active_text_epoch(
         .map(|(_, destination)| destination)
         .collect::<Vec<_>>();
 
-    let build_measurements = build_deltas.iter().fold(
-        mutation::TextBuildDeltaMeasurements::default(),
-        |total, delta| {
-            let measured = delta.row_measurements();
-            mutation::TextBuildDeltaMeasurements::from_parts(
-                total.input_bytes().saturating_add(measured.input_bytes()),
-                total
-                    .output_operations()
-                    .saturating_add(measured.output_operations()),
-                total.output_bytes().saturating_add(measured.output_bytes()),
-            )
-        },
-    );
     let statistics_measurements = statistics.measurements();
     let destination_measurements = prepared_destinations.iter().fold(
         (0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64),
@@ -383,61 +210,26 @@ pub(crate) async fn prepare_active_text_epoch(
         ActiveTextMutationUsage {
             entities: entity_count,
             input_bytes: graph_input_bytes
-                .saturating_add(build_measurements.input_bytes())
                 .saturating_add(statistics_measurements.0)
                 .saturating_add(destination_measurements.0),
-            output_operations: build_measurements
-                .output_operations()
-                .saturating_add(statistics_measurements.1)
-                .saturating_add(destination_measurements.1),
-            output_bytes: build_measurements
-                .output_bytes()
-                .saturating_add(statistics_measurements.2)
-                .saturating_add(destination_measurements.2),
+            output_operations: statistics_measurements
+                .1
+                .saturating_add(destination_measurements.1)
+                .saturating_add(acknowledgement.operations),
+            output_bytes: statistics_measurements
+                .2
+                .saturating_add(destination_measurements.2)
+                .saturating_add(acknowledgement.bytes),
             split_bytes: destination_measurements.3,
             retained_split_bytes: destination_measurements.4,
             manifest_page_bytes: destination_measurements.5,
         },
     )?;
     Ok(PreparedActiveTextEpoch {
-        build_deltas,
         statistics,
         destinations: prepared_destinations,
         measurements,
     })
-}
-
-async fn validate_final_graph_state(
-    transaction: &impl crate::transaction::Mutation,
-    graph: &CoalescedActiveTextMutation,
-) -> Result<()> {
-    let expected = graph.final_state.as_ref().map(|row| row.encoded().clone());
-    if transaction.get(graph.graph_key()).await? != expected {
-        return Err(HelixDbError::InvariantViolation(
-            "Active text graph row disagrees with its coalesced final state".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn active_document(
-    definition: &index_lifecycle::ValidatedTextIndexDefinition,
-    properties: &[Property],
-) -> Result<Option<ActiveTextDocument>> {
-    match super::projection::project(definition, properties).map_err(|error| {
-        HelixDbError::InvalidIndexSourceData {
-            reason: format!(
-                "text index {}:{}: {error}",
-                definition.label().as_str(),
-                definition.property().as_str(),
-            ),
-        }
-    })? {
-        super::projection::TextSourceProjection::NotIndexed => Ok(None),
-        super::projection::TextSourceProjection::Indexed { partition, text } => {
-            Ok(Some(ActiveTextDocument { partition, text }))
-        }
-    }
 }
 
 fn contribution(
@@ -474,7 +266,7 @@ fn group_effect(
     handle: &index_lifecycle::ActiveIndexHandle,
     definition: &index_lifecycle::ValidatedTextIndexDefinition,
     entity: index_keys::IndexEntity,
-    before: Option<AnalyzedActiveTextDocument>,
+    before: Option<work::TextPartition>,
     after: Option<AnalyzedActiveTextDocument>,
 ) -> Result<()> {
     match (before, after) {
@@ -483,15 +275,474 @@ fn group_effect(
             insert_live(destinations, handle, definition, entity, current, false)
         }
         (Some(previous), None) => {
-            insert_retirement(destinations, handle, definition, entity, previous.partition)
+            insert_retirement(destinations, handle, definition, entity, previous)
         }
-        (Some(previous), Some(current)) if previous.partition == current.partition => {
+        (Some(previous), Some(current)) if previous == current.partition => {
             insert_live(destinations, handle, definition, entity, current, true)
         }
         (Some(previous), Some(current)) => {
-            insert_retirement(destinations, handle, definition, entity, previous.partition)?;
+            insert_retirement(destinations, handle, definition, entity, previous)?;
             insert_live(destinations, handle, definition, entity, current, false)
         }
+    }
+}
+
+/// One entity's collapsed queued text effect: its final replacement, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueuedTextEffect {
+    pub(crate) entity: index_keys::IndexEntity,
+    pub(crate) replacement: Option<(work::TextPartition, String)>,
+}
+
+/// Prepares one bounded publication epoch from queued text payloads.
+///
+/// The previous indexed representation comes from the physical statistics
+/// marker read through the publication transaction, never from graph rows.
+/// Every effect replaces that representation with the queued final state,
+/// retiring the old partition's document when the partition changed or the
+/// document was deleted. Only an effect that deletes a never-indexed entity
+/// produces no work: a statistics contribution records the partition, token
+/// count, and unique terms but not term frequencies or positions, so an equal
+/// contribution does not prove the indexed document is unchanged. The epoch's
+/// output admission includes `acknowledgement`, the queue writes the same
+/// transaction stages.
+pub(crate) async fn prepare_queued_text_epoch(
+    transaction: &DbTransaction,
+    handle: &index_lifecycle::ActiveIndexHandle,
+    effects: Vec<QueuedTextEffect>,
+    limits: ActiveTextMutationLimits,
+    acknowledgement: index_lifecycle::queue::storage::AcknowledgementOutput,
+) -> Result<PreparedActiveTextEpoch> {
+    let Some(definition) = handle.text_definition() else {
+        return Err(corruption(
+            "queued text publication received another family handle",
+        ));
+    };
+    let entity_count = u64::try_from(effects.len()).unwrap_or(u64::MAX);
+    let mut statistics = super::statistics::PreparedTextStatisticsBatch::default();
+    let mut destinations = BTreeMap::<DestinationKey, DestinationWork>::new();
+    let mut analysis_budget =
+        crate::search::text::TextAnalysisMemoryBudget::new(limits.max_input_bytes());
+    let mut input_bytes = 0_u64;
+    for effect in effects {
+        if effect.entity.kind != definition.element_kind() {
+            return Err(corruption(
+                "queued text operation names another element kind",
+            ));
+        }
+        let before = super::statistics::accounted_contribution(
+            transaction,
+            &statistics,
+            handle.scope(),
+            handle.index_id(),
+            handle.generation(),
+            effect.entity,
+        )
+        .await?;
+        input_bytes = input_bytes.saturating_add(
+            effect
+                .replacement
+                .as_ref()
+                .map_or(0, |(_, text)| u64::try_from(text.len()).unwrap_or(u64::MAX)),
+        );
+        let after = effect
+            .replacement
+            .map(|(partition, text)| {
+                analyze_document(
+                    definition,
+                    ActiveTextDocument { partition, text },
+                    &mut analysis_budget,
+                )
+            })
+            .transpose()?;
+        if before == work::TextStatisticsContribution::Absent && after.is_none() {
+            continue;
+        }
+        let after_contribution = contribution(definition, after.as_ref())?;
+        let before_partition = match &before {
+            work::TextStatisticsContribution::Present { partition, .. } => Some(partition.clone()),
+            work::TextStatisticsContribution::Absent => None,
+        };
+        let transition = super::statistics::prepare_mutation_in_batch(
+            transaction,
+            &statistics,
+            super::statistics::TextStatisticsMutation::new(
+                handle.scope(),
+                handle.index_id(),
+                handle.generation(),
+                effect.entity,
+                before,
+                after_contribution,
+            ),
+        )
+        .await?;
+        statistics.push(transition)?;
+        group_effect(
+            &mut destinations,
+            handle,
+            definition,
+            effect.entity,
+            before_partition,
+            after,
+        )?;
+    }
+    finish_epoch(
+        transaction,
+        statistics,
+        destinations,
+        entity_count,
+        input_bytes,
+        acknowledgement,
+        limits,
+    )
+    .await
+}
+
+/// Rejects a queued final document that one publication could not replace.
+///
+/// Queue producers call this before commit, while the write can still fail
+/// with a typed [`HelixDbError::ActiveTextMutationLimitExceeded`]. An ASCII
+/// document whose provable bound
+/// ([`crate::search::text::TextAnalysisTotals::ascii_bound`]) fits is admitted
+/// without analysis. The bound is never below the exact totals, so it only
+/// accepts documents [`admit_document`] accepts and every decision is exact.
+/// No storage is read.
+pub(crate) fn admit_queued_document(
+    scope: DataScope,
+    record: &index_lifecycle::IndexRecordV2,
+    entity: index_keys::IndexEntity,
+    partition: &work::TextPartition,
+    text: &str,
+    limits: ActiveTextMutationLimits,
+) -> Result<()> {
+    let index_lifecycle::ValidatedDynamicIndexDefinition::Text(definition) = record.definition()
+    else {
+        return Err(corruption("queued text admission received another family"));
+    };
+    let bounded = crate::search::text::TextAnalysisTotals::ascii_bound(text)
+        .map(|bound| TextDocumentFootprint::measure(scope, record, entity, partition, bound))
+        .transpose()?
+        .is_some_and(|footprint| footprint.first_exceeded(limits).is_none());
+    if bounded {
+        return Ok(());
+    }
+    admit_document(scope, record, definition, entity, partition, text, limits).map(drop)
+}
+
+/// Analyzes one document of `record`'s generation within the publisher's
+/// analysis budget and admits its [`TextDocumentFootprint`].
+///
+/// The analysis charge is exactly the one [`prepare_queued_text_epoch`] makes
+/// for the document when it publishes alone, and analysis stops at the first
+/// token over it. Builds use the returned statistics as the document's
+/// contribution.
+pub(crate) fn admit_document(
+    scope: DataScope,
+    record: &index_lifecycle::IndexRecordV2,
+    definition: &index_lifecycle::ValidatedTextIndexDefinition,
+    entity: index_keys::IndexEntity,
+    partition: &work::TextPartition,
+    text: &str,
+    limits: ActiveTextMutationLimits,
+) -> Result<crate::search::text::AnalyzedText> {
+    let (analyzed, totals) = crate::search::text::analyze_text_within_budget(
+        definition.analyzer(),
+        text,
+        &mut crate::search::text::TextAnalysisMemoryBudget::new(limits.max_input_bytes()),
+    )?;
+    TextDocumentFootprint::measure(scope, record, entity, partition, totals)?.admit(limits)?;
+    Ok(analyzed)
+}
+
+/// Largest output allowance of one document.
+///
+/// Each term adds a row and a marker entry, each holding at least the term's
+/// bytes and a 4-byte length, so a document's statistics rows are at least
+/// twice its marker's term list. Within twice one length-delimited field, that
+/// list fits the one field the stored marker encodes it in.
+const MAX_DOCUMENT_OUTPUT_BYTES: u64 = 2 * work::MAX_LENGTH_DELIMITED_FIELD as u64;
+
+/// Upper bound of one indexed document's share of a single-entity publication.
+///
+/// [`prepare_queued_text_epoch`] replaces an entity's accounted document (its
+/// statistics marker, written by a build or an earlier publication) with its
+/// final queued document, collapsing every document queued in between. Either
+/// side can be any document the entity has held, so neither is known when the
+/// other is admitted. Builds and queue producers therefore admit every indexed
+/// document alone against half of each per-entity row allowance
+/// ([`Self::admit`]): any accounted/final pair then fits one publication, and
+/// a publisher trimmed to one entity always makes progress. A build's
+/// partition scan replaces the accounted document of an entity changed during
+/// the build the same way, so its first entity always makes progress too.
+/// Publication analyzes only the final document, so its analysis charge gets
+/// the whole analysis budget.
+///
+/// Each count matches the stored encoders for the rows publication touches
+/// for the document in either role: its term rows, corpus row, and entity
+/// marker, plus its partition's manifest root, entity state, compaction
+/// pointer, and one manifest-page operation. Input also counts the document
+/// text, the canonical index record, a second corpus read, and a second page
+/// key. Page values are bounded by the manifest-page limit instead: a
+/// publication writes one page and reads at most one existing page per
+/// destination partition.
+///
+/// Admission does not build the document's split. It bounds the split that
+/// publishes the document alone by its analysis charge
+/// ([`crate::search::text::single_document_split_bytes`]) and admits that
+/// bound within the split and retained-split ceilings, so publishing any
+/// admitted document alone fits every ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextDocumentFootprint {
+    analysis_bytes: u64,
+    output_operations: u64,
+    output_bytes: u64,
+    input_bytes: u64,
+    single_split_page_bytes: u64,
+}
+
+impl TextDocumentFootprint {
+    /// Footprint of the smallest indexable one-term document: the text `a`,
+    /// unpartitioned, in the legacy scope of a node index whose label and
+    /// property are one character long.
+    ///
+    /// Every valid [`crate::config::SearchIndexBackfillLimits`] admits it.
+    /// Unit tests pin it to [`Self::measure`].
+    pub(crate) const SMALLEST: Self = Self {
+        analysis_bytes: 1 + crate::search::text::indexed_token_charge(1),
+        output_operations: 7,
+        output_bytes: 636,
+        input_bytes: 768,
+        single_split_page_bytes: 124,
+    };
+
+    /// Returns the analysis bytes this document is charged.
+    #[cfg(test)]
+    pub(crate) const fn analysis_bytes(self) -> u64 {
+        self.analysis_bytes
+    }
+
+    /// Returns the output operations this document is charged.
+    #[cfg(test)]
+    pub(crate) const fn output_operations(self) -> u64 {
+        self.output_operations
+    }
+
+    /// Returns the output bytes this document is charged.
+    #[cfg(test)]
+    pub(crate) const fn output_bytes(self) -> u64 {
+        self.output_bytes
+    }
+
+    /// Returns the input bytes this document is charged.
+    #[cfg(test)]
+    pub(crate) const fn input_bytes(self) -> u64 {
+        self.input_bytes
+    }
+
+    /// Returns the encoded bytes of a one-split page of this document's partition.
+    #[cfg(test)]
+    pub(crate) const fn single_split_page_bytes(self) -> u64 {
+        self.single_split_page_bytes
+    }
+
+    /// Measures one document of `record`'s generation in `partition` from its
+    /// analysis totals.
+    pub(crate) fn measure(
+        scope: DataScope,
+        record: &index_lifecycle::IndexRecordV2,
+        entity: index_keys::IndexEntity,
+        partition: &work::TextPartition,
+        totals: crate::search::text::TextAnalysisTotals,
+    ) -> Result<Self> {
+        let len = |bytes: &[u8]| u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let index_id = record.index_id();
+        let generation = record.state().generation();
+        let statistics_bytes = super::statistics::contribution_row_bytes(
+            scope,
+            index_id,
+            generation,
+            entity,
+            partition,
+            totals.unique_terms,
+            totals.unique_term_bytes,
+        )?;
+        let corpus = super::statistics::corpus_row_bytes(scope, index_id, generation, partition)?;
+        let root_typed = index_keys::TextManifestRootKey {
+            index_id,
+            generation,
+            partition: partition.fingerprint(),
+        };
+        let root = len(&scoped_key(
+            scope,
+            index_keys::ScopedKey::TextManifestRoot(root_typed),
+        ))
+        .saturating_add(len(&index_values::encode_manifest_root(
+            &work::TextManifestRootValue::empty(index_id, generation, partition.clone()),
+        )));
+        let state = len(&scoped_key(
+            scope,
+            index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
+                root: root_typed,
+                entity,
+            }),
+        ))
+        .saturating_add(len(&encode_state(
+            &DestinationKey {
+                scope,
+                index_id,
+                generation,
+                partition: partition.clone(),
+            },
+            entity,
+            index_lifecycle::TextLogicalVersion::initial(),
+            true,
+        )));
+        let pointer_target = index_keys::TextCompactionTarget::try_new(
+            scope,
+            record.identity().clone(),
+            index_id,
+            generation,
+            partition.fingerprint(),
+            0,
+        )?;
+        let pointer = len(&ManagedIndexKey::Global {
+            kind: index_keys::GlobalKey::TextCompactionPointer(pointer_target),
+        }
+        .to_bytes())
+        .saturating_add(len(&index_values::encode_metadata_value(
+            &index_lifecycle::IndexV2MetadataValue::TextCompactionPointer(
+                index_lifecycle::TextCompactionPointerValue {
+                    revision: index_lifecycle::TextManifestRevision::initial(),
+                },
+            ),
+        )));
+        let page_key = len(&scoped_key(
+            scope,
+            index_keys::ScopedKey::TextManifestPage(index_keys::TextManifestPageKey {
+                root: root_typed,
+                page: 0,
+            }),
+        ));
+        let split = work::SplitRef::try_new(
+            work::BlobRef::new([0; 32], 1),
+            0,
+            0,
+            0,
+            1,
+            work::SplitPruning::from_terms(std::iter::empty::<&[u8]>()),
+        )
+        .map_err(|error| corruption(format!("footprint split reference is invalid: {error}")))?;
+        let single_split_page = work::TextManifestPageValue::try_new(
+            index_id,
+            generation,
+            partition.clone(),
+            0,
+            vec![split],
+        )
+        .map_err(|error| corruption(format!("footprint manifest page is invalid: {error}")))?;
+        let record_row = len(&ManagedIndexKey::Data {
+            scope,
+            kind: index_keys::ScopedKey::index_record(record.identity().clone()),
+        }
+        .to_bytes())
+        .saturating_add(len(&index_values::encode_index_record(record)));
+        Ok(Self {
+            analysis_bytes: totals.analysis_bytes,
+            // Term rows, marker, corpus, root, page, state, and pointer.
+            output_operations: totals.unique_terms.saturating_add(6),
+            output_bytes: [statistics_bytes, corpus, root, state, pointer, page_key]
+                .into_iter()
+                .fold(0, u64::saturating_add),
+            input_bytes: [
+                totals.text_bytes,
+                statistics_bytes,
+                corpus,
+                corpus,
+                record_row,
+                root,
+                state,
+                page_key,
+                page_key,
+            ]
+            .into_iter()
+            .fold(0, u64::saturating_add),
+            single_split_page_bytes: len(&index_values::encode_manifest_page(&single_split_page)),
+        })
+    }
+
+    /// Returns the first allowance this document exceeds under `limits`, with
+    /// its usage and that allowance.
+    ///
+    /// The analysis budget, a document's page value, and its lone split are
+    /// whole-publication ceilings; every other allowance is half of what one
+    /// publication may spend on the entity once its page values are reserved.
+    /// Output is also capped at [`MAX_DOCUMENT_OUTPUT_BYTES`] so the marker
+    /// stays encodable. The split bound must fit both the split ceiling and
+    /// the retained-split budget, which is the analysis budget, so a document
+    /// may use the analysis budget only up to the split's fixed layout.
+    pub(crate) fn first_exceeded(
+        self,
+        limits: ActiveTextMutationLimits,
+    ) -> Option<(crate::error::ActiveTextMutationResource, u64, u64)> {
+        let page = limits.max_manifest_page_bytes().get();
+        let split = crate::search::text::single_document_split_bytes(self.analysis_bytes);
+        [
+            (
+                crate::error::ActiveTextMutationResource::AnalysisBytes,
+                self.analysis_bytes,
+                limits.max_input_bytes().get(),
+            ),
+            (
+                crate::error::ActiveTextMutationResource::ManifestPageBytes,
+                self.single_split_page_bytes,
+                page,
+            ),
+            (
+                crate::error::ActiveTextMutationResource::OutputOperations,
+                self.output_operations,
+                limits.max_output_operations().get() / 2,
+            ),
+            (
+                crate::error::ActiveTextMutationResource::OutputBytes,
+                self.output_bytes,
+                (limits.max_output_bytes().get().saturating_sub(page) / 2)
+                    .min(MAX_DOCUMENT_OUTPUT_BYTES),
+            ),
+            (
+                crate::error::ActiveTextMutationResource::InputBytes,
+                self.input_bytes,
+                limits
+                    .max_input_bytes()
+                    .get()
+                    .saturating_sub(page.saturating_mul(2))
+                    / 2,
+            ),
+            (
+                crate::error::ActiveTextMutationResource::SplitBytes,
+                split,
+                limits.max_split_bytes().get(),
+            ),
+            (
+                crate::error::ActiveTextMutationResource::RetainedSplitBytes,
+                split,
+                limits.max_input_bytes().get(),
+            ),
+        ]
+        .into_iter()
+        .find(|(_, observed, allowance)| observed > allowance)
+    }
+
+    /// Admits a document whose publication beside any other admitted
+    /// document fits `limits`, or reports the first exceeded allowance.
+    pub(crate) fn admit(self, limits: ActiveTextMutationLimits) -> Result<()> {
+        let Some((resource, observed, limit)) = self.first_exceeded(limits) else {
+            return Ok(());
+        };
+        Err(HelixDbError::ActiveTextMutationLimitExceeded {
+            resource,
+            observed,
+            limit,
+        })
     }
 }
 
@@ -557,7 +808,7 @@ fn insert_retirement(
 }
 
 async fn prepare_destination(
-    transaction: &impl crate::transaction::Mutation,
+    transaction: &DbTransaction,
     destination: DestinationWork,
     limits: ActiveTextMutationLimits,
 ) -> Result<PreparedDestination> {
@@ -953,7 +1204,7 @@ struct AppendSplitRequest<'a> {
 }
 
 async fn append_split(
-    transaction: &impl crate::transaction::Mutation,
+    transaction: &DbTransaction,
     request: AppendSplitRequest<'_>,
 ) -> Result<(work::TextManifestRootValue, Option<PreparedRow>, u32)> {
     let AppendSplitRequest {
@@ -1103,7 +1354,7 @@ async fn append_split(
 
 /// Stages index-owned rows prepared from this transaction's observed snapshot.
 pub(crate) fn stage_active_text_epoch(
-    transaction: &impl crate::transaction::Mutation,
+    transaction: &DbTransaction,
     published: &super::active_publication::PublishedActiveTextEpoch,
 ) -> Result<()> {
     let prepared = published.prepared();
@@ -1111,9 +1362,6 @@ pub(crate) fn stage_active_text_epoch(
         debug_assert!(destination.payload.is_none());
     }
 
-    for build in &prepared.build_deltas {
-        mutation::stage_prepared_text_build_delta_rows(transaction, build)?;
-    }
     prepared
         .statistics
         .stage_transaction_observed(transaction)?;
@@ -1208,7 +1456,6 @@ mod tests {
             None
         );
         let prepared = PreparedActiveTextEpoch {
-            build_deltas: Vec::new(),
             statistics: super::super::statistics::PreparedTextStatisticsBatch::default(),
             destinations: vec![PreparedDestination {
                 key: destination_key,

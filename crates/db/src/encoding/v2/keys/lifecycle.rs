@@ -1,4 +1,4 @@
-//! Scoped catalog, operation, build-delta, and applied-state keys.
+//! Scoped catalog, operation, build-delta, applied-state, and queue keys.
 
 use crate::index_lifecycle::{
     IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, IndexIdentity, IndexOperationId,
@@ -29,4 +29,26 @@ pub(crate) struct IndexEntityStateKey {
     pub(crate) index_id: IndexId,
     pub(crate) generation: IndexGenerationId,
     pub(crate) entity: IndexEntity,
+}
+
+/// Directly addressable immutable index-operation queue for one generation.
+///
+/// Scope comes from the physical key envelope, so one key names exactly one
+/// `(scope, logical index, generation)` queue. An absent key is an empty queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct IndexOperationQueueKey {
+    pub(crate) index_id: IndexId,
+    pub(crate) generation: IndexGenerationId,
+}
+
+/// One immutable index operation stored as its own row.
+///
+/// Row-layout queues (the benchmark baseline) key each operation by a
+/// writer-allocated sequence, so a generation prefix scan returns operations
+/// in enqueue order. An absent row is an acknowledged operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct IndexOperationRowKey {
+    pub(crate) index_id: IndexId,
+    pub(crate) generation: IndexGenerationId,
+    pub(crate) sequence: u64,
 }

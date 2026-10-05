@@ -362,7 +362,7 @@ mod tests {
                 NonZeroU64::new(u64::MAX).unwrap(),
                 NonZeroU64::MIN,
                 NonZeroU64::new(u64::MAX).unwrap(),
-                NonZeroU64::new(u64::MAX).unwrap(),
+                NonZeroU64::new(1024).unwrap(),
             ),
         )
         .unwrap()
@@ -707,21 +707,18 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        assert!(matches!(
-            prepare_active_text_retirement(
-                &limited,
-                &fixture.handle,
-                work::TextPartition::Unpartitioned,
-                fixture.entity,
-                limits_with_max_output_operations(1),
-            )
-            .await,
-            Err(HelixDbError::ActiveTextMutationLimitExceeded {
-                resource: crate::error::ActiveTextMutationResource::OutputOperations,
-                observed: 2,
-                limit: 1,
-            })
-        ));
+        // Every valid policy allows at least 14 operations (twice a one-term
+        // document's seven), so a two-row retirement always fits.
+        let prepared = prepare_active_text_retirement(
+            &limited,
+            &fixture.handle,
+            work::TextPartition::Unpartitioned,
+            fixture.entity,
+            limits_with_max_output_operations(14),
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.measurements().output_operations(), 2);
         limited.commit().await.unwrap();
         db.close().await.unwrap();
     }

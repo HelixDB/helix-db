@@ -746,7 +746,9 @@ pub(crate) struct EntryCandidateScan<'a> {
 pub(crate) struct ReverseSourcesForTarget {
     keyspace: VectorRowKeyspace,
     sources_by_layer: BTreeMap<u16, Vec<NodeId>>,
-    locator_keys: Vec<Bytes>,
+    /// Every scanned key, with the `(layer, source)` link it locates, or
+    /// `None` for a malformed key or one naming another target.
+    locator_keys: Vec<(Bytes, Option<(u16, NodeId)>)>,
 }
 
 impl ReverseSourcesForTarget {
@@ -2279,19 +2281,21 @@ where
         let mut locator_keys = Vec::new();
 
         while let Some(row) = rows.next().await? {
-            locator_keys.push(row.key.clone());
             let logical_key = self.keyspace.strip_physical_key(&row.key)?;
             let Ok(VectorKey::ReverseEdge(locator)) = VectorKey::parse_from_slice(logical_key)
             else {
+                locator_keys.push((row.key, None));
                 continue;
             };
             if locator.target_node_id() != target_node_id {
+                locator_keys.push((row.key, None));
                 continue;
             }
             sources_by_layer
                 .entry(locator.layer())
                 .or_default()
                 .insert(locator.source_node_id());
+            locator_keys.push((row.key, Some((locator.layer(), locator.source_node_id()))));
         }
 
         Ok(ReverseSourcesForTarget {
@@ -2678,17 +2682,26 @@ impl<'a, 'txn> VectorWriteRows<'a, 'txn> {
         Ok(())
     }
 
-    /// Deletes every locator token captured by a single target scan.
+    /// Deletes every locator token captured by a single target scan except
+    /// those whose `(layer, source)` link `owned` claims.
+    ///
+    /// A claimed locator belongs to a pending neighbor-row transition, whose
+    /// flush alone decides whether it stays. Malformed and foreign-target keys
+    /// are always deleted.
     pub(crate) fn delete_reverse_sources(
         &self,
         sources: &ReverseSourcesForTarget,
+        owned: impl Fn(u16, NodeId) -> bool,
     ) -> Result<(), HelixDbError> {
         if &sources.keyspace != self.keyspace {
             return Err(HelixDbError::InvariantViolation(
                 "reverse-source cleanup belongs to another vector keyspace".to_string(),
             ));
         }
-        for key in &sources.locator_keys {
+        for (key, link) in &sources.locator_keys {
+            if link.is_some_and(|(layer, source)| owned(layer, source)) {
+                continue;
+            }
             self.write.delete(key)?;
         }
         Ok(())

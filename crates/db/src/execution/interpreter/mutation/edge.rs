@@ -186,18 +186,7 @@ impl<'db> ExecutionContext<'db> {
             edge.edge_id,
         )?;
         let encoded = property_row.write_payload();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-                self.row_memory.as_ref(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
         index_context.property_writes.stage(
             txn,
             self.tenant_scope,
@@ -261,18 +250,7 @@ impl<'db> ExecutionContext<'db> {
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-                self.row_memory.as_ref(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
         index_context.property_writes.stage(
             txn,
             self.tenant_scope,
@@ -336,18 +314,7 @@ impl<'db> ExecutionContext<'db> {
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-                self.row_memory.as_ref(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
         index_context.property_writes.stage(
             txn,
             self.tenant_scope,
@@ -601,18 +568,7 @@ impl<'db> ExecutionContext<'db> {
             )?;
         }
         crate::search::stage_delete_edge_endpoints_scoped(txn, edge_id, self.tenant_scope).await?;
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-                self.row_memory.as_ref(),
-            )
-            .await?;
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
         index_context.property_writes.stage(
             txn,
             self.tenant_scope,
@@ -658,17 +614,11 @@ mod tests {
     use super::super::super::test_support;
     use super::*;
 
-    fn index_context(db: &HelixDB) -> MutationIndexContext {
-        MutationIndexContext::for_configured_index_test(std::sync::Arc::clone(
-            db.simhasher_registry(),
-        ))
-    }
-
     #[tokio::test]
     async fn missing_edges_have_explicit_property_and_delete_contracts() {
         let db = test_support::open_db("mutation-missing-edge-contracts").await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)
@@ -705,7 +655,7 @@ mod tests {
         let to = test_support::add_user(&db, "bob").await;
         let edge_id = test_support::add_edge(&db, from, to, "FOLLOWS").await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)
@@ -743,7 +693,7 @@ mod tests {
         )
         .await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)
@@ -793,7 +743,7 @@ mod tests {
         )
         .await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)

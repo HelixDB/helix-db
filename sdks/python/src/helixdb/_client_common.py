@@ -87,9 +87,28 @@ class HelixError(Exception):
         )
 
     def is_retryable(self) -> bool:
-        """Return true only for an explicit server retry classification."""
+        """Return true when the failure is explicitly retryable.
 
+        Remote failures are retryable only when the server says so. Embedded
+        ``index_backpressure`` failures are retryable because the whole request
+        was rejected without effect: a write before commit, or a strong search.
+        """
+
+        if self.kind == "Embedded":
+            return self.is_index_backpressure()
         return self.kind == "Remote" and self.retryable is True
+
+    def is_index_backpressure(self) -> bool:
+        """Return whether asynchronous vector/text index work rejected the request.
+
+        Either a write was rejected before commit because the index backlog is
+        full, or a strong search's answer lies behind more than 800 unpublished
+        changes; eventual searches are never rejected this way. The whole
+        request was rejected (HTTP 429, gRPC resource-exhausted); retry it
+        unchanged after a backoff.
+        """
+
+        return self.kind in ("Remote", "Embedded") and self.code == "index_backpressure"
 
     @classmethod
     def serialization(cls, message: str, *, cause: BaseException | None = None) -> "HelixError":

@@ -80,17 +80,7 @@ impl ExecutionContext<'_> {
                     .write_payload();
                 scope
                     .index_context
-                    .maintain_graph_indexes(
-                        &scope.txn,
-                        transition,
-                        self.db
-                            .config()
-                            .db()
-                            .search_index_backfill()
-                            .active_text_mutation(),
-                        self.row_memory.as_ref(),
-                    )
-                    .await?;
+                    .maintain_graph_indexes(transition, self.row_memory.as_ref())?;
                 scope.index_context.property_writes.stage(
                     &scope.txn,
                     self.tenant_scope,

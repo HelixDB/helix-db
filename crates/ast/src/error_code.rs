@@ -126,6 +126,24 @@ pub enum QueryErrorCode {
     MigrationSteppingRequiresDisabledMode,
     /// An active text mutation exceeded an admission limit.
     ActiveTextMutationLimitExceeded,
+    /// A vector/text index has too much committed but unpublished work.
+    ///
+    /// The whole request was rejected (a write before commit, or a strong
+    /// search whose answer lies behind too many results superseded by
+    /// committed but unpublished work) and is safe to retry after the index
+    /// worker publishes outstanding operations.
+    IndexBackpressure,
+    /// A write would saturate the queued work of a blocked hidden index
+    /// build. Its generation publishes nothing until the build activates, so
+    /// retrying the same write cannot succeed until the blocked build
+    /// operation is retried (after repairing what its blocker names) or
+    /// aborted.
+    IndexBuildBlocked,
+    /// One transaction staged more queued index work than a single transaction
+    /// may carry (an operand above the durable write-ahead-log entry limit, or
+    /// a per-index backlog limit exceeded on its own); retrying the same write
+    /// cannot succeed.
+    IndexOperationBatchTooLarge,
     /// Existing graph data cannot satisfy an index source contract.
     InvalidIndexSourceData,
     /// A value cannot satisfy the current index model.
@@ -213,7 +231,22 @@ impl QueryErrorCode {
                 | Self::VectorComponentMagnitudeExceeded
                 | Self::ZeroNormCosineVector
                 | Self::ActiveTextMutationLimitExceeded
+                | Self::IndexOperationBatchTooLarge
         )
+    }
+
+    /// Whether the database rejected the whole request (a write before
+    /// commit, or a strong search) because asynchronous index work is
+    /// saturated, so an unchanged retry may succeed.
+    ///
+    /// ```
+    /// use helix_ast::error_code::QueryErrorCode;
+    /// assert!(QueryErrorCode::IndexBackpressure.is_retryable_backpressure());
+    /// assert!(!QueryErrorCode::TransactionConflict.is_retryable_backpressure());
+    /// ```
+    #[must_use]
+    pub const fn is_retryable_backpressure(self) -> bool {
+        matches!(self, Self::IndexBackpressure)
     }
 
     /// Every code in the stable public catalog.
@@ -271,6 +304,9 @@ impl QueryErrorCode {
         Self::SecondaryLifecycleSteppingRequiresDisabledMode,
         Self::MigrationSteppingRequiresDisabledMode,
         Self::ActiveTextMutationLimitExceeded,
+        Self::IndexBackpressure,
+        Self::IndexBuildBlocked,
+        Self::IndexOperationBatchTooLarge,
         Self::InvalidIndexSourceData,
         Self::InvalidIndexModel,
         Self::InvalidSecondaryIndexValue,
@@ -366,6 +402,9 @@ impl QueryErrorCode {
                 "migration_stepping_requires_disabled_mode"
             }
             Self::ActiveTextMutationLimitExceeded => "active_text_mutation_limit_exceeded",
+            Self::IndexBackpressure => "index_backpressure",
+            Self::IndexBuildBlocked => "index_build_blocked",
+            Self::IndexOperationBatchTooLarge => "index_operation_batch_too_large",
             Self::InvalidIndexSourceData => "invalid_index_source_data",
             Self::InvalidIndexModel => "invalid_index_model",
             Self::InvalidSecondaryIndexValue => "invalid_secondary_index_value",
@@ -470,6 +509,7 @@ mod tests {
             classified,
             vec![
                 QueryErrorCode::ActiveTextMutationLimitExceeded,
+                QueryErrorCode::IndexOperationBatchTooLarge,
                 QueryErrorCode::InvalidVectorDimension,
                 QueryErrorCode::InvalidVectorComponent,
                 QueryErrorCode::VectorComponentMagnitudeExceeded,

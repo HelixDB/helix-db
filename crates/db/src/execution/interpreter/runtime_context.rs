@@ -291,6 +291,9 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     /// they depend on changes. Parallel step contexts start empty and never
     /// resolve one.
     pub(in crate::execution::interpreter) prepared_memberships: super::stream::PreparedMemberships,
+    /// Visibility of unpublished vector/text work for read-request searches.
+    /// Write transactions always search strongly regardless of this value.
+    pub(in crate::execution::interpreter) search_consistency: helix_ast::query::SearchConsistency,
     /// Concurrent secondary-set child reads shared by every step context of
     /// the request.
     pub(in crate::execution::interpreter) shared_index_reads: Arc<super::access::SharedIndexReads>,
@@ -370,6 +373,7 @@ impl<'db> ExecutionContext<'db> {
             row_mode_max_rows: row_mode::RowModeMaxRowsSetting::default(),
             execution_control,
             prepared_memberships: super::stream::PreparedMemberships::default(),
+            search_consistency: helix_ast::query::SearchConsistency::Strong,
             shared_index_reads: Arc::default(),
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),

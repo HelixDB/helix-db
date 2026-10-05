@@ -80,9 +80,7 @@ async fn storage_helpers_fail_cleanly_across_admission_shortfalls() {
                     .begin(slatedb::IsolationLevel::Snapshot)
                     .await
                     .unwrap();
-                let mut indexes = MutationIndexContext::for_configured_index_test(
-                    std::sync::Arc::clone(db.simhasher_registry()),
-                );
+                let mut indexes = MutationIndexContext::for_configured_index_test();
                 let occupied = budget.reserve(limit - allowance).unwrap();
                 let result = match (entity, operation) {
                     (relational::Entity::Node(_), Operation::Store) => {

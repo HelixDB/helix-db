@@ -148,8 +148,29 @@ export class HelixError extends Error {
     return this.kind === "Remote" && this.statusCode === 429;
   }
 
+  /**
+   * Returns true when the failure is explicitly retryable.
+   *
+   * Remote failures are retryable only when the server says so. Embedded
+   * `index_backpressure` failures are retryable because the whole request was
+   * rejected without effect: a write before commit, or a strong search.
+   */
   isRetryable(): boolean {
+    if (this.kind === "Embedded") return this.isIndexBackpressure();
     return this.kind === "Remote" && this.retryable === true;
+  }
+
+  /**
+   * Returns whether asynchronous vector/text index work rejected the request.
+   *
+   * Either a write was rejected before commit because the index backlog is
+   * full, or a strong search's answer lies behind more than 800 unpublished
+   * changes; eventual searches are never rejected this way. The whole request
+   * was rejected (HTTP 429, gRPC resource-exhausted); retry it unchanged after
+   * a backoff.
+   */
+  isIndexBackpressure(): boolean {
+    return (this.kind === "Remote" || this.kind === "Embedded") && this.code === "index_backpressure";
   }
 }
 

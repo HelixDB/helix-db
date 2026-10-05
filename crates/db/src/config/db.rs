@@ -232,6 +232,9 @@ pub struct DbConfig {
     /// Durable graph and catalog migration policy.
     migrations: MigrationTuning,
 
+    /// Queued asynchronous vector/text operation policy.
+    index_operation_queue: super::IndexOperationQueueTuning,
+
     /// Optional attribution fields for the current open attempt.
     pub(crate) open_attribution: Option<OpenAttribution>,
 }
@@ -256,6 +259,7 @@ impl DbConfig {
             search_index_backfill: SearchIndexBackfillLimits::default(),
             index_lifecycle_throughput: IndexLifecycleThroughputTuning::default(),
             migrations: MigrationTuning::default(),
+            index_operation_queue: super::IndexOperationQueueTuning::default(),
             open_attribution: None,
         }
     }
@@ -526,6 +530,20 @@ impl DbConfig {
         tuning: IndexLifecycleThroughputTuning,
     ) -> Self {
         self.index_lifecycle_throughput = tuning;
+        self
+    }
+
+    /// Returns the queued asynchronous vector/text operation policy.
+    pub const fn index_operation_queue(&self) -> super::IndexOperationQueueTuning {
+        self.index_operation_queue
+    }
+
+    /// Replaces the queued asynchronous vector/text operation policy.
+    pub const fn with_index_operation_queue_tuning(
+        mut self,
+        tuning: super::IndexOperationQueueTuning,
+    ) -> Self {
+        self.index_operation_queue = tuning;
         self
     }
 

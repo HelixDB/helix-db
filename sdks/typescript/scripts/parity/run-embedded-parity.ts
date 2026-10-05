@@ -8,7 +8,7 @@ import { cargoTarget, workspaceRoot } from "./paths.js";
 import { cypherFixturePath, readCypherCases, verifyCypherResults } from "./cypher-results.js";
 import { parityProgress } from "./progress.js";
 
-const EXPECTED_RUNTIME = 233;
+const EXPECTED_RUNTIME = 234;
 const cypherCases = await readCypherCases();
 const typescriptRoot = join(workspaceRoot, "sdks", "typescript");
 const pythonRoot = join(workspaceRoot, "sdks", "python");

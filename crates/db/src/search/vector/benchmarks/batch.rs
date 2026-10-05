@@ -24,10 +24,10 @@ use crate::index_lifecycle::IndexElementKind;
 
 use crate::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
 use crate::search::vector::{
-    benchmark_telemetry_snapshot, reset_benchmark_telemetry, ActiveVectorMutationRuntime, Item,
-    SearchParams, SearchResult, SimHasherRegistry, ValidatedVectorGenerationHandle,
-    VectorCacheWriteSet, VectorDimension, VectorGenerationIdentity, VectorIndex, VectorIndexConfig,
-    VectorMutationBenchmarkTelemetry,
+    benchmark_telemetry_snapshot, record_benchmark_cache_stats, reset_benchmark_telemetry, Item,
+    SearchParams, SearchResult, ValidatedVectorGenerationHandle, VectorBuildSession,
+    VectorDimension, VectorGenerationIdentity, VectorIndex, VectorIndexConfig,
+    VectorMutationBenchmarkTelemetry, VectorWriteRecorder,
 };
 
 const PHYSICAL_NAME: &str = "vector-batch-insert-benchmark";
@@ -261,7 +261,8 @@ pub struct VectorBatchBenchmarkFixture {
     db: Arc<Db>,
     index: BenchmarkIndex,
     generation: ValidatedVectorGenerationHandle,
-    runtime_layers: Vec<u16>,
+    /// Scripted layer of each staged vector, continuing the setup script.
+    layers: Vec<u16>,
     vectors: Vec<Vec<f32>>,
     final_vectors: Vec<Vec<f32>>,
 }
@@ -345,7 +346,7 @@ impl VectorBatchBenchmarkFixture {
             }
         }
         .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))?;
-        let runtime_layers = (setup_insertions..setup_insertions.saturating_add(case.batch_size))
+        let layers = (setup_insertions..setup_insertions.saturating_add(case.batch_size))
             .map(scripted_layer)
             .collect();
         let replacement = case.workload == VectorBatchBenchmarkWorkload::Replacement;
@@ -376,7 +377,7 @@ impl VectorBatchBenchmarkFixture {
             db,
             index,
             generation,
-            runtime_layers,
+            layers,
             vectors,
             final_vectors,
         })
@@ -391,32 +392,12 @@ impl VectorBatchBenchmarkFixture {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .map_err(HelixDbError::from)?;
-        let cache_writes = VectorCacheWriteSet::new(Arc::new(SimHasherRegistry::default()));
-        let mut runtime = ActiveVectorMutationRuntime::new(
-            NonZeroU64::new(self.cache_limits.max_payload_bytes)
-                .expect("validated batch benchmark retained-payload limit is non-zero"),
-        )
-        .with_batch_benchmark_layers(self.runtime_layers.clone())
-        .with_batch_benchmark_limits(
-            self.cache_limits.max_items,
-            self.cache_limits.max_neighbors,
-            self.cache_limits.max_simhashes,
-        );
         let staging_started = Instant::now();
-        for (ordinal, vector) in self.vectors.iter().enumerate() {
-            runtime
-                .upsert(
-                    &transaction,
-                    &self.generation,
-                    &cache_writes,
-                    u64::try_from(self.case.initial_count.saturating_add(ordinal))
-                        .expect("benchmark ordinal fits u64"),
-                    vector,
-                    false,
-                )
-                .await?;
+        match self.case.metric {
+            VectorBatchBenchmarkMetric::Cosine => self.stage::<Cosine>(&transaction).await?,
+            VectorBatchBenchmarkMetric::Euclidean => self.stage::<Euclidean>(&transaction).await?,
+            VectorBatchBenchmarkMetric::Manhattan => self.stage::<Manhattan>(&transaction).await?,
         }
-        runtime.prepare(&transaction).await?;
         let staging = staging_started.elapsed();
         let commit_started = Instant::now();
         transaction.commit().await.map_err(HelixDbError::from)?;
@@ -442,6 +423,39 @@ impl VectorBatchBenchmarkFixture {
             graph_digest,
             recall,
         })
+    }
+
+    /// Stages every vector as queue publication plans one entity: an upsert
+    /// through one build session at its scripted layer, flushed and bounded
+    /// after each entity.
+    async fn stage<D: Distance>(&self, transaction: &DbTransaction) -> Result<()> {
+        let index = VectorIndex::<D>::from_generation(&self.generation);
+        let recorder = VectorWriteRecorder::new();
+        let write = recorder.bind(transaction);
+        let mut session = VectorBuildSession::<D>::with_test_limits(
+            NonZeroU64::new(self.cache_limits.max_payload_bytes)
+                .expect("validated batch benchmark retained-payload limit is non-zero"),
+            self.cache_limits.max_items,
+            self.cache_limits.max_neighbors,
+            self.cache_limits.max_simhashes,
+        );
+        for (ordinal, (vector, layer)) in self.vectors.iter().zip(&self.layers).enumerate() {
+            index
+                .stage_upsert_at_layer_with_session(
+                    &write,
+                    u64::try_from(self.case.initial_count.saturating_add(ordinal))
+                        .expect("benchmark ordinal fits u64"),
+                    vector,
+                    *layer,
+                    &mut session,
+                )
+                .await?;
+            session.flush_all(&write)?;
+            session.enforce_limits(&write)?;
+            session.admit_entity();
+        }
+        record_benchmark_cache_stats(session.stats());
+        Ok(())
     }
 
     async fn graph_digest(&self) -> Result<(u64, u64, String)> {

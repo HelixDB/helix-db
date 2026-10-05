@@ -162,18 +162,11 @@ async fn vector_storage_exercises_all_current_row_families() {
     db::production_coverage::vector_storage_contracts().await;
 }
 
-/// Keeps missing tenant mapping validation fail-closed for real vector rows.
-#[tokio::test]
-async fn vector_missing_partition_mapping_delete_fails_closed() {
-    db::production_coverage::vector_missing_partition_mapping_delete_contract().await;
-}
-
 /// Keeps retained vector build planning state bound to its committed checkpoint.
 #[tokio::test]
 async fn vector_build_cache_reuses_only_exact_committed_checkpoints() {
     db::production_coverage::vector_build_cache_contracts().await;
 }
-
 /// Characterizes safe finite-score limits independently of production validation.
 #[test]
 fn vector_magnitude_oracle_and_kernels_cover_numeric_boundaries() {

@@ -2,6 +2,8 @@
 
 #![recursion_limit = "256"]
 
+#[cfg(feature = "async-index-benchmark")]
+pub mod benchmark;
 mod config;
 mod grpc;
 mod http;
@@ -61,10 +63,20 @@ struct ServerDatabase {
     cache_lock: Option<std::fs::File>,
 }
 
-/// Opens the configured database, first locking a hybrid disk cache's
-/// directory, checking its budget against free space in the background, and
-/// allowing the open files it needs. Every runner opens storage through here.
+/// Opens the configured database as the writer. Every product runner opens
+/// storage through here.
 async fn open_database(config: &ServerConfig) -> ServerResult<ServerDatabase> {
+    let cache_lock = claim_disk_cache(config)?;
+    Ok(ServerDatabase {
+        db: Arc::new(HelixDB::open_for_server(config.db_source(), config.db_config()).await?),
+        cache_lock,
+    })
+}
+
+/// Locks a hybrid disk cache's directory, checks its budget against free
+/// space in the background, and allows the open files it needs. Must run
+/// before storage opens.
+fn claim_disk_cache(config: &ServerConfig) -> ServerResult<Option<std::fs::File>> {
     // Before storage touches the cache, which would delete block-cache
     // partitions another server still has open.
     let cache_lock = config.hybrid_cache().map(HybridCache::claim).transpose()?;
@@ -79,10 +91,7 @@ async fn open_database(config: &ServerConfig) -> ServerResult<ServerDatabase> {
         .required_open_files()
         .map(ensure_open_file_limit)
         .transpose()?;
-    Ok(ServerDatabase {
-        db: Arc::new(HelixDB::open_for_server(config.db_source(), config.db_config()).await?),
-        cache_lock,
-    })
+    Ok(cache_lock)
 }
 
 /// Raises the soft open-file limit to the hard limit for a hybrid disk cache.

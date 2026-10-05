@@ -17,15 +17,18 @@
 //! kind-B scope) and `HELIX_SCOPED_GATE_DIM` (default 768) size the fixture.
 //! A scale small enough that every scope is scanned exactly fails the gate,
 //! because the walk would go unchecked. The vector index is backfilled after
-//! the graph load, because incremental inserts during the load are far slower
-//! at this scale.
+//! the graph load, because publishing queued inserts while the load runs is
+//! far slower at this scale. The load returns once every queued index
+//! operation is published, and the gate checks that before measuring recall,
+//! so no search overlays unpublished work and each scope keeps one strategy.
 
 #[path = "../examples/scoped_search_bench/fixture.rs"]
 mod fixture;
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
-use std::sync::Arc;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use db::production_coverage::{self, RestrictedSearchStrategy};
@@ -74,6 +77,14 @@ async fn scoped_search_keeps_recall_and_exact_filter_semantics() {
         },
     )
     .await;
+    let fixture::Backend::Embedded { db, .. } = &backend else {
+        unreachable!("embedded backend was constructed above")
+    };
+    let queue = db.index_operation_queue_stats();
+    assert_eq!(
+        queue.pending_operations, 0,
+        "recall must run against published indexes: {queue:?}"
+    );
 
     let vectors = fixture::query_vectors(QUERIES, dimension);
     let shape_count = fixture::shapes(&vectors[0]).len();
@@ -195,33 +206,174 @@ fn recall_counts_a_near_tie_at_rank_k_but_not_a_worse_neighbour() {
 }
 
 const OPERATION_ID: &str = "00000000-0000-4000-8000-000000000000";
+const OK: &str = "200 OK";
+/// The server's reply to a write the async index queue rejects.
+const BACKPRESSURE: Option<(&str, &str)> = Some((
+    "429 Too Many Requests",
+    r#"{"error":"index_backpressure","msg":"index backpressure on LegacyUnscoped index 4","retryable":true}"#,
+));
+/// Receipts for the indexes a `VectorBuild::Skip` load creates, as a rerun
+/// gets them, so the load polls no operation.
+const ACTIVE_INDEXES: Option<(&str, &str)> = Some((
+    OK,
+    r#"{"text":{"kind":"already_active"},"group_name":{"kind":"already_active"},"kind":{"kind":"already_active"}}"#,
+));
+/// One item with a few small attributes, loaded in one batch.
+const ONE_ITEM: fixture::LoadOptions = fixture::LoadOptions {
+    scale: 1.0 / fixture::TOTAL_ITEMS,
+    dimension: 4,
+    items_per_batch: 4,
+    vector: fixture::VectorBuild::Skip,
+    index_deadline: Duration::from_secs(30),
+};
 
-/// Serves index-operation status polls with `replies` in order, repeating the
-/// last one; a `None` reply accepts its poll and never answers it.
-fn status_stub(replies: &'static [Option<&'static str>]) -> fixture::Backend {
+/// Serves requests with `(status line, body)` `replies` in order, repeating
+/// the last one; a `None` reply accepts its request and never answers it.
+/// Also returns the body of every request served so far.
+fn status_stub(
+    replies: &'static [Option<(&'static str, &'static str)>],
+) -> (fixture::Backend, Arc<Mutex<Vec<String>>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let served = Arc::clone(&requests);
     std::thread::spawn(move || {
         let mut unanswered = Vec::new();
-        for (poll, mut stream) in listener.incoming().map_while(Result::ok).enumerate() {
-            let _ = stream.read(&mut [0; 4_096]);
-            let Some(body) = replies[poll.min(replies.len() - 1)] else {
+        for (request, stream) in listener.incoming().map_while(Result::ok).enumerate() {
+            // Reads the whole request, so the reply never races its body.
+            let mut reader = BufReader::new(stream);
+            let (mut line, mut length) = (String::new(), 0);
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                length = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map_or(length, |value| value.trim().parse().unwrap());
+                line.clear();
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            served
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&body).into_owned());
+            let mut stream = reader.into_inner();
+            let Some((status, body)) = replies[request.min(replies.len() - 1)] else {
                 unanswered.push(stream);
                 continue;
             };
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
-            let _ = stream.shutdown(std::net::Shutdown::Write);
-            let _ = std::io::copy(&mut stream, &mut std::io::sink());
         }
     });
-    fixture::Backend::Http {
+    let backend = fixture::Backend::Http {
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         url,
-    }
+    };
+    (backend, requests)
+}
+
+/// A load batch the async index queue rejects with a retryable 429 is sent
+/// again unchanged, and the load completes once it is accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn load_retries_a_backpressured_batch() {
+    let (backend, requests) = status_stub(&[
+        ACTIVE_INDEXES,
+        Some((OK, "{}")),
+        BACKPRESSURE,
+        Some((OK, "{}")),
+    ]);
+    assert_eq!(fixture::load(&backend, ONE_ITEM).await, 1);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4, "indexes, groups, and the batch twice");
+    assert!(requests[2].contains("Attribute"), "{}", requests[2]);
+    assert_eq!(requests[3], requests[2]);
+}
+
+/// Backpressure that outlasts the index deadline fails the load, naming the
+/// batch, instead of retrying forever.
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "load batch 0 still backpressured after 1s: 429 Too Many Requests")]
+async fn load_fails_when_backpressure_outlasts_the_index_deadline() {
+    let (backend, _) = status_stub(&[ACTIVE_INDEXES, Some((OK, "{}")), BACKPRESSURE]);
+    fixture::load(
+        &backend,
+        fixture::LoadOptions {
+            index_deadline: Duration::from_secs(1),
+            ..ONE_ITEM
+        },
+    )
+    .await;
+}
+
+/// A batch over a hard per-transaction limit is not retryable and fails the
+/// load at once.
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "load batch 0 failed: 400 Bad Request")]
+async fn load_fails_fast_on_a_batch_too_large() {
+    let (backend, _) = status_stub(&[
+        ACTIVE_INDEXES,
+        Some((OK, "{}")),
+        Some((
+            "400 Bad Request",
+            r#"{"error":"index_operation_batch_too_large","msg":"split the write"}"#,
+        )),
+        Some((OK, "{}")),
+    ]);
+    fixture::load(&backend, ONE_ITEM).await;
+}
+
+/// The largest item the fixture generates, `TOTAL_ATTRIBUTES / TOTAL_ITEMS`
+/// scaled by at most 1.6 and rounded. Each attribute is one pending member of
+/// the vector and of the text index, so this is the smallest member limit that
+/// admits every one-item batch on its own.
+const MAX_ITEM_ATTRIBUTES: u64 = 122;
+
+/// An embedded load that saturates the async index queue is throttled by
+/// retryable backpressure rather than failing, and returns only once the index
+/// worker has published every queued operation.
+///
+/// With one item per batch and a member limit of one item, any two items in a
+/// row of this 12-item load exceed the limit, so each batch after the first is
+/// admitted only once its predecessor is at least partly published.
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_load_retries_backpressure_and_drains_the_index_queue() {
+    let store = Arc::new(fixture::CountingStore::new(
+        Arc::new(InMemory::new()),
+        Duration::ZERO,
+    ));
+    let tuning = db::config::IndexOperationQueueTuning::default()
+        .with_max_members(NonZeroU64::new(MAX_ITEM_ATTRIBUTES).unwrap());
+    let db = HelixDB::open_with_object_store_and_config(
+        "scoped-search-backpressure",
+        Arc::clone(&store) as Arc<dyn ObjectStore>,
+        DbConfig::new().with_index_operation_queue_tuning(tuning),
+    )
+    .await
+    .unwrap();
+    let backend = fixture::Backend::Embedded { db, store };
+    let backpressured = fixture::load(
+        &backend,
+        fixture::LoadOptions {
+            scale: 12.0 / fixture::TOTAL_ITEMS,
+            dimension: 8,
+            items_per_batch: 1,
+            vector: fixture::VectorBuild::Before,
+            index_deadline: Duration::from_secs(300),
+        },
+    )
+    .await;
+    assert!(backpressured > 0, "no load batch was backpressured");
+    let fixture::Backend::Embedded { db, .. } = &backend else {
+        unreachable!("embedded backend was constructed above")
+    };
+    let queue = db.index_operation_queue_stats();
+    assert_eq!(
+        queue.pending_operations, 0,
+        "load returned with unpublished index work: {queue:?}"
+    );
 }
 
 /// A build that never leaves the queue fails the wait at its deadline with
@@ -231,7 +383,7 @@ fn status_stub(replies: &'static [Option<&'static str>]) -> fixture::Backend {
     expected = r#"index vector did not succeed within 1s; last status: {"op":{"status":"queued"}}"#
 )]
 async fn index_wait_fails_at_its_deadline_with_the_last_status() {
-    let backend = status_stub(&[Some(r#"{"op":{"status":"queued"}}"#)]);
+    let (backend, _) = status_stub(&[Some((OK, r#"{"op":{"status":"queued"}}"#))]);
     fixture::wait_for_operations(
         &backend,
         &serde_json::json!({ "vector": { "operation_id": OPERATION_ID } }),
@@ -246,9 +398,9 @@ async fn index_wait_fails_at_its_deadline_with_the_last_status() {
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "index vector did not succeed within 1s; last status: null")]
 async fn index_wait_deadline_names_the_operation_whose_poll_hangs() {
-    let backend = status_stub(&[
-        Some(r#"{"op":{"status":"queued"}}"#),
-        Some(r#"{"op":{"status":"succeeded"}}"#),
+    let (backend, _) = status_stub(&[
+        Some((OK, r#"{"op":{"status":"queued"}}"#)),
+        Some((OK, r#"{"op":{"status":"succeeded"}}"#)),
         None,
     ]);
     fixture::wait_for_operations(
@@ -268,7 +420,7 @@ async fn index_wait_deadline_names_the_operation_whose_poll_hangs() {
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = r#"index vector reported unexpected state None: {"op":null}"#)]
 async fn index_wait_fails_fast_on_an_unexpected_status() {
-    let backend = status_stub(&[Some(r#"{"op":null}"#)]);
+    let (backend, _) = status_stub(&[Some((OK, r#"{"op":null}"#))]);
     fixture::wait_for_operations(
         &backend,
         &serde_json::json!({ "vector": { "operation_id": OPERATION_ID } }),

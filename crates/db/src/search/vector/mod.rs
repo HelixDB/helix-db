@@ -158,7 +158,6 @@ use crate::encoding::NodeId;
 pub(crate) use access::read::production_contracts::run as run_read_boundary_contracts;
 pub(crate) use access::read::{ValidatedVectorReadIndex, VectorReadVisibility};
 pub(crate) use access::read_view::VectorReadView;
-pub(crate) use access::write::managed_vector_write_index;
 #[cfg(feature = "production-coverage")]
 pub(crate) use benchmarks::{
     observe_retained_payload as observe_benchmark_retained_payload,
@@ -175,6 +174,8 @@ pub use benchmarks::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
+#[cfg(test)]
+pub(crate) use cache::commit::gated_wal;
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::commit::production_contracts::run as run_write_cache_contracts;
 pub(crate) use cache::commit::{commit_fenced, VectorCacheWriteSet};
@@ -188,9 +189,7 @@ pub(crate) use cache::part_warm::{warm_object_store_parts, VectorPartWarmSummary
 pub(crate) use cache::reader_refresh::run_reader_refreshes;
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
-pub(crate) use cache::registry::{
-    VectorCachePendingCommit, VectorCacheRegistry, VectorCacheVisibility,
-};
+pub(crate) use cache::registry::{VectorCacheRegistry, VectorCacheVisibility};
 #[cfg(feature = "production-coverage")]
 pub(crate) use cache::store::production_contracts::run as run_memory_store_contracts;
 #[cfg(any(test, feature = "production-coverage"))]
@@ -213,11 +212,13 @@ pub(crate) use hnsw::index::VectorIndex;
 pub(crate) use hnsw::model::Candidate;
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::mutation::production_contracts::run as run_mutation_contracts;
-pub(crate) use hnsw::mutation::{
-    ActiveVectorMutationRuntime, VectorBuildSession, VectorBuildSessionStats,
-};
+pub(crate) use hnsw::mutation::{VectorBuildSession, VectorBuildSessionStats};
+#[cfg(test)]
+pub(crate) use hnsw::mutation::{DISCARDED_ENTITIES, REPLACE_REPLAYS};
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
+#[cfg(any(test, feature = "production-scale"))]
+pub(crate) use hnsw::restricted::observe_restricted_search;
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::restricted::run_production_contracts as run_restricted_contracts;
 #[cfg(feature = "production-coverage")]
@@ -225,11 +226,11 @@ pub use hnsw::restricted::RestrictedSearchStrategy;
 pub(crate) use hnsw::restricted::RestrictedVectorCandidates;
 #[cfg(feature = "production-scale")]
 pub(crate) use hnsw::restricted::{
-    observe_restricted_search, RestrictedBeamOverrideGuard, RestrictedBeamScale,
-    RestrictedSearchTermination,
+    RestrictedBeamOverrideGuard, RestrictedBeamScale, RestrictedSearchTermination,
 };
 #[cfg(feature = "production-coverage")]
 pub(crate) use hnsw::search::production_contracts::run as run_search_contracts;
+pub(crate) use hnsw::search::score_exact_in_memory;
 pub use item::Item;
 #[cfg(feature = "production-coverage")]
 pub(crate) use magnitude_regressions::{

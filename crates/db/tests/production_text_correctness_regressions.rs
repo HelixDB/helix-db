@@ -436,6 +436,31 @@ async fn wait_for_terminal(db: &HelixDB, operation_id: IndexOperationId) -> Inde
     }
 }
 
+/// Waits until the automatic worker has published every queued operation;
+/// the feature-gated observers read only published physical state.
+async fn wait_published(db: &HelixDB) {
+    let started = Instant::now();
+    while db.index_operation_queue_stats().pending_operations != 0 {
+        assert!(
+            started.elapsed() < OPERATION_TIMEOUT,
+            "queued index publication stalled"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits until automatic publication has failed more often than `before`.
+async fn wait_publication_failure(db: &HelixDB, before: u64) {
+    let started = Instant::now();
+    while db.index_operation_queue_stats().publication_error_retries <= before {
+        assert!(
+            started.elapsed() < OPERATION_TIMEOUT,
+            "queued publication was never attempted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn activate_text_definition(
     db: &HelixDB,
     controller: &LifecycleTestController,
@@ -770,6 +795,7 @@ async fn bm25_mismatch(
     query: &str,
     k: usize,
 ) -> Option<String> {
+    wait_published(db).await;
     let oracle_documents = documents
         .iter()
         .map(|(entity_id, text)| OracleDocument {
@@ -799,6 +825,7 @@ async fn tenant_bm25_mismatch(
     query: &str,
     k: usize,
 ) -> Option<String> {
+    wait_published(db).await;
     let oracle_documents = documents
         .iter()
         .map(|(entity_id, text)| OracleDocument {
@@ -1082,6 +1109,7 @@ async fn unrelated_active_text_mutations_do_not_create_statistics_markers() {
         .await
         .expect("matching edge control commits"),
     );
+    wait_published(&db).await;
     let populated = db
         .migration_parity_v2_state()
         .await
@@ -1140,6 +1168,7 @@ async fn obsolete_v2_nonempty_text_state_without_statistics_fails_closed() {
         .expect("a genuinely empty V2 text root remains searchable");
     assert!(query_node_ids(&empty_response, "ids").is_empty());
     let first_entity = insert_node(&empty, "firstactiveinsert").await;
+    wait_published(&empty).await;
     let first_insert_state = empty
         .migration_parity_v2_state()
         .await
@@ -1310,15 +1339,35 @@ async fn active_node_insert_rejects_nonempty_root_without_corpus_statistics() {
     )
     .await
     .expect("node corpus damage is confined to the feature-gated fixture");
-    let before = rollback_snapshot(&db).await;
+    let before = db
+        .migration_parity_v2_state()
+        .await
+        .expect("damaged node evidence reads");
+    let failures = db.index_operation_queue_stats().publication_error_retries;
+    // Producers never read statistics; the damaged root fails closed when
+    // publication applies the queued insert.
+    insert_node(&db, "rejectednodeappendonly").await;
+    wait_publication_failure(&db, failures).await;
+    assert_eq!(
+        db.index_operation_queue_stats().pending_operations,
+        1,
+        "an operation that cannot be published is never acknowledged"
+    );
+    let mut after = db
+        .migration_parity_v2_state()
+        .await
+        .expect("post-failure node evidence reads");
+    assert_eq!(
+        after.scoped_row_counts.remove("IndexOperationQueue"),
+        Some(1),
+        "the unpublished operation stays queued"
+    );
+    assert_eq!(
+        after, before,
+        "failed publication leaves manifests, statistics, and entity states unchanged"
+    );
     let error = db
-        .execute(
-            &add_node_plan(
-                LABEL,
-                vec![(PROPERTY, PropertyValue::from("rejectednodeappendonly"))],
-            ),
-            context::ParamBindings::default(),
-        )
+        .query(unscoped_node_text_ids_request("rejectednodeappendonly"))
         .await
         .expect_err("a non-empty node root without corpus statistics must fail closed");
     let db::error::HelixDbError::IndexCatalogCorruption(reason) = error else {
@@ -1327,11 +1376,6 @@ async fn active_node_insert_rejects_nonempty_root_without_corpus_statistics() {
     assert!(
         reason.contains("no corpus statistics"),
         "damaged node corpus reports its exact corruption category: {reason}"
-    );
-    assert_eq!(
-        rollback_snapshot(&db).await,
-        before,
-        "the rejected node insert must roll back graph, manifests, statistics, and outbox rows"
     );
     db.close()
         .await
@@ -1372,21 +1416,44 @@ async fn active_edge_insert_rejects_nonempty_root_without_corpus_statistics() {
     )
     .await
     .expect("edge corpus damage is confined to the feature-gated fixture");
-    let before = rollback_snapshot(&db).await;
-    let from_parameter = name("damaged_edge_corpus_from");
+    let before = db
+        .migration_parity_v2_state()
+        .await
+        .expect("damaged edge evidence reads");
+    let failures = db.index_operation_queue_stats().publication_error_retries;
+    // Producers never read statistics; the damaged root fails closed when
+    // publication applies the queued insert.
+    insert_edge(&db, from, to, "rejectededgeappendonly").await;
+    wait_publication_failure(&db, failures).await;
+    assert_eq!(
+        db.index_operation_queue_stats().pending_operations,
+        1,
+        "an operation that cannot be published is never acknowledged"
+    );
+    let mut after = db
+        .migration_parity_v2_state()
+        .await
+        .expect("post-failure edge evidence reads");
+    assert_eq!(
+        after.scoped_row_counts.remove("IndexOperationQueue"),
+        Some(1),
+        "the unpublished operation stays queued"
+    );
+    assert_eq!(
+        after, before,
+        "failed publication leaves manifests, statistics, and entity states unchanged"
+    );
     let error = db
-        .execute(
-            &add_edge_plan(
-                from_parameter.clone(),
-                to,
-                EDGE_LABEL,
-                vec![(PROPERTY, PropertyValue::from("rejectededgeappendonly"))],
-            ),
-            context::ParamBindings::default().with_value(
-                from_parameter,
-                PropertyValue::I64(i64::try_from(from).expect("endpoint ID fits i64")),
-            ),
-        )
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "ids",
+                    traversal::g()
+                        .text_search_edges(EDGE_LABEL, PROPERTY, "rejectededgeappendonly", 32, None)
+                        .id(),
+                )
+                .returning(["ids"]),
+        ))
         .await
         .expect_err("a non-empty edge root without corpus statistics must fail closed");
     let db::error::HelixDbError::IndexCatalogCorruption(reason) = error else {
@@ -1395,11 +1462,6 @@ async fn active_edge_insert_rejects_nonempty_root_without_corpus_statistics() {
     assert!(
         reason.contains("no corpus statistics"),
         "damaged edge corpus reports its exact corruption category: {reason}"
-    );
-    assert_eq!(
-        rollback_snapshot(&db).await,
-        before,
-        "the rejected edge insert must roll back graph, manifests, statistics, and outbox rows"
     );
     db.close()
         .await
@@ -2629,7 +2691,7 @@ async fn drive_to_terminal_explicit(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum LateDeltaPause {
+enum LateWritePause {
     Stage(IndexOperationStage),
     StageAfterSteps {
         stage: IndexOperationStage,
@@ -2638,21 +2700,21 @@ enum LateDeltaPause {
     Validation(TextManifestValidationLane),
 }
 
-async fn drive_to_late_delta_pause(
+async fn drive_to_late_write_pause(
     db: &HelixDB,
     controller: &LifecycleTestController,
     operation_id: IndexOperationId,
-    pause: LateDeltaPause,
+    pause: LateWritePause,
 ) -> Result<(), String> {
     let target = LifecycleWorkTarget::Operation {
         scope: DataScope::LegacyUnscoped,
         operation_id,
     };
     match pause {
-        LateDeltaPause::Stage(stage) => {
+        LateWritePause::Stage(stage) => {
             drive_until_stage(db, controller, operation_id, stage).await
         }
-        LateDeltaPause::StageAfterSteps { stage, steps } => {
+        LateWritePause::StageAfterSteps { stage, steps } => {
             drive_until_stage(db, controller, operation_id, stage).await?;
             let logical_start = logical_start_millis();
             for turn in 0..steps {
@@ -2680,7 +2742,7 @@ async fn drive_to_late_delta_pause(
             }
             Ok(())
         }
-        LateDeltaPause::Validation(expected) => {
+        LateWritePause::Validation(expected) => {
             drive_until_stage(
                 db,
                 controller,
@@ -2714,8 +2776,8 @@ async fn drive_to_late_delta_pause(
     }
 }
 
-async fn run_late_delta_case(ordinal: usize, pause: LateDeltaPause) -> Result<(), String> {
-    let token = ProcessLocalDatabaseToken::new(format!("fts-late-delta-{ordinal}"))
+async fn run_late_write_case(ordinal: usize, pause: LateWritePause) -> Result<(), String> {
+    let token = ProcessLocalDatabaseToken::new(format!("fts-late-write-{ordinal}"))
         .map_err(|error| error.to_string())?;
     let db = HelixDB::open_for_index_lifecycle_testing(
         HelixDbSource::InMemoryToken {
@@ -2730,9 +2792,9 @@ async fn run_late_delta_case(ordinal: usize, pause: LateDeltaPause) -> Result<()
     let controller = LifecycleTestController::new();
     let definition: ValidatedDynamicIndexDefinition =
         TextIndexDefinition::new_node(LABEL, PROPERTY)
-            .expect("late-delta definition validates")
+            .expect("late-write definition validates")
             .try_into()
-            .expect("late-delta definition converts");
+            .expect("late-write definition converts");
     let operation_id = receipt_operation_id(
         controller
             .create_index(
@@ -2744,11 +2806,19 @@ async fn run_late_delta_case(ordinal: usize, pause: LateDeltaPause) -> Result<()
             .await
             .map_err(|error| error.to_string())?,
     );
-    drive_to_late_delta_pause(&db, &controller, operation_id, pause).await?;
+    drive_to_late_write_pause(&db, &controller, operation_id, pause).await?;
     let late_id = insert_node(&db, "latedeltadocument").await;
     let terminal = drive_to_terminal_explicit(&db, &controller, operation_id).await?;
     if !matches!(terminal, IndexOperationStatus::Succeeded { .. }) {
-        return Err(format!("late delta ended in {terminal:?}"));
+        return Err(format!("late write ended in {terminal:?}"));
+    }
+    // The late write waited in the hidden generation's queue; activation
+    // makes it publishable.
+    db.publish_index_queues_for_lifecycle_testing()
+        .await
+        .map_err(|error| error.to_string())?;
+    if db.index_operation_queue_stats().pending_operations != 0 {
+        return Err("the late write was not published after activation".to_string());
     }
     db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
         .await
@@ -2780,7 +2850,7 @@ async fn run_late_delta_case(ordinal: usize, pause: LateDeltaPause) -> Result<()
         .map_err(|error| error.to_string())?;
     if !remaining.targets.is_empty() {
         return Err(format!(
-            "terminal late-delta operation left runnable lifecycle work: {:?}",
+            "terminal late-write operation left runnable lifecycle work: {:?}",
             remaining.targets
         ));
     }
@@ -2788,14 +2858,17 @@ async fn run_late_delta_case(ordinal: usize, pause: LateDeltaPause) -> Result<()
 }
 
 #[tokio::test]
-async fn build_delta_before_manifest_preparation_converges_control() {
-    run_late_delta_case(0, LateDeltaPause::Stage(IndexOperationStage::CatchUp))
-        .await
-        .expect("a late delta before manifest preparation converges");
+async fn late_write_during_partition_scan_converges_control() {
+    run_late_write_case(
+        0,
+        LateWritePause::Stage(IndexOperationStage::ScanPartitions),
+    )
+    .await
+    .expect("a late write before manifest preparation converges");
 }
 
 #[tokio::test]
-async fn active_insert_accepts_empty_build_root_with_zero_corpus_statistics() {
+async fn deletes_queued_during_a_build_publish_to_zero_corpus_and_accept_appends() {
     let token = ProcessLocalDatabaseToken::new("fts-empty-build-root-active-append")
         .expect("empty BUILD root token validates");
     let db = HelixDB::open_for_index_lifecycle_testing(
@@ -2828,10 +2901,11 @@ async fn active_insert_accepts_empty_build_root_with_zero_corpus_statistics() {
             .await
             .expect("empty BUILD root CREATE is accepted"),
     );
-    drive_until_stage(&db, &controller, operation_id, IndexOperationStage::CatchUp)
+    drive_until_stage(&db, &controller, operation_id, IndexOperationStage::Compact)
         .await
-        .expect("source scan accounts the initial document before its deletion");
+        .expect("the source scan accounts the initial documents before their deletion");
 
+    // Deletes during the build wait in the hidden generation's queue.
     for (ordinal, initial_id) in initial_ids.into_iter().enumerate() {
         let parameter = name(&format!("empty_build_root_deleted_node_{ordinal}"));
         db.execute(
@@ -2846,18 +2920,21 @@ async fn active_insert_accepts_empty_build_root_with_zero_corpus_statistics() {
     }
     let terminal = drive_to_terminal_explicit(&db, &controller, operation_id)
         .await
-        .expect("empty BUILD root lifecycle converges");
+        .expect("the build converges with deletes queued");
     assert!(
         matches!(terminal, IndexOperationStatus::Succeeded { .. }),
-        "empty BUILD root reaches Active: {terminal:?}"
+        "the build reaches Active: {terminal:?}"
     );
     db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
         .await
-        .expect("empty BUILD root Active definition refreshes");
+        .expect("the Active definition refreshes");
+    db.publish_index_queues_for_lifecycle_testing()
+        .await
+        .expect("queued deletes publish after activation");
     let empty_state = db
         .migration_parity_v2_state()
         .await
-        .expect("empty BUILD root statistics read");
+        .expect("post-delete statistics read");
     assert_eq!(
         empty_state
             .text_corpus_statistics
@@ -2865,44 +2942,20 @@ async fn active_insert_accepts_empty_build_root_with_zero_corpus_statistics() {
             .map(|statistics| (statistics.document_count, statistics.total_token_count))
             .collect::<Vec<_>>(),
         [(0, 0)],
-        "BUILD retains explicit empty-corpus accounting after compacting every stale split"
+        "published deletes leave explicit empty-corpus accounting"
     );
+    for term in ["firstdeletedbeforemanifest", "seconddeletedbeforemanifest"] {
+        let response = db
+            .query(unscoped_node_text_ids_request(term))
+            .await
+            .expect("deleted documents remain searchable as absent");
+        assert!(query_node_ids(&response, "ids").is_empty());
+    }
 
-    let runtime_definition =
-        TextIndexDefinition::new_node(LABEL, PROPERTY).expect("damage definition validates");
-    db.migration_parity_damage_text_statistics(
-        &runtime_definition,
-        db::migration_parity::MigrationParityTextStatisticsDamage::ReplaceCorpus {
-            tenant: None,
-            document_count: 1,
-            total_token_count: 1,
-        },
-    )
-    .await
-    .expect("live corpus damage is confined to the feature-gated fixture");
-    let error = db
-        .query(unscoped_node_text_ids_request("corruptemptyrootstatistics"))
-        .await
-        .expect_err("an empty root with live corpus statistics must fail closed");
-    let db::error::HelixDbError::IndexCatalogCorruption(reason) = error else {
-        panic!("empty-root corpus damage returned the wrong error: {error}")
-    };
-    assert_eq!(
-        reason, "empty Active text manifest retains non-empty corpus statistics",
-        "empty-root corpus damage reports its exact corruption category"
-    );
-
-    db.migration_parity_damage_text_statistics(
-        &runtime_definition,
-        db::migration_parity::MigrationParityTextStatisticsDamage::ReplaceCorpus {
-            tenant: None,
-            document_count: 0,
-            total_token_count: 0,
-        },
-    )
-    .await
-    .expect("canonical empty-corpus accounting is restored through typed rows");
     let replacement = insert_node(&db, "replacementafteremptybuild").await;
+    db.publish_index_queues_for_lifecycle_testing()
+        .await
+        .expect("the append publishes");
     let response = db
         .query(unscoped_node_text_ids_request("replacementafteremptybuild"))
         .await
@@ -2920,61 +2973,61 @@ async fn active_insert_accepts_empty_build_root_with_zero_corpus_statistics() {
             .collect::<Vec<_>>(),
         [(1, 1)]
     );
-    db.close().await.expect("empty BUILD root fixture closes");
+    db.close().await.expect("empty-corpus fixture closes");
 }
 
 #[tokio::test]
-async fn late_build_delta_after_catch_up_converges_to_active() {
+async fn late_write_at_every_build_stage_converges_to_active() {
     let mut failures = Vec::new();
     for (ordinal, (name, pause)) in [
         (
-            "after-catch-up",
-            LateDeltaPause::Stage(IndexOperationStage::Compact),
+            "after-partition-scan",
+            LateWritePause::Stage(IndexOperationStage::Compact),
         ),
         (
             "after-compaction",
-            LateDeltaPause::Stage(IndexOperationStage::PrepareManifests),
+            LateWritePause::Stage(IndexOperationStage::PrepareManifests),
         ),
         (
             "partial-manifest-preparation",
-            LateDeltaPause::StageAfterSteps {
+            LateWritePause::StageAfterSteps {
                 stage: IndexOperationStage::PrepareManifests,
                 steps: 1,
             },
         ),
         (
             "manifest-pages-validation",
-            LateDeltaPause::Validation(TextManifestValidationLane::Pages),
+            LateWritePause::Validation(TextManifestValidationLane::Pages),
         ),
         (
             "manifest-roots-validation",
-            LateDeltaPause::Validation(TextManifestValidationLane::Roots),
+            LateWritePause::Validation(TextManifestValidationLane::Roots),
         ),
         (
             "entity-states-validation",
-            LateDeltaPause::Validation(TextManifestValidationLane::EntityStates),
+            LateWritePause::Validation(TextManifestValidationLane::EntityStates),
         ),
         (
             "before-activation",
-            LateDeltaPause::Stage(IndexOperationStage::Activate),
+            LateWritePause::Stage(IndexOperationStage::Activate),
         ),
     ]
     .into_iter()
     .enumerate()
     {
-        if let Err(error) = run_late_delta_case(ordinal + 1, pause).await {
+        if let Err(error) = run_late_write_case(ordinal + 1, pause).await {
             failures.push(format!("{name}: {error}"));
         }
     }
     assert!(
         failures.is_empty(),
-        "late BuildDelta must re-enter catch-up without rejecting a populated manifest root:\n{}",
+        "late writes must be queued and published after activation without rejecting a populated manifest root:\n{}",
         failures.join("\n")
     );
 }
 
 #[tokio::test]
-async fn delete_during_entity_state_validation_returns_to_catch_up_and_activates() {
+async fn delete_during_entity_state_validation_is_published_after_activation() {
     let token = ProcessLocalDatabaseToken::new("fts-delete-during-entity-validation")
         .expect("late-delete token validates");
     let db = HelixDB::open_for_index_lifecycle_testing(
@@ -3004,11 +3057,11 @@ async fn delete_during_entity_state_validation_returns_to_catch_up_and_activates
             .await
             .expect("late-delete text CREATE is accepted"),
     );
-    drive_to_late_delta_pause(
+    drive_to_late_write_pause(
         &db,
         &controller,
         operation_id,
-        LateDeltaPause::Validation(TextManifestValidationLane::EntityStates),
+        LateWritePause::Validation(TextManifestValidationLane::EntityStates),
     )
     .await
     .expect("entity-state validation pause is reached");
@@ -3024,8 +3077,12 @@ async fn delete_during_entity_state_validation_returns_to_catch_up_and_activates
         .expect("late-delete lifecycle remains runnable");
     assert!(
         matches!(terminal, IndexOperationStatus::Succeeded { .. }),
-        "late delete must return validation to catch-up, observed {terminal:?}"
+        "a late delete must not block the build, observed {terminal:?}"
     );
+    db.publish_index_queues_for_lifecycle_testing()
+        .await
+        .expect("the late delete publishes after activation");
+    assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
 
     db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
         .await
@@ -3045,7 +3102,7 @@ async fn delete_during_entity_state_validation_returns_to_catch_up_and_activates
         .expect("late-delete Active index remains queryable");
     assert!(
         query_node_ids(&response, "ids").is_empty(),
-        "deleted entity must not survive catch-up and activation"
+        "deleted entity must not survive activation and publication"
     );
     db.close().await.expect("late-delete fixture closes");
 }
@@ -3364,45 +3421,44 @@ async fn disk_writer_reader_reopen_and_drop_need_no_runtime_authority() {
 }
 
 #[tokio::test]
-async fn active_text_upload_failure_aborts_graph_and_index_transaction() {
+async fn active_text_upload_failure_retries_publication_without_losing_the_operation() {
     const DATABASE: &str = "fts-active-upload-failure-regression";
     let fixture = open_drop_race_fixture(DATABASE).await;
-    let before = rollback_snapshot(&fixture.db).await;
     let put_count = fixture.store.text_put_count();
     fixture.store.fail_next_text_put();
 
-    let error = fixture
-        .db
-        .execute(
-            &add_node_plan(
-                LABEL,
-                vec![(PROPERTY, PropertyValue::from("uploadfailure"))],
-            ),
-            context::ParamBindings::default(),
-        )
-        .await
-        .expect_err("injected split upload failure aborts the request");
-    assert!(
-        error
-            .to_string()
-            .contains("injected content-addressed text upload failure"),
-        "upload error remains attributable: {error}"
+    // Graph writes only enqueue; they never upload text splits.
+    let retry_id = insert_node(&fixture.db, "uploadfailure").await;
+    assert_eq!(fixture.store.text_put_count(), put_count);
+    assert_eq!(
+        fixture.db.index_operation_queue_stats().pending_operations,
+        1
     );
-    assert_eq!(fixture.store.text_put_count(), put_count + 1);
-    assert_eq!(rollback_snapshot(&fixture.db).await, before);
-    assert!(text_row_node_ids(
+
+    // The failed upload acknowledges nothing; the retry publishes the same
+    // operation exactly once.
+    assert_eq!(
         fixture
             .db
-            .execute(
-                &text_search_plan(LABEL, PROPERTY, "uploadfailure"),
-                context::ParamBindings::default(),
-            )
+            .publish_index_queues_for_lifecycle_testing()
             .await
-            .expect("post-failure search remains valid")
-    )
-    .is_empty());
-
-    let retry_id = insert_node(&fixture.db, "uploadfailure").await;
+            .expect("publication retries past the injected upload failure"),
+        1
+    );
+    let stats = fixture.db.index_operation_queue_stats();
+    assert!(
+        stats.publication_error_retries >= 1,
+        "the injected upload failure is a retried publication attempt: {stats:?}"
+    );
+    assert_eq!(
+        (stats.pending_operations, stats.acknowledged_operations),
+        (0, 1)
+    );
+    assert_eq!(
+        fixture.store.text_put_count(),
+        put_count + 2,
+        "one failed and one successful split upload"
+    );
     assert_eq!(
         text_row_node_ids(
             fixture
@@ -3412,7 +3468,7 @@ async fn active_text_upload_failure_aborts_graph_and_index_transaction() {
                     context::ParamBindings::default(),
                 )
                 .await
-                .expect("retry search succeeds")
+                .expect("post-retry search succeeds")
         ),
         [retry_id]
     );

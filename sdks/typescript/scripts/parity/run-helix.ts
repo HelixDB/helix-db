@@ -20,7 +20,7 @@ import { cargoTarget, goGeneratedRoot, resultsRoot, rustGeneratedRoot, typescrip
 import { cypherFixturePath, readCypherCases, verifyCypherResults } from "./cypher-results.js";
 import { writeCypherCase } from "./cypher-client.js";
 
-const EXPECTED_RUNTIME = 233;
+const EXPECTED_RUNTIME = 234;
 const cypherCases = await readCypherCases();
 const TRANSACTION_CONFLICT_ATTEMPTS = 8;
 

@@ -265,12 +265,22 @@ impl PlannedVectorMutation {
         self.measurement
     }
 
+    /// Iterates the encoded keys this plan writes, in encoded-key order.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &[u8]> {
+        self.writes.iter().map(|write| match write {
+            PlannedVectorWrite::Put { key, .. } | PlannedVectorWrite::Delete { key } => {
+                key.as_ref()
+            }
+        })
+    }
+
     /// Consumes this plan and stages its encoded writes in the target transaction.
     ///
     /// The planning and target transactions must begin from the same committed
-    /// vector state. Lifecycle callers establish that contract only for a
-    /// builder-exclusive hidden generation whose foreground changes are durable
-    /// deltas. Any staging failure must abort the target outbox transaction.
+    /// vector state. Lifecycle callers establish that contract only while they
+    /// are the generation's sole writer: a hidden generation's build, or the
+    /// queue publisher of an Active one. Any staging failure must abort the
+    /// target transaction.
     pub(crate) fn apply_to(self, target: &impl Mutation) -> Result<(), slatedb::Error> {
         self.apply_with(|write| match write {
             PlannedVectorWrite::Put { key, value } => target.put_bytes(key, value),
@@ -299,6 +309,9 @@ impl PlannedVectorMutation {
 pub(crate) struct VectorWriteRecorder {
     identity: Arc<()>,
     writes: Arc<Mutex<VectorWriteState>>,
+    /// Keys read through every transaction bound to this recorder.
+    #[cfg(test)]
+    reads: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl VectorWriteRecorder {
@@ -307,7 +320,21 @@ impl VectorWriteRecorder {
         Self {
             identity: Arc::new(()),
             writes: Arc::new(Mutex::new(VectorWriteState::default())),
+            #[cfg(test)]
+            reads: Arc::default(),
         }
+    }
+
+    /// Returns the keys read through every transaction bound to this recorder.
+    #[cfg(test)]
+    pub(crate) fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// Counts `keys` read through a bound transaction.
+    #[cfg(test)]
+    fn record_reads(&self, keys: usize) {
+        self.reads.fetch_add(keys as u64, Ordering::Relaxed);
     }
 
     /// Borrows a SlateDB transaction while sharing this recorder's write state.
@@ -337,11 +364,15 @@ impl crate::transaction::ReadSource for MeasuredVectorTransaction<'_> {
             crate::transaction::ReadKind::Point => {
                 #[cfg(feature = "production-coverage")]
                 crate::search::vector::record_benchmark_point_get();
+                #[cfg(test)]
+                self.recorder.record_reads(1);
             }
             crate::transaction::ReadKind::MultiGet { keys } => {
                 #[cfg(feature = "production-coverage")]
                 crate::search::vector::record_benchmark_multi_get(keys);
-                #[cfg(not(feature = "production-coverage"))]
+                #[cfg(test)]
+                self.recorder.record_reads(keys);
+                #[cfg(not(any(test, feature = "production-coverage")))]
                 let _ = keys;
             }
             crate::transaction::ReadKind::Scan => {

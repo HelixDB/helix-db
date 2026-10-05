@@ -123,6 +123,7 @@ async fn unique_membership_reader_uses_batch_and_honors_cancellation() {
                     DataScope::LegacyUnscoped,
                     execution_control::ExecutionControl::unlimited(),
                     prepared.into_catalog_proof(),
+                    helix_ast::query::SearchConsistency::Strong,
                 )
                 .await
                 .unwrap();
@@ -155,6 +156,7 @@ async fn unique_membership_reader_uses_batch_and_honors_cancellation() {
                     execution_control::ExecutionControl::unlimited()
                         .with_reader_retirement_cancellation(cancellation),
                     prepared.into_catalog_proof(),
+                    helix_ast::query::SearchConsistency::Strong,
                 )
                 .await
                 .unwrap_err();
@@ -278,6 +280,7 @@ async fn unique_membership_preserves_tenant_and_prepared_snapshot() {
                 scope,
                 execution_control::ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .unwrap();
@@ -531,6 +534,7 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
                                 scope,
                                 execution_control::ExecutionControl::unlimited(),
                                 prepared.into_catalog_proof(),
+                                helix_ast::query::SearchConsistency::Strong,
                             )
                             .await
                             .unwrap();

@@ -452,6 +452,25 @@ stream. Go has separate node and edge methods.
 | Text | At most `min(unique candidates, k, 800)` rows. |
 | Both | More than 1,000,000 unique candidates is a query error. |
 
+## Unpublished changes
+
+Prefiltered searches follow the request's
+[search consistency](/database/helix-db/query-guides/search-consistency). A candidate
+whose indexed vector or text changed in a committed write that the index worker has
+not published yet is superseded: the search drops that candidate's published index rows
+up front and ranks its newest committed value instead, or leaves it out when that write
+removed the value.
+
+- `strong` (the default) treats every superseded candidate this way. Unlike a
+  whole-index search, a prefiltered search never fails with `index_backpressure`
+  because of superseded results; only the limits above apply. A prefiltered text
+  search still fails with `index_backpressure` when its partition holds more
+  [unpublished text](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes)
+  than one text publication may analyze, since its BM25 statistics cover every
+  unpublished document.
+- `eventual` does this for the oldest unpublished work within its per-search budget and
+  ranks the remaining candidates by their last published values until publication.
+
 ## Checklist
 
 - Create a compatible index for the candidate label and property. Vector queries must

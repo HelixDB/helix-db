@@ -268,17 +268,21 @@ impl QueryObservation {
                 warnings: Vec::new(),
             },
             Err(error) => {
-                let error_type = query::QueryErrorType::from(error.classify());
-                let message = match error_type {
-                    query::QueryErrorType::InvalidRequest => "query request was invalid",
-                    query::QueryErrorType::Planning => "query planning failed",
-                    query::QueryErrorType::Execution => "query execution failed",
-                    query::QueryErrorType::Conflict => "query conflicted with another transaction",
-                    query::QueryErrorType::Internal => "query response serialization failed",
+                let class = error.classify();
+                // Backpressure shares the conflict bucket but not its cause.
+                let message = match class {
+                    QueryFailureClass::InvalidRequest => "query request was invalid",
+                    QueryFailureClass::Planning => "query planning failed",
+                    QueryFailureClass::CommitOutcomeUnknown
+                    | QueryFailureClass::WriterModeRequired
+                    | QueryFailureClass::Execution => "query execution failed",
+                    QueryFailureClass::Conflict => "query conflicted with another transaction",
+                    QueryFailureClass::Backpressure => "query was rejected by index backpressure",
+                    QueryFailureClass::Internal => "query response serialization failed",
                 };
                 query::QueryOutcome::Failed {
                     errors: vec![query::QueryError {
-                        error_type,
+                        error_type: class.into(),
                         message: message.to_owned(),
                     }],
                 }
@@ -307,10 +311,16 @@ async fn execute_validated(
     execution_control: ExecutionControl,
 ) -> std::result::Result<QueryResponse, QueryServiceError> {
     execution_control.check()?;
-    let (batch, params) = match query {
-        ValidatedQuery::Read { batch, parameters } => {
-            (BatchQuery::Read(batch), query_param_bindings(parameters)?)
-        }
+    let (batch, params, search_consistency) = match query {
+        ValidatedQuery::Read {
+            batch,
+            parameters,
+            search_consistency,
+        } => (
+            BatchQuery::Read(batch),
+            query_param_bindings(parameters)?,
+            search_consistency,
+        ),
         ValidatedQuery::Write { batch, parameters } => {
             if db.is_reader_mode() {
                 return Err(HelixDbError::WriterModeRequired {
@@ -318,7 +328,11 @@ async fn execute_validated(
                 }
                 .into());
             }
-            (BatchQuery::Write(batch), query_param_bindings(parameters)?)
+            (
+                BatchQuery::Write(batch),
+                query_param_bindings(parameters)?,
+                helix_ast::query::SearchConsistency::Strong,
+            )
         }
     };
     let prepared = execution_control
@@ -334,6 +348,7 @@ async fn execute_validated(
             tenant_scope,
             execution_control,
             prepared.into_catalog_proof(),
+            search_consistency,
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
@@ -344,7 +359,9 @@ enum ValidatedQuery {
     Read {
         batch: ReadBatch,
         parameters: BTreeMap<String, QueryValue>,
+        search_consistency: helix_ast::query::SearchConsistency,
     },
+    /// Write batches always search strongly; the type carries no choice.
     Write {
         batch: WriteBatch,
         parameters: BTreeMap<String, QueryValue>,
@@ -353,9 +370,14 @@ enum ValidatedQuery {
 
 impl ValidatedQuery {
     fn from_request(request: QueryRequest) -> std::result::Result<Self, QueryServiceError> {
+        let search_consistency = request.search_consistency();
         let (query, parameters) = request.into_query();
         match query {
-            BatchQuery::Read(batch) => Ok(Self::Read { batch, parameters }),
+            BatchQuery::Read(batch) => Ok(Self::Read {
+                batch,
+                parameters,
+                search_consistency,
+            }),
             BatchQuery::Write(batch) => Ok(Self::Write { batch, parameters }),
         }
     }
@@ -637,6 +659,14 @@ pub enum QueryFailureClass {
     CommitOutcomeUnknown,
     /// A transaction conflict that is safe to retry.
     Conflict,
+    /// Asynchronous index work is saturated: either a write was rejected
+    /// before commit, or a strong search, in a read or a write request, found
+    /// more superseded results ahead of its answer than it may skip. Nothing
+    /// was committed, and the unchanged request is safe to retry once
+    /// outstanding index work is published. Telemetry buckets it with
+    /// [`Self::Conflict`] as [`query::QueryErrorType::Conflict`]: both reject
+    /// the whole request, and a retry may succeed.
+    Backpressure,
     /// The request itself or the data it carried was invalid.
     InvalidRequest,
     /// Query planning failed before execution started.
@@ -652,7 +682,7 @@ pub enum QueryFailureClass {
 impl From<QueryFailureClass> for query::QueryErrorType {
     fn from(class: QueryFailureClass) -> Self {
         match class {
-            QueryFailureClass::Conflict => Self::Conflict,
+            QueryFailureClass::Conflict | QueryFailureClass::Backpressure => Self::Conflict,
             QueryFailureClass::InvalidRequest => Self::InvalidRequest,
             QueryFailureClass::Planning => Self::Planning,
             QueryFailureClass::CommitOutcomeUnknown
@@ -671,6 +701,7 @@ impl QueryServiceError {
                 QueryFailureClass::CommitOutcomeUnknown
             }
             Self::Db(error) if error.is_transaction_conflict() => QueryFailureClass::Conflict,
+            Self::Db(error) if error.is_index_backpressure() => QueryFailureClass::Backpressure,
             Self::InvalidRequest(_) => QueryFailureClass::InvalidRequest,
             Self::Planner(_) | Self::Db(HelixDbError::Planner(_)) => QueryFailureClass::Planning,
             Self::Db(error) if error.is_invalid_input() => QueryFailureClass::InvalidRequest,
@@ -955,6 +986,7 @@ mod tests {
                     DataScope::LegacyUnscoped,
                     ExecutionControl::unlimited(),
                     prepared.into_catalog_proof(),
+                    helix_ast::query::SearchConsistency::Strong,
                 )
                 .await
                 .expect("the exact prepared read view survives a newer catalog publication");
@@ -1095,6 +1127,7 @@ mod tests {
                     DataScope::LegacyUnscoped,
                     ExecutionControl::unlimited(),
                     prepared.into_catalog_proof(),
+                    helix_ast::query::SearchConsistency::Strong,
                 )
                 .await
                 .expect("graph write opens under its prepared authority");
@@ -1141,6 +1174,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect("foreign proof safely falls back");
@@ -1194,6 +1228,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect_err("foreign catalog authority must be discarded");
@@ -1249,6 +1284,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 proof,
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect("expired proof safely falls back");
@@ -1288,6 +1324,7 @@ mod tests {
             tenant_scope,
             ExecutionControl::unlimited(),
             prepared.into_catalog_proof(),
+            helix_ast::query::SearchConsistency::Strong,
         )
         .await
         .expect("cross-scope proof safely falls back");
@@ -2184,6 +2221,7 @@ mod tests {
         let query = ValidatedQuery::Read {
             batch: ReadBatch::new(),
             parameters: BTreeMap::new(),
+            search_consistency: helix_ast::query::SearchConsistency::Strong,
         };
 
         query
@@ -2467,6 +2505,10 @@ mod tests {
             ),
             (QueryFailureClass::Conflict, query::QueryErrorType::Conflict),
             (
+                QueryFailureClass::Backpressure,
+                query::QueryErrorType::Conflict,
+            ),
+            (
                 QueryFailureClass::InvalidRequest,
                 query::QueryErrorType::InvalidRequest,
             ),
@@ -2593,5 +2635,30 @@ mod tests {
         .expect("telemetry JSON");
         assert!(!encoded.contains("secret@example.com"));
         assert!(encoded.contains("query execution failed"));
+
+        // A strong read search rejected by backpressure is bucketed with
+        // conflicts but not described as one.
+        let rejected = QueryObservation::capture(&request, None)
+            .expect("canonical query")
+            .event(
+                &Err(QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                    scope: DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    resource: crate::error::IndexBackpressureResource::SuppressedSearchResults,
+                    requested: 810,
+                    limit: 800,
+                })),
+                std::time::Duration::from_micros(1),
+            );
+        let query::QueryOutcome::Failed { errors } = &rejected.outcome else {
+            panic!("a rejected query fails");
+        };
+        assert_eq!(
+            errors.as_slice(),
+            [query::QueryError {
+                error_type: query::QueryErrorType::Conflict,
+                message: "query was rejected by index backpressure".to_owned(),
+            }]
+        );
     }
 }

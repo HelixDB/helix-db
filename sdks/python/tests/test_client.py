@@ -361,6 +361,17 @@ class ClientTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIs(remote_error(body, "fallback").is_retryable(), expected)
 
+    def test_index_backpressure_is_retryable(self) -> None:
+        body = b'{"error":"index_backpressure","msg":"index backpressure","retryable":true}'
+        error = remote_error(body, "fallback")
+        self.assertEqual(error.code, "index_backpressure")
+        self.assertTrue(error.is_retryable())
+        self.assertTrue(error.is_index_backpressure())
+        embedded = HelixError.embedded("index backpressure", code="index_backpressure")
+        self.assertTrue(embedded.is_retryable())
+        self.assertTrue(embedded.is_index_backpressure())
+        self.assertFalse(HelixError.embedded("bad", code="invalid_query").is_retryable())
+
     def test_warm_no_content_is_success(self) -> None:
         request = QueryRequest.read(read_batch())
         calls = []

@@ -195,7 +195,6 @@ mod tests {
 
     use super::test_support;
     use super::*;
-    use crate::execution::interpreter::runtime_context::RequestWriteScopeState;
 
     fn step_id(id: usize) -> exec::ExecStepId {
         exec::ExecStepId::new(id).expect("positive test step id")
@@ -500,103 +499,6 @@ mod tests {
             .expect("text DDL uses the opened object store directly");
         assert!(matches!(value, ExecutionValue::IndexDdlReceipt(_)));
         db.close().await.expect("writer closes");
-    }
-
-    #[tokio::test]
-    async fn non_mutation_step_flushes_active_vectors_and_retains_session_for_more_mutations() {
-        let db = test_support::open_db("dispatch-active-vector-flush-barrier").await;
-        let generation = crate::search::vector::ValidatedVectorGenerationHandle::create_current::<
-            crate::search::vector::distance::Cosine,
-        >(
-            crate::search::vector::VectorGenerationIdentity::try_new(
-                crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-                901,
-                "dispatch-active-vector-flush-barrier".to_string(),
-                902,
-                std::num::NonZeroU64::MIN,
-                1,
-                crate::index_lifecycle::IndexElementKind::Node,
-                crate::search::vector::VectorDimension::try_new(4).unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
-        context.enable_request_write_scope().await.unwrap();
-        let RequestWriteScopeState::Active(active) = &mut context.request_write_scope else {
-            panic!("write request owns its transaction and index context");
-        };
-        active
-            .index_context
-            .stage_active_vector_for_test(&active.txn, &generation, 1, &[1.0, 0.1, 0.2, 0.3], true)
-            .await
-            .unwrap();
-        active
-            .index_context
-            .stage_active_vector_for_test(&active.txn, &generation, 2, &[0.2, 1.0, 0.3, 0.4], false)
-            .await
-            .unwrap();
-
-        context
-            .execute_step(&test_support::step(
-                1,
-                Vec::new(),
-                exec::ExecOp::Barrier {
-                    name: test_support::name("vector visibility"),
-                },
-            ))
-            .await
-            .unwrap();
-        let RequestWriteScopeState::Active(active) = &mut context.request_write_scope else {
-            panic!("flush barrier retains the write transaction");
-        };
-        active
-            .index_context
-            .stage_active_vector_for_test(&active.txn, &generation, 3, &[0.3, 0.4, 1.0, 0.5], false)
-            .await
-            .unwrap();
-
-        context
-            .execute_step(&test_support::step(
-                2,
-                Vec::new(),
-                exec::ExecOp::Barrier {
-                    name: test_support::name("vector visibility"),
-                },
-            ))
-            .await
-            .unwrap();
-        let RequestWriteScopeState::Active(active) = &context.request_write_scope else {
-            panic!("second flush barrier retains the write transaction");
-        };
-        let results = crate::search::vector::VectorIndex::<
-            crate::search::vector::distance::Cosine,
-        >::from_generation(&generation)
-        .search(
-            &active.txn,
-            &[0.3, 0.4, 1.0, 0.5],
-            &crate::search::vector::SearchParams::new(3).unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0].entity_id(), 3);
-
-        context.commit_request_write_scope().await.unwrap();
-        let raw = db.inner_db();
-        let persisted = crate::search::vector::VectorIndex::<
-            crate::search::vector::distance::Cosine,
-        >::from_generation(&generation)
-        .search(
-            raw.as_ref(),
-            &[0.3, 0.4, 1.0, 0.5],
-            &crate::search::vector::SearchParams::new(3).unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(persisted.len(), 3);
-        assert_eq!(persisted[0].entity_id(), 3);
-        db.close().await.unwrap();
     }
 
     #[tokio::test]

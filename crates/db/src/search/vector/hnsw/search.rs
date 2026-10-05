@@ -1069,6 +1069,58 @@ impl<D: Distance> VectorIndex<D> {
     }
 }
 
+/// Scores in-memory vectors exactly as the HNSW kernel scores stored rows.
+///
+/// Pending-data overlays use this for committed vectors the index worker has
+/// not published yet. Query and candidate vectors pass the same metric
+/// validation and header construction as stored items, so results merge with
+/// physical results under the existing `(score, entity id)` ordering.
+pub(crate) fn score_exact_in_memory<'a, D: Distance>(
+    query: &[f32],
+    dimension: VectorDimension,
+    candidates: impl IntoIterator<Item = (NodeId, &'a [f32])>,
+) -> Result<Vec<SearchResult>, HelixDbError> {
+    let semantics = ActiveVectorSemantics::for_distance::<D>().ok_or_else(|| {
+        HelixDbError::Config(format!(
+            "vector distance '{}' has no stable durable semantic identity",
+            D::name()
+        ))
+    })?;
+    let query_vector = ValidatedMetricVector::try_new(
+        UnalignedVector::<D::VectorCodec>::from_slice(query),
+        semantics.distance_metric(),
+        dimension,
+    )
+    .map_err(HelixDbError::from)?;
+    let query_item = Item::<D> {
+        header: D::new_header(query_vector.values()),
+        vector: std::borrow::Cow::Borrowed(query_vector.values()),
+    };
+    let mut results = candidates
+        .into_iter()
+        .map(|(node_id, vector)| {
+            let candidate = ValidatedMetricVector::try_new(
+                UnalignedVector::<D::VectorCodec>::from_slice(vector),
+                semantics.distance_metric(),
+                dimension,
+            )
+            .map_err(HelixDbError::from)?;
+            let item = Item::<D> {
+                header: D::new_header(candidate.values()),
+                vector: std::borrow::Cow::Borrowed(candidate.values()),
+            };
+            let candidate = Candidate::try_new(node_id, D::distance(&query_item, &item))?;
+            Ok(SearchResult::new(candidate.node_id, candidate.distance()))
+        })
+        .collect::<Result<Vec<_>, HelixDbError>>()?;
+    results.sort_by(|left, right| {
+        left.score()
+            .cmp(&right.score())
+            .then_with(|| left.entity_id().cmp(&right.entity_id()))
+    });
+    Ok(results)
+}
+
 /// One vector-search invocation bound to a stable read view and observer.
 ///
 /// Public result-only and diagnostic APIs both construct this contract, so

@@ -49,28 +49,18 @@ impl Owned {
         })
     }
 
-    /// Commit without vector cache fences.
-    #[cfg(test)]
+    /// Commit the request's writes. Called only inside the finite commit
+    /// owner, which survives cancellation, so the ledgers stay admitted until
+    /// the backend outcome is known.
     pub(crate) async fn commit(
         self,
-    ) -> std::result::Result<Option<slatedb::WriteHandle>, slatedb::Error> {
-        self.commit_fenced(Vec::new()).await
-    }
-
-    /// Commit and resolve vector cache fences through
-    /// [`crate::search::vector::commit_fenced`]. Called only inside the finite
-    /// commit owner, which survives cancellation, so the ledgers stay admitted
-    /// until the backend outcome is known.
-    pub(crate) async fn commit_fenced(
-        self,
-        fences: Vec<crate::search::vector::VectorCachePendingCommit>,
     ) -> std::result::Result<Option<slatedb::WriteHandle>, slatedb::Error> {
         let Self {
             raw,
             tracking,
             merges,
         } = self;
-        let result = crate::search::vector::commit_fenced(raw, fences).await;
+        let result = raw.commit().await;
         drop(merges);
         drop(tracking);
         result
@@ -148,6 +138,7 @@ pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
         self.mutation_view().raw.delete(key)
     }
 
+    #[cfg(test)]
     fn mark_read<K: AsRef<[u8]>, I: IntoIterator<Item = K>>(
         &self,
         keys: I,
@@ -163,6 +154,20 @@ pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
     /// The borrowed batch cannot be submitted to a different transaction.
     fn merge_batch(&self, entries: usize) -> Result<merges::Batch<'_>> {
         merges::Batch::new(self.mutation_view(), entries)
+    }
+
+    /// Stage one index-operation queue operand as a blind merge. Its size is
+    /// bounded by the database's operand limit when it is built, so it is not
+    /// admitted again here.
+    fn merge_disjoint_tokens<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        tokens: Vec<u128>,
+        bytes: Bytes,
+    ) -> std::result::Result<(), slatedb::Error> {
+        self.mutation_view()
+            .raw
+            .merge_disjoint_tokens(key, tokens, bytes)
     }
 }
 
