@@ -43,7 +43,7 @@ jobs:
   quality:
     name: Workspace and tooling quality
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
