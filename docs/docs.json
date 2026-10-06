@@ -250,6 +250,7 @@
               "cli/command-reference/cluster",
               "cli/command-reference/database",
               "cli/command-reference/delete",
+              "cli/command-reference/doctor",
               "cli/command-reference/feedback",
               "cli/command-reference/init",
               "cli/command-reference/logs",

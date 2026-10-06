@@ -135,6 +135,28 @@ enum Commands {
         instance: Option<String>,
     },
 
+    /// Check an instance's setup: runtime, storage, disk cache, memory, and index use
+    #[command(
+        after_help = r#"Read-only: doctor never changes the instance, its data, or helix.toml.
+It exits 1 when a check fails; warnings alone exit 0.
+
+Examples:
+  helix doctor
+  helix doctor production
+  helix doctor --url http://10.0.1.5:8080
+  helix doctor --json
+
+Docs: https://docs.helix-db.com/cli/command-reference/doctor"#
+    )]
+    Doctor {
+        /// Instance or typed database; defaults to dev or the sole instance
+        #[arg(conflicts_with = "url")]
+        instance: Option<String>,
+        /// Diagnose the server at this base URL instead; no helix.toml needed
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
+
     /// View logs for a local or Helix Cloud instance
     Logs {
         /// Instance name
@@ -398,6 +420,7 @@ fn display_welcome(update_available: Option<String>, skills_update_available: bo
         38,
     );
     print_command("helix status", "Show local and Cloud instance status", 38);
+    print_command("helix doctor", "Check an instance's setup for problems", 38);
     print_command(
         "helix logs <instance> -f",
         "Follow logs for an instance",
@@ -493,6 +516,7 @@ fn print_help() {
     print_command("stop", "Stop a background local instance", W);
     print_command("restart", "Restart a background local instance", W);
     print_command("status", "Show local and Cloud instance status", W);
+    print_command("doctor", "Check an instance's setup for problems", W);
     print_command("logs", "View or follow instance logs", W);
     print_command("query", "Send a query to a local or Cloud instance", W);
     print_command("shell", "Open an interactive JSON query shell", W);
@@ -611,6 +635,7 @@ async fn main() -> Result<()> {
         Some(Commands::Stop { instance }) => commands::stop::run(instance).await,
         Some(Commands::Restart { instance }) => commands::restart::run(instance).await,
         Some(Commands::Status { instance }) => commands::status::run(instance).await,
+        Some(Commands::Doctor { instance, url }) => commands::doctor::run(instance, url).await,
         Some(Commands::Logs {
             instance,
             follow,
@@ -1342,6 +1367,35 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn doctor_targets_an_instance_or_a_url_but_not_both() {
+        match Cli::parse_from(["helix", "doctor"]).command {
+            Some(Commands::Doctor { instance, url }) => {
+                assert!(instance.is_none());
+                assert!(url.is_none());
+            }
+            _ => panic!("expected doctor command"),
+        }
+        match Cli::parse_from(["helix", "doctor", "production"]).command {
+            Some(Commands::Doctor { instance, url }) => {
+                assert_eq!(instance.as_deref(), Some("production"));
+                assert!(url.is_none());
+            }
+            _ => panic!("expected doctor command"),
+        }
+        match Cli::parse_from(["helix", "doctor", "--url", "http://10.0.1.5:8080"]).command {
+            Some(Commands::Doctor { instance, url }) => {
+                assert!(instance.is_none());
+                assert_eq!(url.as_deref(), Some("http://10.0.1.5:8080"));
+            }
+            _ => panic!("expected doctor command"),
+        }
+        assert!(
+            Cli::try_parse_from(["helix", "doctor", "dev", "--url", "http://localhost:6969"])
+                .is_err()
+        );
     }
 
     #[test]

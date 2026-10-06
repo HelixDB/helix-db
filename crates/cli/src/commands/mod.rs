@@ -3,6 +3,7 @@ pub mod auth;
 pub mod chef;
 pub mod cloud;
 pub mod delete;
+pub mod doctor;
 pub mod feedback;
 pub mod init;
 pub mod logs;
