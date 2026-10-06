@@ -1010,11 +1010,20 @@ async fn a_reopened_writer_reloads_its_ledger_exactly() {
     let stats = db.index_operation_queue_stats();
     assert_eq!(stats.pending_operations, pending + 2);
     assert_eq!(stats.discovered_operations, stats.pending_operations);
+    // The load only charges: publication starts with no queue read,
+    // retained, scheduled, or held back.
+    let publisher = db.index_queue_publisher().unwrap();
+    assert_eq!(stats.queue_reads, 0);
+    assert_eq!(db.index_queue_store().retained().retained_bytes(), 0);
+    assert_eq!(publisher.scheduled_targets(), (0, 0));
+    assert_eq!(publisher.blocked_entity_count(), 0);
 
     // Everything reloaded drains: live queues publish, the dropped index's
-    // and the orphan's are discarded.
-    let publisher = db.index_queue_publisher().unwrap();
-    for target in reloaded.outstanding_targets() {
+    // and the orphan's are discarded. Each queue is read once and drains
+    // from what its commits retained, then is read again only to find it
+    // empty, and no drained target keeps a schedule.
+    let drained = reloaded.outstanding_targets();
+    for target in drained.iter().copied() {
         for _ in 0..100 {
             match publisher.publish_once(target).await.unwrap() {
                 PublicationOutcome::Empty => break,
@@ -1029,7 +1038,11 @@ async fn a_reopened_writer_reloads_its_ledger_exactly() {
         }
     }
     assert!(reloaded.outstanding_targets().is_empty());
-    assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(stats.pending_operations, 0);
+    assert_eq!(stats.queue_reads, 2 * drained.len() as u64);
+    assert_eq!(db.index_queue_store().retained().retained_bytes(), 0);
+    assert_eq!(publisher.scheduled_targets().0, 0);
     db.close().await.unwrap();
 }
 

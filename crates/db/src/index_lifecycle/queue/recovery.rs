@@ -101,6 +101,10 @@ pub(crate) async fn discover_scopes(reader: &(impl DbReadOps + Sync)) -> Result<
 /// framing (see [`super::storage::QueueDiscovery`]) plus the ledger, never
 /// the whole backlog. Each operation's payload is validated in place, never
 /// decoded.
+///
+/// Only the ledger is loaded: publication starts with no retained queue,
+/// schedule, or held entity, and each target's first attempt reads and
+/// groups its queue itself (see [`super::storage::StoredQueue`]).
 pub(crate) async fn load_backlog(
     reader: &(impl DbReadOps + Sync),
     store: &QueueStore,
