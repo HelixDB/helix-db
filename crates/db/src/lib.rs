@@ -28,6 +28,7 @@ pub mod migrations;
 pub mod query_service;
 mod runtime_dependencies;
 pub mod search;
+mod slate_cache;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
@@ -622,7 +623,7 @@ impl StartupCacheTasks {
 }
 
 struct HelixCaches {
-    slate_db: Option<Arc<dyn DbCache>>,
+    slate_db: Option<slate_cache::SlateDbCache>,
     fts: Option<Arc<search::text::FtsCache>>,
     vector_memory: VectorMemoryCache,
     slate_last_warm: Mutex<Option<SlateWarmSummary>>,
@@ -942,7 +943,7 @@ impl HelixDB {
                     tracing::warn!(
                         error = %close_error,
                         original_error = %open_error,
-                        "failed to close database runtime after writer open failed"
+                        "failed to close database runtime after open failed"
                     );
                 }
                 Err(open_error)
@@ -1215,55 +1216,60 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache));
+                builder = builder.with_db_cache(Arc::clone(cache.cache()));
             }
         }
         let stage_started = Instant::now();
         let db = Arc::new(builder.build().await?);
         log_stage("slatedb_writer_open", stage_started);
-        let stage_started = Instant::now();
-        match &open_mode {
-            WriterOpenMode::Embedded => {
-                migrations::startup::bootstrap_writer(&db).await?;
-                migrations::preflight_legacy_vector_reservations(&db).await?;
-            }
-            WriterOpenMode::Managed {
-                intent: ManagedWriterOpenIntent::Bootstrap,
-                ..
-            } => {
-                migrations::startup::bootstrap_managed_writer(&db).await?;
-                index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
-            }
-            WriterOpenMode::Managed {
-                intent: ManagedWriterOpenIntent::Failover,
-                ..
-            } => {
-                migrations::startup::require_current_managed_writer(&db).await?;
-                index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
-            }
-            WriterOpenMode::Managed {
-                intent: ManagedWriterOpenIntent::ControlledMigration(authorization),
-                ..
-            } => {
-                if authorization.target_schema_version().get() != MANAGED_STORAGE_SCHEMA_VERSION {
-                    return Err(HelixDbError::Config(format!(
-                        "managed migration operation {} targets storage schema {}, but this binary requires {}",
-                        authorization.operation_id(),
-                        authorization.target_schema_version(),
-                        MANAGED_STORAGE_SCHEMA_VERSION,
-                    )));
-                }
-                migrations::startup::bootstrap_writer(&db).await?;
-                migrations::preflight_legacy_vector_reservations(&db).await?;
-            }
-        }
-        log_stage("storage_contract_validation", stage_started);
+        // Built before the storage checks so every failure below closes
+        // storage: an unclosed Db keeps its tasks, and the cache they read
+        // through, running for the life of the runtime.
         let writer = HelixWriter::new(
             Arc::clone(&db),
             config.id_lease_size(),
             config.id_lease_refill_threshold(),
         );
         let runtime_inputs: Result<_> = async {
+            let stage_started = Instant::now();
+            match &open_mode {
+                WriterOpenMode::Embedded => {
+                    migrations::startup::bootstrap_writer(&db).await?;
+                    migrations::preflight_legacy_vector_reservations(&db).await?;
+                }
+                WriterOpenMode::Managed {
+                    intent: ManagedWriterOpenIntent::Bootstrap,
+                    ..
+                } => {
+                    migrations::startup::bootstrap_managed_writer(&db).await?;
+                    index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+                }
+                WriterOpenMode::Managed {
+                    intent: ManagedWriterOpenIntent::Failover,
+                    ..
+                } => {
+                    migrations::startup::require_current_managed_writer(&db).await?;
+                    index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+                }
+                WriterOpenMode::Managed {
+                    intent: ManagedWriterOpenIntent::ControlledMigration(authorization),
+                    ..
+                } => {
+                    if authorization.target_schema_version().get()
+                        != MANAGED_STORAGE_SCHEMA_VERSION
+                    {
+                        return Err(HelixDbError::Config(format!(
+                            "managed migration operation {} targets storage schema {}, but this binary requires {}",
+                            authorization.operation_id(),
+                            authorization.target_schema_version(),
+                            MANAGED_STORAGE_SCHEMA_VERSION,
+                        )));
+                    }
+                    migrations::startup::bootstrap_writer(&db).await?;
+                    migrations::preflight_legacy_vector_reservations(&db).await?;
+                }
+            }
+            log_stage("storage_contract_validation", stage_started);
             let stage_started = Instant::now();
             let migration_authorized = matches!(
                 &open_mode,
@@ -1490,7 +1496,7 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache));
+                builder = builder.with_db_cache(Arc::clone(cache.cache()));
             }
         }
         #[cfg(feature = "async-index-benchmark")]
@@ -1498,21 +1504,42 @@ impl HelixDB {
             builder = builder.with_metrics_recorder(benchmark::storage_recorder());
         }
         let reader = builder.build().await?;
-        let compatibility =
-            index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
-        // Product builds cannot select another queue layout, so only builds
-        // that can pay this per-tenant-scope probe.
-        #[cfg(any(test, feature = "async-index-benchmark"))]
-        index_lifecycle::queue::recovery::require_layout(
-            &reader,
-            config.index_operation_queue().layout(),
-        )
-        .await?;
-        let loaded_catalog =
-            index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
-                .await?;
+        let runtime_inputs: Result<_> = async {
+            let compatibility =
+                index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+            // Product builds cannot select another queue layout, so only builds
+            // that can pay this per-tenant-scope probe.
+            #[cfg(any(test, feature = "async-index-benchmark"))]
+            index_lifecycle::queue::recovery::require_layout(
+                &reader,
+                config.index_operation_queue().layout(),
+            )
+            .await?;
+            let loaded_catalog =
+                index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
+                    .await?;
+            let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+            Ok((compatibility, loaded_catalog, fts_cache))
+        }
+        .await;
+        // An unclosed reader's manifest poller runs for the life of the
+        // runtime, holding the cache it reads through and its disk files.
+        // Callers retry these errors, such as a reader awaiting a writer
+        // migration, so each would strand another set.
+        let (compatibility, loaded_catalog, fts_cache) = match runtime_inputs {
+            Ok(inputs) => inputs,
+            Err(open_error) => {
+                if let Err(close_error) = reader.close().await {
+                    tracing::warn!(
+                        error = %close_error,
+                        original_error = %open_error,
+                        "failed to close SlateDB after reader open failed"
+                    );
+                }
+                return Err(open_error);
+            }
+        };
         let storage = HelixStorage::Reader(Arc::new(reader));
-        let fts_cache = build_fts_cache(&path, &object_store, &config)?;
         let db = Self::from_storage(
             HelixStorageParts::new(path, object_store, storage),
             HelixConfig::new(config),
@@ -1521,9 +1548,13 @@ impl HelixDB {
             fts_cache,
             compatibility,
         );
-        db.run_configured_startup_cache_warm(true).await?;
-        db.run_configured_vector_memory_warm(vector_memory_settings, true)
-            .await?;
+        let warm_result: Result<()> = async {
+            db.run_configured_startup_cache_warm(true).await?;
+            db.run_configured_vector_memory_warm(vector_memory_settings, true)
+                .await
+        }
+        .await;
+        db.close_on_open_error(warm_result).await?;
         Ok(db)
     }
 
@@ -1531,7 +1562,7 @@ impl HelixDB {
         storage: HelixStorageParts,
         config: HelixConfig,
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
-        slate_db_cache: Option<Arc<dyn DbCache>>,
+        slate_db_cache: Option<slate_cache::SlateDbCache>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
@@ -1550,7 +1581,7 @@ impl HelixDB {
         storage: HelixStorageParts,
         config: HelixConfig,
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
-        slate_db_cache: Option<Arc<dyn DbCache>>,
+        slate_db_cache: Option<slate_cache::SlateDbCache>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         index_scheduling: IndexLifecycleScheduling,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
@@ -3855,7 +3886,7 @@ fn remove_stale_foyer_partitions(
     })
 }
 
-async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
+async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<slate_cache::SlateDbCache>> {
     match config {
         CacheMode::VectorMemoryOnly => Ok(None),
         CacheMode::Memory { slate_db, .. } => {
@@ -3869,12 +3900,12 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                     max_capacity: slate_db.metadata_bytes(),
                     ..Default::default()
                 }));
-            Ok(Some(Arc::new(
+            Ok(Some(slate_cache::SlateDbCache::Memory(Arc::new(
                 SplitCache::new()
                     .with_block_cache(Some(block_cache))
                     .with_meta_cache(Some(metadata_cache))
                     .build(),
-            )))
+            ))))
         }
         CacheMode::Hybrid { slate_db, .. } => {
             remove_stale_foyer_partitions(
@@ -3888,6 +3919,7 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                     slate_db.disk().root().display()
                 ))
             })?;
+            let disk_engine = slate_cache::DiskEngineRuntime::start()?;
             let metrics = FoyerHybridCacheMetrics::new();
             let cache = HybridCacheBuilder::new()
                 .with_name("helix-slate-hybrid")
@@ -3897,25 +3929,28 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                 .storage()
                 .with_io_engine_config(PsyncIoEngineConfig::new())
                 .with_engine_config(
-                    BlockEngineConfig::new(
-                        FsDeviceBuilder::new(slate_db.disk().root())
-                            .with_capacity(slate_db.disk().bytes())
-                            .build()
-                            .map_err(|err| {
-                                HelixDbError::Config(format!(
-                                    "failed to build Slate hybrid cache device: {err}"
-                                ))
-                            })?,
-                    )
-                    .with_block_size(slate_db.disk_block_bytes()),
+                    disk_engine.engine_config(
+                        BlockEngineConfig::new(
+                            FsDeviceBuilder::new(slate_db.disk().root())
+                                .with_capacity(slate_db.disk().bytes())
+                                .build()
+                                .map_err(|err| {
+                                    HelixDbError::Config(format!(
+                                        "failed to build Slate hybrid cache device: {err}"
+                                    ))
+                                })?,
+                        )
+                        .with_block_size(slate_db.disk_block_bytes()),
+                    ),
                 )
                 .build()
                 .await
                 .map_err(|err| {
                     HelixDbError::Config(format!("failed to build Slate hybrid cache: {err}"))
                 })?;
-            Ok(Some(Arc::new(
-                FoyerHybridCache::new_with_cache_and_metrics(cache, metrics),
+            Ok(Some(slate_cache::SlateDbCache::hybrid(
+                Arc::new(FoyerHybridCache::new_with_cache_and_metrics(cache, metrics)),
+                disk_engine,
             )))
         }
     }
