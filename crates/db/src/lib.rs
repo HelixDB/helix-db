@@ -28,6 +28,7 @@ pub mod migrations;
 pub mod query_service;
 mod runtime_dependencies;
 pub mod search;
+mod slate_cache;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
@@ -622,7 +623,7 @@ impl StartupCacheTasks {
 }
 
 struct HelixCaches {
-    slate_db: Option<Arc<dyn DbCache>>,
+    slate_db: Option<slate_cache::SlateDbCache>,
     fts: Option<Arc<search::text::FtsCache>>,
     vector_memory: VectorMemoryCache,
     slate_last_warm: Mutex<Option<SlateWarmSummary>>,
@@ -1215,7 +1216,7 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache));
+                builder = builder.with_db_cache(Arc::clone(cache.cache()));
             }
         }
         let stage_started = Instant::now();
@@ -1490,7 +1491,7 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache));
+                builder = builder.with_db_cache(Arc::clone(cache.cache()));
             }
         }
         #[cfg(feature = "async-index-benchmark")]
@@ -1531,7 +1532,7 @@ impl HelixDB {
         storage: HelixStorageParts,
         config: HelixConfig,
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
-        slate_db_cache: Option<Arc<dyn DbCache>>,
+        slate_db_cache: Option<slate_cache::SlateDbCache>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
@@ -1550,7 +1551,7 @@ impl HelixDB {
         storage: HelixStorageParts,
         config: HelixConfig,
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
-        slate_db_cache: Option<Arc<dyn DbCache>>,
+        slate_db_cache: Option<slate_cache::SlateDbCache>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         index_scheduling: IndexLifecycleScheduling,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
@@ -3855,7 +3856,7 @@ fn remove_stale_foyer_partitions(
     })
 }
 
-async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
+async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<slate_cache::SlateDbCache>> {
     match config {
         CacheMode::VectorMemoryOnly => Ok(None),
         CacheMode::Memory { slate_db, .. } => {
@@ -3869,12 +3870,12 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                     max_capacity: slate_db.metadata_bytes(),
                     ..Default::default()
                 }));
-            Ok(Some(Arc::new(
+            Ok(Some(slate_cache::SlateDbCache::Memory(Arc::new(
                 SplitCache::new()
                     .with_block_cache(Some(block_cache))
                     .with_meta_cache(Some(metadata_cache))
                     .build(),
-            )))
+            ))))
         }
         CacheMode::Hybrid { slate_db, .. } => {
             remove_stale_foyer_partitions(
@@ -3888,6 +3889,7 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                     slate_db.disk().root().display()
                 ))
             })?;
+            let disk_engine = slate_cache::DiskEngineRuntime::start()?;
             let metrics = FoyerHybridCacheMetrics::new();
             let cache = HybridCacheBuilder::new()
                 .with_name("helix-slate-hybrid")
@@ -3897,26 +3899,29 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                 .storage()
                 .with_io_engine_config(PsyncIoEngineConfig::new())
                 .with_engine_config(
-                    BlockEngineConfig::new(
-                        FsDeviceBuilder::new(slate_db.disk().root())
-                            .with_capacity(slate_db.disk().bytes())
-                            .build()
-                            .map_err(|err| {
-                                HelixDbError::Config(format!(
-                                    "failed to build Slate hybrid cache device: {err}"
-                                ))
-                            })?,
-                    )
-                    .with_block_size(slate_db.disk_block_bytes()),
+                    disk_engine.engine_config(
+                        BlockEngineConfig::new(
+                            FsDeviceBuilder::new(slate_db.disk().root())
+                                .with_capacity(slate_db.disk().bytes())
+                                .build()
+                                .map_err(|err| {
+                                    HelixDbError::Config(format!(
+                                        "failed to build Slate hybrid cache device: {err}"
+                                    ))
+                                })?,
+                        )
+                        .with_block_size(slate_db.disk_block_bytes()),
+                    ),
                 )
                 .build()
                 .await
                 .map_err(|err| {
                     HelixDbError::Config(format!("failed to build Slate hybrid cache: {err}"))
                 })?;
-            Ok(Some(Arc::new(
-                FoyerHybridCache::new_with_cache_and_metrics(cache, metrics),
-            )))
+            Ok(Some(slate_cache::SlateDbCache::Hybrid {
+                cache: Arc::new(FoyerHybridCache::new_with_cache_and_metrics(cache, metrics)),
+                disk_engine,
+            }))
         }
     }
 }

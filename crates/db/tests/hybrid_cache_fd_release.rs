@@ -11,10 +11,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use db::HelixDB;
 use db::config;
-use slatedb::object_store::ObjectStore;
+use db::HelixDB;
 use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::ObjectStore;
 
 const DATABASE: &str = "hybrid-cache-fd-release";
 const REOPENS: usize = 8;
