@@ -44,6 +44,7 @@ pub(crate) use driver::publication_production_contracts::{
 pub(crate) mod publication;
 pub(crate) use driver::{
     OfferedVectorBuild, PublicationBacklog, VectorBuildCache, VectorIndexDriver,
+    MAX_RETAINED_PUBLICATIONS,
 };
 
 /// Validated vector and its canonical physical-partition identity.

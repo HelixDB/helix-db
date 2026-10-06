@@ -1334,7 +1334,7 @@ async fn queued(db: &HelixDB, target: QueueTarget) -> Vec<codec::QueuedOperation
         .read(db.inner_db().as_ref(), target)
         .await
         .expect("queue reads")
-        .map_or_else(Vec::new, |stored| stored.queue().operations().to_vec())
+        .map_or_else(Vec::new, |stored| stored.operations().cloned().collect())
 }
 
 /// Returns the most recently committed operation of `target`.

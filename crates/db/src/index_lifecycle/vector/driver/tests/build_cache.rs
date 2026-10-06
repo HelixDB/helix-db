@@ -694,9 +694,10 @@ async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound
             .await
             .expect("the queue reads")
             .expect("the deferred operations stay queued")
-            .queue()
-            .operations(),
-        operations.as_slice(),
+            .operations()
+            .cloned()
+            .collect::<Vec<_>>(),
+        operations,
         "deferral acknowledges nothing"
     );
     assert_eq!(
