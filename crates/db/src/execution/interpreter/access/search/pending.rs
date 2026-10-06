@@ -456,14 +456,18 @@ impl PendingSelection {
     /// holds every committed operation of the generation, so it replaces the
     /// partition's cached analyses with the ones it analyzed or reused, even
     /// when it stops at the bound: searches repeated past the bound then
-    /// reuse the analyses instead of redoing them. Eventual selections only
-    /// read the cache.
+    /// reuse the analyses instead of redoing them. One whose request stops
+    /// awaiting it partway, or whose analysis fails, keeps what it analyzed
+    /// and what the cache held for the rest of its selection within the
+    /// bound, so the next search resumes where it stopped rather than over.
+    /// Eventual selections only read the cache.
     ///
     /// A strong selection analyzes afresh only while it holds the turn
     /// ([`PendingTextAnalyses::analyzing`]): reaching a document it would
     /// analyze afresh without it, it stops, waits for the turn, and starts
-    /// over reading the cache again. The turn passes on only once the holder
-    /// has cached what it analyzed or stopped, so however many strong
+    /// over reading the cache again. The holder's blocking work keeps the
+    /// turn, even once its request stops awaiting it, and passes it on only
+    /// once it stopped and cached what it analyzed, so however many strong
     /// searches run at once they analyze at most one bound together, and
     /// those that waited reuse what the one before them cached rather than
     /// repeat it. Eventual selections never wait; one publication's budget
@@ -517,7 +521,11 @@ impl PendingSelection {
                         text.to_owned(),
                         budget,
                     ) {
-                        Ok(analysis) => Ok(Ok(Arc::new(analysis))),
+                        Ok(analysis) => {
+                            #[cfg(test)]
+                            cache.analyzed_afresh();
+                            Ok(Ok(Arc::new(analysis)))
+                        }
                         Err(HelixDbError::ActiveTextMutationLimitExceeded { observed, .. }) => {
                             Ok(Err(observed))
                         }
@@ -548,6 +556,10 @@ impl PendingSelection {
                 let mut reached = strong.then(HashMap::new);
                 let mut analyses = Vec::with_capacity(entities.selected + local.len());
                 let mut refused = None;
+                // Why a strong pass stopped analyzing partway. It still walks
+                // the rest of its selection to keep what the cache holds, so
+                // the next search resumes where it stopped.
+                let mut stopped = None;
                 for (position, committed) in entities.selected_committed().enumerate() {
                     let pending = &committed.pending;
                     if entities.local.ids.contains(pending.entity.id.get()) {
@@ -574,8 +586,15 @@ impl PendingSelection {
                             }) => Err(observed),
                             Err(error) => return Err(error),
                         },
+                        None if stopped.is_some() => continue,
                         None if !may_analyze => return Ok(None),
-                        None => analyze(text, &mut budget)?,
+                        None => match analyze(text, &mut budget) {
+                            Err(error) if strong => {
+                                stopped = Some(error);
+                                continue;
+                            }
+                            charged => charged?,
+                        },
                     };
                     let analysis = match charged {
                         Ok(analysis) => analysis,
@@ -595,6 +614,7 @@ impl PendingSelection {
                 // The next strong search takes the turn only once the cache
                 // holds what this one analyzed.
                 drop(turn);
+                stopped.map_or(Ok(()), Err)?;
                 analyses.extend(local);
                 Ok(Some((analyses, refused)))
             })
@@ -1801,6 +1821,139 @@ mod tests {
         .unwrap();
         assert_eq!(analyses.len(), documents.len());
         assert_eq!(cache.cached(target(), &searched), documents.len());
+    }
+
+    /// A strong search whose request stops awaiting it mid-analysis, by being
+    /// dropped, retired, or expiring, keeps the turn until its blocking work
+    /// stops before its next document. It then caches what it analyzed and
+    /// what the cache held for the rest of its selection, so the strong
+    /// search waiting for the turn never analyzes beside it and resumes where
+    /// it stopped: every document is analyzed once.
+    #[tokio::test]
+    async fn an_abandoned_turn_holder_keeps_the_turn_until_its_analysis_stops() {
+        use crate::execution_control::{ExecutionControl, ReaderRetirementCancellation};
+        use std::collections::HashSet;
+        use std::time::Duration;
+
+        #[derive(Debug, Clone, Copy)]
+        enum Abandonment {
+            Dropped,
+            Retired,
+            Expired,
+        }
+        let searched = TextPartition::Unpartitioned;
+        let documents = ["abcd", "efgh", "ijkl", "mnop"].map(|text| Some((searched.clone(), text)));
+        let limit = bound(u64::MAX);
+        for abandonment in [
+            Abandonment::Dropped,
+            Abandonment::Retired,
+            Abandonment::Expired,
+        ] {
+            let cache = unbounded_cache();
+            let tail = fresh_analysis("mnop");
+            cache.replace(
+                target(),
+                &searched,
+                HashMap::from([(operation(3), Arc::clone(&tail))]),
+            );
+            let retirement = ReaderRetirementCancellation::new();
+            let control = match abandonment {
+                Abandonment::Dropped => ExecutionControl::unlimited(),
+                Abandonment::Retired => ExecutionControl::unlimited()
+                    .with_reader_retirement_cancellation(retirement.clone()),
+                Abandonment::Expired => ExecutionControl::from_timeout(Duration::from_secs(2)),
+            };
+
+            // The first search takes the turn, analyzes its first document,
+            // and pauses.
+            let pause = cache.pause_analysis().await;
+            let mut first = texts(SearchConsistency::Strong, &documents);
+            let mut first = Box::pin(
+                control.run(first.analyze_text(&control, &searched, ANALYZER, limit, &cache)),
+            );
+            while cache.analyzed() == 0 {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), &mut first)
+                        .await
+                        .is_err(),
+                    "{abandonment:?}: the first search pauses"
+                );
+            }
+            // A second strong search finds its first document uncached and
+            // waits for the turn.
+            let mut second = texts(SearchConsistency::Strong, &documents);
+            let mut second = Box::pin(analyze(&mut second, &searched, limit, &cache));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), &mut second)
+                    .await
+                    .is_err(),
+                "{abandonment:?}: the second search waits for the turn"
+            );
+
+            // The first request stops awaiting its analysis, which keeps the
+            // turn and has cached nothing yet.
+            match abandonment {
+                Abandonment::Dropped => drop(first),
+                Abandonment::Retired => {
+                    retirement.cancel();
+                    let error = first.await.expect_err("a retired request fails");
+                    assert!(
+                        matches!(error, HelixDbError::QueryCancelledByReaderRetirement),
+                        "{error}"
+                    );
+                }
+                Abandonment::Expired => {
+                    let error = first.await.expect_err("an expired request fails");
+                    assert!(
+                        matches!(error, HelixDbError::QueryDeadlineExceeded),
+                        "{error}"
+                    );
+                }
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), &mut second)
+                    .await
+                    .is_err(),
+                "{abandonment:?}: the abandoned analysis keeps the turn"
+            );
+            assert_eq!(cache.cached(target(), &searched), 1, "{abandonment:?}");
+
+            // Resumed, it stops before its next document and caches what it
+            // analyzed beside the tail the cache held. The second search then
+            // takes the turn, reuses that, and pauses after its own first
+            // fresh analysis, before caching anything.
+            drop(pause);
+            let pause = cache.pause_analysis().await;
+            while cache.analyzed() < 2 {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), &mut second)
+                        .await
+                        .is_err(),
+                    "{abandonment:?}: the second search pauses"
+                );
+            }
+            let held = cache.get(target(), &searched).unwrap();
+            assert_eq!(
+                held.keys().copied().collect::<HashSet<_>>(),
+                HashSet::from([operation(0), operation(3)]),
+                "{abandonment:?}: the stopped search keeps its prefix and the cached tail"
+            );
+
+            drop(pause);
+            let analyses = second.await.unwrap();
+            assert_eq!(analyzed_entities(&analyses), [true; 4]);
+            assert!(Arc::ptr_eq(
+                analyses[0].as_ref().unwrap(),
+                &held[&operation(0)]
+            ));
+            assert!(Arc::ptr_eq(analyses[3].as_ref().unwrap(), &tail));
+            assert_eq!(
+                cache.analyzed(),
+                3,
+                "{abandonment:?}: no document is analyzed twice"
+            );
+            assert_eq!(cache.cached(target(), &searched), documents.len());
+        }
     }
 
     /// The property `family` indexes, set for a document at `position`.

@@ -64,6 +64,12 @@ pub(crate) struct PendingTextAnalyses {
     state: Mutex<CacheState>,
     /// Held by the one strong search analyzing text the cache lacks.
     analyzing: Arc<tokio::sync::Mutex<()>>,
+    /// Analyses searches made afresh, for tests that follow them.
+    #[cfg(test)]
+    analyzed: std::sync::atomic::AtomicUsize,
+    /// Held by tests that pause searches after their next fresh analysis.
+    #[cfg(test)]
+    paused: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -160,6 +166,10 @@ impl PendingTextAnalyses {
             budget,
             state: Mutex::new(CacheState::default()),
             analyzing: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            analyzed: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            paused: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -170,9 +180,9 @@ impl PendingTextAnalyses {
     /// text in progress stays within one strong search's bound however many
     /// search at once, and a search that waited finds what the one before it
     /// analyzed already cached. The guard is owned so the analysis it admits
-    /// can hold it on the blocking pool until that analysis is cached or
-    /// stops, even after its request stopped awaiting it. Reading and
-    /// replacing entries never waits.
+    /// can hold it on the blocking pool until that analysis stops and
+    /// caches what it analyzed, even after its request stopped awaiting it.
+    /// Reading and replacing entries never waits.
     pub(crate) async fn analyzing(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.analyzing).lock_owned().await
     }
@@ -266,6 +276,28 @@ impl PendingTextAnalyses {
     #[cfg(test)]
     pub(crate) fn held_bytes(&self) -> u64 {
         self.state.lock().held
+    }
+
+    /// Counts one analysis a search made afresh, then waits on the blocking
+    /// pool while a test pauses analysis ([`Self::pause_analysis`]).
+    #[cfg(test)]
+    pub(crate) fn analyzed_afresh(&self) {
+        self.analyzed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        drop(self.paused.blocking_lock());
+    }
+
+    /// Analyses searches made afresh so far.
+    #[cfg(test)]
+    pub(crate) fn analyzed(&self) -> usize {
+        self.analyzed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Pauses every search right after its next fresh analysis until the
+    /// returned guard drops.
+    #[cfg(test)]
+    pub(crate) async fn pause_analysis(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.paused.lock().await
     }
 
     /// Number of analyses cached for `target`'s `partition`, without marking
