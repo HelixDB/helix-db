@@ -3451,9 +3451,10 @@ impl HelixDB {
             limit,
             rejections,
             "strong text search refused: unpublished text in its partition exceeds \
-             strong_text_search_max_analysis_bytes; it succeeds once the index worker \
-             publishes the backlog. Search with eventual consistency during heavy ingest, or \
-             raise HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES"
+             IndexOperationQueueTuning::strong_text_search_max_analysis_bytes \
+             (HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES on a server); it succeeds once the \
+             index worker publishes the backlog. Search with eventual consistency during \
+             heavy ingest, or raise the bound"
         );
     }
 

@@ -466,7 +466,7 @@ removed the value.
   because of superseded results; only the limits above apply. A prefiltered text
   search still fails with `index_backpressure` when its partition holds more
   [unpublished text](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes)
-  than one text publication may analyze, since its BM25 statistics cover every
+  than a `strong` text search may analyze, since its BM25 statistics cover every
   unpublished document, and a prefiltered vector search fails the same way when
   its index holds more
   [unpublished vector work](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes)
