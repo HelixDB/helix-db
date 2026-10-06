@@ -3265,7 +3265,8 @@ impl HelixDB {
     ///
     /// Reads in-memory state only: atomics plus one scan of retained charges
     /// under the ledger lock, so sample it periodically rather than per
-    /// request. Reader handles own no ledger or publisher and report zeros.
+    /// request. Reader handles own no ledger or publisher, so every field but
+    /// `strong_text_search_rejections` reads zero.
     pub fn index_operation_queue_stats(&self) -> IndexOperationQueueStats {
         let backlog = self.inner.index_operation_backlog.totals();
         let stats = IndexOperationQueueStats {

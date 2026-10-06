@@ -171,8 +171,9 @@ its own:
 
 Past its bound a search, whole-index or prefiltered, fails with a retryable
 `index_backpressure` error naming the resource, and it succeeds once the index worker
-publishes enough; within the bound it stays exact. A write batch's own changes never
-cause it, and `eventual` searches never fail this way. Each server variable takes a
+publishes enough; within the bound it stays exact. A write batch's own vector changes
+never count toward the vector bound, but its own documents count toward the text bound
+(see below). `eventual` searches never fail this way. Each server variable takes a
 positive byte count; an embedded database sets the bounds with
 `IndexOperationQueueTuning::with_strong_text_search_max_analysis_bytes` and
 `IndexOperationQueueTuning::with_strong_vector_search_max_pending_bytes`.
