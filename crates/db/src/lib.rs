@@ -3948,10 +3948,10 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<slate_cache::
                 .map_err(|err| {
                     HelixDbError::Config(format!("failed to build Slate hybrid cache: {err}"))
                 })?;
-            Ok(Some(slate_cache::SlateDbCache::Hybrid {
-                cache: Arc::new(FoyerHybridCache::new_with_cache_and_metrics(cache, metrics)),
+            Ok(Some(slate_cache::SlateDbCache::hybrid(
+                Arc::new(FoyerHybridCache::new_with_cache_and_metrics(cache, metrics)),
                 disk_engine,
-            }))
+            )))
         }
     }
 }

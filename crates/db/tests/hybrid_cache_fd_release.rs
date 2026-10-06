@@ -1,8 +1,8 @@
 //! Closed hybrid-cache readers must release their disk-cache files.
 //!
 //! A hybrid SlateDB cache holds one open file per Foyer disk block while it
-//! runs. A process that reopens readers must return to its baseline descriptor
-//! count after each close, or it exhausts `nofile` after a handful of reopens.
+//! runs. A process that reopens readers must release those files on each
+//! close, or it exhausts `nofile` after a handful of reopens.
 //! Descriptors are counted through `/proc/self/fd`, so the test skips on
 //! platforms without procfs. It is its own target so no concurrent test opens
 //! or closes descriptors while it counts.

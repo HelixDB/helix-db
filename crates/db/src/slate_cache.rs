@@ -7,9 +7,15 @@
 //! the engine's device, with one open file per disk block, alive for as long
 //! as their runtime runs. Stopping the owned runtime drops them, so the files
 //! close when the last handle to the cache drops.
+//!
+//! The runtime stops only once the cache has closed, which drains the engine's
+//! flushes and reclaims. Stopping it under an open cache can deadlock: the
+//! stop drops an in-flight reclaim, whose drop schedules the next reclaim
+//! while holding the block manager's lock, and the stopped runtime drops that
+//! task in place, which takes the same lock again.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use foyer::{
     BlockEngineConfig, Engine, EngineBuildContext, EngineConfig, HybridCacheProperties, Spawner,
@@ -19,7 +25,7 @@ use slatedb::db_cache::{CachedEntry, CachedKey, DbCache};
 
 use crate::error::{HelixDbError, Result};
 
-/// Longest a close waits for the disk engine's tasks to drop.
+/// Longest a stop waits for the disk engine's tasks to drop.
 ///
 /// A closed engine's tasks are idle, so this bounds only a stuck shutdown.
 const DISK_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,11 +40,20 @@ pub(crate) enum SlateDbCache {
     /// Foyer hybrid cache whose disk engine runs on `disk_engine`.
     Hybrid {
         cache: Arc<dyn DbCache>,
-        disk_engine: DiskEngineRuntime,
+        /// `None` once stopped.
+        disk_engine: parking_lot::Mutex<Option<DiskEngineRuntime>>,
     },
 }
 
 impl SlateDbCache {
+    /// A hybrid cache whose disk engine's tasks run on `disk_engine`.
+    pub(crate) fn hybrid(cache: Arc<dyn DbCache>, disk_engine: DiskEngineRuntime) -> Self {
+        Self::Hybrid {
+            cache,
+            disk_engine: parking_lot::Mutex::new(Some(disk_engine)),
+        }
+    }
+
     /// The cache SlateDB reads through.
     pub(crate) fn cache(&self) -> &Arc<dyn DbCache> {
         match self {
@@ -46,17 +61,48 @@ impl SlateDbCache {
         }
     }
 
-    /// Flushes the cache, then stops a hybrid cache's disk engine so dropping
+    /// Closes the cache, then stops a hybrid cache's disk engine so dropping
     /// the last handle to the cache closes its disk-block files.
     ///
-    /// A failed flush leaves the engine running so the close can be retried.
+    /// If the cache fails to close, its engine keeps running, and dropping the
+    /// cache closes it again before stopping the engine.
     pub(crate) async fn close(&self) -> Result<()> {
         self.cache().close().await?;
         let Self::Hybrid { disk_engine, .. } = self else {
             return Ok(());
         };
-        disk_engine.shutdown().await;
+        let Some(disk_engine) = disk_engine.lock().take() else {
+            return Ok(());
+        };
+        // Stopping waits for the worker thread to exit, which an async worker
+        // must not do. A blocking pool that is shutting down drops this
+        // closure unrun, and the engine it drops stops without waiting.
+        if let Err(error) = tokio::task::spawn_blocking(move || disk_engine.stop()).await {
+            tracing::warn!(%error, "Slate hybrid cache disk engine stop did not run");
+        }
         Ok(())
+    }
+}
+
+impl Drop for SlateDbCache {
+    /// Closes a hybrid cache no close reached, then stops its disk engine. A
+    /// drop cannot wait for either, so a thread of its own does both.
+    fn drop(&mut self) {
+        let Self::Hybrid { cache, disk_engine } = self else {
+            return;
+        };
+        let Some(disk_engine) = disk_engine.get_mut().take() else {
+            return;
+        };
+        let cache = Arc::clone(cache);
+        if let Err(error) = std::thread::Builder::new()
+            .name("helix-foyer-close".to_string())
+            .spawn(move || disk_engine.close_then_stop(cache.as_ref()))
+        {
+            // The engine dropped with the thread's closure, stopped under an
+            // open cache.
+            tracing::warn!(%error, "failed to start the Slate hybrid cache close thread");
+        }
     }
 }
 
@@ -65,10 +111,13 @@ impl SlateDbCache {
 /// It has a single worker: Foyer's default engine runs one flusher and one
 /// reclaimer, which await disk I/O the caller's runtime performs. Foyer still
 /// runs cache-miss loads, and so object-store reads, on the caller's runtime.
+///
+/// Dropping it stops the runtime without waiting, which is safe in any
+/// context, including an async worker.
 pub(crate) struct DiskEngineRuntime {
     handle: tokio::runtime::Handle,
-    /// `None` once shut down.
-    runtime: parking_lot::Mutex<Option<tokio::runtime::Runtime>>,
+    /// Taken only by [`Self::stop`] and the drop.
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl DiskEngineRuntime {
@@ -85,7 +134,7 @@ impl DiskEngineRuntime {
             })?;
         Ok(Self {
             handle: runtime.handle().clone(),
-            runtime: parking_lot::Mutex::new(Some(runtime)),
+            runtime: Some(runtime),
         })
     }
 
@@ -97,29 +146,36 @@ impl DiskEngineRuntime {
         })
     }
 
-    /// Stops the runtime and waits for its tasks to drop.
-    async fn shutdown(&self) {
-        let Some(runtime) = self.runtime.lock().take() else {
+    /// Closes `cache`, whose engine runs here, then stops the runtime. Blocks
+    /// until both finish, so it must not run on an async worker.
+    fn close_then_stop(self, cache: &dyn DbCache) {
+        if let Err(error) = self.handle.block_on(cache.close()) {
+            tracing::warn!(%error, "Slate hybrid cache failed to close; stopping its disk engine");
+        }
+        self.stop();
+    }
+
+    /// Stops the runtime, waiting for its tasks to drop. Blocks, so it must
+    /// not run on an async worker.
+    fn stop(mut self) {
+        let Some(runtime) = self.runtime.take() else {
             return;
         };
-        // Waiting for the worker thread to exit blocks, which an async worker
-        // must not do.
-        let Err(error) = tokio::task::spawn_blocking(move || {
-            runtime.shutdown_timeout(DISK_ENGINE_SHUTDOWN_TIMEOUT);
-        })
-        .await
-        else {
-            return;
-        };
-        tracing::warn!(%error, "Slate hybrid cache disk engine shutdown did not finish");
+        let started = Instant::now();
+        runtime.shutdown_timeout(DISK_ENGINE_SHUTDOWN_TIMEOUT);
+        if started.elapsed() >= DISK_ENGINE_SHUTDOWN_TIMEOUT {
+            tracing::warn!(
+                timeout_secs = DISK_ENGINE_SHUTDOWN_TIMEOUT.as_secs(),
+                "Slate hybrid cache disk engine tasks did not stop in time"
+            );
+        }
     }
 }
 
 impl Drop for DiskEngineRuntime {
-    /// Stops a runtime no close stopped. A drop cannot wait, so the tasks drop
-    /// shortly after it returns.
+    /// Stops a runtime nothing stopped, without waiting for its tasks.
     fn drop(&mut self) {
-        let Some(runtime) = self.runtime.get_mut().take() else {
+        let Some(runtime) = self.runtime.take() else {
             return;
         };
         runtime.shutdown_background();
@@ -284,16 +340,135 @@ mod tests {
             );
             let built = std::fs::read_dir(root)
                 .expect("cache root lists")
-                .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-                .filter(|name| name.starts_with(crate::FOYER_PARTITION_FILE_PREFIX))
-                .count();
-            assert_eq!(built, partitions, "open attempt {attempt} built the cache");
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(crate::FOYER_PARTITION_FILE_PREFIX)
+                })
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                built.len(),
+                partitions,
+                "open attempt {attempt} built the cache"
+            );
             let open = partition_files_open_after_release(root).await;
             assert_eq!(
                 open, 0,
                 "open attempt {attempt} leaked {open} of {partitions} partition files"
             );
+            // So the next attempt's check proves that attempt built the cache.
+            built
+                .iter()
+                .try_for_each(std::fs::remove_file)
+                .expect("closed partition files remove");
         }
+    }
+
+    /// The order a [`RecordingCache`] closed and a task on the disk engine's
+    /// runtime dropped in.
+    type Events = Arc<parking_lot::Mutex<Vec<&'static str>>>;
+
+    /// A cache that records its close and serves nothing.
+    struct RecordingCache(Events);
+
+    #[async_trait::async_trait]
+    impl DbCache for RecordingCache {
+        async fn get_block(
+            &self,
+            _key: &CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            Ok(None)
+        }
+
+        async fn get_index(
+            &self,
+            _key: &CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            Ok(None)
+        }
+
+        async fn get_filter(
+            &self,
+            _key: &CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            Ok(None)
+        }
+
+        async fn get_stats(
+            &self,
+            _key: &CachedKey,
+        ) -> std::result::Result<Option<CachedEntry>, slatedb::Error> {
+            Ok(None)
+        }
+
+        async fn insert(&self, _key: CachedKey, _value: CachedEntry) {}
+
+        async fn remove(&self, _key: &CachedKey) {}
+
+        fn entry_count(&self) -> u64 {
+            0
+        }
+
+        async fn close(&self) -> std::result::Result<(), slatedb::Error> {
+            self.0.lock().push("cache closed");
+            Ok(())
+        }
+    }
+
+    /// Records when the disk engine task holding it drops.
+    struct EngineTask(Events);
+
+    impl Drop for EngineTask {
+        fn drop(&mut self) {
+            self.0.lock().push("engine task dropped");
+        }
+    }
+
+    /// Asserts `release` closes a hybrid cache before its disk engine stops:
+    /// stopping the engine under an open cache can deadlock its reclaims.
+    async fn assert_release_closes_cache_before_engine_stops(
+        release: impl AsyncFnOnce(SlateDbCache),
+    ) {
+        let events = Events::default();
+        let disk_engine = DiskEngineRuntime::start().expect("disk engine runtime starts");
+        let task = EngineTask(Arc::clone(&events));
+        disk_engine.handle.spawn(async move {
+            let _task = task;
+            std::future::pending::<()>().await;
+        });
+        let cache =
+            SlateDbCache::hybrid(Arc::new(RecordingCache(Arc::clone(&events))), disk_engine);
+
+        release(cache).await;
+        let started = Instant::now();
+        while events.lock().len() < 2 && started.elapsed() < RELEASE_DEADLINE {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*events.lock(), ["cache closed", "engine task dropped"]);
+    }
+
+    #[tokio::test]
+    async fn closing_a_hybrid_cache_closes_it_before_its_disk_engine_stops() {
+        assert_release_closes_cache_before_engine_stops(async |cache: SlateDbCache| {
+            cache.close().await.expect("hybrid cache closes");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dropping_an_unclosed_hybrid_cache_closes_it_before_its_disk_engine_stops() {
+        assert_release_closes_cache_before_engine_stops(async |cache: SlateDbCache| drop(cache))
+            .await;
+    }
+
+    /// A close that runs on a shutting-down caller can drop the engine unrun,
+    /// so dropping one must never wait, which would panic on an async worker.
+    #[tokio::test]
+    async fn dropping_a_disk_engine_runtime_on_an_async_worker_does_not_wait() {
+        drop(DiskEngineRuntime::start().expect("disk engine runtime starts"));
     }
 
     #[tokio::test]
@@ -303,10 +478,10 @@ mod tests {
         let SlateDbCache::Hybrid { disk_engine, .. } = &cache else {
             panic!("hybrid mode builds a hybrid cache");
         };
-        assert!(disk_engine.runtime.lock().is_some());
+        assert!(disk_engine.lock().is_some());
 
         cache.close().await.expect("hybrid cache closes");
-        assert!(disk_engine.runtime.lock().is_none());
+        assert!(disk_engine.lock().is_none());
         cache
             .close()
             .await
