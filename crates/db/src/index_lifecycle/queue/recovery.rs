@@ -123,10 +123,13 @@ pub(crate) async fn load_backlog(
         load_queue(reader, backlog, &mut owners, &mut summary, queue).await?;
     }
     drop(legacy);
+    // The walk starts at the tenant keyspace itself, not tenant zero's queue
+    // range, so a malformed envelope sorting before that range (such as a
+    // lone `TENANT_KEY_PREFIX`) is read and fails the open closed. It costs
+    // at most one seek more than starting inside tenant zero's range.
     let mut tenants = reader
         .scan(
-            discovery_range(DataScope::Tenant(TenantId::from_u128(0))).start
-                ..Bytes::from_static(&[TENANT_KEY_PREFIX + 1]),
+            Bytes::from_static(&[TENANT_KEY_PREFIX])..Bytes::from_static(&[TENANT_KEY_PREFIX + 1]),
         )
         .await?;
     while let Some(row) = next_tenant_queue_row(&mut tenants).await? {

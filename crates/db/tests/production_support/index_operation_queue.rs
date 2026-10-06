@@ -722,6 +722,20 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
             vec![0x01],
             "tenant discovery encountered an invalid envelope",
         ),
+        // Malformed envelopes sorting before tenant zero's queue range: the
+        // lone marker, and one byte short of tenant zero's envelope.
+        (
+            "queue-tenant-envelope-marker",
+            vec![TENANT_KEY_PREFIX],
+            vec![0x01],
+            "tenant discovery encountered an invalid envelope",
+        ),
+        (
+            "queue-tenant-envelope-short-zero",
+            [vec![TENANT_KEY_PREFIX], vec![0x00; 15]].concat(),
+            vec![0x01],
+            "tenant discovery encountered an invalid envelope",
+        ),
         (
             "queue-undecodable",
             raw_target(1).key().to_vec(),

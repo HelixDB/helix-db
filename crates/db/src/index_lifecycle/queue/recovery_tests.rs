@@ -698,6 +698,20 @@ async fn corrupt_keys_values_and_envelopes_fail_closed() {
             b"x".to_vec(),
             "tenant discovery encountered an invalid envelope",
         ),
+        // Malformed envelopes sorting before tenant zero's queue range: the
+        // lone marker, and one byte short of tenant zero's envelope.
+        (
+            "lone envelope marker",
+            vec![TENANT_KEY_PREFIX],
+            b"x".to_vec(),
+            "tenant discovery encountered an invalid envelope",
+        ),
+        (
+            "short tenant zero envelope",
+            [vec![TENANT_KEY_PREFIX], vec![0x00; 15]].concat(),
+            b"x".to_vec(),
+            "tenant discovery encountered an invalid envelope",
+        ),
     ] {
         let db = raw_db(Arc::new(InMemory::new())).await;
         enqueue(
