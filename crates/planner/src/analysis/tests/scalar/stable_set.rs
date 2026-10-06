@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn bounded_literal_sets_match_legacy_scalar_identity_and_first_representatives() {
+fn bounded_literal_sets_keep_first_representatives_by_query_equality_identity() {
     let leaves = vec![
         PropertyValue::Null,
         PropertyValue::Bool(false),
@@ -37,10 +37,13 @@ fn bounded_literal_sets_match_legacy_scalar_identity_and_first_representatives()
             let input: Vec<_> = (0..size)
                 .map(|index| leaves[(index + offset) % leaves.len()].clone())
                 .collect();
+            // Values without a hashable identity (heterogeneous arrays and
+            // objects) all stay; a proof treats their repeats as one value.
             let expected = input.iter().cloned().fold(Vec::new(), |mut unique, value| {
-                if !unique
-                    .iter()
-                    .any(|previous| property_values_equal(previous, &value))
+                if property_value_identity(&value).is_none()
+                    || !unique
+                        .iter()
+                        .any(|previous| property_values_equal(previous, &value))
                 {
                     unique.push(value);
                 }

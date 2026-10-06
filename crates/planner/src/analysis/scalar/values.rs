@@ -228,14 +228,27 @@ fn canonical_number(value: &PropertyValue) -> Option<CanonicalNumber> {
     }
 }
 
-/// `values` without repeats under [`property_values_equal`], keeping each
-/// first representative in first-seen order, in `O(n log n)` comparisons.
+/// `values` without repeats under [`property_values_equal`], in first-seen
+/// order, in linear time.
+///
+/// Repeats are found by [`property_value_identity`]. Values without an
+/// identity (NaN, heterogeneous arrays, objects) all stay, which a proof over
+/// the allowed values treats as one value anyway.
 fn dedup_property_values(values: Vec<PropertyValue>) -> Vec<PropertyValue> {
-    super::super::literal_set::dedup_by(
-        values,
-        |left, right| super::super::literal_set::LiteralOrder::ScalarNumeric.compare(left, right),
-        property_values_equal,
-    )
+    let mut seen = std::collections::HashSet::new();
+    let first_seen = values
+        .iter()
+        .map(|value| property_value_identity(value).is_none_or(|identity| seen.insert(identity)))
+        .collect::<Vec<_>>();
+    let mut values = values
+        .into_iter()
+        .zip(first_seen)
+        .filter_map(|(value, first_seen)| first_seen.then_some(value))
+        .collect::<Vec<_>>();
+    // Collecting reuses the input allocation; a duplicate-heavy list must not
+    // keep the original wide capacity in the plan.
+    values.shrink_to_fit();
+    values
 }
 
 /// Hashable identity of a property value under [`property_values_equal`]:
