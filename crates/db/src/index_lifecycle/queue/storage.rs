@@ -4,12 +4,14 @@
 //! and acknowledgements stage blind merge operands. [`QueueLayout::Rows`]
 //! stores one row per operation under a writer-allocated sequence and
 //! acknowledges by deleting that row; it is the baseline for queue-layout
-//! benchmarks. Both layouts decode into the same [`OperationQueue`], so the
-//! producer, the publisher, recovery, and search overlays run identical logic
-//! over either layout. Only test and benchmark builds can select the row
-//! layout. A database always reopens with the layout that wrote its queues:
-//! writer opens fail closed on the other layout's queues, and so do reader
-//! opens in builds that can select it.
+//! benchmarks. Both layouts read into the same [`StoredQueue`] for
+//! publication, [`LatestOperations`] for search overlays, and
+//! [`OperationFrame`]s for startup accounting, so the publisher, recovery,
+//! and search overlays run identical logic over either layout. Only test and
+//! benchmark builds can select the row layout. A database always reopens
+//! with the layout that wrote its queues: writer opens fail closed on the
+//! other layout's queues, and so do reader opens in builds that can select
+//! it.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
