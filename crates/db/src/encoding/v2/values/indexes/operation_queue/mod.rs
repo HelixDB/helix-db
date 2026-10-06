@@ -476,19 +476,7 @@ impl OperationQueue {
     /// corruption at this boundary. Corrupt values are errors, never empty
     /// queues.
     pub(crate) fn decode(value: &[u8]) -> Result<Self, EncodingError> {
-        let (family, records) = resolved_records(value)?;
-        let mut ids = std::collections::HashSet::new();
-        let operations = records
-            .map(|record| {
-                let (id, body) = record?;
-                if !ids.insert(id) {
-                    return Err(EncodingError::Custom(
-                        "queued value inserts one operation ID twice".to_string(),
-                    ));
-                }
-                decode_body(family, id, body)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let (family, operations) = decode_unique(value, decode_body)?;
         Ok(Self { family, operations })
     }
 
@@ -535,20 +523,7 @@ impl OperationFrame {
     /// Reads every operation's frame from one resolved queue value, in
     /// storage order.
     pub(crate) fn decode_queue(value: &[u8]) -> Result<(QueueFamily, Vec<Self>), EncodingError> {
-        let (family, records) = resolved_records(value)?;
-        let mut ids = std::collections::HashSet::new();
-        let frames = records
-            .map(|record| {
-                let (id, body) = record?;
-                if !ids.insert(id) {
-                    return Err(EncodingError::Custom(
-                        "queued value inserts one operation ID twice".to_string(),
-                    ));
-                }
-                Self::validate(family, id, body)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((family, frames))
+        decode_unique(value, Self::validate)
     }
 
     /// Reads one row-layout value's frame.
@@ -740,6 +715,30 @@ fn resolved_records(value: &[u8]) -> Result<(QueueFamily, ResolvedRecords<'_>), 
         ));
     }
     Ok((family, ResolvedRecords { cursor, remaining }))
+}
+
+/// Decodes each record of one resolved value with `decode`, in storage
+/// order, as a full [`OperationQueue::decode`] and startup's
+/// [`OperationFrame::decode_queue`] both read it: the value must name each
+/// operation ID once, so both accept and reject the same framing.
+fn decode_unique<T>(
+    value: &[u8],
+    decode: impl Fn(QueueFamily, QueuedOperationId, &[u8]) -> Result<T, EncodingError>,
+) -> Result<(QueueFamily, Vec<T>), EncodingError> {
+    let (family, records) = resolved_records(value)?;
+    let mut ids = std::collections::HashSet::new();
+    let decoded = records
+        .map(|record| {
+            let (id, body) = record?;
+            if !ids.insert(id) {
+                return Err(EncodingError::Custom(
+                    "queued value inserts one operation ID twice".to_string(),
+                ));
+            }
+            decode(family, id, body)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((family, decoded))
 }
 
 /// Each record of one resolved value as its operation ID and encoded body,
