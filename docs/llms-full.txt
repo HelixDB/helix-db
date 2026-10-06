@@ -261,7 +261,7 @@ TypeScript, and Python ship embedded runtimes; the Go SDK is currently HTTP-only
 
 Page type: Guide
 
-The `ghcr.io/helixdb/helixdb:v0.0.9` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.10` image runs the standalone HelixDB server.
 It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
@@ -300,9 +300,12 @@ helix start dev             # add --disk to persist this instance
 
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
-For an existing project, set `tag = "v0.0.9"` in its `[local.dev]` block in
+For an existing project, set `tag = "v0.0.10"` in its `[local.dev]` block in
 `helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
 
+The first time v0.0.10 opens a persisted database, it upgrades the index storage
+version, and v0.0.9 and earlier then refuse to open that database. Back up the data
+before changing the tag if you may need to roll back.
 ```bash
 helix query dev \
   -e 'readBatch().varAs("count", g().nWithLabel("User").count()).returning(["count"])'
@@ -347,7 +350,7 @@ Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 ```bash
 docker run --rm --name helixdb \
   -p 6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.9
+  ghcr.io/helixdb/helixdb:v0.0.10
 ```
 
 The standalone server exposes liveness and readiness checks:
@@ -371,7 +374,7 @@ docker run --rm --name helixdb \
   -p 6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
-  ghcr.io/helixdb/helixdb:v0.0.9
+  ghcr.io/helixdb/helixdb:v0.0.10
 ```
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
@@ -430,7 +433,7 @@ services:
       retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.9
+    image: ghcr.io/helixdb/helixdb:v0.0.10
     restart: unless-stopped
     depends_on:
       seaweedfs:
@@ -519,7 +522,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.9
+  ghcr.io/helixdb/helixdb:v0.0.10
 ```
 
 In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
@@ -1283,6 +1286,19 @@ Have a feature request? [Let us know on Discord](https://discord.com/invite/2stg
 # Release notes
 
 Page type: Reference
+
+- **Upgrading: index storage version 5.** The first time a v0.0.10 writer opens a database, it upgrades the index storage version from 4 to 5. It rewrites only the version marker and rebuilds no index. After that, v0.0.9 and earlier refuse to open the database with `unsupported_index_storage_version`:
+  - Upgrade readers before the writer; v0.0.10 readers serve both versions.
+  - Never start a v0.0.9-or-earlier writer against an upgraded database.
+  - Take a backup before upgrading if you may need to roll back.
+- **[Vector and text indexes publish asynchronously](/database/helix-db/query-guides/search-consistency).** A write commits its graph change together with a durable queued index operation, and a background index worker publishes it into the vector or text index, so writes no longer wait on index maintenance. Steady vector insert publication went from 6.2 to 239 per second. Index builds no longer livelock under concurrent writes: on a c7i.8xlarge with 100 writes/s during the build, backfilling 100K 768-dimension vectors on disk finished in about 2,500 s, where v0.0.9 never finished.
+- **Search consistency.** Read requests set `search_consistency` to `strong` (the default) or `eventual`. `strong` searches include every committed write, published or not. `eventual` searches include a bounded amount of unpublished work and serve the rest as last published, so they can return a node or edge that has since changed tenant, label or indexed property. Write requests always search `strong`, and a write batch that searches an index fails with a retryable `transaction_conflict` if the index worker publishes into that index first. The SDK options ship in the next SDK releases; until then, send `search_consistency` in a direct HTTP request.
+- **[Index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).** Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work. Three cases fail with `index_backpressure` (HTTP 429, `retryable: true`) before the request takes effect: a write past either limit, a whole-index `strong` search behind more than 800 unpublished changes, and a `strong` text search that would analyze more unpublished text than one publication may (64 MiB by default). Retry it unchanged with bounded backoff. A single write that stages more than 8 MiB of index work for one index fails with `index_operation_batch_too_large` (HTTP 400); split it.
+- **[Text write limits are per document](/database/helix-cloud/operate/limits#active-text-mutation-admission).** `active_text_mutation_limit_exceeded` now checks each indexed document against its own allowances, about 16,000 unique terms, instead of limiting a write to 512 text-indexed entities.
+- **A failing index entry no longer stalls its index.** An entry whose index update fails the same way every time, for example on damaged index data, is held back while the rest of the index keeps publishing. `GET /healthz` counts it under `blocked_index_entity_count`, the server logs an error naming it, and the worker retries it about once a minute. See [troubleshooting](/database/helix-db/query-guides/troubleshooting).
+- **Fixed: `missing simhash` after re-embedding and then deleting a node** (the v0.0.9 known issue). Re-embedding a node no longer loses track of the vector index (HNSW) links that point at it, so deleting it later removes them all, and a node is never linked to itself. Indexes written by v0.0.9 and earlier can still hold such links; drop and recreate the vector index to repair them.
+- **Fixed: counts over a range index with other indexed filters.** A `.count()` over `N<L>.where(...)` or `E<L>.where(...)` that combined a range condition with other indexed conditions counted the range alone, for example 149 rows instead of 49. Counts now apply every filter.
+- **CLI 3.4.3** defaults to image v0.0.10. Projects that saved a `tag` in `helix.toml` keep using it until you change it.
 
 - **Upgrading S3 deployments** — S3 storage now always writes a local disk cache, so an S3 container that ran v0.0.8 or earlier can fail or use more resources after the upgrade:
   - The cache directory, `/var/cache/helix` unless `HELIX_DISK_CACHE_DIR` names another, must be writable. Mount a volume there (required with a read-only root filesystem), and set `HELIX_DISK_CACHE_DIR` when running as a user other than `65532`.
@@ -6869,7 +6885,7 @@ When a command cannot choose a resource on its own, pass it by ID, slug, or name
 
 Page type: Guide
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.9` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.10` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -8470,7 +8486,7 @@ helix start [INSTANCE] [OPTIONS]
 
 ## Behavior
 
-- Defaults to `ghcr.io/helixdb/helixdb:v0.0.9`. Flags override the image tag and pull policy set in `[local.<instance>]`.
+- Defaults to `ghcr.io/helixdb/helixdb:v0.0.10`. Flags override the image tag and pull policy set in `[local.<instance>]`.
 - `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
 - All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
@@ -8511,7 +8527,7 @@ helix start dev --disk
 helix start dev --image-version latest
 
 # Save a specific image version
-helix start dev --image-version v0.0.9 --persist
+helix start dev --image-version v0.0.10 --persist
 
 # Start using cached images only
 helix start dev --pull never
