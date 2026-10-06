@@ -989,17 +989,7 @@ pub(crate) fn build_analyzed_documents_as_split(
             .iter()
             .flat_map(|document| document.analyzed.statistics().unique_terms.iter().cloned()),
     );
-    populate_analyzed_index(
-        &index,
-        fields,
-        documents.into_iter().map(|document| {
-            (
-                document.entity_id,
-                document.logical_version,
-                document.analyzed.into_pre_tokenized_string(),
-            )
-        }),
-    )?;
+    populate_analyzed_index(&index, fields, documents)?;
 
     let mut file_names = index.directory().list_managed_files();
     file_names.insert(PathBuf::from(META_JSON_FILE));
@@ -1470,21 +1460,21 @@ fn populate_index(
     Ok(())
 }
 
-/// Indexes `(entity ID, logical version, token stream)` documents.
 fn populate_analyzed_index(
     index: &Index,
     fields: TextSchemaFields,
-    documents: impl IntoIterator<Item = (u64, u64, PreTokenizedString)>,
+    documents: Vec<AnalyzedTextDocumentInput>,
 ) -> Result<(), HelixDbError> {
     let mut writer = index.writer(15_000_000).map_err(|error| {
         HelixDbError::Config(format!("failed to create Tantivy writer: {error}"))
     })?;
     writer.set_merge_policy(Box::new(NoMergePolicy));
-    for (entity_id, logical_version, tokens) in documents {
+    for document in documents {
         let mut tantivy_document = TantivyDocument::default();
-        tantivy_document.add_u64(fields.entity_id, entity_id);
-        tantivy_document.add_u64(fields.logical_version, logical_version);
-        tantivy_document.add_pre_tokenized_text(fields.body, tokens);
+        tantivy_document.add_u64(fields.entity_id, document.entity_id);
+        tantivy_document.add_u64(fields.logical_version, document.logical_version);
+        tantivy_document
+            .add_pre_tokenized_text(fields.body, document.analyzed.into_pre_tokenized_string());
         writer.add_document(tantivy_document).map_err(|error| {
             HelixDbError::Config(format!("failed to add Tantivy document: {error}"))
         })?;
@@ -1735,24 +1725,37 @@ fn search_index(
     search_reader(&reader, fields, analyzer, query, k)
 }
 
-/// Analysis bytes of the pending documents each in-memory overlay indexed, by
-/// index label, so a test bounds its own searches' analysis without observing
+/// Analysis bytes of the pending documents each overlay scored, by index
+/// label, so a test bounds its own searches' analysis without observing
 /// searches of tests running beside it.
 #[cfg(test)]
 pub(crate) static PENDING_ANALYSIS_BYTES: std::sync::Mutex<Vec<(String, u64)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Searches pending documents in memory exactly as persisted splits are searched.
+/// Pending documents one scoring step scores between cancellation checks.
+const PENDING_SCORE_CHUNK: usize = 4_096;
+
+/// Scores pending documents exactly as persisted splits score them.
 ///
-/// The same schema, analyzer, OR-term query, deterministic collector, traversal
-/// scope, and caller-supplied BM25 statistics produce scores that merge
-/// directly with physical split results. Each document arrives analyzed
-/// ([`analyze_text_for_indexing`]), possibly by an earlier search, and is
-/// indexed from a copy of its token stream.
+/// Each document arrives analyzed ([`analyze_text_for_indexing`]), possibly
+/// by an earlier search, and is scored from that analysis in place rather
+/// than copied into an in-memory index, and only the `k` best are kept, so a
+/// search's memory grows with `k`, not its documents. Every query term is
+/// one OR clause weighted by Tantivy's BM25 for the caller-supplied
+/// statistics, as each persisted term query weighs it; a document's field
+/// norm and term frequencies are those indexing its token stream records. A
+/// document matching no term never ranks, and hits rank by score, then
+/// ascending entity ID, as the persisted collector ranks them. Clause scores
+/// are summed in query-term order: Tantivy's own order varies with index
+/// layout, so a document matching three or more terms may differ from its
+/// published score in the last place, as it may between two persisted
+/// layouts.
 ///
-/// The caller selected `documents` within `analysis_limit` of charged
-/// analysis, so documents charged past it are an invariant violation rather
-/// than a limit a request can reach.
+/// The caller restricts `documents` to the search's traversal scope and
+/// selected them within `analysis_limit` of charged analysis, so documents
+/// charged past it are an invariant violation rather than a limit a request
+/// can reach. Scoring calls `check` before each step of at most 4,096
+/// documents and stops with its error.
 pub(crate) fn search_pending_documents(
     definition: &TextIndexDefinition,
     documents: &[(u64, Arc<IndexedTextAnalysis>)],
@@ -1760,9 +1763,10 @@ pub(crate) fn search_pending_documents(
     query: &str,
     k: usize,
     statistics: &crate::index_lifecycle::text::statistics::TextBm25Statistics,
-    scope: &TextSearchScope,
+    mut check: impl FnMut() -> Result<(), HelixDbError>,
 ) -> Result<Vec<TextSearchHit>, HelixDbError> {
-    if documents.is_empty() {
+    let terms = analyze_query_terms(definition.analyzer(), query);
+    if documents.is_empty() || terms.is_empty() || k == 0 {
         return Ok(Vec::new());
     }
     let charged = documents
@@ -1780,30 +1784,73 @@ pub(crate) fn search_pending_documents(
         .lock()
         .expect("pending analysis log is never poisoned")
         .push((definition.label().to_string(), charged));
-    let (index, fields) = create_ram_index(definition)?;
-    populate_analyzed_index(
-        &index,
-        fields,
-        documents
+    let (_, fields) = build_schema(definition.analyzer(), definition.positions_enabled());
+    let weights = terms
+        .iter()
+        .map(|term| {
+            tantivy::query::Bm25Weight::for_terms(
+                statistics,
+                &[Term::from_field_text(fields.body, term)],
+            )
+        })
+        .collect::<tantivy::Result<Vec<_>>>()
+        .map_err(|error| {
+            HelixDbError::InvariantViolation(format!(
+                "pending text statistics failed to weigh a query term: {error}"
+            ))
+        })?;
+    // Analyzed query terms are unique and sorted, so each token finds its
+    // clause by binary search; the counts are reused across documents rather
+    // than allocated per document.
+    debug_assert!(terms.is_sorted());
+    let mut term_frequencies = vec![0_u32; terms.len()];
+    let mut score = |analysis: &IndexedTextAnalysis| {
+        term_frequencies.fill(0);
+        analysis
+            .pre_tokenized
+            .tokens
             .iter()
-            .map(|(entity_id, analysis)| (*entity_id, 0, analysis.pre_tokenized.clone())),
+            .filter_map(|token| terms.binary_search(&token.text).ok())
+            .for_each(|clause| {
+                term_frequencies[clause] = term_frequencies[clause].saturating_add(1);
+            });
+        let fieldnorm_id = tantivy::fieldnorm::FieldNormReader::fieldnorm_to_id(
+            u32::try_from(analysis.statistics.token_count).unwrap_or(u32::MAX),
+        );
+        term_frequencies
+            .iter()
+            .zip(&weights)
+            .filter(|(frequency, _)| **frequency > 0)
+            .map(|(frequency, weight)| weight.score(fieldnorm_id, *frequency))
+            .reduce(|total, score| total + score)
+    };
+    let rank = |left: &TextSearchHit, right: &TextSearchHit| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+    };
+    // Only a document among a step's `k` best, ties broken by entity ID, can
+    // be among the `k` best overall.
+    let mut hits = documents.chunks(PENDING_SCORE_CHUNK).try_fold(
+        Vec::with_capacity(k.saturating_add(PENDING_SCORE_CHUNK).min(documents.len())),
+        |mut best, chunk| {
+            check()?;
+            best.extend(chunk.iter().filter_map(|(entity_id, analysis)| {
+                score(analysis).map(|score| TextSearchHit {
+                    entity_id: *entity_id,
+                    score,
+                })
+            }));
+            if best.len() > k {
+                best.select_nth_unstable_by(k - 1, rank);
+                best.truncate(k);
+            }
+            Ok::<_, HelixDbError>(best)
+        },
     )?;
-    let reader = build_reader(&index)?;
-    Ok(search_reader_candidates_with_statistics(
-        &reader,
-        fields,
-        definition.analyzer(),
-        query,
-        k,
-        Some(statistics),
-        scope,
-    )?
-    .into_iter()
-    .map(|candidate| TextSearchHit {
-        entity_id: candidate.entity_id,
-        score: candidate.score,
-    })
-    .collect())
+    hits.sort_unstable_by(rank);
+    Ok(hits)
 }
 
 fn build_reader(index: &Index) -> Result<IndexReader, HelixDbError> {
@@ -2713,6 +2760,307 @@ mod tests {
 
             prop_assert_eq!(restricted, oracle);
         }
+    }
+
+    /// Analyzes `text` as a text search analyzes pending documents.
+    fn pending_analysis(text: &str) -> Arc<IndexedTextAnalysis> {
+        Arc::new(
+            analyze_text_for_indexing(
+                TextAnalyzerKind::Standard,
+                text.to_string(),
+                &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Statistics of `documents` plus `others` documents published beside
+    /// them, holding `other_tokens` tokens and each analyzed term
+    /// `other_frequency` times.
+    fn corpus_statistics(
+        documents: &[(u64, Arc<IndexedTextAnalysis>)],
+        others: u64,
+        other_tokens: u64,
+        other_frequency: u64,
+    ) -> crate::index_lifecycle::text::statistics::TextBm25Statistics {
+        let mut frequencies = BTreeMap::<Bytes, u64>::new();
+        documents
+            .iter()
+            .flat_map(|(_, analysis)| &analysis.statistics.unique_terms)
+            .for_each(|term| *frequencies.entry(term.clone()).or_default() += 1);
+        frequencies
+            .values_mut()
+            .for_each(|frequency| *frequency += other_frequency.min(others));
+        crate::index_lifecycle::text::statistics::TextBm25Statistics::for_benchmark(
+            documents.len() as u64 + others,
+            documents
+                .iter()
+                .map(|(_, analysis)| analysis.statistics.token_count)
+                .sum::<u64>()
+                + other_tokens,
+            frequencies,
+        )
+    }
+
+    /// What a Tantivy index of `documents`, built as publication builds a
+    /// split, answers for the same statistics and scope.
+    fn indexed_hits(
+        documents: &[(u64, Arc<IndexedTextAnalysis>)],
+        query: &str,
+        k: usize,
+        statistics: &crate::index_lifecycle::text::statistics::TextBm25Statistics,
+        scope: &TextSearchScope,
+    ) -> Vec<TextSearchHit> {
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let (index, fields) = create_ram_index(&definition).unwrap();
+        populate_analyzed_index(
+            &index,
+            fields,
+            documents
+                .iter()
+                .map(|(entity_id, analysis)| AnalyzedTextDocumentInput {
+                    entity_id: *entity_id,
+                    logical_version: 0,
+                    analyzed: (**analysis).clone(),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let reader = build_reader(&index).unwrap();
+        search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            query,
+            k,
+            Some(statistics),
+            scope,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|candidate| TextSearchHit {
+            entity_id: candidate.entity_id,
+            score: candidate.score,
+        })
+        .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Scoring pending analyses in place answers exactly what indexing
+        /// them answers, to the bit, for queries of up to two terms: field
+        /// norms past Tantivy's lossless range, repeated terms, documents
+        /// matching nothing or holding no token, ties, restricted scopes,
+        /// and corpus statistics beyond the pending documents.
+        #[test]
+        fn pending_documents_score_exactly_as_an_index_of_them(
+            bodies in prop::collection::vec(prop::collection::vec(0_usize..5, 0..120), 1..24),
+            query in prop::collection::vec(0_usize..6, 1..3),
+            restricted in prop::option::of(prop::collection::vec(0_u64..80, 0..40)),
+            published in (0_u64..1_000, 0_u64..50_000, 0_u64..1_000),
+            k in 1_usize..30,
+        ) {
+            const WORDS: [&str; 6] = ["alpha", "beta", "gamma", "delta", "epsilon", "missing"];
+            let (others, other_tokens, other_frequency) = published;
+            let documents = bodies
+                .iter()
+                .enumerate()
+                .map(|(ordinal, words)| {
+                    let text = words.iter().map(|word| WORDS[*word]).collect::<Vec<_>>();
+                    (ordinal as u64 * 3 + 1, pending_analysis(&text.join(" ")))
+                })
+                .collect::<Vec<_>>();
+            let statistics = corpus_statistics(&documents, others, other_tokens, other_frequency);
+            let query = query.iter().map(|word| WORDS[*word]).collect::<Vec<_>>().join(" ");
+            let scope = restricted.map_or(TextSearchScope::Unrestricted, |ids| {
+                TextSearchScope::restricted(Arc::new(RestrictedTextCandidates::from_ids(ids).unwrap()))
+            });
+            let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+            // The caller passes only documents in scope.
+            let in_scope = documents
+                .iter()
+                .filter(|(id, _)| scope.candidates().is_none_or(|ids| ids.contains(*id)))
+                .cloned()
+                .collect::<Vec<_>>();
+            let scored = search_pending_documents(
+                &definition,
+                &in_scope,
+                NonZeroU64::MAX,
+                &query,
+                k,
+                &statistics,
+                || Ok(()),
+            )
+            .unwrap();
+            prop_assert_eq!(scored, indexed_hits(&documents, &query, k, &statistics, &scope));
+        }
+    }
+
+    /// Past two matching terms only the float sum order may differ from an
+    /// index's, never the hits or more than rounding.
+    #[test]
+    fn pending_documents_matching_many_terms_score_within_rounding_of_an_index() {
+        let documents = (0..40_u64)
+            .map(|id| {
+                let filler = "epsilon ".repeat(usize::try_from(id).unwrap());
+                (
+                    id,
+                    pending_analysis(&format!("alpha beta gamma delta {filler}")),
+                )
+            })
+            .collect::<Vec<_>>();
+        let statistics = corpus_statistics(&documents, 100, 4_000, 7);
+        let query = "delta gamma beta alpha epsilon";
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let by_id = |mut hits: Vec<TextSearchHit>| {
+            hits.sort_by_key(|hit| hit.entity_id);
+            hits
+        };
+        let scored = by_id(
+            search_pending_documents(
+                &definition,
+                &documents,
+                NonZeroU64::MAX,
+                query,
+                documents.len(),
+                &statistics,
+                || Ok(()),
+            )
+            .unwrap(),
+        );
+        let indexed = by_id(indexed_hits(
+            &documents,
+            query,
+            documents.len(),
+            &statistics,
+            &TextSearchScope::Unrestricted,
+        ));
+        assert_eq!(scored.len(), documents.len());
+        for (scored, indexed) in scored.iter().zip(&indexed) {
+            assert_eq!(scored.entity_id, indexed.entity_id);
+            assert!(
+                (scored.score - indexed.score).abs() <= indexed.score * 4.0 * f32::EPSILON,
+                "{scored:?} vs {indexed:?}"
+            );
+        }
+    }
+
+    /// Ties keep the lowest entity IDs; a zero `k` or a query without terms
+    /// finds nothing; documents charged past the bound their selection was
+    /// sized to are an invariant violation, not a result.
+    #[test]
+    fn pending_document_scoring_ranks_ties_and_rejects_impossible_input() {
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let documents = [9_u64, 4, 7, 1, 5]
+            .map(|id| (id, pending_analysis("alpha beta")))
+            .to_vec();
+        let statistics = corpus_statistics(&documents, 0, 0, 0);
+        let search = |query: &str, k: usize, limit: u64| {
+            search_pending_documents(
+                &definition,
+                &documents,
+                NonZeroU64::new(limit).unwrap(),
+                query,
+                k,
+                &statistics,
+                || Ok(()),
+            )
+        };
+        let charged = documents
+            .iter()
+            .map(|(_, analysis)| analysis.retained_bytes())
+            .sum::<u64>();
+        let top = search("alpha", 3, charged).unwrap();
+        assert_eq!(
+            top.iter().map(|hit| hit.entity_id).collect::<Vec<_>>(),
+            [1, 4, 5]
+        );
+        assert_eq!(
+            top,
+            indexed_hits(
+                &documents,
+                "alpha",
+                3,
+                &statistics,
+                &TextSearchScope::Unrestricted
+            )
+        );
+        assert!(search("alpha", 0, charged).unwrap().is_empty());
+        assert!(search("!! ??", 3, charged).unwrap().is_empty());
+        assert!(matches!(
+            search("alpha", 3, charged - 1),
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+    }
+
+    /// Scoring in steps keeps exactly the `k` best of every document, ties
+    /// across steps included, and checks before each step, stopping with
+    /// the check's error.
+    #[test]
+    fn pending_document_scoring_keeps_the_k_best_across_steps_and_checks_each() {
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let count = 2 * PENDING_SCORE_CHUNK as u64 + 5;
+        // Field norms repeat every seven documents, so scores tie across
+        // steps; every fifth document matches nothing.
+        let documents = (0..count)
+            .map(|id| {
+                let body = if id % 5 == 0 {
+                    "other".to_string()
+                } else {
+                    format!("alpha {}", "beta ".repeat(usize::try_from(id % 7).unwrap()))
+                };
+                (count - id, pending_analysis(&body))
+            })
+            .collect::<Vec<_>>();
+        let statistics = corpus_statistics(&documents, 0, 0, 0);
+        for k in [1, 10, PENDING_SCORE_CHUNK + 1, count as usize] {
+            let mut checks = 0;
+            let scored = search_pending_documents(
+                &definition,
+                &documents,
+                NonZeroU64::MAX,
+                "alpha",
+                k,
+                &statistics,
+                || {
+                    checks += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(checks, 3, "k {k}");
+            assert_eq!(
+                scored,
+                indexed_hits(
+                    &documents,
+                    "alpha",
+                    k,
+                    &statistics,
+                    &TextSearchScope::Unrestricted
+                ),
+                "k {k}"
+            );
+        }
+        let mut checks = 0;
+        let error = search_pending_documents(
+            &definition,
+            &documents,
+            NonZeroU64::MAX,
+            "alpha",
+            10,
+            &statistics,
+            || {
+                checks += 1;
+                if checks == 2 {
+                    return Err(HelixDbError::QueryDeadlineExceeded);
+                }
+                Ok(())
+            },
+        )
+        .expect_err("a failed check stops scoring");
+        assert!(matches!(error, HelixDbError::QueryDeadlineExceeded));
+        assert_eq!(checks, 2);
     }
 
     #[test]

@@ -493,8 +493,9 @@ impl<'db> ExecutionContext<'db> {
     /// persisted contributions leave the corpus statistics, and their latest
     /// documents in the searched partition, analyzed in `overlay` (one entry
     /// per selected entity, in selection order), join them and are scored
-    /// against the same statistics in an in-memory index. Only documents
-    /// holding a query term are indexed: the query is a disjunction of its
+    /// from those analyses against the same statistics, on the blocking pool
+    /// ([`crate::search::text::search_pending_documents`]). Only documents
+    /// holding a query term are scored: the query is a disjunction of its
     /// terms, so any other document matches no clause and never ranks. A
     /// traversal-restricted search removes superseded entities from its
     /// candidate set and skips its physical search when none remain. An
@@ -503,8 +504,8 @@ impl<'db> ExecutionContext<'db> {
     /// limit to the caller, which fails or reruns it with a smaller
     /// selection. Only the first physical search that `demand` allows
     /// records a use of its splits. The caller analyzed `overlay` within
-    /// `analysis_limit` with [`PendingSelection::analyze_text`], which the
-    /// in-memory index asserts.
+    /// `analysis_limit` with [`PendingSelection::analyze_text`], which
+    /// scoring asserts.
     ///
     /// [`PendingSelection::analyze_text`]: super::pending::PendingSelection::analyze_text
     #[allow(
@@ -598,8 +599,7 @@ impl<'db> ExecutionContext<'db> {
             let definition = definition.clone();
             let query = query.to_string();
             let statistics = statistics.clone();
-            let scope = scope.clone();
-            tokio::task::spawn_blocking(move || {
+            super::blocking::run_blocking(&self.execution_control, move |probe| {
                 crate::search::text::search_pending_documents(
                     &definition,
                     &documents,
@@ -607,15 +607,10 @@ impl<'db> ExecutionContext<'db> {
                     &query,
                     k,
                     &statistics,
-                    &scope,
+                    || probe.check(),
                 )
             })
-            .await
-            .map_err(|error| {
-                HelixDbError::InvariantViolation(format!(
-                    "pending text search task failed: {error}"
-                ))
-            })??
+            .await?
         };
         let physical_scope = match scope.candidates() {
             Some(candidates) => {

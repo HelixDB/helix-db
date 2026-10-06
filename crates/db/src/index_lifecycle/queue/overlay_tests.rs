@@ -2650,9 +2650,8 @@ async fn held_back_text_counts_toward_the_strong_text_analysis_bound() {
 /// The strong text bound is its own setting, not the publication budget: a
 /// strong search stays exact past what one publication analyzes while
 /// eventual search still overlays only that much. Its analyses are reused by
-/// later searches, only documents holding a query term are indexed in
-/// memory, and the results equal the published index's after publication
-/// and a restart.
+/// later searches, only documents holding a query term are scored, and the
+/// results equal the published index's after publication and a restart.
 #[tokio::test]
 async fn strong_text_search_stays_exact_past_the_publication_budget() {
     const LABEL: &str = "OverlayStrongBoundDoc";
@@ -2703,14 +2702,14 @@ async fn strong_text_search_stays_exact_past_the_publication_budget() {
         db.pending_text_analyses().held_bytes(),
         DOCS as u64 * charge
     );
-    // No document holds the term, so nothing is indexed in memory.
+    // No document holds the term, so nothing is scored.
     assert!(search(&db, "missing", SearchConsistency::Strong)
         .await
         .is_empty());
     assert_eq!(
         analyzed(LABEL).len(),
         2,
-        "only matching documents are indexed"
+        "only matching documents are scored"
     );
     // Eventual search overlays one publication's analysis and serves the
     // rest as published (nothing yet).

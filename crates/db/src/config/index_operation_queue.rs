@@ -345,7 +345,9 @@ impl IndexOperationQueueTuning {
     ///
     /// The bound also caps the analyses the database keeps for reuse by
     /// later strong searches until their documents publish, and strong
-    /// searches analyze what is not kept one at a time. 512 MiB unless
+    /// searches analyze what is not kept one at a time and score documents
+    /// without copying them, so however many run at once the analyses of
+    /// unpublished text they hold stay about two bounds. 512 MiB unless
     /// [replaced](Self::with_strong_text_search_max_analysis_bytes).
     pub const fn strong_text_search_max_analysis_bytes(self) -> NonZeroU64 {
         self.strong_text_search_max_analysis_bytes

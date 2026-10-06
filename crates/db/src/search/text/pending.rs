@@ -1,10 +1,10 @@
 //! Analyses of unpublished text that text searches reuse.
 //!
 //! A text search overlays every unpublished document of its partition: it
-//! analyzes each one for exact BM25 statistics and indexes it in memory.
-//! Under sustained ingest nearly all of them were already pending for the
-//! previous search, so [`PendingTextAnalyses`] keeps their analyses keyed by
-//! the queued operation that carries them.
+//! analyzes each one for exact BM25 statistics and scores it from that
+//! analysis. Under sustained ingest nearly all of them were already pending
+//! for the previous search, so [`PendingTextAnalyses`] keeps their analyses
+//! keyed by the queued operation that carries them.
 //!
 //! # Exactness
 //!
@@ -34,10 +34,12 @@
 //! again.
 //!
 //! Strong searches analyze what the cache lacks one at a time
-//! ([`PendingTextAnalyses::analyzing`]), so however many run at once they
-//! analyze at most one bound of committed text together. A search also keeps
-//! what it read until it finishes, even analyses evicted meanwhile, and its
-//! write transaction's own documents, which are never cached.
+//! ([`PendingTextAnalyses::analyzing`]) and score documents from these
+//! analyses without copying them, so however many run at once their
+//! committed text takes about two bounds of analyses: one cached, one being
+//! analyzed. A search also keeps what it read until it finishes, even
+//! analyses evicted meanwhile, and its write transaction's own documents,
+//! which are never cached.
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;

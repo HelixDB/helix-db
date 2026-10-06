@@ -438,8 +438,8 @@ impl PendingSelection {
     /// [`PendingEntity::text_in`] has none.
     ///
     /// A text overlay needs the latest document of every selected entity in
-    /// the searched partition, for corpus statistics and for its in-memory
-    /// index, whether or not a traversal restricts the search. That work
+    /// the searched partition, for corpus statistics and to score it,
+    /// whether or not a traversal restricts the search. That work
     /// grows with the committed backlog rather than with `k`, so it is
     /// charged exactly as one publication charges the documents it analyzes
     /// ([`crate::search::text::TextAnalysisMemoryBudget`]: text bytes plus a
