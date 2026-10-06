@@ -195,6 +195,9 @@ mod tests {
             index_operation_queue: db::config::IndexOperationQueueTuning::default()
                 .with_strong_vector_search_max_pending_bytes(
                     std::num::NonZeroU64::new(1 << 20).unwrap(),
+                )
+                .with_strong_text_search_max_analysis_bytes(
+                    std::num::NonZeroU64::new(2 << 20).unwrap(),
                 ),
         };
         let Err(error) = open_database(Role::Reader, QueueLayout::Map, &config).await else {
