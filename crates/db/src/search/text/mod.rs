@@ -66,6 +66,7 @@ pub(crate) mod compaction;
 mod debug_proxy_directory;
 mod hot_directory;
 mod overlay_directory;
+pub(crate) mod pending;
 #[cfg(feature = "production-coverage")]
 mod prefilter_benchmark;
 mod restricted;
@@ -988,7 +989,17 @@ pub(crate) fn build_analyzed_documents_as_split(
             .iter()
             .flat_map(|document| document.analyzed.statistics().unique_terms.iter().cloned()),
     );
-    populate_analyzed_index(&index, fields, documents)?;
+    populate_analyzed_index(
+        &index,
+        fields,
+        documents.into_iter().map(|document| {
+            (
+                document.entity_id,
+                document.logical_version,
+                document.analyzed.into_pre_tokenized_string(),
+            )
+        }),
+    )?;
 
     let mut file_names = index.directory().list_managed_files();
     file_names.insert(PathBuf::from(META_JSON_FILE));
@@ -1459,21 +1470,21 @@ fn populate_index(
     Ok(())
 }
 
+/// Indexes `(entity ID, logical version, token stream)` documents.
 fn populate_analyzed_index(
     index: &Index,
     fields: TextSchemaFields,
-    documents: Vec<AnalyzedTextDocumentInput>,
+    documents: impl IntoIterator<Item = (u64, u64, PreTokenizedString)>,
 ) -> Result<(), HelixDbError> {
     let mut writer = index.writer(15_000_000).map_err(|error| {
         HelixDbError::Config(format!("failed to create Tantivy writer: {error}"))
     })?;
     writer.set_merge_policy(Box::new(NoMergePolicy));
-    for document in documents {
+    for (entity_id, logical_version, tokens) in documents {
         let mut tantivy_document = TantivyDocument::default();
-        tantivy_document.add_u64(fields.entity_id, document.entity_id);
-        tantivy_document.add_u64(fields.logical_version, document.logical_version);
-        tantivy_document
-            .add_pre_tokenized_text(fields.body, document.analyzed.into_pre_tokenized_string());
+        tantivy_document.add_u64(fields.entity_id, entity_id);
+        tantivy_document.add_u64(fields.logical_version, logical_version);
+        tantivy_document.add_pre_tokenized_text(fields.body, tokens);
         writer.add_document(tantivy_document).map_err(|error| {
             HelixDbError::Config(format!("failed to add Tantivy document: {error}"))
         })?;
@@ -1724,7 +1735,7 @@ fn search_index(
     search_reader(&reader, fields, analyzer, query, k)
 }
 
-/// Analysis bytes each successful pending-document analysis charged, by
+/// Analysis bytes of the pending documents each in-memory overlay indexed, by
 /// index label, so a test bounds its own searches' analysis without observing
 /// searches of tests running beside it.
 #[cfg(test)]
@@ -1735,15 +1746,16 @@ pub(crate) static PENDING_ANALYSIS_BYTES: std::sync::Mutex<Vec<(String, u64)>> =
 ///
 /// The same schema, analyzer, OR-term query, deterministic collector, traversal
 /// scope, and caller-supplied BM25 statistics produce scores that merge
-/// directly with physical split results.
+/// directly with physical split results. Each document arrives analyzed
+/// ([`analyze_text_for_indexing`]), possibly by an earlier search, and is
+/// indexed from a copy of its token stream.
 ///
-/// The caller sized `documents` to fit `analysis_limit` with
-/// [`analyze_text_within_budget`], which charges exactly what indexing them
-/// here charges, so analysis past it is an invariant violation rather than a
-/// limit a request can reach.
+/// The caller selected `documents` within `analysis_limit` of charged
+/// analysis, so documents charged past it are an invariant violation rather
+/// than a limit a request can reach.
 pub(crate) fn search_pending_documents(
     definition: &TextIndexDefinition,
-    documents: &[(u64, Arc<str>)],
+    documents: &[(u64, Arc<IndexedTextAnalysis>)],
     analysis_limit: NonZeroU64,
     query: &str,
     k: usize,
@@ -1753,40 +1765,29 @@ pub(crate) fn search_pending_documents(
     if documents.is_empty() {
         return Ok(Vec::new());
     }
-    let (index, fields) = create_ram_index(definition)?;
-    let mut budget = TextAnalysisMemoryBudget::new(analysis_limit);
-    let analyzed = documents
+    let charged = documents
         .iter()
-        .map(|(entity_id, text)| {
-            Ok(AnalyzedTextDocumentInput {
-                entity_id: *entity_id,
-                logical_version: 0,
-                analyzed: analyze_text_for_indexing(
-                    definition.analyzer(),
-                    text.to_string(),
-                    &mut budget,
-                )
-                .map_err(|error| {
-                    let HelixDbError::ActiveTextMutationLimitExceeded {
-                        observed, limit, ..
-                    } = error
-                    else {
-                        return error;
-                    };
-                    HelixDbError::InvariantViolation(format!(
-                        "pending text analysis reached {observed} bytes past the {limit} its \
-                         selection was sized to"
-                    ))
-                })?,
-            })
-        })
-        .collect::<Result<Vec<_>, HelixDbError>>()?;
+        .map(|(_, analysis)| analysis.retained_bytes())
+        .fold(0, u64::saturating_add);
+    if charged > analysis_limit.get() {
+        return Err(HelixDbError::InvariantViolation(format!(
+            "pending text analysis reached {charged} bytes past the {analysis_limit} its \
+             selection was sized to"
+        )));
+    }
     #[cfg(test)]
     PENDING_ANALYSIS_BYTES
         .lock()
         .expect("pending analysis log is never poisoned")
-        .push((definition.label().to_string(), budget.used()));
-    populate_analyzed_index(&index, fields, analyzed)?;
+        .push((definition.label().to_string(), charged));
+    let (index, fields) = create_ram_index(definition)?;
+    populate_analyzed_index(
+        &index,
+        fields,
+        documents
+            .iter()
+            .map(|(entity_id, analysis)| (*entity_id, 0, analysis.pre_tokenized.clone())),
+    )?;
     let reader = build_reader(&index)?;
     Ok(search_reader_candidates_with_statistics(
         &reader,
@@ -2040,8 +2041,38 @@ impl IndexedTextAnalysis {
         self.pre_tokenized
     }
 
+    /// Returns the analyzed text.
+    pub(crate) fn text(&self) -> &str {
+        &self.pre_tokenized.text
+    }
+
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.retained_bytes
+    }
+
+    /// Charges `budget` exactly what analyzing this text again under it
+    /// would ([`analyze_text_for_indexing`]): [`Self::retained_bytes`] when
+    /// it fits, or else the same refusal, at the same token, that analysis
+    /// reports.
+    pub(crate) fn recharge(
+        &self,
+        budget: &mut TextAnalysisMemoryBudget,
+    ) -> Result<(), HelixDbError> {
+        if budget.try_reserve(self.retained_bytes).is_ok() {
+            return Ok(());
+        }
+        // Analysis charged the text, then each retained token in order, and
+        // nothing else, so replaying those charges fails where it would.
+        budget
+            .try_reserve(u64::try_from(self.pre_tokenized.text.capacity()).unwrap_or(u64::MAX))?;
+        self.pre_tokenized.tokens.iter().try_for_each(|token| {
+            budget.try_reserve(indexed_token_charge(
+                u64::try_from(token.text.len()).unwrap_or(u64::MAX),
+            ))
+        })?;
+        Err(HelixDbError::InvariantViolation(
+            "a text analysis's charges fit a budget its total did not".to_string(),
+        ))
     }
 }
 
@@ -2062,6 +2093,8 @@ impl TextAnalysisMemoryBudget {
         Self { limit, used: 0 }
     }
 
+    /// Charges `additional` bytes, or fails with the charge it would reach
+    /// past the limit and charges nothing.
     fn try_reserve(&mut self, additional: u64) -> Result<(), HelixDbError> {
         let observed = self.used.saturating_add(additional);
         if observed > self.limit.get() {
