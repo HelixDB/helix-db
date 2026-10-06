@@ -86,11 +86,16 @@ pub enum IndexBackpressureResource {
     PendingMembers,
     /// Superseded physical results one search would have to skip.
     SuppressedSearchResults,
-    /// Analysis charge of the committed but unpublished documents one text
-    /// search would analyze in its partition: the conservative charge, text
-    /// bytes plus a fixed overhead per token, that bounds one text
-    /// publication's analysis.
+    /// Analysis charge of the committed but unpublished documents one strong
+    /// text search would analyze in its partition: the conservative charge,
+    /// text bytes plus a fixed overhead per token, that one text publication
+    /// also charges, bounded by
+    /// [`crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`].
     PendingTextAnalysisBytes,
+    /// Retained bytes of the latest committed but unpublished operations one
+    /// strong vector search would decode and score exactly, bounded by
+    /// [`crate::config::IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`].
+    PendingVectorBytes,
 }
 
 impl core::fmt::Display for IndexBackpressureResource {
@@ -100,6 +105,7 @@ impl core::fmt::Display for IndexBackpressureResource {
             Self::PendingMembers => "pending_members",
             Self::SuppressedSearchResults => "suppressed_search_results",
             Self::PendingTextAnalysisBytes => "pending_text_analysis_bytes",
+            Self::PendingVectorBytes => "pending_vector_bytes",
         })
     }
 }
@@ -119,8 +125,8 @@ pub enum IndexOperationBatchResource {
     /// pending-member limit.
     PendingMembers,
     /// Analysis charge of the transaction's own unpublished documents that a
-    /// text search in it would analyze in one partition, bounded by one text
-    /// publication's analysis budget.
+    /// text search in it would analyze in one partition, bounded by
+    /// [`crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`].
     PendingTextAnalysisBytes,
 }
 
@@ -306,15 +312,19 @@ pub enum HelixDbError {
     /// Either a write transaction was rejected before commit, or a strong
     /// search found more results superseded by committed but unpublished work
     /// ahead of its answer than it may skip, or a strong text search found
-    /// more committed but unpublished text to analyze than one text
-    /// publication's analysis budget; a write's own changes alone never
-    /// cause it. Eventual searches never fail this way. The whole request may be
-    /// retried unchanged once the index worker publishes outstanding work.
-    /// Work the worker holds back ([`crate::BlockedIndexEntity`], only after
-    /// limits were lowered) is never published, so text it alone keeps past
-    /// the bound fails strong text searches until a later write to it
-    /// publishes or the limits are raised. A write that exceeds a limit on its
-    /// own fails with [`Self::IndexOperationBatchTooLarge`] instead.
+    /// more committed but unpublished text to analyze than its bound
+    /// ([`crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`]),
+    /// or a strong vector search found more committed but unpublished vector
+    /// work to score than its bound
+    /// ([`crate::config::IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`]);
+    /// a write's own changes alone never cause it. Eventual searches never
+    /// fail this way. The whole request may be retried unchanged once the
+    /// index worker publishes outstanding work. Work the worker holds back
+    /// ([`crate::BlockedIndexEntity`], only after limits were lowered) is
+    /// never published, so text it alone keeps past the bound fails strong
+    /// text searches until a later write to it publishes or the bound is
+    /// raised. A write that exceeds a limit on its own fails with
+    /// [`Self::IndexOperationBatchTooLarge`] instead.
     #[error("index backpressure on {scope:?} index {index_id}: {resource} would reach {requested}, limit {limit}. Retry after outstanding index work is published.")]
     IndexBackpressure {
         /// Data scope owning the logical index.

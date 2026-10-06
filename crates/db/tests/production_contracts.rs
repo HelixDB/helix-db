@@ -11569,6 +11569,8 @@ async fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served
 /// window over the intersection keeps the range's order, as its rows do.
 #[test]
 fn counts_over_range_intersections_apply_every_filter() {
+    // Match the other large query contracts: debug futures exceed the Linux
+    // test runner's default stack, so construct and poll them on this thread.
     run_high_stack_contract(
         "range-intersection-counts",
         counts_over_range_intersections_apply_every_filter_contract,

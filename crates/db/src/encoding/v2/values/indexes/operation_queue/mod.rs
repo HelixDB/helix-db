@@ -554,10 +554,11 @@ impl OperationFrame {
 ///
 /// Holds the longest run of entities, in the order of each one's oldest
 /// outstanding operation, whose latest operations'
-/// [`QueuedOperation::retained_bytes`] fit the read's budget. An entity is
-/// selected at its latest state or not at all, never at an earlier state of
-/// its chain: a build or publication may already have written the latest
-/// state physically, and an earlier one would hide it.
+/// [`QueuedOperation::retained_bytes`] fit the read's budget, and whether the
+/// budget left any entity out ([`Self::refused`]). An entity is selected at
+/// its latest state or not at all, never at an earlier state of its chain: a
+/// build or publication may already have written the latest state
+/// physically, and an earlier one would hide it.
 ///
 /// # Contract
 ///
@@ -576,36 +577,35 @@ impl OperationFrame {
 /// them.
 ///
 /// ```text
-/// value  = [e1 op1: 28 bytes][e2 op2: 40 bytes][e1 op3: 30 bytes][?? op4: corrupt body]
-/// budget = 70       -> [op3, op2]  (e1 at its latest state; op1 and op4 never decoded)
-/// budget = 50       -> [op3]
-/// budget = 29       -> None        (e1's latest operation does not fit)
-/// budget = u64::MAX -> error       (op4 is selected and fails to decode)
+/// value  = [e1 op1: 28 bytes][e2 op2: 40 bytes][e1 op3: 30 bytes][?? op4: 25 bytes, corrupt body]
+/// budget = 70       -> [op3, op2], refused at 95  (e1 at its latest state; op1 and op4 never decoded)
+/// budget = 50       -> [op3],      refused at 70
+/// budget = 29       -> [],         refused at 30  (e1's latest operation does not fit)
+/// budget = u64::MAX -> error                      (op4 is selected and fails to decode)
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LatestOperations {
     family: QueueFamily,
     operations: Vec<QueuedOperation>,
+    refused: Option<u64>,
 }
 
 impl LatestOperations {
-    /// Selects from one resolved queue value within `budget`; `None` when
-    /// not even the first entity's latest operation fits.
-    pub(crate) fn decode(value: &[u8], budget: u64) -> Result<Option<Self>, EncodingError> {
+    /// Selects from one resolved queue value within `budget`.
+    pub(crate) fn decode(value: &[u8], budget: u64) -> Result<Self, EncodingError> {
         let (family, records) = resolved_records(value)?;
-        let selected = select_latest(records, budget)?;
-        Self::decode_selected(family, selected)
+        let (selected, refused) = select_latest(records, budget)?;
+        Self::decode_selected(family, selected, refused)
     }
 
     /// Selects from one generation's row values in sequence order within
-    /// `budget`; `None` when there are no rows or not even the first
-    /// entity's latest operation fits.
+    /// `budget`; `None` when there are no rows.
     pub(crate) fn decode_rows<'a>(
         rows: impl IntoIterator<Item = &'a [u8]>,
         budget: u64,
     ) -> Result<Option<Self>, EncodingError> {
         let mut family = None;
-        let selected = select_latest(
+        let (selected, refused) = select_latest(
             rows.into_iter().map(|row| {
                 let (row_family, id, body) = QueueRow::split(row)?;
                 if *family.get_or_insert(row_family) != row_family {
@@ -620,23 +620,39 @@ impl LatestOperations {
         let Some(family) = family else {
             return Ok(None);
         };
-        Self::decode_selected(family, selected)
+        Self::decode_selected(family, selected, refused).map(Some)
     }
 
     fn decode_selected(
         family: QueueFamily,
         selected: Vec<(QueuedOperationId, &[u8])>,
-    ) -> Result<Option<Self>, EncodingError> {
+        refused: Option<u64>,
+    ) -> Result<Self, EncodingError> {
         let operations = selected
             .into_iter()
             .map(|(id, body)| decode_body(family, id, body))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((!operations.is_empty()).then_some(Self { family, operations }))
+        Ok(Self {
+            family,
+            operations,
+            refused,
+        })
     }
 
     /// Returns the retained family.
     pub(crate) const fn family(&self) -> QueueFamily {
         self.family
+    }
+
+    /// Retained bytes the selection would have reached with the first entity
+    /// the budget left out, which always exceed the budget, or `None` when
+    /// it selected every entity.
+    ///
+    /// When more entities are pending than the walk tracks, and every
+    /// tracked one fits, the first untracked entity is charged the smallest
+    /// retained record, so the reach is a lower bound.
+    pub(crate) const fn refused(&self) -> Option<u64> {
+        self.refused
     }
 
     /// Consumes the selection into its operations, one per entity, in
@@ -646,9 +662,14 @@ impl LatestOperations {
     }
 }
 
+/// Selected `(operation ID, encoded body)` records and the reach of the
+/// first entity left out (see [`LatestOperations::refused`]).
+type SelectedRecords<'a> = (Vec<(QueuedOperationId, &'a [u8])>, Option<u64>);
+
 /// Selects each entity's latest record, in the order of each entity's first
 /// record, while the records' retained bytes fit `budget`; the first that
-/// does not fit ends the selection.
+/// does not fit ends the selection, and the retained bytes it would have
+/// reached are returned with it.
 ///
 /// Records are `(operation ID, encoded body)` and are grouped by the raw
 /// bytes naming their entity: the kind byte and the ID varint, up to its
@@ -658,15 +679,16 @@ impl LatestOperations {
 /// `budget / MIN_RETAINED_RECORD_LEN` are not tracked: memory follows the
 /// budget, not the backlog. Selecting one of them would take an operation
 /// smaller than any valid one, so the cap only ever leaves such a corrupt
-/// operation undecoded.
+/// operation undecoded; an untracked entity still refuses the selection.
 fn select_latest<'a>(
     records: impl Iterator<Item = Result<(QueuedOperationId, &'a [u8]), EncodingError>>,
     budget: u64,
-) -> Result<Vec<(QueuedOperationId, &'a [u8])>, EncodingError> {
+) -> Result<SelectedRecords<'a>, EncodingError> {
     const MAX_ENTITY_LEN: usize = KIND_LEN + MAX_VARINT_LEN;
     let trackable = usize::try_from(budget / MIN_RETAINED_RECORD_LEN as u64).unwrap_or(usize::MAX);
     let mut order = Vec::new();
     let mut latest = std::collections::HashMap::new();
+    let mut untracked = false;
     for record in records {
         let (id, body) = record?;
         let entity_len = body
@@ -686,20 +708,30 @@ fn select_latest<'a>(
                 order.push(entity);
                 slot.insert(state);
             }
-            std::collections::hash_map::Entry::Vacant(_) => {}
+            std::collections::hash_map::Entry::Vacant(_) => untracked = true,
         }
     }
-    let mut remaining = budget;
-    Ok(order
-        .into_iter()
-        .map_while(|entity| {
-            let (retained, record) = latest
-                .remove(entity)
-                .expect("every tracked entity has a latest record");
-            remaining = remaining.checked_sub(retained)?;
-            Some(record)
-        })
-        .collect())
+    // A loop rather than `map_while`: the first record past the budget both
+    // ends the selection and is charged in the reach it reports.
+    let mut charged = 0_u64;
+    let mut selected = Vec::with_capacity(order.len());
+    for entity in order {
+        let (retained, record) = latest
+            .remove(entity)
+            .expect("every tracked entity has a latest record");
+        let reached = charged.saturating_add(retained);
+        if reached > budget {
+            return Ok((selected, Some(reached)));
+        }
+        charged = reached;
+        selected.push(record);
+    }
+    let refused = untracked.then(|| {
+        charged
+            .saturating_add(MIN_RETAINED_RECORD_LEN as u64)
+            .max(budget.saturating_add(1))
+    });
+    Ok((selected, refused))
 }
 
 /// Validates one resolved value's header, empty removal set, and non-zero

@@ -242,7 +242,7 @@ embedded configurations may override it.
 | `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
 | `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
 | `active_text_mutation_limit_exceeded` | One indexed text document exceeded a hard per-document admission limit. | 400 | Shorten the text before retrying | Yes |
-| `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry, or a text search in it would analyze more of its own text than one text publication may. | 400 | Split the write before retrying | Yes |
+| `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry, or a text search in it would analyze more of its own text than a `strong` text search may (512 MiB of analysis by default). | 400 | Split the write before retrying | Yes |
 | `index_build_blocked` | A write would exceed a vector or text index's unpublished-work limit while the index's build is blocked; nothing publishes that work until the build is retried or aborted. | 500 | After retrying or aborting the blocked build | Yes |
 | `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
@@ -265,7 +265,7 @@ embedded configurations may override it.
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
-| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text than one text publication may (64 MiB of analysis by default). | 429 | Yes, bounded backoff | No request change required |
+| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text in its partition than its bound allows (512 MiB of analysis by default), or a `strong` vector search would score more unpublished vector work than its bound allows (by default the index's retained-byte limit, which writes reach first). | 429 | Yes, bounded backoff | No request change required |
 | `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
 | `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
 | `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |

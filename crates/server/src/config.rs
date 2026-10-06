@@ -1,7 +1,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::net::{AddrParseError, SocketAddr};
-use std::num::{NonZeroUsize, ParseIntError};
+use std::num::{NonZeroU64, NonZeroUsize, ParseIntError};
 use std::path::{Path, PathBuf};
 
 use db::HelixDbSource;
@@ -65,6 +65,10 @@ pub struct ServerConfig {
     pub db_path: String,
     /// Storage backend.
     pub storage: StorageConfig,
+    /// Queued vector/text index policy: the defaults, with the strong search
+    /// bounds from `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` and
+    /// `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES`.
+    pub index_operation_queue: db::config::IndexOperationQueueTuning,
 }
 
 impl ServerConfig {
@@ -77,6 +81,11 @@ impl ServerConfig {
     /// variable. Without `HELIX_DISK_CACHE_BYTES`, the default disk budget
     /// must fit the cache's filesystem. `HELIX_DISK_CACHE_WARM=off` stops the
     /// startup warm of the disk cache ([`HybridCache`]).
+    /// `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` and
+    /// `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES`, each a positive byte
+    /// count, replace the strong vector and text search bounds
+    /// ([`db::config::IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`],
+    /// [`db::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`]).
     pub fn from_env() -> Result<Self, ServerConfigError> {
         Self::from_lookup(|name| env::var_os(name))
     }
@@ -94,6 +103,19 @@ impl ServerConfig {
         )?;
         let db_path =
             text(&mut lookup, &["DB_PATH"])?.map_or_else(|| "db/".to_string(), |(_, path)| path);
+        let tuning = db::config::IndexOperationQueueTuning::default();
+        let tuning =
+            parse_queue_bytes(&mut lookup, "HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES")?
+                .map_or(tuning, |bytes| {
+                    tuning.with_strong_vector_search_max_pending_bytes(bytes)
+                });
+        let index_operation_queue =
+            parse_queue_bytes(&mut lookup, "HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES")?
+                .map_or(tuning, |bytes| {
+                    tuning.with_strong_text_search_max_analysis_bytes(bytes)
+                });
+        // Last, so every other variable is valid before a cache directory is
+        // created.
         let storage = StorageConfig::from_lookup(&mut lookup)?;
 
         Ok(Self {
@@ -101,6 +123,7 @@ impl ServerConfig {
             grpc_addr,
             db_path,
             storage,
+            index_operation_queue,
         })
     }
 
@@ -130,7 +153,8 @@ impl ServerConfig {
         }
     }
 
-    /// Build the DB runtime config for the selected storage and cache.
+    /// Build the DB runtime config for the selected storage, cache, and
+    /// index queue policy.
     ///
     /// Memory storage, and disk storage without a hybrid cache, keep
     /// [`db::DbConfig::new`]'s bounded in-memory caches.
@@ -157,6 +181,7 @@ impl ServerConfig {
     ///         grpc_addr: "127.0.0.1:0".parse().unwrap(),
     ///         db_path: "db/".to_string(),
     ///         storage,
+    ///         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     ///     };
     ///     let db::config::CacheMode::Hybrid { object_store, .. } =
     ///         config.db_config().cache().mode().clone()
@@ -195,6 +220,7 @@ impl ServerConfig {
             } => cache.db_config(false),
             StorageConfig::S3 { cache, .. } => cache.db_config(true),
         }
+        .with_index_operation_queue_tuning(self.index_operation_queue)
     }
 
     /// Minimum open files the hard limit must allow before storage opens, or
@@ -210,6 +236,7 @@ impl ServerConfig {
     ///     grpc_addr: "127.0.0.1:0".parse().unwrap(),
     ///     db_path: "db/".to_string(),
     ///     storage: StorageConfig::Memory,
+    ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     /// };
     /// assert_eq!(config.required_open_files(), None);
     /// ```
@@ -739,6 +766,23 @@ fn parse_cache_bytes(
         .transpose()
 }
 
+fn parse_queue_bytes(
+    lookup: &mut impl FnMut(&str) -> Option<OsString>,
+    variable: &'static str,
+) -> Result<Option<NonZeroU64>, ServerConfigError> {
+    text(lookup, &[variable])?
+        .map(|(_, value)| {
+            value
+                .parse()
+                .map_err(|source| ServerConfigError::IndexQueueBytes {
+                    variable,
+                    value,
+                    source,
+                })
+        })
+        .transpose()
+}
+
 /// Disk space the files below `directory` occupy, counting allocated blocks
 /// rather than lengths because block-cache partitions are sparse.
 ///
@@ -808,6 +852,16 @@ pub enum ServerConfigError {
     CacheWarm {
         /// Raw value.
         value: String,
+    },
+    /// An index queue limit was not a positive integer byte count.
+    #[error("invalid {variable} `{value}`: expected a positive byte count")]
+    IndexQueueBytes {
+        /// Limit variable.
+        variable: &'static str,
+        /// Raw value.
+        value: String,
+        /// Parse error.
+        source: ParseIntError,
     },
     /// A cache size was not a positive integer byte count.
     #[error("invalid {variable} `{value}`: expected a positive byte count")]
@@ -942,7 +996,87 @@ mod tests {
         assert_eq!(config.db_path, "db/");
         assert_eq!(config.storage, StorageConfig::Memory);
         assert_eq!(config.db_config().cache(), db::DbConfig::new().cache());
+        assert_eq!(
+            config.db_config().index_operation_queue(),
+            db::config::IndexOperationQueueTuning::default()
+        );
         assert_eq!(config.required_open_files(), None);
+    }
+
+    /// Each strong search bound is a positive byte count, parsed before
+    /// storage creates a cache directory, and both apply together.
+    #[test]
+    fn the_strong_search_bounds_are_positive_byte_counts() {
+        type Tuning = db::config::IndexOperationQueueTuning;
+        type WithBound = fn(Tuning, NonZeroU64) -> Tuning;
+        const VECTOR: &str = "HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES";
+        const TEXT: &str = "HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES";
+        let bounds: [(&str, WithBound); 2] = [
+            (VECTOR, Tuning::with_strong_vector_search_max_pending_bytes),
+            (TEXT, Tuning::with_strong_text_search_max_analysis_bytes),
+        ];
+        for (variable, bounded) in bounds {
+            for (raw, bytes) in [
+                ("1", 1),
+                ("2147483648", 1 << 31),
+                ("18446744073709551615", u64::MAX),
+            ] {
+                let config = ServerConfig::from_lookup(|name| {
+                    (name == variable).then(|| OsString::from(raw))
+                })
+                .unwrap();
+                let expected = bounded(Tuning::default(), NonZeroU64::new(bytes).unwrap());
+                assert_eq!(config.index_operation_queue, expected, "{variable}={raw}");
+                assert_eq!(
+                    config.db_config().index_operation_queue(),
+                    expected,
+                    "{variable}={raw}"
+                );
+            }
+
+            for value in ["0", "-1", "", "512MiB", "18446744073709551616"] {
+                let error = ServerConfig::from_lookup(|name| {
+                    (name == variable).then(|| OsString::from(value))
+                })
+                .unwrap_err();
+                assert!(
+                    matches!(
+                        &error,
+                        ServerConfigError::IndexQueueBytes { variable: reported, value: raw, .. }
+                            if *reported == variable && raw == value
+                    ),
+                    "{variable}={value:?} produced {error:?}"
+                );
+                assert_eq!(
+                    error.to_string(),
+                    format!("invalid {variable} `{value}`: expected a positive byte count")
+                );
+            }
+            // Rejected before storage creates a cache directory.
+            let error = ServerConfig::from_lookup(|name| match name {
+                "S3_BUCKET" => Some(OsString::from("bucket")),
+                "HELIX_DISK_CACHE_DIR" => Some(OsString::from("")),
+                _ => (name == variable).then(|| OsString::from("0")),
+            })
+            .unwrap_err();
+            assert!(
+                matches!(error, ServerConfigError::IndexQueueBytes { .. }),
+                "{variable}: {error:?}"
+            );
+        }
+
+        let config = ServerConfig::from_lookup(|name| match name {
+            VECTOR => Some(OsString::from("1048576")),
+            TEXT => Some(OsString::from("2097152")),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            config.index_operation_queue,
+            Tuning::default()
+                .with_strong_vector_search_max_pending_bytes(NonZeroU64::new(1 << 20).unwrap())
+                .with_strong_text_search_max_analysis_bytes(NonZeroU64::new(2 << 20).unwrap())
+        );
     }
 
     /// Set only in the child process [`from_env_reads_the_process_environment`]

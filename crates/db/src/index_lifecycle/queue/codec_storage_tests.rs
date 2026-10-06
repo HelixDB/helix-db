@@ -1153,14 +1153,15 @@ async fn latest_reads_of_rows_decode_only_the_operations_they_select() {
         let store = &store;
         let db = &db;
         async move {
-            store.read_latest(db, target, budget).await.map(|latest| {
-                latest.map_or_else(Vec::new, |latest| {
-                    latest
-                        .into_operations()
-                        .iter()
-                        .map(|operation| operation.id().get())
-                        .collect::<Vec<_>>()
-                })
+            let Some(bytes) = store.read_latest(db, target).await? else {
+                return Ok(Vec::new());
+            };
+            bytes.decode_latest(budget).map(|latest| {
+                latest
+                    .into_operations()
+                    .iter()
+                    .map(|operation| operation.id().get())
+                    .collect::<Vec<_>>()
             })
         }
     };
@@ -1225,9 +1226,11 @@ async fn known_limitation_a_latest_read_merges_the_whole_queue_below_a_pending_o
     };
     let before = merged();
     let latest = store
-        .read_latest(&db, target, budget)
+        .read_latest(&db, target)
         .await
         .unwrap()
+        .unwrap()
+        .decode_latest(budget)
         .unwrap();
     assert_eq!(latest.into_operations(), operations[..1]);
     assert_eq!(merged() - before, 0, "a resolved value is read as stored");
@@ -1245,9 +1248,11 @@ async fn known_limitation_a_latest_read_merges_the_whole_queue_below_a_pending_o
     for _ in 0..2 {
         let before = merged();
         let latest = store
-            .read_latest(&db, target, budget)
+            .read_latest(&db, target)
             .await
             .unwrap()
+            .unwrap()
+            .decode_latest(budget)
             .unwrap();
         assert_eq!(latest.into_operations(), operations[..1]);
         let read = merged() - before;

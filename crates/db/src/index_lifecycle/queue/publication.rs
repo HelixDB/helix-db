@@ -359,6 +359,9 @@ pub(crate) struct TextPublicationResources {
     pub(crate) object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     pub(crate) database: String,
     pub(crate) limits: ActiveTextMutationLimits,
+    /// Analyses strong text searches keep of queued text, dropped per
+    /// generation once nothing of it is queued.
+    pub(crate) pending_analyses: Arc<crate::search::text::pending::PendingTextAnalyses>,
 }
 
 /// Shared publication runtime owned by the lifecycle supervisor.
@@ -729,6 +732,21 @@ impl QueuePublisher {
             | PublicationOutcome::Stalled => {
                 self.vector.planning_cache.forget_publication(target).await;
             }
+        }
+        // Searches keep analyses of queued text until a later strong search
+        // of their partition replaces them; once nothing of the generation is
+        // queued, none can be selected again, so they are dropped here.
+        let drained = match outcome {
+            PublicationOutcome::Discarded { .. } | PublicationOutcome::Empty => true,
+            PublicationOutcome::Published { .. } => !self.backlog.has_charges(target),
+            PublicationOutcome::Deferred
+            | PublicationOutcome::Retry
+            | PublicationOutcome::Trimmed
+            | PublicationOutcome::Blocked
+            | PublicationOutcome::Stalled => false,
+        };
+        if drained {
+            self.text.pending_analyses.forget(target);
         }
         self.reschedule(target, outcome, admitted);
         Ok(outcome)

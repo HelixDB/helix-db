@@ -1129,6 +1129,46 @@ async fn a_queue_retained_before_its_index_drops_is_discarded_and_never_publishe
     db.close().await.unwrap();
 }
 
+/// Dropping a text index retires its generation: the index worker discards
+/// its queued operations and releases what strong searches cached of them,
+/// although no search of the index can run again to replace it.
+#[tokio::test]
+async fn dropping_a_text_index_releases_its_cached_pending_analyses() {
+    let db = open("drop-text-cache", Arc::new(InMemory::new()), config()).await;
+    let operation = create(&db, text_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    let target = target(&db, QueueFamily::Text).await;
+    for index in 0..4_u8 {
+        add(
+            &db,
+            [f32::from(index), 1.0],
+            &format!("alpha {index}"),
+            None,
+        )
+        .await;
+    }
+    assert_eq!(
+        text_search(&db, "alpha", 10, None, SearchConsistency::Strong)
+            .await
+            .len(),
+        4
+    );
+    let cached = || {
+        db.pending_text_analyses().cached(
+            target,
+            &crate::index_lifecycle::work::TextPartition::Unpartitioned,
+        )
+    };
+    assert_eq!(cached(), 4);
+
+    let drop_operation = drop_index(&db, text_spec()).await.unwrap();
+    assert_eq!(wait_terminal(&db, &drop_operation).await, "succeeded");
+    assert_eq!(discard_all(&db, target).await, 4);
+    assert_eq!(cached(), 0);
+    assert_eq!(db.pending_text_analyses().held_bytes(), 0);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn aborting_a_build_discards_operations_written_during_it() {
     let db = open("abort-discard", Arc::new(InMemory::new()), config()).await;

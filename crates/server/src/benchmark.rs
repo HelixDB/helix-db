@@ -13,7 +13,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use db::config::{IndexOperationQueueTuning, QueueLayout};
+use db::config::QueueLayout;
 use db::HelixDB;
 
 use crate::config::{ServerConfig, StorageConfig};
@@ -103,9 +103,9 @@ pub(crate) async fn open_database(
     if role == Role::Reader && matches!(config.storage, StorageConfig::Memory) {
         return Err("a benchmark reader requires shared disk or object storage".into());
     }
-    let db_config = config.db_config().with_index_operation_queue_tuning(
-        IndexOperationQueueTuning::default().with_layout(layout),
-    );
+    let db_config = config
+        .db_config()
+        .with_index_operation_queue_tuning(config.index_operation_queue.with_layout(layout));
     let cache_lock = crate::claim_disk_cache(config)?;
     let db = match role {
         Role::Writer => HelixDB::open_for_server(config.db_source(), db_config).await?,
@@ -192,6 +192,13 @@ mod tests {
             grpc_addr: "127.0.0.1:0".parse().unwrap(),
             db_path: "benchmark-sample".to_string(),
             storage: StorageConfig::Memory,
+            index_operation_queue: db::config::IndexOperationQueueTuning::default()
+                .with_strong_vector_search_max_pending_bytes(
+                    std::num::NonZeroU64::new(1 << 20).unwrap(),
+                )
+                .with_strong_text_search_max_analysis_bytes(
+                    std::num::NonZeroU64::new(2 << 20).unwrap(),
+                ),
         };
         let Err(error) = open_database(Role::Reader, QueueLayout::Map, &config).await else {
             panic!("a memory reader cannot share the writer's storage");
@@ -202,6 +209,11 @@ mod tests {
             .await
             .unwrap()
             .db;
+        // The benchmark layout keeps the server's queue policy.
+        assert_eq!(
+            db.config().db().index_operation_queue(),
+            config.index_operation_queue.with_layout(QueueLayout::Map)
+        );
         let started = Instant::now();
         let first = sample(&db, Role::Writer, 0, started);
         let second = sample(&db, Role::Writer, 1, started);
@@ -292,6 +304,7 @@ mod tests {
                 root: root.path().to_path_buf(),
                 cache: crate::config::CacheConfig::Memory,
             },
+            index_operation_queue: db::config::IndexOperationQueueTuning::default(),
         };
         let writer = open_database(Role::Writer, QueueLayout::Map, &config)
             .await

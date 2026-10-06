@@ -29,7 +29,7 @@ use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
 use crate::search::vector::VectorDistanceMetric;
 use crate::HelixDB;
 
-async fn install(db: &HelixDB, tenant: Option<&str>) {
+pub(super) async fn install(db: &HelixDB, tenant: Option<&str>) {
     let vector =
         VectorIndexDefinition::new_node("Doc", "embedding", 2, VectorDistanceMetric::Euclidean)
             .unwrap();
@@ -2077,17 +2077,21 @@ fn analyzed(label: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Opens a queued database under `limits` with a `label` text index on
-/// `body`.
-async fn open_with_text_index(
-    name: &str,
-    label: &str,
-    limits: SearchIndexBackfillLimits,
-) -> HelixDB {
+/// Paused queue tuning whose strong text searches analyze at most `bound`
+/// bytes.
+fn strong_text_bound(bound: u64) -> IndexOperationQueueTuning {
+    IndexOperationQueueTuning::default()
+        .with_strong_text_search_max_analysis_bytes(NonZeroU64::new(bound).unwrap())
+}
+
+/// Opens a queued database whose strong text searches and text publications
+/// both analyze at most `budget` bytes, with a `label` text index on `body`.
+async fn open_with_text_index(name: &str, label: &str, budget: u64) -> HelixDB {
     let db = open(
         name,
         Arc::new(InMemory::new()),
-        queued(IndexOperationQueueTuning::default()).with_search_index_backfill_limits(limits),
+        queued(strong_text_bound(budget))
+            .with_search_index_backfill_limits(analysis_budget(budget)),
     )
     .await;
     db.install_index_for_tests(
@@ -2141,12 +2145,12 @@ fn text_search_request(
 }
 
 #[tokio::test]
-async fn strong_text_overlay_is_bounded_by_the_publication_budget() {
+async fn strong_text_overlay_is_bounded_by_its_analysis_bound() {
     // A label no other test indexes keys this test's analysis log entries.
     const LABEL: &str = "OverlayBudgetDoc";
     const BUDGET: u64 = 64 * 1024;
     const DOCS: usize = 40;
-    let db = open_with_text_index("overlay-text-budget", LABEL, analysis_budget(BUDGET)).await;
+    let db = open_with_text_index("overlay-text-budget", LABEL, BUDGET).await;
     // One term padded to 4 KiB, so each document alone fits the per-document
     // admission allowances and only their sum exceeds the budget.
     let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
@@ -2172,6 +2176,11 @@ async fn strong_text_overlay_is_bounded_by_the_publication_budget() {
     .expect_err("strong search fails rather than analyze past the budget");
     assert!(error.is_index_backpressure(), "{error}");
     assert!(analyzed(LABEL).is_empty(), "nothing was analyzed in memory");
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        1
+    );
     // Eventual search degrades within the budget instead of failing.
     let result = Box::pin(db.query(text_search_request(
         LABEL,
@@ -2181,6 +2190,12 @@ async fn strong_text_overlay_is_bounded_by_the_publication_budget() {
     )))
     .await
     .expect("eventual search never fails for backlog");
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        1,
+        "eventual searches are never refused"
+    );
     let calls = analyzed(LABEL);
     let found = hits(&result, "hits").len() as u64;
     assert_eq!(found, BUDGET / charge);
@@ -2191,18 +2206,17 @@ async fn strong_text_overlay_is_bounded_by_the_publication_budget() {
     db.close().await.unwrap();
 }
 
-/// The strong text bound is one text publication's analysis budget, not what
-/// one publication drains: a publication that selects less input than that
-/// budget analyzes leaves a strong search past the bound failing until enough
-/// publications bring the backlog back within it, here one per document past
-/// the bound.
+/// The strong text bound is not what one publication drains: a publication
+/// that selects less input than the bound leaves a strong search past it
+/// failing until enough publications bring the backlog back within it, here
+/// one per document past the bound.
 #[tokio::test]
 async fn a_strong_text_search_past_the_bound_waits_for_every_publication_it_needs() {
     const LABEL: &str = "OverlayNarrowInputDoc";
     const BUDGET: u64 = 64 * 1024;
     const PAST: usize = 3;
     let limits = analysis_budget(BUDGET);
-    let db = open_with_text_index("overlay-text-narrow-input", LABEL, limits).await;
+    let db = open_with_text_index("overlay-text-narrow-input", LABEL, BUDGET).await;
     let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
     let within = usize::try_from(BUDGET / analysis_charge(&body)).unwrap();
     add_bodies(&db, LABEL, &vec![body; within + PAST]).await;
@@ -2263,7 +2277,7 @@ async fn dense_token_text_is_bounded_by_its_analysis_not_its_length() {
     const LABEL: &str = "OverlayDenseDoc";
     const BUDGET: u64 = 64 * 1024;
     const DOCS: usize = 3;
-    let db = open_with_text_index("overlay-text-dense", LABEL, analysis_budget(BUDGET)).await;
+    let db = open_with_text_index("overlay-text-dense", LABEL, BUDGET).await;
     let body = "a ".repeat(100);
     let ids = add_bodies(&db, LABEL, &vec![body.clone(); DOCS]).await;
     let charge = analysis_charge(&body);
@@ -2334,8 +2348,7 @@ async fn text_analysis_bound_covers_prefiltered_searches_and_a_write_batchs_own_
     const LABEL: &str = "OverlayBoundDoc";
     const BUDGET: u64 = 64 * 1024;
     const DOCS: usize = 20;
-    let db =
-        open_with_text_index("overlay-text-bound-scopes", LABEL, analysis_budget(BUDGET)).await;
+    let db = open_with_text_index("overlay-text-bound-scopes", LABEL, BUDGET).await;
     let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
     let add = || traversal::g().add_n(LABEL, vec![("body", PropertyInput::from(body.clone()))]);
     let ids = add_bodies(&db, LABEL, &vec![body.clone(); DOCS]).await;
@@ -2433,6 +2446,13 @@ async fn text_analysis_bound_covers_prefiltered_searches_and_a_write_batchs_own_
         "{error}"
     );
     assert!(queue(&db, QueueFamily::Text).await.is_none());
+    // The prefiltered read and the write batch past committed work were
+    // refused retryably; a write's own text past the bound is not counted.
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        2
+    );
     db.close().await.unwrap();
 }
 
@@ -2446,7 +2466,7 @@ async fn text_analysis_bound_counts_only_the_searched_tenant_partition() {
     let db = open(
         "overlay-text-bound-tenants",
         Arc::new(InMemory::new()),
-        queued(IndexOperationQueueTuning::default())
+        queued(strong_text_bound(BUDGET))
             .with_search_index_backfill_limits(analysis_budget(BUDGET)),
     )
     .await;
@@ -2519,11 +2539,11 @@ async fn text_analysis_bound_counts_only_the_searched_tenant_partition() {
 }
 
 /// Text the index worker holds back still counts toward the strong text
-/// analysis bound, although no publication drains it: with limits lowered
-/// below a queued document, strong text searches of its partition fail with
-/// backpressure that no retry or publication attempt clears, eventual ones
-/// serve the published index, and a rewrite that publishes makes strong
-/// search exact again.
+/// analysis bound, although no publication drains it: with publication
+/// limits and the bound lowered below a queued document, strong text searches
+/// of its partition fail with backpressure that no retry or publication
+/// attempt clears, eventual ones serve the published index, and a rewrite
+/// that publishes makes strong search exact again.
 #[tokio::test]
 async fn held_back_text_counts_toward_the_strong_text_analysis_bound() {
     const LABEL: &str = "OverlayHeldBackDoc";
@@ -2560,7 +2580,7 @@ async fn held_back_text_counts_toward_the_strong_text_analysis_bound() {
     let db = open(
         name,
         store,
-        queued(IndexOperationQueueTuning::default())
+        queued(strong_text_bound(BUDGET))
             .with_search_index_backfill_limits(analysis_budget(BUDGET)),
     )
     .await;
@@ -2624,5 +2644,599 @@ async fn held_back_text_counts_toward_the_strong_text_analysis_bound() {
     );
     let replaced = search("held0", SearchConsistency::Strong).await.unwrap();
     assert!(hits(&replaced, "hits").is_empty());
+    db.close().await.unwrap();
+}
+
+/// The strong text bound is its own setting, not the publication budget: a
+/// strong search stays exact past what one publication analyzes while
+/// eventual search still overlays only that much. Its analyses are reused by
+/// later searches, only documents holding a query term are scored, and the
+/// results equal the published index's after publication and a restart.
+#[tokio::test]
+async fn strong_text_search_stays_exact_past_the_publication_budget() {
+    const LABEL: &str = "OverlayStrongBoundDoc";
+    const BUDGET: u64 = 64 * 1024;
+    const DOCS: usize = 40;
+    let name = "overlay-text-strong-bound";
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let config = || {
+        queued(IndexOperationQueueTuning::default())
+            .with_search_index_backfill_limits(analysis_budget(BUDGET))
+    };
+    let db = open(name, Arc::clone(&store), config()).await;
+    db.install_index_for_tests(
+        ValidatedDynamicIndexDefinition::try_from(
+            TextIndexDefinition::new_node(LABEL, "body").unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
+    let ids = add_bodies(&db, LABEL, &vec![body.clone(); DOCS]).await;
+    let charge = analysis_charge(&body);
+    assert!(DOCS as u64 * charge > 2 * BUDGET);
+    async fn search(db: &HelixDB, term: &str, consistency: SearchConsistency) -> Vec<(u64, u64)> {
+        let request = text_search_request(LABEL, term, DOCS, consistency);
+        hits(&Box::pin(db.query(request)).await.unwrap(), "hits")
+    }
+
+    let pending = search(&db, "alpha", SearchConsistency::Strong).await;
+    let mut found = pending.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    found.sort_unstable();
+    assert_eq!(
+        found, ids,
+        "strong search is exact past the publication budget"
+    );
+    assert_eq!(
+        db.pending_text_analyses().held_bytes(),
+        DOCS as u64 * charge
+    );
+    assert_eq!(analyzed(LABEL), [DOCS as u64 * charge]);
+    // Reused, not analyzed again: the cache is unchanged and the result too.
+    assert_eq!(
+        search(&db, "alpha", SearchConsistency::Strong).await,
+        pending
+    );
+    assert_eq!(
+        db.pending_text_analyses().held_bytes(),
+        DOCS as u64 * charge
+    );
+    // No document holds the term, so nothing is scored.
+    assert!(search(&db, "missing", SearchConsistency::Strong)
+        .await
+        .is_empty());
+    assert_eq!(
+        analyzed(LABEL).len(),
+        2,
+        "only matching documents are scored"
+    );
+    // Eventual search overlays one publication's analysis and serves the
+    // rest as published (nothing yet).
+    let eventual = search(&db, "alpha", SearchConsistency::Eventual).await;
+    assert_eq!(eventual.len() as u64, BUDGET / charge);
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        0
+    );
+
+    // A restart empties the cache; the overlay is rebuilt identically.
+    db.close().await.unwrap();
+    let db = open(name, Arc::clone(&store), config()).await;
+    assert_eq!(db.pending_text_analyses().held_bytes(), 0);
+    assert_eq!(
+        search(&db, "alpha", SearchConsistency::Strong).await,
+        pending
+    );
+
+    // Publishing the whole queue drops the generation's cached analyses, and
+    // the published documents score the same.
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    assert_eq!(db.pending_text_analyses().held_bytes(), 0);
+    assert_eq!(
+        search(&db, "alpha", SearchConsistency::Strong).await,
+        pending
+    );
+    assert_eq!(db.pending_text_analyses().held_bytes(), 0);
+    db.close().await.unwrap();
+}
+
+/// The strong text bound admits a backlog charged exactly the bound and
+/// refuses one byte less, whether the search analyzes the backlog or reuses
+/// analyses a refused search left, reporting the whole backlog's charge
+/// either way. Eventual searches answer the same whatever the cache holds.
+#[tokio::test]
+async fn the_strong_text_bound_admits_exactly_its_charge_cold_and_warm() {
+    const LABEL: &str = "OverlayBoundaryDoc";
+    const DOCS: usize = 6;
+    let name = "overlay-text-boundary";
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let bodies = (0..DOCS)
+        .map(|ordinal| format!("alpha term{ordinal}{}", " beta".repeat(ordinal)))
+        .collect::<Vec<_>>();
+    let total = bodies.iter().map(|body| analysis_charge(body)).sum::<u64>();
+    let open_bounded =
+        |bound: u64| open(name, Arc::clone(&store), queued(strong_text_bound(bound)));
+    async fn search(
+        db: &HelixDB,
+        consistency: SearchConsistency,
+    ) -> crate::Result<Vec<(u64, u64)>> {
+        Box::pin(db.query(text_search_request(LABEL, "alpha", DOCS, consistency)))
+            .await
+            .map(|result| hits(&result, "hits"))
+    }
+
+    let db = open_bounded(total).await;
+    db.install_index_for_tests(
+        ValidatedDynamicIndexDefinition::try_from(
+            TextIndexDefinition::new_node(LABEL, "body").unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    add_bodies(&db, LABEL, &bodies).await;
+    let eventual = search(&db, SearchConsistency::Eventual).await.unwrap();
+    assert_eq!(db.pending_text_analyses().held_bytes(), 0);
+    let cold = search(&db, SearchConsistency::Strong).await.unwrap();
+    assert_eq!(cold.len(), DOCS);
+    assert_eq!(db.pending_text_analyses().held_bytes(), total);
+    assert_eq!(search(&db, SearchConsistency::Strong).await.unwrap(), cold);
+    assert_eq!(
+        search(&db, SearchConsistency::Eventual).await.unwrap(),
+        eventual,
+        "a warm cache leaves eventual results unchanged"
+    );
+    assert_eq!(eventual, cold, "everything fits the eventual budget too");
+    db.close().await.unwrap();
+
+    let db = open_bounded(total - 1).await;
+    for attempt in ["analyzed", "reused"] {
+        let error = search(&db, SearchConsistency::Strong)
+            .await
+            .expect_err("one byte past the bound");
+        assert!(
+            matches!(
+                error,
+                crate::error::HelixDbError::IndexBackpressure {
+                    resource: crate::error::IndexBackpressureResource::PendingTextAnalysisBytes,
+                    requested,
+                    limit,
+                    ..
+                } if requested == total && limit == total - 1
+            ),
+            "{attempt}: {error}"
+        );
+        // The refused search kept every analysis it reached for its retry.
+        let reached = bodies[..DOCS - 1]
+            .iter()
+            .map(|body| analysis_charge(body))
+            .sum::<u64>();
+        assert_eq!(
+            db.pending_text_analyses().held_bytes(),
+            reached,
+            "{attempt}"
+        );
+    }
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        2
+    );
+    assert_eq!(
+        search(&db, SearchConsistency::Eventual).await.unwrap(),
+        eventual
+    );
+    db.close().await.unwrap();
+}
+
+/// A write batch's text search reads its own staged documents, never an
+/// analysis cached for the committed document it replaced, and caches none
+/// of its own: the committed operation it superseded is dropped, the rest
+/// are kept, and scores equal a search that analyzes everything afresh.
+#[tokio::test]
+async fn a_warm_cache_never_hides_a_write_batchs_own_text() {
+    let db = open(
+        "overlay-text-cache-local",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&db, None).await;
+    let first = add(&db, [0.0, 0.0], "alpha one", None).await;
+    let second = add(&db, [1.0, 0.0], "alpha two", None).await;
+    let text_target = target(&db, QueueFamily::Text).await;
+    let cached = || {
+        db.pending_text_analyses().cached(
+            text_target,
+            &crate::index_lifecycle::work::TextPartition::Unpartitioned,
+        )
+    };
+    assert_eq!(
+        sorted_ids(text_search(&db, "alpha", 10, None, SearchConsistency::Strong).await),
+        [first, second]
+    );
+    assert_eq!(cached(), 2);
+
+    let result = write(&db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "replaced",
+                    traversal::g()
+                        .n(NodeRef::from(first))
+                        .set_property("body", "beta replaced".to_string()),
+                )
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![
+                            ("embedding", PropertyInput::from(vec![2.0_f32, 0.0])),
+                            ("body", PropertyInput::from("alpha local".to_string())),
+                        ],
+                    ),
+                )
+                .var_as(
+                    "alpha",
+                    traversal::g().text_search_nodes("Doc", "body", "alpha", 10, None),
+                )
+                .var_as(
+                    "beta",
+                    traversal::g().text_search_nodes("Doc", "body", "beta", 10, None),
+                )
+                .returning(["created", "alpha", "beta"]),
+        )
+    })
+    .await;
+    let created = result["created"][0]["$id"].as_u64().unwrap();
+    assert_eq!(sorted_ids(hits(&result, "alpha")), [second, created]);
+    assert_eq!(sorted_ids(hits(&result, "beta")), [first]);
+    assert_eq!(cached(), 1, "only the committed operation it left in place");
+
+    let warm = text_search(&db, "alpha beta", 10, None, SearchConsistency::Strong).await;
+    assert_eq!(sorted_ids(warm.clone()), [first, second, created]);
+    assert_eq!(cached(), 3);
+    db.pending_text_analyses().forget(text_target);
+    assert_eq!(
+        text_search(&db, "alpha beta", 10, None, SearchConsistency::Strong).await,
+        warm,
+        "reused analyses score exactly as fresh ones"
+    );
+    db.close().await.unwrap();
+}
+
+/// The index worker drops a generation's cached analyses once nothing of it
+/// is queued, without another search: a publication that leaves work queued
+/// keeps them for the searches that still need them.
+#[tokio::test]
+async fn publication_releases_cached_analyses_once_the_queue_drains() {
+    let db = open(
+        "overlay-text-cache-drain",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    db.install_index_for_tests(
+        ValidatedDynamicIndexDefinition::try_from(
+            TextIndexDefinition::new_node("Doc", "body").unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    for ordinal in 0..3 {
+        add(&db, [0.0, 0.0], &format!("alpha {ordinal}"), None).await;
+    }
+    let text_target = target(&db, QueueFamily::Text).await;
+    let found = text_search(&db, "alpha", 10, None, SearchConsistency::Strong).await;
+    assert_eq!(found.len(), 3);
+    let held = db.pending_text_analyses().held_bytes();
+    assert!(held > 0);
+
+    // An input budget below any operation: one operation per publication.
+    let narrow = publisher_with_limits(
+        &db,
+        super::publication_tests::batch_limits(1, 32_768),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
+    assert_eq!(
+        narrow.publish_once(text_target).await.unwrap(),
+        PublicationOutcome::Published {
+            operations: 1,
+            entities: 1
+        }
+    );
+    assert_eq!(
+        db.pending_text_analyses().held_bytes(),
+        held,
+        "work stays queued"
+    );
+    drain(&db, text_target).await;
+    assert_eq!(db.pending_text_analyses().held_bytes(), 0);
+    assert_eq!(
+        text_search(&db, "alpha", 10, None, SearchConsistency::Strong).await,
+        found
+    );
+    db.close().await.unwrap();
+}
+
+/// A strong search that finds its generation's queue empty drops what is
+/// still cached for that generation: here what a search whose view predates
+/// the drain, but that read the queue after the index worker released it,
+/// cached again. One that read the queue before the drain caches nothing.
+/// Eventual searches keep it, and other generations' entries stay.
+#[tokio::test]
+async fn a_strong_search_of_a_drained_queue_releases_its_generations_analyses() {
+    let db = open(
+        "overlay-text-cache-empty-queue",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&db, None).await;
+    for ordinal in 0..3 {
+        add(&db, [0.0, 0.0], &format!("alpha {ordinal}"), None).await;
+    }
+    let text_target = target(&db, QueueFamily::Text).await;
+    let next_generation = QueueTarget::new(
+        text_target.scope,
+        text_target.index_id,
+        crate::index_lifecycle::IndexGenerationId::new(text_target.generation.get() + 1).unwrap(),
+    );
+    let all = crate::index_lifecycle::work::TextPartition::Unpartitioned;
+    let cache = db.pending_text_analyses();
+    let found = text_search(&db, "alpha", 10, None, SearchConsistency::Strong).await;
+    assert_eq!(found.len(), 3);
+    let stale = cache
+        .get(text_target, &all)
+        .expect("the strong search cached its selection");
+    let held = cache.held_bytes();
+    let before = cache.now();
+    drain(&db, text_target).await;
+    assert!(queue(&db, QueueFamily::Text).await.is_none());
+    assert_eq!(cache.held_bytes(), 0);
+    cache.replace(text_target, &all, (*stale).clone(), before);
+    assert_eq!(cache.held_bytes(), 0, "read before the drain");
+    let recache = || cache.replace(text_target, &all, (*stale).clone(), cache.now());
+    recache();
+    cache.replace(next_generation, &all, (*stale).clone(), cache.now());
+    assert_eq!(cache.held_bytes(), 2 * held);
+
+    assert_eq!(
+        text_search(&db, "alpha", 10, None, SearchConsistency::Eventual).await,
+        found
+    );
+    assert_eq!(
+        cache.held_bytes(),
+        2 * held,
+        "eventual searches never release"
+    );
+    assert_eq!(
+        text_search(&db, "alpha", 10, None, SearchConsistency::Strong).await,
+        found
+    );
+    assert_eq!(cache.cached(text_target, &all), 0);
+    assert_eq!(cache.cached(next_generation, &all), 3, "another generation");
+    assert_eq!(cache.held_bytes(), held);
+
+    // A write batch's search is strong and releases the same way.
+    recache();
+    let result = write(&db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "hits",
+                    traversal::g().text_search_nodes("Doc", "body", "alpha", 10, None),
+                )
+                .returning(["hits"]),
+        )
+    })
+    .await;
+    assert_eq!(hits(&result, "hits"), found);
+    assert_eq!(cache.cached(text_target, &all), 0);
+    assert_eq!(cache.held_bytes(), held);
+    db.close().await.unwrap();
+}
+
+/// A reader handle has no index worker, so a strong search that finds the
+/// queue drained is what releases the analyses its earlier strong searches
+/// cached.
+#[tokio::test]
+async fn a_reader_releases_cached_analyses_once_it_reads_the_queue_drained() {
+    let name = "overlay-text-cache-reader";
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let writer = open(
+        name,
+        Arc::clone(&store),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&writer, None).await;
+    for ordinal in 0..3 {
+        add(&writer, [0.0, 0.0], &format!("alpha {ordinal}"), None).await;
+    }
+    let text_target = target(&writer, QueueFamily::Text).await;
+    let reader = HelixDB::open_reader_with_object_store_for_tests(name, Arc::clone(&store))
+        .await
+        .unwrap();
+    let all = crate::index_lifecycle::work::TextPartition::Unpartitioned;
+    let found = text_search(&reader, "alpha", 10, None, SearchConsistency::Strong).await;
+    assert_eq!(
+        found,
+        text_search(&writer, "alpha", 10, None, SearchConsistency::Strong).await
+    );
+    assert_eq!(reader.pending_text_analyses().cached(text_target, &all), 3);
+    let held = reader.pending_text_analyses().held_bytes();
+
+    drain(&writer, text_target).await;
+    // The reader replays the writer's WAL in order, so once it sees a later
+    // vector-only write it also sees the drained text queue.
+    let marker = write(&writer, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![("embedding", PropertyInput::from(vec![9.0_f32, 9.0]))],
+                    ),
+                )
+                .returning(["created"]),
+        )
+    })
+    .await["created"][0]["$id"]
+        .as_u64()
+        .unwrap();
+    assert!(queue(&writer, QueueFamily::Text).await.is_none());
+    writer.flush_writer().await.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !vector_search(&reader, [9.0, 9.0], 1, None, SearchConsistency::Strong)
+        .await
+        .iter()
+        .any(|(id, _)| *id == marker)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reader never caught up"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        text_search(&reader, "alpha", 10, None, SearchConsistency::Eventual).await,
+        found
+    );
+    assert_eq!(reader.pending_text_analyses().held_bytes(), held);
+    assert_eq!(
+        text_search(&reader, "alpha", 10, None, SearchConsistency::Strong).await,
+        found
+    );
+    assert_eq!(reader.pending_text_analyses().held_bytes(), 0);
+    reader.close().await.unwrap();
+    writer.close().await.unwrap();
+}
+
+/// Updates, deletes, and re-inserts after the cache is warm replace cached
+/// analyses by operation: every strong search answers from each entity's
+/// latest committed document, scored exactly as publication scores it.
+#[tokio::test]
+async fn cached_text_analyses_follow_updates_deletes_and_reinserts() {
+    let db = open(
+        "overlay-text-cache-churn",
+        Arc::new(InMemory::new()),
+        queued(IndexOperationQueueTuning::default()),
+    )
+    .await;
+    install(&db, None).await;
+    let strong = |term: &'static str| text_search(&db, term, 10, None, SearchConsistency::Strong);
+    let ids_of = |found: Vec<(u64, u64)>| {
+        let mut ids = found.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    };
+    let text_target = target(&db, QueueFamily::Text).await;
+    let cached = || {
+        db.pending_text_analyses().cached(
+            text_target,
+            &crate::index_lifecycle::work::TextPartition::Unpartitioned,
+        )
+    };
+    let first = add(&db, [0.0, 0.0], "alpha", None).await;
+    let second = add(&db, [1.0, 0.0], "alpha beta", None).await;
+    assert_eq!(ids_of(strong("alpha").await), [first, second]);
+    assert_eq!(cached(), 2);
+
+    update(&db, first, [0.0, 0.0], "gamma").await;
+    assert_eq!(ids_of(strong("alpha").await), [second]);
+    assert_eq!(ids_of(strong("gamma").await), [first]);
+    assert_eq!(
+        cached(),
+        2,
+        "the superseded operation's analysis is dropped"
+    );
+
+    delete(&db, second).await;
+    assert!(strong("alpha").await.is_empty());
+    assert_eq!(cached(), 1, "a deleted entity has nothing to analyze");
+
+    let third = add(&db, [2.0, 0.0], "alpha delta", None).await;
+    let before = strong("alpha").await;
+    assert_eq!(ids_of(before.clone()), [third]);
+    let gamma = strong("gamma").await;
+    drain(&db, text_target).await;
+    assert_eq!(
+        strong("alpha").await,
+        before,
+        "publication keeps every score"
+    );
+    assert_eq!(strong("gamma").await, gamma);
+    assert_eq!(cached(), 0);
+    db.close().await.unwrap();
+}
+
+/// Strong text searches racing writes and automatic publication share the
+/// cache: each one sees every document committed before it started,
+/// whichever search last replaced the cached analyses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_strong_text_searches_stay_exact_while_publication_runs() {
+    const WRITES: usize = 60;
+    const SEARCHERS: usize = 3;
+    let db = Arc::new(
+        open(
+            "overlay-text-cache-concurrent",
+            Arc::new(InMemory::new()),
+            DbConfig::new(),
+        )
+        .await,
+    );
+    install(&db, None).await;
+    let committed = Arc::new(std::sync::Mutex::new(Vec::<(u64, String)>::new()));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let searchers = (0..SEARCHERS)
+        .map(|searcher| {
+            let (db, committed, done) =
+                (Arc::clone(&db), Arc::clone(&committed), Arc::clone(&done));
+            tokio::spawn(async move {
+                let mut checked = 0;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let visible = committed.lock().unwrap().clone();
+                    let Some((id, term)) = visible.get((checked + searcher) % visible.len().max(1))
+                    else {
+                        tokio::task::yield_now().await;
+                        continue;
+                    };
+                    let found = text_search(&db, term, 10, None, SearchConsistency::Strong).await;
+                    assert_eq!(
+                        found.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                        [*id],
+                        "{term} was committed before the search"
+                    );
+                    let shared = text_search(&db, "shared", 100, None, SearchConsistency::Strong)
+                        .await
+                        .len();
+                    assert!(shared >= visible.len(), "{shared} < {}", visible.len());
+                    checked += 1;
+                }
+                checked
+            })
+        })
+        .collect::<Vec<_>>();
+    for ordinal in 0..WRITES {
+        let term = format!("unique{ordinal}");
+        let id = add(&db, [ordinal as f32, 0.0], &format!("shared {term}"), None).await;
+        committed.lock().unwrap().push((id, term));
+        tokio::task::yield_now().await;
+    }
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    for searcher in searchers {
+        assert!(
+            searcher.await.unwrap() > 0,
+            "every searcher checked a write"
+        );
+    }
     db.close().await.unwrap();
 }

@@ -33,9 +33,10 @@ pub(crate) struct TextBm25Statistics {
     document_frequencies: BTreeMap<Bytes, u64>,
 }
 
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-coverage"))]
 impl TextBm25Statistics {
-    /// Constructs exact corpus statistics for the production FTS benchmark fixture.
+    /// Constructs exact corpus statistics for fixtures: the production FTS
+    /// benchmark and unit tests.
     pub(crate) fn for_benchmark(
         total_document_count: u64,
         total_token_count: u64,
@@ -124,10 +125,10 @@ pub(crate) async fn load_query_statistics(
 /// Loads query statistics adjusted for selected pending entities.
 ///
 /// Every selected entity's physical contribution in `partition` (read from
-/// its indexed-entity statistics marker through `reader`) is removed, and its
-/// latest pending document in `partition`, if any, is added. Documents that do
-/// not match the query still change corpus totals, so BM25 scores for physical
-/// and pending documents share one consistent corpus.
+/// its indexed-entity statistics marker through `reader`) is removed, and the
+/// analysis of its latest pending document in `partition`, if any, is added.
+/// Documents that do not match the query still change corpus totals, so BM25
+/// scores for physical and pending documents share one consistent corpus.
 #[allow(
     clippy::too_many_arguments,
     reason = "the overlay binds one exact view, generation, partition, analyzer, query, and selection"
@@ -140,7 +141,10 @@ pub(crate) async fn load_overlaid_query_statistics(
     partition: &work::TextPartition,
     analyzer: TextAnalyzerKind,
     query: &str,
-    pending: &[(index_keys::IndexEntity, Option<&str>)],
+    pending: &[(
+        index_keys::IndexEntity,
+        Option<&crate::search::text::AnalyzedText>,
+    )],
 ) -> Result<LoadedTextQueryStatistics> {
     let analyzed = crate::search::text::analyze_text(analyzer, query);
     if analyzed.unique_terms.is_empty() {
@@ -192,7 +196,7 @@ pub(crate) async fn load_overlaid_query_statistics(
             })
             .collect::<Vec<_>>();
         let markers = reader.multi_get(&keys).await?;
-        for ((entity, text), marker) in chunk.iter().zip(markers) {
+        for ((entity, added), marker) in chunk.iter().zip(markers) {
             if let Some(marker) = marker {
                 let marker = index_values::decode_statistics_entity(&marker)?;
                 if marker.index_id != index_id
@@ -227,10 +231,9 @@ pub(crate) async fn load_overlaid_query_statistics(
                     }
                 }
             }
-            let Some(text) = text else {
+            let Some(added) = added else {
                 continue;
             };
-            let added = crate::search::text::analyze_text(analyzer, text);
             documents = documents.saturating_add(1);
             tokens = tokens.saturating_add(added.token_count);
             for (term, frequency) in &mut frequencies {

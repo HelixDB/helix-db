@@ -185,7 +185,7 @@ bucket was exhausted.
 | Limit | Value |
 | --- | --- |
 | Activation | Asynchronous and atomic after scan, secondary-index catch-up, and validation |
-| Vector and text publication | Asynchronous. Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work (each change counts its encoded size plus 576 bytes), and one write stages at most 8 MiB for one index; see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure) |
+| Vector and text publication | Asynchronous. Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work (each change counts its encoded size plus 576 bytes), and one write stages at most 8 MiB for one index; see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure). A `strong` text search analyzes at most 512 MiB of unpublished text in its partition; see [searches behind unpublished changes](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 | Progress | Monotonic entity/byte/operation counters; no percentage or total-work estimate |
 | Controls | Poll all operations; retry blocked operations; abort eligible constructing builds |
 | Memory reporting | Cache and batch budgets do not constitute a hard process-RSS cap |
