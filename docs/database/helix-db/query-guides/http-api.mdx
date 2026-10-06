@@ -33,10 +33,15 @@ Cloud, use the gateway URL and database ID shown in the dashboard. The
 `cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
 shared query endpoint.
 
-The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
-local HelixDB server. The Helix Cloud gateway is advertised only for
-`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
-this specification.
+The root OpenAPI server and the `/healthz`, `/readyz` and `/v2/diagnostics`
+operations describe a local HelixDB server. The Helix Cloud gateway is advertised
+only for `POST /v2/query`; its separate `/health` and `/readyz` contracts are not
+part of this specification.
+
+`GET /v2/diagnostics` returns read-only checks of the server's setup: storage,
+the S3 bucket's region, the disk cache's device and room, memory, index
+publication, and recent queries' index use.
+[`helix doctor`](/cli/command-reference/doctor) renders it.
 
 Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same

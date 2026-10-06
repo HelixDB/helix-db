@@ -41,6 +41,7 @@ pub(crate) fn router(state: ServerState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/v2/diagnostics", get(diagnostics))
         .route("/v2/query", post(execute_query))
         .with_state(state)
 }
@@ -68,6 +69,11 @@ fn health_response(status: StatusCode, state: ServerState) -> Response {
             "blocked_index_entity_count": state.blocked_index_entity_count(),
         }),
     )
+}
+
+/// Read-only checks of how this server is set up ([`crate::diagnostics`]).
+async fn diagnostics(State(state): State<ServerState>) -> Response {
+    json_response(StatusCode::OK, &crate::diagnostics::report(&state).await)
 }
 
 async fn execute_query(

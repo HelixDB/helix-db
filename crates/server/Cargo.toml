@@ -11,9 +11,11 @@ async-index-benchmark = ["db/async-index-benchmark"]
 db = { path = "../db" }
 helix-ast = { path = "../ast" }
 helix-metrics = { path = "../metrics" }
+helix-planner = { path = "../planner" }
 axum = "0.8.8"
-object_store = "0.14"
+object_store = { version = "0.14", features = ["aws"] }
 prost = "0.14.3"
+reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d" }
@@ -41,7 +43,6 @@ tonic-prost-build = "0.14.6"
 async-trait = "0.1"
 helix-db = { path = "../../sdks/rust" }
 helix-db-testkit = { path = "../db-testkit" }
-helix-planner = { path = "../planner" }
 tempfile = "3"
 tokio-test = "0.4"
 tokio-stream = { version = "0.1", features = ["net"] }

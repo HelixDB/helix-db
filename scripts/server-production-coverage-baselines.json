@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "uncovered_source_lines": {
-    "count": 103,
-    "sha256": "e48064e19bb4f1b7ece0902f00afd52d81e749677f3e34278172001b8a17cd7a",
+    "count": 115,
+    "sha256": "88cc5b4e7d359b36831d69cc9b333e0131129747df6f60268b81d97873aa4bd7",
     "classification": "test-required",
-    "reason": "Every remaining uncovered production line in the transport server and its production-compiled query-service dependency remains in the explicit launch test backlog. Three static error-code mapping lines are exhaustively covered by the database mapping tests rather than this server-only shard. The exact digest makes coverage changes require a reviewed ratchet update."
+    "reason": "Every remaining uncovered production line in the transport server and its production-compiled query-service dependency remains in the explicit launch test backlog. Three static error-code mapping lines are exhaustively covered by the database mapping tests rather than this server-only shard. The exact digest makes coverage changes require a reviewed ratchet update. The diagnostics probes that reach real AWS endpoints (the bucket-region lookup and the metadata-backed region branch) and the unreadable /proc/self/mountinfo branch are exercised by the image end-to-end runs instead."
   },
   "scopes": {
     "query_service": {
