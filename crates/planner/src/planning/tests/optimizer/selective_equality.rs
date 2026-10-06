@@ -609,3 +609,47 @@ fn null_equality_intersects_with_the_selective_index_before_sorting() {
     )));
     assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
 }
+
+/// A unique lookup yields each owner at most once whatever its value, so a
+/// dedup over it adds no distinct operator, even where the lookup is not
+/// bounded to one row: null, a parameter, a wide literal set or an
+/// intersection of sets. A non-unique lookup of several values keeps it.
+#[test]
+fn dedup_over_unique_lookups_adds_no_distinct_for_any_value() {
+    let context = |uniqueness| {
+        let mut context = PlannerContext::default();
+        context.indexes.node_eq.insert(
+            ScopedPropertyKey::try_new("User", "uid").unwrap(),
+            crate::catalog::NodeEqualityIndexMeta::try_new("node_eq:User:uid")
+                .unwrap()
+                .with_uniqueness(uniqueness),
+        );
+        context
+    };
+    let uids = |range: std::ops::Range<i64>| PropertyValue::I64Array(range.collect());
+    for predicate in [
+        Predicate::eq("uid", 7),
+        Predicate::eq("uid", PropertyValue::Null),
+        Predicate::eq_param("uid", "uid"),
+        Predicate::is_in("uid", uids(0..1_024)),
+        Predicate::and(vec![
+            Predicate::is_in("uid", uids(0..512)),
+            Predicate::is_in("uid", uids(256..768)),
+        ]),
+    ] {
+        let plan = executable_traversal(
+            g().n_with_label_where("User", predicate.clone()).dedup(),
+            context(crate::catalog::IndexUniqueness::Unique),
+        );
+        assert!(
+            !has_exec_op_family(&plan, ExecOpFamily::Distinct),
+            "{predicate:?}"
+        );
+    }
+    let non_unique = executable_traversal(
+        g().n_with_label_where("User", Predicate::is_in("uid", uids(0..3)))
+            .dedup(),
+        context(crate::catalog::IndexUniqueness::NonUnique),
+    );
+    assert!(has_exec_op_family(&non_unique, ExecOpFamily::Distinct));
+}
