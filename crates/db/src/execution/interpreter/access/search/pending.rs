@@ -5,19 +5,22 @@
 //! never mixes snapshots. A search only ever sees a pending entity at its
 //! latest state in that view, never at an earlier state of its chain: a build
 //! or publication may already have written the latest state physically, and
-//! an earlier one would hide it. Strong searches select every pending entity;
-//! eventual searches select the oldest pending entities whose latest
-//! operations fit their budget and leave the rest to their physical
-//! representation. Only decoding and searching follow that budget; reading
-//! the queue still follows the backlog (see
+//! an earlier one would hide it. Strong searches select every pending entity,
+//! and a strong vector search fails with retryable index backpressure rather
+//! than decode and score more than its configured bound; eventual searches
+//! select the oldest pending entities whose latest operations fit their
+//! budget and leave the rest to their physical representation. Only decoding
+//! and searching follow those bounds; reading the queue still follows the
+//! backlog (see
 //! [`crate::index_lifecycle::queue::storage::QueueStore::read_latest`]).
+//! One request reads and decodes each searched queue once ([`PendingSets`]),
+//! on the blocking pool.
 //! Write transactions read the queue through their serializable transaction,
 //! additionally overlay their own uncommitted changes from the write context,
 //! and always search strongly. No publication clears the physical results
 //! their own changes supersede, so those never count toward the suppression
 //! limit.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -27,9 +30,7 @@ use roaring::RoaringTreemap;
 
 use super::*;
 use crate::encoding::v2::keys::IndexEntity;
-use crate::encoding::v2::values::indexes::operation_queue::{
-    LatestOperations, QueueFamily, QueuedPayload,
-};
+use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedPayload};
 use crate::index_lifecycle::queue::producer::PendingEntityState;
 use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::work::TextPartition;
@@ -63,115 +64,275 @@ impl PendingEntity {
     }
 }
 
-/// Consistency a selection was made under.
-#[derive(Debug)]
-enum SelectionConsistency {
-    /// Every pending entity. `local` holds the IDs of those the searching
-    /// write transaction changed itself, which no publication clears; it is
-    /// empty for read requests.
-    Strong { local: RoaringTreemap },
-    /// The oldest committed pending entities whose latest operations fit
-    /// the eventual search budget, each at that latest state. Only read
-    /// requests search eventually.
-    Eventual,
+/// Committed pending entities of one generation queue as one request view
+/// sees them: decoded once and shared by every search of the request.
+#[derive(Debug, Clone)]
+struct CommittedPending {
+    /// Entities in selection order, each at its latest state in the view.
+    entities: Arc<[PendingEntity]>,
+    /// Exactly the IDs of `entities`; a generation indexes one element kind,
+    /// so the ID alone identifies an entity.
+    superseded: Arc<RoaringTreemap>,
+}
+
+impl CommittedPending {
+    fn new(entities: Vec<PendingEntity>) -> Self {
+        let superseded = entities
+            .iter()
+            .map(|pending| pending.entity.id.get())
+            .collect::<RoaringTreemap>();
+        debug_assert_eq!(
+            superseded.len(),
+            entities.len() as u64,
+            "a selection names each entity once"
+        );
+        Self {
+            entities: Arc::from(entities),
+            superseded: Arc::new(superseded),
+        }
+    }
+}
+
+/// What one request view's read of a generation queue gives its searches.
+#[derive(Debug, Clone)]
+enum CommittedRead {
+    /// The committed pending entities a search under the read's consistency
+    /// overlays.
+    Selected(CommittedPending),
+    /// Committed pending vector work a strong search may not decode: its
+    /// selection reached `reached` retained bytes, past `limit`, when it
+    /// stopped.
+    PastStrongVectorBound { reached: u64, limit: u64 },
+}
+
+/// One committed pending set, read once by whichever search needs it first.
+type PendingSet = Arc<tokio::sync::OnceCell<CommittedRead>>;
+
+/// Committed pending sets read in one request view: one per searched
+/// generation queue and search consistency, shared by every search of the
+/// request.
+///
+/// # Contract
+///
+/// A set is read and decoded at most once while its view stands, however
+/// many searches, steps, `ForEach` frames, or parallel step contexts of the
+/// request search its queue; concurrent first searches wait for one read.
+/// A failed or abandoned read leaves the set unread, so the next search reads
+/// it again and fails again if the queue is corrupt.
+///
+/// A read request's view is one immutable snapshot, which every parallel
+/// step context shares, so they share one instance. A write transaction reads
+/// the committed queue through itself and stages its own queue operands only
+/// at commit, so the committed queue it reads never changes while it stands:
+/// a set stays exact across its writes, and each search overlays the
+/// transaction's current changes on it afresh. The owning context forgets
+/// every set whenever the transaction opens, commits, or aborts, when an
+/// isolated mutation scope commits, and on index DDL, exactly where it
+/// forgets prepared memberships.
+///
+/// Sets live until the request ends or forgets them, so a request holds the
+/// decoded pending work of every queue it searched at once; each is bounded
+/// as one search of it is.
+#[derive(Debug, Default)]
+pub(in crate::execution::interpreter) struct PendingSets {
+    sets: parking_lot::Mutex<HashMap<(QueueTarget, SearchConsistency), PendingSet>>,
+    /// Queue reads made, for tests that prove reuse.
+    #[cfg(test)]
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl PendingSets {
+    /// The set of `target` under `consistency`, produced by `read` only when
+    /// no search of this view has produced it yet.
+    async fn get_or_read(
+        &self,
+        target: QueueTarget,
+        consistency: SearchConsistency,
+        read: impl std::future::Future<Output = Result<CommittedRead>>,
+    ) -> Result<CommittedRead> {
+        // The guard is released before awaiting the set.
+        let set = Arc::clone(self.sets.lock().entry((target, consistency)).or_default());
+        set.get_or_try_init(|| {
+            #[cfg(test)]
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            read
+        })
+        .await
+        .cloned()
+    }
+
+    /// Returns how many queue reads the sets made.
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The searching write transaction's own changes to one generation, at their
+/// latest states.
+#[derive(Debug, Default)]
+struct LocalChanges {
+    /// Exactly the IDs of `entities`.
+    ids: RoaringTreemap,
+    entities: Vec<PendingEntity>,
+}
+
+/// The entities one search overlays: a selected prefix of the request view's
+/// committed pending entities, with the searching write transaction's own
+/// latest states in place of theirs.
+///
+/// Cloning shares the entities instead of copying them, so work on the
+/// blocking pool can own a clone.
+#[derive(Debug, Clone)]
+pub(super) struct PendingEntities {
+    committed: Arc<[PendingEntity]>,
+    /// Length of the selected prefix of `committed`.
+    selected: usize,
+    /// Empty for read requests.
+    local: Arc<LocalChanges>,
+}
+
+impl PendingEntities {
+    /// Every overlaid entity at its latest state: selected committed
+    /// entities in selection order, then the write transaction's own.
+    pub(super) fn iter(&self) -> impl Iterator<Item = &PendingEntity> {
+        self.selected_committed()
+            .filter(|pending| !self.local.ids.contains(pending.entity.id.get()))
+            .chain(&self.local.entities)
+    }
+
+    /// Selected committed entities, including those the write transaction
+    /// changed since.
+    fn selected_committed(&self) -> std::slice::Iter<'_, PendingEntity> {
+        self.committed[..self.selected].iter()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.selected == 0 && self.local.entities.is_empty()
+    }
 }
 
 /// Pending entities selected for one search.
-///
-/// `superseded` holds exactly the IDs of `entities`; a generation indexes one
-/// element kind, so the ID alone identifies an entity.
 #[derive(Debug)]
 pub(super) struct PendingSelection {
     /// Generation queue the entities were selected from.
     target: QueueTarget,
-    /// Consistency the entities were selected under.
-    consistency: SelectionConsistency,
-    /// Entities whose physical representation is superseded.
-    pub(super) superseded: RoaringTreemap,
-    /// Selected entities in deterministic selection order.
-    pub(super) entities: Vec<PendingEntity>,
+    /// Consistency the entities were selected under. Eventual selections
+    /// belong to read requests and hold no local changes.
+    consistency: SearchConsistency,
+    entities: PendingEntities,
+    /// Entities whose physical representation is superseded: exactly the
+    /// IDs of [`Self::entities`].
+    pub(super) superseded: Arc<RoaringTreemap>,
 }
 
 impl PendingSelection {
     fn new(
         target: QueueTarget,
         consistency: SearchConsistency,
-        entities: Vec<PendingEntity>,
+        committed: CommittedPending,
     ) -> Self {
         Self {
             target,
-            consistency: match consistency {
-                SearchConsistency::Strong => SelectionConsistency::Strong {
-                    local: RoaringTreemap::new(),
-                },
-                SearchConsistency::Eventual => SelectionConsistency::Eventual,
+            consistency,
+            entities: PendingEntities {
+                selected: committed.entities.len(),
+                committed: committed.entities,
+                local: Arc::default(),
             },
-            superseded: entities
-                .iter()
-                .map(|pending| pending.entity.id.get())
-                .collect(),
-            entities,
+            superseded: committed.superseded,
         }
     }
 
-    /// Strongly selects committed `entities` with a write transaction's own
+    /// Strongly selects `committed` entities with a write transaction's own
     /// `local` changes overlaid on their latest states.
     ///
-    /// Costs one pass over the selection plus one lookup per local change,
-    /// not a scan of the committed backlog per change.
+    /// Costs one pass over the local changes plus, when there are any, one
+    /// union of the committed and local IDs, not a scan of the committed
+    /// backlog per change.
     fn overlaid<'a>(
         target: QueueTarget,
-        entities: Vec<PendingEntity>,
+        committed: CommittedPending,
         local: impl Iterator<Item = (IndexEntity, &'a PendingEntityState)>,
     ) -> Self {
-        let mut selection = Self::new(target, SearchConsistency::Strong, entities);
-        let mut local = local.peekable();
-        if local.peek().is_none() {
+        let mut selection = Self::new(target, SearchConsistency::Strong, committed);
+        let entities = local
+            .map(|(entity, state)| PendingEntity {
+                entity,
+                latest: match state {
+                    PendingEntityState::Vector { current, .. } => {
+                        current.as_ref().map(|document| {
+                            (
+                                document.partition().clone(),
+                                PendingValue::Vector(Arc::from(document.vector())),
+                            )
+                        })
+                    }
+                    PendingEntityState::Text { current, .. } => current.as_ref().map(|document| {
+                        (
+                            document.partition.clone(),
+                            PendingValue::Text(Arc::clone(&document.text)),
+                        )
+                    }),
+                },
+            })
+            .collect::<Vec<_>>();
+        if entities.is_empty() {
             return selection;
         }
-        let mut positions = selection
-            .entities
+        let ids = entities
             .iter()
-            .enumerate()
-            .map(|(position, pending)| (pending.entity, position))
-            .collect::<HashMap<_, _>>();
-        let mut local_ids = RoaringTreemap::new();
-        for (entity, state) in local {
-            let latest = match state {
-                PendingEntityState::Vector { current, .. } => current.as_ref().map(|document| {
-                    (
-                        document.partition().clone(),
-                        PendingValue::Vector(Arc::from(document.vector())),
-                    )
-                }),
-                PendingEntityState::Text { current, .. } => current.as_ref().map(|document| {
-                    (
-                        document.partition.clone(),
-                        PendingValue::Text(Arc::clone(&document.text)),
-                    )
-                }),
-            };
-            local_ids.insert(entity.id.get());
-            match positions.entry(entity) {
-                Entry::Occupied(position) => selection.entities[*position.get()].latest = latest,
-                Entry::Vacant(position) => {
-                    position.insert(selection.entities.len());
-                    selection.superseded.insert(entity.id.get());
-                    selection.entities.push(PendingEntity { entity, latest });
-                }
-            }
-        }
-        selection.consistency = SelectionConsistency::Strong { local: local_ids };
+            .map(|pending| pending.entity.id.get())
+            .collect::<RoaringTreemap>();
+        assert_eq!(
+            ids.len(),
+            entities.len() as u64,
+            "a transaction changes each entity of a generation once"
+        );
+        selection.superseded = Arc::new(&*selection.superseded | &ids);
+        selection.entities.local = Arc::new(LocalChanges { ids, entities });
         selection
+    }
+
+    /// A strong read selection of `entities`, for tests of overlay consumers.
+    #[cfg(test)]
+    pub(super) fn strong_for_tests(target: QueueTarget, entities: Vec<PendingEntity>) -> Self {
+        Self::new(
+            target,
+            SearchConsistency::Strong,
+            CommittedPending::new(entities),
+        )
+    }
+
+    /// The entities this search overlays.
+    pub(super) const fn entities(&self) -> &PendingEntities {
+        &self.entities
     }
 
     /// IDs of the superseded entities the searching write transaction changed
     /// itself, or `None` for an eventual selection, which has none.
     pub(super) fn local(&self) -> Option<&RoaringTreemap> {
-        match &self.consistency {
-            SelectionConsistency::Strong { local } => Some(local),
-            SelectionConsistency::Eventual => None,
+        match self.consistency {
+            SearchConsistency::Strong => Some(&self.entities.local.ids),
+            SearchConsistency::Eventual => None,
         }
+    }
+
+    /// Keeps only the first `end` committed entities of an eventual
+    /// selection, leaving the rest to their published representation.
+    fn truncate_eventual(&mut self, end: usize) {
+        debug_assert!(
+            self.consistency == SearchConsistency::Eventual && self.entities.local.ids.is_empty(),
+            "only an eventual read selection shrinks"
+        );
+        self.entities.selected = end.min(self.entities.selected);
+        self.superseded = Arc::new(
+            self.entities
+                .selected_committed()
+                .map(|pending| pending.entity.id.get())
+                .collect(),
+        );
     }
 
     /// Resolves a search whose answer lies behind more than
@@ -191,26 +352,21 @@ impl PendingSelection {
     pub(super) fn yield_to_suppression_limit(&mut self, skipped: usize) -> Result<()> {
         let limit = super::limits::MAX_SUPPRESSED_SEARCH_RESULTS;
         match self.consistency {
-            SelectionConsistency::Strong { .. } => Err(HelixDbError::IndexBackpressure {
+            SearchConsistency::Strong => Err(HelixDbError::IndexBackpressure {
                 scope: self.target.scope,
                 index_id: self.target.index_id.get(),
                 resource: crate::error::IndexBackpressureResource::SuppressedSearchResults,
                 requested: u64::try_from(skipped).unwrap_or(u64::MAX),
                 limit: limit as u64,
             }),
-            SelectionConsistency::Eventual if self.entities.len() > limit => {
-                self.entities.truncate(limit);
-                self.superseded = self
-                    .entities
-                    .iter()
-                    .map(|pending| pending.entity.id.get())
-                    .collect();
+            SearchConsistency::Eventual if self.entities.selected > limit => {
+                self.truncate_eventual(limit);
                 Ok(())
             }
-            SelectionConsistency::Eventual => Err(HelixDbError::InvariantViolation(format!(
+            SearchConsistency::Eventual => Err(HelixDbError::InvariantViolation(format!(
                 "a search superseding {} entities skipped {skipped} results, past a suppression \
                  limit it cannot reach",
-                self.entities.len()
+                self.entities.selected
             ))),
         }
     }
@@ -273,13 +429,10 @@ impl PendingSelection {
             }
             Err(error) => Err(error),
         };
-        let local = self.local();
-        let is_local = |pending: &PendingEntity| {
-            local.is_some_and(|local| local.contains(pending.entity.id.get()))
-        };
-        self.entities
+        let local = Arc::clone(&self.entities.local);
+        local
+            .entities
             .iter()
-            .filter(|pending| is_local(pending))
             .filter_map(|pending| pending.text_in(partition))
             .map(&mut refused)
             .find_map(Result::transpose)
@@ -294,9 +447,9 @@ impl PendingSelection {
             })?;
         let committed = self
             .entities
-            .iter()
+            .selected_committed()
             .enumerate()
-            .filter(|(_, pending)| !is_local(pending))
+            .filter(|(_, pending)| !local.ids.contains(pending.entity.id.get()))
             .filter_map(|(position, pending)| {
                 pending.text_in(partition).map(|text| (position, text))
             })
@@ -309,20 +462,15 @@ impl PendingSelection {
             return Ok(());
         };
         match self.consistency {
-            SelectionConsistency::Strong { .. } => Err(HelixDbError::IndexBackpressure {
+            SearchConsistency::Strong => Err(HelixDbError::IndexBackpressure {
                 scope: self.target.scope,
                 index_id: self.target.index_id.get(),
                 resource: crate::error::IndexBackpressureResource::PendingTextAnalysisBytes,
                 requested,
                 limit: limit.get(),
             }),
-            SelectionConsistency::Eventual => {
-                self.entities.truncate(end);
-                self.superseded = self
-                    .entities
-                    .iter()
-                    .map(|pending| pending.entity.id.get())
-                    .collect();
+            SearchConsistency::Eventual => {
+                self.truncate_eventual(end);
                 Ok(())
             }
         }
@@ -334,35 +482,45 @@ impl<'db> ExecutionContext<'db> {
     /// is pending or no queued publication is configured.
     ///
     /// Every selected entity is searched at its latest state in the view.
-    /// Strong search selects every pending entity. Eventual search selects
+    /// Strong search selects every pending entity; a strong vector search
+    /// whose committed pending entities' latest operations retain more than
+    /// [`IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`]
+    /// fails with retryable index backpressure instead of decoding and
+    /// scoring them. Eventual search selects
     /// entities in the order of their oldest pending operation until the
     /// next one's latest operation would exceed the per-search source-input
     /// budget; unselected entities keep their physical representation, stale
     /// or not, until published, and an entity is never selected at an
     /// earlier state, which could be older than that representation. The
-    /// budget bounds decoding and searching, not the queue read: the map
+    /// bounds cover decoding and searching, not the queue read: the map
     /// layout fetches its whole value, and while merge operands are pending
     /// above its base SlateDB resolves them against all of it, validating
     /// every record, so that read costs the backlog and fails on a corrupt
     /// record the budget never selects (see
     /// [`crate::index_lifecycle::queue::storage::QueueStore::read_latest`]).
-    /// An eventual search may shrink its selection further to stay within
-    /// the suppression limit (see
-    /// [`PendingSelection::yield_to_suppression_limit`]). Write transactions
-    /// are always strong and add their own uncommitted changes.
+    /// One request reads and decodes each queue once per consistency
+    /// ([`PendingSets`]), decoding on the blocking pool. An eventual search
+    /// may shrink its selection further to stay within the suppression limit
+    /// (see [`PendingSelection::yield_to_suppression_limit`]). Write
+    /// transactions are always strong and add their own uncommitted changes,
+    /// which never count toward the strong vector bound: the transaction
+    /// bounds them itself.
     ///
     /// A write transaction reads the queue through its serializable
     /// transaction, so the searched generation's queue becomes a read
     /// dependency: a concurrent commit that enqueues to or acknowledges that
     /// generation aborts this transaction with a retryable conflict instead
     /// of letting it commit a decision made without that work. Writes that do
-    /// not search read no queue and keep committing concurrently.
+    /// not search read no queue and keep committing concurrently; reusing a
+    /// set keeps the dependency its first read recorded.
+    ///
+    /// [`IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`]: crate::config::IndexOperationQueueTuning::strong_vector_search_max_pending_bytes
     pub(super) async fn pending_selection(
         &self,
         identity: &IndexIdentity,
         family: QueueFamily,
     ) -> Result<Option<PendingSelection>> {
-        let (target, latest, consistency) = if let Some(active) = self.active_write_tx() {
+        let (target, consistency, read) = if let Some(active) = self.active_write_tx() {
             let Some(handle) = crate::index_lifecycle::repository::load_active_handle(
                 &active.txn,
                 self.tenant_scope,
@@ -374,12 +532,10 @@ impl<'db> ExecutionContext<'db> {
             };
             let target =
                 QueueTarget::new(self.tenant_scope, handle.index_id(), handle.generation());
-            let latest = self
-                .db
-                .index_queue_store()
-                .read_latest(&active.txn, target, u64::MAX)
+            let read = self
+                .committed_pending(&active.txn, target, family, SearchConsistency::Strong)
                 .await?;
-            (target, latest, SearchConsistency::Strong)
+            (target, SearchConsistency::Strong, read)
         } else if let Some(view) = self.request_read_view() {
             let Some(handle) = crate::index_lifecycle::repository::load_active_handle(
                 view,
@@ -392,52 +548,110 @@ impl<'db> ExecutionContext<'db> {
             };
             let target =
                 QueueTarget::new(self.tenant_scope, handle.index_id(), handle.generation());
-            let budget = match self.search_consistency {
-                SearchConsistency::Strong => u64::MAX,
-                SearchConsistency::Eventual => self
-                    .db
-                    .config()
-                    .db()
-                    .index_operation_queue()
-                    .eventual_search_budget(),
-            };
-            let latest = self
-                .db
-                .index_queue_store()
-                .read_latest(view, target, budget)
+            let read = self
+                .committed_pending(view, target, family, self.search_consistency)
                 .await?;
-            (target, latest, self.search_consistency)
+            (target, self.search_consistency, read)
         } else {
             return Ok(None);
         };
-        if let Some(latest) = &latest
-            && latest.family() != family
-        {
-            return Err(HelixDbError::IndexCatalogCorruption(
-                "search overlay read another family's operation queue".to_string(),
-            ));
-        }
-        let entities = latest
-            .map(LatestOperations::into_operations)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|operation| PendingEntity {
-                entity: operation.entity(),
-                latest: latest_value(operation.payload()),
-            })
-            .collect();
+        let committed = match read {
+            CommittedRead::Selected(committed) => committed,
+            CommittedRead::PastStrongVectorBound { reached, limit } => {
+                return Err(HelixDbError::IndexBackpressure {
+                    scope: target.scope,
+                    index_id: target.index_id.get(),
+                    resource: crate::error::IndexBackpressureResource::PendingVectorBytes,
+                    requested: reached,
+                    limit,
+                });
+            }
+        };
         let selection = match self.active_write_tx() {
             Some(active) => PendingSelection::overlaid(
                 target,
-                entities,
+                committed,
                 active
                     .index_context
                     .queued_mutations()
                     .pending_entities(target),
             ),
-            None => PendingSelection::new(target, consistency, entities),
+            None => PendingSelection::new(target, consistency, committed),
         };
         Ok((!selection.entities.is_empty()).then_some(selection))
+    }
+
+    /// The committed pending entities of `target` a search under
+    /// `consistency` overlays, read through `read` once per request view
+    /// ([`PendingSets`]) and decoded on the blocking pool.
+    ///
+    /// A strong vector search decodes within
+    /// `strong_vector_search_max_pending_bytes` and reports a selection the
+    /// bound ends instead of decoding past it; a strong text search decodes
+    /// everything; an eventual search decodes within its source-input budget.
+    async fn committed_pending(
+        &self,
+        read: &(impl slatedb::DbReadOps + Sync),
+        target: QueueTarget,
+        family: QueueFamily,
+        consistency: SearchConsistency,
+    ) -> Result<CommittedRead> {
+        let tuning = self.db.config().db().index_operation_queue();
+        let budget = match (consistency, family) {
+            (SearchConsistency::Eventual, _) => tuning.eventual_search_budget(),
+            (SearchConsistency::Strong, QueueFamily::Vector) => {
+                tuning.strong_vector_search_max_pending_bytes().get()
+            }
+            (SearchConsistency::Strong, QueueFamily::Text) => u64::MAX,
+        };
+        let load = async move {
+            let Some(bytes) = self
+                .db
+                .index_queue_store()
+                .read_latest(read, target)
+                .await?
+            else {
+                return Ok(CommittedRead::Selected(CommittedPending::new(Vec::new())));
+            };
+            super::blocking::run_blocking(&self.execution_control, move |probe| {
+                probe.check()?;
+                let latest = bytes.decode_latest(budget)?;
+                if latest.family() != family {
+                    return Err(HelixDbError::IndexCatalogCorruption(
+                        "search overlay read another family's operation queue".to_string(),
+                    ));
+                }
+                match (consistency, family, latest.refused()) {
+                    (SearchConsistency::Strong, QueueFamily::Vector, Some(reached)) => {
+                        return Ok(CommittedRead::PastStrongVectorBound {
+                            reached,
+                            limit: budget,
+                        });
+                    }
+                    (SearchConsistency::Strong, QueueFamily::Text, Some(_)) => {
+                        return Err(HelixDbError::InvariantViolation(
+                            "an unbounded strong text overlay left pending work out".to_string(),
+                        ));
+                    }
+                    (SearchConsistency::Strong, _, None) | (SearchConsistency::Eventual, _, _) => {}
+                }
+                probe.check()?;
+                Ok(CommittedRead::Selected(CommittedPending::new(
+                    latest
+                        .into_operations()
+                        .into_iter()
+                        .map(|operation| PendingEntity {
+                            entity: operation.entity(),
+                            latest: latest_value(operation.payload()),
+                        })
+                        .collect(),
+                )))
+            })
+            .await
+        };
+        self.pending_sets
+            .get_or_read(target, consistency, load)
+            .await
     }
 }
 
@@ -540,25 +754,44 @@ mod tests {
         batch::write_batch().var_as("created", traversal::g().add_n("Doc", properties))
     }
 
-    /// A selection of `count` deleted nodes, oldest first by ID.
-    fn deletions(consistency: SearchConsistency, count: u64) -> PendingSelection {
-        PendingSelection::new(
-            QueueTarget::new(
-                DataScope::LegacyUnscoped,
-                IndexId::new(7).unwrap(),
-                IndexGenerationId::new(9).unwrap(),
-            ),
-            consistency,
+    fn target() -> QueueTarget {
+        QueueTarget::new(
+            DataScope::LegacyUnscoped,
+            IndexId::new(7).unwrap(),
+            IndexGenerationId::new(9).unwrap(),
+        )
+    }
+
+    fn node(id: u64) -> IndexEntity {
+        IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(id),
+        }
+    }
+
+    /// `count` committed deletions of nodes, oldest first by ID.
+    fn deleted(count: u64) -> CommittedPending {
+        CommittedPending::new(
             (0..count)
                 .map(|id| PendingEntity {
-                    entity: IndexEntity {
-                        kind: IndexElementKind::Node,
-                        id: IndexEntityId::new(id),
-                    },
+                    entity: node(id),
                     latest: None,
                 })
                 .collect(),
         )
+    }
+
+    /// A selection of `count` deleted nodes, oldest first by ID.
+    fn deletions(consistency: SearchConsistency, count: u64) -> PendingSelection {
+        PendingSelection::new(target(), consistency, deleted(count))
+    }
+
+    fn selected(selection: &PendingSelection) -> Vec<u64> {
+        selection
+            .entities()
+            .iter()
+            .map(|pending| pending.entity.id.get())
+            .collect()
     }
 
     #[test]
@@ -582,7 +815,7 @@ mod tests {
             "{error}"
         );
         assert!(error.is_index_backpressure());
-        assert_eq!(strong.entities.len(), limit + 1, "the selection is kept");
+        assert_eq!(selected(&strong).len(), limit + 1, "the selection is kept");
     }
 
     #[test]
@@ -591,16 +824,9 @@ mod tests {
         let mut eventual = deletions(SearchConsistency::Eventual, limit as u64 + 5);
         eventual.yield_to_suppression_limit(limit + 1).unwrap();
         let oldest = (0..limit as u64).collect::<Vec<_>>();
+        assert_eq!(selected(&eventual), oldest);
         assert_eq!(
-            eventual
-                .entities
-                .iter()
-                .map(|pending| pending.entity.id.get())
-                .collect::<Vec<_>>(),
-            oldest
-        );
-        assert_eq!(
-            eventual.superseded,
+            *eventual.superseded,
             oldest.into_iter().collect::<RoaringTreemap>()
         );
         // A selection within the limit can never be past it.
@@ -615,32 +841,39 @@ mod tests {
 
     #[test]
     fn overlaid_selections_supersede_and_mark_every_local_change() {
-        let entity = |id| IndexEntity {
-            kind: IndexElementKind::Node,
-            id: IndexEntityId::new(id),
-        };
-        let deleted = PendingEntityState::Vector {
+        let removed = PendingEntityState::Vector {
             first: None,
             current: None,
         };
-        let committed = deletions(SearchConsistency::Strong, 3);
+        let committed = CommittedPending::new(
+            (0..3)
+                .map(|id| PendingEntity {
+                    entity: node(id),
+                    latest: Some((
+                        TextPartition::Unpartitioned,
+                        PendingValue::Vector(Arc::from([id as f32, 0.0])),
+                    )),
+                })
+                .collect(),
+        );
         // Local changes to a committed pending entity and to one without
         // committed work.
         let selection = PendingSelection::overlaid(
-            committed.target,
-            committed.entities,
-            [(entity(2), &deleted), (entity(5), &deleted)].into_iter(),
+            target(),
+            committed.clone(),
+            [(node(2), &removed), (node(5), &removed)].into_iter(),
         );
-        assert_eq!(
+        assert_eq!(selected(&selection), [0, 1, 2, 5]);
+        assert!(
             selection
-                .entities
+                .entities()
                 .iter()
-                .map(|pending| pending.entity.id.get())
-                .collect::<Vec<_>>(),
-            [0, 1, 2, 5]
+                .filter(|pending| [2, 5].contains(&pending.entity.id.get()))
+                .all(|pending| pending.latest.is_none()),
+            "the transaction's own latest state replaces the committed one"
         );
         assert_eq!(
-            selection.superseded,
+            *selection.superseded,
             [0, 1, 2, 5].into_iter().collect::<RoaringTreemap>()
         );
         assert_eq!(
@@ -648,15 +881,38 @@ mod tests {
             Some(&[2, 5].into_iter().collect::<RoaringTreemap>()),
             "both local changes are exempt from the suppression limit"
         );
+        // The shared committed set is untouched for the request's other
+        // searches.
+        assert_eq!(
+            *committed.superseded,
+            [0, 1, 2].into_iter().collect::<RoaringTreemap>()
+        );
+        assert!(committed
+            .entities
+            .iter()
+            .all(|pending| pending.latest.is_some()));
 
-        let committed = deletions(SearchConsistency::Strong, 3);
         let selection = PendingSelection::overlaid(
-            committed.target,
-            committed.entities,
+            target(),
+            deleted(3),
             std::iter::empty::<(IndexEntity, &PendingEntityState)>(),
         );
         assert_eq!(selection.local(), Some(&RoaringTreemap::new()));
         assert_eq!(deletions(SearchConsistency::Eventual, 1).local(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "a transaction changes each entity of a generation once")]
+    fn an_overlay_rejects_a_local_entity_changed_twice() {
+        let removed = PendingEntityState::Vector {
+            first: None,
+            current: None,
+        };
+        PendingSelection::overlaid(
+            target(),
+            deleted(1),
+            [(node(4), &removed), (node(4), &removed)].into_iter(),
+        );
     }
 
     /// A selection whose entity `id` has latest state `documents[id]`: text in
@@ -665,21 +921,22 @@ mod tests {
         consistency: SearchConsistency,
         documents: &[Option<(TextPartition, &str)>],
     ) -> PendingSelection {
-        let mut selection = deletions(consistency, documents.len() as u64);
-        for (pending, document) in selection.entities.iter_mut().zip(documents) {
-            pending.latest = document
-                .clone()
-                .map(|(partition, text)| (partition, PendingValue::Text(Arc::from(text))));
-        }
-        selection
+        PendingSelection::new(target(), consistency, committed_texts(documents))
     }
 
-    fn selected(selection: &PendingSelection) -> Vec<u64> {
-        selection
-            .entities
-            .iter()
-            .map(|pending| pending.entity.id.get())
-            .collect()
+    fn committed_texts(documents: &[Option<(TextPartition, &str)>]) -> CommittedPending {
+        CommittedPending::new(
+            documents
+                .iter()
+                .enumerate()
+                .map(|(id, document)| PendingEntity {
+                    entity: node(id as u64),
+                    latest: document
+                        .clone()
+                        .map(|(partition, text)| (partition, PendingValue::Text(Arc::from(text)))),
+                })
+                .collect(),
+        )
     }
 
     const ANALYZER: crate::config::TextAnalyzerKind = crate::config::TextAnalyzerKind::Standard;
@@ -708,7 +965,7 @@ mod tests {
     /// `committed` with one write transaction's own `text` overlaid as entity
     /// `id` in `partition`.
     fn with_local(
-        committed: PendingSelection,
+        committed: CommittedPending,
         id: u64,
         partition: &TextPartition,
         text: &str,
@@ -722,17 +979,7 @@ mod tests {
                 },
             ),
         };
-        PendingSelection::overlaid(
-            committed.target,
-            committed.entities,
-            std::iter::once((
-                IndexEntity {
-                    kind: IndexElementKind::Node,
-                    id: IndexEntityId::new(id),
-                },
-                &local,
-            )),
-        )
+        PendingSelection::overlaid(target(), committed, std::iter::once((node(id), &local)))
     }
 
     #[test]
@@ -754,7 +1001,7 @@ mod tests {
                 .unwrap();
             assert_eq!(selected(&selection), [0, 1, 2, 3], "{consistency:?}");
             assert_eq!(
-                selection.superseded,
+                *selection.superseded,
                 [0, 1, 2, 3].into_iter().collect::<RoaringTreemap>()
             );
         }
@@ -853,7 +1100,7 @@ mod tests {
         // prefix ends at the first document past the bound.
         assert_eq!(selected(&eventual), [0, 1]);
         assert_eq!(
-            eventual.superseded,
+            *eventual.superseded,
             [0, 1].into_iter().collect::<RoaringTreemap>()
         );
         // A first document past the bound leaves nothing to overlay.
@@ -861,7 +1108,7 @@ mod tests {
         eventual
             .yield_to_text_analysis_limit(&searched, ANALYZER, bound(charge(&["abcd"]) - 1))
             .unwrap();
-        assert!(eventual.entities.is_empty());
+        assert!(eventual.entities().is_empty());
         assert!(eventual.superseded.is_empty());
     }
 
@@ -873,13 +1120,10 @@ mod tests {
         let searched = TextPartition::Unpartitioned;
         let other = TextPartition::try_tenant_value(bytes::Bytes::from_static(b"t")).unwrap();
         let committed = || {
-            texts(
-                SearchConsistency::Strong,
-                &[
-                    Some((searched.clone(), "abcd")),
-                    Some((searched.clone(), "efgh")),
-                ],
-            )
+            committed_texts(&[
+                Some((searched.clone(), "abcd")),
+                Some((searched.clone(), "efgh")),
+            ])
         };
         let own = "one two three";
         let limit = charge(&["abcd", "efgh"]);
@@ -1007,6 +1251,224 @@ mod tests {
                 );
                 db.close().await.unwrap();
             }
+        }
+    }
+
+    fn selected_read(count: u64) -> CommittedRead {
+        CommittedRead::Selected(deleted(count))
+    }
+
+    fn selected_count(read: &CommittedRead) -> usize {
+        match read {
+            CommittedRead::Selected(committed) => committed.entities.len(),
+            CommittedRead::PastStrongVectorBound { .. } => panic!("{read:?} selected nothing"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_sets_read_each_queue_and_consistency_once() {
+        let sets = PendingSets::default();
+        let other = QueueTarget::new(
+            DataScope::LegacyUnscoped,
+            IndexId::new(7).unwrap(),
+            IndexGenerationId::new(10).unwrap(),
+        );
+        // A failed read leaves the set unread, and the next search reads it.
+        let error = sets
+            .get_or_read(target(), SearchConsistency::Strong, async {
+                Err(HelixDbError::IndexCatalogCorruption("damaged".to_string()))
+            })
+            .await
+            .expect_err("a failed read fails its search");
+        assert!(matches!(error, HelixDbError::IndexCatalogCorruption(_)));
+        let read = sets
+            .get_or_read(target(), SearchConsistency::Strong, async {
+                Ok(selected_read(2))
+            })
+            .await
+            .unwrap();
+        assert_eq!(selected_count(&read), 2);
+        // Later searches reuse it without reading.
+        let reused = sets
+            .get_or_read(target(), SearchConsistency::Strong, async {
+                Err(HelixDbError::InvariantViolation("read twice".to_string()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(selected_count(&reused), 2);
+        assert_eq!(sets.reads(), 2);
+        // Another consistency or generation is another set.
+        for (target, consistency) in [
+            (target(), SearchConsistency::Eventual),
+            (other, SearchConsistency::Strong),
+        ] {
+            let read = sets
+                .get_or_read(target, consistency, async { Ok(selected_read(1)) })
+                .await
+                .unwrap();
+            assert_eq!(selected_count(&read), 1);
+        }
+        assert_eq!(sets.reads(), 4);
+
+        // Concurrent first searches wait for one read.
+        let sets = PendingSets::default();
+        let (first, second) = tokio::join!(
+            sets.get_or_read(target(), SearchConsistency::Strong, async {
+                tokio::task::yield_now().await;
+                Ok(selected_read(3))
+            }),
+            sets.get_or_read(target(), SearchConsistency::Strong, async {
+                Ok(selected_read(1))
+            }),
+        );
+        assert_eq!(selected_count(&first.unwrap()), 3);
+        assert_eq!(selected_count(&second.unwrap()), 3);
+        assert_eq!(sets.reads(), 1);
+
+        // A refused strong vector read is reused too.
+        let sets = PendingSets::default();
+        for _ in 0..2 {
+            let read = sets
+                .get_or_read(target(), SearchConsistency::Strong, async {
+                    Ok(CommittedRead::PastStrongVectorBound {
+                        reached: 9,
+                        limit: 8,
+                    })
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                read,
+                CommittedRead::PastStrongVectorBound {
+                    reached: 9,
+                    limit: 8
+                }
+            ));
+        }
+        assert_eq!(sets.reads(), 1);
+    }
+
+    /// Commits one document indexed by both families at `position`.
+    async fn commit_document(db: &HelixDB, position: f32) {
+        let mut context = staged(
+            db,
+            insert(vec![
+                indexed(QueueFamily::Vector, position),
+                indexed(QueueFamily::Text, position),
+            ]),
+        )
+        .await;
+        context.commit_request_write_scope().await.unwrap();
+    }
+
+    fn rank_both(
+        batch: batch::ReadBatch,
+        suffix: &str,
+        position: f32,
+        k: usize,
+    ) -> batch::ReadBatch {
+        batch
+            .var_as(
+                &format!("vector{suffix}"),
+                traversal::g().vector_search_nodes(
+                    "Doc",
+                    "embedding",
+                    vec![position, 0.0],
+                    k,
+                    None,
+                ),
+            )
+            .var_as(
+                &format!("text{suffix}"),
+                traversal::g().text_search_nodes("Doc", "body", "shared", k, None),
+            )
+    }
+
+    /// Every search of one request, read or write, shares one read of each
+    /// queue it searches.
+    #[tokio::test]
+    async fn one_request_reads_each_searched_queue_once() {
+        for layout in [QueueLayout::Map, QueueLayout::Rows] {
+            let db = open(&format!("pending-reuse-{layout:?}"), layout).await;
+            for position in [0.0, 1.0, 2.0] {
+                commit_document(&db, position).await;
+            }
+            let batch = (0..3).fold(batch::read_batch(), |batch, index| {
+                rank_both(batch, &index.to_string(), index as f32, index + 1)
+            });
+            for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
+                let plan = helix_planner::planning::plan_read_batch(
+                    &batch,
+                    &db.planner_context(ParamBindings::default()),
+                )
+                .unwrap();
+                let mut context = ExecutionContext::new(&db, ParamBindings::default());
+                context.search_consistency = consistency;
+                context.enable_request_read_view().await.unwrap();
+                context
+                    .execute_steps(
+                        plan.steps(),
+                        plan.execution_order(),
+                        plan.root(),
+                        plan.execution_program(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    context.pending_sets.reads(),
+                    2,
+                    "{layout:?} {consistency:?}: one read per queue"
+                );
+                context.close_request_read_view().unwrap();
+            }
+
+            // A write batch that changes and searches both indexes in turn.
+            let batch = (0..3).fold(batch::write_batch(), |batch, index| {
+                let position = 10.0 + index as f32;
+                batch
+                    .var_as(
+                        &format!("created{index}"),
+                        traversal::g().add_n(
+                            "Doc",
+                            vec![
+                                indexed(QueueFamily::Vector, position),
+                                indexed(QueueFamily::Text, position),
+                            ],
+                        ),
+                    )
+                    .var_as(
+                        &format!("vector{index}"),
+                        traversal::g().vector_search_nodes(
+                            "Doc",
+                            "embedding",
+                            vec![position, 0.0],
+                            1,
+                            None,
+                        ),
+                    )
+                    .var_as(
+                        &format!("text{index}"),
+                        traversal::g().text_search_nodes("Doc", "body", "shared", 1, None),
+                    )
+            });
+            let mut context = staged(&db, batch).await;
+            assert_eq!(context.pending_sets.reads(), 2, "{layout:?}: writes reuse");
+
+            // Committing, opening, and aborting the transaction forget every
+            // set; the next transaction reads its own view.
+            let forgotten = |context: &ExecutionContext<'_>, before: &Arc<PendingSets>| {
+                !Arc::ptr_eq(before, &context.pending_sets) && context.pending_sets.reads() == 0
+            };
+            let before = Arc::clone(&context.pending_sets);
+            context.commit_request_write_scope().await.unwrap();
+            assert!(forgotten(&context, &before), "{layout:?}: commit");
+            let before = Arc::clone(&context.pending_sets);
+            context.enable_request_write_scope().await.unwrap();
+            assert!(forgotten(&context, &before), "{layout:?}: open");
+            let before = Arc::clone(&context.pending_sets);
+            context.abort_request_write_scope();
+            assert!(forgotten(&context, &before), "{layout:?}: abort");
+            db.close().await.unwrap();
         }
     }
 }

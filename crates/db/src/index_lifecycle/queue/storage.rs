@@ -75,6 +75,40 @@ impl StoredQueue {
     }
 }
 
+/// One generation queue's stored bytes as a search read them, not yet
+/// decoded.
+#[derive(Debug)]
+pub(crate) enum PendingQueueBytes {
+    /// The merge-backed value, resolved by the read.
+    Map(Bytes),
+    /// Every operation row in sequence order; never empty.
+    Rows(Vec<Bytes>),
+}
+
+impl PendingQueueBytes {
+    /// Decodes each entity at its latest outstanding operation, selecting
+    /// entities in the order of their oldest operation while their latest
+    /// operations' retained bytes fit `budget` (see [`LatestOperations`]).
+    ///
+    /// Only decoding follows the budget: finding each entity's latest
+    /// operation walks every record's framing. Everything decoded must be
+    /// valid, otherwise the decode fails closed.
+    pub(crate) fn decode_latest(&self, budget: u64) -> Result<LatestOperations> {
+        match self {
+            Self::Map(value) => Ok(LatestOperations::decode(value, budget)?),
+            Self::Rows(values) => {
+                LatestOperations::decode_rows(values.iter().map(Bytes::as_ref), budget)?.ok_or_else(
+                    || {
+                        HelixDbError::InvariantViolation(
+                            "a search read an empty operation row set".to_string(),
+                        )
+                    },
+                )
+            }
+        }
+    }
+}
+
 /// Queues publication read from storage, each minus the operations its own
 /// commits acknowledged since, kept for the target's next attempt so that
 /// draining a backlog reads it once instead of once per batch.
@@ -274,36 +308,25 @@ impl QueueStore {
         }
     }
 
-    /// Reads, for a search, each entity of one generation queue at its
-    /// latest outstanding operation, selecting entities in the order of
-    /// their oldest operation while their latest operations' retained bytes
-    /// fit `budget` (see [`LatestOperations`]); `None` when the queue is
-    /// absent or not even the first entity fits.
+    /// Reads, for a search, the stored bytes of one generation queue; `None`
+    /// when the queue is absent. Decode them with
+    /// [`PendingQueueBytes::decode_latest`], off the async workers: that
+    /// work follows the backlog.
     ///
-    /// Only decoding follows the budget. Finding each entity's latest
-    /// operation walks every record's framing, and the map layout's read
-    /// fetches the whole value: while merge operands are pending above its
-    /// base, which is the normal state of an index taking writes, SlateDB
-    /// first resolves them against all of it, validating and re-encoding
-    /// every record. Such a read therefore costs the backlog (up to the
-    /// per-index `max_retained_bytes`) whatever the budget, and fails on a
-    /// corrupt record the budget never selects; once the value is resolved
-    /// in storage, only the walk follows the backlog. The row layout scans
-    /// every row. Everything decoded must be valid, otherwise the read fails
-    /// closed.
+    /// The map layout's read fetches the whole value: while merge operands
+    /// are pending above its base, which is the normal state of an index
+    /// taking writes, SlateDB first resolves them against all of it,
+    /// validating and re-encoding every record, inside this read. Such a
+    /// read therefore costs the backlog (up to the per-index
+    /// `max_retained_bytes`) whatever a later decode selects, and fails on a
+    /// corrupt record no decode would select. The row layout scans every row.
     pub(crate) async fn read_latest(
         &self,
         read: &(impl DbReadOps + Sync),
         target: QueueTarget,
-        budget: u64,
-    ) -> Result<Option<LatestOperations>> {
+    ) -> Result<Option<PendingQueueBytes>> {
         match self.layout {
-            QueueLayout::Map => {
-                let Some(value) = read.get(target.key()).await? else {
-                    return Ok(None);
-                };
-                Ok(LatestOperations::decode(&value, budget)?)
-            }
+            QueueLayout::Map => Ok(read.get(target.key()).await?.map(PendingQueueBytes::Map)),
             QueueLayout::Rows => {
                 let prefix = row_prefix(target);
                 let mut scan = read.scan_prefix(&prefix, ..).await?;
@@ -311,10 +334,7 @@ impl QueueStore {
                 while let Some(row) = scan.next().await? {
                     values.push(row.value);
                 }
-                Ok(LatestOperations::decode_rows(
-                    values.iter().map(Bytes::as_ref),
-                    budget,
-                )?)
+                Ok((!values.is_empty()).then_some(PendingQueueBytes::Rows(values)))
             }
         }
     }

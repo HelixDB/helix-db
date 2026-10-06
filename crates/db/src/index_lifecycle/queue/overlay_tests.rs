@@ -29,7 +29,7 @@ use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
 use crate::search::vector::VectorDistanceMetric;
 use crate::HelixDB;
 
-async fn install(db: &HelixDB, tenant: Option<&str>) {
+pub(super) async fn install(db: &HelixDB, tenant: Option<&str>) {
     let vector =
         VectorIndexDefinition::new_node("Doc", "embedding", 2, VectorDistanceMetric::Euclidean)
             .unwrap();
