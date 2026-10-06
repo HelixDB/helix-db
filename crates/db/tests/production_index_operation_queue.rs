@@ -30,7 +30,7 @@ use db::search::vector::VectorDistanceMetric;
 use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken, PublicationLagHistogram};
 use helix_ast::error_code::QueryErrorCode;
 use helix_ast::graph::NodeRef;
-use helix_ast::query::QueryRequest;
+use helix_ast::query::{QueryRequest, SearchConsistency};
 use helix_ast::value::PropertyInput;
 use helix_ast::{batch, traversal};
 use helix_metrics::query::QueryErrorType;
@@ -1108,6 +1108,174 @@ async fn reader_handles_own_no_queue_state() {
         "{error}"
     );
     reader.close().await.expect("reader closes");
+}
+
+/// One read request ranking documents near the origin `searches` times.
+fn vector_searches(searches: usize, consistency: SearchConsistency) -> QueryRequest {
+    let names = (0..searches)
+        .map(|index| format!("hits_{index}"))
+        .collect::<Vec<_>>();
+    let read = names.iter().fold(batch::read_batch(), |read, name| {
+        read.var_as(
+            name,
+            traversal::g().vector_search_nodes(LABEL, EMBEDDING, vec![0.0, 0.0], 10, None),
+        )
+    });
+    QueryRequest::read(read.returning(names))
+        .with_search_consistency(consistency)
+        .expect("read requests accept any consistency")
+}
+
+/// One write inserting a document at each of `positions`, then ranking
+/// documents.
+fn insert_and_search(positions: &[f32]) -> QueryRequest {
+    let write =
+        positions
+            .iter()
+            .enumerate()
+            .fold(batch::write_batch(), |write, (index, position)| {
+                write.var_as(
+                    &format!("created_{index}"),
+                    traversal::g().add_n(
+                        LABEL,
+                        vec![(EMBEDDING, PropertyInput::from(vec![*position, 0.0]))],
+                    ),
+                )
+            });
+    QueryRequest::write(
+        write
+            .var_as(
+                "hits",
+                traversal::g().vector_search_nodes(LABEL, EMBEDDING, vec![0.0, 0.0], 10, None),
+            )
+            .returning(["hits"]),
+    )
+}
+
+fn hit_count(result: &serde_json::Value, name: &str) -> usize {
+    result[name].as_array().map_or(0, Vec::len)
+}
+
+/// Strong vector searches, in read and write requests, fail with retryable
+/// `pending_vector_bytes` backpressure while committed pending work exceeds
+/// the configured bound, and transports classify it as backpressure.
+/// Eventual searches keep answering, a write's own changes never count, and
+/// publication clears the condition.
+#[tokio::test]
+async fn strong_vector_searches_past_their_bound_fail_until_publication() {
+    let name = "queue-strong-vector-bound";
+    let store = fixture(name, vec![vector_definition()]).await;
+    let db = open(
+        name,
+        &store,
+        IndexOperationQueueTuning::default(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await;
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "first",
+                traversal::g().add_n(
+                    LABEL,
+                    vec![(EMBEDDING, PropertyInput::from(vec![1.0_f32, 0.0]))],
+                ),
+            )
+            .var_as(
+                "second",
+                traversal::g().add_n(
+                    LABEL,
+                    vec![(EMBEDDING, PropertyInput::from(vec![2.0_f32, 0.0]))],
+                ),
+            ),
+    ))
+    .await
+    .expect("documents queue");
+    // Two inserts and nothing they supersede: every retained byte is one
+    // entity's latest operation.
+    let pending = db.index_operation_queue_stats().retained_bytes;
+    db.close().await.expect("fixture closes");
+
+    let tuning = IndexOperationQueueTuning::default()
+        .with_strong_vector_search_max_pending_bytes(nonzero(pending - 1));
+    assert_eq!(
+        tuning.strong_vector_search_max_pending_bytes().get(),
+        pending - 1
+    );
+    assert_eq!(
+        IndexOperationQueueTuning::default().strong_vector_search_max_pending_bytes(),
+        IndexOperationQueueTuning::default().max_retained_bytes(),
+        "by default the bound is the retained-byte ceiling"
+    );
+    let db = Arc::new(open(name, &store, tuning, LifecycleTestScheduling::Explicit).await);
+    let error = db
+        .query(vector_searches(3, SearchConsistency::Strong))
+        .await
+        .expect_err("committed work past the bound");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::PendingVectorBytes,
+                requested,
+                limit,
+                ..
+            } if requested == pending && limit == pending - 1
+        ),
+        "{error}"
+    );
+    assert!(error.is_index_backpressure());
+    assert_eq!(error.error_code(), QueryErrorCode::IndexBackpressure);
+    assert!(
+        error.to_string().contains("pending_vector_bytes"),
+        "{error}"
+    );
+    let error = HelixQueryService::new(Arc::clone(&db))
+        .execute_query(vector_searches(1, SearchConsistency::Strong))
+        .await
+        .expect_err("still past the bound");
+    assert_eq!(error.classify(), QueryFailureClass::Backpressure);
+
+    let eventual = db
+        .query(vector_searches(2, SearchConsistency::Eventual))
+        .await
+        .expect("eventual searches keep their own budget");
+    assert_eq!(
+        (
+            hit_count(&eventual, "hits_0"),
+            hit_count(&eventual, "hits_1")
+        ),
+        (2, 2)
+    );
+    let error = db
+        .query(insert_and_search(&[3.0]))
+        .await
+        .expect_err("a write's search sees the same committed work");
+    assert!(error.is_index_backpressure(), "{error}");
+    assert_eq!(
+        document_count(&db).await,
+        2,
+        "the rejected write rolled back"
+    );
+
+    assert_eq!(
+        db.publish_index_queues_for_lifecycle_testing()
+            .await
+            .expect("publication drains"),
+        2
+    );
+    let strong = db
+        .query(vector_searches(3, SearchConsistency::Strong))
+        .await
+        .expect("nothing is pending");
+    assert_eq!(hit_count(&strong, "hits_2"), 2);
+    // Its own three inserts alone exceed the bound, and never count.
+    let written = db
+        .query(insert_and_search(&[3.0, 4.0, 5.0]))
+        .await
+        .expect("a write's own changes never count");
+    assert_eq!(hit_count(&written, "hits"), 5);
+    db.close().await.expect("fixture closes");
 }
 
 /// Creates `definitions` through an automatically scheduled writer, waits

@@ -22,6 +22,31 @@
 //! assert_eq!(config.index_operation_queue(), tuning);
 //! assert_eq!(IndexOperationQueueTuning::default().max_members().get(), 250_000);
 //!
+//! // Strong vector searches decode and score at most this much unpublished
+//! // work before failing with retryable backpressure. By default that is the
+//! // retained-byte ceiling, so writes reach backpressure first, and it
+//! // follows the ceiling; an explicit bound stays put.
+//! let default = IndexOperationQueueTuning::default();
+//! assert_eq!(
+//!     default.strong_vector_search_max_pending_bytes(),
+//!     default.max_retained_bytes()
+//! );
+//! let raised = default
+//!     .with_max_retained_bytes(NonZeroU64::new(2_000_000_000).unwrap())
+//!     .unwrap();
+//! assert_eq!(raised.strong_vector_search_max_pending_bytes().get(), 2_000_000_000);
+//! let strong = raised
+//!     .with_strong_vector_search_max_pending_bytes(NonZeroU64::new(64 << 20).unwrap());
+//! assert_eq!(strong.strong_vector_search_max_pending_bytes().get(), 64 << 20);
+//! assert_eq!(
+//!     strong
+//!         .with_max_retained_bytes(NonZeroU64::new(1 << 20).unwrap())
+//!         .unwrap()
+//!         .strong_vector_search_max_pending_bytes()
+//!         .get(),
+//!     64 << 20
+//! );
+//!
 //! // A larger retained-byte ceiling could let one queue value outgrow the
 //! // longest value storage can encode.
 //! let largest = IndexOperationQueueTuning::MAX_RETAINED_BYTES;
@@ -114,6 +139,9 @@ pub struct IndexOperationQueueTuning {
     start_paused: bool,
     /// Per-search source-input budget for eventual pending overlays.
     eventual_search_budget: u64,
+    /// Most committed pending vector work one strong search decodes and
+    /// scores; `None` follows `max_retained_bytes`.
+    strong_vector_search_max_pending_bytes: Option<NonZeroU64>,
 }
 
 impl Default for IndexOperationQueueTuning {
@@ -130,6 +158,7 @@ impl Default for IndexOperationQueueTuning {
             #[cfg(test)]
             start_paused: false,
             eventual_search_budget: EVENTUAL_SEARCH_SOURCE_INPUT_BYTES,
+            strong_vector_search_max_pending_bytes: None,
         }
     }
 }
@@ -240,6 +269,45 @@ impl IndexOperationQueueTuning {
     /// Returns the per-search eventual overlay budget (128 MiB outside tests).
     pub(crate) const fn eventual_search_budget(self) -> u64 {
         self.eventual_search_budget
+    }
+
+    /// Returns the most committed but unpublished vector work, in retained
+    /// bytes of each pending entity's latest operation, that one strong
+    /// vector search decodes and scores exactly.
+    ///
+    /// A strong vector search, in a read or write request, whose index has
+    /// more committed pending work fails with retryable `index_backpressure`
+    /// (`pending_vector_bytes`) instead of decoding it, and succeeds once the
+    /// index worker has published enough of it. A write request's own
+    /// changes never count. Eventual searches are unaffected: they overlay
+    /// the oldest work within their own budget. A strong search still reads
+    /// the stored queue before it can tell, so the bound caps the decoding
+    /// and exact scoring that follow, not that read.
+    ///
+    /// The bound charges the searched generation's whole queue, every tenant
+    /// partition included, as [admission](Self::max_retained_bytes) does: the
+    /// queue is one value per generation, which a search reads and walks
+    /// whole either way.
+    ///
+    /// Unless [replaced](Self::with_strong_vector_search_max_pending_bytes),
+    /// it is [`Self::max_retained_bytes`]. Admission already charges every
+    /// operation, superseded ones included, against that ceiling across the
+    /// index's generations, so with the default a backlog that writes were
+    /// admitted into never fails strong vector searches; writes reach
+    /// backpressure first. Only work admitted beyond the ceiling, after it
+    /// was lowered or by a blocker repair, can exceed it.
+    pub const fn strong_vector_search_max_pending_bytes(self) -> NonZeroU64 {
+        match self.strong_vector_search_max_pending_bytes {
+            Some(bytes) => bytes,
+            None => self.max_retained_bytes,
+        }
+    }
+
+    /// Replaces the [strong vector search bound](Self::strong_vector_search_max_pending_bytes),
+    /// which then no longer follows the retained-byte ceiling.
+    pub const fn with_strong_vector_search_max_pending_bytes(mut self, bytes: NonZeroU64) -> Self {
+        self.strong_vector_search_max_pending_bytes = Some(bytes);
+        self
     }
 
     /// Returns whether automatic publication starts paused.

@@ -72,6 +72,13 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` only for a trusted plain-HTTP endpoint. |
 | `DB_PATH` | Logical database prefix inside the selected store; defaults to `db/`. |
 
+`HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` sets the most unpublished vector work,
+in bytes, that one `strong` vector search scores exactly before it fails with the
+retryable `index_backpressure` (`pending_vector_bytes`). It defaults to each index's
+retained-byte limit (1000000000) with any storage, so writes reach backpressure first;
+set it lower to cap the CPU time of each strong vector search. The bound counts every
+tenant partition of an index. Startup fails naming it when it is not a positive integer.
+
 ### Benchmark images
 
 `docker-image/build.sh --async-index-benchmark` builds a separate benchmark

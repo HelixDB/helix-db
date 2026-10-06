@@ -709,22 +709,30 @@ fn latest_decodes_select_each_entity_at_its_latest_operation_within_the_budget()
         panic!("three operations are outstanding");
     };
     let selected = |value: &[u8], budget| {
-        LatestOperations::decode(value, budget)
-            .unwrap()
-            .map(LatestOperations::into_operations)
+        let selection = LatestOperations::decode(value, budget).unwrap();
+        let refused = selection.refused();
+        (selection.into_operations(), refused)
     };
     // Entity 1 is selected at its latest state or not at all, never at the
     // first operation that alone would fit; entity 3 follows in first-seen
-    // order and is never selected ahead of it.
-    assert_eq!(selected(&value, latest_bytes - 1), None);
-    assert_eq!(selected(&value, latest_bytes), Some(vec![latest.clone()]));
+    // order and is never selected ahead of it. A selection the budget ends
+    // reports what the first entity it left out would have reached.
     assert_eq!(
-        selected(&value, latest_bytes + deleted_bytes - 1),
-        Some(vec![latest.clone()])
+        selected(&value, latest_bytes - 1),
+        (Vec::new(), Some(latest_bytes))
     );
-    let both = Some(vec![latest.clone(), deleted.clone()]);
-    assert_eq!(selected(&value, latest_bytes + deleted_bytes), both);
-    assert_eq!(selected(&value, u64::MAX), both);
+    let both_bytes = latest_bytes + deleted_bytes;
+    assert_eq!(
+        selected(&value, latest_bytes),
+        (vec![latest.clone()], Some(both_bytes))
+    );
+    assert_eq!(
+        selected(&value, both_bytes - 1),
+        (vec![latest.clone()], Some(both_bytes))
+    );
+    let both = vec![latest.clone(), deleted.clone()];
+    assert_eq!(selected(&value, both_bytes), (both.clone(), None));
+    assert_eq!(selected(&value, u64::MAX), (both, None));
     assert_eq!(
         OperationQueue::decode(&value).unwrap().operations(),
         operations.as_slice()
@@ -754,7 +762,10 @@ fn latest_decodes_select_each_entity_at_its_latest_operation_within_the_budget()
     let small = text_operation(3, 3, Some("kept")).retained_bytes();
     assert_eq!(
         selected(&corrupt, latest_bytes + small),
-        Some(vec![latest.clone(), text_operation(3, 3, Some("kept"))])
+        (
+            vec![latest.clone(), text_operation(3, 3, Some("kept"))],
+            Some(latest_bytes + small + retained_len(4 + 96))
+        )
     );
     assert!(LatestOperations::decode(&corrupt, u64::MAX).is_err());
     assert!(OperationQueue::decode(&corrupt).is_err());
@@ -782,11 +793,18 @@ fn latest_decodes_select_each_entity_at_its_latest_operation_within_the_budget()
                 (InsertMode::IfAbsent, 2, corrupt),
             ],
         );
-        assert_eq!(selected(&bytes, 0), None, "{name}");
+        // A zero budget tracks no entity and charges the first the
+        // smallest record any operation retains.
         assert_eq!(
-            selected(&bytes, first.retained_bytes()),
-            Some(vec![first.clone()]),
+            selected(&bytes, 0),
+            (Vec::new(), Some(MIN_RETAINED_RECORD_LEN as u64)),
             "{name}"
+        );
+        let (operations, refused) = selected(&bytes, first.retained_bytes());
+        assert_eq!(operations, vec![first.clone()], "{name}");
+        assert!(
+            refused.is_some_and(|reached| reached > first.retained_bytes()),
+            "{name}: {refused:?}"
         );
         assert!(
             LatestOperations::decode(&bytes, u64::MAX).is_err(),
@@ -853,10 +871,16 @@ fn latest_decodes_select_as_many_minimal_entities_as_the_budget_covers() {
     };
     for count in 0..=10 {
         let budget = MIN_RETAINED_RECORD_LEN as u64 * count;
+        let selection = LatestOperations::decode(&value, budget).unwrap();
+        // Entities past the tracked ones still refuse the selection, each
+        // charged at least the smallest record.
         assert_eq!(
-            LatestOperations::decode(&value, budget)
-                .unwrap()
-                .map_or_else(Vec::new, LatestOperations::into_operations),
+            selection.refused(),
+            (count < 10).then_some(budget + MIN_RETAINED_RECORD_LEN as u64),
+            "within {budget}"
+        );
+        assert_eq!(
+            selection.into_operations(),
             operations[..usize::try_from(count).unwrap()],
             "within {budget}"
         );
@@ -871,12 +895,12 @@ fn latest_decodes_select_as_many_minimal_entities_as_the_budget_covers() {
     for operation in &late {
         put_insert(&mut bytes, InsertMode::IfAbsent, operation);
     }
+    let selection = LatestOperations::decode(&bytes, MIN_RETAINED_RECORD_LEN as u64 * 2).unwrap();
     assert_eq!(
-        LatestOperations::decode(&bytes, MIN_RETAINED_RECORD_LEN as u64 * 2)
-            .unwrap()
-            .map(LatestOperations::into_operations),
-        Some(operations[..2].to_vec())
+        selection.refused(),
+        Some(MIN_RETAINED_RECORD_LEN as u64 * 3)
     );
+    assert_eq!(selection.into_operations(), operations[..2].to_vec());
 }
 
 #[test]
@@ -913,7 +937,7 @@ fn latest_row_decodes_match_the_map_layout() {
     for budget in budgets {
         assert_eq!(
             LatestOperations::decode_rows(rows.iter().map(Bytes::as_ref), budget).unwrap(),
-            LatestOperations::decode(&value, budget).unwrap(),
+            Some(LatestOperations::decode(&value, budget).unwrap()),
             "within {budget}"
         );
     }
@@ -934,8 +958,10 @@ fn latest_row_decodes_match_the_map_layout() {
         [rows[0].to_vec(), unknown_entity, rows[2].to_vec()],
     ] {
         assert_eq!(
-            LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), 0).unwrap(),
-            None
+            LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), 0)
+                .unwrap()
+                .map(LatestOperations::into_operations),
+            Some(Vec::new())
         );
         assert!(
             LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), u64::MAX).is_err()

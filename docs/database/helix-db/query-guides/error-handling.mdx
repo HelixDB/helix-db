@@ -265,7 +265,7 @@ embedded configurations may override it.
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
-| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text than one text publication may (64 MiB of analysis by default). | 429 | Yes, bounded backoff | No request change required |
+| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text than one text publication may (64 MiB of analysis by default), or a `strong` vector search would score more unpublished vector work than its bound (by default the index's retained-byte limit, which writes reach first). | 429 | Yes, bounded backoff | No request change required |
 | `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
 | `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
 | `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |

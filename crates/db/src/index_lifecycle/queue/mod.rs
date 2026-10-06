@@ -285,6 +285,8 @@ mod soak_tests;
 #[cfg(test)]
 mod stats_tests;
 #[cfg(test)]
+mod strong_vector_bound_tests;
+#[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
 mod text_publication_tests;
