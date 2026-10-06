@@ -2965,8 +2965,9 @@ async fn publication_releases_cached_analyses_once_the_queue_drains() {
 }
 
 /// A strong search that finds its generation's queue empty drops what is
-/// still cached for that generation: here what a search pinned to a view
-/// from before the drain cached again after the index worker released it.
+/// still cached for that generation: here what a search whose view predates
+/// the drain, but that read the queue after the index worker released it,
+/// cached again. One that read the queue before the drain caches nothing.
 /// Eventual searches keep it, and other generations' entries stay.
 #[tokio::test]
 async fn a_strong_search_of_a_drained_queue_releases_its_generations_analyses() {
@@ -2994,12 +2995,15 @@ async fn a_strong_search_of_a_drained_queue_releases_its_generations_analyses() 
         .get(text_target, &all)
         .expect("the strong search cached its selection");
     let held = cache.held_bytes();
+    let before = cache.now();
     drain(&db, text_target).await;
     assert!(queue(&db, QueueFamily::Text).await.is_none());
     assert_eq!(cache.held_bytes(), 0);
-    let recache = || cache.replace(text_target, &all, (*stale).clone());
+    cache.replace(text_target, &all, (*stale).clone(), before);
+    assert_eq!(cache.held_bytes(), 0, "read before the drain");
+    let recache = || cache.replace(text_target, &all, (*stale).clone(), cache.now());
     recache();
-    cache.replace(next_generation, &all, (*stale).clone());
+    cache.replace(next_generation, &all, (*stale).clone(), cache.now());
     assert_eq!(cache.held_bytes(), 2 * held);
 
     assert_eq!(

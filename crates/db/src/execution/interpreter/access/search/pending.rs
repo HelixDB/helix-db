@@ -37,8 +37,13 @@ use crate::index_lifecycle::queue::producer::PendingEntityState;
 use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::work::TextPartition;
 use crate::index_lifecycle::IndexIdentity;
-use crate::search::text::pending::PendingTextAnalyses;
+use crate::search::text::pending::{CacheInstant, PendingTextAnalyses};
 use crate::search::text::IndexedTextAnalysis;
+
+/// Committed entities a text analysis walks between cancellation checks, as
+/// many as one pending scoring step scores. Fresh analysis also checks before
+/// each document; this bounds the walk over reused ones.
+const ANALYSIS_CHECK_STEP: usize = 4_096;
 
 /// Latest searchable value of one pending entity.
 #[derive(Debug, Clone)]
@@ -96,10 +101,14 @@ struct CommittedPending {
     /// Exactly the IDs of `entities`; a generation indexes one element kind,
     /// so the ID alone identifies an entity.
     superseded: Arc<RoaringTreemap>,
+    /// The analyses cache's instant just before the queue was read, so a
+    /// text search caches nothing for a target forgotten since
+    /// ([`PendingTextAnalyses::replace`]).
+    read: CacheInstant,
 }
 
 impl CommittedPending {
-    fn new(entities: Vec<CommittedEntity>) -> Self {
+    fn new(entities: Vec<CommittedEntity>, read: CacheInstant) -> Self {
         let superseded = entities
             .iter()
             .map(|committed| committed.pending.entity.id.get())
@@ -112,6 +121,7 @@ impl CommittedPending {
         Self {
             entities: Arc::from(entities),
             superseded: Arc::new(superseded),
+            read,
         }
     }
 }
@@ -265,6 +275,8 @@ pub(super) struct PendingSelection {
     /// Consistency the entities were selected under. Eventual selections
     /// belong to read requests and hold no local changes.
     consistency: SearchConsistency,
+    /// When the committed entities' queue was read.
+    read: CacheInstant,
     entities: PendingEntities,
     /// Entities whose physical representation is superseded: exactly the
     /// IDs of [`Self::entities`].
@@ -280,6 +292,7 @@ impl PendingSelection {
         Self {
             target,
             consistency,
+            read: committed.read,
             entities: PendingEntities {
                 selected: committed.entities.len(),
                 committed: committed.entities,
@@ -355,6 +368,7 @@ impl PendingSelection {
                         pending,
                     })
                     .collect(),
+                CacheInstant::ORIGIN,
             ),
         )
     }
@@ -447,8 +461,9 @@ impl PendingSelection {
     /// far more than its length) and bounded by `limit`. Charging stops at
     /// the first token past the bound, so a search never analyzes more than
     /// the bound either. It runs on the blocking pool
-    /// ([`super::blocking::run_blocking`]) and stops before the next document
-    /// it would analyze once the request stops awaiting it.
+    /// ([`super::blocking::run_blocking`]) and, once the request stops
+    /// awaiting it, stops before the next document it would analyze or within
+    /// [`ANALYSIS_CHECK_STEP`] entities of reused ones.
     ///
     /// Committed documents reuse the analyses `cache` holds for their queued
     /// operations and are charged exactly what analyzing them again would,
@@ -457,10 +472,12 @@ impl PendingSelection {
     /// partition's cached analyses with the ones it analyzed or reused, even
     /// when it stops at the bound: searches repeated past the bound then
     /// reuse the analyses instead of redoing them. One whose request stops
-    /// awaiting it partway, or whose analysis fails, keeps what it analyzed
-    /// and what the cache held for the rest of its selection within the
-    /// bound, so the next search resumes where it stopped rather than over.
-    /// Eventual selections only read the cache.
+    /// awaiting it partway, or whose analysis fails, stops walking its
+    /// selection and keeps what it reached and, within the bound, what the
+    /// cache held, so the next search resumes where it stopped rather than
+    /// over. A selection whose queue was read before publication drained it
+    /// caches nothing ([`PendingTextAnalyses::replace`]). Eventual selections
+    /// only read the cache.
     ///
     /// A strong selection analyzes afresh only while it holds the turn
     /// ([`PendingTextAnalyses::analyzing`]): reaching a document it would
@@ -506,7 +523,8 @@ impl PendingSelection {
         // the turn reached a document it would analyze afresh.
         let pass = |turn: Option<tokio::sync::OwnedMutexGuard<()>>| {
             let entities = self.entities.clone();
-            let (target, partition, cache) = (self.target, partition.clone(), Arc::clone(cache));
+            let (target, read, partition, cache) =
+                (self.target, self.read, partition.clone(), Arc::clone(cache));
             super::blocking::run_blocking(control, move |probe| {
                 let may_analyze = !strong || turn.is_some();
                 let cached = cache.get(target, &partition);
@@ -556,11 +574,20 @@ impl PendingSelection {
                 let mut reached = strong.then(HashMap::new);
                 let mut analyses = Vec::with_capacity(entities.selected + local.len());
                 let mut refused = None;
-                // Why a strong pass stopped analyzing partway. It still walks
-                // the rest of its selection to keep what the cache holds, so
-                // the next search resumes where it stopped.
+                // Why a strong pass stopped partway: it then caches what it
+                // reached without walking the rest of its selection.
                 let mut stopped = None;
                 for (position, committed) in entities.selected_committed().enumerate() {
+                    if position % ANALYSIS_CHECK_STEP == 0 {
+                        match probe.check() {
+                            Ok(()) => {}
+                            Err(error) if strong => {
+                                stopped = Some(error);
+                                break;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
                     let pending = &committed.pending;
                     if entities.local.ids.contains(pending.entity.id.get()) {
                         continue;
@@ -579,19 +606,23 @@ impl PendingSelection {
                                     .to_string(),
                             ));
                         }
-                        Some(cached) => match cached.recharge(&mut budget) {
-                            Ok(()) => Ok(Arc::clone(cached)),
-                            Err(HelixDbError::ActiveTextMutationLimitExceeded {
-                                observed, ..
-                            }) => Err(observed),
-                            Err(error) => return Err(error),
-                        },
-                        None if stopped.is_some() => continue,
+                        Some(cached) => {
+                            #[cfg(test)]
+                            cache.reused_cached();
+                            match cached.recharge(&mut budget) {
+                                Ok(()) => Ok(Arc::clone(cached)),
+                                Err(HelixDbError::ActiveTextMutationLimitExceeded {
+                                    observed,
+                                    ..
+                                }) => Err(observed),
+                                Err(error) => return Err(error),
+                            }
+                        }
                         None if !may_analyze => return Ok(None),
                         None => match analyze(text, &mut budget) {
                             Err(error) if strong => {
                                 stopped = Some(error);
-                                continue;
+                                break;
                             }
                             charged => charged?,
                         },
@@ -608,8 +639,23 @@ impl PendingSelection {
                     }
                     analyses.push(Some(analysis));
                 }
+                // A stopped pass also keeps what the cache held, within the
+                // bound, so the next search resumes where it stopped.
+                if let (Some(reached), Some(_), Some(cached)) = (&mut reached, &stopped, &cached) {
+                    let held = cached
+                        .iter()
+                        .filter(|(operation, _)| !reached.contains_key(*operation))
+                        .map_while(|(operation, analysis)| {
+                            analysis
+                                .recharge(&mut budget)
+                                .ok()
+                                .map(|()| (*operation, Arc::clone(analysis)))
+                        })
+                        .collect::<Vec<_>>();
+                    reached.extend(held);
+                }
                 if let Some(reached) = reached {
-                    cache.replace(target, &partition, reached);
+                    cache.replace(target, &partition, reached, read);
                 }
                 // The next strong search takes the turn only once the cache
                 // holds what this one analyzed.
@@ -779,13 +825,17 @@ impl<'db> ExecutionContext<'db> {
             (SearchConsistency::Strong, QueueFamily::Text) => u64::MAX,
         };
         let load = async move {
+            let read_at = self.db.pending_text_analyses().now();
             let Some(bytes) = self
                 .db
                 .index_queue_store()
                 .read_latest(read, target)
                 .await?
             else {
-                return Ok(CommittedRead::Selected(CommittedPending::new(Vec::new())));
+                return Ok(CommittedRead::Selected(CommittedPending::new(
+                    Vec::new(),
+                    read_at,
+                )));
             };
             super::blocking::run_blocking(&self.execution_control, move |probe| {
                 probe.check()?;
@@ -822,6 +872,7 @@ impl<'db> ExecutionContext<'db> {
                             },
                         })
                         .collect(),
+                    read_at,
                 )))
             })
             .await
@@ -964,7 +1015,10 @@ mod tests {
 
     /// `count` committed deletions of nodes, oldest first by ID.
     fn deleted(count: u64) -> CommittedPending {
-        CommittedPending::new((0..count).map(|id| committed(id, None)).collect())
+        CommittedPending::new(
+            (0..count).map(|id| committed(id, None)).collect(),
+            CacheInstant::ORIGIN,
+        )
     }
 
     /// A selection of `count` deleted nodes, oldest first by ID.
@@ -1043,6 +1097,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            CacheInstant::ORIGIN,
         );
         // Local changes to a committed pending entity and to one without
         // committed work.
@@ -1141,6 +1196,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            CacheInstant::ORIGIN,
         )
     }
 
@@ -1499,6 +1555,7 @@ mod tests {
                 .skip(1)
                 .cloned()
                 .collect(),
+            CacheInstant::ORIGIN,
         );
         analyze(
             &mut PendingSelection::new(target(), SearchConsistency::Strong, published),
@@ -1664,6 +1721,7 @@ mod tests {
             target(),
             &searched,
             HashMap::from([(operation(0), fresh_analysis("other"))]),
+            cache.now(),
         );
         let error = analyze(
             &mut texts(
@@ -1747,7 +1805,7 @@ mod tests {
             .into_iter()
             .map(|(id, text)| (operation(id), fresh_analysis(text)))
             .collect::<HashMap<_, _>>();
-        cache.replace(target(), &searched, held.clone());
+        cache.replace(target(), &searched, held.clone(), cache.now());
         let mut warm = texts(SearchConsistency::Strong, &documents);
         assert!(
             finishes_without_the_turn(analyze(&mut warm, &searched, limit, &cache)).await,
@@ -1855,6 +1913,7 @@ mod tests {
                 target(),
                 &searched,
                 HashMap::from([(operation(3), Arc::clone(&tail))]),
+                cache.now(),
             );
             let retirement = ReaderRetirementCancellation::new();
             let control = match abandonment {
@@ -1953,6 +2012,130 @@ mod tests {
                 "{abandonment:?}: no document is analyzed twice"
             );
             assert_eq!(cache.cached(target(), &searched), documents.len());
+        }
+    }
+
+    /// A strong search whose queue was read before publication drained it
+    /// and released its analyses answers exactly but caches nothing when it
+    /// finishes afterwards: no later search selects those operations. One
+    /// whose queue was read since caches as usual.
+    #[tokio::test]
+    async fn a_search_read_before_its_queue_drained_caches_nothing() {
+        use std::time::Duration;
+
+        let searched = TextPartition::Unpartitioned;
+        let documents = ["abcd", "efgh"].map(|text| Some((searched.clone(), text)));
+        let limit = bound(u64::MAX);
+        let cache = unbounded_cache();
+        let read_now = || {
+            PendingSelection::new(
+                target(),
+                SearchConsistency::Strong,
+                CommittedPending {
+                    read: cache.now(),
+                    ..committed_texts(&documents)
+                },
+            )
+        };
+
+        // It pauses after its first fresh analysis while the queue drains.
+        let pause = cache.pause_analysis().await;
+        let mut stale = read_now();
+        let mut stale = Box::pin(analyze(&mut stale, &searched, limit, &cache));
+        while cache.analyzed() == 0 {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut stale)
+                    .await
+                    .is_err(),
+                "the search pauses"
+            );
+        }
+        cache.forget(target());
+        drop(pause);
+        let analyses = stale.await.unwrap();
+        assert_eq!(analyzed_entities(&analyses), [true, true]);
+        assert_eq!(cache.cached(target(), &searched), 0);
+        assert_eq!(cache.held_bytes(), 0);
+
+        analyze(&mut read_now(), &searched, limit, &cache)
+            .await
+            .unwrap();
+        assert_eq!(cache.cached(target(), &searched), documents.len());
+    }
+
+    /// A strong search whose request stops awaiting it, by being dropped or
+    /// expiring, while it walks reused analyses stops at its next check
+    /// rather than walking the rest of its selection with the turn. It still
+    /// caches what it analyzed beside what the cache held.
+    #[tokio::test]
+    async fn an_abandoned_walk_over_reused_analyses_stops_at_its_next_check() {
+        use crate::execution_control::ExecutionControl;
+        use std::time::Duration;
+
+        let searched = TextPartition::Unpartitioned;
+        let count = 3 * ANALYSIS_CHECK_STEP;
+        let documents = (0..count)
+            .map(|_| Some((searched.clone(), "abcd")))
+            .collect::<Vec<_>>();
+        let limit = bound(u64::MAX);
+        for expires in [false, true] {
+            let cache = unbounded_cache();
+            let reused = fresh_analysis("abcd");
+            // Every document but the first is cached.
+            cache.replace(
+                target(),
+                &searched,
+                (1..count as u64)
+                    .map(|id| (operation(id), Arc::clone(&reused)))
+                    .collect(),
+                cache.now(),
+            );
+            let control = if expires {
+                ExecutionControl::from_timeout(Duration::from_secs(2))
+            } else {
+                ExecutionControl::unlimited()
+            };
+
+            // It takes the turn, analyzes its first document, and pauses.
+            let pause = cache.pause_analysis().await;
+            let mut selection = texts(SearchConsistency::Strong, &documents);
+            let mut search = Box::pin(
+                control.run(selection.analyze_text(&control, &searched, ANALYZER, limit, &cache)),
+            );
+            while cache.analyzed() == 0 {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), &mut search)
+                        .await
+                        .is_err(),
+                    "expires {expires}: the search pauses"
+                );
+            }
+            assert_eq!(cache.reused(), 0, "expires {expires}");
+            if expires {
+                let error = search.await.expect_err("an expired request fails");
+                assert!(
+                    matches!(error, HelixDbError::QueryDeadlineExceeded),
+                    "{error}"
+                );
+            } else {
+                drop(search);
+            }
+
+            // Resumed, it reuses analyses only up to its next check, then
+            // caches and passes the turn on.
+            drop(pause);
+            drop(cache.analyzing().await);
+            assert_eq!(
+                cache.reused(),
+                ANALYSIS_CHECK_STEP - 1,
+                "expires {expires}: it stops at its next check"
+            );
+            assert_eq!(cache.analyzed(), 1);
+            assert_eq!(
+                cache.cached(target(), &searched),
+                count,
+                "expires {expires}: what it analyzed and what the cache held"
+            );
         }
     }
 

@@ -27,11 +27,12 @@
 //! the bytes their analyses were charged within the budget, one strong
 //! search's bound. The index worker also drops a generation's entries once
 //! nothing of it stays queued, and a strong search that finds its queue
-//! empty does too, so a published or dropped index keeps none. A search
-//! pinned to a view from before such a drop may cache its selection again;
-//! its next strong search or eviction drops it. Nothing here is persisted,
-//! so a restart or an eviction only costs the next search its analysis
-//! again.
+//! empty does too, so a published or dropped index keeps none. A search that
+//! read its queue before such a drop never caches its selection again
+//! ([`CacheInstant`]); one whose view predates the drop but that read the
+//! queue after it may, until its partition's next strong search or an
+//! eviction drops it. Nothing here is persisted, so a restart or an eviction
+//! only costs the next search its analysis again.
 //!
 //! Strong searches analyze what the cache lacks one at a time
 //! ([`PendingTextAnalyses::analyzing`]) and score documents from these
@@ -56,6 +57,25 @@ use super::IndexedTextAnalysis;
 /// Analyses of one partition's queued text, by queued operation.
 pub(crate) type PartitionAnalyses = HashMap<QueuedOperationId, Arc<IndexedTextAnalysis>>;
 
+/// Targets whose latest forget the cache remembers; forgetting one more
+/// forgets them all at once ([`CacheState::forgotten_before`]).
+const FORGOTTEN_TARGETS: usize = 4_096;
+
+/// When a search read the queue whose analyses it may cache, on one
+/// [`PendingTextAnalyses`]'s clock ([`PendingTextAnalyses::now`]).
+///
+/// A replacement read before its target was last forgotten
+/// ([`PendingTextAnalyses::forget`]) caches nothing: that selection names
+/// operations publication drained, which no later search selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheInstant(u64);
+
+impl CacheInstant {
+    /// Before anything any cache did, for fixtures that never forget.
+    #[cfg(test)]
+    pub(crate) const ORIGIN: Self = Self(0);
+}
+
 /// Shared analyses of queued text, bounded by the bytes their analysis
 /// charged ([`IndexedTextAnalysis::retained_bytes`]).
 #[derive(Debug)]
@@ -67,6 +87,9 @@ pub(crate) struct PendingTextAnalyses {
     /// Analyses searches made afresh, for tests that follow them.
     #[cfg(test)]
     analyzed: std::sync::atomic::AtomicUsize,
+    /// Cached analyses searches reused, for tests that follow them.
+    #[cfg(test)]
+    reused: std::sync::atomic::AtomicUsize,
     /// Held by tests that pause searches after their next fresh analysis.
     #[cfg(test)]
     paused: tokio::sync::Mutex<()>,
@@ -81,6 +104,11 @@ struct CacheState {
     targets: HashMap<QueueTarget, HashMap<TextPartition, CachedPartition>>,
     /// Every cached partition by its recency stamp, least recent first.
     recency: BTreeMap<u64, (QueueTarget, TextPartition)>,
+    /// Stamp of each remembered target's latest forget.
+    forgotten: HashMap<QueueTarget, u64>,
+    /// Stamp at which `forgotten` last overflowed and was cleared: every
+    /// target counts as forgotten then.
+    forgotten_floor: u64,
 }
 
 #[derive(Debug)]
@@ -98,6 +126,18 @@ impl CacheState {
     fn stamp(&mut self) -> u64 {
         self.clock += 1;
         self.clock
+    }
+
+    /// Whether `target` was forgotten after `read`. Past
+    /// [`FORGOTTEN_TARGETS`] remembered targets, every read before the
+    /// overflow counts as forgotten, which costs only those searches their
+    /// caching.
+    fn forgotten_before(&self, target: QueueTarget, read: CacheInstant) -> bool {
+        read.0 < self.forgotten_floor
+            || self
+                .forgotten
+                .get(&target)
+                .is_some_and(|forgot| *forgot > read.0)
     }
 
     /// Removes `target`'s `partition`, releasing its bytes, and returns it so
@@ -169,6 +209,8 @@ impl PendingTextAnalyses {
             #[cfg(test)]
             analyzed: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
+            reused: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             paused: tokio::sync::Mutex::new(()),
         }
     }
@@ -185,6 +227,12 @@ impl PendingTextAnalyses {
     /// Reading and replacing entries never waits.
     pub(crate) async fn analyzing(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.analyzing).lock_owned().await
+    }
+
+    /// The current instant, for a search about to read the queue whose
+    /// analyses it may cache ([`Self::replace`]).
+    pub(crate) fn now(&self) -> CacheInstant {
+        CacheInstant(self.state.lock().clock)
     }
 
     /// Returns the analyses cached for `target`'s `partition`, if any, and
@@ -209,24 +257,30 @@ impl PendingTextAnalyses {
 
     /// Replaces the analyses cached for `target`'s `partition` with exactly
     /// `analyses`, the partition's committed selection as one strong search
-    /// analyzed it.
+    /// that read its queue at `read` analyzed it.
     ///
     /// Other partitions give up analyses, least recently used first and
     /// each only as many as the new entries still need, until those fit the
     /// budget: partitions whose backlogs together exceed it then reanalyze
     /// only the excess. Entries that alone exceed the budget, or an empty
-    /// selection, leave the partition uncached and evict nothing else.
+    /// selection, leave the partition uncached and evict nothing else. A
+    /// selection read before `target` was last forgotten changes nothing.
     pub(crate) fn replace(
         &self,
         target: QueueTarget,
         partition: &TextPartition,
         analyses: PartitionAnalyses,
+        read: CacheInstant,
     ) {
         let bytes = analyses
             .values()
             .map(|analysis| analysis.retained_bytes())
             .fold(0, u64::saturating_add);
         let mut state = self.state.lock();
+        // The guard drops before `analyses`, which is freed unlocked.
+        if state.forgotten_before(target, read) {
+            return;
+        }
         let mut freed = state
             .remove(target, partition)
             .map(|removed| removed.analyses)
@@ -259,9 +313,15 @@ impl PendingTextAnalyses {
     }
 
     /// Drops every analysis cached for `target`, nothing of whose queue is
-    /// left to search.
+    /// left to search, and refuses replacements read before now.
     pub(crate) fn forget(&self, target: QueueTarget) {
         let mut state = self.state.lock();
+        let forgot = state.stamp();
+        if state.forgotten.len() >= FORGOTTEN_TARGETS && !state.forgotten.contains_key(&target) {
+            state.forgotten.clear();
+            state.forgotten_floor = forgot;
+        }
+        state.forgotten.insert(target, forgot);
         let Some(partitions) = state.targets.remove(&target) else {
             return;
         };
@@ -291,6 +351,19 @@ impl PendingTextAnalyses {
     #[cfg(test)]
     pub(crate) fn analyzed(&self) -> usize {
         self.analyzed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Counts one cached analysis a search reused.
+    #[cfg(test)]
+    pub(crate) fn reused_cached(&self) {
+        self.reused
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Cached analyses searches reused so far.
+    #[cfg(test)]
+    pub(crate) fn reused(&self) -> usize {
+        self.reused.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Pauses every search right after its next fresh analysis until the
@@ -381,7 +454,12 @@ mod tests {
         let all = TextPartition::Unpartitioned;
         assert!(cache.get(target(1), &all).is_none());
 
-        cache.replace(target(1), &all, analyses(&[(1, &one), (2, &two)]));
+        cache.replace(
+            target(1),
+            &all,
+            analyses(&[(1, &one), (2, &two)]),
+            cache.now(),
+        );
         assert_eq!(cache.held_bytes(), charge, "exactly the budget fits");
         let hits = cache.get(target(1), &all).unwrap();
         assert!(Arc::ptr_eq(&hits[&operation(2)], &two));
@@ -390,7 +468,7 @@ mod tests {
 
         // A later selection without operation 1 (published) drops it, while
         // a search still holding the earlier snapshot keeps reading it.
-        cache.replace(target(1), &all, analyses(&[(2, &two)]));
+        cache.replace(target(1), &all, analyses(&[(2, &two)]), cache.now());
         assert_eq!(found(&cache, target(1), &all, &[1, 2]), [false, true]);
         assert_eq!(cache.held_bytes(), two.retained_bytes());
         assert!(Arc::ptr_eq(&hits[&operation(1)], &one));
@@ -398,7 +476,7 @@ mod tests {
         assert_eq!(found(&cache, target(2), &all, &[2]), [false]);
 
         // An empty selection leaves nothing cached.
-        cache.replace(target(1), &all, HashMap::new());
+        cache.replace(target(1), &all, HashMap::new(), cache.now());
         assert_eq!(cache.held_bytes(), 0);
         assert_eq!(cache.cached(target(1), &all), 0);
     }
@@ -409,11 +487,16 @@ mod tests {
         let charge = one.retained_bytes() + two.retained_bytes();
         let cache = PendingTextAnalyses::new(NonZeroU64::new(charge - 1).unwrap());
         let all = TextPartition::Unpartitioned;
-        cache.replace(target(1), &all, analyses(&[(1, &one)]));
+        cache.replace(target(1), &all, analyses(&[(1, &one)]), cache.now());
         assert_eq!(cache.cached(target(1), &all), 1);
         // Replacing it with a selection one byte past the budget drops the
         // partition rather than keep a stale or partial selection.
-        cache.replace(target(1), &all, analyses(&[(1, &one), (2, &two)]));
+        cache.replace(
+            target(1),
+            &all,
+            analyses(&[(1, &one), (2, &two)]),
+            cache.now(),
+        );
         assert_eq!(cache.cached(target(1), &all), 0);
         assert_eq!(cache.held_bytes(), 0);
         assert!(cache.get(target(1), &all).is_none());
@@ -425,12 +508,12 @@ mod tests {
         let charge = text.retained_bytes();
         let cache = PendingTextAnalyses::new(NonZeroU64::new(2 * charge).unwrap());
         let (a, b, c) = (tenant("a"), tenant("b"), tenant("c"));
-        cache.replace(target(1), &a, analyses(&[(1, &text)]));
-        cache.replace(target(1), &b, analyses(&[(2, &text)]));
+        cache.replace(target(1), &a, analyses(&[(1, &text)]), cache.now());
+        cache.replace(target(1), &b, analyses(&[(2, &text)]), cache.now());
         // Tenant `a` is used after `b`, so `b` is the least recently used.
         assert_eq!(found(&cache, target(1), &a, &[1]), [true]);
         assert_eq!(found(&cache, target(1), &a, &[2]), [false], "per partition");
-        cache.replace(target(1), &c, analyses(&[(3, &text)]));
+        cache.replace(target(1), &c, analyses(&[(3, &text)]), cache.now());
         assert_eq!(
             [&a, &b, &c].map(|partition| cache.cached(target(1), partition)),
             [1, 0, 1]
@@ -443,6 +526,7 @@ mod tests {
             target(1),
             &b,
             analyses(&[(4, &text), (5, &text), (6, &text)]),
+            cache.now(),
         );
         assert_eq!(
             [&a, &b, &c].map(|partition| cache.cached(target(1), partition)),
@@ -450,7 +534,12 @@ mod tests {
         );
         // Replacing a cached partition releases its own bytes first, so a
         // selection of the whole budget evicts only the other partition.
-        cache.replace(target(1), &a, analyses(&[(1, &text), (7, &text)]));
+        cache.replace(
+            target(1),
+            &a,
+            analyses(&[(1, &text), (7, &text)]),
+            cache.now(),
+        );
         assert_eq!(
             [&a, &b, &c].map(|partition| cache.cached(target(1), partition)),
             [2, 0, 0]
@@ -470,8 +559,8 @@ mod tests {
         let (a, b, c) = (tenant("a"), tenant("b"), tenant("c"));
         let three =
             |first: u128| analyses(&[(first, &text), (first + 1, &text), (first + 2, &text)]);
-        cache.replace(target(1), &a, three(1));
-        cache.replace(target(1), &b, three(4));
+        cache.replace(target(1), &a, three(1), cache.now());
+        cache.replace(target(1), &b, three(4), cache.now());
         assert_eq!(
             [&a, &b].map(|partition| cache.cached(target(1), partition)),
             [1, 3]
@@ -480,7 +569,7 @@ mod tests {
         // The survivor of `a` is a subset of its selection, still reusable.
         let survivor = cache.get(target(1), &a).unwrap();
         assert!(survivor.keys().all(|id| (1..=3).contains(&id.get())));
-        cache.replace(target(1), &a, three(1));
+        cache.replace(target(1), &a, three(1), cache.now());
         assert_eq!(
             [&a, &b].map(|partition| cache.cached(target(1), partition)),
             [3, 1]
@@ -493,9 +582,14 @@ mod tests {
         assert!(long.retained_bytes() > charge);
         let cache =
             PendingTextAnalyses::new(NonZeroU64::new(long.retained_bytes() + 2 * charge).unwrap());
-        cache.replace(target(1), &b, analyses(&[(3, &long)]));
-        cache.replace(target(1), &a, analyses(&[(1, &text), (2, &text)]));
-        cache.replace(target(1), &c, analyses(&[(4, &text)]));
+        cache.replace(target(1), &b, analyses(&[(3, &long)]), cache.now());
+        cache.replace(
+            target(1),
+            &a,
+            analyses(&[(1, &text), (2, &text)]),
+            cache.now(),
+        );
+        cache.replace(target(1), &c, analyses(&[(4, &text)]), cache.now());
         assert_eq!(
             [&a, &b, &c].map(|partition| cache.cached(target(1), partition)),
             [2, 0, 1]
@@ -513,9 +607,10 @@ mod tests {
             target(1),
             &TextPartition::Unpartitioned,
             analyses(&[(1, &text)]),
+            cache.now(),
         );
-        cache.replace(target(1), &tenant, analyses(&[(2, &text)]));
-        cache.replace(target(2), &tenant, analyses(&[(3, &text)]));
+        cache.replace(target(1), &tenant, analyses(&[(2, &text)]), cache.now());
+        cache.replace(target(2), &tenant, analyses(&[(3, &text)]), cache.now());
         cache.forget(target(1));
         cache.forget(target(3));
         assert_eq!(cache.held_bytes(), charge);
@@ -523,30 +618,80 @@ mod tests {
         assert_eq!(cache.cached(target(2), &tenant), 1);
         // The released bytes are reusable without evicting the survivor, and
         // the released recency stamps are never consulted again.
-        cache.replace(target(1), &tenant, analyses(&[(4, &text), (5, &text)]));
+        cache.replace(
+            target(1),
+            &tenant,
+            analyses(&[(4, &text), (5, &text)]),
+            cache.now(),
+        );
         assert_eq!(cache.held_bytes(), 3 * charge);
         assert_eq!(cache.cached(target(2), &tenant), 1);
         assert_eq!(found(&cache, target(1), &tenant, &[4, 5]), [true, true]);
-        cache.replace(target(3), &tenant, analyses(&[(6, &text)]));
+        cache.replace(target(3), &tenant, analyses(&[(6, &text)]), cache.now());
         assert_eq!(cache.cached(target(2), &tenant), 0, "least recently used");
         assert_eq!(cache.held_bytes(), 3 * charge);
     }
 
-    /// A search pinned to a view from before its generation's queue drained
-    /// may cache that view's selection after the drop: the entries are
-    /// unreachable, since no later selection names their operations, and the
-    /// next strong search of the partition replaces them.
+    /// A selection read before its target was forgotten names operations
+    /// publication drained, so replacing with it afterwards caches nothing,
+    /// even for a target that had nothing cached; other targets and
+    /// selections read since cache as usual.
     #[test]
-    fn a_selection_cached_after_a_forget_is_replaced_by_the_next_search() {
+    fn a_selection_read_before_a_forget_is_never_cached() {
+        let text = analysis("alpha");
+        let charge = text.retained_bytes();
+        let cache = PendingTextAnalyses::new(NonZeroU64::MAX);
+        let all = TextPartition::Unpartitioned;
+        let before = cache.now();
+        cache.replace(target(1), &all, analyses(&[(1, &text)]), before);
+        assert_eq!(cache.held_bytes(), charge);
+        cache.forget(target(1));
+        cache.forget(target(2));
+        for drained in [target(1), target(2)] {
+            cache.replace(drained, &all, analyses(&[(1, &text)]), before);
+            assert_eq!(cache.cached(drained, &all), 0, "{drained:?}");
+        }
+        assert_eq!(cache.held_bytes(), 0);
+        cache.replace(target(3), &all, analyses(&[(1, &text)]), before);
+        assert_eq!(cache.cached(target(3), &all), 1, "another target");
+
+        // A selection read after the forget caches, and a later one replaces
+        // it as usual.
+        let after = cache.now();
+        cache.replace(target(1), &all, analyses(&[(2, &text)]), after);
+        assert_eq!(found(&cache, target(1), &all, &[1, 2]), [false, true]);
+        cache.forget(target(3));
+        cache.replace(target(1), &all, analyses(&[(3, &text)]), after);
+        assert_eq!(found(&cache, target(1), &all, &[2, 3]), [false, true]);
+        assert_eq!(cache.held_bytes(), charge);
+    }
+
+    /// Past [`FORGOTTEN_TARGETS`] remembered forgets, every selection read
+    /// before the overflow counts as forgotten, whatever its target, so the
+    /// remembered forgets stay bounded without ever caching a drained one.
+    #[test]
+    fn forgetting_more_targets_than_remembered_refuses_every_earlier_read() {
         let text = analysis("alpha");
         let cache = PendingTextAnalyses::new(NonZeroU64::MAX);
         let all = TextPartition::Unpartitioned;
-        cache.replace(target(1), &all, analyses(&[(1, &text)]));
-        cache.forget(target(1));
-        cache.replace(target(1), &all, analyses(&[(1, &text)]));
-        assert_eq!(cache.held_bytes(), text.retained_bytes());
-        cache.replace(target(1), &all, analyses(&[(2, &text)]));
-        assert_eq!(found(&cache, target(1), &all, &[1, 2]), [false, true]);
-        assert_eq!(cache.held_bytes(), text.retained_bytes());
+        let before = cache.now();
+        (1..=FORGOTTEN_TARGETS as u64).for_each(|generation| cache.forget(target(generation)));
+        assert_eq!(cache.state.lock().forgotten.len(), FORGOTTEN_TARGETS);
+        let never_forgotten = target(FORGOTTEN_TARGETS as u64 + 2);
+        cache.replace(never_forgotten, &all, analyses(&[(1, &text)]), before);
+        assert_eq!(cache.cached(never_forgotten, &all), 1, "within the limit");
+
+        let between = cache.now();
+        cache.forget(target(FORGOTTEN_TARGETS as u64 + 1));
+        assert_eq!(cache.state.lock().forgotten.len(), 1);
+        for read in [before, between] {
+            cache.replace(never_forgotten, &all, analyses(&[(2, &text)]), read);
+            assert_eq!(found(&cache, never_forgotten, &all, &[1, 2]), [true, false]);
+        }
+        // Forgetting a remembered target again never overflows.
+        cache.forget(target(FORGOTTEN_TARGETS as u64 + 1));
+        let after = cache.now();
+        cache.replace(never_forgotten, &all, analyses(&[(2, &text)]), after);
+        assert_eq!(found(&cache, never_forgotten, &all, &[1, 2]), [false, true]);
     }
 }
