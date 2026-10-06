@@ -135,14 +135,17 @@ mod tests {
             };
             let work = move |probe: &BlockingProbe| {
                 entered.send(()).unwrap();
-                let checks = std::iter::repeat_with(|| {
+                let failed = std::iter::repeat_with(|| {
                     std::thread::sleep(Duration::from_millis(5));
                     probe.check()
                 })
                 .take(10_000)
                 .find_map(Result::err);
-                stopped.send(checks.is_some()).unwrap();
-                Ok(())
+                stopped.send(failed.is_some()).unwrap();
+                // Like real search work, return the probe's error: the work
+                // can finish before the deadline timer is polled, and the
+                // request must still fail.
+                failed.map_or(Ok(()), Err)
             };
             let request = {
                 let control = control.clone();
