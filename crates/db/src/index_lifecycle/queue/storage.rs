@@ -4,15 +4,19 @@
 //! and acknowledgements stage blind merge operands. [`QueueLayout::Rows`]
 //! stores one row per operation under a writer-allocated sequence and
 //! acknowledges by deleting that row; it is the baseline for queue-layout
-//! benchmarks. Both layouts decode into the same [`OperationQueue`], so the
-//! producer, the publisher, recovery, and search overlays run identical logic
-//! over either layout. Only test and benchmark builds can select the row
-//! layout. A database always reopens with the layout that wrote its queues:
-//! writer opens fail closed on the other layout's queues, and so do reader
-//! opens in builds that can select it.
+//! benchmarks. Both layouts read into the same [`StoredQueue`] for
+//! publication, [`LatestOperations`] for search overlays, and
+//! [`OperationFrame`]s for startup accounting, so the publisher, recovery,
+//! and search overlays run identical logic over either layout. Only test and
+//! benchmark builds can select the row layout. A database always reopens
+//! with the layout that wrote its queues: writer opens fail closed on the
+//! other layout's queues, and so do reader opens in builds that can select
+//! it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
@@ -21,13 +25,16 @@ use slatedb::{DbReadOps, DbTransaction};
 
 use crate::config::QueueLayout;
 use crate::encoding::v2::keys::scope::DataScope;
-use crate::encoding::v2::keys::{IndexOperationRowKey, ManagedIndexKey, RecordKind, ScopedKey};
+use crate::encoding::v2::keys::{
+    IndexEntity, IndexOperationRowKey, ManagedIndexKey, RecordKind, ScopedKey,
+};
 use crate::encoding::v2::values::indexes::operation_queue::{
-    LatestOperations, OperationQueue, QueueFamily, QueueOperand, QueueRow, QueuedOperation,
-    QueuedOperationId, QueuedPayload,
+    LatestOperations, OperationFrame, OperationQueue, QueueFamily, QueueOperand, QueueRow,
+    QueuedOperation, QueuedOperationId, QueuedPayload,
 };
 use crate::error::{HelixDbError, Result};
 
+use super::backlog::{charged_bytes, Admission};
 use super::{OutputBudget, QueueTarget};
 
 /// Exact writes one acknowledgement stages in a publication transaction.
@@ -37,20 +44,157 @@ pub(crate) struct AcknowledgementOutput {
     pub(crate) bytes: u64,
 }
 
-/// One generation queue as read from storage.
+/// One generation queue as read from storage, grouped by entity.
+///
+/// Publication selects whole per-entity prefixes, visiting entities in the
+/// order of each one's oldest outstanding operation, and acknowledges exactly
+/// those prefixes. The queue therefore keeps each entity's operations as a
+/// chain through the read's storage order, and its entities ordered by their
+/// chains' oldest operations, both built once per read. Selecting a batch
+/// visits only the entities it reaches ([`Self::rotation`]) and an
+/// acknowledgement updates only the chains it names ([`Self::without`]), so
+/// draining a backlog through retained queues costs one decode of it plus
+/// work proportional to each batch, rather than a pass over the whole
+/// backlog per batch.
+///
+/// ```text
+/// read order   0:a1  1:b1  2:a2  3:c1  4:b2
+/// chains       a: 0 -> 2   b: 1 -> 4   c: 3
+/// order        {0: a, 1: b, 3: c}
+/// without(a1)  a: 2        order {1: b, 2: a, 3: c}
+/// ```
 #[derive(Debug)]
 pub(crate) struct StoredQueue {
-    queue: OperationQueue,
-    /// Row key of each operation (row layout only).
+    family: QueueFamily,
+    /// Every operation read, in storage order; `None` once acknowledged.
+    operations: Vec<Option<QueuedOperation>>,
+    /// Read position of the same entity's next operation, by read position;
+    /// an entity's newest operation points at itself.
+    next: Vec<usize>,
+    /// Each entity's outstanding operations; an entity is present only while
+    /// it has one.
+    chains: HashMap<IndexEntity, Chain>,
+    /// Every chained entity, by the read position of its oldest outstanding
+    /// operation.
+    order: BTreeMap<usize, IndexEntity>,
+    /// Every chained entity, by the ID of its oldest outstanding operation.
+    oldest: HashMap<QueuedOperationId, IndexEntity>,
+    /// Row key of each outstanding operation (row layout only).
     rows: HashMap<QueuedOperationId, Bytes>,
+    /// [`charged_bytes`] summed over the outstanding operations.
+    charged_bytes: u64,
+    /// Outstanding operations; never zero.
+    outstanding: NonZeroUsize,
     /// Stored key and value bytes read to materialize the queue.
     encoded_bytes: u64,
+    /// The target's latest admission observed before the read, if recorded.
+    admitted: Option<Admission>,
+}
+
+/// One entity's outstanding operations in a [`StoredQueue`].
+#[derive(Debug, Clone, Copy)]
+struct Chain {
+    /// Read position of the oldest.
+    oldest: usize,
+    /// Read position of the newest.
+    newest: usize,
+    len: NonZeroUsize,
 }
 
 impl StoredQueue {
-    /// Returns the decoded queue in enqueue order.
-    pub(crate) const fn queue(&self) -> &OperationQueue {
-        &self.queue
+    /// Groups `family`'s `operations`, in storage order, read with the row
+    /// keys `rows` (row layout only) from `encoded_bytes` stored bytes;
+    /// `None` for the empty queue.
+    pub(crate) fn new(
+        family: QueueFamily,
+        operations: Vec<QueuedOperation>,
+        rows: HashMap<QueuedOperationId, Bytes>,
+        encoded_bytes: u64,
+    ) -> Option<Self> {
+        let outstanding = NonZeroUsize::new(operations.len())?;
+        let mut next = (0..operations.len()).collect::<Vec<_>>();
+        let mut chains = HashMap::<IndexEntity, Chain>::new();
+        let mut order = BTreeMap::new();
+        let mut oldest = HashMap::new();
+        let mut charged = 0_u64;
+        for (position, operation) in operations.iter().enumerate() {
+            charged += charged_bytes(operation.retained_bytes());
+            match chains.entry(operation.entity()) {
+                Entry::Occupied(mut chain) => {
+                    let chain = chain.get_mut();
+                    next[chain.newest] = position;
+                    chain.newest = position;
+                    chain.len = chain.len.saturating_add(1);
+                }
+                Entry::Vacant(chain) => {
+                    chain.insert(Chain {
+                        oldest: position,
+                        newest: position,
+                        len: NonZeroUsize::MIN,
+                    });
+                    order.insert(position, operation.entity());
+                    oldest.insert(operation.id(), operation.entity());
+                }
+            }
+        }
+        Some(Self {
+            family,
+            operations: operations.into_iter().map(Some).collect(),
+            next,
+            chains,
+            order,
+            oldest,
+            rows,
+            charged_bytes: charged,
+            outstanding,
+            encoded_bytes,
+            admitted: None,
+        })
+    }
+
+    /// Records `admitted`, the target's latest admission observed before
+    /// this queue was read: an operation admitted later may be missing.
+    pub(crate) const fn observed_after(mut self, admitted: Option<Admission>) -> Self {
+        self.admitted = admitted;
+        self
+    }
+
+    /// Returns the latest admission [`Self::observed_after`] recorded.
+    pub(crate) const fn admitted(&self) -> Option<Admission> {
+        self.admitted
+    }
+
+    /// Returns the retained family.
+    pub(crate) const fn family(&self) -> QueueFamily {
+        self.family
+    }
+
+    /// Returns every outstanding operation in storage order.
+    pub(crate) fn operations(&self) -> impl Iterator<Item = &QueuedOperation> {
+        self.operations.iter().flatten()
+    }
+
+    /// Returns how many operations are outstanding.
+    #[cfg(test)]
+    pub(crate) const fn len(&self) -> NonZeroUsize {
+        self.outstanding
+    }
+
+    /// Returns how many entities have an outstanding operation.
+    pub(crate) fn entities(&self) -> usize {
+        self.chains.len()
+    }
+
+    /// Returns whether `entity` has an outstanding operation.
+    pub(crate) fn contains(&self, entity: IndexEntity) -> bool {
+        self.chains.contains_key(&entity)
+    }
+
+    /// Returns what admission charges the outstanding operations
+    /// ([`charged_bytes`]).
+    #[cfg(test)]
+    pub(crate) const fn charged_bytes(&self) -> u64 {
+        self.charged_bytes
     }
 
     /// Returns the stored key and value bytes read to materialize the queue.
@@ -58,20 +202,160 @@ impl StoredQueue {
         self.encoded_bytes
     }
 
+    /// Returns every entity's outstanding operations once, in the order of
+    /// each entity's oldest outstanding operation, starting after `after`
+    /// and wrapping around to end at it; from the first entity when `after`
+    /// has no outstanding operation.
+    ///
+    /// Each entity it yields costs a lookup in the order, however many
+    /// entities or operations the queue holds.
+    pub(crate) fn rotation(
+        &self,
+        after: Option<IndexEntity>,
+    ) -> impl Iterator<Item = EntityOperations<'_>> {
+        let (first, second) = match after.and_then(|entity| self.chains.get(&entity)) {
+            Some(chain) => (
+                (Bound::Excluded(chain.oldest), Bound::Unbounded),
+                (Bound::Unbounded, Bound::Included(chain.oldest)),
+            ),
+            None => (
+                (Bound::Unbounded, Bound::Unbounded),
+                (Bound::Unbounded, Bound::Excluded(0)),
+            ),
+        };
+        self.order
+            .range(first)
+            .chain(self.order.range(second))
+            .map(|(_, entity)| EntityOperations {
+                queue: self,
+                entity: *entity,
+                chain: self.chains[entity],
+            })
+    }
+
     /// Returns what remains of this queue once `acknowledged` committed, or
     /// `None` when nothing remains; the remainder was read from no storage.
-    fn without(self, acknowledged: &[QueuedOperationId]) -> Option<Self> {
-        let acknowledged = acknowledged.iter().copied().collect::<HashSet<_>>();
-        let family = self.queue.family();
-        let mut operations = self.queue.into_operations();
-        operations.retain(|operation| !acknowledged.contains(&operation.id()));
-        let mut rows = self.rows;
-        rows.retain(|id, _| !acknowledged.contains(id));
-        OperationQueue::from_rows(family, operations).map(|queue| Self {
-            queue,
-            rows,
+    ///
+    /// Costs work proportional to `acknowledged`, never to the queue.
+    ///
+    /// # Panics
+    ///
+    /// Unless `acknowledged` names, entity by entity, each one's oldest
+    /// outstanding operations in order, as every publication and discard
+    /// acknowledges them.
+    fn without(mut self, acknowledged: &[QueuedOperationId]) -> Option<Self> {
+        for id in acknowledged {
+            let Some(entity) = self.oldest.remove(id) else {
+                panic!("an acknowledgement names each entity's oldest outstanding operations");
+            };
+            let Entry::Occupied(mut chain) = self.chains.entry(entity) else {
+                unreachable!("an entity with an oldest operation is chained");
+            };
+            let position = chain.get().oldest;
+            let operation = self.operations[position]
+                .take()
+                .expect("a chain names only outstanding operations");
+            debug_assert_eq!(operation.id(), *id);
+            self.order.remove(&position);
+            self.rows.remove(id);
+            self.charged_bytes -= charged_bytes(operation.retained_bytes());
+            self.outstanding = NonZeroUsize::new(self.outstanding.get() - 1)?;
+            let Some(len) = NonZeroUsize::new(chain.get().len.get() - 1) else {
+                chain.remove();
+                continue;
+            };
+            let next = self.next[position];
+            let chain = chain.get_mut();
+            chain.oldest = next;
+            chain.len = len;
+            self.order.insert(next, entity);
+            self.oldest.insert(
+                self.operations[next]
+                    .as_ref()
+                    .expect("a chain names only outstanding operations")
+                    .id(),
+                entity,
+            );
+        }
+        Some(Self {
             encoded_bytes: 0,
+            ..self
         })
+    }
+}
+
+/// One entity's outstanding operations in a [`StoredQueue`], oldest first.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntityOperations<'a> {
+    queue: &'a StoredQueue,
+    entity: IndexEntity,
+    chain: Chain,
+}
+
+impl<'a> EntityOperations<'a> {
+    /// Returns the entity.
+    pub(crate) const fn entity(&self) -> IndexEntity {
+        self.entity
+    }
+
+    /// Returns how many operations of the entity are outstanding.
+    pub(crate) const fn len(&self) -> NonZeroUsize {
+        self.chain.len
+    }
+
+    /// Returns the entity's newest outstanding operation.
+    pub(crate) fn newest(&self) -> &'a QueuedOperation {
+        self.queue.operations[self.chain.newest]
+            .as_ref()
+            .expect("a chain names only outstanding operations")
+    }
+
+    /// Returns the entity's outstanding operations, oldest first.
+    pub(crate) fn iter(self) -> impl Iterator<Item = &'a QueuedOperation> {
+        let queue = self.queue;
+        std::iter::successors(Some(self.chain.oldest), move |position| {
+            Some(queue.next[*position])
+        })
+        .take(self.chain.len.get())
+        .map(move |position| {
+            queue.operations[position]
+                .as_ref()
+                .expect("a chain names only outstanding operations")
+        })
+    }
+}
+
+/// One generation queue's stored bytes as a search read them, not yet
+/// decoded.
+#[derive(Debug)]
+pub(crate) enum PendingQueueBytes {
+    /// The merge-backed value, resolved by the read.
+    Map(Bytes),
+    /// Every operation row in sequence order; never empty.
+    Rows(Vec<Bytes>),
+}
+
+impl PendingQueueBytes {
+    /// Decodes each entity at its latest outstanding operation, selecting
+    /// entities in the order of their oldest operation while their latest
+    /// operations' retained bytes fit `budget` (see [`LatestOperations`]).
+    ///
+    /// Only decoding follows the budget: finding each entity's latest
+    /// operation walks every record's framing. Everything decoded must be
+    /// valid, otherwise the decode fails closed.
+    pub(crate) fn decode_latest(&self, budget: u64) -> Result<LatestOperations> {
+        match self {
+            Self::Map(value) => Ok(LatestOperations::decode(value, budget)?),
+            Self::Rows(values) => {
+                LatestOperations::decode_rows(values.iter().map(Bytes::as_ref), budget)?.ok_or_else(
+                    || {
+                        HelixDbError::InvariantViolation(
+                            "a search read an empty operation row set".to_string(),
+                        )
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -88,41 +372,45 @@ impl StoredQueue {
 /// follows every retained operation of its entity. An attempt therefore
 /// [takes](Self::take) its target's queue before it classifies the target
 /// and [retains](Self::retain) only what an outcome it knows the durable
-/// effect of left: the remainder after a commit that succeeded, or the
-/// whole queue after an attempt that provably committed nothing (a trimmed
-/// selection or a definite commit conflict). An outcome whose
-/// acknowledgement may or may not have committed, an error, a blocked
-/// operation, an ownership change, and a retired or hidden generation drop
-/// it. Newer work becomes visible once the retained operations are
-/// published and the next attempt reads storage again; a retained queue
-/// whose every entity is held back is dropped and read again in the same
-/// attempt, since only newer work can repair a held entity.
+/// effect of left: the remainder after a commit that succeeded, publishing
+/// or discarding, or the whole queue after an attempt that provably
+/// committed nothing (a trimmed selection, an entity held back, or a
+/// definite commit conflict). An outcome whose acknowledgement may or may
+/// not have committed, an error, an ownership change, and a hidden
+/// generation drop it; a retired generation discards from it. Newer work
+/// becomes visible once the retained operations are published and the next
+/// attempt reads storage again. A held-back entity is repaired only by newer
+/// work or a due retry, so a retained queue whose every entity is held back
+/// is read again in the same attempt when none has a repair to try, and one
+/// whose every entity waits for newer work or a retry is read again as soon
+/// as an operation was admitted since its read ([`StoredQueue::admitted`]).
 ///
 /// Every publisher of one writer shares one instance (it lives in the
 /// writer's [`QueueStore`]), so the take-then-retain discipline holds
-/// whichever publisher attempts a target. Retained queues are charged their
-/// operations' retained bytes against one budget shared by every target. A
-/// queue that does not fit beside those already held is dropped and read
-/// again by its target's next attempt; held queues are never evicted for
-/// it. Publication visits targets round-robin, so evicting the least
-/// recently used queue would evict exactly the one attempted next, while a
-/// held queue only shrinks as its target drains and so frees its share.
+/// whichever publisher attempts a target. Retained queues are charged what
+/// admission charges their operations ([`charged_bytes`]) against one budget
+/// shared by every target. A queue that does not fit beside those already
+/// held is dropped and read again by its target's next attempt; held queues
+/// are never evicted for it. Publication visits targets round-robin, so
+/// evicting the least recently used queue would evict exactly the one
+/// attempted next, while a held queue only shrinks as its target drains and
+/// so frees its share.
 #[derive(Debug)]
 pub(crate) struct RetainedQueues {
-    /// Most retained bytes held across every target.
+    /// Most charged bytes held across every target.
     budget: u64,
     state: Mutex<RetainedState>,
 }
 
 #[derive(Debug, Default)]
 struct RetainedState {
-    /// Retained bytes of every held queue.
+    /// Charged bytes of every held queue.
     held: u64,
     queues: HashMap<QueueTarget, (StoredQueue, u64)>,
 }
 
 impl RetainedQueues {
-    /// Holds at most `budget` retained bytes of operations across every
+    /// Holds at most `budget` charged bytes of operations across every
     /// target.
     pub(crate) fn new(budget: u64) -> Self {
         Self {
@@ -131,7 +419,7 @@ impl RetainedQueues {
         }
     }
 
-    /// Removes and returns `target`'s retained queue, releasing its bytes.
+    /// Removes and returns `target`'s retained queue, releasing its charge.
     pub(crate) fn take(&self, target: QueueTarget) -> Option<StoredQueue> {
         let mut state = self.state.lock();
         let (stored, bytes) = state.queues.remove(&target)?;
@@ -151,12 +439,7 @@ impl RetainedQueues {
         let Some(remaining) = stored.without(acknowledged) else {
             return;
         };
-        let bytes = remaining
-            .queue
-            .operations()
-            .iter()
-            .map(QueuedOperation::retained_bytes)
-            .sum::<u64>();
+        let bytes = remaining.charged_bytes;
         let mut state = self.state.lock();
         assert!(
             !state.queues.contains_key(&target),
@@ -169,7 +452,7 @@ impl RetainedQueues {
         state.queues.insert(target, (remaining, bytes));
     }
 
-    /// Returns the retained bytes of every held queue.
+    /// Returns the charged bytes of every held queue.
     #[cfg(test)]
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.state.lock().held
@@ -191,7 +474,7 @@ pub(crate) struct QueueStore {
 impl QueueStore {
     /// Creates storage for `layout` whose operands stay within
     /// `max_operand_bytes` and whose publishers retain at most
-    /// `retained_budget` bytes of queued operations between attempts;
+    /// `retained_budget` charged bytes of queued operations between attempts;
     /// recovery raises the row sequence past every retained row before the
     /// first write.
     pub(crate) fn new(layout: QueueLayout, max_operand_bytes: u64, retained_budget: u64) -> Self {
@@ -235,11 +518,13 @@ impl QueueStore {
                 let Some(value) = read.get(target.key()).await? else {
                     return Ok(None);
                 };
-                Ok(Some(StoredQueue {
-                    queue: OperationQueue::decode(&value)?,
-                    rows: HashMap::new(),
-                    encoded_bytes: (target.key().len() + value.len()) as u64,
-                }))
+                let queue = OperationQueue::decode(&value)?;
+                Ok(StoredQueue::new(
+                    queue.family(),
+                    queue.into_operations(),
+                    HashMap::new(),
+                    (target.key().len() + value.len()) as u64,
+                ))
             }
             QueueLayout::Rows => {
                 let prefix = row_prefix(target);
@@ -263,47 +548,30 @@ impl QueueStore {
                 let Some(family) = family else {
                     return Ok(None);
                 };
-                Ok(
-                    OperationQueue::from_rows(family, operations).map(|queue| StoredQueue {
-                        queue,
-                        rows,
-                        encoded_bytes,
-                    }),
-                )
+                Ok(StoredQueue::new(family, operations, rows, encoded_bytes))
             }
         }
     }
 
-    /// Reads, for a search, each entity of one generation queue at its
-    /// latest outstanding operation, selecting entities in the order of
-    /// their oldest operation while their latest operations' retained bytes
-    /// fit `budget` (see [`LatestOperations`]); `None` when the queue is
-    /// absent or not even the first entity fits.
+    /// Reads, for a search, the stored bytes of one generation queue; `None`
+    /// when the queue is absent. Decode them with
+    /// [`PendingQueueBytes::decode_latest`], off the async workers: that
+    /// work follows the backlog.
     ///
-    /// Only decoding follows the budget. Finding each entity's latest
-    /// operation walks every record's framing, and the map layout's read
-    /// fetches the whole value: while merge operands are pending above its
-    /// base, which is the normal state of an index taking writes, SlateDB
-    /// first resolves them against all of it, validating and re-encoding
-    /// every record. Such a read therefore costs the backlog (up to the
-    /// per-index `max_retained_bytes`) whatever the budget, and fails on a
-    /// corrupt record the budget never selects; once the value is resolved
-    /// in storage, only the walk follows the backlog. The row layout scans
-    /// every row. Everything decoded must be valid, otherwise the read fails
-    /// closed.
+    /// The map layout's read fetches the whole value: while merge operands
+    /// are pending above its base, which is the normal state of an index
+    /// taking writes, SlateDB first resolves them against all of it,
+    /// validating and re-encoding every record, inside this read. Such a
+    /// read therefore costs the backlog (up to the per-index
+    /// `max_retained_bytes`) whatever a later decode selects, and fails on a
+    /// corrupt record no decode would select. The row layout scans every row.
     pub(crate) async fn read_latest(
         &self,
         read: &(impl DbReadOps + Sync),
         target: QueueTarget,
-        budget: u64,
-    ) -> Result<Option<LatestOperations>> {
+    ) -> Result<Option<PendingQueueBytes>> {
         match self.layout {
-            QueueLayout::Map => {
-                let Some(value) = read.get(target.key()).await? else {
-                    return Ok(None);
-                };
-                Ok(LatestOperations::decode(&value, budget)?)
-            }
+            QueueLayout::Map => Ok(read.get(target.key()).await?.map(PendingQueueBytes::Map)),
             QueueLayout::Rows => {
                 let prefix = row_prefix(target);
                 let mut scan = read.scan_prefix(&prefix, ..).await?;
@@ -311,10 +579,7 @@ impl QueueStore {
                 while let Some(row) = scan.next().await? {
                     values.push(row.value);
                 }
-                Ok(LatestOperations::decode_rows(
-                    values.iter().map(Bytes::as_ref),
-                    budget,
-                )?)
+                Ok((!values.is_empty()).then_some(PendingQueueBytes::Rows(values)))
             }
         }
     }
@@ -362,10 +627,9 @@ impl QueueStore {
     ) -> Result<()> {
         match self.layout {
             QueueLayout::Map => {
-                let (bytes, tokens) =
-                    QueueOperand::acknowledge(stored.queue.family(), ids.iter().copied())
-                        .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?
-                        .into_parts();
+                let (bytes, tokens) = QueueOperand::acknowledge(stored.family, ids.iter().copied())
+                    .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?
+                    .into_parts();
                 transaction.merge_disjoint_tokens(target.key(), tokens, bytes)?;
             }
             QueueLayout::Rows => {
@@ -392,7 +656,7 @@ impl QueueStore {
     ) -> Result<AcknowledgementOutput> {
         match self.layout {
             QueueLayout::Map => {
-                let operand = QueueOperand::acknowledge(stored.queue.family(), ids.iter().copied())
+                let operand = QueueOperand::acknowledge(stored.family, ids.iter().copied())
                     .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
                 Ok(AcknowledgementOutput {
                     operations: 1,
@@ -440,76 +704,144 @@ impl QueueStore {
             .unwrap_or(NonZeroUsize::MIN)
     }
 
-    /// Discovers every queue in `scope` for startup accounting.
-    ///
-    /// Rows of the other layout mean the database was written with a
-    /// different layout, which fails closed rather than orphaning work.
-    pub(crate) async fn discover(
-        &self,
-        read: &(impl DbReadOps + Sync),
-        scope: DataScope,
-    ) -> Result<Vec<(QueueTarget, OperationQueue)>> {
-        require_scope_layout(read, self.layout, scope).await?;
-        let own = match self.layout {
-            QueueLayout::Map => RecordKind::IndexOperationQueue,
-            QueueLayout::Rows => RecordKind::IndexOperationRow,
-        };
-        let prefix = ManagedIndexKey::data_prefix(scope, ScopedKey::logical_prefix(own));
-        let mut scan = read.scan_prefix(&prefix, ..).await?;
-        let mut queues = Vec::new();
-        // Row keys sort by (index, generation, sequence), so one generation's
-        // rows are contiguous and already in enqueue order.
-        let mut pending: Option<(QueueTarget, QueueFamily, Vec<QueuedOperation>)> = None;
-        while let Some(row) = scan.next().await? {
-            match ManagedIndexKey::parse_data_from_slice(&row.key) {
-                Ok(ManagedIndexKey::Data {
-                    scope: key_scope,
-                    kind: ScopedKey::IndexOperationQueue(key),
-                }) if key_scope == scope => queues.push((
-                    QueueTarget::new(scope, key.index_id, key.generation),
-                    OperationQueue::decode(&row.value)?,
-                )),
-                Ok(ManagedIndexKey::Data {
-                    scope: key_scope,
-                    kind: ScopedKey::IndexOperationRow(key),
-                }) if key_scope == scope => {
-                    self.next_sequence
-                        .fetch_max(key.sequence.saturating_add(1), Ordering::Relaxed);
-                    let target = QueueTarget::new(scope, key.index_id, key.generation);
-                    let (family, operation) = QueueRow::decode(&row.value)?;
-                    match pending.as_mut() {
-                        Some((current, current_family, operations)) if *current == target => {
-                            if *current_family != family {
-                                return Err(HelixDbError::IndexCatalogCorruption(format!(
-                                    "operation rows for index {} mix families",
-                                    target.index_id.get()
-                                )));
-                            }
-                            operations.push(operation);
-                        }
-                        Some(_) | None => {
-                            queues.extend(finish_rows(pending.take()));
-                            pending = Some((target, family, vec![operation]));
-                        }
-                    }
-                }
-                Ok(_) | Err(_) => {
-                    return Err(HelixDbError::IndexCatalogCorruption(
-                        "operation queue prefix holds another key".to_string(),
-                    ));
-                }
-            }
+    /// Groups the rows of [`discovery_range`]s, read in key order, into
+    /// generation queues for startup accounting.
+    pub(crate) const fn discovery(&self) -> QueueDiscovery<'_> {
+        QueueDiscovery {
+            store: self,
+            pending: None,
         }
-        queues.extend(finish_rows(pending));
-        Ok(queues)
+    }
+}
+
+/// Every queue key of `scope` in either layout.
+///
+/// The layouts' record kinds are adjacent, so one scan of this range both
+/// finds this layout's queues and fails closed on the other's, without a
+/// separate probe.
+pub(crate) fn discovery_range(scope: DataScope) -> std::ops::Range<Bytes> {
+    const _: () = assert!(
+        RecordKind::IndexOperationRow.as_u8() == RecordKind::IndexOperationQueue.as_u8() + 1,
+        "both queue layouts form one contiguous key range"
+    );
+    let start = ManagedIndexKey::data_prefix(
+        scope,
+        ScopedKey::logical_prefix(RecordKind::IndexOperationQueue),
+    );
+    let mut end = ManagedIndexKey::data_prefix(
+        scope,
+        ScopedKey::logical_prefix(RecordKind::IndexOperationRow),
+    )
+    .to_vec();
+    *end.last_mut().expect("a logical prefix ends with its kind") += 1;
+    start..Bytes::from(end)
+}
+
+/// One generation queue found at startup, as its operations' frames in
+/// storage order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveredQueue {
+    pub(crate) target: QueueTarget,
+    pub(crate) family: QueueFamily,
+    /// Never empty.
+    pub(crate) frames: Vec<OperationFrame>,
+}
+
+/// Turns the rows of [`discovery_range`]s into generation queues as a scan
+/// yields them, so startup holds one queue at a time rather than all of a
+/// scope's.
+///
+/// # Contract
+///
+/// Rows must arrive in key order: each map-layout row is a whole queue, and
+/// one generation's row-layout rows are contiguous and already in enqueue
+/// order, so a row-layout queue completes when the next generation's first
+/// row arrives or at [`Self::finish`]. A row of the other layout fails
+/// closed with [`HelixDbError::Config`], since the publisher and search
+/// overlays would never see its operations; any other key, a queue that
+/// does not decode, and one generation's rows of two families are
+/// [`HelixDbError::IndexCatalogCorruption`] or encoding errors.
+///
+/// ```text
+/// map  rows: [q(1,1)] [q(2,1)]              -> push: q(1,1), q(2,1); finish: -
+/// rows rows: [r(1,1,0)] [r(1,1,1)] [r(2,1,2)] -> push: -, -, q(1,1); finish: q(2,1)
+/// ```
+#[derive(Debug)]
+pub(crate) struct QueueDiscovery<'a> {
+    store: &'a QueueStore,
+    /// The row-layout generation whose rows are still arriving.
+    pending: Option<DiscoveredQueue>,
+}
+
+impl QueueDiscovery<'_> {
+    /// Accepts the next row of a discovery range and returns the queue it
+    /// completes, if any.
+    pub(crate) fn push(&mut self, key: &[u8], value: &[u8]) -> Result<Option<DiscoveredQueue>> {
+        let Ok(ManagedIndexKey::Data { scope, kind }) = ManagedIndexKey::parse_data_from_slice(key)
+        else {
+            return Err(HelixDbError::IndexCatalogCorruption(
+                "operation queue prefix holds another key".to_string(),
+            ));
+        };
+        match (self.store.layout, kind) {
+            (QueueLayout::Map, ScopedKey::IndexOperationQueue(key)) => {
+                let (family, frames) = OperationFrame::decode_queue(value)?;
+                Ok(Some(DiscoveredQueue {
+                    target: QueueTarget::new(scope, key.index_id, key.generation),
+                    family,
+                    frames,
+                }))
+            }
+            (QueueLayout::Rows, ScopedKey::IndexOperationRow(key)) => {
+                self.store
+                    .next_sequence
+                    .fetch_max(key.sequence.saturating_add(1), Ordering::Relaxed);
+                let target = QueueTarget::new(scope, key.index_id, key.generation);
+                let (family, frame) = OperationFrame::decode_row(value)?;
+                let Some(pending) = self
+                    .pending
+                    .as_mut()
+                    .filter(|pending| pending.target == target)
+                else {
+                    return Ok(self.pending.replace(DiscoveredQueue {
+                        target,
+                        family,
+                        frames: vec![frame],
+                    }));
+                };
+                if pending.family != family {
+                    return Err(HelixDbError::IndexCatalogCorruption(format!(
+                        "operation rows for index {} mix families",
+                        target.index_id.get()
+                    )));
+                }
+                pending.frames.push(frame);
+                Ok(None)
+            }
+            (layout, ScopedKey::IndexOperationQueue(_) | ScopedKey::IndexOperationRow(_)) => {
+                Err(HelixDbError::Config(format!(
+                    "index operation queues were written with a layout other than {layout:?}"
+                )))
+            }
+            (_, _) => Err(HelixDbError::IndexCatalogCorruption(
+                "operation queue prefix holds another key".to_string(),
+            )),
+        }
+    }
+
+    /// Returns the last queue once every row was pushed.
+    pub(crate) fn finish(self) -> Option<DiscoveredQueue> {
+        self.pending
     }
 }
 
 /// Fails closed when `scope` holds queues written with a layout other than
 /// `layout`.
 ///
-/// Recovery, publication, and search overlays read one layout only, so the
-/// other layout's operations would otherwise be silently invisible.
+/// Search overlays read one layout only, so the other layout's operations
+/// would otherwise be silently invisible to a reader. Writers check the
+/// layout while discovering queues instead.
+#[cfg(any(test, feature = "async-index-benchmark"))]
 pub(crate) async fn require_scope_layout(
     read: &(impl DbReadOps + Sync),
     layout: QueueLayout,
@@ -526,14 +858,6 @@ pub(crate) async fn require_scope_layout(
         )));
     }
     Ok(())
-}
-
-/// Closes one generation's contiguous rows into a queue.
-fn finish_rows(
-    rows: Option<(QueueTarget, QueueFamily, Vec<QueuedOperation>)>,
-) -> Option<(QueueTarget, OperationQueue)> {
-    let (target, family, operations) = rows?;
-    OperationQueue::from_rows(family, operations).map(|queue| (target, queue))
 }
 
 /// Prefix of every row of one generation queue (row layout).

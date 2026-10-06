@@ -53,9 +53,10 @@ use super::{IndexGenerationId, IndexId};
 /// Point-in-time counters for asynchronous vector/text index publication.
 ///
 /// Backlog fields describe work retained right now across every logical
-/// index; publication fields are monotonic since this handle opened. A
-/// reader handle owns neither the admission ledger nor a publisher, so every
-/// field reads zero there.
+/// index; publication and search fields are monotonic since this handle
+/// opened. A reader handle owns neither the admission ledger nor a
+/// publisher, so every field but `strong_text_search_rejections` reads zero
+/// there.
 ///
 /// Every durable operation is counted once, in `committed_operations` or
 /// `discovered_operations`, and every durable exact-ID acknowledgement once in
@@ -65,7 +66,9 @@ use super::{IndexGenerationId, IndexId};
 /// the lag histogram's count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct IndexOperationQueueStats {
-    /// Encoded bytes of committed operations not yet acknowledged.
+    /// Bytes retained operations count toward their indexes' retained-byte
+    /// limits: each operation not yet acknowledged counts its encoded size
+    /// plus [`crate::config::IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`].
     pub retained_bytes: u64,
     /// Distinct pending `(generation, entity)` members.
     pub pending_members: u64,
@@ -143,6 +146,11 @@ pub struct IndexOperationQueueStats {
     pub publication_error_retries: u64,
     /// Attempts deferred because a hidden build owns the generation.
     pub deferred_attempts: u64,
+    /// Strong text searches refused with retryable `index_backpressure`
+    /// (`pending_text_analysis_bytes`) because the unpublished text of their
+    /// partition exceeded
+    /// [`IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`](crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes).
+    pub strong_text_search_rejections: u64,
 }
 
 /// One entity whose queued vector/text work is held back because one of its
@@ -183,12 +191,13 @@ pub struct IndexOperationQueueStats {
 /// `index_backpressure`. Stop writing it until it publishes.
 ///
 /// Its queued text still counts toward the pending text a strong text search
-/// may analyze in its partition (one text publication's analysis budget),
+/// may analyze in its partition
+/// ([`crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`]),
 /// and no publication drains it: while held-back text alone exceeds that
-/// budget, strong text searches of the partition fail with
+/// bound, strong text searches of the partition fail with
 /// `index_backpressure` (`pending_text_analysis_bytes`) that retrying cannot
-/// clear. Raise the limits again, rewrite or delete the entity where that
-/// fits, or search with eventual consistency.
+/// clear. Raise the limits or the bound, rewrite or delete the entity where
+/// that fits, or search with eventual consistency.
 ///
 /// [`crate::HelixDB::blocked_index_entities`] lists them, and the writer logs
 /// an error naming each one's scope, index, generation, and entity when it is
@@ -261,11 +270,17 @@ impl QueueTarget {
 #[cfg(test)]
 mod codec_storage_tests;
 #[cfg(test)]
+mod drain_tests;
+#[cfg(test)]
+mod grouping_tests;
+#[cfg(test)]
 mod isolation_tests;
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod open_measurement_tests;
 #[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]
@@ -273,9 +288,13 @@ mod planning_session_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod soak_tests;
 #[cfg(test)]
 mod stats_tests;
+#[cfg(test)]
+mod strong_vector_bound_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]

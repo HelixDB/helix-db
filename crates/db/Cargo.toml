@@ -163,6 +163,10 @@ required-features = [
 ]
 
 [[test]]
+name = "production_queue_admission_memory"
+required-features = ["production-coverage"]
+
+[[test]]
 name = "production_text_correctness_regressions"
 required-features = [
     "production-coverage",

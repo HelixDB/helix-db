@@ -273,6 +273,8 @@ impl<'db> ExecutionContext<'db> {
             prepared_memberships: super::stream::PreparedMemberships::default(),
             search_consistency: self.search_consistency,
             shared_index_reads: Arc::clone(&self.shared_index_reads),
+            // Parallel contexts share the parent's immutable reader snapshot.
+            pending_sets: Arc::clone(&self.pending_sets),
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
             #[cfg(test)]
@@ -712,6 +714,8 @@ mod tests {
             context.variables.get(&variable),
             Some(&ExecutionValue::Stream(Vec::new()))
         );
+        // Every step context of one read request shares its pending sets.
+        assert!(Arc::ptr_eq(&context.pending_sets, &fork.pending_sets));
     }
 
     #[test]

@@ -1,11 +1,39 @@
 //! Runtime admission accounting for retained immutable index operations.
 //!
 //! The ledger charges every retained operation its exact encoded record size
-//! and counts a `(generation, entity)` member once while it has at least one
-//! outstanding operation. Limits aggregate per logical index across its
-//! generations. The ledger is process memory only: it never adds a shared
-//! persisted counter to foreground transactions, and it is rebuilt from the
-//! durable queues before a writer accepts graph writes.
+//! plus [`OPERATION_OVERHEAD_BYTES`] (see "Charges" below) and counts a
+//! `(generation, entity)` member once while it has at least one outstanding
+//! operation. Limits aggregate per logical index across its generations. The
+//! ledger is process memory only: it never adds a shared persisted counter to
+//! foreground transactions, and it is rebuilt from the durable queues before
+//! a writer accepts graph writes.
+//!
+//! # Charges
+//!
+//! An operation's encoded record understates the memory it costs while
+//! retained, most for small operations: a delete encodes in about 24 bytes,
+//! while its ledger entry (about 370 bytes), its decoded form in a queue a
+//! publisher holds, grouped by entity (about 460), and its share of resolving
+//! its queue's merge operands (about 190) cost about 45 times that. So every
+//! operation is charged [`charged_bytes`]: its encoded size plus the fixed
+//! [`OPERATION_OVERHEAD_BYTES`]. The payload adds about one copy of the encoded
+//! payload to the decoded queue and one to a resolution, and the
+//! payload-independent costs stay below twice the overhead, so for every
+//! operation shape the heap one retained operation holds in the ledger, in one
+//! decoded copy of its queue, and in one resolution of its merge operands is at
+//! most twice its charge: from about 1.7 times for a delete to 2 times for a
+//! large vector. A logical index's retained-byte limit therefore bounds that
+//! heap to twice the limit, whatever mix of operations fills it. The
+//! `production_queue_admission_memory` test measures every shape at the
+//! allocator's chunk sizes and enforces the bound.
+//!
+//! The ledger applies the overhead itself, to the encoded size every path
+//! reports: foreground admission (including blocker repairs admitted beyond
+//! the limits), operations found at open, and operations reconciliation
+//! discovers. A reopened writer therefore charges exactly what live admission
+//! did. Publishers budget the decoded queues they retain between attempts in
+//! the same unit, and charged bytes sum across logical indexes, so a
+//! writer-wide ceiling can bound them together.
 //!
 //! Each charge moves through a closed lifecycle:
 //!
@@ -79,6 +107,20 @@ use crate::index_lifecycle::{IndexGenerationId, IndexId, IndexOperationId};
 use super::lag::PublicationLagHistogram;
 use super::QueueTarget;
 
+/// Fixed bytes charged to every retained operation beyond its encoded record.
+///
+/// See "Charges" in the module documentation; the
+/// `production_queue_admission_memory` test asserts that it covers the
+/// measured payload-independent memory of every operation shape.
+pub(crate) const OPERATION_OVERHEAD_BYTES: u64 = 576;
+
+/// Returns the bytes an operation whose record encodes in `encoded_bytes`
+/// counts toward its index's retained-byte limit: `encoded_bytes` plus
+/// [`OPERATION_OVERHEAD_BYTES`].
+pub(crate) const fn charged_bytes(encoded_bytes: u64) -> u64 {
+    encoded_bytes.saturating_add(OPERATION_OVERHEAD_BYTES)
+}
+
 /// Per-logical-index admission ceilings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BacklogLimits {
@@ -122,7 +164,10 @@ pub(crate) struct OperationCharge {
     pub(crate) target: QueueTarget,
     pub(crate) entity: IndexEntity,
     pub(crate) id: QueuedOperationId,
-    pub(crate) bytes: u64,
+    /// The operation's encoded record size,
+    /// [`crate::encoding::v2::values::indexes::operation_queue::QueuedOperation::retained_bytes`];
+    /// the ledger charges [`charged_bytes`] of it.
+    pub(crate) encoded_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +219,8 @@ enum DurableOrigin {
 struct Charge {
     target: QueueTarget,
     entity: IndexEntity,
-    bytes: u64,
+    /// [`charged_bytes`] of the operation's encoded size.
+    charged: u64,
     state: ChargeState,
 }
 
@@ -194,6 +240,7 @@ pub(crate) struct Admission(u64);
 /// Current retained work for one logical index.
 #[derive(Debug, Default)]
 struct IndexUsage {
+    /// Charged bytes of every retained operation.
     retained_bytes: u64,
     /// Outstanding operation references per `(generation, entity)` member.
     members: HashMap<(IndexGenerationId, IndexEntity), u32>,
@@ -252,6 +299,7 @@ pub(crate) struct LedgerOutcomes {
 /// Observable usage for one logical index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct BacklogUsage {
+    /// [`charged_bytes`] summed over retained operations.
     pub(crate) retained_bytes: u64,
     pub(crate) members: u64,
     pub(crate) operations: u64,
@@ -335,7 +383,7 @@ impl IndexOperationBacklog {
                         .to_string(),
                 ));
             }
-            *bytes = bytes.saturating_add(charge.bytes);
+            *bytes = bytes.saturating_add(charged_bytes(charge.encoded_bytes));
             entities.insert(charge.entity);
         }
         for (index, (_, bytes, entities)) in &staged {
@@ -500,24 +548,26 @@ impl IndexOperationBacklog {
         }
     }
 
-    /// Charges the durable operations of one queue found at open.
+    /// Charges the durable operations of one queue found at open, each given
+    /// as its ID, entity, and encoded size.
     ///
     /// Runs before any graph write, so every operation is discovered durable
     /// work; an ID already charged (the same queue loaded twice) is left
-    /// unchanged. Reconciliation reads go through
-    /// [`Self::finish_reconciliation`] instead.
+    /// unchanged. Each is charged exactly as live admission charged it.
+    /// Reconciliation reads go through [`Self::finish_reconciliation`]
+    /// instead.
     pub(crate) fn load_durable(
         &self,
         target: QueueTarget,
         operations: impl IntoIterator<Item = (QueuedOperationId, IndexEntity, u64)>,
     ) {
         let mut state = self.state.lock();
-        for (id, entity, bytes) in operations {
+        for (id, entity, encoded_bytes) in operations {
             state.discover(OperationCharge {
                 target,
                 entity,
                 id,
-                bytes,
+                encoded_bytes,
             });
         }
     }
@@ -555,16 +605,17 @@ impl IndexOperationBacklog {
     /// Settles `target`'s uncertain charges against a flushed read of its
     /// queue, returning how many were released.
     ///
-    /// `present` must be every operation of `target`'s queue in a read taken
-    /// after a successful writer flush that itself began after `ticket` was
-    /// issued. Presence proves an enqueue durable whenever it was marked, so
-    /// a present uncertain enqueue or unknown ID becomes a discovered durable
-    /// charge. Every other uncertain charge settles only if marked before
-    /// `ticket`: an absent enqueue never committed and is released; an absent
-    /// acknowledgement committed and counts as one; a present acknowledgement
-    /// did not commit, so the charge is durable again. Work under the ledger
-    /// lock scales with `present` and `target`'s uncertain charges, never with
-    /// other targets' charges.
+    /// `present` must be every operation of `target`'s queue, each as its
+    /// ID, entity, and encoded size, in a read taken after a successful
+    /// writer flush that itself began after `ticket` was issued. Presence
+    /// proves an enqueue durable whenever it was marked, so a present
+    /// uncertain enqueue or unknown ID becomes a discovered durable charge,
+    /// charged as live admission would have. Every other uncertain charge
+    /// settles only if marked before `ticket`: an absent enqueue never
+    /// committed and is released; an absent acknowledgement committed and
+    /// counts as one; a present acknowledgement did not commit, so the charge
+    /// is durable again. Work under the ledger lock scales with `present` and
+    /// `target`'s uncertain charges, never with other targets' charges.
     pub(crate) fn finish_reconciliation(
         &self,
         ticket: ReconciliationTicket,
@@ -577,13 +628,13 @@ impl IndexOperationBacklog {
         // Only present uncertain IDs are kept, so the set is bounded by the
         // target's uncertain charges rather than by its queue.
         let mut present_uncertain = HashSet::new();
-        for (id, entity, bytes) in present {
+        for (id, entity, encoded_bytes) in present {
             let Some(charge) = state.charges.get(&id) else {
                 state.discover(OperationCharge {
                     target,
                     entity,
                     id,
-                    bytes,
+                    encoded_bytes,
                 });
                 continue;
             };
@@ -726,6 +777,20 @@ impl IndexOperationBacklog {
         }
     }
 
+    /// Returns every retained charge by operation ID, with its
+    /// [`charged_bytes`].
+    #[cfg(test)]
+    pub(crate) fn charges(
+        &self,
+    ) -> std::collections::BTreeMap<QueuedOperationId, (QueueTarget, IndexEntity, u64)> {
+        self.state
+            .lock()
+            .charges
+            .iter()
+            .map(|(id, charge)| (*id, (charge.target, charge.entity, charge.charged)))
+            .collect()
+    }
+
     /// Returns current usage for one logical index, asserting that the
     /// per-target uncertain index agrees with every retained charge.
     #[cfg(test)]
@@ -836,7 +901,8 @@ impl BacklogState {
             .indexes
             .entry(charge.target.logical_index())
             .or_default();
-        usage.retained_bytes = usage.retained_bytes.saturating_add(charge.bytes);
+        let charged = charged_bytes(charge.encoded_bytes);
+        usage.retained_bytes = usage.retained_bytes.saturating_add(charged);
         *usage
             .members
             .entry((charge.target.generation, charge.entity))
@@ -857,7 +923,7 @@ impl BacklogState {
             Charge {
                 target: charge.target,
                 entity: charge.entity,
-                bytes: charge.bytes,
+                charged,
                 state,
             },
         );
@@ -919,7 +985,7 @@ impl BacklogState {
             .indexes
             .get_mut(&index)
             .expect("a retained charge's logical index has usage");
-        usage.retained_bytes = usage.retained_bytes.saturating_sub(charge.bytes);
+        usage.retained_bytes = usage.retained_bytes.saturating_sub(charge.charged);
         let member = (charge.target.generation, charge.entity);
         let references = usage
             .members

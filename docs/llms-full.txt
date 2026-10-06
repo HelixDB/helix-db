@@ -494,6 +494,8 @@ SeaweedFS 4.09 or later enforce both.
 | `AWS_SESSION_TOKEN` | Optional temporary-credential token |
 | `AWS_ENDPOINT` or `AWS_ENDPOINT_URL_S3` | Non-AWS S3 endpoint |
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
+| `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` | Most unpublished vector work, in bytes, one `strong` vector search scores before it fails with `index_backpressure`; defaults to the index's retained-byte limit (1,000,000,000), which writes reach first. See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
+| `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` | Most unpublished text, in analysis bytes, one `strong` text search includes per partition before it fails with `index_backpressure`; defaults to 512 MiB (536,870,912). See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 | `HELIX_ENABLE_CYPHER` | Set to `true` or `1` to serve Cypher at `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`; off by default |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
@@ -4774,8 +4776,13 @@ removed the value.
   because of superseded results; only the limits above apply. A prefiltered text
   search still fails with `index_backpressure` when its partition holds more
   [unpublished text](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes)
-  than one text publication may analyze, since its BM25 statistics cover every
-  unpublished document.
+  than a `strong` text search may analyze, since its BM25 statistics cover every
+  unpublished document, and a prefiltered vector search fails the same way when
+  its index holds more
+  [unpublished vector work](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes)
+  than a `strong` search may score. That work counts every tenant partition of the
+  index, so with a lowered bound another tenant's backlog can fail the search even
+  when its own candidates have nothing unpublished.
 - `eventual` does this for the oldest unpublished work within its per-search budget and
   ranks the remaining candidates by their last published values until publication.
 
@@ -4950,41 +4957,92 @@ answer without those changes, and it succeeds once that work is published.
   changed candidates up front and keep only their own
   [result limits](/database/helix-db/query-guides/prefiltering#result-limits).
 
-A `strong` text search, whole-index or prefiltered, also fails with a retryable
-`index_backpressure` error (`pending_text_analysis_bytes`) when analyzing the
-unpublished text in its partition would exceed the analysis budget of one text
-publication: the text compaction input limit, 64 MiB by default. The search analyzes
-every unpublished document in its partition to keep BM25 statistics exact, and each
-document is charged as the index worker charges it: its bytes plus about 280 bytes per
-indexed word. Text of many short words therefore reaches the limit with far less text,
-for example about 1 MB of ordinary English. The index worker may need several
-publications to bring the backlog back under it. Within the limit the search stays exact.
+`strong` searches also bound the unpublished work they include, text and vector each on
+its own:
+
+| `strong` search | Bounded work | Default | Resource | Server variable |
+| --- | --- | --- | --- | --- |
+| Text | Analysis of the unpublished text in its partition | 512 MiB | `pending_text_analysis_bytes` | `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` |
+| Vector | Unpublished vectors in its index, every tenant partition included | The retained-byte limit, 1,000,000,000 bytes | `pending_vector_bytes` | `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` |
+
+Past its bound a search, whole-index or prefiltered, fails with a retryable
+`index_backpressure` error naming the resource, and it succeeds once the index worker
+publishes enough; within the bound it stays exact. A write batch's own vector changes
+never count toward the vector bound, but its own documents count toward the text bound
+(see below). `eventual` searches never fail this way. Each server variable takes a
+positive byte count; an embedded database sets the bounds with
+`IndexOperationQueueTuning::with_strong_text_search_max_analysis_bytes` and
+`IndexOperationQueueTuning::with_strong_vector_search_max_pending_bytes`.
+
+A `strong` text search includes every unpublished document of its partition to keep
+BM25 statistics exact, and each document is charged as the index worker charges it: its
+bytes plus about 280 bytes per indexed word. 512 MiB is about 44,000 unpublished documents of 40 words, or about 8 MB
+of ordinary English. Within the bound the search stays exact. The server keeps each
+unpublished document's analysis for later searches until the document is published, so
+repeated searches during ingest analyze only new documents while the backlogs of the
+partitions being searched fit the bound together. The index worker may need several
+publications to bring a backlog back under the bound.
 
 - A write batch's own documents are charged first. A write batch whose own documents
-  exceed the limit fails with the non-retryable `index_operation_batch_too_large`
+  exceed the bound fails with the non-retryable `index_operation_batch_too_large`
   (`pending_text_analysis_bytes`), since no publication clears them; split it.
 - An `eventual` text search in the same position never fails. It analyzes only the
-  oldest unpublished documents within the limit and serves the rest as last published.
+  oldest unpublished documents within one text publication's analysis budget (64 MiB
+  by default) and serves the rest as last published.
 - Documents the index worker holds back never publish, and they still count. Only
   lowering the text limits below documents already admitted creates them. While their
-  text alone exceeds the limit, `strong` text searches of their partition keep failing.
-  Raise the limits again, or search `eventual`. Rewriting or deleting such a document
-  also clears it once replacing or removing its published version fits the lowered
-  limits, which a document published under much larger limits may never do.
+  text alone exceeds the bound, `strong` text searches of their partition keep failing.
+  Raise the limits or the bound, or search `eventual`. Rewriting or deleting such a
+  document also clears it once replacing or removing its published version fits the
+  lowered limits, which a document published under much larger limits may never do.
+
+The text bound also caps the analyses the server keeps for reuse, and `strong` text
+searches analyze unpublished text one at a time, so however many run at once they hold
+about twice the bound in analyses. When the bound refuses a search, the server logs a
+warning at most once a minute.
+
+Ingest that is faster than the index worker publishes, such as a bulk import, grows the
+backlog past any bound. Search those indexes `eventual` while the import runs: eventual
+text searches never fail for backlog, and they serve what is not yet published as last
+published.
+
+A `strong` vector search, whole-index or prefiltered, scores every unpublished vector
+in its index exactly, so its CPU time grows with that work. Each changed node or edge
+counts once, at its latest unpublished vector (4 bytes per dimension) plus a few dozen
+bytes. By default a search may score as much as its index may retain, the
+[retained-byte limit](#index-backpressure) of 1,000,000,000 bytes: about 160,000
+pending vectors of 1,536 dimensions. That limit also counts every superseded change, so
+writes fail with `index_backpressure` before such searches do. Only lowering the limit
+below work already admitted, or a blocked build's repair write admitted past it, leaves
+more behind a search. A search behind more than its bound fails with a retryable
+`index_backpressure` error (`pending_vector_bytes`) until the index worker publishes
+enough of it. Self-hosted servers can set a lower bound, which caps the CPU
+time of each search, with `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES`. Within the
+bound the search stays exact.
+
+- The bound counts unpublished vectors in every tenant partition of the index, as the
+  retained-byte limit does. With a lowered bound, one tenant's backlog also fails other
+  tenants' `strong` vector searches, including prefiltered ones whose own candidates
+  have nothing unpublished.
+- A write batch's own changes never count toward it.
+- An `eventual` vector search never fails this way. It includes up to 128 MiB of
+  unpublished work, oldest first, and serves the rest as last published.
 
 ## Index backpressure
 
 By default, each index retains at most 1,000,000,000 bytes or 250,000 pending
-entities of unpublished work. A write that would push an index past either limit fails
-before commit with `index_backpressure`: HTTP 429 with `retryable: true` and no
-`Retry-After` header, or gRPC `ResourceExhausted`. Nothing from the rejected request
-commits. Retry the unchanged request with bounded backoff and jitter; it succeeds once
-the index worker has published enough of the backlog, or, while the index is building,
-once the index activates.
+entities of unpublished work. Each pending change counts its encoded size plus a fixed
+576 bytes for the memory that tracks it, so the byte limit also caps how many changes an
+index holds: about 1.7 million, however small each one is. A write that would push an
+index past either limit fails before commit with `index_backpressure`: HTTP 429 with
+`retryable: true` and no `Retry-After` header, or gRPC `ResourceExhausted`. Nothing
+from the rejected request commits. Retry the unchanged request with bounded backoff and
+jitter; it succeeds once the index worker has published enough of the backlog, or,
+while the index is building, once the index activates.
 
 A single write that exceeds either limit on its own, or stages more than 8 MiB of
 queued work for one index, can never be admitted, nor can a text search in a write
-batch whose own documents exceed one publication's analysis budget. Either fails with
+batch whose own documents exceed the `strong` text search bound. Either fails with
 the non-retryable `index_operation_batch_too_large` error (HTTP 400) instead; split it
 into smaller writes. See the
 [query error reference](/database/helix-db/query-guides/error-handling) for both codes.
@@ -5168,8 +5226,9 @@ durability waits on reads are rejected with `400 Bad Request`.
   rejects it before query parsing.
 - `429` reports a Helix Cloud rate limit (`rate_limited`), which can include
   `Retry-After`, or database engine backpressure (`index_backpressure`): a vector
-  or text index holds its maximum unpublished work, or a whole-index `strong`
-  search lies behind too many unpublished changes. Backpressure responses carry
+  or text index holds its maximum unpublished work, or a `strong` search lies
+  behind too many unpublished changes or would include more unpublished work than
+  it may. Backpressure responses carry
   `retryable: true` and no `Retry-After`; nothing from the request took effect.
   See [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - `500` reports an internal query or storage failure.
@@ -5508,7 +5567,7 @@ embedded configurations may override it.
 | `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
 | `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
 | `active_text_mutation_limit_exceeded` | One indexed text document exceeded a hard per-document admission limit. | 400 | Shorten the text before retrying | Yes |
-| `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry, or a text search in it would analyze more of its own text than one text publication may. | 400 | Split the write before retrying | Yes |
+| `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry, or a text search in it would analyze more of its own text than a `strong` text search may (512 MiB of analysis by default). | 400 | Split the write before retrying | Yes |
 | `index_build_blocked` | A write would exceed a vector or text index's unpublished-work limit while the index's build is blocked; nothing publishes that work until the build is retried or aborted. | 500 | After retrying or aborting the blocked build | Yes |
 | `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
@@ -5531,7 +5590,7 @@ embedded configurations may override it.
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
-| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text than one text publication may (64 MiB of analysis by default). | 429 | Yes, bounded backoff | No request change required |
+| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text in its partition than its bound allows (512 MiB of analysis by default), or a `strong` vector search would score more unpublished vector work than its bound allows (by default the index's retained-byte limit, which writes reach first). | 429 | Yes, bounded backoff | No request change required |
 | `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
 | `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
 | `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |
@@ -5670,21 +5729,28 @@ An HTTP 429 with `index_backpressure` comes from the database engine, not a rate
 Either a vector or text index already holds its maximum unpublished work, so the write
 was rejected before commit, or a whole-index `strong` search's answer lies behind more
 than 800 unpublished changes, or a `strong` text search would analyze more unpublished
-text than one text publication may (64 MiB of analysis by default). Nothing from the
-request took effect.
+text in its partition than its bound allows (`pending_text_analysis_bytes`; 512 MiB of
+analysis by default, about 44,000 unpublished 40-word documents), or a `strong` vector
+search would score more unpublished vector work than its bound allows
+(`pending_vector_bytes`; by default the index's retained-byte limit, which writes reach
+first). Nothing from the request took effect.
 
 Retry the unchanged request with bounded backoff and jitter; it succeeds once the index
 worker publishes the backlog, or, while the index is building, once it activates. Reads
 that can tolerate lag can use `eventual` search.
 See [Search consistency](/database/helix-db/query-guides/search-consistency).
 
-If `strong` text searches keep returning `pending_text_analysis_bytes` after the worker
-has caught up, the text limits were probably lowered below documents already admitted.
-The worker holds those documents back and never publishes them. Health responses
+`strong` text searches that return `pending_text_analysis_bytes` while text is ingested
+mean the ingest is outpacing the index worker, as during a bulk import; the server logs a
+warning at most once a minute when this happens. Search `eventual` during the import. A
+self-hosted server can also raise the bound with
+`HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES`. If they keep failing after the worker has
+caught up, the text limits were probably lowered below documents already admitted. The
+worker holds those documents back and never publishes them. Health responses
 (`GET /healthz`) count them under `blocked_index_entity_count`, and the server logs an
 error naming each one when it is held back. Raise the limits again. Rewriting or
-deleting a document also clears it once replacing or removing its published version
-fits the lowered limits.
+deleting a document also clears it once replacing or removing its published version fits
+the lowered limits.
 
 The worker also holds back a single vector or text entry whose update fails the same
 way every time it is applied, for example on damaged index data, and keeps publishing
@@ -6717,7 +6783,7 @@ bucket was exhausted.
 | Limit | Value |
 | --- | --- |
 | Activation | Asynchronous and atomic after scan, secondary-index catch-up, and validation |
-| Vector and text publication | Asynchronous. Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work, and one write stages at most 8 MiB for one index; see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure) |
+| Vector and text publication | Asynchronous. Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work (each change counts its encoded size plus 576 bytes), and one write stages at most 8 MiB for one index; see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure). A `strong` text search analyzes at most 512 MiB of unpublished text in its partition; see [searches behind unpublished changes](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 | Progress | Monotonic entity/byte/operation counters; no percentage or total-work estimate |
 | Controls | Poll all operations; retry blocked operations; abort eligible constructing builds |
 | Memory reporting | Cache and batch budgets do not constitute a hard process-RSS cap |

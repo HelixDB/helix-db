@@ -669,6 +669,9 @@ async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound
             object_store: Arc::new(InMemory::new()),
             database: "vector-build-cache-queued-writes".to_string(),
             limits: SearchIndexBackfillLimits::default().active_text_mutation(),
+            pending_analyses: Arc::new(crate::search::text::pending::PendingTextAnalyses::new(
+                NonZeroU64::MIN,
+            )),
         },
     );
     // A publication session left for the target is forgotten by deferral,
@@ -694,9 +697,10 @@ async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound
             .await
             .expect("the queue reads")
             .expect("the deferred operations stay queued")
-            .queue()
-            .operations(),
-        operations.as_slice(),
+            .operations()
+            .cloned()
+            .collect::<Vec<_>>(),
+        operations,
         "deferral acknowledges nothing"
     );
     assert_eq!(
@@ -2375,6 +2379,9 @@ async fn publication_shares_the_planning_budget_with_a_retained_build() {
             object_store: Arc::new(InMemory::new()),
             database: "vector-build-cache-publication-share".to_string(),
             limits: SearchIndexBackfillLimits::default().active_text_mutation(),
+            pending_analyses: Arc::new(crate::search::text::pending::PendingTextAnalyses::new(
+                NonZeroU64::MIN,
+            )),
         },
     );
     assert_eq!(

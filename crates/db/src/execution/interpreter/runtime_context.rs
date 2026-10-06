@@ -297,6 +297,11 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     /// Concurrent secondary-set child reads shared by every step context of
     /// the request.
     pub(in crate::execution::interpreter) shared_index_reads: Arc<super::access::SharedIndexReads>,
+    /// Committed pending search sets read in the current request view,
+    /// shared by every step context of a read request and replaced whenever
+    /// a write request's transaction changes (see
+    /// [`super::access::PendingSets`]).
+    pub(in crate::execution::interpreter) pending_sets: Arc<super::access::PendingSets>,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
     #[cfg(test)]
@@ -375,6 +380,7 @@ impl<'db> ExecutionContext<'db> {
             prepared_memberships: super::stream::PreparedMemberships::default(),
             search_consistency: helix_ast::query::SearchConsistency::Strong,
             shared_index_reads: Arc::default(),
+            pending_sets: Arc::default(),
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
             #[cfg(test)]

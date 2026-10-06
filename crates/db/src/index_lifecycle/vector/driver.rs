@@ -306,7 +306,7 @@ const MAX_RETAINED_VECTOR_BUILDS: usize = 16;
 /// dropped instead: evicting one would only make that target's next attempt
 /// cold in turn, so under round-robin over `N` targets this many stay warm
 /// rather than none. It also bounds the per-session work of every rebalance.
-const MAX_RETAINED_PUBLICATIONS: usize = 16;
+pub(crate) const MAX_RETAINED_PUBLICATIONS: usize = 16;
 
 /// Whether a publication target still had queued work after the commit that
 /// retained its session.

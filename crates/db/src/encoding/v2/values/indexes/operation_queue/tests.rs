@@ -421,16 +421,25 @@ fn malformed_values_are_errors_not_empty_queues() {
             OperationQueue::decode(&bytes).is_err(),
             "{name} must not decode"
         );
+        assert!(
+            OperationFrame::decode_queue(&bytes).is_err(),
+            "{name} must not frame"
+        );
     }
 
     // Resolved readers reject unresolved transformations.
-    assert!(OperationQueue::decode(&raw_value(QueueFamily::Text, &[1], &[])).is_err());
-    assert!(OperationQueue::decode(&raw_value(
-        QueueFamily::Text,
-        &[],
-        &[(InsertMode::Set, 1, body.clone())]
-    ))
-    .is_err());
+    for unresolved in [
+        raw_value(QueueFamily::Text, &[1], &[]),
+        raw_value(
+            QueueFamily::Text,
+            &[],
+            &[(InsertMode::Set, 1, body.clone())],
+        ),
+        raw_value(QueueFamily::Text, &[], &[]),
+    ] {
+        assert!(OperationQueue::decode(&unresolved).is_err());
+        assert!(OperationFrame::decode_queue(&unresolved).is_err());
+    }
     // Mixed families never merge.
     let vector = raw_value(
         QueueFamily::Vector,
@@ -700,22 +709,30 @@ fn latest_decodes_select_each_entity_at_its_latest_operation_within_the_budget()
         panic!("three operations are outstanding");
     };
     let selected = |value: &[u8], budget| {
-        LatestOperations::decode(value, budget)
-            .unwrap()
-            .map(LatestOperations::into_operations)
+        let selection = LatestOperations::decode(value, budget).unwrap();
+        let refused = selection.refused();
+        (selection.into_operations(), refused)
     };
     // Entity 1 is selected at its latest state or not at all, never at the
     // first operation that alone would fit; entity 3 follows in first-seen
-    // order and is never selected ahead of it.
-    assert_eq!(selected(&value, latest_bytes - 1), None);
-    assert_eq!(selected(&value, latest_bytes), Some(vec![latest.clone()]));
+    // order and is never selected ahead of it. A selection the budget ends
+    // reports what the first entity it left out would have reached.
     assert_eq!(
-        selected(&value, latest_bytes + deleted_bytes - 1),
-        Some(vec![latest.clone()])
+        selected(&value, latest_bytes - 1),
+        (Vec::new(), Some(latest_bytes))
     );
-    let both = Some(vec![latest.clone(), deleted.clone()]);
-    assert_eq!(selected(&value, latest_bytes + deleted_bytes), both);
-    assert_eq!(selected(&value, u64::MAX), both);
+    let both_bytes = latest_bytes + deleted_bytes;
+    assert_eq!(
+        selected(&value, latest_bytes),
+        (vec![latest.clone()], Some(both_bytes))
+    );
+    assert_eq!(
+        selected(&value, both_bytes - 1),
+        (vec![latest.clone()], Some(both_bytes))
+    );
+    let both = vec![latest.clone(), deleted.clone()];
+    assert_eq!(selected(&value, both_bytes), (both.clone(), None));
+    assert_eq!(selected(&value, u64::MAX), (both, None));
     assert_eq!(
         OperationQueue::decode(&value).unwrap().operations(),
         operations.as_slice()
@@ -745,7 +762,10 @@ fn latest_decodes_select_each_entity_at_its_latest_operation_within_the_budget()
     let small = text_operation(3, 3, Some("kept")).retained_bytes();
     assert_eq!(
         selected(&corrupt, latest_bytes + small),
-        Some(vec![latest.clone(), text_operation(3, 3, Some("kept"))])
+        (
+            vec![latest.clone(), text_operation(3, 3, Some("kept"))],
+            Some(latest_bytes + small + retained_len(4 + 96))
+        )
     );
     assert!(LatestOperations::decode(&corrupt, u64::MAX).is_err());
     assert!(OperationQueue::decode(&corrupt).is_err());
@@ -773,11 +793,18 @@ fn latest_decodes_select_each_entity_at_its_latest_operation_within_the_budget()
                 (InsertMode::IfAbsent, 2, corrupt),
             ],
         );
-        assert_eq!(selected(&bytes, 0), None, "{name}");
+        // A zero budget tracks no entity and charges the first the
+        // smallest record any operation retains.
         assert_eq!(
-            selected(&bytes, first.retained_bytes()),
-            Some(vec![first.clone()]),
+            selected(&bytes, 0),
+            (Vec::new(), Some(MIN_RETAINED_RECORD_LEN as u64)),
             "{name}"
+        );
+        let (operations, refused) = selected(&bytes, first.retained_bytes());
+        assert_eq!(operations, vec![first.clone()], "{name}");
+        assert!(
+            refused.is_some_and(|reached| reached > first.retained_bytes()),
+            "{name}: {refused:?}"
         );
         assert!(
             LatestOperations::decode(&bytes, u64::MAX).is_err(),
@@ -844,10 +871,16 @@ fn latest_decodes_select_as_many_minimal_entities_as_the_budget_covers() {
     };
     for count in 0..=10 {
         let budget = MIN_RETAINED_RECORD_LEN as u64 * count;
+        let selection = LatestOperations::decode(&value, budget).unwrap();
+        // Entities past the tracked ones still refuse the selection, each
+        // charged at least the smallest record.
         assert_eq!(
-            LatestOperations::decode(&value, budget)
-                .unwrap()
-                .map_or_else(Vec::new, LatestOperations::into_operations),
+            selection.refused(),
+            (count < 10).then_some(budget + MIN_RETAINED_RECORD_LEN as u64),
+            "within {budget}"
+        );
+        assert_eq!(
+            selection.into_operations(),
             operations[..usize::try_from(count).unwrap()],
             "within {budget}"
         );
@@ -862,12 +895,12 @@ fn latest_decodes_select_as_many_minimal_entities_as_the_budget_covers() {
     for operation in &late {
         put_insert(&mut bytes, InsertMode::IfAbsent, operation);
     }
+    let selection = LatestOperations::decode(&bytes, MIN_RETAINED_RECORD_LEN as u64 * 2).unwrap();
     assert_eq!(
-        LatestOperations::decode(&bytes, MIN_RETAINED_RECORD_LEN as u64 * 2)
-            .unwrap()
-            .map(LatestOperations::into_operations),
-        Some(operations[..2].to_vec())
+        selection.refused(),
+        Some(MIN_RETAINED_RECORD_LEN as u64 * 3)
     );
+    assert_eq!(selection.into_operations(), operations[..2].to_vec());
 }
 
 #[test]
@@ -904,7 +937,7 @@ fn latest_row_decodes_match_the_map_layout() {
     for budget in budgets {
         assert_eq!(
             LatestOperations::decode_rows(rows.iter().map(Bytes::as_ref), budget).unwrap(),
-            LatestOperations::decode(&value, budget).unwrap(),
+            Some(LatestOperations::decode(&value, budget).unwrap()),
             "within {budget}"
         );
     }
@@ -925,8 +958,10 @@ fn latest_row_decodes_match_the_map_layout() {
         [rows[0].to_vec(), unknown_entity, rows[2].to_vec()],
     ] {
         assert_eq!(
-            LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), 0).unwrap(),
-            None
+            LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), 0)
+                .unwrap()
+                .map(LatestOperations::into_operations),
+            Some(Vec::new())
         );
         assert!(
             LatestOperations::decode_rows(corrupt.iter().map(Vec::as_slice), u64::MAX).is_err()
@@ -1307,6 +1342,92 @@ proptest! {
     }
 }
 
+fn partition_strategy() -> impl Strategy<Value = TextPartition> {
+    prop_oneof![
+        Just(TextPartition::Unpartitioned),
+        proptest::collection::vec(any::<u8>(), 1..4).prop_map(|bytes| tenant(&bytes)),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Frames are exactly the identity, entity, and retained bytes of a full
+    /// decode, for every payload shape and every resolved queue.
+    #[test]
+    fn frames_match_full_decodes_of_arbitrary_queues(
+        vector in any::<bool>(),
+        operations in proptest::collection::vec(
+            (
+                any::<bool>(),
+                any::<u64>(),
+                proptest::option::of(partition_strategy()),
+                proptest::option::of((
+                    partition_strategy(),
+                    proptest::collection::vec(-1.0e6_f32..1.0e6, 1..6),
+                )),
+                proptest::option::of((partition_strategy(), ".{0,12}")),
+            ),
+            1..24,
+        ),
+    ) {
+        let operations = operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, (edge, entity, previous, vector_replacement, text_replacement))| {
+                let payload = if vector {
+                    QueuedPayload::Vector(QueuedVectorPayload {
+                        previous,
+                        replacement: vector_replacement.map(|(partition, components)| {
+                            QueuedVectorReplacement::try_new(partition, Arc::from(components))
+                                .unwrap()
+                        }),
+                    })
+                } else {
+                    QueuedPayload::Text(QueuedTextPayload {
+                        replacement: text_replacement.map(|(partition, text)| {
+                            QueuedTextReplacement::new(partition, Arc::from(text.as_str()))
+                        }),
+                    })
+                };
+                QueuedOperation::new(
+                    id(index as u128 + 1),
+                    IndexEntity {
+                        kind: if edge { IndexElementKind::Edge } else { IndexElementKind::Node },
+                        id: IndexEntityId::new(entity),
+                    },
+                    payload,
+                )
+            })
+            .collect::<Vec<_>>();
+        // One operand per operation, so one entity may repeat across them.
+        let operands = operations
+            .iter()
+            .map(|operation| {
+                QueueOperand::enqueue(std::slice::from_ref(operation))
+                    .unwrap()
+                    .bytes()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let QueueMergeResult::Value(value) = merge_with_base(None, &operands).unwrap() else {
+            panic!("a non-empty queue resolves to a value");
+        };
+        let decoded = OperationQueue::decode(&value).unwrap();
+        prop_assert_eq!(
+            OperationFrame::decode_queue(&value).unwrap(),
+            (decoded.family(), decoded.operations().iter().map(frame).collect::<Vec<_>>())
+        );
+        for operation in &operations {
+            prop_assert_eq!(
+                OperationFrame::decode_row(&QueueRow::encode(decoded.family(), operation))
+                    .unwrap(),
+                (decoded.family(), frame(operation))
+            );
+        }
+    }
+}
+
 #[test]
 fn queue_keys_round_trip_for_every_scope() {
     for scope in [
@@ -1393,10 +1514,116 @@ fn malformed_rows_are_errors() {
         ),
     ] {
         assert!(QueueRow::decode(&bytes).is_err(), "{case} must not decode");
+        assert!(
+            OperationFrame::decode_row(&bytes).is_err(),
+            "{case} must not frame"
+        );
     }
     // A merge-layout value is never accepted as a row.
     let map_value = QueueOperand::enqueue(&[text_operation(9, 5, Some("row"))]).unwrap();
     assert!(QueueRow::decode(map_value.bytes()).is_err());
+    assert!(OperationFrame::decode_row(map_value.bytes()).is_err());
+    // Nor a row as a map-layout value.
+    assert!(OperationFrame::decode_queue(&valid).is_err());
+}
+
+fn frame(operation: &QueuedOperation) -> OperationFrame {
+    OperationFrame {
+        id: operation.id(),
+        entity: operation.entity(),
+        retained_bytes: operation.retained_bytes(),
+    }
+}
+
+#[test]
+fn frames_match_full_decodes_of_every_payload_shape() {
+    let vectors = vec![
+        vector_operation(
+            1,
+            7,
+            None,
+            Some((TextPartition::Unpartitioned, vec![0.25; 1536])),
+        ),
+        vector_operation(2, 9, None, None),
+        vector_operation(
+            3,
+            u64::MAX,
+            Some(tenant(b"old")),
+            Some((tenant(b"new"), vec![-0.0, f32::MIN])),
+        ),
+        vector_operation(4, 7, Some(TextPartition::Unpartitioned), None),
+    ];
+    let texts = vec![
+        text_operation(5, 0, None),
+        text_operation(6, 300, Some("h\u{e9}llo")),
+        text_operation(7, 0, Some("")),
+    ];
+    for (family, operations) in [(QueueFamily::Vector, vectors), (QueueFamily::Text, texts)] {
+        let operand = QueueOperand::enqueue(&operations[..2]).unwrap();
+        let later = QueueOperand::enqueue(&operations[2..]).unwrap();
+        let QueueMergeResult::Value(value) =
+            merge_with_base(None, &[operand.bytes().clone(), later.bytes().clone()]).unwrap()
+        else {
+            panic!("a non-empty queue resolves to a value");
+        };
+        let decoded = OperationQueue::decode(&value).unwrap();
+        assert_eq!(
+            OperationFrame::decode_queue(&value).unwrap(),
+            (
+                family,
+                decoded.operations().iter().map(frame).collect::<Vec<_>>()
+            )
+        );
+        for operation in &operations {
+            assert_eq!(
+                OperationFrame::decode_row(&QueueRow::encode(family, operation)).unwrap(),
+                (family, frame(operation))
+            );
+        }
+    }
+    // The sizes the type's documentation shows.
+    let (_, frames) = OperationFrame::decode_queue(
+        QueueOperand::enqueue(&[
+            vector_operation(
+                1,
+                7,
+                None,
+                Some((TextPartition::Unpartitioned, vec![0.25; 1536])),
+            ),
+            vector_operation(2, 9, None, None),
+        ])
+        .unwrap()
+        .bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| (frame.entity.id.get(), frame.retained_bytes))
+            .collect::<Vec<_>>(),
+        [(7, 6_170), (9, 22)]
+    );
+}
+
+#[test]
+fn frames_validate_payloads_in_place() {
+    // Only the payload is corrupt: framing and entity are intact.
+    let mut nan = vec![0x01, 0x01, 0x00, 0x01, 0x01, 0x01];
+    nan.put_u32(f32::NAN.to_bits());
+    let value = raw_value(QueueFamily::Vector, &[], &[(InsertMode::IfAbsent, 1, nan)]);
+    assert!(OperationQueue::decode(&value).is_err());
+    assert!(OperationFrame::decode_queue(&value).is_err());
+    let invalid_utf8 = vec![0x01, 0x01, 0x01, 0x01, 0x02, 0xC3, 0x28];
+    let value = raw_value(
+        QueueFamily::Text,
+        &[],
+        &[
+            (InsertMode::IfAbsent, 1, text_body(1, "valid")),
+            (InsertMode::IfAbsent, 2, invalid_utf8),
+        ],
+    );
+    assert!(OperationQueue::decode(&value).is_err());
+    assert!(OperationFrame::decode_queue(&value).is_err());
 }
 
 #[test]

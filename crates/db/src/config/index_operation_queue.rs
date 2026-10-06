@@ -4,6 +4,13 @@
 //! generations. They are never serialized, so changing them does not alter
 //! the persisted queue format.
 //!
+//! The retained-byte limit bounds memory, not just encoded size: every queued
+//! operation counts its encoded size plus
+//! [`IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`], so a backlog of
+//! many small operations, such as deletes, reaches it long before its encoded
+//! bytes would. The heap an index's backlog holds in admission accounting,
+//! one decoded copy, and one merge resolution stays within twice the limit.
+//!
 //! # Usage
 //!
 //! ```
@@ -21,6 +28,60 @@
 //! let config = DbConfig::new().with_index_operation_queue_tuning(tuning);
 //! assert_eq!(config.index_operation_queue(), tuning);
 //! assert_eq!(IndexOperationQueueTuning::default().max_members().get(), 250_000);
+//!
+//! // The default 1 GB limit holds at most this many queued operations,
+//! // however small each one encodes.
+//! let overhead = IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES;
+//! assert_eq!(overhead, 576);
+//! assert_eq!(1_000_000_000 / overhead, 1_736_111);
+//!
+//! // A smaller retained-byte ceiling could not admit even the smallest
+//! // operation, so every queued write would fail.
+//! let smallest = IndexOperationQueueTuning::MIN_RETAINED_BYTES;
+//! assert_eq!(smallest, overhead + 21);
+//! assert!(IndexOperationQueueTuning::default()
+//!     .with_max_retained_bytes(NonZeroU64::new(smallest).unwrap())
+//!     .is_ok());
+//! assert_eq!(
+//!     IndexOperationQueueTuning::default()
+//!         .with_max_retained_bytes(NonZeroU64::new(smallest - 1).unwrap()),
+//!     Err(IndexOperationQueueTuningError::RetainedBytesBelowOneOperation {
+//!         requested: smallest - 1,
+//!     })
+//! );
+//!
+//! // Strong vector searches decode and score at most this much unpublished
+//! // work before failing with retryable backpressure. By default that is the
+//! // retained-byte ceiling, so writes reach backpressure first, and it
+//! // follows the ceiling; an explicit bound stays put.
+//! let default = IndexOperationQueueTuning::default();
+//! assert_eq!(
+//!     default.strong_vector_search_max_pending_bytes(),
+//!     default.max_retained_bytes()
+//! );
+//! let raised = default
+//!     .with_max_retained_bytes(NonZeroU64::new(2_000_000_000).unwrap())
+//!     .unwrap();
+//! assert_eq!(raised.strong_vector_search_max_pending_bytes().get(), 2_000_000_000);
+//! let strong = raised
+//!     .with_strong_vector_search_max_pending_bytes(NonZeroU64::new(64 << 20).unwrap());
+//! assert_eq!(strong.strong_vector_search_max_pending_bytes().get(), 64 << 20);
+//! assert_eq!(
+//!     strong
+//!         .with_max_retained_bytes(NonZeroU64::new(1 << 20).unwrap())
+//!         .unwrap()
+//!         .strong_vector_search_max_pending_bytes()
+//!         .get(),
+//!     64 << 20
+//! );
+//!
+//! // Strong text searches analyze at most this much unpublished text per
+//! // partition, 512 MiB unless replaced, before they fail with retryable
+//! // index backpressure.
+//! assert_eq!(default.strong_text_search_max_analysis_bytes().get(), 512 << 20);
+//! let text =
+//!     default.with_strong_text_search_max_analysis_bytes(NonZeroU64::new(1 << 30).unwrap());
+//! assert_eq!(text.strong_text_search_max_analysis_bytes().get(), 1 << 30);
 //!
 //! // A larger retained-byte ceiling could let one queue value outgrow the
 //! // longest value storage can encode.
@@ -44,9 +105,13 @@ use std::time::Duration;
 const DEFAULT_MAX_RETAINED_BYTES: u64 = 1_000_000_000;
 const DEFAULT_MAX_MEMBERS: u64 = 250_000;
 const DEFAULT_MAX_OPERAND_BYTES: u64 = 8 * 1024 * 1024;
+/// About 44,000 unpublished 40-word documents: a 40-word document charges
+/// about 12 KB of analysis.
+const DEFAULT_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_RECOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const EVENTUAL_SEARCH_SOURCE_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const _: () = assert!(DEFAULT_MAX_RETAINED_BYTES <= IndexOperationQueueTuning::MAX_RETAINED_BYTES);
+const _: () = assert!(DEFAULT_MAX_RETAINED_BYTES >= IndexOperationQueueTuning::MIN_RETAINED_BYTES);
 
 /// Invalid queue policy rejected before a database opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +121,13 @@ pub enum IndexOperationQueueTuningError {
     /// The retained-byte ceiling exceeds
     /// [`IndexOperationQueueTuning::MAX_RETAINED_BYTES`].
     RetainedBytesAboveQueueValueLimit {
+        /// The rejected ceiling.
+        requested: u64,
+    },
+    /// The retained-byte ceiling is below
+    /// [`IndexOperationQueueTuning::MIN_RETAINED_BYTES`], so it could not
+    /// admit even the smallest operation.
+    RetainedBytesBelowOneOperation {
         /// The rejected ceiling.
         requested: u64,
     },
@@ -72,6 +144,12 @@ impl core::fmt::Display for IndexOperationQueueTuningError {
                 "index operation queue max retained bytes {requested} exceed the queue value \
                  limit {}",
                 IndexOperationQueueTuning::MAX_RETAINED_BYTES
+            ),
+            Self::RetainedBytesBelowOneOperation { requested } => write!(
+                formatter,
+                "index operation queue max retained bytes {requested} are below the charge of \
+                 the smallest operation {}",
+                IndexOperationQueueTuning::MIN_RETAINED_BYTES
             ),
         }
     }
@@ -114,6 +192,12 @@ pub struct IndexOperationQueueTuning {
     start_paused: bool,
     /// Per-search source-input budget for eventual pending overlays.
     eventual_search_budget: u64,
+    /// Most committed pending vector work one strong search decodes and
+    /// scores; `None` follows `max_retained_bytes`.
+    strong_vector_search_max_pending_bytes: Option<NonZeroU64>,
+    /// Analysis bytes one strong text search may charge for unpublished text
+    /// in its partition.
+    strong_text_search_max_analysis_bytes: NonZeroU64,
 }
 
 impl Default for IndexOperationQueueTuning {
@@ -130,6 +214,11 @@ impl Default for IndexOperationQueueTuning {
             #[cfg(test)]
             start_paused: false,
             eventual_search_budget: EVENTUAL_SEARCH_SOURCE_INPUT_BYTES,
+            strong_vector_search_max_pending_bytes: None,
+            strong_text_search_max_analysis_bytes: NonZeroU64::new(
+                DEFAULT_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES,
+            )
+            .expect("default strong text search bound is nonzero"),
         }
     }
 }
@@ -145,7 +234,29 @@ impl IndexOperationQueueTuning {
     pub const MAX_RETAINED_BYTES: u64 =
         crate::encoding::v2::values::indexes::operation_queue::MAX_RETAINED_BYTES;
 
-    /// Returns the retained-operation byte ceiling per logical index.
+    /// Fixed bytes every queued operation counts toward
+    /// [`Self::max_retained_bytes`] beyond its encoded size.
+    ///
+    /// It covers the process memory a retained operation costs whatever its
+    /// payload: its admission-ledger entry, its decoded form in a queue a
+    /// publisher holds, and its share of resolving its queue's merge
+    /// operands, measured at the allocator's real chunk sizes. Together with
+    /// the copies of its payload those hold, they stay within twice the
+    /// operation's charge for every operation shape.
+    pub const OPERATION_OVERHEAD_BYTES: u64 =
+        crate::index_lifecycle::queue::backlog::OPERATION_OVERHEAD_BYTES;
+
+    /// Smallest retained-byte ceiling: the charge of the smallest operation,
+    /// a deletion of an entity whose ID encodes in one byte. Every queued
+    /// operation is charged at least this much, so a lower ceiling would
+    /// reject every queued write.
+    pub const MIN_RETAINED_BYTES: u64 = crate::index_lifecycle::queue::backlog::charged_bytes(
+        crate::encoding::v2::values::indexes::operation_queue::MIN_RETAINED_RECORD_LEN as u64,
+    );
+
+    /// Returns the retained-operation byte ceiling per logical index: each
+    /// queued operation counts its encoded size plus
+    /// [`Self::OPERATION_OVERHEAD_BYTES`].
     pub const fn max_retained_bytes(self) -> NonZeroU64 {
         self.max_retained_bytes
     }
@@ -182,12 +293,20 @@ impl IndexOperationQueueTuning {
         self
     }
 
-    /// Replaces the retained-operation byte ceiling; a ceiling above
-    /// [`Self::MAX_RETAINED_BYTES`] is rejected.
+    /// Replaces the retained-operation byte ceiling; a ceiling below
+    /// [`Self::MIN_RETAINED_BYTES`] or above [`Self::MAX_RETAINED_BYTES`] is
+    /// rejected.
     pub const fn with_max_retained_bytes(
         mut self,
         bytes: NonZeroU64,
     ) -> Result<Self, IndexOperationQueueTuningError> {
+        if bytes.get() < Self::MIN_RETAINED_BYTES {
+            return Err(
+                IndexOperationQueueTuningError::RetainedBytesBelowOneOperation {
+                    requested: bytes.get(),
+                },
+            );
+        }
         if bytes.get() > Self::MAX_RETAINED_BYTES {
             return Err(
                 IndexOperationQueueTuningError::RetainedBytesAboveQueueValueLimit {
@@ -240,6 +359,76 @@ impl IndexOperationQueueTuning {
     /// Returns the per-search eventual overlay budget (128 MiB outside tests).
     pub(crate) const fn eventual_search_budget(self) -> u64 {
         self.eventual_search_budget
+    }
+
+    /// Returns the most committed but unpublished vector work, in retained
+    /// bytes of each pending entity's latest operation, that one strong
+    /// vector search decodes and scores exactly.
+    ///
+    /// A strong vector search, in a read or write request, whose index has
+    /// more committed pending work fails with retryable `index_backpressure`
+    /// (`pending_vector_bytes`) instead of decoding it, and succeeds once the
+    /// index worker has published enough of it. A write request's own
+    /// changes never count. Eventual searches are unaffected: they overlay
+    /// the oldest work within their own budget. A strong search still reads
+    /// the stored queue before it can tell, so the bound caps the decoding
+    /// and exact scoring that follow, not that read.
+    ///
+    /// The bound charges the searched generation's whole queue, every tenant
+    /// partition included, as [admission](Self::max_retained_bytes) does: the
+    /// queue is one value per generation, which a search reads and walks
+    /// whole either way.
+    ///
+    /// Unless [replaced](Self::with_strong_vector_search_max_pending_bytes),
+    /// it is [`Self::max_retained_bytes`]. Admission already charges every
+    /// operation, superseded ones included, against that ceiling across the
+    /// index's generations, so with the default a backlog that writes were
+    /// admitted into never fails strong vector searches; writes reach
+    /// backpressure first. Only work admitted beyond the ceiling, after it
+    /// was lowered or by a blocker repair, can exceed it.
+    pub const fn strong_vector_search_max_pending_bytes(self) -> NonZeroU64 {
+        match self.strong_vector_search_max_pending_bytes {
+            Some(bytes) => bytes,
+            None => self.max_retained_bytes,
+        }
+    }
+
+    /// Replaces the [strong vector search bound](Self::strong_vector_search_max_pending_bytes),
+    /// which then no longer follows the retained-byte ceiling.
+    pub const fn with_strong_vector_search_max_pending_bytes(mut self, bytes: NonZeroU64) -> Self {
+        self.strong_vector_search_max_pending_bytes = Some(bytes);
+        self
+    }
+
+    /// Returns the most analysis one strong text search may charge for the
+    /// committed but unpublished text of its partition.
+    ///
+    /// A strong text search, in a read or write request, includes every
+    /// unpublished document of its tenant partition to keep BM25 statistics
+    /// exact, charging each as one text publication charges it: its bytes
+    /// plus a fixed overhead per indexed token, about 12 KB for a 40-word
+    /// document. Past this bound it fails with retryable
+    /// `index_backpressure` (`pending_text_analysis_bytes`) instead of
+    /// analyzing more, and succeeds once the index worker has published
+    /// enough. A write request's own documents are charged first; alone past
+    /// the bound they fail the write with `index_operation_batch_too_large`.
+    /// Eventual searches are unaffected: they overlay at most what one text
+    /// publication analyzes and serve the rest as last published.
+    ///
+    /// The bound also caps the analyses the database keeps for reuse by
+    /// later strong searches until their documents publish, and strong
+    /// searches analyze what is not kept one at a time and score documents
+    /// without copying them, so however many run at once the analyses of
+    /// unpublished text they hold stay about two bounds. 512 MiB unless
+    /// [replaced](Self::with_strong_text_search_max_analysis_bytes).
+    pub const fn strong_text_search_max_analysis_bytes(self) -> NonZeroU64 {
+        self.strong_text_search_max_analysis_bytes
+    }
+
+    /// Replaces the [strong text search bound](Self::strong_text_search_max_analysis_bytes).
+    pub const fn with_strong_text_search_max_analysis_bytes(mut self, bytes: NonZeroU64) -> Self {
+        self.strong_text_search_max_analysis_bytes = bytes;
+        self
     }
 
     /// Returns whether automatic publication starts paused.

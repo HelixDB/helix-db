@@ -17,7 +17,7 @@ use slatedb::{
 
 use bytes::Bytes;
 
-use super::storage::QueueStore;
+use super::storage::{QueueStore, StoredQueue};
 use super::QueueTarget;
 use crate::config::QueueLayout;
 use crate::encoding::v2::keys::scope::{DataScope, TenantId};
@@ -59,6 +59,14 @@ fn ids_of(queue: Option<&OperationQueue>) -> Vec<u128> {
             .map(|operation| operation.id().get())
             .collect()
     })
+}
+
+/// IDs of a stored queue's outstanding operations, in storage order.
+fn stored_ids(stored: &StoredQueue) -> Vec<u128> {
+    stored
+        .operations()
+        .map(|operation| operation.id().get())
+        .collect()
 }
 
 const PATH: &str = "operation-queue-storage";
@@ -391,7 +399,7 @@ async fn submit_compaction(
     .expect("compaction commits its manifest");
 }
 
-async fn compact_l0(admin: &slatedb::admin::Admin, destination: u32) {
+pub(super) async fn compact_l0(admin: &slatedb::admin::Admin, destination: u32) {
     let manifest = admin.read_manifest(None).await.unwrap().unwrap();
     submit_compaction(
         admin,
@@ -433,7 +441,7 @@ async fn compacted_ids(store: &Arc<InMemory>) -> Vec<u128> {
 
 /// Settings under which only submitted compactions run, so a test decides
 /// exactly which base stays hidden below upper sorted runs.
-fn manual_compaction_settings() -> config::Settings {
+pub(super) fn manual_compaction_settings() -> config::Settings {
     config::Settings {
         flush_interval: Some(Duration::from_millis(1)),
         manifest_poll_interval: Duration::from_millis(10),
@@ -1017,8 +1025,10 @@ async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operation
             )
         })
         .collect::<Vec<_>>();
-    let one = text_operation(2, 2, Some("b")).retained_bytes();
-    let both = one + text_operation(1, 1, Some("a")).retained_bytes();
+    // Retained queues are charged what admission charges.
+    let one = super::backlog::charged_bytes(text_operation(2, 2, Some("b")).retained_bytes());
+    let both =
+        one + super::backlog::charged_bytes(text_operation(1, 1, Some("a")).retained_bytes());
     assert_eq!(both, 2 * one);
     // Room for two whole queues across every target.
     let store = QueueStore::new(QueueLayout::Map, 1 << 20, 2 * both);
@@ -1046,7 +1056,7 @@ async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operation
 
     // A take releases its bytes for the next queue.
     let taken = retained.take(targets[0]).expect("the remainder was held");
-    assert_eq!(ids_of(Some(taken.queue())), vec![2]);
+    assert_eq!(stored_ids(&taken), vec![2]);
     assert_eq!(
         taken.encoded_bytes(),
         0,
@@ -1057,13 +1067,13 @@ async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operation
         "a take removes the queue"
     );
     let whole = retained.take(target).expect("the whole queue was held");
-    assert_eq!(ids_of(Some(whole.queue())), vec![1, 2]);
+    assert_eq!(stored_ids(&whole), vec![1, 2]);
     assert_eq!(retained.retained_bytes(), one);
     retained.retain(targets[1], stored().await, &[]);
     assert_eq!(retained.retained_bytes(), both + one);
     for (target, ids) in [(targets[1], vec![1, 2]), (targets[2], vec![2])] {
         let taken = retained.take(target).expect("the queue was held");
-        assert_eq!(ids_of(Some(taken.queue())), ids);
+        assert_eq!(stored_ids(&taken), ids);
     }
     assert_eq!(retained.retained_bytes(), 0);
     db.close().await.unwrap();
@@ -1143,14 +1153,15 @@ async fn latest_reads_of_rows_decode_only_the_operations_they_select() {
         let store = &store;
         let db = &db;
         async move {
-            store.read_latest(db, target, budget).await.map(|latest| {
-                latest.map_or_else(Vec::new, |latest| {
-                    latest
-                        .into_operations()
-                        .iter()
-                        .map(|operation| operation.id().get())
-                        .collect::<Vec<_>>()
-                })
+            let Some(bytes) = store.read_latest(db, target).await? else {
+                return Ok(Vec::new());
+            };
+            bytes.decode_latest(budget).map(|latest| {
+                latest
+                    .into_operations()
+                    .iter()
+                    .map(|operation| operation.id().get())
+                    .collect::<Vec<_>>()
             })
         }
     };
@@ -1215,9 +1226,11 @@ async fn known_limitation_a_latest_read_merges_the_whole_queue_below_a_pending_o
     };
     let before = merged();
     let latest = store
-        .read_latest(&db, target, budget)
+        .read_latest(&db, target)
         .await
         .unwrap()
+        .unwrap()
+        .decode_latest(budget)
         .unwrap();
     assert_eq!(latest.into_operations(), operations[..1]);
     assert_eq!(merged() - before, 0, "a resolved value is read as stored");
@@ -1235,9 +1248,11 @@ async fn known_limitation_a_latest_read_merges_the_whole_queue_below_a_pending_o
     for _ in 0..2 {
         let before = merged();
         let latest = store
-            .read_latest(&db, target, budget)
+            .read_latest(&db, target)
             .await
             .unwrap()
+            .unwrap()
+            .decode_latest(budget)
             .unwrap();
         assert_eq!(latest.into_operations(), operations[..1]);
         let read = merged() - before;

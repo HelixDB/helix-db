@@ -93,7 +93,7 @@ const OPERATION_TOKEN_BIT: u128 = 1 << 127;
 /// length, and a text deletion of an entity whose ID is one varint byte
 /// (entity kind, ID, absent replacement). A vector deletion adds an absent
 /// previous partition.
-const MIN_RETAINED_RECORD_LEN: usize = MODE_LEN + OPERATION_ID_LEN + 1 + 3;
+pub(crate) const MIN_RETAINED_RECORD_LEN: usize = MODE_LEN + OPERATION_ID_LEN + 1 + 3;
 /// Upper bound on the bytes of a value that are not records: the header and
 /// both counts.
 const MAX_VALUE_FRAMING_LEN: usize = HEADER_LEN + 2 * MAX_VARINT_LEN;
@@ -328,10 +328,13 @@ impl QueuedOperation {
         &self.payload
     }
 
-    /// Returns the exact bytes this operation retains in a resolved queue.
+    /// Returns the exact bytes this operation retains in a resolved queue:
+    /// mode, identity, body length, entity, and the complete payload,
+    /// including deletions.
     ///
-    /// Accounting charges this size: mode, identity, body length, entity, and
-    /// the complete payload, including deletions.
+    /// Admission charges more than this size: pass it to
+    /// [`crate::index_lifecycle::queue::backlog::charged_bytes`], which adds
+    /// the fixed per-operation overhead, rather than charging it directly.
     pub(crate) fn retained_bytes(&self) -> u64 {
         retained_len(body_encoded_len(self))
     }
@@ -476,26 +479,8 @@ impl OperationQueue {
     /// corruption at this boundary. Corrupt values are errors, never empty
     /// queues.
     pub(crate) fn decode(value: &[u8]) -> Result<Self, EncodingError> {
-        let (family, records) = resolved_records(value)?;
-        let mut ids = std::collections::HashSet::new();
-        let operations = records
-            .map(|record| {
-                let (id, body) = record?;
-                if !ids.insert(id) {
-                    return Err(EncodingError::Custom(
-                        "queued value inserts one operation ID twice".to_string(),
-                    ));
-                }
-                decode_body(family, id, body)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let (family, operations) = decode_unique(value, decode_body)?;
         Ok(Self { family, operations })
-    }
-
-    /// Assembles a queue from row-layout operations in sequence order,
-    /// returning `None` for the empty queue.
-    pub(crate) fn from_rows(family: QueueFamily, operations: Vec<QueuedOperation>) -> Option<Self> {
-        (!operations.is_empty()).then_some(Self { family, operations })
     }
 
     /// Returns the retained family.
@@ -504,6 +489,7 @@ impl OperationQueue {
     }
 
     /// Returns every outstanding operation in storage commit order.
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub(crate) fn operations(&self) -> &[QueuedOperation] {
         &self.operations
     }
@@ -514,14 +500,65 @@ impl OperationQueue {
     }
 }
 
+/// One outstanding operation as startup accounting reads it: its identity,
+/// entity, and exact retained bytes, without its payload.
+///
+/// # Contract
+///
+/// Reading frames accepts and rejects exactly the values and rows
+/// [`OperationQueue::decode`] and [`QueueRow::decode`] do, and yields each
+/// decoded operation's ID, entity, and [`QueuedOperation::retained_bytes`]
+/// in the same order. Payloads are validated in place rather than decoded,
+/// so reading a queue allocates per operation, never per payload byte.
+///
+/// ```text
+/// value  = [op1: node 7, 1536-dimension vector][op2: node 9, deletion]
+/// frames = [(op1, node 7, 6_170 bytes), (op2, node 9, 22 bytes)]
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OperationFrame {
+    pub(crate) id: QueuedOperationId,
+    pub(crate) entity: IndexEntity,
+    pub(crate) retained_bytes: u64,
+}
+
+impl OperationFrame {
+    /// Reads every operation's frame from one resolved queue value, in
+    /// storage order.
+    pub(crate) fn decode_queue(value: &[u8]) -> Result<(QueueFamily, Vec<Self>), EncodingError> {
+        decode_unique(value, Self::validate)
+    }
+
+    /// Reads one row-layout value's frame.
+    pub(crate) fn decode_row(value: &[u8]) -> Result<(QueueFamily, Self), EncodingError> {
+        let (family, id, body) = QueueRow::split(value)?;
+        Ok((family, Self::validate(family, id, body)?))
+    }
+
+    /// Validates one encoded body in place and frames it.
+    fn validate(
+        family: QueueFamily,
+        id: QueuedOperationId,
+        body: &[u8],
+    ) -> Result<Self, EncodingError> {
+        algebra::validate_body(family, body)?;
+        Ok(Self {
+            id,
+            entity: Cursor::new(body).take_entity()?,
+            retained_bytes: retained_len(body.len()),
+        })
+    }
+}
+
 /// Each pending entity's latest outstanding operation, as a search reads it.
 ///
 /// Holds the longest run of entities, in the order of each one's oldest
 /// outstanding operation, whose latest operations'
-/// [`QueuedOperation::retained_bytes`] fit the read's budget. An entity is
-/// selected at its latest state or not at all, never at an earlier state of
-/// its chain: a build or publication may already have written the latest
-/// state physically, and an earlier one would hide it.
+/// [`QueuedOperation::retained_bytes`] fit the read's budget, and whether the
+/// budget left any entity out ([`Self::refused`]). An entity is selected at
+/// its latest state or not at all, never at an earlier state of its chain: a
+/// build or publication may already have written the latest state
+/// physically, and an earlier one would hide it.
 ///
 /// # Contract
 ///
@@ -540,36 +577,35 @@ impl OperationQueue {
 /// them.
 ///
 /// ```text
-/// value  = [e1 op1: 28 bytes][e2 op2: 40 bytes][e1 op3: 30 bytes][?? op4: corrupt body]
-/// budget = 70       -> [op3, op2]  (e1 at its latest state; op1 and op4 never decoded)
-/// budget = 50       -> [op3]
-/// budget = 29       -> None        (e1's latest operation does not fit)
-/// budget = u64::MAX -> error       (op4 is selected and fails to decode)
+/// value  = [e1 op1: 28 bytes][e2 op2: 40 bytes][e1 op3: 30 bytes][?? op4: 25 bytes, corrupt body]
+/// budget = 70       -> [op3, op2], refused at 95  (e1 at its latest state; op1 and op4 never decoded)
+/// budget = 50       -> [op3],      refused at 70
+/// budget = 29       -> [],         refused at 30  (e1's latest operation does not fit)
+/// budget = u64::MAX -> error                      (op4 is selected and fails to decode)
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LatestOperations {
     family: QueueFamily,
     operations: Vec<QueuedOperation>,
+    refused: Option<u64>,
 }
 
 impl LatestOperations {
-    /// Selects from one resolved queue value within `budget`; `None` when
-    /// not even the first entity's latest operation fits.
-    pub(crate) fn decode(value: &[u8], budget: u64) -> Result<Option<Self>, EncodingError> {
+    /// Selects from one resolved queue value within `budget`.
+    pub(crate) fn decode(value: &[u8], budget: u64) -> Result<Self, EncodingError> {
         let (family, records) = resolved_records(value)?;
-        let selected = select_latest(records, budget)?;
-        Self::decode_selected(family, selected)
+        let (selected, refused) = select_latest(records, budget)?;
+        Self::decode_selected(family, selected, refused)
     }
 
     /// Selects from one generation's row values in sequence order within
-    /// `budget`; `None` when there are no rows or not even the first
-    /// entity's latest operation fits.
+    /// `budget`; `None` when there are no rows.
     pub(crate) fn decode_rows<'a>(
         rows: impl IntoIterator<Item = &'a [u8]>,
         budget: u64,
     ) -> Result<Option<Self>, EncodingError> {
         let mut family = None;
-        let selected = select_latest(
+        let (selected, refused) = select_latest(
             rows.into_iter().map(|row| {
                 let (row_family, id, body) = QueueRow::split(row)?;
                 if *family.get_or_insert(row_family) != row_family {
@@ -584,23 +620,39 @@ impl LatestOperations {
         let Some(family) = family else {
             return Ok(None);
         };
-        Self::decode_selected(family, selected)
+        Self::decode_selected(family, selected, refused).map(Some)
     }
 
     fn decode_selected(
         family: QueueFamily,
         selected: Vec<(QueuedOperationId, &[u8])>,
-    ) -> Result<Option<Self>, EncodingError> {
+        refused: Option<u64>,
+    ) -> Result<Self, EncodingError> {
         let operations = selected
             .into_iter()
             .map(|(id, body)| decode_body(family, id, body))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((!operations.is_empty()).then_some(Self { family, operations }))
+        Ok(Self {
+            family,
+            operations,
+            refused,
+        })
     }
 
     /// Returns the retained family.
     pub(crate) const fn family(&self) -> QueueFamily {
         self.family
+    }
+
+    /// Retained bytes the selection would have reached with the first entity
+    /// the budget left out, which always exceed the budget, or `None` when
+    /// it selected every entity.
+    ///
+    /// When more entities are pending than the walk tracks, and every
+    /// tracked one fits, the first untracked entity is charged the smallest
+    /// retained record, so the reach is a lower bound.
+    pub(crate) const fn refused(&self) -> Option<u64> {
+        self.refused
     }
 
     /// Consumes the selection into its operations, one per entity, in
@@ -610,9 +662,14 @@ impl LatestOperations {
     }
 }
 
+/// Selected `(operation ID, encoded body)` records and the reach of the
+/// first entity left out (see [`LatestOperations::refused`]).
+type SelectedRecords<'a> = (Vec<(QueuedOperationId, &'a [u8])>, Option<u64>);
+
 /// Selects each entity's latest record, in the order of each entity's first
 /// record, while the records' retained bytes fit `budget`; the first that
-/// does not fit ends the selection.
+/// does not fit ends the selection, and the retained bytes it would have
+/// reached are returned with it.
 ///
 /// Records are `(operation ID, encoded body)` and are grouped by the raw
 /// bytes naming their entity: the kind byte and the ID varint, up to its
@@ -622,15 +679,16 @@ impl LatestOperations {
 /// `budget / MIN_RETAINED_RECORD_LEN` are not tracked: memory follows the
 /// budget, not the backlog. Selecting one of them would take an operation
 /// smaller than any valid one, so the cap only ever leaves such a corrupt
-/// operation undecoded.
+/// operation undecoded; an untracked entity still refuses the selection.
 fn select_latest<'a>(
     records: impl Iterator<Item = Result<(QueuedOperationId, &'a [u8]), EncodingError>>,
     budget: u64,
-) -> Result<Vec<(QueuedOperationId, &'a [u8])>, EncodingError> {
+) -> Result<SelectedRecords<'a>, EncodingError> {
     const MAX_ENTITY_LEN: usize = KIND_LEN + MAX_VARINT_LEN;
     let trackable = usize::try_from(budget / MIN_RETAINED_RECORD_LEN as u64).unwrap_or(usize::MAX);
     let mut order = Vec::new();
     let mut latest = std::collections::HashMap::new();
+    let mut untracked = false;
     for record in records {
         let (id, body) = record?;
         let entity_len = body
@@ -650,20 +708,30 @@ fn select_latest<'a>(
                 order.push(entity);
                 slot.insert(state);
             }
-            std::collections::hash_map::Entry::Vacant(_) => {}
+            std::collections::hash_map::Entry::Vacant(_) => untracked = true,
         }
     }
-    let mut remaining = budget;
-    Ok(order
-        .into_iter()
-        .map_while(|entity| {
-            let (retained, record) = latest
-                .remove(entity)
-                .expect("every tracked entity has a latest record");
-            remaining = remaining.checked_sub(retained)?;
-            Some(record)
-        })
-        .collect())
+    // A loop rather than `map_while`: the first record past the budget both
+    // ends the selection and is charged in the reach it reports.
+    let mut charged = 0_u64;
+    let mut selected = Vec::with_capacity(order.len());
+    for entity in order {
+        let (retained, record) = latest
+            .remove(entity)
+            .expect("every tracked entity has a latest record");
+        let reached = charged.saturating_add(retained);
+        if reached > budget {
+            return Ok((selected, Some(reached)));
+        }
+        charged = reached;
+        selected.push(record);
+    }
+    let refused = untracked.then(|| {
+        charged
+            .saturating_add(MIN_RETAINED_RECORD_LEN as u64)
+            .max(budget.saturating_add(1))
+    });
+    Ok((selected, refused))
 }
 
 /// Validates one resolved value's header, empty removal set, and non-zero
@@ -682,6 +750,30 @@ fn resolved_records(value: &[u8]) -> Result<(QueueFamily, ResolvedRecords<'_>), 
         ));
     }
     Ok((family, ResolvedRecords { cursor, remaining }))
+}
+
+/// Decodes each record of one resolved value with `decode`, in storage
+/// order, as a full [`OperationQueue::decode`] and startup's
+/// [`OperationFrame::decode_queue`] both read it: the value must name each
+/// operation ID once, so both accept and reject the same framing.
+fn decode_unique<T>(
+    value: &[u8],
+    decode: impl Fn(QueueFamily, QueuedOperationId, &[u8]) -> Result<T, EncodingError>,
+) -> Result<(QueueFamily, Vec<T>), EncodingError> {
+    let (family, records) = resolved_records(value)?;
+    let mut ids = std::collections::HashSet::new();
+    let decoded = records
+        .map(|record| {
+            let (id, body) = record?;
+            if !ids.insert(id) {
+                return Err(EncodingError::Custom(
+                    "queued value inserts one operation ID twice".to_string(),
+                ));
+            }
+            decode(family, id, body)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((family, decoded))
 }
 
 /// Each record of one resolved value as its operation ID and encoded body,

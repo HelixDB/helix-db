@@ -11,12 +11,13 @@
 use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use db::config::{
-    DbConfig, SearchIndexBackfillLimitError, SearchIndexBackfillLimits, SearchIndexBatchLimits,
-    TextBackfillCompactionLimits, TextIndexDefinition, VectorIndexDefinition,
+    DbConfig, IndexOperationQueueTuning, SearchIndexBackfillLimitError, SearchIndexBackfillLimits,
+    SearchIndexBatchLimits, TextBackfillCompactionLimits, TextIndexDefinition,
+    VectorIndexDefinition,
 };
 use db::encoding::v2::keys::scope::DataScope;
 use db::error::{HelixDbError, IndexBackpressureResource};
@@ -33,6 +34,7 @@ use db::production_coverage::{
     text_compaction_pointer_count, text_manifest_row_counts, text_manifest_split_counts,
     TextBuildDamage, TextSplitObjectDamage,
 };
+use db::query_service::{HelixQueryService, QueryFailureClass};
 use db::search::vector::VectorDistanceMetric;
 use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::batch;
@@ -1874,4 +1876,213 @@ async fn split_object_faults_block_validation_until_restored_contract() {
         );
         db.close().await.expect("fixture closes");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Strong text search bound.
+// ---------------------------------------------------------------------------
+
+/// Text publications analyze at most this much; the strong bound is separate.
+const PUBLICATION_ANALYSIS_BYTES: u64 = 64 * 1024;
+
+/// A writer whose text publications analyze at most
+/// [`PUBLICATION_ANALYSIS_BYTES`] and whose strong text searches analyze at
+/// most `strong` bytes, or the default bound.
+fn strong_text_bound_config(strong: Option<u64>) -> DbConfig {
+    let defaults = SearchIndexBackfillLimits::default();
+    let compaction = defaults.text_compaction();
+    let limits = SearchIndexBackfillLimits::try_new(
+        defaults.batch(),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        TextBackfillCompactionLimits::new(
+            compaction.max_fan_in(),
+            NonZeroU64::new(PUBLICATION_ANALYSIS_BYTES).expect("positive"),
+            compaction.max_temporary_disk_bytes(),
+            compaction.max_output_blob_bytes(),
+            NonZeroU64::new(8 * 1024).expect("positive"),
+        ),
+    )
+    .expect("publication analysis limits validate");
+    let tuning = strong.map_or_else(IndexOperationQueueTuning::default, |bytes| {
+        IndexOperationQueueTuning::default().with_strong_text_search_max_analysis_bytes(
+            NonZeroU64::new(bytes).expect("positive bound"),
+        )
+    });
+    DbConfig::new()
+        .with_search_index_backfill_limits(limits)
+        .with_index_operation_queue_tuning(tuning)
+}
+
+/// Requires `error` to be retryable strong text bound backpressure at `limit`.
+fn assert_past_the_strong_text_bound(error: &HelixDbError, limit: u64, context: &str) {
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::PendingTextAnalysisBytes,
+                requested,
+                limit: refused,
+                ..
+            } if *refused == limit && *requested > limit
+        ),
+        "{context}: {error}"
+    );
+    assert!(error.is_index_backpressure(), "{context}");
+    assert_eq!(error.error_code(), QueryErrorCode::IndexBackpressure);
+    assert!(
+        error.to_string().contains("pending_text_analysis_bytes"),
+        "{context}: {error}"
+    );
+}
+
+/// Strong text searches include every unpublished document of their
+/// partition up to their own bound, far past what one text publication
+/// analyzes. Past it, read and write requests fail with retryable
+/// `pending_text_analysis_bytes` backpressure, which transports classify as
+/// backpressure and the queue stats count, until publication; eventual
+/// searches keep their publication-sized overlay, and a write's own text
+/// alone past the bound fails it without retry.
+#[test]
+fn strong_text_searches_reach_their_own_bound_and_fail_past_it_until_publication() {
+    run_contract(
+        "strong_text_searches_reach_their_own_bound_and_fail_past_it_until_publication",
+        strong_text_searches_reach_their_own_bound_and_fail_past_it_until_publication_contract,
+    );
+}
+
+async fn strong_text_searches_reach_their_own_bound_and_fail_past_it_until_publication_contract() {
+    const DOCS: usize = 40;
+    // About 4.4 KB of analysis each: 40 are 2.7 times one publication's.
+    const BOUND: u64 = 100 * 1024;
+    let body = format!("alpha{}", " ".repeat(4 * 1024 - "alpha".len()));
+    let documents = |count: usize| {
+        (0..count)
+            .map(|_| document(&body, None, None))
+            .collect::<Vec<_>>()
+    };
+    let (token, db) = open(
+        "queue-text-strong-bound",
+        strong_text_bound_config(None),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await;
+    let controller = LifecycleTestController::new();
+    build(&db, &controller, text_definition(false)).await;
+    let inserted = sorted(insert(&db, DOC, documents(DOCS)).await);
+    let strong = search(&db, text("alpha", DOCS, None), SearchConsistency::Strong)
+        .await
+        .expect("the default bound covers the backlog");
+    assert_eq!(
+        sorted(strong),
+        inserted,
+        "exact past the publication budget"
+    );
+    let eventual = search(&db, text("alpha", DOCS, None), SearchConsistency::Eventual)
+        .await
+        .expect("eventual searches never fail for backlog");
+    assert!(
+        !eventual.is_empty() && eventual.len() < DOCS,
+        "eventual overlays one publication's analysis: {eventual:?}"
+    );
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        0
+    );
+    db.close().await.expect("fixture closes");
+
+    let db = Arc::new(
+        reopen(
+            &token,
+            strong_text_bound_config(Some(BOUND)),
+            LifecycleTestScheduling::Explicit,
+        )
+        .await,
+    );
+    let error = search(&db, text("alpha", 5, None), SearchConsistency::Strong)
+        .await
+        .expect_err("the backlog exceeds the lowered bound");
+    assert_past_the_strong_text_bound(&error, BOUND, "read");
+    let error = HelixQueryService::new(Arc::clone(&db))
+        .execute_query(read(text("alpha", 5, None), SearchConsistency::Strong))
+        .await
+        .expect_err("still past the bound");
+    assert_eq!(error.classify(), QueryFailureClass::Backpressure);
+    assert_eq!(
+        search(&db, text("alpha", DOCS, None), SearchConsistency::Eventual)
+            .await
+            .expect("eventual searches keep their own budget"),
+        eventual
+    );
+    // A write's search sees the same committed backlog and rolls it back.
+    let error = query(
+        &db,
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(DOC, document("alpha", None, None)),
+                )
+                .var_as("ids", text("alpha", 5, None).id())
+                .returning(["ids"]),
+        ),
+    )
+    .await
+    .expect_err("a write's strong search never analyzes past the bound");
+    assert_past_the_strong_text_bound(&error, BOUND, "write");
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        3
+    );
+
+    assert_eq!(publish(&db).await, DOCS as u64);
+    assert_eq!(
+        sorted(
+            search(&db, text("alpha", DOCS, None), SearchConsistency::Strong)
+                .await
+                .expect("nothing is pending")
+        ),
+        inserted,
+        "the rejected write rolled back"
+    );
+    // A write's own text alone past the bound can never be searched.
+    let own = documents(30).into_iter().enumerate().fold(
+        batch::write_batch(),
+        |write, (ordinal, properties)| {
+            write.var_as(
+                &format!("d{ordinal}"),
+                traversal::g().add_n(DOC, properties),
+            )
+        },
+    );
+    let error = query(
+        &db,
+        QueryRequest::write(
+            own.var_as("ids", text("alpha", 5, None).id())
+                .returning(["ids"]),
+        ),
+    )
+    .await
+    .expect_err("a write's own text past the bound fails it");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexOperationBatchTooLarge {
+                resource: db::error::IndexOperationBatchResource::PendingTextAnalysisBytes,
+                limit,
+                ..
+            } if limit == BOUND
+        ),
+        "{error}"
+    );
+    assert!(!error.is_index_backpressure());
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .strong_text_search_rejections,
+        3,
+        "a write's own text is not counted"
+    );
+    db.close().await.expect("fixture closes");
 }

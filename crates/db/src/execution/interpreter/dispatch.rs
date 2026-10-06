@@ -148,6 +148,7 @@ impl<'db> ExecutionContext<'db> {
                 // DDL changes which indexes serve a set and may start a newer
                 // request snapshot.
                 self.prepared_memberships.clear();
+                self.pending_sets = std::sync::Arc::default();
                 if !plan.requires_isolated_catalog_transaction() {
                     return self.execute_index_ddl(input, plan).await;
                 }

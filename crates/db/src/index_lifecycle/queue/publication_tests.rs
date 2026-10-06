@@ -23,6 +23,7 @@ use super::overlay_tests::{delete, hits, vector_search, write};
 use super::publication::{
     select_batch, HeldEntity, NextTarget, PublicationOutcome, QueuePublisher,
 };
+use super::storage::StoredQueue;
 use super::tests::{
     add_doc, all_keys, open, publisher_with_limits, queue, queued, release_within_operand_bound,
     rows, target,
@@ -1426,7 +1427,7 @@ async fn an_empty_queue_with_charged_work_backs_off() {
                     id: IndexEntityId::new(1),
                 },
                 id: QueuedOperationId::generate(),
-                bytes: 64,
+                encoded_bytes: 64,
             }],
             &[],
         )
@@ -3273,7 +3274,8 @@ fn a_repair_is_reached_however_its_generation_is_rewritten() {
     let mut batches = Vec::new();
     for round in 0..8_u128 {
         let selected = select_batch(
-            &queue,
+            &StoredQueue::new(QueueFamily::Text, queue.clone(), HashMap::new(), 0)
+                .expect("the queue holds operations"),
             Some(cursor),
             &holds,
             512,

@@ -224,7 +224,7 @@ async fn target(db: &HelixDB, family: QueueFamily) -> QueueTarget {
             .read(db.inner_db().as_ref(), target)
             .await
             .expect("queue reads")
-            .is_some_and(|stored| stored.queue().family() == family)
+            .is_some_and(|stored| stored.family() == family)
         {
             return target;
         }
@@ -239,7 +239,7 @@ async fn queued(db: &HelixDB, target: QueueTarget) -> Vec<QueuedOperation> {
         .read(db.inner_db().as_ref(), target)
         .await
         .expect("queue reads")
-        .map_or_else(Vec::new, |stored| stored.queue().operations().to_vec())
+        .map_or_else(Vec::new, |stored| stored.operations().cloned().collect())
 }
 
 async fn all_keys(db: &HelixDB) -> BTreeSet<Bytes> {
@@ -374,6 +374,8 @@ async fn selection_and_collapse_boundaries() {
     let vector_target = target(&db, QueueFamily::Vector).await;
     let vector = queued(&db, vector_target).await;
     let text = queued(&db, target(&db, QueueFamily::Text).await).await;
+    let grouped = StoredQueue::new(QueueFamily::Vector, vector.clone(), HashMap::new(), 0)
+        .expect("the vector queue holds operations");
     // Each selected entity's acknowledged and superseding operation counts.
     let shape = |selected: &[SelectedEntity<'_>]| {
         selected
@@ -391,7 +393,7 @@ async fn selection_and_collapse_boundaries() {
     // An operation ceiling ends the batch inside the first entity's prefix.
     assert_eq!(
         shape(&select_batch(
-            &vector,
+            &grouped,
             None,
             &HashMap::new(),
             512,
@@ -405,7 +407,7 @@ async fn selection_and_collapse_boundaries() {
     // the batch's first.
     assert_eq!(
         shape(&select_batch(
-            &vector,
+            &grouped,
             None,
             &HashMap::new(),
             512,
@@ -418,7 +420,7 @@ async fn selection_and_collapse_boundaries() {
     // A batch after the first entity rotates to the second, then wraps.
     assert_eq!(
         shape(&select_batch(
-            &vector,
+            &grouped,
             Some(vector[0].entity()),
             &HashMap::new(),
             512,
@@ -431,7 +433,7 @@ async fn selection_and_collapse_boundaries() {
     // The acknowledgement ceiling bounds a batch like the operation ceiling.
     assert_eq!(
         shape(&select_batch(
-            &vector,
+            &grouped,
             None,
             &HashMap::new(),
             512,
@@ -458,7 +460,7 @@ async fn selection_and_collapse_boundaries() {
     };
     let select = |after: usize, held: &HashMap<_, _>, operations, acknowledged, input| {
         select_batch(
-            &vector,
+            &grouped,
             Some(vector[after].entity()),
             held,
             512,
@@ -763,7 +765,7 @@ async fn uncertain_acknowledgements_reconcile() {
         .await
         .expect("queue reads")
         .expect("queue is stored");
-    let operations = stored.queue().operations().to_vec();
+    let operations = stored.operations().cloned().collect::<Vec<_>>();
     // The first acknowledgement commits but its outcome is never observed.
     let transaction = db
         .inner_db()
@@ -849,7 +851,7 @@ async fn retired_generations_discard_and_retry() {
     // The attempts classified Active generations, but their publication
     // transactions read the retirement and retry.
     let stored = publisher
-        .read_queue(vector)
+        .read_queue(vector, None)
         .await
         .expect("vector queue reads")
         .expect("vector queue remains");
@@ -863,7 +865,7 @@ async fn retired_generations_discard_and_retry() {
     );
     drop(permit);
     let stored = publisher
-        .read_queue(text)
+        .read_queue(text, None)
         .await
         .expect("text queue reads")
         .expect("text queue remains");

@@ -28,9 +28,7 @@ use crate::config::{
 };
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{ManagedIndexKey, ScopedKey};
-use crate::encoding::v2::values::indexes::operation_queue::{
-    QueueFamily, QueuedOperation, QueuedOperationId,
-};
+use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
 use crate::error::{ActiveTextMutationResource, HelixDbError};
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
 use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
@@ -974,7 +972,7 @@ async fn text_publication_continues_from_its_last_commit_and_rereads_after_an_er
         stored()
             .await
             .iter()
-            .map(QueuedOperation::retained_bytes)
+            .map(|operation| super::backlog::charged_bytes(operation.retained_bytes()))
             .sum::<u64>(),
         "the rest is retained"
     );
@@ -1067,7 +1065,7 @@ async fn text_publication_keeps_its_queue_after_a_conflict_and_rereads_after_an_
         .unwrap()
         .operations()
         .iter()
-        .map(QueuedOperation::retained_bytes)
+        .map(|operation| super::backlog::charged_bytes(operation.retained_bytes()))
         .sum::<u64>();
     let narrow = publisher_with_limits(
         &db,
@@ -1151,9 +1149,7 @@ async fn queued_entities(db: &HelixDB) -> Vec<u64> {
         .unwrap()
         .map_or_else(Vec::new, |stored| {
             stored
-                .queue()
                 .operations()
-                .iter()
                 .map(|operation| operation.entity().id.get())
                 .collect()
         })
@@ -1781,7 +1777,7 @@ async fn an_enqueue_returning_after_a_stalled_read_makes_its_generation_eligible
                     id: crate::index_lifecycle::IndexEntityId::new(wide),
                 },
                 id: operation,
-                bytes: 1,
+                encoded_bytes: 1,
             }],
             &[],
         )
@@ -1841,7 +1837,7 @@ async fn the_worker_retries_a_stalled_generation_when_an_enqueue_is_cancelled_mi
                     id: crate::index_lifecycle::IndexEntityId::new(wide),
                 },
                 id: operation,
-                bytes: 1,
+                encoded_bytes: 1,
             }],
             &[],
         )

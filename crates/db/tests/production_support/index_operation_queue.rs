@@ -38,7 +38,7 @@ use crate::encoding::v2::values::decode_index_record;
 use crate::encoding::v2::values::indexes::operation_queue as codec;
 use crate::error::HelixDbError;
 use crate::index_lifecycle::queue::backlog::{
-    BacklogLimits, BacklogReservation, IndexOperationBacklog, OperationCharge,
+    charged_bytes, BacklogLimits, BacklogReservation, IndexOperationBacklog, OperationCharge,
 };
 use crate::index_lifecycle::queue::publication::PublicationOutcome;
 use crate::index_lifecycle::queue::QueueTarget;
@@ -78,7 +78,7 @@ pub fn index_operation_queue_ledger_contracts() {
         target,
         entity: node(entity),
         id: codec::QueuedOperationId::generate(),
-        bytes,
+        encoded_bytes: bytes,
     };
     let invariant = |result: crate::error::Result<BacklogReservation>, expected: &str| {
         let Err(HelixDbError::InvariantViolation(message)) = &result else {
@@ -88,7 +88,7 @@ pub fn index_operation_queue_ledger_contracts() {
     };
     let backlog = IndexOperationBacklog::new(
         BacklogLimits {
-            max_retained_bytes: 1_000,
+            max_retained_bytes: 10_000,
             max_members: 10,
         },
         crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
@@ -120,7 +120,7 @@ pub fn index_operation_queue_ledger_contracts() {
 
     // Startup discovery charges each durable identity once.
     let durable = charge(target(1), 4, 25);
-    let loaded = [(durable.id, durable.entity, durable.bytes)];
+    let loaded = [(durable.id, durable.entity, durable.encoded_bytes)];
     backlog.load_durable(durable.target, loaded);
     backlog.load_durable(durable.target, loaded);
     assert_eq!(backlog.totals().usage.operations, 1);
@@ -154,7 +154,11 @@ pub fn index_operation_queue_ledger_contracts() {
     assert_eq!(backlog.finish_reconciliation(ticket, target(1), []), 0);
     assert!(backlog.has_uncertain(target(1)));
     assert_eq!(
-        backlog.finish_reconciliation(ticket, target(1), [(late.id, late.entity, late.bytes)]),
+        backlog.finish_reconciliation(
+            ticket,
+            target(1),
+            [(late.id, late.entity, late.encoded_bytes)]
+        ),
         0
     );
     assert!(!backlog.has_uncertain(target(1)));
@@ -219,7 +223,7 @@ pub async fn index_operation_queue_reconciliation_contracts() {
                 target,
                 entity: node(document),
                 id: codec::QueuedOperationId::generate(),
-                bytes: 64,
+                encoded_bytes: 64,
             }],
             &[],
         )
@@ -722,11 +726,48 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
             vec![0x01],
             "tenant discovery encountered an invalid envelope",
         ),
+        // Malformed envelopes sorting before tenant zero's queue range: the
+        // lone marker, and one byte short of tenant zero's envelope.
+        (
+            "queue-tenant-envelope-marker",
+            vec![TENANT_KEY_PREFIX],
+            vec![0x01],
+            "tenant discovery encountered an invalid envelope",
+        ),
+        (
+            "queue-tenant-envelope-short-zero",
+            [vec![TENANT_KEY_PREFIX], vec![0x00; 15]].concat(),
+            vec![0x01],
+            "tenant discovery encountered an invalid envelope",
+        ),
         (
             "queue-undecodable",
             raw_target(1).key().to_vec(),
             vec![0x01],
             "Buffer too short",
+        ),
+        (
+            "queue-duplicate-operation",
+            raw_target(1).key().to_vec(),
+            raw_value(
+                VECTOR,
+                &[],
+                &[
+                    (IF_ABSENT, 1, &vector_body([1.0, 2.0])),
+                    (IF_ABSENT, 1, &vector_body([3.0, 4.0])),
+                ],
+            ),
+            "inserts one operation ID twice",
+        ),
+        (
+            "queue-corrupt-payload",
+            raw_target(1).key().to_vec(),
+            raw_value(
+                VECTOR,
+                &[],
+                &[(IF_ABSENT, 1, &vector_body([1.0, f32::NAN]))],
+            ),
+            "not finite",
         ),
     ] {
         let error = reopen_after(name, Vec::new(), |db| async move {
@@ -739,6 +780,87 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
         .await;
         assert!(error.to_string().contains(expected), "{name}: {error}");
     }
+}
+
+/// Proves a reopened writer discovers every queue wherever its tenant sits
+/// in the keyspace.
+///
+/// Writer open finds tenant queues in one forward-seeking pass over the
+/// tenant keyspace. Queues in the first and last tenant IDs and in adjacent
+/// tenants, between graph rows that sort before them and rows that sort
+/// after them, are charged exactly once; a tenant holding only graph rows
+/// contributes nothing; and queues no canonical record owns reload to be
+/// discarded.
+pub async fn index_operation_queue_scope_walk_contracts() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "queue-scope-walk";
+    let db = Box::pin(open_explicit(name, &store)).await;
+    let queued = [0, 7, 8, u128::MAX].map(|tenant| DataScope::Tenant(TenantId::from_u128(tenant)));
+    for (ordinal, scope) in queued
+        .into_iter()
+        .chain([DataScope::Tenant(TenantId::from_u128(9))])
+        .enumerate()
+    {
+        Box::pin(scoped_insert(
+            &db,
+            scope,
+            [1.0, ordinal as f32],
+            "graph rows",
+        ))
+        .await;
+    }
+    // Keys that sort after a tenant's queues, as a later record kind would.
+    for tenant in [8, u128::MAX] {
+        let mut key = Vec::new();
+        DataScope::Tenant(TenantId::from_u128(tenant)).encode_key_prefix(&mut key);
+        key.extend_from_slice(&[0x06, 0x16]);
+        db.inner_db()
+            .put(&key, b"after the queues")
+            .await
+            .expect("raw row writes");
+    }
+    let mut targets = BTreeSet::new();
+    let mut retained_bytes = 0;
+    for (ordinal, scope) in queued.into_iter().enumerate() {
+        for index in [900, 901] {
+            let target = QueueTarget::new(
+                scope,
+                IndexId::new(index).expect("index ID is nonzero"),
+                IndexGenerationId::initial(),
+            );
+            let operation = vector_operation(ordinal as u64 + 1, [1.0, 2.0]);
+            commit_operation(&db, target, &operation).await;
+            retained_bytes += charged_bytes(operation.retained_bytes());
+            targets.insert(target);
+        }
+    }
+    db.close().await.expect("scope walk writer closes");
+
+    let db = Box::pin(open_explicit(name, &store)).await;
+    assert_eq!(
+        db.index_operation_backlog()
+            .outstanding_targets()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        targets
+    );
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(
+        (
+            stats.pending_operations,
+            stats.discovered_operations,
+            stats.retained_bytes
+        ),
+        (8, 8, retained_bytes)
+    );
+    for target in targets {
+        assert_eq!(
+            Box::pin(publish(&db, target)).await,
+            PublicationOutcome::Discarded { operations: 1 }
+        );
+    }
+    assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
+    db.close().await.expect("scope walk writer closes");
 }
 
 /// One tenant scope's live documents: embedding and body by node ID.
@@ -1334,7 +1456,7 @@ async fn queued(db: &HelixDB, target: QueueTarget) -> Vec<codec::QueuedOperation
         .read(db.inner_db().as_ref(), target)
         .await
         .expect("queue reads")
-        .map_or_else(Vec::new, |stored| stored.queue().operations().to_vec())
+        .map_or_else(Vec::new, |stored| stored.operations().cloned().collect())
 }
 
 /// Returns the most recently committed operation of `target`.
@@ -1369,7 +1491,7 @@ async fn commit_reserved(
                 target,
                 entity: operation.entity(),
                 id: operation.id(),
-                bytes: operation.retained_bytes(),
+                encoded_bytes: operation.retained_bytes(),
             }],
             &[],
         )

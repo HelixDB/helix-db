@@ -152,8 +152,9 @@ durability waits on reads are rejected with `400 Bad Request`.
   rejects it before query parsing.
 - `429` reports a Helix Cloud rate limit (`rate_limited`), which can include
   `Retry-After`, or database engine backpressure (`index_backpressure`): a vector
-  or text index holds its maximum unpublished work, or a whole-index `strong`
-  search lies behind too many unpublished changes. Backpressure responses carry
+  or text index holds its maximum unpublished work, or a `strong` search lies
+  behind too many unpublished changes or would include more unpublished work than
+  it may. Backpressure responses carry
   `retryable: true` and no `Retry-After`; nothing from the request took effect.
   See [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - `500` reports an internal query or storage failure.

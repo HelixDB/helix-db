@@ -204,7 +204,7 @@ pub(super) fn bounded_count(
 }
 
 /// Validates one insert body without allocating its decoded payload.
-fn validate_body(family: QueueFamily, body: &[u8]) -> Result<(), EncodingError> {
+pub(super) fn validate_body(family: QueueFamily, body: &[u8]) -> Result<(), EncodingError> {
     let mut cursor = Cursor::new(body);
     match cursor.take_u8()? {
         0x01 | 0x02 => {}

@@ -248,7 +248,7 @@ async fn publication_queue_reads_are_linear_in_backlog() {
 async fn interleaved_drains_read_each_targets_queue_once() {
     const ENTITIES: usize = 16;
     const DOCS: usize = 8 * ENTITIES;
-    const CEILING: u64 = 4_800;
+    const CEILING: u64 = 4_800 + DOCS as u64 * super::backlog::OPERATION_OVERHEAD_BYTES;
     let db = open(
         "queue-read-two-targets",
         Arc::new(InMemory::new()),
@@ -272,7 +272,7 @@ async fn interleaved_drains_read_each_targets_queue_once() {
                 .unwrap()
                 .operations()
                 .iter()
-                .map(QueuedOperation::retained_bytes)
+                .map(|operation| super::backlog::charged_bytes(operation.retained_bytes()))
                 .sum::<u64>(),
         );
     }
@@ -333,7 +333,7 @@ async fn interleaved_drains_read_each_targets_queue_once() {
 async fn retained_queues_stay_within_the_writer_budget_across_many_targets() {
     const DOCS: usize = 4_000;
     const PROPERTIES: [&str; 4] = ["p0", "p1", "p2", "p3"];
-    const CEILING: u64 = 120_000;
+    const CEILING: u64 = 120_000 + DOCS as u64 * super::backlog::OPERATION_OVERHEAD_BYTES;
     let db = open(
         "queue-retained-budget",
         Arc::new(InMemory::new()),
@@ -394,10 +394,8 @@ async fn retained_queues_stay_within_the_writer_budget_across_many_targets() {
                 .await
                 .unwrap()
                 .unwrap()
-                .queue()
                 .operations()
-                .iter()
-                .map(QueuedOperation::retained_bytes)
+                .map(|operation| super::backlog::charged_bytes(operation.retained_bytes()))
                 .sum::<u64>(),
         );
     }
@@ -514,7 +512,7 @@ async fn publication_continues_from_its_last_commit_and_rereads_after_an_error()
             queue
                 .operations()
                 .iter()
-                .map(QueuedOperation::retained_bytes)
+                .map(|operation| super::backlog::charged_bytes(operation.retained_bytes()))
                 .sum::<u64>()
         })
     };
@@ -628,7 +626,7 @@ async fn publication_keeps_its_queue_after_a_conflict_and_rereads_after_an_uncer
         .unwrap()
         .operations()
         .iter()
-        .map(QueuedOperation::retained_bytes)
+        .map(|operation| super::backlog::charged_bytes(operation.retained_bytes()))
         .sum::<u64>();
     let narrow = publisher_with_limits(
         &db,
