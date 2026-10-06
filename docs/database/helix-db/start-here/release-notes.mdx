@@ -10,6 +10,27 @@ pageType: "Reference"
 <Update
   label="October 2026"
   rss={{
+    title: "Docker v0.0.10 and CLI 3.4.3: asynchronous vector and text indexing",
+    description: "Vector and text index work moves off the write path, searches choose strong or eventual consistency, and counts over range indexes with other filters are fixed"
+  }}
+>
+- **Upgrading: index storage version 5.** The first time a v0.0.10 writer opens a database, it upgrades the index storage version from 4 to 5. It rewrites only the version marker and rebuilds no index. After that, v0.0.9 and earlier refuse to open the database with `unsupported_index_storage_version`:
+  - Upgrade readers before the writer; v0.0.10 readers serve both versions.
+  - Never start a v0.0.9-or-earlier writer against an upgraded database.
+  - Take a backup before upgrading if you may need to roll back.
+- **[Vector and text indexes publish asynchronously](/database/helix-db/query-guides/search-consistency).** A write commits its graph change together with a durable queued index operation, and a background index worker publishes it into the vector or text index, so writes no longer wait on index maintenance. Steady vector insert publication went from 6.2 to 239 per second. Index builds no longer livelock under concurrent writes: on a c7i.8xlarge with 100 writes/s during the build, backfilling 100K 768-dimension vectors on disk finished in about 2,500 s, where v0.0.9 never finished.
+- **Search consistency.** Read requests set `search_consistency` to `strong` (the default) or `eventual`. `strong` searches include every committed write, published or not. `eventual` searches include a bounded amount of unpublished work and serve the rest as last published, so they can return a node or edge that has since changed tenant, label or indexed property. Write requests always search `strong`, and a write batch that searches an index fails with a retryable `transaction_conflict` if the index worker publishes into that index first. The SDK options ship in the next SDK releases; until then, send `search_consistency` in a direct HTTP request.
+- **[Index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).** Each index retains at most 1,000,000,000 bytes or 250,000 pending entities of unpublished work. Three cases fail with `index_backpressure` (HTTP 429, `retryable: true`) before the request takes effect: a write past either limit, a whole-index `strong` search behind more than 800 unpublished changes, and a `strong` text search that would analyze more unpublished text than one publication may (64 MiB by default). Retry it unchanged with bounded backoff. A single write that stages more than 8 MiB of index work for one index fails with `index_operation_batch_too_large` (HTTP 400); split it.
+- **[Text write limits are per document](/database/helix-cloud/operate/limits#active-text-mutation-admission).** `active_text_mutation_limit_exceeded` now checks each indexed document against its own allowances, about 16,000 unique terms, instead of limiting a write to 512 text-indexed entities.
+- **A failing index entry no longer stalls its index.** An entry whose index update fails the same way every time, for example on damaged index data, is held back while the rest of the index keeps publishing. `GET /healthz` counts it under `blocked_index_entity_count`, the server logs an error naming it, and the worker retries it about once a minute. See [troubleshooting](/database/helix-db/query-guides/troubleshooting).
+- **Fixed: `missing simhash` after re-embedding and then deleting a node** (the v0.0.9 known issue). Re-embedding a node no longer loses track of the vector index (HNSW) links that point at it, so deleting it later removes them all, and a node is never linked to itself. Indexes written by v0.0.9 and earlier can still hold such links; drop and recreate the vector index to repair them.
+- **Fixed: counts over a range index with other indexed filters.** A `.count()` over `N<L>.where(...)` or `E<L>.where(...)` that combined a range condition with other indexed conditions counted the range alone, for example 149 rows instead of 49. Counts now apply every filter.
+- **CLI 3.4.3** defaults to image v0.0.10. Projects that saved a `tag` in `helix.toml` keep using it until you change it.
+</Update>
+
+<Update
+  label="October 2026"
+  rss={{
     title: "Docker v0.0.9 and CLI 3.4.2: an always-on S3 disk cache and faster cold vector search",
     description: "S3 storage always caches on local disk, first vector searches after a restart are much faster, and source filters and counts always use indexes"
   }}
