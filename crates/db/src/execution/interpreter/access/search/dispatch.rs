@@ -401,6 +401,25 @@ impl<'db> ExecutionContext<'db> {
             )
             .await?;
         let Some(mut pending) = pending else {
+            // A strong search that finds nothing pending read the whole
+            // queue, so nothing cached for the generation can be selected
+            // again. The index worker drops it too, but readers have none.
+            let strong = self.active_write_tx().is_some()
+                || self.search_consistency == helix_ast::query::SearchConsistency::Strong;
+            match generation.as_ref() {
+                super::generation::TextSearchAuthority::Managed(handle) if strong => {
+                    let authority = handle.physical();
+                    self.db.pending_text_analyses().forget(
+                        crate::index_lifecycle::queue::QueueTarget::new(
+                            authority.scope(),
+                            authority.index_id(),
+                            authority.generation(),
+                        ),
+                    );
+                }
+                super::generation::TextSearchAuthority::Managed(_)
+                | super::generation::TextSearchAuthority::AbsentManagedPartition => {}
+            }
             let Some(manifest) = self.load_text_manifest_root(generation.as_ref()).await? else {
                 return Ok(Vec::new());
             };
@@ -412,12 +431,34 @@ impl<'db> ExecutionContext<'db> {
         let super::generation::TextSearchAuthority::Managed(handle) = generation.as_ref() else {
             return Ok(Vec::new());
         };
-        let analysis_limit = self.db.active_text_mutation_limits().max_input_bytes();
-        pending.yield_to_text_analysis_limit(
-            handle.partition(),
-            definition.analyzer(),
-            analysis_limit,
-        )?;
+        // Strong searches answer exactly or fail, so their bound is the
+        // configured strong one; eventual searches overlay at most what one
+        // text publication analyzes and serve the rest as published.
+        let analysis_limit = if pending.is_strong() {
+            self.db
+                .config()
+                .db()
+                .index_operation_queue()
+                .strong_text_search_max_analysis_bytes()
+        } else {
+            self.db.active_text_mutation_limits().max_input_bytes()
+        };
+        let analyses = pending
+            .analyze_text(
+                &self.execution_control,
+                handle.partition(),
+                definition.analyzer(),
+                analysis_limit,
+                self.db.pending_text_analyses(),
+            )
+            .await
+            .inspect_err(|error| self.db.record_strong_text_search_rejection(error))?;
+        let mut overlay = pending
+            .entities()
+            .iter()
+            .map(|pending| pending.entity)
+            .zip(analyses)
+            .collect::<Vec<_>>();
         // One logical search records one use of its splits, however often it
         // widens or reruns with a smaller selection.
         let mut demand = crate::search::text::SplitDemand::Record;
@@ -427,6 +468,7 @@ impl<'db> ExecutionContext<'db> {
                     &definition,
                     handle,
                     &pending,
+                    &overlay,
                     analysis_limit,
                     &query,
                     k,
@@ -436,7 +478,10 @@ impl<'db> ExecutionContext<'db> {
                 .await?
             {
                 Settlement::Settled(hits) => return Ok(hits),
-                Settlement::Exceeded { skipped } => pending.yield_to_suppression_limit(skipped)?,
+                Settlement::Exceeded { skipped } => {
+                    pending.yield_to_suppression_limit(skipped)?;
+                    overlay.truncate(pending.entities().len());
+                }
             }
         }
     }
@@ -446,41 +491,59 @@ impl<'db> ExecutionContext<'db> {
     ///
     /// Selected pending entities supersede their physical documents: their
     /// persisted contributions leave the corpus statistics, and their latest
-    /// documents in the searched partition are indexed in memory with the
-    /// production analyzer and scored against the same statistics. A
+    /// documents in the searched partition, analyzed in `overlay` (one entry
+    /// per selected entity, in selection order), join them and are scored
+    /// from those analyses against the same statistics, on the blocking pool
+    /// ([`crate::search::text::search_pending_documents`]). Only documents
+    /// holding a query term are scored: the query is a disjunction of its
+    /// terms, so any other document matches no clause and never ranks. A
     /// traversal-restricted search removes superseded entities from its
     /// candidate set and skips its physical search when none remain. An
     /// unrestricted search suppresses their split hits and widens past them
     /// with [`settle_physical`], reporting a search past its suppression
     /// limit to the caller, which fails or reruns it with a smaller
     /// selection. Only the first physical search that `demand` allows
-    /// records a use of its splits. The caller has already bounded the
-    /// pending text it analyzes in `handle`'s partition to `analysis_limit`
-    /// with [`PendingSelection::yield_to_text_analysis_limit`], which the
-    /// in-memory index asserts.
+    /// records a use of its splits. The caller analyzed `overlay` within
+    /// `analysis_limit` with [`PendingSelection::analyze_text`], which
+    /// scoring asserts.
     ///
-    /// [`PendingSelection::yield_to_text_analysis_limit`]: super::pending::PendingSelection::yield_to_text_analysis_limit
+    /// [`PendingSelection::analyze_text`]: super::pending::PendingSelection::analyze_text
     #[allow(
         clippy::too_many_arguments,
-        reason = "one overlaid attempt binds its definition, partition, selection, bound, query, and demand"
+        reason = "one overlaid attempt binds its definition, partition, selection, analyses, bound, query, and demand"
     )]
     async fn overlaid_text_hits(
         &self,
         definition: &crate::config::TextIndexDefinition,
         handle: &super::generation::ResolvedTextGenerationHandle,
         pending: &super::pending::PendingSelection,
+        overlay: &[(
+            crate::encoding::v2::keys::IndexEntity,
+            Option<Arc<crate::search::text::IndexedTextAnalysis>>,
+        )],
         analysis_limit: std::num::NonZeroU64,
         query: &str,
         k: usize,
         scope: &TextSearchScope,
         demand: &mut crate::search::text::SplitDemand,
     ) -> Result<Settlement<crate::search::text::TextSearchHit>> {
+        assert_eq!(
+            overlay.len(),
+            pending.entities().len(),
+            "the overlay analyzes exactly the selected entities"
+        );
         let partition = handle.partition();
         let authority = handle.physical();
-        let overlay = pending
-            .entities()
+        let counted = overlay
             .iter()
-            .map(|pending| (pending.entity, pending.text_in(partition)))
+            .map(|(entity, analysis)| {
+                (
+                    *entity,
+                    analysis
+                        .as_deref()
+                        .map(crate::search::text::IndexedTextAnalysis::statistics),
+                )
+            })
             .collect::<Vec<_>>();
         let statistics = if let Some(active) = self.active_write_tx() {
             crate::index_lifecycle::text::statistics::load_overlaid_query_statistics(
@@ -491,7 +554,7 @@ impl<'db> ExecutionContext<'db> {
                 partition,
                 definition.analyzer(),
                 query,
-                &overlay,
+                &counted,
             )
             .await?
         } else if let Some(view) = self.request_read_view() {
@@ -503,7 +566,7 @@ impl<'db> ExecutionContext<'db> {
                 partition,
                 definition.analyzer(),
                 query,
-                &overlay,
+                &counted,
             )
             .await?
         } else {
@@ -516,23 +579,27 @@ impl<'db> ExecutionContext<'db> {
         else {
             return Ok(Settlement::Settled(Vec::new()));
         };
+        let terms = crate::search::text::analyze_text(definition.analyzer(), query).unique_terms;
         let documents = overlay
             .iter()
-            .filter_map(|(entity, text)| {
-                let text = (*text)?;
+            .filter_map(|(entity, analysis)| {
+                let analysis = analysis.as_ref()?;
                 let id = entity.id.get();
-                scope
+                let unique_terms = &analysis.statistics().unique_terms;
+                (scope
                     .candidates()
                     .is_none_or(|candidates| candidates.contains(id))
-                    .then(|| (id, std::sync::Arc::<str>::from(text)))
+                    && terms
+                        .iter()
+                        .any(|term| unique_terms.binary_search(term).is_ok()))
+                .then(|| (id, Arc::clone(analysis)))
             })
             .collect::<Vec<_>>();
         let pending_hits = {
             let definition = definition.clone();
             let query = query.to_string();
             let statistics = statistics.clone();
-            let scope = scope.clone();
-            tokio::task::spawn_blocking(move || {
+            super::blocking::run_blocking(&self.execution_control, move |probe| {
                 crate::search::text::search_pending_documents(
                     &definition,
                     &documents,
@@ -540,15 +607,10 @@ impl<'db> ExecutionContext<'db> {
                     &query,
                     k,
                     &statistics,
-                    &scope,
+                    || probe.check(),
                 )
             })
-            .await
-            .map_err(|error| {
-                HelixDbError::InvariantViolation(format!(
-                    "pending text search task failed: {error}"
-                ))
-            })??
+            .await?
         };
         let physical_scope = match scope.candidates() {
             Some(candidates) => {

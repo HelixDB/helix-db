@@ -192,6 +192,7 @@ pub(super) fn publisher_with_limits(
             object_store: Arc::clone(db.object_store()),
             database: db.path().to_string(),
             limits: text,
+            pending_analyses: Arc::clone(&db.inner.pending_text_analyses),
         },
     )
 }

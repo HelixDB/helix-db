@@ -815,6 +815,13 @@ struct HelixDBInner {
     index_operation_backlog: Arc<index_lifecycle::queue::backlog::IndexOperationBacklog>,
     index_queue_store: Arc<index_lifecycle::queue::storage::QueueStore>,
     index_queue_publisher: Option<Arc<index_lifecycle::queue::publication::QueuePublisher>>,
+    /// Analyses of queued text that text searches reuse, shared with the
+    /// publisher, which drops a generation's once nothing of it is queued.
+    pending_text_analyses: Arc<search::text::pending::PendingTextAnalyses>,
+    /// Strong text searches refused for unpublished text past their bound.
+    strong_text_search_rejections: std::sync::atomic::AtomicU64,
+    /// When such a refusal was last logged.
+    strong_text_search_warned: parking_lot::Mutex<Option<Instant>>,
     secondary_lifecycle_step: Mutex<()>,
     #[cfg(feature = "index-lifecycle-testing")]
     lifecycle_test_scheduling: IndexLifecycleScheduling,
@@ -1671,6 +1678,9 @@ impl HelixDB {
                     .unwrap_or(u64::MAX),
             ),
         ));
+        let pending_text_analyses = Arc::new(search::text::pending::PendingTextAnalyses::new(
+            queue_tuning.strong_text_search_max_analysis_bytes(),
+        ));
         // Every writer owns a publisher; only automatic scheduling hands it to
         // the supervisor, so explicitly stepped harnesses drive it directly.
         let index_queue_publisher = match storage.handle() {
@@ -1693,6 +1703,7 @@ impl HelixDB {
                         object_store: Arc::clone(storage.object_store()),
                         database: storage.path().to_string(),
                         limits: config.db().search_index_backfill().active_text_mutation(),
+                        pending_analyses: Arc::clone(&pending_text_analyses),
                     },
                 ))
             }
@@ -1754,6 +1765,9 @@ impl HelixDB {
                 index_operation_backlog,
                 index_queue_store,
                 index_queue_publisher,
+                pending_text_analyses,
+                strong_text_search_rejections: std::sync::atomic::AtomicU64::new(0),
+                strong_text_search_warned: parking_lot::Mutex::new(None),
                 secondary_lifecycle_step: Mutex::new(()),
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_test_scheduling: index_scheduling,
@@ -3251,7 +3265,8 @@ impl HelixDB {
     ///
     /// Reads in-memory state only: atomics plus one scan of retained charges
     /// under the ledger lock, so sample it periodically rather than per
-    /// request. Reader handles own no ledger or publisher and report zeros.
+    /// request. Reader handles own no ledger or publisher, so every field but
+    /// `strong_text_search_rejections` reads zero.
     pub fn index_operation_queue_stats(&self) -> IndexOperationQueueStats {
         let backlog = self.inner.index_operation_backlog.totals();
         let stats = IndexOperationQueueStats {
@@ -3264,6 +3279,10 @@ impl HelixDB {
             acknowledged_operations: backlog.outcomes.acknowledged,
             censored_acknowledgements: backlog.outcomes.acknowledged_censored,
             oldest_pending_micros: backlog.oldest_committed_pending_micros,
+            strong_text_search_rejections: self
+                .inner
+                .strong_text_search_rejections
+                .load(std::sync::atomic::Ordering::Relaxed),
             ..IndexOperationQueueStats::default()
         };
         let Some(publisher) = &self.inner.index_queue_publisher else {
@@ -3392,6 +3411,52 @@ impl HelixDB {
     /// Returns the per-transaction queue operand ceiling in bytes.
     pub(crate) fn index_operand_limit(&self) -> u64 {
         self.inner.index_queue_store.max_operand_bytes()
+    }
+
+    /// Returns the analyses of queued text that text searches reuse.
+    pub(crate) fn pending_text_analyses(&self) -> &Arc<search::text::pending::PendingTextAnalyses> {
+        &self.inner.pending_text_analyses
+    }
+
+    /// Counts a strong text search that `error` refused because its
+    /// partition's unpublished text exceeded the strong text search bound,
+    /// and logs a warning at most once a minute; any other error is ignored.
+    pub(crate) fn record_strong_text_search_rejection(&self, error: &HelixDbError) {
+        const QUIET: Duration = Duration::from_secs(60);
+        let HelixDbError::IndexBackpressure {
+            scope,
+            index_id,
+            resource: error::IndexBackpressureResource::PendingTextAnalysisBytes,
+            requested,
+            limit,
+        } = error
+        else {
+            return;
+        };
+        let rejections = self
+            .inner
+            .strong_text_search_rejections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        {
+            let mut warned = self.inner.strong_text_search_warned.lock();
+            if warned.is_some_and(|warned| warned.elapsed() < QUIET) {
+                return;
+            }
+            *warned = Some(Instant::now());
+        }
+        tracing::warn!(
+            ?scope,
+            index_id,
+            requested,
+            limit,
+            rejections,
+            "strong text search refused: unpublished text in its partition exceeds \
+             IndexOperationQueueTuning::strong_text_search_max_analysis_bytes \
+             (HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES on a server); it succeeds once the \
+             index worker publishes the backlog. Search with eventual consistency during \
+             heavy ingest, or raise the bound"
+        );
     }
 
     /// Returns the limits queued text publication applies to one entity.

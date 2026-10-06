@@ -79,6 +79,13 @@ retained-byte limit (1000000000) with any storage, so writes reach backpressure 
 set it lower to cap the CPU time of each strong vector search. The bound counts every
 tenant partition of an index. Startup fails naming it when it is not a positive integer.
 
+`HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` sets the most unpublished text, in analysis
+bytes (text plus about 280 bytes per token), that one `strong` text search includes per
+tenant partition before it fails with the retryable `index_backpressure`
+(`pending_text_analysis_bytes`). It defaults to 512 MiB (536870912) with any storage and
+also caps the analyses the server keeps for reuse. Startup fails naming it when it is not
+a positive integer.
+
 ### Benchmark images
 
 `docker-image/build.sh --async-index-benchmark` builds a separate benchmark
