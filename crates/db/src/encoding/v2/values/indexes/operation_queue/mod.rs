@@ -93,7 +93,7 @@ const OPERATION_TOKEN_BIT: u128 = 1 << 127;
 /// length, and a text deletion of an entity whose ID is one varint byte
 /// (entity kind, ID, absent replacement). A vector deletion adds an absent
 /// previous partition.
-const MIN_RETAINED_RECORD_LEN: usize = MODE_LEN + OPERATION_ID_LEN + 1 + 3;
+pub(crate) const MIN_RETAINED_RECORD_LEN: usize = MODE_LEN + OPERATION_ID_LEN + 1 + 3;
 /// Upper bound on the bytes of a value that are not records: the header and
 /// both counts.
 const MAX_VALUE_FRAMING_LEN: usize = HEADER_LEN + 2 * MAX_VARINT_LEN;
@@ -328,10 +328,13 @@ impl QueuedOperation {
         &self.payload
     }
 
-    /// Returns the exact bytes this operation retains in a resolved queue.
+    /// Returns the exact bytes this operation retains in a resolved queue:
+    /// mode, identity, body length, entity, and the complete payload,
+    /// including deletions.
     ///
-    /// Accounting charges this size: mode, identity, body length, entity, and
-    /// the complete payload, including deletions.
+    /// Admission charges more than this size: pass it to
+    /// [`crate::index_lifecycle::queue::backlog::charged_bytes`], which adds
+    /// the fixed per-operation overhead, rather than charging it directly.
     pub(crate) fn retained_bytes(&self) -> u64 {
         retained_len(body_encoded_len(self))
     }

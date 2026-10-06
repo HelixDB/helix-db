@@ -235,12 +235,14 @@ bound the search stays exact.
 ## Index backpressure
 
 By default, each index retains at most 1,000,000,000 bytes or 250,000 pending
-entities of unpublished work. A write that would push an index past either limit fails
-before commit with `index_backpressure`: HTTP 429 with `retryable: true` and no
-`Retry-After` header, or gRPC `ResourceExhausted`. Nothing from the rejected request
-commits. Retry the unchanged request with bounded backoff and jitter; it succeeds once
-the index worker has published enough of the backlog, or, while the index is building,
-once the index activates.
+entities of unpublished work. Each pending change counts its encoded size plus a fixed
+576 bytes for the memory that tracks it, so the byte limit also caps how many changes an
+index holds: about 1.7 million, however small each one is. A write that would push an
+index past either limit fails before commit with `index_backpressure`: HTTP 429 with
+`retryable: true` and no `Retry-After` header, or gRPC `ResourceExhausted`. Nothing
+from the rejected request commits. Retry the unchanged request with bounded backoff and
+jitter; it succeeds once the index worker has published enough of the backlog, or,
+while the index is building, once the index activates.
 
 A single write that exceeds either limit on its own, or stages more than 8 MiB of
 queued work for one index, can never be admitted, nor can a text search in a write

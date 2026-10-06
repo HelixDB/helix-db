@@ -23,14 +23,23 @@ fn id(value: u128) -> QueuedOperationId {
     QueuedOperationId::try_from_u128(value).unwrap()
 }
 
-fn charge(target: QueueTarget, entity_id: u64, operation: u128, bytes: u64) -> OperationCharge {
+/// A charge for an operation whose record encodes in `encoded_bytes`.
+fn charge(
+    target: QueueTarget,
+    entity_id: u64,
+    operation: u128,
+    encoded_bytes: u64,
+) -> OperationCharge {
     OperationCharge {
         target,
         entity: entity(entity_id),
         id: id(operation),
-        bytes,
+        encoded_bytes,
     }
 }
+
+/// Fixed charge of every operation beyond its encoded size.
+const OVERHEAD: u64 = OPERATION_OVERHEAD_BYTES;
 
 fn ledger(max_retained_bytes: u64, max_members: u64) -> Arc<IndexOperationBacklog> {
     IndexOperationBacklog::new(
@@ -46,38 +55,156 @@ fn usage(backlog: &IndexOperationBacklog, index: u64) -> BacklogUsage {
     backlog.usage(DataScope::LegacyUnscoped, IndexId::new(index).unwrap())
 }
 
+/// Each operation is charged its encoded size plus the fixed overhead, so
+/// the limit counts operations as well as bytes.
 #[test]
 fn byte_limit_accepts_exactly_the_limit_and_rejects_one_more_byte() {
-    let backlog = ledger(100, 1_000);
+    let limit = 100 + 2 * OVERHEAD;
+    let backlog = ledger(limit, 1_000);
     backlog
         .reserve(&[charge(target(1, 1), 1, 1, 60)], &[])
         .unwrap()
         .committed();
+    let error = backlog
+        .reserve(&[charge(target(1, 1), 2, 2, 41)], &[])
+        .expect_err("one byte above the limit is rejected");
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexBackpressure {
+                resource: IndexBackpressureResource::RetainedBytes,
+                requested,
+                limit: refused_at,
+                ..
+            } if requested == limit + 1 && refused_at == limit
+        ),
+        "{error:?}"
+    );
+    assert!(error.is_index_backpressure());
     backlog
         .reserve(&[charge(target(1, 1), 2, 2, 40)], &[])
         .expect("reaching the limit exactly is admitted")
         .committed();
-    let error = backlog
-        .reserve(&[charge(target(1, 1), 3, 3, 1)], &[])
-        .expect_err("one byte above the limit is rejected");
+    assert_eq!(usage(&backlog, 1).retained_bytes, limit);
+    // An operation is never cheaper than the overhead, whatever it encodes.
     assert!(matches!(
-        error,
-        HelixDbError::IndexBackpressure {
-            resource: IndexBackpressureResource::RetainedBytes,
-            requested: 101,
-            limit: 100,
-            ..
-        }
+        backlog.reserve(&[charge(target(1, 1), 3, 3, 0)], &[]),
+        Err(HelixDbError::IndexBackpressure { requested, .. }) if requested == limit + OVERHEAD
     ));
-    assert!(error.is_index_backpressure());
-    assert_eq!(usage(&backlog, 1).retained_bytes, 100);
-    // Acknowledging releases exactly the acknowledged bytes.
+    // Acknowledging releases exactly the acknowledged charge.
     backlog.acknowledge([id(1)]);
-    assert_eq!(usage(&backlog, 1).retained_bytes, 40);
+    assert_eq!(usage(&backlog, 1).retained_bytes, 40 + OVERHEAD);
     backlog
         .reserve(&[charge(target(1, 1), 3, 3, 60)], &[])
         .unwrap()
         .committed();
+    assert_eq!(usage(&backlog, 1).retained_bytes, limit);
+}
+
+/// The overhead dominates small operations: a limit admits exactly
+/// `limit / (encoded + overhead)` of them, not the 25 times as many that
+/// `limit / encoded` would.
+#[test]
+fn the_byte_limit_bounds_the_operation_count_of_tiny_operations() {
+    const TINY: u64 = 21;
+    const OPERATIONS: u64 = 64;
+    let backlog = ledger(OPERATIONS * (TINY + OVERHEAD), u64::MAX);
+    for operation in 1..=OPERATIONS {
+        backlog
+            .reserve(
+                &[charge(target(1, 1), operation, u128::from(operation), TINY)],
+                &[],
+            )
+            .unwrap()
+            .committed();
+    }
+    assert!(matches!(
+        backlog.reserve(&[charge(target(1, 1), 1, 1_000, TINY)], &[]),
+        Err(HelixDbError::IndexBackpressure {
+            resource: IndexBackpressureResource::RetainedBytes,
+            ..
+        })
+    ));
+    assert_eq!(
+        usage(&backlog, 1),
+        BacklogUsage {
+            retained_bytes: OPERATIONS * (TINY + OVERHEAD),
+            members: OPERATIONS,
+            operations: OPERATIONS,
+            uncertain_operations: 0,
+        }
+    );
+}
+
+/// Every path that charges an operation charges its encoded size plus the
+/// same fixed overhead: live admission, a blocker repair admitted beyond the
+/// limits, discovery at open, and discovery by reconciliation. A reopened or
+/// reconciled ledger therefore holds exactly what live admission did, for
+/// tiny and large operations alike.
+#[test]
+fn every_admission_path_charges_the_encoded_size_plus_the_overhead() {
+    // (entity, operation, encoded bytes): a delete-sized and a large one.
+    let operations = [(1, 1, 21), (2, 2, 6_172)];
+    let expected = BacklogUsage {
+        retained_bytes: 21 + 6_172 + 2 * OVERHEAD,
+        members: 2,
+        operations: 2,
+        uncertain_operations: 0,
+    };
+    let charged = |load: &dyn Fn(&Arc<IndexOperationBacklog>)| {
+        let backlog = ledger(u64::MAX, u64::MAX);
+        load(&backlog);
+        usage(&backlog, 1)
+    };
+    assert_eq!(
+        charged(&|backlog| {
+            backlog
+                .reserve(
+                    &operations.map(|(entity, operation, bytes)| {
+                        charge(target(1, 1), entity, operation, bytes)
+                    }),
+                    &[],
+                )
+                .unwrap()
+                .committed();
+        }),
+        expected,
+        "live admission"
+    );
+    let found =
+        operations.map(|(entity_id, operation, bytes)| (id(operation), entity(entity_id), bytes));
+    assert_eq!(
+        charged(&|backlog| backlog.load_durable(target(1, 1), found)),
+        expected,
+        "discovery at open"
+    );
+    assert_eq!(
+        charged(&|backlog| {
+            let ticket = backlog.begin_reconciliation();
+            assert_eq!(
+                backlog.finish_reconciliation(ticket, target(1, 1), found),
+                0
+            );
+        }),
+        expected,
+        "discovery by reconciliation"
+    );
+    // A blocker's repair admitted beyond a saturated limit is charged alike.
+    let backlog = ledger(21 + OVERHEAD, u64::MAX);
+    backlog
+        .reserve(&[charge(target(1, 1), 1, 1, 21)], &[])
+        .unwrap()
+        .committed();
+    let blocked = [BlockedBuild {
+        target: target(1, 1),
+        operation_id: crate::index_lifecycle::IndexOperationId::new_v4(),
+        repair: Some(BlockerRepair::Remove(entity(2))),
+    }];
+    backlog
+        .reserve(&[charge(target(1, 1), 2, 2, 21)], &blocked)
+        .expect("the repair is admitted beyond the byte limit")
+        .committed();
+    assert_eq!(usage(&backlog, 1).retained_bytes, 2 * (21 + OVERHEAD));
 }
 
 #[test]
@@ -273,9 +400,9 @@ fn an_enqueue_commit_returning_wakes_the_index_worker() {
 
 #[test]
 fn multi_index_reservations_are_all_or_nothing() {
-    let backlog = ledger(100, 10);
+    let backlog = ledger(100 + 2 * OVERHEAD, 10);
     backlog
-        .reserve(&[charge(target(2, 1), 1, 1, 95)], &[])
+        .reserve(&[charge(target(2, 1), 1, 1, 95 + OVERHEAD)], &[])
         .unwrap()
         .committed();
     let error = backlog
@@ -289,7 +416,7 @@ fn multi_index_reservations_are_all_or_nothing() {
         .expect_err("the second index rejects the transaction");
     assert!(error.is_index_backpressure());
     assert_eq!(usage(&backlog, 1), BacklogUsage::default());
-    assert_eq!(usage(&backlog, 2).retained_bytes, 95);
+    assert_eq!(usage(&backlog, 2).retained_bytes, 95 + 2 * OVERHEAD);
     // A duplicate operation ID is an invariant violation, not backpressure,
     // whether it is already retained or repeated within the transaction.
     assert!(matches!(
@@ -513,7 +640,7 @@ fn a_blocked_build_admits_only_its_blocker_repairs_beyond_the_limits() {
         (3, 5)
     );
 
-    let backlog = ledger(100, u64::MAX);
+    let backlog = ledger(100 + OVERHEAD, u64::MAX);
     backlog
         .reserve(&[charge(target(1, 1), 1, 1, 100)], &replace)
         .unwrap()
@@ -539,7 +666,7 @@ fn a_blocked_build_admits_only_its_blocker_repairs_beyond_the_limits() {
         .reserve(&[charge(target(1, 1), 9, 3, 100)], &replace)
         .expect("an aborted repair leaves the next one first")
         .committed();
-    assert_eq!(usage(&backlog, 1).retained_bytes, 200);
+    assert_eq!(usage(&backlog, 1).retained_bytes, 200 + 2 * OVERHEAD);
     refused(
         backlog.reserve(&[charge(target(1, 1), 9, 4, 1)], &replace),
         IndexBackpressureResource::RetainedBytes,
@@ -550,7 +677,7 @@ fn a_blocked_build_admits_only_its_blocker_repairs_beyond_the_limits() {
         .reserve(&[charge(target(1, 1), 9, 4, 1)], &remove)
         .expect("a removal is admitted above the byte limit")
         .committed();
-    assert_eq!(usage(&backlog, 1).retained_bytes, 201);
+    assert_eq!(usage(&backlog, 1).retained_bytes, 201 + 3 * OVERHEAD);
     refused(
         backlog.reserve(&[charge(target(1, 1), 9, 5, 1)], &replace),
         IndexBackpressureResource::RetainedBytes,
@@ -599,7 +726,8 @@ fn above_a_limit_only_writes_that_grow_it_are_refused() {
         .committed();
     assert_eq!(usage(&backlog, 1).members, 2);
 
-    let backlog = ledger(15, u64::MAX);
+    let limit = 15 + 2 * OVERHEAD;
+    let backlog = ledger(limit, u64::MAX);
     backlog.load_durable(
         target(1, 1),
         [(id(1), entity(1), 10), (id(2), entity(2), 10)],
@@ -608,16 +736,16 @@ fn above_a_limit_only_writes_that_grow_it_are_refused() {
         backlog.reserve(&[charge(target(1, 1), 1, 3, 1)], &[]),
         Err(HelixDbError::IndexBackpressure {
             resource: IndexBackpressureResource::RetainedBytes,
-            requested: 21,
-            limit: 15,
+            requested,
+            limit: refused_at,
             ..
-        })
+        }) if requested == 21 + 3 * OVERHEAD && refused_at == limit
     ));
 }
 
 #[test]
 fn reservation_outcomes_release_only_on_definite_abort() {
-    let backlog = ledger(1_000, 10);
+    let backlog = ledger(u64::MAX, 10);
     // Dropping before commit submission is a definite abort.
     drop(
         backlog
@@ -646,7 +774,7 @@ fn reservation_outcomes_release_only_on_definite_abort() {
     assert_eq!(
         usage(&backlog, 1),
         BacklogUsage {
-            retained_bytes: 20,
+            retained_bytes: 20 + 2 * OVERHEAD,
             members: 2,
             operations: 2,
             uncertain_operations: 2,
@@ -672,7 +800,7 @@ fn reservation_outcomes_release_only_on_definite_abort() {
     assert_eq!(
         usage(&backlog, 1),
         BacklogUsage {
-            retained_bytes: 10,
+            retained_bytes: 10 + OVERHEAD,
             members: 1,
             operations: 1,
             uncertain_operations: 0,
@@ -694,7 +822,7 @@ fn reservation_outcomes_release_only_on_definite_abort() {
 
 #[test]
 fn startup_observation_charges_durable_operations_once() {
-    let backlog = ledger(1_000, 10);
+    let backlog = ledger(u64::MAX, 10);
     let durable = [
         (id(1), entity(1), 25),
         (id(2), entity(1), 5),
@@ -705,7 +833,7 @@ fn startup_observation_charges_durable_operations_once() {
     assert_eq!(
         usage(&backlog, 1),
         BacklogUsage {
-            retained_bytes: 37,
+            retained_bytes: 37 + 3 * OVERHEAD,
             members: 2,
             operations: 3,
             uncertain_operations: 0,
@@ -718,7 +846,7 @@ fn startup_observation_charges_durable_operations_once() {
 
 #[test]
 fn acknowledgements_time_only_operations_whose_commit_was_observed() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     // Committed here: timed.
     backlog
@@ -774,7 +902,7 @@ fn acknowledgements_time_only_operations_whose_commit_was_observed() {
 
 #[test]
 fn aborts_and_reconciled_absences_are_not_acknowledgements() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     backlog
         .reserve(&[charge(target, 1, 1, 10)], &[])
@@ -793,7 +921,7 @@ fn aborts_and_reconciled_absences_are_not_acknowledgements() {
 
 #[test]
 fn oldest_pending_age_tracks_only_observed_commits() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     backlog.load_durable(target, [(id(1), entity(1), 10)]);
     assert_eq!(
@@ -871,7 +999,7 @@ fn reconciliation_visits_only_the_target_uncertain_charges() {
 
 #[test]
 fn presence_proves_an_enqueue_durable_whenever_it_was_marked() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     backlog
         .reserve(&[charge(target, 2, 2, 10)], &[])
@@ -917,7 +1045,7 @@ fn presence_proves_an_enqueue_durable_whenever_it_was_marked() {
 #[test]
 fn a_transaction_over_a_limit_on_its_own_is_a_hard_batch_error() {
     // Three distinct members can never fit a limit of two, even when empty.
-    let backlog = ledger(1_000, 2);
+    let backlog = ledger(u64::MAX, 2);
     let error = backlog
         .reserve(
             &[
@@ -952,18 +1080,19 @@ fn a_transaction_over_a_limit_on_its_own_is_a_hard_batch_error() {
         )
         .expect("two members reach the limit exactly")
         .committed();
-    // Bytes alone above the limit are just as permanent.
+    // Bytes alone above the limit are just as permanent, overhead included.
+    let limit = 15 + 2 * OVERHEAD;
     assert!(matches!(
-        ledger(15, 10).reserve(
+        ledger(limit, 10).reserve(
             &[charge(target(1, 1), 1, 1, 8), charge(target(1, 1), 2, 2, 8),],
             &[]
         ),
         Err(HelixDbError::IndexOperationBatchTooLarge {
             resource: IndexOperationBatchResource::RetainedBytes,
-            observed: 16,
-            limit: 15,
+            observed,
+            limit: refused_at,
             ..
-        })
+        }) if observed == 16 + 2 * OVERHEAD && refused_at == limit
     ));
 }
 
@@ -1003,9 +1132,9 @@ fn a_transaction_staging_two_generations_of_one_index_is_an_invariant_violation(
 
 #[test]
 fn a_hard_batch_error_outranks_backpressure_on_another_index() {
-    let backlog = ledger(100, 2);
+    let backlog = ledger(100 + 3 * OVERHEAD, 2);
     backlog
-        .reserve(&[charge(target(1, 1), 1, 1, 95)], &[])
+        .reserve(&[charge(target(1, 1), 1, 1, 95 + 2 * OVERHEAD)], &[])
         .unwrap()
         .committed();
     // Index 1 is saturated (retryable) but index 2 can never admit three
@@ -1031,13 +1160,13 @@ fn a_hard_batch_error_outranks_backpressure_on_another_index() {
         .reserve(&[charge(target(1, 1), 2, 2, 10)], &[])
         .unwrap_err()
         .is_index_backpressure());
-    assert_eq!(usage(&backlog, 1).retained_bytes, 95);
+    assert_eq!(usage(&backlog, 1).retained_bytes, 95 + 3 * OVERHEAD);
     assert_eq!(usage(&backlog, 2), BacklogUsage::default());
 }
 
 #[test]
 fn uncertain_acknowledgements_keep_outcomes_exact() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     backlog
         .reserve(&[charge(target, 1, 1, 10), charge(target, 2, 2, 10)], &[])
@@ -1090,7 +1219,7 @@ fn uncertain_acknowledgements_keep_outcomes_exact() {
 
 #[test]
 fn an_uncertain_acknowledgement_racing_the_producer_commit_stays_uncertain() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     let mut racing = backlog.reserve(&[charge(target, 1, 1, 10)], &[]).unwrap();
     racing.begin_commit();
@@ -1118,7 +1247,7 @@ fn an_uncertain_acknowledgement_racing_the_producer_commit_stays_uncertain() {
 
 #[test]
 fn acknowledging_an_uncertain_enqueue_proves_it_durable() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     let mut uncertain = backlog.reserve(&[charge(target, 1, 1, 10)], &[]).unwrap();
     uncertain.begin_commit();
@@ -1139,7 +1268,7 @@ fn acknowledging_an_uncertain_enqueue_proves_it_durable() {
 
 #[test]
 fn an_acknowledgement_before_an_uncertain_producer_outcome_counts_one_discovery() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     let mut racing = backlog.reserve(&[charge(target, 1, 1, 10)], &[]).unwrap();
     racing.begin_commit();
@@ -1163,7 +1292,7 @@ fn an_acknowledgement_before_an_uncertain_producer_outcome_counts_one_discovery(
 
 #[test]
 fn an_uncertain_producer_after_an_uncertain_acknowledgement_counts_one_discovery() {
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     let mut racing = backlog.reserve(&[charge(target, 1, 1, 10)], &[]).unwrap();
     racing.begin_commit();
@@ -1185,7 +1314,7 @@ fn an_uncertain_producer_after_an_uncertain_acknowledgement_counts_one_discovery
     assert_eq!(
         usage(&backlog, 1),
         BacklogUsage {
-            retained_bytes: 10,
+            retained_bytes: 10 + OVERHEAD,
             members: 1,
             operations: 1,
             uncertain_operations: 0,
@@ -1216,7 +1345,7 @@ fn an_uncertain_producer_after_an_uncertain_acknowledgement_counts_one_discovery
 #[test]
 fn a_producer_outcome_after_a_reconciled_acknowledgement_counts_once() {
     for committed in [true, false] {
-        let backlog = ledger(1_000, 1_000);
+        let backlog = ledger(u64::MAX, 1_000);
         let target = target(1, 1);
         let mut racing = backlog.reserve(&[charge(target, 1, 1, 10)], &[]).unwrap();
         racing.begin_commit();
@@ -1254,7 +1383,7 @@ fn a_producer_outcome_after_a_reconciled_acknowledgement_counts_once() {
 fn a_read_before_the_producer_returns_leaves_the_lag_timed() {
     // Only an acknowledgement, committed or attempted, before the producer's
     // commit returns censors the lag; reading the operation first does not.
-    let backlog = ledger(1_000, 1_000);
+    let backlog = ledger(u64::MAX, 1_000);
     let target = target(1, 1);
     let mut racing = backlog.reserve(&[charge(target, 1, 1, 10)], &[]).unwrap();
     racing.begin_commit();
@@ -1280,7 +1409,7 @@ fn a_read_before_the_producer_returns_leaves_the_lag_timed() {
 #[test]
 fn an_uncertain_acknowledgement_of_an_uncertain_enqueue_counts_one_discovery() {
     for present in [false, true] {
-        let backlog = ledger(1_000, 1_000);
+        let backlog = ledger(u64::MAX, 1_000);
         let target = target(1, 1);
         let mut uncertain = backlog.reserve(&[charge(target, 1, 1, 10)], &[]).unwrap();
         uncertain.begin_commit();
@@ -1317,7 +1446,7 @@ fn an_uncertain_acknowledgement_of_an_uncertain_enqueue_counts_one_discovery() {
         assert_eq!(
             usage(&backlog, 1),
             BacklogUsage {
-                retained_bytes: 10 * u64::from(present),
+                retained_bytes: (10 + OVERHEAD) * u64::from(present),
                 members: u64::from(present),
                 operations: u64::from(present),
                 uncertain_operations: 0,

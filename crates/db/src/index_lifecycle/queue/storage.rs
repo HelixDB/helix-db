@@ -34,7 +34,7 @@ use crate::encoding::v2::values::indexes::operation_queue::{
 };
 use crate::error::{HelixDbError, Result};
 
-use super::backlog::Admission;
+use super::backlog::{charged_bytes, Admission};
 use super::{OutputBudget, QueueTarget};
 
 /// Exact writes one acknowledgement stages in a publication transaction.
@@ -81,8 +81,8 @@ pub(crate) struct StoredQueue {
     oldest: HashMap<QueuedOperationId, IndexEntity>,
     /// Row key of each outstanding operation (row layout only).
     rows: HashMap<QueuedOperationId, Bytes>,
-    /// Retained bytes of the outstanding operations.
-    retained_bytes: u64,
+    /// [`charged_bytes`] summed over the outstanding operations.
+    charged_bytes: u64,
     /// Outstanding operations; never zero.
     outstanding: NonZeroUsize,
     /// Stored key and value bytes read to materialize the queue.
@@ -116,9 +116,9 @@ impl StoredQueue {
         let mut chains = HashMap::<IndexEntity, Chain>::new();
         let mut order = BTreeMap::new();
         let mut oldest = HashMap::new();
-        let mut retained_bytes = 0_u64;
+        let mut charged = 0_u64;
         for (position, operation) in operations.iter().enumerate() {
-            retained_bytes += operation.retained_bytes();
+            charged += charged_bytes(operation.retained_bytes());
             match chains.entry(operation.entity()) {
                 Entry::Occupied(mut chain) => {
                     let chain = chain.get_mut();
@@ -145,7 +145,7 @@ impl StoredQueue {
             order,
             oldest,
             rows,
-            retained_bytes,
+            charged_bytes: charged,
             outstanding,
             encoded_bytes,
             admitted: None,
@@ -190,10 +190,11 @@ impl StoredQueue {
         self.chains.contains_key(&entity)
     }
 
-    /// Returns the retained bytes of every outstanding operation.
+    /// Returns what admission charges the outstanding operations
+    /// ([`charged_bytes`]).
     #[cfg(test)]
-    pub(crate) const fn retained_bytes(&self) -> u64 {
-        self.retained_bytes
+    pub(crate) const fn charged_bytes(&self) -> u64 {
+        self.charged_bytes
     }
 
     /// Returns the stored key and value bytes read to materialize the queue.
@@ -257,7 +258,7 @@ impl StoredQueue {
             debug_assert_eq!(operation.id(), *id);
             self.order.remove(&position);
             self.rows.remove(id);
-            self.retained_bytes -= operation.retained_bytes();
+            self.charged_bytes -= charged_bytes(operation.retained_bytes());
             self.outstanding = NonZeroUsize::new(self.outstanding.get() - 1)?;
             let Some(len) = NonZeroUsize::new(chain.get().len.get() - 1) else {
                 chain.remove();
@@ -386,29 +387,30 @@ impl PendingQueueBytes {
 ///
 /// Every publisher of one writer shares one instance (it lives in the
 /// writer's [`QueueStore`]), so the take-then-retain discipline holds
-/// whichever publisher attempts a target. Retained queues are charged their
-/// operations' retained bytes against one budget shared by every target. A
-/// queue that does not fit beside those already held is dropped and read
-/// again by its target's next attempt; held queues are never evicted for
-/// it. Publication visits targets round-robin, so evicting the least
-/// recently used queue would evict exactly the one attempted next, while a
-/// held queue only shrinks as its target drains and so frees its share.
+/// whichever publisher attempts a target. Retained queues are charged what
+/// admission charges their operations ([`charged_bytes`]) against one budget
+/// shared by every target. A queue that does not fit beside those already
+/// held is dropped and read again by its target's next attempt; held queues
+/// are never evicted for it. Publication visits targets round-robin, so
+/// evicting the least recently used queue would evict exactly the one
+/// attempted next, while a held queue only shrinks as its target drains and
+/// so frees its share.
 #[derive(Debug)]
 pub(crate) struct RetainedQueues {
-    /// Most retained bytes held across every target.
+    /// Most charged bytes held across every target.
     budget: u64,
     state: Mutex<RetainedState>,
 }
 
 #[derive(Debug, Default)]
 struct RetainedState {
-    /// Retained bytes of every held queue.
+    /// Charged bytes of every held queue.
     held: u64,
     queues: HashMap<QueueTarget, (StoredQueue, u64)>,
 }
 
 impl RetainedQueues {
-    /// Holds at most `budget` retained bytes of operations across every
+    /// Holds at most `budget` charged bytes of operations across every
     /// target.
     pub(crate) fn new(budget: u64) -> Self {
         Self {
@@ -417,7 +419,7 @@ impl RetainedQueues {
         }
     }
 
-    /// Removes and returns `target`'s retained queue, releasing its bytes.
+    /// Removes and returns `target`'s retained queue, releasing its charge.
     pub(crate) fn take(&self, target: QueueTarget) -> Option<StoredQueue> {
         let mut state = self.state.lock();
         let (stored, bytes) = state.queues.remove(&target)?;
@@ -437,7 +439,7 @@ impl RetainedQueues {
         let Some(remaining) = stored.without(acknowledged) else {
             return;
         };
-        let bytes = remaining.retained_bytes;
+        let bytes = remaining.charged_bytes;
         let mut state = self.state.lock();
         assert!(
             !state.queues.contains_key(&target),
@@ -450,7 +452,7 @@ impl RetainedQueues {
         state.queues.insert(target, (remaining, bytes));
     }
 
-    /// Returns the retained bytes of every held queue.
+    /// Returns the charged bytes of every held queue.
     #[cfg(test)]
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.state.lock().held
@@ -472,7 +474,7 @@ pub(crate) struct QueueStore {
 impl QueueStore {
     /// Creates storage for `layout` whose operands stay within
     /// `max_operand_bytes` and whose publishers retain at most
-    /// `retained_budget` bytes of queued operations between attempts;
+    /// `retained_budget` charged bytes of queued operations between attempts;
     /// recovery raises the row sequence past every retained row before the
     /// first write.
     pub(crate) fn new(layout: QueueLayout, max_operand_bytes: u64, retained_budget: u64) -> Self {

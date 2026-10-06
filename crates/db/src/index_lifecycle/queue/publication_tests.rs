@@ -1427,7 +1427,7 @@ async fn an_empty_queue_with_charged_work_backs_off() {
                     id: IndexEntityId::new(1),
                 },
                 id: QueuedOperationId::generate(),
-                bytes: 64,
+                encoded_bytes: 64,
             }],
             &[],
         )

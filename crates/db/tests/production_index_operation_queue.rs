@@ -157,6 +157,37 @@ fn queue_tuning_lag_histogram_and_merge_counters_are_public_contracts() {
             largest + 1
         )
     );
+    // Every operation is charged at least the smallest one's charge, so a
+    // lower ceiling could admit nothing.
+    let smallest = IndexOperationQueueTuning::MIN_RETAINED_BYTES;
+    assert_eq!(
+        smallest,
+        IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES + 21
+    );
+    assert_eq!(
+        tuning
+            .with_max_retained_bytes(nonzero(smallest))
+            .expect("the smallest ceiling is valid")
+            .max_retained_bytes()
+            .get(),
+        smallest
+    );
+    for requested in [1, smallest - 1] {
+        let error = tuning
+            .with_max_retained_bytes(nonzero(requested))
+            .expect_err("a ceiling below one operation's charge admits nothing");
+        assert_eq!(
+            error,
+            IndexOperationQueueTuningError::RetainedBytesBelowOneOperation { requested }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "index operation queue max retained bytes {requested} are below the charge of \
+                 the smallest operation {smallest}"
+            )
+        );
+    }
     assert_eq!(
         DbConfig::new()
             .with_index_operation_queue_tuning(tuning)
@@ -318,12 +349,16 @@ async fn member_backpressure_rejects_whole_writes_until_publication_drains() {
 
 /// Retained bytes throttle like members; a write whose own operations or
 /// operand exceed a ceiling is rejected before commit without leaking
-/// capacity, and a reopened writer charges what is still durable.
+/// capacity, and a reopened writer charges what is still durable. Every
+/// operation counts its encoded size plus a fixed overhead.
 #[tokio::test]
 async fn byte_and_operand_limits_reject_writes_before_commit() {
     let store = fixture("queue-bytes", vec![text_definition()]).await;
+    // Two one-letter documents (about 24 encoded bytes each) fit; a third
+    // does not.
+    let limit = 60 + 2 * IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES;
     let tuning = IndexOperationQueueTuning::default()
-        .with_max_retained_bytes(nonzero(60))
+        .with_max_retained_bytes(nonzero(limit))
         .expect("a small retained-byte ceiling is valid");
     let db = open(
         "queue-bytes",
@@ -344,15 +379,16 @@ async fn byte_and_operand_limits_reject_writes_before_commit() {
             HelixDbError::IndexBackpressure {
                 resource: IndexBackpressureResource::RetainedBytes,
                 requested,
-                limit: 60,
+                limit: refused_at,
                 ..
-            } if requested > 60
+            } if requested > limit && refused_at == limit
         ),
         "{error}"
     );
     assert!(error.to_string().contains("retained_bytes"), "{error}");
+    let oversized = "x".repeat(usize::try_from(limit).expect("a small limit"));
     let error = db
-        .query(text_write(&[&"x".repeat(60)]))
+        .query(text_write(&[&oversized]))
         .await
         .expect_err("one document above the byte limit");
     assert!(
@@ -361,9 +397,9 @@ async fn byte_and_operand_limits_reject_writes_before_commit() {
             HelixDbError::IndexOperationBatchTooLarge {
                 resource: IndexOperationBatchResource::RetainedBytes,
                 observed,
-                limit: 60,
+                limit: refused_at,
                 ..
-            } if observed > 60
+            } if observed > limit && refused_at == limit
         ),
         "{error}"
     );

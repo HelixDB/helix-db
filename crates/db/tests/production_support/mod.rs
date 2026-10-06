@@ -35,6 +35,7 @@ mod index_lifecycle_typed_boundaries;
 #[cfg(feature = "index-lifecycle-testing")]
 mod index_operation_queue;
 mod migration_text_rebuild;
+mod queue_admission_memory;
 mod secondary_equality_hot_path;
 mod text_generation_rows;
 mod v1_migration;
@@ -46,6 +47,9 @@ pub use index_operation_queue::{
     index_operation_queue_reconciliation_contracts,
     index_operation_queue_recovery_corruption_contracts,
     index_operation_queue_scope_walk_contracts, index_operation_queue_tenant_scope_contracts,
+};
+pub use queue_admission_memory::{
+    index_operation_queue_memory_samples, AllocationProbe, QueueMemorySample,
 };
 pub use secondary_equality_hot_path::{
     benchmark_million_sequential_id_bitmap, SecondaryEqualityHotPathFixture,

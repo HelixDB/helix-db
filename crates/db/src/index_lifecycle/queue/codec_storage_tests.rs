@@ -1025,8 +1025,10 @@ async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operation
             )
         })
         .collect::<Vec<_>>();
-    let one = text_operation(2, 2, Some("b")).retained_bytes();
-    let both = one + text_operation(1, 1, Some("a")).retained_bytes();
+    // Retained queues are charged what admission charges.
+    let one = super::backlog::charged_bytes(text_operation(2, 2, Some("b")).retained_bytes());
+    let both =
+        one + super::backlog::charged_bytes(text_operation(1, 1, Some("a")).retained_bytes());
     assert_eq!(both, 2 * one);
     // Room for two whole queues across every target.
     let store = QueueStore::new(QueueLayout::Map, 1 << 20, 2 * both);

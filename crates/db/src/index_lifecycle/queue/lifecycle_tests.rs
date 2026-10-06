@@ -1272,7 +1272,7 @@ async fn uncertain_charges_of_a_hidden_build_reconcile_while_it_runs() {
                     id: IndexEntityId::new(ids[2]),
                 },
                 id: QueuedOperationId::generate(),
-                bytes: 64,
+                encoded_bytes: 64,
             }],
             &[],
         )
@@ -1324,7 +1324,7 @@ async fn uncertain_charges_of_an_active_generation_reconcile_while_its_ownership
                     id: IndexEntityId::new(ids[2]),
                 },
                 id: QueuedOperationId::generate(),
-                bytes: 64,
+                encoded_bytes: 64,
             }],
             &[],
         )
