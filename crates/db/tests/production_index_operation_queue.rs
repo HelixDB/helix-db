@@ -1228,8 +1228,10 @@ async fn strong_vector_searches_past_their_bound_fail_until_publication() {
     .await
     .expect("documents queue");
     // Two inserts and nothing they supersede: every retained byte is one
-    // entity's latest operation.
-    let pending = db.index_operation_queue_stats().retained_bytes;
+    // entity's latest operation. Admission charges each its encoded size
+    // plus a fixed overhead; the strong bound counts only the encoded size.
+    let pending = db.index_operation_queue_stats().retained_bytes
+        - 2 * IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES;
     db.close().await.expect("fixture closes");
 
     let tuning = IndexOperationQueueTuning::default()

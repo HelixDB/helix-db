@@ -345,9 +345,11 @@ async fn by_default_writes_reach_backpressure_before_strong_vector_searches() {
     )
     .await;
     install_vector_and_text(&db).await;
+    // Enough entities that their latest work exceeds the smallest ceiling a
+    // tuning accepts, so a reopen can lower the ceiling just below it.
     let mut ids = Vec::new();
-    for position in [1.0, 2.0, 3.0] {
-        ids.push(add_vector(&db, [position, 0.0]).await.unwrap());
+    for position in 1..=32u8 {
+        ids.push(add_vector(&db, [f32::from(position), 0.0]).await.unwrap());
     }
     // Superseded operations: admission charges them, the bound does not.
     for position in [0.5, 0.25] {
@@ -366,6 +368,7 @@ async fn by_default_writes_reach_backpressure_before_strong_vector_searches() {
     let retained = db.index_operation_queue_stats().retained_bytes;
     let latest = latest_vector_bytes(&db).await;
     assert!(retained > latest, "superseded operations are admitted");
+    assert!(latest > IndexOperationQueueTuning::MIN_RETAINED_BYTES);
     db.close().await.unwrap();
 
     let ceiling = |bytes: u64| {
@@ -394,7 +397,9 @@ async fn by_default_writes_reach_backpressure_before_strong_vector_searches() {
             .await
             .expect_err("the backlog fills the ceiling"),
     );
-    let result = Box::pin(db.query(strong_vector_request(10))).await.unwrap();
+    let result = Box::pin(db.query(strong_vector_request(ids.len())))
+        .await
+        .unwrap();
     assert_eq!(strong_ids(&result), ids);
     db.close().await.unwrap();
 
@@ -408,18 +413,24 @@ async fn by_default_writes_reach_backpressure_before_strong_vector_searches() {
             .expect_err("past the lowered ceiling"),
     );
     assert_past_bound(
-        &Box::pin(db.query(strong_vector_request(10)))
+        &Box::pin(db.query(strong_vector_request(ids.len())))
             .await
             .expect_err("work admitted past the lowered ceiling"),
         latest,
         latest - 1,
     );
     assert_eq!(
-        vector_search(&db, [0.0, 0.0], 10, None, SearchConsistency::Eventual)
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>(),
+        vector_search(
+            &db,
+            [0.0, 0.0],
+            ids.len(),
+            None,
+            SearchConsistency::Eventual
+        )
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>(),
         ids
     );
     db.close().await.unwrap();
@@ -433,14 +444,18 @@ async fn by_default_writes_reach_backpressure_before_strong_vector_searches() {
         ),
     )
     .await;
-    let result = Box::pin(db.query(strong_vector_request(10))).await.unwrap();
+    let result = Box::pin(db.query(strong_vector_request(ids.len())))
+        .await
+        .unwrap();
     assert_eq!(strong_ids(&result), ids);
     db.close().await.unwrap();
 
     // Publication clears the lowered default bound.
     let db = open(name, Arc::clone(&store), queued(lowered)).await;
     drain(&db, target(&db, QueueFamily::Vector).await).await;
-    let result = Box::pin(db.query(strong_vector_request(10))).await.unwrap();
+    let result = Box::pin(db.query(strong_vector_request(ids.len())))
+        .await
+        .unwrap();
     assert_eq!(strong_ids(&result), ids);
     db.close().await.unwrap();
 }
