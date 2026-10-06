@@ -476,26 +476,8 @@ impl OperationQueue {
     /// corruption at this boundary. Corrupt values are errors, never empty
     /// queues.
     pub(crate) fn decode(value: &[u8]) -> Result<Self, EncodingError> {
-        let (family, records) = resolved_records(value)?;
-        let mut ids = std::collections::HashSet::new();
-        let operations = records
-            .map(|record| {
-                let (id, body) = record?;
-                if !ids.insert(id) {
-                    return Err(EncodingError::Custom(
-                        "queued value inserts one operation ID twice".to_string(),
-                    ));
-                }
-                decode_body(family, id, body)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let (family, operations) = decode_unique(value, decode_body)?;
         Ok(Self { family, operations })
-    }
-
-    /// Assembles a queue from row-layout operations in sequence order,
-    /// returning `None` for the empty queue.
-    pub(crate) fn from_rows(family: QueueFamily, operations: Vec<QueuedOperation>) -> Option<Self> {
-        (!operations.is_empty()).then_some(Self { family, operations })
     }
 
     /// Returns the retained family.
@@ -504,6 +486,7 @@ impl OperationQueue {
     }
 
     /// Returns every outstanding operation in storage commit order.
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub(crate) fn operations(&self) -> &[QueuedOperation] {
         &self.operations
     }
@@ -511,6 +494,56 @@ impl OperationQueue {
     /// Consumes the queue into its ordered operations.
     pub(crate) fn into_operations(self) -> Vec<QueuedOperation> {
         self.operations
+    }
+}
+
+/// One outstanding operation as startup accounting reads it: its identity,
+/// entity, and exact retained bytes, without its payload.
+///
+/// # Contract
+///
+/// Reading frames accepts and rejects exactly the values and rows
+/// [`OperationQueue::decode`] and [`QueueRow::decode`] do, and yields each
+/// decoded operation's ID, entity, and [`QueuedOperation::retained_bytes`]
+/// in the same order. Payloads are validated in place rather than decoded,
+/// so reading a queue allocates per operation, never per payload byte.
+///
+/// ```text
+/// value  = [op1: node 7, 1536-dimension vector][op2: node 9, deletion]
+/// frames = [(op1, node 7, 6_170 bytes), (op2, node 9, 22 bytes)]
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OperationFrame {
+    pub(crate) id: QueuedOperationId,
+    pub(crate) entity: IndexEntity,
+    pub(crate) retained_bytes: u64,
+}
+
+impl OperationFrame {
+    /// Reads every operation's frame from one resolved queue value, in
+    /// storage order.
+    pub(crate) fn decode_queue(value: &[u8]) -> Result<(QueueFamily, Vec<Self>), EncodingError> {
+        decode_unique(value, Self::validate)
+    }
+
+    /// Reads one row-layout value's frame.
+    pub(crate) fn decode_row(value: &[u8]) -> Result<(QueueFamily, Self), EncodingError> {
+        let (family, id, body) = QueueRow::split(value)?;
+        Ok((family, Self::validate(family, id, body)?))
+    }
+
+    /// Validates one encoded body in place and frames it.
+    fn validate(
+        family: QueueFamily,
+        id: QueuedOperationId,
+        body: &[u8],
+    ) -> Result<Self, EncodingError> {
+        algebra::validate_body(family, body)?;
+        Ok(Self {
+            id,
+            entity: Cursor::new(body).take_entity()?,
+            retained_bytes: retained_len(body.len()),
+        })
     }
 }
 
@@ -714,6 +747,30 @@ fn resolved_records(value: &[u8]) -> Result<(QueueFamily, ResolvedRecords<'_>), 
         ));
     }
     Ok((family, ResolvedRecords { cursor, remaining }))
+}
+
+/// Decodes each record of one resolved value with `decode`, in storage
+/// order, as a full [`OperationQueue::decode`] and startup's
+/// [`OperationFrame::decode_queue`] both read it: the value must name each
+/// operation ID once, so both accept and reject the same framing.
+fn decode_unique<T>(
+    value: &[u8],
+    decode: impl Fn(QueueFamily, QueuedOperationId, &[u8]) -> Result<T, EncodingError>,
+) -> Result<(QueueFamily, Vec<T>), EncodingError> {
+    let (family, records) = resolved_records(value)?;
+    let mut ids = std::collections::HashSet::new();
+    let decoded = records
+        .map(|record| {
+            let (id, body) = record?;
+            if !ids.insert(id) {
+                return Err(EncodingError::Custom(
+                    "queued value inserts one operation ID twice".to_string(),
+                ));
+            }
+            decode(family, id, body)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((family, decoded))
 }
 
 /// Each record of one resolved value as its operation ID and encoded body,

@@ -726,6 +726,19 @@ impl IndexOperationBacklog {
         }
     }
 
+    /// Returns every retained charge by operation ID.
+    #[cfg(test)]
+    pub(crate) fn charges(
+        &self,
+    ) -> std::collections::BTreeMap<QueuedOperationId, (QueueTarget, IndexEntity, u64)> {
+        self.state
+            .lock()
+            .charges
+            .iter()
+            .map(|(id, charge)| (*id, (charge.target, charge.entity, charge.bytes)))
+            .collect()
+    }
+
     /// Returns current usage for one logical index, asserting that the
     /// per-target uncertain index agrees with every retained charge.
     #[cfg(test)]

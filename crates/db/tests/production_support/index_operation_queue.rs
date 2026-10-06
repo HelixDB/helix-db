@@ -722,11 +722,48 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
             vec![0x01],
             "tenant discovery encountered an invalid envelope",
         ),
+        // Malformed envelopes sorting before tenant zero's queue range: the
+        // lone marker, and one byte short of tenant zero's envelope.
+        (
+            "queue-tenant-envelope-marker",
+            vec![TENANT_KEY_PREFIX],
+            vec![0x01],
+            "tenant discovery encountered an invalid envelope",
+        ),
+        (
+            "queue-tenant-envelope-short-zero",
+            [vec![TENANT_KEY_PREFIX], vec![0x00; 15]].concat(),
+            vec![0x01],
+            "tenant discovery encountered an invalid envelope",
+        ),
         (
             "queue-undecodable",
             raw_target(1).key().to_vec(),
             vec![0x01],
             "Buffer too short",
+        ),
+        (
+            "queue-duplicate-operation",
+            raw_target(1).key().to_vec(),
+            raw_value(
+                VECTOR,
+                &[],
+                &[
+                    (IF_ABSENT, 1, &vector_body([1.0, 2.0])),
+                    (IF_ABSENT, 1, &vector_body([3.0, 4.0])),
+                ],
+            ),
+            "inserts one operation ID twice",
+        ),
+        (
+            "queue-corrupt-payload",
+            raw_target(1).key().to_vec(),
+            raw_value(
+                VECTOR,
+                &[],
+                &[(IF_ABSENT, 1, &vector_body([1.0, f32::NAN]))],
+            ),
+            "not finite",
         ),
     ] {
         let error = reopen_after(name, Vec::new(), |db| async move {
@@ -739,6 +776,87 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
         .await;
         assert!(error.to_string().contains(expected), "{name}: {error}");
     }
+}
+
+/// Proves a reopened writer discovers every queue wherever its tenant sits
+/// in the keyspace.
+///
+/// Writer open finds tenant queues in one forward-seeking pass over the
+/// tenant keyspace. Queues in the first and last tenant IDs and in adjacent
+/// tenants, between graph rows that sort before them and rows that sort
+/// after them, are charged exactly once; a tenant holding only graph rows
+/// contributes nothing; and queues no canonical record owns reload to be
+/// discarded.
+pub async fn index_operation_queue_scope_walk_contracts() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "queue-scope-walk";
+    let db = Box::pin(open_explicit(name, &store)).await;
+    let queued = [0, 7, 8, u128::MAX].map(|tenant| DataScope::Tenant(TenantId::from_u128(tenant)));
+    for (ordinal, scope) in queued
+        .into_iter()
+        .chain([DataScope::Tenant(TenantId::from_u128(9))])
+        .enumerate()
+    {
+        Box::pin(scoped_insert(
+            &db,
+            scope,
+            [1.0, ordinal as f32],
+            "graph rows",
+        ))
+        .await;
+    }
+    // Keys that sort after a tenant's queues, as a later record kind would.
+    for tenant in [8, u128::MAX] {
+        let mut key = Vec::new();
+        DataScope::Tenant(TenantId::from_u128(tenant)).encode_key_prefix(&mut key);
+        key.extend_from_slice(&[0x06, 0x16]);
+        db.inner_db()
+            .put(&key, b"after the queues")
+            .await
+            .expect("raw row writes");
+    }
+    let mut targets = BTreeSet::new();
+    let mut retained_bytes = 0;
+    for (ordinal, scope) in queued.into_iter().enumerate() {
+        for index in [900, 901] {
+            let target = QueueTarget::new(
+                scope,
+                IndexId::new(index).expect("index ID is nonzero"),
+                IndexGenerationId::initial(),
+            );
+            let operation = vector_operation(ordinal as u64 + 1, [1.0, 2.0]);
+            commit_operation(&db, target, &operation).await;
+            retained_bytes += operation.retained_bytes();
+            targets.insert(target);
+        }
+    }
+    db.close().await.expect("scope walk writer closes");
+
+    let db = Box::pin(open_explicit(name, &store)).await;
+    assert_eq!(
+        db.index_operation_backlog()
+            .outstanding_targets()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        targets
+    );
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(
+        (
+            stats.pending_operations,
+            stats.discovered_operations,
+            stats.retained_bytes
+        ),
+        (8, 8, retained_bytes)
+    );
+    for target in targets {
+        assert_eq!(
+            Box::pin(publish(&db, target)).await,
+            PublicationOutcome::Discarded { operations: 1 }
+        );
+    }
+    assert_eq!(db.index_operation_queue_stats().pending_operations, 0);
+    db.close().await.expect("scope walk writer closes");
 }
 
 /// One tenant scope's live documents: embedding and body by node ID.
