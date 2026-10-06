@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{catalog, ir};
 
 /// Secondary-index family recommended by the planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecondaryIndexKind {
     /// Equality index.

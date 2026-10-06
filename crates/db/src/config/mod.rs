@@ -23,6 +23,7 @@ pub use cache::{
 };
 pub use db::{DbConfig, EdgeEncoding, EdgeUpdatePolicy, HelixConfig, OpenAttribution};
 pub use definition_differences::{DefinitionDifference, NonEmptyDefinitionDifferences};
+pub use host_memory::memory_ceiling_bytes;
 pub use index_lifecycle_throughput::{
     IndexLifecycleConcurrency, IndexLifecycleScanTuning, IndexLifecycleThroughputTuning,
     IndexLifecycleThroughputTuningError,
