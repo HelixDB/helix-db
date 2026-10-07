@@ -541,19 +541,19 @@
   },
   {
     "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 903,
+    "line": 923,
     "reason": "SlateDB scan_prefix returns only rows under the exact DataScope-qualified prefix used to create the iterator, so stripping that same scope cannot fail.",
     "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
   },
   {
     "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 961,
+    "line": 981,
     "reason": "This error value belongs to the platform-gated resident-byte overflow that cannot occur in a supported 64-bit address space.",
     "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 966,
+    "line": 986,
     "reason": "This error value belongs to the platform-gated live-entry-count overflow that cannot occur in a supported process address space.",
     "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries and db-vector-production-coverage architecture matrix"
   },

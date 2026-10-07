@@ -1,6 +1,7 @@
 //! Resident vector-cache ownership, hydration, and commit effects.
 
 #[cfg(feature = "production-coverage")]
+#[path = "../../../../tests/production_support/vector/memory_benchmark.rs"]
 pub(super) mod benchmark;
 pub(super) mod commit;
 pub(super) mod hydration;
