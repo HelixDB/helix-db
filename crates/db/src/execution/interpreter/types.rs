@@ -104,7 +104,7 @@ impl ExecutionRow {
         }
     }
 
-    pub(super) fn set_current(&mut self, current: ElementRef) {
+    pub(crate) fn set_current(&mut self, current: ElementRef) {
         self.current = Some(current.clone());
         self.virtual_properties = RowVirtualProperties::empty();
         self.path.push(current);
@@ -125,7 +125,7 @@ impl ExecutionRow {
         }
     }
 
-    pub(super) fn mark_path_visible(mut self) -> Self {
+    pub(crate) fn mark_path_visible(mut self) -> Self {
         self.path_visible = true;
         self
     }
@@ -134,7 +134,7 @@ impl ExecutionRow {
         self.path.is_simple()
     }
 
-    pub(super) fn set_sack(&mut self, value: DbPropertyValue) {
+    pub(crate) fn set_sack(&mut self, value: DbPropertyValue) {
         self.sack.set(value);
     }
 
@@ -142,7 +142,7 @@ impl ExecutionRow {
         self.sack.clear();
     }
 
-    pub(super) fn mark_sack_visible(mut self) -> Self {
+    pub(crate) fn mark_sack_visible(mut self) -> Self {
         self.sack.mark_visible();
         self
     }
@@ -185,7 +185,7 @@ impl RowVirtualProperties {
     }
 
     /// Sets one runtime-only property while preserving existing row annotations.
-    pub(super) fn insert(&mut self, name: ir::NonEmptyString, value: DbPropertyValue) {
+    pub(crate) fn insert(&mut self, name: ir::NonEmptyString, value: DbPropertyValue) {
         self.values.insert(name, value);
     }
 }

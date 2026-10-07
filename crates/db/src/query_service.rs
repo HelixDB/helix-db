@@ -791,6 +791,8 @@ mod index_membership_tests;
 #[cfg(test)]
 mod index_served_sources_tests;
 #[cfg(test)]
+mod response_encoding_tests;
+#[cfg(test)]
 mod selective_equality_tests;
 
 #[cfg(test)]

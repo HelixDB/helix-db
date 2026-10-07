@@ -221,6 +221,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finish_returns_unique_and_shared_values_unchanged() {
+        let db = test_support::open_db("state-finish-shared-returns").await;
+        let unique = name("unique");
+        let forked = name("forked");
+        let retained = step_id(5);
+        let rows = ExecutionValue::Stream(vec![row(1), row(2)]);
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.variables.insert(unique.clone(), rows.clone());
+        let (variable, step_output) = ExecutionValueSlot::from(rows.clone()).fork();
+        ctx.variables.insert_slot(forked.clone(), variable);
+        ctx.step_outputs.insert_slot(retained, step_output);
+        let snapshot = ctx.variables.shallow_snapshot();
+
+        let result = ctx
+            .finish(
+                step_id(9),
+                &return_variables(vec![
+                    ("unique", exec::ReturnShape::List),
+                    ("forked", exec::ReturnShape::List),
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            result.returns,
+            BTreeMap::from([
+                (unique, ReturnedValue::Present(rows.clone())),
+                (forked.clone(), ReturnedValue::Present(rows.clone())),
+            ])
+        );
+        assert_eq!(ctx.step_outputs.get(&retained), Some(&rows));
+        assert_eq!(snapshot.get(&forked), Some(&rows));
+    }
+
+    #[tokio::test]
     async fn finish_without_return_variables_preserves_last_and_variable_state() {
         let db = test_support::open_db("state-finish-no-returns").await;
         let root = step_id(1);
