@@ -10,7 +10,7 @@
 
 use super::ExecStepId;
 
-pub(in crate::exec) struct StepPositions {
+pub(crate) struct StepPositions {
     /// Every step ID, ascending and unique.
     ids: Vec<ExecStepId>,
     /// `ids` has no gaps, so a position is an offset from the first ID.
@@ -20,9 +20,7 @@ pub(in crate::exec) struct StepPositions {
 impl StepPositions {
     /// Index the given step IDs, or return the first ID that repeats, in the
     /// order given.
-    pub(in crate::exec) fn new(
-        ids: impl Iterator<Item = ExecStepId> + Clone,
-    ) -> Result<Self, ExecStepId> {
+    pub(crate) fn new(ids: impl Iterator<Item = ExecStepId> + Clone) -> Result<Self, ExecStepId> {
         let mut sorted = ids.clone().collect::<Vec<_>>();
         sorted.sort_unstable();
         if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -51,7 +49,7 @@ impl StepPositions {
         &self.ids
     }
 
-    pub(in crate::exec) fn position(&self, id: ExecStepId) -> Option<usize> {
+    pub(crate) fn position(&self, id: ExecStepId) -> Option<usize> {
         match self.consecutive {
             true => {
                 let offset = id.get().checked_sub(self.ids.first()?.get())?;

@@ -42,6 +42,7 @@ pub use self::metrics::PlannerMetrics;
 pub use self::op::*;
 pub use self::order::*;
 pub use self::plan::{ExecutablePlan, ExecutableSubplan};
+pub(crate) use self::positions::StepPositions;
 pub use self::pull::{ExecProgram, ExecPullCapability, ExecPullRegion};
 pub(crate) use self::returns::return_shape_from_ast;
 pub use self::returns::{
