@@ -1906,7 +1906,7 @@ mod tests {
     fn memory_helix_args_match_existing_run_shape() {
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.10",
+            "ghcr.io/helixdb/helixdb:v0.0.11",
             9090,
             true,
             &HelixStorage::Memory,
@@ -1927,7 +1927,7 @@ mod tests {
                 "9090:8080",
                 "--label",
                 "helixdb.identity=4:demo/dev",
-                "ghcr.io/helixdb/helixdb:v0.0.10",
+                "ghcr.io/helixdb/helixdb:v0.0.11",
             ]
             .into_iter()
             .map(String::from)
@@ -1945,7 +1945,7 @@ mod tests {
         };
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.10",
+            "ghcr.io/helixdb/helixdb:v0.0.11",
             8080,
             true,
             &storage,
@@ -1980,7 +1980,7 @@ mod tests {
         assert!(has_pair(&args, "-e", "HELIX_TELEMETRY_LEVEL=off"));
         assert_eq!(
             args.last().map(String::as_str),
-            Some("ghcr.io/helixdb/helixdb:v0.0.10")
+            Some("ghcr.io/helixdb/helixdb:v0.0.11")
         );
     }
 
@@ -2004,7 +2004,7 @@ mod tests {
         };
         let args = helix_run_args(
             "helix-my-helix-project-production",
-            "ghcr.io/helixdb/helixdb:v0.0.10",
+            "ghcr.io/helixdb/helixdb:v0.0.11",
             8080,
             true,
             &storage,
@@ -2054,7 +2054,7 @@ mod tests {
         };
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.10",
+            "ghcr.io/helixdb/helixdb:v0.0.11",
             8080,
             true,
             &storage,

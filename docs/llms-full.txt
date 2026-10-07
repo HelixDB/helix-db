@@ -261,7 +261,7 @@ TypeScript, and Python ship embedded runtimes; the Go SDK is currently HTTP-only
 
 Page type: Guide
 
-The `ghcr.io/helixdb/helixdb:v0.0.10` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.11` image runs the standalone HelixDB server.
 It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
@@ -300,10 +300,10 @@ helix start dev             # add --disk to persist this instance
 
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
-For an existing project, set `tag = "v0.0.10"` in its `[local.dev]` block in
+For an existing project, set `tag = "v0.0.11"` in its `[local.dev]` block in
 `helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
 
-The first time v0.0.10 opens a persisted database, it upgrades the index storage
+The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
 version, and v0.0.9 and earlier then refuse to open that database. Back up the data
 before changing the tag if you may need to roll back.
 ```bash
@@ -350,7 +350,7 @@ Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 ```bash
 docker run --rm --name helixdb \
   -p 6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.10
+  ghcr.io/helixdb/helixdb:v0.0.11
 ```
 
 The standalone server exposes liveness and readiness checks:
@@ -374,7 +374,7 @@ docker run --rm --name helixdb \
   -p 6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
-  ghcr.io/helixdb/helixdb:v0.0.10
+  ghcr.io/helixdb/helixdb:v0.0.11
 ```
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
@@ -433,7 +433,7 @@ services:
       retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.10
+    image: ghcr.io/helixdb/helixdb:v0.0.11
     restart: unless-stopped
     depends_on:
       seaweedfs:
@@ -524,7 +524,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.10
+  ghcr.io/helixdb/helixdb:v0.0.11
 ```
 
 In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
@@ -1288,6 +1288,15 @@ Have a feature request? [Let us know on Discord](https://discord.com/invite/2stg
 # Release notes
 
 Page type: Reference
+
+- **Strong text search keeps working during ingest.** A `strong` text search now has its own bound, 512 MiB of unpublished text per partition by default (it was one publication's 64 MiB), and reuses analyses of pending text across searches. Ingest bursts of 20K–40K documents that made v0.0.10's strong text searches fail with `index_backpressure` now complete with no rejections, and a strong text search behind 5,000 pending documents dropped from about 200 ms to 30 ms. Set `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` to change the bound; past it the search fails with retryable `index_backpressure` (`pending_text_analysis_bytes`).
+- **Strong searches decode pending index work once per request.** Several searches in one request share one decoded copy of the pending queue, decoding and exact scoring run off the async workers so they no longer stall other requests, and four strong vector searches in one request behind 160K pending 768-dimension changes went from about 5.0 s to 2.2 s.
+- **Strong vector searches are bounded.** A `strong` vector search decodes and scores at most the index's retained-byte limit of unpublished work by default (1 GB, so writes reach backpressure first). Set `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` to lower it; past it the search fails with retryable `index_backpressure` (`pending_vector_bytes`).
+- **Queue admission tracks real memory.** Each queued index operation now counts its encoded size plus 576 bytes against the 1 GB per-index limit, so a backlog of many small operations, such as deletes, can no longer use several times the limit in memory. Such backlogs reach `index_backpressure` sooner; the 250,000 pending-entity limit is unchanged.
+- **Writers reopen faster with a large backlog.** Opening a writer loads its queued index work one queue at a time instead of decoding every queue at once: a 2.26 GB backlog opened in about 5 s instead of 25 s, with peak memory bounded by the largest queue instead of the whole backlog.
+- **Publication drains in linear time.** Selecting work to publish no longer rescans the whole queue each time, which was 9.4 s of bookkeeping per 250K-operation drain and is now 0.16 s, and a queue retired by an index drop is discarded without being re-read.
+- No storage changes since v0.0.10: upgrading from v0.0.10 needs no migration. Upgrading from v0.0.9 or earlier follows the v0.0.10 notes below.
+- **CLI 3.4.4** defaults to image v0.0.11. Projects that saved a `tag` in `helix.toml` keep using it until you change it.
 
 - **Upgrading: index storage version 5.** The first time a v0.0.10 writer opens a database, it upgrades the index storage version from 4 to 5. It rewrites only the version marker and rebuilds no index. After that, v0.0.9 and earlier refuse to open the database with `unsupported_index_storage_version`:
   - Upgrade readers before the writer; v0.0.10 readers serve both versions.
@@ -6951,7 +6960,7 @@ When a command cannot choose a resource on its own, pass it by ID, slug, or name
 
 Page type: Guide
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.10` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.11` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -8552,7 +8561,7 @@ helix start [INSTANCE] [OPTIONS]
 
 ## Behavior
 
-- Defaults to `ghcr.io/helixdb/helixdb:v0.0.10`. Flags override the image tag and pull policy set in `[local.<instance>]`.
+- Defaults to `ghcr.io/helixdb/helixdb:v0.0.11`. Flags override the image tag and pull policy set in `[local.<instance>]`.
 - `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
 - All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
@@ -8593,7 +8602,7 @@ helix start dev --disk
 helix start dev --image-version latest
 
 # Save a specific image version
-helix start dev --image-version v0.0.10 --persist
+helix start dev --image-version v0.0.11 --persist
 
 # Start using cached images only
 helix start dev --pull never
