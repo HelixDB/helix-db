@@ -6,7 +6,7 @@ use std::ptr::read_unaligned;
 
 use crate::search::vector::dimension::SameDimensionPair;
 #[cfg(target_arch = "x86_64")]
-use crate::search::vector::unaligned_vector::UnalignedVector;
+use crate::search::vector::unaligned_vector;
 
 #[target_feature(enable = "sse")]
 unsafe fn hsum128_ps_sse(x: __m128) -> f32 {
@@ -131,7 +131,7 @@ pub(crate) unsafe fn dot_similarity_sse(pair: SameDimensionPair<'_>) -> f32 {
 /// dispatch only proves SSE and uses the scalar reference instead.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-pub(crate) unsafe fn squared_norm_sse2(vector: &UnalignedVector<f32>) -> f64 {
+pub(crate) unsafe fn squared_norm_sse2(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
     // SAFETY: The view holds exactly `n` f32 values. SSE2 is baseline on x86_64, the
     // loads accept unaligned data, and every offset read stays below `n`.
     unsafe {

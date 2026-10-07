@@ -1,7 +1,7 @@
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use crate::search::vector::dimension::SameDimensionPair;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-use crate::search::vector::unaligned_vector::UnalignedVector;
+use crate::search::vector::unaligned_vector;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use std::arch::aarch64::*;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -94,7 +94,7 @@ pub(crate) unsafe fn dot_similarity_neon(pair: SameDimensionPair<'_>) -> f32 {
 /// fused into one of eight f64x2 accumulators, sixteen components per step.
 #[inline(always)]
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-pub(crate) unsafe fn squared_norm_neon(vector: &UnalignedVector<f32>) -> f64 {
+pub(crate) unsafe fn squared_norm_neon(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
     // SAFETY: The view holds exactly `n` f32 values. The caller guarantees NEON support.
     // AArch64 permits unaligned loads, and every offset read stays below `n`.
     unsafe {
