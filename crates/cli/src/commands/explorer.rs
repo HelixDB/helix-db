@@ -46,7 +46,7 @@ pub struct Args {
     /// Don't open the Explorer in a browser
     #[arg(long, conflicts_with = "stop")]
     pub no_open: bool,
-    /// Explorer image [env: HELIX_EXPLORER_IMAGE] [default: ghcr.io/helixdb/helix-explorer:latest]
+    /// Explorer image [env: HELIX_EXPLORER_IMAGE] [default: ghcr.io/helixdb/helix-explorer:v0.1.0]
     #[arg(long, value_name = "REF", conflicts_with = "stop")]
     pub image: Option<String>,
     /// Stop and remove this instance's Explorer
@@ -451,12 +451,12 @@ mod tests {
         assert_eq!(explorer_image(None, Some("b:2".into())).unwrap(), "b:2");
         assert_eq!(
             explorer_image(None, None).unwrap(),
-            "ghcr.io/helixdb/helix-explorer:latest"
+            "ghcr.io/helixdb/helix-explorer:v0.1.0"
         );
         // An empty variable counts as unset, as shells leave `VAR=` behind.
         assert_eq!(
             explorer_image(None, Some("  ".into())).unwrap(),
-            "ghcr.io/helixdb/helix-explorer:latest"
+            "ghcr.io/helixdb/helix-explorer:v0.1.0"
         );
     }
 
