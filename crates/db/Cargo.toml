@@ -90,6 +90,10 @@ name = "projection_materialization"
 harness = false
 
 [[bench]]
+name = "property_row_reads"
+harness = false
+
+[[bench]]
 name = "write_path_mutations"
 harness = false
 
