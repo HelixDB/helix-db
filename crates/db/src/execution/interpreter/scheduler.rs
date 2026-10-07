@@ -32,7 +32,7 @@ impl<'db> ExecutionContext<'db> {
                 .iter()
                 .map(|step| (step.id, step))
                 .collect::<BTreeMap<_, _>>();
-            let fused = fusion::plan(steps, root, program);
+            let fused = fusion::plan(&by_id, &self.step_output_uses, program);
 
             for stage in order.stages() {
                 self.check_execution_deadline()?;
@@ -312,14 +312,25 @@ impl<'db> ExecutionContext<'db> {
                 "step-output use plan was not isolated from its enclosing plan".to_string(),
             ));
         }
-        for step in steps {
-            let references = step_output_references(step)?;
-            for (dependency, count) in references.iter() {
-                add_output_uses(&mut self.step_output_uses, *dependency, *count)?;
-            }
-        }
-        increment_output_use(&mut self.step_output_uses, root)
+        self.step_output_uses = output_uses(steps, root)?;
+        Ok(())
     }
+}
+
+/// Every use of each step's output in a DAG: each dependency and condition
+/// that reads it, and the DAG's own use of its `root`.
+pub(in crate::execution::interpreter) fn output_uses(
+    steps: &[exec::ExecStep],
+    root: exec::ExecStepId,
+) -> Result<runtime_context::StepOutputUsePlan> {
+    let mut uses = runtime_context::StepOutputUsePlan::default();
+    for step in steps {
+        for (dependency, count) in step_output_references(step)?.iter() {
+            add_output_uses(&mut uses, *dependency, *count)?;
+        }
+    }
+    increment_output_use(&mut uses, root)?;
+    Ok(uses)
 }
 
 fn step_output_references(step: &exec::ExecStep) -> Result<runtime_context::StepOutputUsePlan> {

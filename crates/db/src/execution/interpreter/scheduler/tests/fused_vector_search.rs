@@ -82,6 +82,15 @@ async fn plan_read(db: &HelixDB, read: &batch::ReadBatch) -> exec::ExecutablePla
     planning::plan_read_batch(read, prepared.context()).unwrap()
 }
 
+/// The roles the scheduler gives the steps of a DAG rooted at `root`.
+fn roles<'a>(
+    steps: &'a [exec::ExecStep],
+    root: exec::ExecStepId,
+    program: &exec::ExecProgram,
+) -> BTreeMap<exec::ExecStepId, fusion::Role<'a>> {
+    fusion::plan(&by_id(steps), &output_uses(steps, root).unwrap(), program)
+}
+
 /// How a test runs a plan's DAG.
 #[derive(Debug, Clone, Copy)]
 enum Run {
@@ -173,7 +182,7 @@ fn fused_access(plan: &exec::ExecutablePlan) -> &exec::ExecNodeAccessPlan {
         panic!("expected a node access: {access_plan:?}");
     };
     assert_eq!(search.dependencies, vec![access.id]);
-    let fused = fusion::plan(plan.steps(), plan.root(), plan.execution_program());
+    let fused = roles(plan.steps(), plan.root(), plan.execution_program());
     assert!(matches!(fused.get(&access.id), Some(fusion::Role::Source)));
     assert!(matches!(
         fused.get(&search.id),
@@ -434,7 +443,7 @@ async fn parallel_stages_fuse_each_search() {
         let plan = test_support::executable(ir::PlanKind::Read, steps, 5);
         assert_eq!(parallel_stages(&plan), parallel);
         assert_eq!(
-            fusion::plan(plan.steps(), plan.root(), plan.execution_program()).len(),
+            roles(plan.steps(), plan.root(), plan.execution_program()).len(),
             4
         );
 
@@ -484,14 +493,16 @@ async fn fused_pairs_run_beside_pull_regions() {
             steps[1].schedule = search_schedule;
             let plan = test_support::executable(ir::PlanKind::Read, steps, root);
             assert!(parallel_stages(&plan) >= 1);
-            assert!(plan.execution_order().stages().iter().any(|stage| stage
-                .iter()
-                .any(|id| plan.execution_program().is_absorbed(id))
-                && stage
+            assert!(plan.execution_order().stages().iter().any(|stage| {
+                stage
                     .iter()
-                    .any(|id| id == plan.steps()[0].id || id == plan.steps()[1].id)));
+                    .any(|id| plan.execution_program().is_absorbed(id))
+                    && stage
+                        .iter()
+                        .any(|id| id == plan.steps()[0].id || id == plan.steps()[1].id)
+            }));
             assert_eq!(
-                fusion::plan(plan.steps(), plan.root(), plan.execution_program()).len(),
+                roles(plan.steps(), plan.root(), plan.execution_program()).len(),
                 2
             );
 
@@ -604,7 +615,7 @@ async fn planned_shapes_that_must_not_fuse_run_unfused() {
     ] {
         let plan = plan_read(&db, &read).await;
         assert!(
-            fusion::plan(plan.steps(), plan.root(), plan.execution_program()).is_empty(),
+            roles(plan.steps(), plan.root(), plan.execution_program()).is_empty(),
             "{name}: {:#?}",
             plan.steps()
         );
@@ -656,7 +667,7 @@ async fn planned_shapes_that_must_not_fuse_run_unfused() {
             exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::Bitmap { .. })
         )
     )));
-    assert!(fusion::plan(plan.steps(), plan.root(), plan.execution_program()).is_empty());
+    assert!(roles(plan.steps(), plan.root(), plan.execution_program()).is_empty());
     let response = db.query(query::QueryRequest::write(write)).await.unwrap();
     let created = response["created"][0]["$id"].as_u64().unwrap();
     assert_eq!(
@@ -683,7 +694,7 @@ async fn pairing_requires_an_exclusive_unconditional_index_set_and_node_search()
     let root = plan.root();
     assert_eq!(root, searched);
     let program = exec::ExecProgram::default();
-    let pairs = |steps: &[exec::ExecStep], root| fusion::plan(steps, root, &program).len();
+    let pairs = |steps: &[exec::ExecStep], root| roles(steps, root, &program).len();
     assert_eq!(pairs(&planned, root), 2);
     assert_eq!(pairs(&planned[..1], source), 0, "an access alone");
 
@@ -833,5 +844,5 @@ async fn pairing_requires_an_exclusive_unconditional_index_set_and_node_search()
         .unwrap()
         .id;
     assert!(limited.execution_program().is_absorbed(limited_source));
-    assert!(fusion::plan(limited.steps(), limited.root(), limited.execution_program()).is_empty());
+    assert!(roles(limited.steps(), limited.root(), limited.execution_program()).is_empty());
 }
