@@ -18,7 +18,14 @@ use crate::{context, ir};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamCardinality {
     input: RootStream,
-    params: context::ParamBindings,
+    /// The request's bindings, which every expression of one planning
+    /// session shares. They are not part of the expression's identity: memo
+    /// and selected-root digests serialize every explored expression, so
+    /// serializing megabytes of parameters per expression dominated planning
+    /// for parameter-heavy requests. A deserialized expression carries no
+    /// bindings and plans with none.
+    #[serde(skip)]
+    params: context::SharedParamBindings,
     late_bound_params: BTreeSet<ir::NonEmptyString>,
 }
 
@@ -62,7 +69,7 @@ impl StreamCardinality {
         };
         Self {
             input,
-            params: context::ParamBindings::default(),
+            params: context::SharedParamBindings::default(),
             late_bound_params: BTreeSet::new(),
         }
     }
@@ -71,10 +78,10 @@ impl StreamCardinality {
     /// bindings while this cardinality terminal executes.
     pub fn with_planning_bindings(
         mut self,
-        params: context::ParamBindings,
+        params: impl Into<context::SharedParamBindings>,
         late_bound_params: BTreeSet<ir::NonEmptyString>,
     ) -> Self {
-        self.params = params;
+        self.params = params.into();
         self.late_bound_params = late_bound_params;
         self
     }
@@ -85,7 +92,13 @@ impl StreamCardinality {
     }
 
     /// Immutable request bindings available for planning-time specialization.
-    pub const fn params(&self) -> &context::ParamBindings {
+    pub fn params(&self) -> &context::ParamBindings {
+        &self.params
+    }
+
+    /// The same bindings as [`Self::params`], for rewrites that carry them
+    /// to a new expression without copying them.
+    pub const fn shared_params(&self) -> &context::SharedParamBindings {
         &self.params
     }
 

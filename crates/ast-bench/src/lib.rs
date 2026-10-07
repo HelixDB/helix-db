@@ -55,7 +55,7 @@ pub fn param_bindings(parameters: BTreeMap<String, QueryValue>) -> ParamBindings
 /// sees a request against an empty database.
 pub fn planner_context(params: ParamBindings) -> PlannerContext {
     PlannerContext {
-        params,
+        params: params.into(),
         ..PlannerContext::default()
     }
 }

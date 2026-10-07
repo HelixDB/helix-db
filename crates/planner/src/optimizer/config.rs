@@ -19,8 +19,9 @@ pub struct OptimizerConfig {
     pub storage: cost::StorageCostProfile,
     /// Immutable index catalog snapshot visible to exploration rules.
     pub indexes: catalog::IndexCatalogSnapshot,
-    /// Immutable request bindings used to specialize ordinary parameters.
-    pub params: context::ParamBindings,
+    /// Immutable request bindings used to specialize ordinary parameters,
+    /// shared with the planner context.
+    pub params: context::SharedParamBindings,
     /// Active scopes whose object fields keep enclosed parameters runtime-dependent.
     pub late_bound_params: BTreeSet<ir::NonEmptyString>,
 }

@@ -905,9 +905,10 @@ impl PreparedPlannerContext {
     }
 
     /// Transfer the request's original parameters together with its catalog
-    /// proof. Serial planning and execution need no duplicate binding tables.
+    /// proof. Planning only borrows the shared bindings, so once it is done
+    /// they move out without a copy.
     pub(crate) fn into_execution_inputs(self) -> (ParamBindings, CatalogRefreshProof) {
-        (self.context.params, self.proof)
+        (self.context.params.into_inner(), self.proof)
     }
 }
 
@@ -2171,7 +2172,7 @@ impl HelixDB {
     pub fn planner_context(&self, params: ParamBindings) -> PlannerContext {
         let indexes = self.runtime_catalog_snapshot();
         PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2190,7 +2191,7 @@ impl HelixDB {
     ) -> Result<PlannerContext> {
         let indexes = self.runtime_catalog_snapshot_scoped(tenant_scope).await?;
         Ok(PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2239,7 +2240,7 @@ impl HelixDB {
         };
         Ok(PreparedPlannerContext {
             context: PlannerContext {
-                params,
+                params: params.into(),
                 late_bound_params: Default::default(),
                 indexes,
                 stats: Default::default(),
