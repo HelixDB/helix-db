@@ -431,7 +431,12 @@ async fn collect_limited(
     Ok(rows)
 }
 
-fn retain_read(bytes: Bytes, budget: Option<&super::rows::memory::Budget>) -> Result<Bytes> {
+/// Admits a storage-returned value to `budget`, when the request has one,
+/// for as long as the value is held.
+pub(in crate::execution::interpreter) fn retain_read(
+    bytes: Bytes,
+    budget: Option<&super::rows::memory::Budget>,
+) -> Result<Bytes> {
     let Some(budget) = budget else {
         return Ok(bytes);
     };

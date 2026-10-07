@@ -280,20 +280,6 @@ async fn endpoint_property_lookup_propagates_corrupt_node_properties() {
     ));
 }
 
-/// Error text with the validator's absolute buffer addresses masked, so
-/// errors from different copies of the same bytes compare equal.
-fn masked_error(error: &str) -> String {
-    let mut masked = String::with_capacity(error.len());
-    let mut rest = error;
-    while let Some(start) = rest.find("0x") {
-        masked.push_str(&rest[..start]);
-        masked.push_str("0x?");
-        rest = rest[start + 2..].trim_start_matches(|c: char| c.is_ascii_hexdigit());
-    }
-    masked.push_str(rest);
-    masked
-}
-
 /// Stored rows covering every value variant, duplicate names, dotted names,
 /// empty rows and large payloads.
 fn stored_shapes() -> Vec<Vec<Property>> {
@@ -538,7 +524,10 @@ async fn resolver_rejects_corrupt_rows_lazily_with_the_decoder_error() {
                     Err(HelixDbError::Encoding(crate::encoding::error::EncodingError::Rkyv(
                         actual,
                     ))),
-                ) => assert_eq!(masked_error(&actual), masked_error(expected)),
+                ) => assert_eq!(
+                    crate::encoding::v2::values::property::view::tests::masked(&actual),
+                    crate::encoding::v2::values::property::view::tests::masked(expected)
+                ),
                 (expected, actual) => panic!("{id} {path}: {expected:?} vs {actual:?}"),
             }
         }
@@ -605,9 +594,15 @@ async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_r
     let unaligned = bytes::Bytes::from(padded).slice(1..);
     let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
     let buffers = crate::encoding::v2::values::property::view::Buffers::default();
+    let alignment = std::mem::align_of::<rkyv::Archived<Property>>();
+    assert_ne!(unaligned.as_ptr().align_offset(alignment), 0);
     for record in [scanned.clone(), unaligned] {
-        let mut resolver =
-            RowValueResolver::with_record(&ctx, ElementRef::Node(1), record, Default::default());
+        let record_is_unaligned = record.as_ptr().align_offset(alignment) != 0;
+        let mut resolver = RowValueResolver::with_record(
+            &ctx,
+            Some((ElementRef::Node(1), record)),
+            Default::default(),
+        );
         let before = ctx.projection_read_snapshot();
         assert_eq!(
             resolver
@@ -642,13 +637,17 @@ async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_r
             ctx.projection_read_snapshot().property_gets,
             before.property_gets + 1
         );
-        drop(resolver.into_buffers());
+        // Only the unaligned record needed an aligned copy, which returns
+        // to the buffers for the next row.
+        assert_eq!(
+            resolver.into_buffers().retained(),
+            usize::from(record_is_unaligned)
+        );
     }
     // A corrupt scanned record fails only when it is read.
     let mut resolver = RowValueResolver::with_record(
         &ctx,
-        ElementRef::Node(1),
-        bytes::Bytes::from_static(b"corrupt"),
+        Some((ElementRef::Node(1), bytes::Bytes::from_static(b"corrupt"))),
         buffers,
     );
     let before = ctx.projection_read_snapshot();
@@ -660,17 +659,39 @@ async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_r
         Some(DbPropertyValue::I64(1))
     );
     assert_eq!(ctx.projection_read_snapshot(), before);
+    // A rejected record stays cached: every read fails as a repeated storage
+    // read of it would, and none falls back to the valid stored row.
+    for _ in 0..2 {
+        assert!(matches!(
+            resolver.row_property(&current_node(1), &name("name")).await,
+            Err(HelixDbError::Encoding(
+                crate::encoding::error::EncodingError::Rkyv(_)
+            ))
+        ));
+    }
     assert!(matches!(
-        resolver.row_property(&current_node(1), &name("name")).await,
+        resolver.row_properties(&current_node(1), true).await,
         Err(HelixDbError::Encoding(
             crate::encoding::error::EncodingError::Rkyv(_)
         ))
     ));
+    assert_eq!(
+        ctx.projection_read_snapshot().property_gets,
+        before.property_gets
+    );
+    // Without a record the resolver reads storage as a new one does.
+    let mut resolver = RowValueResolver::with_record(&ctx, None, Default::default());
+    assert_eq!(
+        resolver
+            .row_property(&current_node(1), &name("name"))
+            .await
+            .unwrap(),
+        Some(DbPropertyValue::String("stored".into()))
+    );
     // The full row of a scanned record decodes like the stored decoder.
     let mut resolver = RowValueResolver::with_record(
         &ctx,
-        ElementRef::Node(1),
-        scanned.clone(),
+        Some((ElementRef::Node(1), scanned.clone())),
         Default::default(),
     );
     assert_eq!(

@@ -23,7 +23,7 @@ use super::{
 use crate::encoding::error::EncodingError;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Reusable aligned copy target for rows stored at unaligned addresses.
 ///
@@ -74,13 +74,33 @@ pub(crate) fn decode_selected(
 }
 
 /// Aligned copies released by dropped [`Row`]s, kept for later rows.
+///
+/// Its owner holds at most as many copies as it had rows alive at once,
+/// each with the capacity of the largest row copied into it, until the
+/// owner is dropped. Owners live for one predicate scan or one record batch.
 #[derive(Default)]
 pub(crate) struct Buffers(Vec<Scratch>);
+
+#[cfg(test)]
+impl Buffers {
+    /// The number of released copies held for reuse.
+    pub(crate) fn retained(&self) -> usize {
+        self.0.len()
+    }
+}
 
 /// A stored property row validated once and then read in place.
 ///
 /// Construction is the only validation; every later read relies on it, so
 /// the bytes behind a `Row` are never mutated.
+///
+/// An aligned row keeps the storage `Bytes` it was read as, which may be a
+/// slice of a larger memtable or block buffer. Unlike the request read
+/// cache, which copies values it keeps so a small value cannot pin a large
+/// buffer (see `Budget::copy_read`), a `Row` lives only as long as one
+/// predicate evaluation or one record batch of at most
+/// `RECORD_BATCH_ROWS` rows, and its row bytes stay charged to the request
+/// budget while it is held.
 pub(crate) struct Row(Storage);
 
 enum Storage {
