@@ -425,8 +425,21 @@ async fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget_contrac
     })
     .await
     .expect("a split searched twice reaches the disk tier");
-    let admitted = db.fts_cache_state().await.unwrap().disk_artifact_count;
+    let hydrated = db.fts_cache_state().await.unwrap();
+    let admitted = hydrated.disk_artifact_count;
     assert_eq!(admitted, 1);
+    // The split retained since the first search reads the object store;
+    // the next search reopens it from the published artifact instead.
+    assert_eq!(
+        db.query(search.clone()).await.unwrap(),
+        serde_json::json!({ "ids": [0] })
+    );
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (state.remote_opens, state.disk_hits),
+        (hydrated.remote_opens, hydrated.disk_hits + 1),
+        "the search after hydration opens the split from disk"
+    );
     db.close().await.expect("server writer closes");
     // Past the one-second grace that protects recently used splits.
     tokio::time::sleep(Duration::from_millis(1100)).await;
