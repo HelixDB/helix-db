@@ -1,0 +1,76 @@
+---
+title: "helix explorer"
+sidebarTitle: "explorer"
+description: "Browse a running local instance in the graph Explorer"
+pageType: "Reference"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+Run the graph Explorer in a container next to a running local instance and open it in your browser.
+The Explorer reads and writes the instance through its `POST /v2/query` endpoint. Local only.
+
+## Usage
+
+```bash
+helix explorer [INSTANCE] [OPTIONS]
+```
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Local instance to explore. Defaults to `dev`, then the only local instance, then a picker in a terminal; otherwise the command fails and lists the local instances. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--port <PORT>` | Host port for the Explorer UI. An explicit port is used as given and must be free. | `6970`, or the next free port when `6970` is taken |
+| `--no-open` | Don't open the Explorer in a browser. | Off (opens in a terminal session) |
+| `--image <REF>` | Explorer image to run, for example a local build such as `helix-explorer:local`. | `HELIX_EXPLORER_IMAGE`, else `ghcr.io/helixdb/helix-explorer:latest` |
+| `--stop` | Stop and remove this instance's Explorer container. Cannot be combined with the options above. | Off |
+| `--json` | Print the result as JSON on stdout, and never prompt or open a browser. | Off |
+
+## Behavior
+
+- The instance must be running. Otherwise the command fails and suggests `helix start <instance>`.
+- The CLI reads the host port the instance's container publishes, so an instance started with `helix start --port` works without changes to `helix.toml`.
+- The Explorer runs as `helix-<project>-<instance>.explorer`, labelled with the instance's identity (`helixdb.identity`) and `helixdb.role=explorer`. Instance names cannot contain `.`, so no instance's container has that name. It is detached and removed when it stops (`-d --rm`), and its port is published on `127.0.0.1` only.
+- The CLI only reuses, lists, or removes a container with that name when it carries both labels. Any other container under that name is left alone, and starting the Explorer fails until it is renamed.
+- The container reaches the instance through the host. With Docker, `HELIX_URL` is `http://host.docker.internal:<instance port>` and the CLI adds `--add-host host.docker.internal:host-gateway`. With Podman, `HELIX_URL` is `http://host.containers.internal:<instance port>`, a name Podman provides itself.
+- A missing image is pulled first, with the pull's progress on the spinner. An image that is already present is not pulled again; run `docker pull ghcr.io/helixdb/helix-explorer:latest` (or `podman pull`) to update it, then `helix explorer` again to switch to it.
+- When the instance's Explorer is already running, the CLI reuses it and prints its URL. It replaces it instead when it runs another image (images are compared by ID, so a re-pulled or rebuilt tag counts as another image), serves another port than an explicit `--port`, or reads an instance port that has since changed.
+- A replacement keeps the running Explorer's port unless `--port` names another. The CLI checks that port and pulls the image before it removes the running Explorer, so a busy port or a failed pull leaves the running Explorer in place.
+- The CLI waits up to 30 seconds for the Explorer's `GET /healthz`. If the Explorer reports that it cannot reach the instance, the CLI prints a warning and still succeeds. If the container exits first, the error shows how to run the image attached to see its output.
+- The browser opens only in an interactive terminal, and never with `--no-open` or `--json`.
+- [`helix stop`](/cli/command-reference/stop) and [`helix prune`](/cli/command-reference/prune) also remove the instance's Explorer, and [`helix status`](/cli/command-reference/status) lists a running one.
+- `--json` prints `instance`, `url`, `container`, `image`, `helixUrl` (the instance URL as the container reaches it), `helix` (`reachable` or `unreachable`, as reported by `/healthz`), and `reused`. With `--stop`, it prints `instance`, `container`, and `wasRunning`.
+
+## Environment
+
+| Variable | Description |
+| --- | --- |
+| `HELIX_EXPLORER_IMAGE` | Explorer image to run when `--image` is not passed. An empty value is ignored. |
+
+## Examples
+
+```bash
+# Open the Explorer for 'dev' or the only local instance
+helix explorer
+
+# Start it without opening a browser and print the URL as JSON
+helix explorer dev --no-open --json
+
+# Run a locally built Explorer image on a specific port
+helix explorer dev --image helix-explorer:local --port 7000
+
+# Stop the Explorer and keep the instance running
+helix explorer dev --stop
+```
+
+## Related
+
+- [`helix start`](/cli/command-reference/start) — start the local instance the Explorer reads.
+- [`helix query`](/cli/command-reference/query) — send one request from the terminal.
+- [Local workflow](/cli/workflows/local) — run and debug a local instance.
