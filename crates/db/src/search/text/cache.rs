@@ -1,6 +1,6 @@
 //! Bounded split-aware cache for immutable Tantivy text artifacts.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
@@ -116,7 +116,17 @@ pub(crate) struct OpenedTextSplit {
     reader: IndexReader,
     fields: TextSchemaFields,
     size_bytes: u64,
-    _artifact_lease: Option<DiskArtifactLease>,
+    backing: SplitBacking,
+}
+
+/// Where an opened split reads the byte ranges its searches miss in the
+/// split's range cache.
+enum SplitBacking {
+    /// The object store, one request per missed range.
+    Remote,
+    /// The local artifact, leased so disk cleanup keeps it while the split
+    /// stays open.
+    Local { _lease: DiskArtifactLease },
 }
 
 impl OpenedTextSplit {
@@ -469,6 +479,15 @@ impl FtsCache {
         };
         let opened = Arc::new(opened);
         self.insert_memory(key.clone(), Arc::clone(&opened));
+        // A hydration that published the artifact while this open read the
+        // object store dropped remote entries before this one existed, so
+        // this one is dropped here and the next search opens the artifact.
+        if matches!(opened.backing, SplitBacking::Remote)
+            && let Some(path) = self.artifact_path(key.sha256)
+            && tokio_fs::try_exists(&path).await.unwrap_or(false)
+        {
+            self.evict_remote_entry(&key);
+        }
         drop(guard);
         self.inflight.remove(&key);
         Ok(opened)
@@ -686,6 +705,29 @@ impl FtsCache {
         }
     }
 
+    /// Drops `key`'s retained split if it reads the object store, so the
+    /// next search reopens the split from its local artifact.
+    ///
+    /// Called once the artifact is published: by [`Self::ensure_artifact`]
+    /// for splits retained before it, and by [`Self::get_or_open_split`] for
+    /// a remote open that raced the publication. A split already reopened
+    /// from disk stays retained, and searches still holding a dropped split
+    /// finish on it.
+    fn evict_remote_entry(&self, key: &TextSplitCacheKey) {
+        let mut memory = self.memory.lock();
+        let hash_map::Entry::Occupied(entry) = memory.entries.entry(key.clone()) else {
+            return;
+        };
+        if matches!(entry.get().split.backing, SplitBacking::Local { .. }) {
+            return;
+        }
+        let evicted = entry.remove();
+        memory.bytes = memory
+            .bytes
+            .checked_sub(evicted.size_bytes)
+            .expect("retained bytes include every retained split");
+    }
+
     async fn open_remote(&self, split: &TextSplitRef) -> Result<OpenedTextSplit, HelixDbError> {
         self.stats.remote_opens.fetch_add(1, Ordering::Relaxed);
         let result = async {
@@ -713,7 +755,7 @@ impl FtsCache {
                 footer.hotcache_bytes.as_ref(),
                 split.total_size_bytes,
                 range_cache,
-                None,
+                SplitBacking::Remote,
             )
         }
         .await;
@@ -751,7 +793,7 @@ impl FtsCache {
                 footer.hotcache_bytes.as_ref(),
                 split_for_open.total_size_bytes,
                 range_cache,
-                Some(lease),
+                SplitBacking::Local { _lease: lease },
             )
         })
         .await
@@ -811,6 +853,7 @@ impl FtsCache {
                     .await;
                 drop(guard);
                 self.hydration_inflight.remove(&split.blob.sha256);
+                self.evict_remote_entry(&key);
                 return Ok(0);
             }
             self.remove_artifact(split.blob.sha256).await;
@@ -883,7 +926,7 @@ impl FtsCache {
             };
             sync_parent(final_path.clone()).await?;
             if published {
-                self.validated.lock().insert(key);
+                self.validated.lock().insert(key.clone());
                 let size = tokio_fs::metadata(&final_path)
                     .await
                     .map_err(|error| HelixDbError::Config(error.to_string()))?
@@ -898,7 +941,7 @@ impl FtsCache {
         .await;
         drop(guard);
         self.hydration_inflight.remove(&split.blob.sha256);
-        result
+        result.inspect(|_| self.evict_remote_entry(&key))
     }
 
     /// Evicts the least recently used disk artifacts down to the disk budget,
@@ -1105,7 +1148,7 @@ fn open_entry_from_directory(
     hotcache: &[u8],
     size_bytes: u64,
     range_cache: RangeCache<PathBuf>,
-    artifact_lease: Option<DiskArtifactLease>,
+    backing: SplitBacking,
 ) -> Result<OpenedTextSplit, HelixDbError> {
     let cached: Arc<dyn tantivy::Directory> =
         Arc::new(CachingDirectory::new(Arc::new(directory), range_cache));
@@ -1122,7 +1165,7 @@ fn open_entry_from_directory(
         reader,
         fields,
         size_bytes,
-        _artifact_lease: artifact_lease,
+        backing,
     })
 }
 
@@ -1426,12 +1469,26 @@ mod tests {
     }
 
     /// Holds every read until the test adds a permit to `gate`, so a
-    /// hydration can be paused mid-download at a known point.
+    /// hydration can be paused mid-download at a known point, and counts the
+    /// reads in `reads`.
     #[derive(Debug)]
     struct GatedStore {
         inner: InMemory,
         reading: Notify,
         gate: Semaphore,
+        reads: AtomicU64,
+    }
+
+    impl GatedStore {
+        /// A store whose reads never wait, for tests that only count them.
+        fn open() -> Self {
+            Self {
+                inner: InMemory::new(),
+                reading: Notify::new(),
+                gate: Semaphore::new(Semaphore::MAX_PERMITS),
+                reads: AtomicU64::new(0),
+            }
+        }
     }
 
     impl fmt::Display for GatedStore {
@@ -1464,6 +1521,7 @@ mod tests {
             location: &ObjectPath,
             options: GetOptions,
         ) -> ObjectStoreResult<GetResult> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             self.reading.notify_one();
             let _permit = self.gate.acquire().await.expect("the gate is never closed");
             self.inner.get_opts(location, options).await
@@ -2058,9 +2116,8 @@ mod tests {
         // Outside the footer, so only the hash can tell.
         corrupt[0] ^= 0xff;
         let gated = Arc::new(GatedStore {
-            inner: InMemory::new(),
-            reading: Notify::new(),
             gate: Semaphore::new(0),
+            ..GatedStore::open()
         });
         let gated_store: Arc<dyn ObjectStore> = Arc::<GatedStore>::clone(&gated);
         put_split(&gated_store, database, corrupt, &split).await;
@@ -2417,5 +2474,478 @@ mod tests {
         );
         evicting.cleanup_disk().await.expect("unprotected cleanup");
         assert_eq!(evicting.snapshot().disk_artifact_count, 1);
+    }
+
+    /// Warms `split` for `query` and returns how many documents match it.
+    async fn search(split: &OpenedTextSplit, query: &str) -> usize {
+        split
+            .warm(TextAnalyzerKind::Standard, query)
+            .await
+            .expect("warm");
+        split
+            .search_candidates_with_statistics(
+                TextAnalyzerKind::Standard,
+                query,
+                10,
+                None,
+                &crate::search::text::TextSearchScope::Unrestricted,
+            )
+            .expect("search")
+            .len()
+    }
+
+    /// The retained byte total equals the sum of the retained splits.
+    fn assert_exact_memory_bytes(cache: &FtsCache) {
+        let memory = cache.memory.lock();
+        assert_eq!(
+            memory.bytes,
+            memory
+                .entries
+                .values()
+                .map(|entry| entry.size_bytes)
+                .sum::<u64>()
+        );
+    }
+
+    /// A split opened remotely before its second search stays retained
+    /// until demand hydration publishes it; the next search then reopens it
+    /// from disk and reads no term from the object store again, while a
+    /// search still holding the remote split finishes on it.
+    #[tokio::test]
+    async fn demand_hydration_reopens_retained_remote_splits_from_disk() {
+        let database = "fts-cache-hydration-reopen";
+        let counting = Arc::new(GatedStore::open());
+        let store: Arc<dyn ObjectStore> = Arc::<GatedStore>::clone(&counting);
+        let (bytes, split) = valid_split(22);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.total_size_bytes * 2,
+            Duration::from_secs(300),
+        );
+
+        let remote = cache.get_or_open_split(&split).await.expect("remote open");
+        assert!(matches!(remote.backing, SplitBacking::Remote));
+        assert_eq!(search(&remote, "split").await, 1);
+        for _ in 0..2 {
+            cache.after_successful_search(split.clone()).await;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while cache.snapshot().hydration_completions == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the second search hydrates");
+        let state = cache.snapshot();
+        assert_eq!(
+            (state.retained_split_count, state.retained_split_bytes),
+            (0, 0),
+            "hydration dropped the remote split"
+        );
+
+        let reads = counting.reads.load(Ordering::SeqCst);
+        let local = cache.get_or_open_split(&split).await.expect("disk reopen");
+        assert!(matches!(local.backing, SplitBacking::Local { .. }));
+        assert_eq!(search(&local, "22").await, 1);
+        assert_eq!(search(&local, "absent").await, 0);
+        assert_eq!(
+            counting.reads.load(Ordering::SeqCst),
+            reads,
+            "new terms on the reopened split read no object"
+        );
+        let state = cache.snapshot();
+        assert_eq!(
+            (
+                state.remote_opens,
+                state.disk_hits,
+                state.retained_split_count,
+                state.retained_split_bytes
+            ),
+            (1, 1, 1, split.total_size_bytes)
+        );
+        assert!(Arc::ptr_eq(
+            &local,
+            &cache.get_or_open_split(&split).await.expect("memory hit")
+        ));
+
+        assert_eq!(
+            search(&remote, "22").await,
+            1,
+            "a search holding the dropped split finishes on it"
+        );
+        assert!(
+            counting.reads.load(Ordering::SeqCst) > reads,
+            "the dropped split still reads new terms from the object store"
+        );
+        assert_exact_memory_bytes(&cache);
+        cache.close().await;
+    }
+
+    /// A remote open that misses the disk before another handle publishes
+    /// the artifact retains its split only after that publication dropped
+    /// remote splits. The open notices the artifact and drops its own
+    /// split, so the next search opens the artifact.
+    #[tokio::test]
+    async fn remote_open_racing_publication_reopens_from_disk() {
+        let database = "fts-cache-open-races-publication";
+        let (bytes, split) = valid_split(23);
+        let gated = Arc::new(GatedStore {
+            gate: Semaphore::new(0),
+            ..GatedStore::open()
+        });
+        let gated_store: Arc<dyn ObjectStore> = Arc::<GatedStore>::clone(&gated);
+        put_split(&gated_store, database, bytes.clone(), &split).await;
+        let valid_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        put_split(&valid_store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let open_cache = |store: Arc<dyn ObjectStore>| {
+            cache(
+                database,
+                store,
+                Some(disk.path().to_path_buf()),
+                split.total_size_bytes,
+                split.total_size_bytes * 2,
+                Duration::from_secs(300),
+            )
+        };
+        let (opening, publishing) = (open_cache(gated_store), open_cache(valid_store));
+
+        let (remote, ()) = tokio::join!(opening.get_or_open_split(&split), async {
+            gated.reading.notified().await;
+            publishing
+                .ensure_artifact(&split)
+                .await
+                .expect("the other handle publishes");
+            gated.gate.add_permits(Semaphore::MAX_PERMITS);
+        });
+        let remote = remote.expect("remote open");
+        assert!(matches!(remote.backing, SplitBacking::Remote));
+        assert_eq!(search(&remote, "split").await, 1);
+        let state = opening.snapshot();
+        assert_eq!(
+            (state.retained_split_count, state.retained_split_bytes),
+            (0, 0),
+            "the racing open dropped its remote split"
+        );
+
+        let local = opening.get_or_open_split(&split).await.expect("disk open");
+        assert!(matches!(local.backing, SplitBacking::Local { .. }));
+        let state = opening.snapshot();
+        assert_eq!(
+            (
+                state.remote_opens,
+                state.disk_hits,
+                state.retained_split_count
+            ),
+            (1, 1, 1)
+        );
+        assert_exact_memory_bytes(&opening);
+    }
+
+    /// Hydrating a split already reopened from disk keeps that split.
+    #[tokio::test]
+    async fn hydration_keeps_splits_reopened_from_disk() {
+        let database = "fts-cache-hydration-keeps-local";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(24);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.total_size_bytes * 2,
+            Duration::from_secs(300),
+        );
+
+        cache.ensure_artifact(&split).await.expect("hydration");
+        let local = cache.get_or_open_split(&split).await.expect("disk open");
+        assert!(matches!(local.backing, SplitBacking::Local { .. }));
+        assert_eq!(cache.ensure_artifact(&split).await.expect("reuse"), 0);
+        assert!(Arc::ptr_eq(
+            &local,
+            &cache.get_or_open_split(&split).await.expect("memory hit")
+        ));
+        let state = cache.snapshot();
+        assert_eq!(
+            (state.memory_hits, state.disk_hits, state.remote_opens),
+            (1, 1, 0)
+        );
+        assert_eq!(state.retained_split_bytes, split.total_size_bytes);
+        assert_exact_memory_bytes(&cache);
+    }
+
+    /// A hydration that fails publishes nothing, so the remote split stays
+    /// retained; so does one in a memory-only cache, which never hydrates.
+    #[tokio::test]
+    async fn remote_splits_stay_retained_without_a_published_artifact() {
+        let database = "fts-cache-failed-hydration-keeps-remote";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(25);
+        let mut corrupt = bytes.clone();
+        // Outside the footer, so only the hash can tell.
+        corrupt[0] ^= 0xff;
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let hybrid = cache(
+            database,
+            Arc::clone(&store),
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.total_size_bytes * 2,
+            Duration::from_secs(300),
+        );
+        let memory_only = cache(
+            database,
+            Arc::clone(&store),
+            None,
+            split.total_size_bytes,
+            0,
+            Duration::from_secs(300),
+        );
+
+        let failed = hybrid.get_or_open_split(&split).await.expect("remote open");
+        let unhydrated = memory_only
+            .get_or_open_split(&split)
+            .await
+            .expect("remote open");
+        put_split(&store, database, corrupt, &split).await;
+        assert!(hybrid.ensure_artifact(&split).await.is_err());
+        assert_eq!(
+            memory_only.ensure_artifact(&split).await.expect("no disk"),
+            0
+        );
+        for (handle, retained) in [(&hybrid, &failed), (&memory_only, &unhydrated)] {
+            assert!(Arc::ptr_eq(
+                retained,
+                &handle.get_or_open_split(&split).await.expect("memory hit")
+            ));
+            let state = handle.snapshot();
+            assert_eq!(
+                (
+                    state.memory_hits,
+                    state.remote_opens,
+                    state.retained_split_bytes
+                ),
+                (1, 1, split.total_size_bytes)
+            );
+            assert_exact_memory_bytes(handle);
+        }
+    }
+
+    /// Dropping a hydrated split's remote copy leaves every other retained
+    /// split, and the retained byte total, exact; repeating it is a no-op.
+    #[tokio::test]
+    async fn remote_eviction_keeps_other_splits_and_exact_bytes() {
+        let database = "fts-cache-eviction-accounting";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (hydrated_bytes, hydrated) = valid_split(26);
+        let (other_bytes, other) = valid_split(27);
+        put_split(&store, database, hydrated_bytes, &hydrated).await;
+        put_split(&store, database, other_bytes, &other).await;
+        let total = hydrated.total_size_bytes + other.total_size_bytes;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            total,
+            total * 2,
+            Duration::from_secs(300),
+        );
+
+        let other_split = cache.get_or_open_split(&other).await.expect("other open");
+        cache.get_or_open_split(&hydrated).await.expect("open");
+        assert_eq!(cache.snapshot().retained_split_bytes, total);
+        cache.ensure_artifact(&hydrated).await.expect("hydration");
+        cache.evict_remote_entry(&TextSplitCacheKey::from(&hydrated));
+        let state = cache.snapshot();
+        assert_eq!(
+            (state.retained_split_count, state.retained_split_bytes),
+            (1, other.total_size_bytes)
+        );
+        assert_exact_memory_bytes(&cache);
+        assert!(Arc::ptr_eq(
+            &other_split,
+            &cache.get_or_open_split(&other).await.expect("memory hit")
+        ));
+
+        cache.get_or_open_split(&hydrated).await.expect("disk open");
+        let state = cache.snapshot();
+        assert_eq!(
+            (
+                state.retained_split_count,
+                state.retained_split_bytes,
+                state.memory_evictions
+            ),
+            (2, total, 0)
+        );
+        assert_exact_memory_bytes(&cache);
+    }
+
+    /// Searches racing a hydration all succeed, and once it lands the cache
+    /// settles on one retained split opened from disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn searches_racing_hydration_settle_on_the_disk_split() {
+        let database = "fts-cache-searches-race-hydration";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(28);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.total_size_bytes * 2,
+            Duration::from_secs(300),
+        );
+
+        let (searches, hydration) = tokio::join!(
+            futures::future::join_all((0..16).map(|round| {
+                let (cache, split) = (Arc::clone(&cache), split.clone());
+                tokio::spawn(async move {
+                    for _ in 0..round {
+                        tokio::task::yield_now().await;
+                    }
+                    let opened = cache.get_or_open_split(&split).await?;
+                    Ok::<_, HelixDbError>(search(&opened, "28").await)
+                })
+            })),
+            cache.ensure_artifact(&split)
+        );
+        hydration.expect("hydration");
+        assert!(searches
+            .into_iter()
+            .map(|result| result.expect("search task").expect("open"))
+            .all(|hits| hits == 1));
+        let settled = cache.get_or_open_split(&split).await.expect("open");
+        assert!(matches!(settled.backing, SplitBacking::Local { .. }));
+        let state = cache.snapshot();
+        assert_eq!(
+            (state.retained_split_count, state.retained_split_bytes),
+            (1, split.total_size_bytes)
+        );
+        assert_exact_memory_bytes(&cache);
+    }
+
+    /// A split reopened from disk leases its artifact, so disk cleanup keeps
+    /// it however old and over budget. Once cleanup evicts an artifact
+    /// nothing leases, the next search opens the split remotely again and
+    /// keeps that split retained rather than reopening it every search.
+    #[tokio::test]
+    async fn cleanup_spares_reopened_splits_and_evicted_ones_stay_retained() {
+        let database = "fts-cache-reopen-cleanup";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(29);
+        let (other_bytes, other) = valid_split(31);
+        put_split(&store, database, bytes, &split).await;
+        put_split(&store, database, other_bytes, &other).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes.max(other.total_size_bytes),
+            split.total_size_bytes - 1,
+            Duration::from_secs(1),
+        );
+        let artifact = cache
+            .artifact_path(split.blob.sha256)
+            .expect("artifact path");
+        let forget_use = || async {
+            let metadata = serde_json::to_vec(&ArtifactMetadata {
+                size_bytes: split.blob.size_bytes,
+                last_access_unix_ms: 0,
+            })
+            .expect("serialize metadata");
+            tokio_fs::write(
+                cache
+                    .metadata_path(split.blob.sha256)
+                    .expect("metadata path"),
+                metadata,
+            )
+            .await
+            .expect("write metadata");
+        };
+
+        cache.get_or_open_split(&split).await.expect("remote open");
+        cache.ensure_artifact(&split).await.expect("hydration");
+        let local = cache.get_or_open_split(&split).await.expect("disk open");
+        assert!(matches!(local.backing, SplitBacking::Local { .. }));
+        drop(local);
+        forget_use().await;
+        cache.cleanup_disk().await.expect("leased cleanup");
+        assert!(
+            artifact.try_exists().expect("artifact status"),
+            "the retained split leases its artifact"
+        );
+
+        cache.get_or_open_split(&other).await.expect("other open");
+        assert_eq!(cache.snapshot().memory_evictions, 1);
+        forget_use().await;
+        cache.cleanup_disk().await.expect("unleased cleanup");
+        assert!(!artifact.try_exists().expect("artifact status"));
+
+        let remote = cache.get_or_open_split(&split).await.expect("remote open");
+        assert!(matches!(remote.backing, SplitBacking::Remote));
+        assert!(Arc::ptr_eq(
+            &remote,
+            &cache.get_or_open_split(&split).await.expect("memory hit")
+        ));
+        let state = cache.snapshot();
+        assert_eq!(
+            (
+                state.remote_opens,
+                state.disk_evictions,
+                state.retained_split_bytes
+            ),
+            (3, 1, split.total_size_bytes)
+        );
+        assert_exact_memory_bytes(&cache);
+    }
+
+    /// A warm of a split already retained remotely hydrates it and leaves
+    /// the split reopened from disk.
+    #[tokio::test]
+    async fn warm_reopens_retained_remote_splits_from_disk() {
+        let database = "fts-cache-warm-reopen";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(30);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.total_size_bytes * 2,
+            Duration::from_secs(300),
+        );
+
+        cache.get_or_open_split(&split).await.expect("remote open");
+        let warmed = cache.warm_splits(1, vec![split.clone()]).await;
+        assert_eq!(
+            (
+                warmed.opened_splits,
+                warmed.hydrated_splits,
+                warmed.warm_errors
+            ),
+            (1, 1, 0)
+        );
+        let warm = cache.get_or_open_split(&split).await.expect("memory hit");
+        assert!(matches!(warm.backing, SplitBacking::Local { .. }));
+        let state = cache.snapshot();
+        assert_eq!(
+            (state.remote_opens, state.disk_hits, state.memory_hits),
+            (1, 1, 1)
+        );
+        assert_exact_memory_bytes(&cache);
     }
 }
