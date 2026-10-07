@@ -391,7 +391,6 @@ async fn run_empty_contracts() {
 
 /// Covers initial publication, immutable refresh, and deterministic budget shares.
 async fn run_refresh_and_budget_contracts() {
-    const ENTRY_OVERHEAD_BYTES: u64 = 64;
     let db = raw_db("production-vector-hydration-refresh").await;
     let scope = DataScope::LegacyUnscoped;
     let (active, physical) = active_vector(scope, 2, 21, false);
@@ -462,9 +461,9 @@ async fn run_refresh_and_budget_contracts() {
     let low_key = upper_vector_key(scope, 31, 1);
     let high_key = upper_vector_key(scope, 41, 1);
     assert_eq!(low_key.len(), high_key.len());
-    let row_bytes = u64::try_from(low_key.len() + value.len())
-        .expect("hydration row length fits u64")
-        + ENTRY_OVERHEAD_BYTES;
+    let row_bytes = super::super::store::isolated_upper_row_admission_bytes(
+        u64::try_from(value.len()).expect("hydration row length fits u64"),
+    );
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     transaction.put(low_key, value.clone()).unwrap();
     transaction.put(high_key, value).unwrap();

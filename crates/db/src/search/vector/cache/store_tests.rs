@@ -376,7 +376,10 @@ async fn removal_after_hydration_matches_the_model() {
     model.vectors.remove(&64);
     store.remove_simhash(3);
     model.simhashes.remove(&3);
-    store.remove_upper_neighbors_for_node(1_000);
+    // Removing every neighbor layer keeps the node's vector.
+    for layer in 0..=MAX_LAYER {
+        store.remove_upper_neighbors(layer, 1_000);
+    }
     model.neighbors.retain(|(_, node), _| *node != 1_000);
     model.assert_matches(&store, 0..fixture.node_count);
 
@@ -558,7 +561,9 @@ proptest! {
                     model.neighbors.remove(&(layer, node_id));
                 }
                 Operation::RemoveNodeNeighbors(node_id) => {
-                    store.remove_upper_neighbors_for_node(node_id);
+                    for layer in 0..=MAX_LAYER {
+                        store.remove_upper_neighbors(layer, node_id);
+                    }
                     model.neighbors.retain(|(_, node), _| *node != node_id);
                 }
                 Operation::RemoveSimHash(node_id) => {
