@@ -76,7 +76,7 @@
   {
     "path": "crates/db/src/search/vector/cache/store.rs",
     "lines": [
-      450
+      455
     ],
     "classification": "named-test",
     "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries",
