@@ -90,7 +90,7 @@ fn decode_node_ids(data: &[u8], count: usize) -> Vec<NodeId> {
 pub fn encode_layer0_neighbors(neighbors: &[NodeId]) -> Bytes {
     let canonical = canonical_neighbors(neighbors);
     let count = count_prefix(canonical.len());
-    let capacity = encoded_len(LAYER0_NEIGHBORS_HEADER_LEN, canonical.len(), 0);
+    let capacity = encoded_layer0_neighbors_len(canonical.len());
 
     let mut buf = Vec::with_capacity(capacity);
     buf.push(ENCODING_TYPE_LAYER0_NEIGHBORS);
@@ -99,6 +99,17 @@ pub fn encode_layer0_neighbors(neighbors: &[NodeId]) -> Bytes {
     debug_assert_eq!(buf.len(), capacity);
 
     Bytes::from(buf)
+}
+
+/// Returns the exact length [`encode_layer0_neighbors`] gives `count`
+/// canonical (sorted, unique) neighbors, without encoding them.
+///
+/// Callers holding canonical neighbor sets measure row payloads through this
+/// instead of an encoding they would discard. Panics exactly when the
+/// encoder's length computation would.
+#[inline]
+pub(crate) fn encoded_layer0_neighbors_len(count: usize) -> usize {
+    encoded_len(LAYER0_NEIGHBORS_HEADER_LEN, count, 0)
 }
 
 /// Encode a layer-0 record with neighbors and optional SimHash.
@@ -435,7 +446,23 @@ mod tests {
         let _ = encoded_len(usize::MAX, 1, 1);
     }
 
+    #[test]
+    fn encoded_layer0_neighbors_len_counts_the_header_and_every_id() {
+        assert_eq!(encoded_layer0_neighbors_len(0), 5);
+        assert_eq!(encoded_layer0_neighbors_len(3), 5 + 3 * 8);
+    }
+
     proptest! {
+        #[test]
+        fn encoded_layer0_neighbors_len_matches_canonical_encodings(neighbors in proptest::collection::btree_set(any::<NodeId>(), 0..96)) {
+            let neighbors = neighbors.into_iter().collect::<Vec<_>>();
+
+            prop_assert_eq!(
+                encoded_layer0_neighbors_len(neighbors.len()),
+                encode_layer0_neighbors(&neighbors).len()
+            );
+        }
+
         #[test]
         fn encode_layer0_neighbors_canonicalizes_arbitrary_neighbors(neighbors in proptest::collection::vec(any::<NodeId>(), 0..64)) {
             let expected = neighbors.iter().copied().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
