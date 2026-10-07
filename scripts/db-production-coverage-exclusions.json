@@ -114,12 +114,6 @@
     "evidence": "populated_legacy_vector_is_adopted_in_place and db-vector-production-coverage architecture matrix"
   },
   {
-    "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 1145,
-    "reason": "This closing edge belongs to an impossible empty-recency result after the absent payload admission loop proved the item cache is non-empty.",
-    "evidence": "vector_index_exercises_facade_and_row_safety_contracts"
-  },
-  {
     "path": "crates/db/src/search/vector/storage/mod.rs",
     "line": 589,
     "reason": "Each lane iterator is created from that lane's exact physical prefix, and every successfully parsed key under it carries the same physical index and lane discriminant.",
