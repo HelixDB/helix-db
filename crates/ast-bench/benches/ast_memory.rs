@@ -115,43 +115,6 @@ fn live() -> isize {
     COUNT.with(|cell| cell.get().expect("observation is active").live)
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Backend {
-    Sonic,
-    SimdJson,
-}
-
-impl Backend {
-    const ALL: [Self; 2] = [Self::Sonic, Self::SimdJson];
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Sonic => "sonic",
-            Self::SimdJson => "simd_json",
-        }
-    }
-
-    /// Parse `body` as the transport would; simd-json rewrites it in place.
-    fn parse(self, body: &mut [u8]) -> QueryRequest {
-        match self {
-            Self::Sonic => QueryRequest::from_json_slice(body).expect("corpus shapes parse"),
-            Self::SimdJson => QueryRequest::from_json_slice_mut(body).expect("corpus shapes parse"),
-        }
-    }
-
-    /// Parse `body` into `bump`.
-    fn parse_arena<'a>(self, bump: &'a Bump, body: &mut [u8]) -> ArenaQueryRequest<'a> {
-        match self {
-            Self::Sonic => {
-                ArenaQueryRequest::from_json_slice(bump, body).expect("corpus shapes parse")
-            }
-            Self::SimdJson => {
-                ArenaQueryRequest::from_json_slice_mut(bump, body).expect("corpus shapes parse")
-            }
-        }
-    }
-}
-
 fn mib(bytes: isize) -> String {
     format!("{:.3}", bytes as f64 / (1024.0 * 1024.0))
 }
@@ -206,34 +169,34 @@ fn parse() {
         );
     };
     for shape in support::shapes() {
-        for backend in Backend::ALL {
-            let mut body = shape.json.clone();
-            let (request, parsed) = observe(|| backend.parse(&mut body));
-            let ((), dropped) = observe(|| drop(request));
-            row(
-                shape,
-                backend.name().to_owned(),
-                parsed,
-                None,
-                parsed.live + dropped.live,
-            );
-        }
-        for backend in Backend::ALL {
-            let mut body = shape.json.clone();
-            let bump = Bump::new();
-            let (request, parsed) = observe(|| backend.parse_arena(&bump, &mut body));
-            let chunks = bump.allocated_bytes();
-            let filled = chunks - bump.chunk_capacity();
-            let ((), dropped_request) = observe(|| drop(request));
-            let ((), dropped_arena) = observe(|| drop(bump));
-            row(
-                shape,
-                format!("{}_arena", backend.name()),
-                parsed,
-                Some((chunks, filled)),
-                parsed.live + dropped_request.live + dropped_arena.live,
-            );
-        }
+        // simd-json parses the transport's body in place.
+        let mut body = shape.json.clone();
+        let (request, parsed) =
+            observe(|| QueryRequest::from_json_slice_mut(&mut body).expect("corpus shapes parse"));
+        let ((), dropped) = observe(|| drop(request));
+        row(
+            shape,
+            String::from("owned"),
+            parsed,
+            None,
+            parsed.live + dropped.live,
+        );
+        let mut body = shape.json.clone();
+        let bump = Bump::new();
+        let (request, parsed) = observe(|| {
+            ArenaQueryRequest::from_json_slice_mut(&bump, &mut body).expect("corpus shapes parse")
+        });
+        let chunks = bump.allocated_bytes();
+        let filled = chunks - bump.chunk_capacity();
+        let ((), dropped_request) = observe(|| drop(request));
+        let ((), dropped_arena) = observe(|| drop(bump));
+        row(
+            shape,
+            String::from("arena"),
+            parsed,
+            Some((chunks, filled)),
+            parsed.live + dropped_request.live + dropped_arena.live,
+        );
     }
 }
 
@@ -244,14 +207,16 @@ fn parameters() {
     );
     println!("|---|---:|---:|---:|---:|---:|---:|");
     for shape in support::shapes() {
+        let mut body = shape.json.clone();
         let (value, owned) = observe(|| {
-            sonic_rs::from_slice::<QueryValue>(&shape.json).expect("corpus shapes are JSON")
+            simd_json::serde::from_slice::<QueryValue>(&mut body).expect("corpus shapes are JSON")
         });
         drop(value);
+        let mut body = shape.json.clone();
         let bump = Bump::new();
         let ((), parsed) = observe(|| {
-            let text = std::str::from_utf8(&shape.json).expect("corpus shapes are UTF-8");
-            let mut deserializer = sonic_rs::Deserializer::from_str(text);
+            let mut deserializer =
+                simd_json::Deserializer::from_slice(&mut body).expect("corpus shapes are JSON");
             let value: arena::QueryValue<'_> =
                 serde::de::DeserializeSeed::deserialize(arena::Seed::new(&bump), &mut deserializer)
                     .expect("corpus shapes are JSON");
@@ -295,7 +260,7 @@ impl Retention {
 /// Live heap at each `query_service` stage boundary, the peak across the
 /// request, and the heap still live while execution would run.
 fn lifecycle(retention: Retention) {
-    println!("\n## lifecycle: {} (sonic)\n", retention.name());
+    println!("\n## lifecycle: {}\n", retention.name());
     println!(
         "| shape | body | +parse | +check_nesting | +bindings | +context | +plan | during execution | peak | after drop |"
     );
@@ -303,9 +268,10 @@ fn lifecycle(retention: Retention) {
     for name in support::plannable_shape_names() {
         let json = &support::shape(name).json;
         let (boundaries, count) = observe(|| {
-            let body = json.clone();
+            let mut body = json.clone();
             let after_body = live();
-            let request = QueryRequest::from_json_slice(&body).expect("corpus shapes parse");
+            let request =
+                QueryRequest::from_json_slice_mut(&mut body).expect("corpus shapes parse");
             let body = match retention {
                 Retention::HeldUntilExecution => Some(body),
                 Retention::FreedEarly => {
@@ -410,14 +376,9 @@ fn stack_probe_child(probe: &str) {
             );
         }
     }
-    let mut parts = probe.split(':');
-    let (Some(backend), Some(stage), Some(kib)) = (parts.next(), parts.next(), parts.next()) else {
+    let Some((stage, kib)) = probe.split_once(':') else {
         panic!("malformed probe {probe}");
     };
-    let backend = Backend::ALL
-        .into_iter()
-        .find(|candidate| candidate.name() == backend)
-        .expect("known backend");
     let stage = StackStage::ALL
         .into_iter()
         .find(|candidate| candidate.name() == stage)
@@ -426,18 +387,22 @@ fn stack_probe_child(probe: &str) {
     let mut body = testing::deep_chain(testing::MAX_DEEP_CHAIN_STEPS).json;
     let prepared = match stage {
         StackStage::Parse | StackStage::ArenaParse => None,
-        StackStage::Drop => Some(backend.parse(&mut body.clone())),
+        StackStage::Drop => {
+            Some(QueryRequest::from_json_slice_mut(&mut body.clone()).expect("corpus shapes parse"))
+        }
     };
     std::thread::Builder::new()
         .stack_size(kib << 10)
         .spawn(move || match (stage, prepared) {
             (StackStage::ArenaParse, _) => {
                 let bump = Bump::new();
-                std::hint::black_box(backend.parse_arena(&bump, &mut body).request_type());
+                let request = ArenaQueryRequest::from_json_slice_mut(&bump, &mut body)
+                    .expect("corpus shapes parse");
+                std::hint::black_box(request.request_type());
             }
-            (StackStage::Parse | StackStage::Drop, None) => {
-                std::mem::forget(backend.parse(&mut body))
-            }
+            (StackStage::Parse | StackStage::Drop, None) => std::mem::forget(
+                QueryRequest::from_json_slice_mut(&mut body).expect("corpus shapes parse"),
+            ),
             (StackStage::Parse | StackStage::Drop, Some(request)) => drop(request),
         })
         .expect("probe thread spawns")
@@ -450,14 +415,11 @@ fn stack() {
         "\n## stack (deep_chain/{} = deepest accepted request)\n",
         testing::MAX_DEEP_CHAIN_STEPS
     );
-    println!("| backend | stage | smallest stack KiB |\n|---|---|---:|");
+    println!("| stage | smallest stack KiB |\n|---|---:|");
     let exe = std::env::current_exe().expect("benchmark binary path");
-    let fits = |backend: Backend, stage: StackStage, kib: usize| {
+    let fits = |stage: StackStage, kib: usize| {
         Command::new(&exe)
-            .env(
-                STACK_PROBE,
-                format!("{}:{}:{kib}", backend.name(), stage.name()),
-            )
+            .env(STACK_PROBE, format!("{}:{kib}", stage.name()))
             .output()
             .expect("probe process runs")
             .status
@@ -468,28 +430,21 @@ fn stack() {
                 other => panic!("stack probe failed with status {other}"),
             })
     };
-    for backend in Backend::ALL {
-        for stage in StackStage::ALL {
-            // Binary search in 16 KiB steps between 16 KiB and 16 MiB.
-            let (mut low, mut high) = (1_usize, 1_024_usize);
-            if !fits(backend, stage, high * 16) {
-                println!(
-                    "| {} | {} | > {} |",
-                    backend.name(),
-                    stage.name(),
-                    high * 16
-                );
-                continue;
-            }
-            while low < high {
-                let middle = (low + high) / 2;
-                match fits(backend, stage, middle * 16) {
-                    true => high = middle,
-                    false => low = middle + 1,
-                }
-            }
-            println!("| {} | {} | {} |", backend.name(), stage.name(), low * 16);
+    for stage in StackStage::ALL {
+        // Binary search in 16 KiB steps between 16 KiB and 16 MiB.
+        let (mut low, mut high) = (1_usize, 1_024_usize);
+        if !fits(stage, high * 16) {
+            println!("| {} | > {} |", stage.name(), high * 16);
+            continue;
         }
+        while low < high {
+            let middle = (low + high) / 2;
+            match fits(stage, middle * 16) {
+                true => high = middle,
+                false => low = middle + 1,
+            }
+        }
+        println!("| {} | {} |", stage.name(), low * 16);
     }
 }
 

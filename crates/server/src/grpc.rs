@@ -131,10 +131,13 @@ impl HelixDbServer for GrpcService {
                 format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
             ));
         }
-        let parsed = QueryRequest::from_json_slice(&body);
-        // The request owns everything it needs, so the body is freed now rather
-        // than held through planning and execution.
-        drop(body);
+        // simd-json parses a uniquely owned body in place and copies a shared
+        // one. The request owns everything it needs, so the body is freed here
+        // rather than held through planning and execution.
+        let parsed = match body.try_into_mut() {
+            Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
+            Err(shared) => QueryRequest::from_json_slice(&shared),
+        };
         let query = parsed.map_err(|error| {
             status_with_error_code(
                 tonic::Code::InvalidArgument,

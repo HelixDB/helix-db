@@ -5,17 +5,18 @@ edition = "2024"
 
 [features]
 test-utils = []
-# simd-json backend; the parser picks AVX2, SSE4.2, NEON or its portable
-# implementation for the running CPU (`runtime-detection`).
-simd-json = ["dep:simd-json"]
 
 [dependencies]
 bumpalo = { version = "3.20.3", features = ["collections"] }
 chrono = "0.4"
 helix-ast-arena-derive = { path = "../ast-arena-derive" }
 serde = { version = "1", features = ["derive"] }
-sonic-rs = "0.5.8"
-simd-json = { version = "0.18.1", optional = true, default-features = false, features = [
+# The parser picks AVX2, SSE4.2, NEON or its portable implementation for the
+# running CPU (`runtime-detection`).
+# `big-int-as-float` reads integers outside i64/u64 as f64, as request
+# parameters always have, instead of rejecting them.
+simd-json = { version = "0.18.1", default-features = false, features = [
+    "big-int-as-float",
     "runtime-detection",
     "serde_impl",
     "swar-number-parsing",

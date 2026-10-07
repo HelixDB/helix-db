@@ -62,24 +62,11 @@ pub const THROUGHPUT_SHAPES: [&str; 4] = [
     "bulk_write_untyped/1000x768",
 ];
 
-/// Print which SIMD paths the JSON parsers use in this build and on this CPU,
-/// so every result records what actually ran.
+/// Print which SIMD path simd-json detected on this CPU, so every result
+/// records what actually ran.
 pub fn print_environment() {
-    let sonic = match (
-        cfg!(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            target_feature = "pclmulqdq",
-            target_feature = "sse2"
-        )),
-        cfg!(all(target_arch = "aarch64", target_feature = "neon")),
-    ) {
-        (true, _) => "x86_64 AVX2+PCLMULQDQ (compile time)",
-        (false, true) => "aarch64 NEON (compile time)",
-        (false, false) => "portable fallback (compile time)",
-    };
     eprintln!(
-        "sonic-rs: {sonic}; simd-json: {:?} (runtime); allocator: mimalloc",
+        "simd-json: {:?} (runtime); allocator: mimalloc",
         simd_json::Deserializer::algorithm()
     );
 }

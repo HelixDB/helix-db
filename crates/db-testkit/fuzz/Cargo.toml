@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 db = { path = "../../db" }
-helix-ast = { path = "../../ast", features = ["simd-json"] }
+helix-ast = { path = "../../ast" }
 helix-db-testkit = { path = ".." }
 helix-planner = { path = "../../planner" }
 libfuzzer-sys = "0.4"

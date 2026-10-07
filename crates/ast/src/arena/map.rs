@@ -18,8 +18,9 @@ use super::{allocation_failed, ArenaDeserialize, Bump, Seed};
 /// use helix_ast::value::PropertyValue;
 ///
 /// let bump = arena::Bump::new();
-/// let mut deserializer =
-///     sonic_rs::Deserializer::from_str(r#"{"object":{"b":{"i64":1},"a":{"null":null},"b":{"i64":2}}}"#);
+/// let mut body =
+///     br#"{"object":{"b":{"i64":1},"a":{"null":null},"b":{"i64":2}}}"#.to_vec();
+/// let mut deserializer = simd_json::Deserializer::from_slice(&mut body).unwrap();
 /// let value: arena::PropertyValue<'_> =
 ///     serde::de::DeserializeSeed::deserialize(arena::Seed::new(&bump), &mut deserializer).unwrap();
 /// let arena::PropertyValue::Object(map) = value else { panic!("object") };

@@ -28,19 +28,10 @@ fn main() {
 
 const THREADS: [usize; 6] = [1, 2, 4, 8, 16, 0];
 
+/// Every arm parses a fresh copy of the body, made outside the timed region,
+/// in place.
 #[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
-fn sonic_parse_drop(bencher: Bencher, name: &str) {
-    let json = &support::shape(name).json;
-    bencher.bench(|| {
-        let request = QueryRequest::from_json_slice(json).expect("corpus shapes parse");
-        request.check_nesting().expect("corpus shapes are bounded");
-        drop(request);
-    });
-}
-
-/// simd-json parses a fresh copy of the body made outside the timed region.
-#[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
-fn simd_json_parse_drop(bencher: Bencher, name: &str) {
+fn parse_drop(bencher: Bencher, name: &str) {
     let json = &support::shape(name).json;
     bencher.with_inputs(|| json.clone()).bench_refs(|body| {
         let request = QueryRequest::from_json_slice_mut(body).expect("corpus shapes parse");
@@ -52,10 +43,10 @@ fn simd_json_parse_drop(bencher: Bencher, name: &str) {
 /// The front end up to and including planning, as `query_service` runs it:
 /// the batch is dropped once planned and the parameters move to execution.
 #[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
-fn sonic_parse_plan_drop(bencher: Bencher, name: &str) {
+fn parse_plan_drop(bencher: Bencher, name: &str) {
     let json = &support::shape(name).json;
-    bencher.bench(|| {
-        let request = QueryRequest::from_json_slice(json).expect("corpus shapes parse");
+    bencher.with_inputs(|| json.clone()).bench_refs(|body| {
+        let request = QueryRequest::from_json_slice_mut(body).expect("corpus shapes parse");
         request.check_nesting().expect("corpus shapes are bounded");
         let (batch, parameters) = request.into_query();
         let context = helix_ast_bench::planner_context(helix_ast_bench::param_bindings(parameters));
@@ -79,11 +70,12 @@ static POOL: Pool = Pool::new(PoolConfig {
 });
 
 #[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
-fn arena_pooled_sonic_parse_drop(bencher: Bencher, name: &str) {
+fn arena_pooled_parse_drop(bencher: Bencher, name: &str) {
     let json = &support::shape(name).json;
-    bencher.bench(|| {
+    bencher.with_inputs(|| json.clone()).bench_refs(|body| {
         let bump = POOL.checkout();
-        let request = ArenaQueryRequest::from_json_slice(&bump, json).expect("corpus shapes parse");
+        let request =
+            ArenaQueryRequest::from_json_slice_mut(&bump, body).expect("corpus shapes parse");
         divan::black_box(request.query());
         drop(request);
         drop(bump);
@@ -91,11 +83,12 @@ fn arena_pooled_sonic_parse_drop(bencher: Bencher, name: &str) {
 }
 
 #[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
-fn arena_fresh_sonic_parse_drop(bencher: Bencher, name: &str) {
+fn arena_fresh_parse_drop(bencher: Bencher, name: &str) {
     let json = &support::shape(name).json;
-    bencher.bench(|| {
+    bencher.with_inputs(|| json.clone()).bench_refs(|body| {
         let bump = Bump::new();
-        let request = ArenaQueryRequest::from_json_slice(&bump, json).expect("corpus shapes parse");
+        let request =
+            ArenaQueryRequest::from_json_slice_mut(&bump, body).expect("corpus shapes parse");
         divan::black_box(request.query());
         drop(request);
         drop(bump);
@@ -105,30 +98,17 @@ fn arena_fresh_sonic_parse_drop(bencher: Bencher, name: &str) {
 /// A per-thread arena: no pool lock, but unusable across awaits, because a
 /// request may resume on another thread.
 #[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
-fn arena_thread_local_sonic_parse_drop(bencher: Bencher, name: &str) {
+fn arena_thread_local_parse_drop(bencher: Bencher, name: &str) {
     thread_local! {
         static BUMP: RefCell<Bump> = RefCell::new(Bump::new());
     }
     let json = &support::shape(name).json;
-    bencher.bench(|| {
+    bencher.with_inputs(|| json.clone()).bench_refs(|body| {
         BUMP.with_borrow_mut(|bump| {
             bump.reset();
             let request =
-                ArenaQueryRequest::from_json_slice(bump, json).expect("corpus shapes parse");
+                ArenaQueryRequest::from_json_slice_mut(bump, body).expect("corpus shapes parse");
             divan::black_box(request.query());
         });
-    });
-}
-
-#[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
-fn arena_pooled_simd_json_parse_drop(bencher: Bencher, name: &str) {
-    let json = &support::shape(name).json;
-    bencher.with_inputs(|| json.clone()).bench_refs(|body| {
-        let bump = POOL.checkout();
-        let request =
-            ArenaQueryRequest::from_json_slice_mut(&bump, body).expect("corpus shapes parse");
-        divan::black_box(request.query());
-        drop(request);
-        drop(bump);
     });
 }

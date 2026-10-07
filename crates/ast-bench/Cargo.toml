@@ -5,19 +5,18 @@ edition = "2024"
 publish = false
 
 [dependencies]
-helix-ast = { path = "../ast", features = ["simd-json"] }
+helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
 simd-json = { version = "0.18.1", default-features = false, features = [
     "runtime-detection",
     "serde_impl",
     "swar-number-parsing",
 ] }
-sonic-rs = "0.5.8"
 # The server's allocator, so measurements match production.
 mimalloc = "0.1.52"
 
 [dev-dependencies]
-helix-ast = { path = "../ast", features = ["simd-json", "test-utils"] }
+helix-ast = { path = "../ast", features = ["test-utils"] }
 divan = "0.1.21"
 serde = "1"
 libc = "0.2.186"

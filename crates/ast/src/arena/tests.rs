@@ -21,58 +21,28 @@ fn on_large_stack(test: impl FnOnce() + Send + 'static) {
 /// The outcome of one parse: the owned request, or the error message.
 type Outcome = Result<QueryRequest, String>;
 
-fn sonic_owned(json: &[u8]) -> Outcome {
+fn owned(json: &[u8]) -> Outcome {
     QueryRequest::from_json_slice(json).map_err(|error| error.to_string())
 }
 
-fn sonic_arena(json: &[u8]) -> Outcome {
+fn arena(json: &[u8]) -> Outcome {
     let bump = Bump::new();
     ArenaQueryRequest::from_json_slice(&bump, json)
         .map(IntoOwned::into_owned)
         .map_err(|error| error.to_string())
 }
 
-#[cfg(feature = "simd-json")]
-fn simd_owned(json: &[u8]) -> Outcome {
-    QueryRequest::from_json_slice_mut(&mut json.to_vec()).map_err(|error| error.to_string())
-}
-
-#[cfg(feature = "simd-json")]
-fn simd_arena(json: &[u8]) -> Outcome {
-    let bump = Bump::new();
-    ArenaQueryRequest::from_json_slice_mut(&bump, &mut json.to_vec())
-        .map(IntoOwned::into_owned)
-        .map_err(|error| error.to_string())
-}
-
-/// Arena and owned parsing agree exactly for each backend: the same request
-/// or the same error message. Across backends only the verdict must agree,
-/// because each backend words its own syntax errors.
+/// Arena and owned parsing agree exactly: the same request or the same
+/// error message.
 fn assert_equivalent(name: &str, json: &[u8]) {
-    let owned = sonic_owned(json);
-    assert_eq!(sonic_arena(json), owned, "sonic: {name}");
-    #[cfg(feature = "simd-json")]
-    {
-        let simd = simd_owned(json);
-        assert_eq!(simd_arena(json), simd, "simd-json: {name}");
-        assert_eq!(
-            simd.is_ok(),
-            owned.is_ok(),
-            "backends disagree on {name}: sonic {owned:?}, simd-json {simd:?}"
-        );
-        assert_eq!(
-            simd.as_ref().ok(),
-            owned.as_ref().ok(),
-            "backends parse {name} differently"
-        );
-    }
+    assert_eq!(arena(json), owned(json), "{name}");
 }
 
 #[test]
 fn every_variant_and_benchmark_shape_parses_to_the_owned_request() {
     on_large_stack(|| {
         for shape in testing::every_variant().into_iter().chain(testing::all()) {
-            assert!(sonic_owned(&shape.json).is_ok(), "{} is valid", shape.name);
+            assert!(owned(&shape.json).is_ok(), "{} is valid", shape.name);
             assert_equivalent(&shape.name, &shape.json);
         }
     });
@@ -164,7 +134,7 @@ fn single_edits_of_every_variant_get_the_same_verdict_and_error() {
             for mutated in mutations(&value) {
                 let json = serde_json::to_vec(&mutated).expect("values serialize");
                 assert_equivalent(&shape.name, &json);
-                match sonic_owned(&json) {
+                match owned(&json) {
                     Ok(_) => accepted += 1,
                     Err(_) => rejected += 1,
                 }
@@ -241,7 +211,7 @@ fn mutations_nested_in_read_batches_are_rejected_alike() {
                 },
             ] {
                 let json = nested(root);
-                let owned = sonic_owned(json.as_bytes());
+                let owned = owned(json.as_bytes());
                 assert!(
                     owned
                         .as_ref()
@@ -316,28 +286,8 @@ fn hand_written_edge_cases_get_the_same_verdict_and_error() {
         // Past the depth limit, every entry point rejects before parsing.
         let deep = testing::deep_chain(testing::MAX_DEEP_CHAIN_STEPS + 1).json;
         assert_equivalent("deepest chain + 1", &deep);
-        assert!(sonic_owned(&deep).is_err());
+        assert!(owned(&deep).is_err());
     });
-}
-
-/// The one verdict the backends disagree on: simd-json accepts a struct
-/// written as a sequence with extra trailing elements, which sonic-rs
-/// rejects. Arena and owned parsing still agree within each backend.
-#[cfg(feature = "simd-json")]
-#[test]
-fn simd_json_ignores_extra_elements_of_a_struct_in_sequence_form() {
-    let json = br#"{"request_type":"read","query":{"read":{"entries":[{"query":{"root":{"nodes":["all","all"]}}}]}}}"#;
-    let sonic = sonic_owned(json);
-    assert!(
-        sonic
-            .as_ref()
-            .is_err_and(|error| error.contains("while parsing")),
-        "{sonic:?}"
-    );
-    assert_eq!(sonic_arena(json), sonic);
-    let simd = simd_owned(json);
-    assert!(simd.is_ok(), "{simd:?}");
-    assert_eq!(simd_arena(json), simd);
 }
 
 #[test]
@@ -351,15 +301,8 @@ fn invalid_utf8_is_rejected_by_every_entry_point() {
         .concat()
     };
     for json in [body(b"\xff"), body(b"ok\xc3")] {
-        assert!(sonic_owned(&json).is_err());
-        // The arena entry point checks UTF-8 before parsing, so it words
-        // this error differently: the one documented divergence.
-        assert!(sonic_arena(&json).is_err());
-        #[cfg(feature = "simd-json")]
-        {
-            assert!(simd_owned(&json).is_err());
-            assert!(simd_arena(&json).is_err());
-        }
+        assert!(owned(&json).is_err());
+        assert_equivalent("invalid UTF-8", &json);
     }
 }
 
@@ -373,16 +316,6 @@ fn an_allocation_limit_fails_the_parse_instead_of_panicking() {
         error.to_string().contains(arena::ALLOCATION_LIMIT_EXCEEDED),
         "{error}"
     );
-    #[cfg(feature = "simd-json")]
-    {
-        let bump = Bump::new();
-        bump.set_allocation_limit(Some(4096));
-        let error = ArenaQueryRequest::from_json_slice_mut(&bump, &mut json.clone()).unwrap_err();
-        assert!(
-            error.to_string().contains(arena::ALLOCATION_LIMIT_EXCEEDED),
-            "{error}"
-        );
-    }
     // The same limit with room to spare parses.
     let bump = Bump::new();
     bump.set_allocation_limit(Some(1 << 20));

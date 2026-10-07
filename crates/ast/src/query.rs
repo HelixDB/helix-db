@@ -56,7 +56,7 @@ pub enum QueryRequestType {
 /// use std::collections::BTreeMap;
 /// use helix_ast::query::QueryValue;
 /// let value: QueryValue =
-///     sonic_rs::from_str(r#"[null, -1, 18446744073709551615, 0.5, "a\n", {"k": 1, "k": true}]"#)
+///     simd_json::from_reader(r#"[null, -1, 18446744073709551615, 0.5, "a\n", {"k": 1, "k": true}]"#.as_bytes())
 ///         .unwrap();
 /// assert_eq!(
 ///     value,
@@ -218,7 +218,7 @@ impl From<&QueryValue> for PropertyValue {
 #[derive(Debug)]
 pub enum QueryError {
     /// JSON serialization error.
-    Serialize(sonic_rs::Error),
+    Serialize(simd_json::Error),
     /// UTF-8 conversion error.
     Utf8(std::string::FromUtf8Error),
     /// Bytes cannot be represented safely in query parameters.
@@ -326,8 +326,8 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-impl From<sonic_rs::Error> for QueryError {
-    fn from(value: sonic_rs::Error) -> Self {
+impl From<simd_json::Error> for QueryError {
+    fn from(value: simd_json::Error) -> Self {
         Self::Serialize(value)
     }
 }
@@ -362,7 +362,7 @@ impl Default for QueryParameters {
 /// use helix_ast::query::SearchConsistency;
 ///
 /// assert_eq!(SearchConsistency::default(), SearchConsistency::Strong);
-/// assert_eq!(sonic_rs::to_string(&SearchConsistency::Eventual).unwrap(), "\"eventual\"");
+/// assert_eq!(simd_json::to_string(&SearchConsistency::Eventual).unwrap(), "\"eventual\"");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
@@ -400,8 +400,8 @@ pub struct QueryRequest {
     search_consistency: SearchConsistency,
 }
 
-/// Deepest JSON nesting a native request may use: sonic-rs's own limit for
-/// the values it deserializes.
+/// Deepest JSON nesting a native request may use. Every JSON entry point
+/// enforces it before parsing.
 pub const MAX_REQUEST_JSON_DEPTH: usize = 255;
 
 /// Reject JSON nested deeper than [`MAX_REQUEST_JSON_DEPTH`] with one flat
@@ -477,10 +477,9 @@ pub(crate) fn check_json_depth<E: serde::de::Error>(bytes: &[u8]) -> Result<(), 
 }
 
 impl QueryRequest {
-    /// Parse a request from JSON bytes. A flat scan bounds the nesting first:
-    /// sonic-rs skips the value of an unknown key recursively without its own
-    /// depth limit, so an unchecked body could exhaust the parsing thread's
-    /// stack.
+    /// Parse a request from JSON bytes. simd-json parses in place, so this
+    /// copies `bytes` first; a caller that owns a mutable body should use
+    /// [`Self::from_json_slice_mut`] instead.
     ///
     /// ```
     /// use helix_ast::query::{QueryRequest, MAX_REQUEST_JSON_DEPTH};
@@ -490,15 +489,15 @@ impl QueryRequest {
     ///     .to_string()
     ///     .contains("nesting"));
     /// ```
-    pub fn from_json_slice(bytes: &[u8]) -> sonic_rs::Result<Self> {
-        check_json_depth::<sonic_rs::Error>(bytes)?;
-        sonic_rs::from_slice(bytes)
+    pub fn from_json_slice(bytes: &[u8]) -> simd_json::Result<Self> {
+        Self::from_json_slice_mut(&mut bytes.to_vec())
     }
 
-    /// Parse a request with simd-json, which selects its SIMD implementation
-    /// for the running CPU at runtime rather than at compile time. The same
-    /// flat scan bounds the nesting first. simd-json rewrites `bytes` in
-    /// place while it unescapes strings, so the body is not reusable after.
+    /// Parse a request in place with simd-json, which selects its SIMD
+    /// implementation for the running CPU at runtime. A flat scan bounds the
+    /// nesting first, so no body can exhaust the parsing thread's stack.
+    /// simd-json rewrites `bytes` while it unescapes strings, so the body is
+    /// not reusable after.
     ///
     /// ```
     /// use helix_ast::query::QueryRequest;
@@ -509,7 +508,6 @@ impl QueryRequest {
     ///     br#"{"request_type":"read","query":{"read":{"entries":[]}}}"#,
     /// ).unwrap());
     /// ```
-    #[cfg(feature = "simd-json")]
     pub fn from_json_slice_mut(bytes: &mut [u8]) -> simd_json::Result<Self> {
         check_json_depth::<simd_json::Error>(bytes)?;
         simd_json::serde::from_slice(bytes)
@@ -527,7 +525,6 @@ impl QueryRequest {
     ///     assert!(QueryRequest::from_json_slice_mut_with_buffers(&mut body, &mut buffers).is_ok());
     /// }
     /// ```
-    #[cfg(feature = "simd-json")]
     pub fn from_json_slice_mut_with_buffers(
         bytes: &mut [u8],
         buffers: &mut simd_json::Buffers,
@@ -765,7 +762,7 @@ impl QueryRequest {
 
     /// Serialize to JSON bytes.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, QueryError> {
-        Ok(sonic_rs::to_vec(self)?)
+        Ok(simd_json::to_vec(self)?)
     }
 
     /// Serialize to JSON string.
@@ -1011,35 +1008,26 @@ pub struct ArenaQueryRequest<'a> {
 }
 
 impl<'a> ArenaQueryRequest<'a> {
-    /// Parse a request into `bump` with sonic-rs, after the same flat depth
-    /// scan as [`QueryRequest::from_json_slice`].
+    /// Parse a request into `bump`, copying `bytes` first as
+    /// [`QueryRequest::from_json_slice`] does.
     ///
     /// # Errors
     ///
     /// Returns every error [`QueryRequest::from_json_slice`] returns for the
-    /// same body (an invalid UTF-8 body is reported with different wording),
-    /// and [`arena::ALLOCATION_LIMIT_EXCEEDED`] when `bump` refuses memory.
-    pub fn from_json_slice(bump: &'a arena::Bump, bytes: &[u8]) -> sonic_rs::Result<Self> {
-        check_json_depth::<sonic_rs::Error>(bytes)?;
-        // Only sonic-rs's own entry points validate UTF-8 after parsing, so a
-        // seeded parse checks the body first.
-        let text =
-            std::str::from_utf8(bytes).map_err(<sonic_rs::Error as serde::de::Error>::custom)?;
-        let mut deserializer = sonic_rs::Deserializer::from_str(text);
-        let request = Self::deserialize_in(bump, &mut deserializer)?;
-        deserializer.end()?;
-        Ok(request)
+    /// same body, and [`arena::ALLOCATION_LIMIT_EXCEEDED`] when `bump` refuses
+    /// memory.
+    pub fn from_json_slice(bump: &'a arena::Bump, bytes: &[u8]) -> simd_json::Result<Self> {
+        Self::from_json_slice_mut(bump, &mut bytes.to_vec())
     }
 
-    /// Parse a request into `bump` with simd-json, which selects its SIMD
-    /// implementation at runtime; see [`QueryRequest::from_json_slice_mut`].
+    /// Parse a request into `bump` in place, after the same flat depth scan
+    /// as [`QueryRequest::from_json_slice_mut`].
     ///
     /// # Errors
     ///
     /// Returns every error [`QueryRequest::from_json_slice_mut`] returns for
     /// the same body, and [`arena::ALLOCATION_LIMIT_EXCEEDED`] when `bump`
     /// refuses memory.
-    #[cfg(feature = "simd-json")]
     pub fn from_json_slice_mut(bump: &'a arena::Bump, bytes: &mut [u8]) -> simd_json::Result<Self> {
         check_json_depth::<simd_json::Error>(bytes)?;
         Self::deserialize_in(bump, &mut simd_json::Deserializer::from_slice(bytes)?)
@@ -1050,7 +1038,6 @@ impl<'a> ArenaQueryRequest<'a> {
     /// # Errors
     ///
     /// As [`Self::from_json_slice_mut`].
-    #[cfg(feature = "simd-json")]
     pub fn from_json_slice_mut_with_buffers(
         bump: &'a arena::Bump,
         bytes: &mut [u8],
@@ -1145,10 +1132,11 @@ impl IntoOwned<QueryRequest> for ArenaQueryRequest<'_> {
 ///
 /// let bump = arena::Bump::new();
 /// let json = r#"[null,-1,18446744073709551615,0.5,"a\n",{"k":true,"k":false}]"#;
-/// let mut deserializer = sonic_rs::Deserializer::from_str(json);
+/// let mut body = json.as_bytes().to_vec();
+/// let mut deserializer = simd_json::Deserializer::from_slice(&mut body).unwrap();
 /// let value: ArenaQueryValue<'_> =
 ///     serde::de::DeserializeSeed::deserialize(arena::Seed::new(&bump), &mut deserializer).unwrap();
-/// let owned: QueryValue = sonic_rs::from_str(json).unwrap();
+/// let owned: QueryValue = simd_json::from_reader(json.as_bytes()).unwrap();
 /// assert_eq!(value.into_owned(), owned);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1605,14 +1593,14 @@ mod tests {
             )
         };
         assert!(
-            check_json_depth::<sonic_rs::Error>(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok()
+            check_json_depth::<simd_json::Error>(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok()
         );
         assert!(
-            check_json_depth::<sonic_rs::Error>(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes())
+            check_json_depth::<simd_json::Error>(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes())
                 .is_err()
         );
         // Brackets and escaped quotes inside strings are not structure.
-        assert!(check_json_depth::<sonic_rs::Error>(
+        assert!(check_json_depth::<simd_json::Error>(
             format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()
         )
         .is_ok());
@@ -1662,20 +1650,20 @@ mod tests {
                 body.extend_from_slice(fragments[(seed >> 33) as usize % fragments.len()]);
             }
             assert_eq!(
-                check_json_depth::<sonic_rs::Error>(&body).is_ok(),
+                check_json_depth::<simd_json::Error>(&body).is_ok(),
                 oracle(&body),
                 "{:?}",
                 String::from_utf8_lossy(&body)
             );
         }
         // Many shallow siblings pass the full scan.
-        assert!(check_json_depth::<sonic_rs::Error>(
+        assert!(check_json_depth::<simd_json::Error>(
             format!("{{\"x\":[{}[]]}}", "[],".repeat(1_000)).as_bytes()
         )
         .is_ok());
         let request = QueryRequest::read(read_batch());
         assert_eq!(
-            QueryRequest::from_json_slice(&sonic_rs::to_vec(&request).unwrap()).unwrap(),
+            QueryRequest::from_json_slice(&simd_json::to_vec(&request).unwrap()).unwrap(),
             request
         );
     }
@@ -1798,9 +1786,9 @@ mod tests {
 
         for (json, expected) in cases {
             assert_eq!(
-                sonic_rs::from_str::<QueryValue>(json).unwrap(),
+                simd_json::from_reader::<_, QueryValue>(json.as_bytes()).unwrap(),
                 expected,
-                "sonic-rs: {json}"
+                "simd-json: {json}"
             );
             assert_eq!(
                 serde_json::from_str::<QueryValue>(json).unwrap(),
@@ -1812,9 +1800,9 @@ mod tests {
                 expected,
                 "serde_json::Value: {json}"
             );
-            let serialized = sonic_rs::to_string(&expected).unwrap();
+            let serialized = simd_json::to_string(&expected).unwrap();
             assert_eq!(
-                sonic_rs::from_str::<QueryValue>(&serialized).unwrap(),
+                simd_json::from_reader::<_, QueryValue>(serialized.as_bytes()).unwrap(),
                 expected,
                 "round trip: {serialized}"
             );
@@ -1822,7 +1810,7 @@ mod tests {
 
         for invalid in ["", "[1,", r#"{"k"}"#, "nul", r#""\x""#] {
             assert!(
-                sonic_rs::from_str::<QueryValue>(invalid).is_err(),
+                simd_json::from_reader::<_, QueryValue>(invalid.as_bytes()).is_err(),
                 "{invalid}"
             );
             assert!(
@@ -1934,10 +1922,10 @@ mod tests {
             .to_json_string()
             .expect("write request should serialize");
 
-        let parsed_read =
-            sonic_rs::from_str::<QueryRequest>(&read).expect("read/read should deserialize");
-        let parsed_write =
-            sonic_rs::from_str::<QueryRequest>(&write).expect("write/write should deserialize");
+        let parsed_read = simd_json::from_reader::<_, QueryRequest>(read.as_bytes())
+            .expect("read/read should deserialize");
+        let parsed_write = simd_json::from_reader::<_, QueryRequest>(write.as_bytes())
+            .expect("write/write should deserialize");
         assert_eq!(parsed_read.request_type(), QueryRequestType::Read);
         assert_eq!(parsed_write.request_type(), QueryRequestType::Write);
 
@@ -1945,8 +1933,8 @@ mod tests {
             write.replacen(r#""request_type":"write""#, r#""request_type":"read""#, 1);
         let write_tagged_read =
             read.replacen(r#""request_type":"read""#, r#""request_type":"write""#, 1);
-        assert!(sonic_rs::from_str::<QueryRequest>(&read_tagged_write).is_err());
-        assert!(sonic_rs::from_str::<QueryRequest>(&write_tagged_read).is_err());
+        assert!(simd_json::from_reader::<_, QueryRequest>(read_tagged_write.as_bytes()).is_err());
+        assert!(simd_json::from_reader::<_, QueryRequest>(write_tagged_read.as_bytes()).is_err());
     }
 
     #[test]
@@ -1956,7 +1944,7 @@ mod tests {
             .expect("strong read should serialize");
         assert!(!strong.contains("search_consistency"));
         assert_eq!(
-            sonic_rs::from_str::<QueryRequest>(&strong)
+            simd_json::from_reader::<_, QueryRequest>(strong.as_bytes())
                 .expect("absent consistency is strong")
                 .search_consistency(),
             SearchConsistency::Strong
@@ -1970,7 +1958,8 @@ mod tests {
             .expect("eventual read should serialize");
         assert!(wire.contains(r#""search_consistency":"eventual""#));
         assert_eq!(
-            sonic_rs::from_str::<QueryRequest>(&wire).expect("eventual read round-trips"),
+            simd_json::from_reader::<_, QueryRequest>(wire.as_bytes())
+                .expect("eventual read round-trips"),
             eventual
         );
 
@@ -1979,7 +1968,7 @@ mod tests {
             &strong[..strong.len() - 1]
         );
         assert_eq!(
-            sonic_rs::from_str::<QueryRequest>(&explicit_strong)
+            simd_json::from_reader::<_, QueryRequest>(explicit_strong.as_bytes())
                 .expect("explicit strong is accepted")
                 .search_consistency(),
             SearchConsistency::Strong
@@ -1988,7 +1977,7 @@ mod tests {
             "{},\"search_consistency\":\"sometimes\"}}",
             &strong[..strong.len() - 1]
         );
-        assert!(sonic_rs::from_str::<QueryRequest>(&unknown).is_err());
+        assert!(simd_json::from_reader::<_, QueryRequest>(unknown.as_bytes()).is_err());
 
         let write = QueryRequest::write(write_batch());
         assert!(matches!(
@@ -2002,21 +1991,22 @@ mod tests {
             "{},\"search_consistency\":\"eventual\"}}",
             &write_wire[..write_wire.len() - 1]
         );
-        let error = sonic_rs::from_str::<QueryRequest>(&eventual_write)
+        let error = simd_json::from_reader::<_, QueryRequest>(eventual_write.as_bytes())
             .expect_err("eventual writes are rejected on the wire");
         assert!(error.to_string().contains("only valid for read requests"));
         let strong_write = format!(
             "{},\"search_consistency\":\"strong\"}}",
             &write_wire[..write_wire.len() - 1]
         );
-        assert!(sonic_rs::from_str::<QueryRequest>(&strong_write).is_ok());
+        assert!(simd_json::from_reader::<_, QueryRequest>(strong_write.as_bytes()).is_ok());
     }
 
     #[test]
     fn published_openapi_examples_are_valid_query_requests() {
-        let specification =
-            sonic_rs::from_str::<sonic_rs::Value>(include_str!("../../../docs/openapi.json"))
-                .expect("published OpenAPI document is valid JSON");
+        let specification = simd_json::from_reader::<_, simd_json::OwnedValue>(
+            (include_str!("../../../docs/openapi.json")).as_bytes(),
+        )
+        .expect("published OpenAPI document is valid JSON");
         let examples = &specification["paths"]["/v2/query"]["post"]["requestBody"]["content"]
             ["application/json"]["examples"];
 
@@ -2024,9 +2014,9 @@ mod tests {
             ("read", QueryRequestType::Read),
             ("write", QueryRequestType::Write),
         ] {
-            let example = sonic_rs::to_string(&examples[name]["value"])
+            let example = simd_json::to_string(&examples[name]["value"])
                 .expect("OpenAPI query example is serializable");
-            let request = sonic_rs::from_str::<QueryRequest>(&example)
+            let request = simd_json::from_reader::<_, QueryRequest>(example.as_bytes())
                 .unwrap_or_else(|error| panic!("OpenAPI {name} example is invalid: {error}"));
             assert_eq!(request.request_type(), expected_type);
         }
@@ -2201,7 +2191,7 @@ mod tests {
             duplicate_type,
         ] {
             assert!(
-                sonic_rs::from_str::<QueryRequest>(&invalid).is_err(),
+                simd_json::from_reader::<_, QueryRequest>(invalid.as_bytes()).is_err(),
                 "invalid DTO should be rejected: {invalid}"
             );
         }
@@ -2210,7 +2200,8 @@ mod tests {
     #[test]
     fn raw_f32_is_normalized_and_untyped_parameters_remain_explicit() {
         let raw = read_wire(r#"{"value":1.25}"#, Some(r#"{"value":"f32"}"#));
-        let typed = sonic_rs::from_str::<QueryRequest>(&raw).expect("valid typed f32 request");
+        let typed = simd_json::from_reader::<_, QueryRequest>(raw.as_bytes())
+            .expect("valid typed f32 request");
         assert!(matches!(
             typed.parameters().unwrap().get("value"),
             Some(QueryValue::F32(value)) if *value == 1.25
@@ -2220,7 +2211,7 @@ mod tests {
             r#"{"value":[1,0,-1]}"#,
             Some(r#"{"value":{"array":"f32"}}"#),
         );
-        let typed = sonic_rs::from_str::<QueryRequest>(&raw)
+        let typed = simd_json::from_reader::<_, QueryRequest>(raw.as_bytes())
             .expect("integer JSON values normalize into a typed f32 array");
         assert!(matches!(
             typed.parameters().unwrap().get("value"),
@@ -2233,7 +2224,8 @@ mod tests {
         ));
 
         let raw = read_wire(r#"{"value":{"nested":[true,1,"x"]}}"#, None);
-        let untyped = sonic_rs::from_str::<QueryRequest>(&raw).expect("valid untyped JSON request");
+        let untyped = simd_json::from_reader::<_, QueryRequest>(raw.as_bytes())
+            .expect("valid untyped JSON request");
         assert!(untyped.parameter_types().is_none());
         assert!(matches!(
             untyped.parameters().unwrap().get("value"),

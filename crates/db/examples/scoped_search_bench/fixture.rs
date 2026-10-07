@@ -275,7 +275,7 @@ impl Backend {
                 let response = client
                     .post(format!("{url}/v2/query"))
                     .header("content-type", "application/json")
-                    .body(sonic_rs::to_string(&request).map_err(|error| error.to_string())?)
+                    .body(simd_json::to_string(&request).map_err(|error| error.to_string())?)
                     .send()
                     .await
                     .map_err(|error| error.to_string())?;

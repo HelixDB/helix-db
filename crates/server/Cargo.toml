@@ -18,7 +18,11 @@ prost = "0.14.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d" }
-sonic-rs = "0.5.8"
+simd-json = { version = "0.18.1", default-features = false, features = [
+    "runtime-detection",
+    "serde_impl",
+    "swar-number-parsing",
+] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14.6"

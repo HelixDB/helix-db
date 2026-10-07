@@ -98,9 +98,9 @@ impl From<ExprProjection> for Projection {
 /// ```
 /// use helix_ast::projection::BindingTarget;
 ///
-/// assert_eq!(sonic_rs::to_string(&BindingTarget::current()).unwrap(), r#""current""#);
+/// assert_eq!(simd_json::to_string(&BindingTarget::current()).unwrap(), r#""current""#);
 /// assert_eq!(
-///     sonic_rs::to_string(&BindingTarget::binding("service")).unwrap(),
+///     simd_json::to_string(&BindingTarget::binding("service")).unwrap(),
 ///     r#"{"binding":"service"}"#
 /// );
 /// ```
@@ -132,7 +132,7 @@ impl BindingTarget {
 ///
 /// let value_ref = BindingValueRef::new(BindingTarget::binding("service"), "$id");
 /// assert_eq!(
-///     sonic_rs::to_string(&value_ref).unwrap(),
+///     simd_json::to_string(&value_ref).unwrap(),
 ///     r#"{"target":{"binding":"service"},"source":"$id"}"#
 /// );
 /// ```
@@ -177,7 +177,7 @@ impl BindingValueRef {
 ///     "workload_id",
 /// );
 /// assert_eq!(
-///     sonic_rs::to_string(&projection).unwrap(),
+///     simd_json::to_string(&projection).unwrap(),
 ///     r#"{"coalesce":{"refs":[{"target":{"binding":"deployment"},"source":"$id"},{"target":{"binding":"owner"},"source":"$id"}],"alias":"workload_id"}}"#
 /// );
 /// ```

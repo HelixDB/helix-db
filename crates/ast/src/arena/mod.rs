@@ -31,7 +31,8 @@
 //! use helix_ast::graph::NodeRef;
 //!
 //! let bump = arena::Bump::new();
-//! let mut deserializer = sonic_rs::Deserializer::from_str(r#"{"ids":[1,2,3]}"#);
+//! let mut body = br#"{"ids":[1,2,3]}"#.to_vec();
+//! let mut deserializer = simd_json::Deserializer::from_slice(&mut body).unwrap();
 //! let node_ref: arena::NodeRef<'_> =
 //!     serde::de::DeserializeSeed::deserialize(arena::Seed::new(&bump), &mut deserializer).unwrap();
 //! assert_eq!(node_ref, arena::NodeRef::Ids(&[1, 2, 3]));

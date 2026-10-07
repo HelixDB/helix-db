@@ -6,7 +6,7 @@
 //! perf record -g target/release/examples/profile_stage plan wide_batch/1000 10
 //! ```
 //!
-//! Stages: `parse` (sonic-rs into the owned AST), `plan` (parse, then plan;
+//! Stages: `parse` (simd-json into the owned AST, from a copy of the body), `plan` (parse, then plan;
 //! parsing is a few percent of it for most shapes), and `front_end` (parse,
 //! nesting check and plan, as `query_service` runs them).
 

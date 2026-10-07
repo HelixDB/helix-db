@@ -4377,7 +4377,7 @@ mod tests {
         db.query_scoped(request.clone(), DataScope::LegacyUnscoped)
             .await
             .expect("scoped query");
-        let encoded = sonic_rs::to_vec(&request).expect("encode request");
+        let encoded = simd_json::to_vec(&request).expect("encode request");
         db.query_json(&encoded).await.expect("JSON query");
         db.query_json_scoped(&encoded, DataScope::LegacyUnscoped)
             .await
@@ -6128,20 +6128,20 @@ mod tests {
             .await
             .expect("tenant b second write succeeds");
 
-        let tenant_a_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_a_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_a)
                 .await
-                .expect("tenant a read succeeds"),
+                .expect("tenant a read succeeds")[..],
         )
         .expect("tenant a response decodes");
-        let tenant_b_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_b_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_b)
                 .await
-                .expect("tenant b read succeeds"),
+                .expect("tenant b read succeeds")[..],
         )
         .expect("tenant b response decodes");
         let legacy_json: serde_json::Value =
-            sonic_rs::from_slice(&db.query_json(&read).await.expect("legacy read succeeds"))
+            simd_json::from_reader(&db.query_json(&read).await.expect("legacy read succeeds")[..])
                 .expect("legacy response decodes");
 
         assert_eq!(tenant_a_json.get("users"), Some(&serde_json::json!(1)));

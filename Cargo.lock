@@ -1293,10 +1293,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "simd-json",
  "siphasher",
  "slatedb",
  "slatedb-common",
- "sonic-rs",
  "stable_deref_trait",
  "tantivy",
  "tempfile",
@@ -1562,18 +1562,6 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
-
-[[package]]
-name = "faststr"
-version = "0.2.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ca7d44d22004409a61c393afb3369c8f7bb74abcae49fe249ee01dcc3002113"
-dependencies = [
- "bytes",
- "rkyv",
- "serde",
- "simdutf8",
-]
 
 [[package]]
 name = "figment"
@@ -2108,7 +2096,6 @@ dependencies = [
  "serde",
  "serde_json",
  "simd-json",
- "sonic-rs",
 ]
 
 [[package]]
@@ -2131,7 +2118,6 @@ dependencies = [
  "mimalloc",
  "serde",
  "simd-json",
- "sonic-rs",
 ]
 
 [[package]]
@@ -2193,7 +2179,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sonic-rs",
+ "simd-json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -2298,7 +2284,7 @@ dependencies = [
  "helix-ast",
  "helix-graph-algorithms",
  "serde_json",
- "sonic-rs",
+ "simd-json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -4719,8 +4705,8 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "simd-json",
  "slatedb",
- "sonic-rs",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -4954,45 +4940,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "sonic-number"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3775c3390edf958191f1ab1e8c5c188907feebd0f3ce1604cb621f72961dbf32"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
-name = "sonic-rs"
-version = "0.5.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d971cc77a245ccf1756dbd1a87c3e7f709c0191464096510d43eec056d0f2c4f"
-dependencies = [
- "ahash",
- "bumpalo",
- "bytes",
- "cfg-if",
- "faststr",
- "itoa",
- "ref-cast",
- "serde",
- "simdutf8",
- "sonic-number",
- "sonic-simd",
- "thiserror 2.0.19",
- "zmij",
-]
-
-[[package]]
-name = "sonic-simd"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f99e664ecd2d85a68c87e3c7a3cfe691f647ea9e835de984aba4d54a41f817d4"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]

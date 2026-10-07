@@ -1,6 +1,6 @@
 //! Per-stage cost of turning a native request body into a plan.
 //!
-//! `parse` compares the JSON backends and owned against arena parsing over
+//! `parse` compares owned against arena parsing with simd-json over
 //! every corpus shape, `drop` times freeing what parsing built, `params`
 //! compares owned and arena parameter values, and `stages` times each later
 //! step of `db::query_service` on its own. Inputs are built outside the timed
@@ -32,9 +32,10 @@ fn parse(json: &[u8]) -> QueryRequest {
     QueryRequest::from_json_slice(json).expect("corpus shapes parse")
 }
 
-/// Parse into `bump` and keep only what outlives the arena tree.
-fn arena_parse(bump: &Bump, json: &[u8]) -> BTreeMap<String, QueryValue> {
-    let request = ArenaQueryRequest::from_json_slice(bump, json).expect("corpus shapes parse");
+/// Parse `body` in place into `bump` and keep only what outlives the arena
+/// tree.
+fn arena_parse(bump: &Bump, body: &mut [u8]) -> BTreeMap<String, QueryValue> {
+    let request = ArenaQueryRequest::from_json_slice_mut(bump, body).expect("corpus shapes parse");
     divan::black_box(request.query());
     request.into_query().1
 }
@@ -43,21 +44,13 @@ fn arena_parse(bump: &Bump, json: &[u8]) -> BTreeMap<String, QueryValue> {
 /// its first chunk (from `ast_memory`).
 const ARENA_BYTES_PER_BODY_BYTE: usize = 4;
 
+/// simd-json rewrites its input, so every arm parses a fresh copy of the body
+/// made outside the timed region, unless the copy is what it measures.
 mod parse {
     use super::*;
 
     #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn sonic(bencher: Bencher, name: &str) {
-        let json = &support::shape(name).json;
-        bencher
-            .counter(BytesCount::of_slice(json))
-            .bench(|| QueryRequest::from_json_slice(json).expect("corpus shapes parse"));
-    }
-
-    /// simd-json rewrites its input, so each sample parses a fresh copy made
-    /// outside the timed region.
-    #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn simd_json(bencher: Bencher, name: &str) {
+    fn owned(bencher: Bencher, name: &str) {
         let json = &support::shape(name).json;
         bencher
             .counter(BytesCount::of_slice(json))
@@ -67,39 +60,72 @@ mod parse {
             });
     }
 
-    /// A fresh arena per request, growing chunk by chunk.
+    /// simd-json's scratch buffers kept across requests.
     #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn arena_sonic(bencher: Bencher, name: &str) {
+    fn owned_reused_buffers(bencher: Bencher, name: &str) {
+        let json = &support::shape(name).json;
+        let mut buffers = simd_json::Buffers::new(json.len());
+        bencher
+            .counter(BytesCount::of_slice(json))
+            .with_inputs(|| json.clone())
+            .bench_local_refs(|body| {
+                QueryRequest::from_json_slice_mut_with_buffers(body, &mut buffers)
+                    .expect("corpus shapes parse")
+            });
+    }
+
+    /// What the embedded `query_json` path pays: it holds `&[u8]`, so
+    /// simd-json needs its own mutable copy.
+    #[divan::bench(args = support::shape_names(), max_time = 1)]
+    fn owned_with_copy(bencher: Bencher, name: &str) {
         let json = &support::shape(name).json;
         bencher
             .counter(BytesCount::of_slice(json))
-            .with_inputs(Bump::new)
-            .bench_local_refs(|bump| arena_parse(bump, json));
+            .bench(|| QueryRequest::from_json_slice(json).expect("corpus shapes parse"));
+    }
+
+    /// A fresh arena per request, growing chunk by chunk.
+    #[divan::bench(args = support::shape_names(), max_time = 1)]
+    fn arena(bencher: Bencher, name: &str) {
+        let json = &support::shape(name).json;
+        bencher
+            .counter(BytesCount::of_slice(json))
+            .with_inputs(|| (Bump::new(), json.clone()))
+            .bench_local_refs(|(bump, body)| arena_parse(bump, body));
     }
 
     /// A fresh arena sized up front, so parsing never grows it.
     #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn arena_sonic_presized(bencher: Bencher, name: &str) {
+    fn arena_presized(bencher: Bencher, name: &str) {
         let json = &support::shape(name).json;
         bencher
             .counter(BytesCount::of_slice(json))
-            .with_inputs(|| Bump::with_capacity(json.len() * ARENA_BYTES_PER_BODY_BYTE))
-            .bench_local_refs(|bump| arena_parse(bump, json));
+            .with_inputs(|| {
+                (
+                    Bump::with_capacity(json.len() * ARENA_BYTES_PER_BODY_BYTE),
+                    json.clone(),
+                )
+            })
+            .bench_local_refs(|(bump, body)| arena_parse(bump, body));
     }
 
     /// One arena reused across requests, reset before each, as a pool does.
     #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn arena_sonic_reused(bencher: Bencher, name: &str) {
+    fn arena_reused(bencher: Bencher, name: &str) {
         let json = &support::shape(name).json;
         let mut bump = Bump::new();
-        bencher.counter(BytesCount::of_slice(json)).bench_local(|| {
-            bump.reset();
-            arena_parse(&bump, json)
-        });
+        bencher
+            .counter(BytesCount::of_slice(json))
+            .with_inputs(|| json.clone())
+            .bench_local_refs(|body| {
+                bump.reset();
+                arena_parse(&bump, body)
+            });
     }
 
+    /// A reused arena and reused simd-json scratch buffers.
     #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn arena_simd_json_reused(bencher: Bencher, name: &str) {
+    fn arena_reused_buffers(bencher: Bencher, name: &str) {
         let json = &support::shape(name).json;
         let mut bump = Bump::new();
         let mut buffers = simd_json::Buffers::new(json.len());
@@ -119,39 +145,18 @@ mod parse {
     /// Arena parsing followed by the conversion to the owned request: what a
     /// single parser for both paths would cost the owned path.
     #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn arena_sonic_then_into_owned(bencher: Bencher, name: &str) {
+    fn arena_then_into_owned(bencher: Bencher, name: &str) {
         let json = &support::shape(name).json;
         let mut bump = Bump::new();
-        bencher.counter(BytesCount::of_slice(json)).bench_local(|| {
-            bump.reset();
-            ArenaQueryRequest::from_json_slice(&bump, json)
-                .expect("corpus shapes parse")
-                .into_owned()
-        });
-    }
-
-    #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn simd_json_reused_buffers(bencher: Bencher, name: &str) {
-        let json = &support::shape(name).json;
-        let mut buffers = simd_json::Buffers::new(json.len());
         bencher
             .counter(BytesCount::of_slice(json))
             .with_inputs(|| json.clone())
             .bench_local_refs(|body| {
-                QueryRequest::from_json_slice_mut_with_buffers(body, &mut buffers)
+                bump.reset();
+                ArenaQueryRequest::from_json_slice_mut(&bump, body)
                     .expect("corpus shapes parse")
+                    .into_owned()
             });
-    }
-
-    /// What the embedded `query_json` path pays: it holds `&[u8]`, so
-    /// simd-json needs its own mutable copy.
-    #[divan::bench(args = support::shape_names(), max_time = 1)]
-    fn simd_json_with_copy(bencher: Bencher, name: &str) {
-        let json = &support::shape(name).json;
-        bencher.counter(BytesCount::of_slice(json)).bench(|| {
-            let mut body = json.clone();
-            QueryRequest::from_json_slice_mut(&mut body).expect("corpus shapes parse")
-        });
     }
 }
 
@@ -190,7 +195,7 @@ mod drop {
         bencher
             .with_inputs(|| {
                 let bump = Bump::new();
-                drop(arena_parse(&bump, json));
+                drop(arena_parse(&bump, &mut json.clone()));
                 bump
             })
             .bench_local_values(std::mem::drop);
@@ -203,7 +208,7 @@ mod drop {
         bencher
             .with_inputs(|| {
                 let bump = Bump::new();
-                drop(arena_parse(&bump, json));
+                drop(arena_parse(&bump, &mut json.clone()));
                 bump
             })
             .bench_local_refs(Bump::reset);
@@ -221,7 +226,10 @@ mod params {
         let json = &support::shape(name).json;
         bencher
             .counter(BytesCount::of_slice(json))
-            .bench(|| sonic_rs::from_slice::<QueryValue>(json).expect("corpus shapes are JSON"));
+            .with_inputs(|| json.clone())
+            .bench_local_refs(|body| {
+                simd_json::serde::from_slice::<QueryValue>(body).expect("corpus shapes are JSON")
+            });
     }
 
     #[divan::bench(args = support::shape_names(), max_time = 1)]
@@ -229,10 +237,10 @@ mod params {
         let json = &support::shape(name).json;
         bencher
             .counter(BytesCount::of_slice(json))
-            .with_inputs(Bump::new)
-            .bench_local_refs(|bump| {
-                let text = std::str::from_utf8(json).expect("corpus shapes are UTF-8");
-                let mut deserializer = sonic_rs::Deserializer::from_str(text);
+            .with_inputs(|| (Bump::new(), json.clone()))
+            .bench_local_refs(|(bump, body)| {
+                let mut deserializer =
+                    simd_json::Deserializer::from_slice(body).expect("corpus shapes are JSON");
                 let value: arena::QueryValue<'_> = serde::de::DeserializeSeed::deserialize(
                     arena::Seed::new(bump),
                     &mut deserializer,
@@ -247,7 +255,8 @@ mod params {
         let json = &support::shape(name).json;
         bencher
             .with_inputs(|| {
-                sonic_rs::from_slice::<QueryValue>(json).expect("corpus shapes are JSON")
+                simd_json::serde::from_slice::<QueryValue>(&mut json.clone())
+                    .expect("corpus shapes are JSON")
             })
             .bench_local_values(std::mem::drop);
     }

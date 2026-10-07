@@ -464,7 +464,7 @@ impl QueryResponse {
 
     /// Serialize the response as JSON bytes.
     pub fn to_json_bytes(&self) -> std::result::Result<Vec<u8>, QueryServiceError> {
-        sonic_rs::to_vec(self).map_err(QueryServiceError::Serialize)
+        simd_json::to_vec(self).map_err(QueryServiceError::Serialize)
     }
 
     /// Borrow the returned values.
@@ -650,7 +650,7 @@ pub enum QueryServiceError {
 
     /// Response serialization failed.
     #[error("json serialization error: {0}")]
-    Serialize(sonic_rs::Error),
+    Serialize(simd_json::Error),
 }
 
 /// Transport- and telemetry-neutral failure class shared by HTTP, gRPC and metrics.
@@ -1407,7 +1407,7 @@ mod tests {
         .to_json_string()
         .expect("write request should serialize");
         let disguised = write.replacen(r#""request_type":"write""#, r#""request_type":"read""#, 1);
-        sonic_rs::from_str::<QueryRequest>(&disguised)
+        simd_json::from_reader::<_, QueryRequest>(disguised.as_bytes())
             .expect_err("a read envelope must reject a write payload");
 
         let response = service
@@ -1443,7 +1443,7 @@ mod tests {
         let disguised = write
             .replacen(r#""request_type":"write""#, r#""request_type":"read""#, 1)
             .replacen(r#""write":{"#, r#""read":{"#, 1);
-        sonic_rs::from_str::<QueryRequest>(&disguised)
+        simd_json::from_reader::<_, QueryRequest>(disguised.as_bytes())
             .expect_err("a read batch must reject a mutation traversal");
 
         let response = service
@@ -2424,9 +2424,10 @@ mod tests {
         assert!(matches!(json, QueryServiceError::JsonSerialize(_)));
         assert!(matches!(HelixDbError::from(json), HelixDbError::Query(_)));
 
-        let sonic = sonic_rs::from_str::<u8>("not-json").expect_err("invalid JSON should fail");
+        let decode = simd_json::from_reader::<_, u8>("not-json".as_bytes())
+            .expect_err("invalid JSON should fail");
         assert!(matches!(
-            HelixDbError::from(QueryServiceError::Serialize(sonic)),
+            HelixDbError::from(QueryServiceError::Serialize(decode)),
             HelixDbError::Query(_)
         ));
     }
@@ -2439,8 +2440,8 @@ mod tests {
         let QueryServiceError::JsonSerialize(json_error) = json_error else {
             panic!("datetime overflow should be a JSON serialization failure");
         };
-        let sonic_error =
-            sonic_rs::from_str::<u8>("not-json").expect_err("invalid JSON should fail");
+        let decode_error = simd_json::from_reader::<_, u8>("not-json".as_bytes())
+            .expect_err("invalid JSON should fail");
         let cases = [
             (
                 QueryServiceError::Db(HelixDbError::WriterFencedCommitOutcomeUnknown),
@@ -2491,7 +2492,7 @@ mod tests {
                 QueryFailureClass::Internal,
             ),
             (
-                QueryServiceError::Serialize(sonic_error),
+                QueryServiceError::Serialize(decode_error),
                 QueryFailureClass::Internal,
             ),
         ];
