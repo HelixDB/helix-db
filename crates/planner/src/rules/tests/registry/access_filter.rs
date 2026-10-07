@@ -12,7 +12,8 @@ fn selective_equality_type_union_is_one_index_intersection() {
     let config = optimizer::OptimizerConfig::from_context(&crate::context::PlannerContext {
         indexes,
         ..Default::default()
-    });
+    })
+    .into_owned();
     let expr = node_access_filter_expr(
         ir::NodeAccessPlan::LabelScan {
             label: name("Resource"),
@@ -72,7 +73,8 @@ fn selective_equality_offers_only_the_full_intersection() {
     let config = optimizer::OptimizerConfig::from_context(&crate::context::PlannerContext {
         indexes,
         ..Default::default()
-    });
+    })
+    .into_owned();
     let expr = node_access_filter_expr(
         ir::NodeAccessPlan::LabelScan {
             label: name("Resource"),
@@ -129,9 +131,9 @@ fn seed_rule_set_explores_access_filter_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let impossible = ir::PredicatePlan::new(helix_ast::expr::Predicate::compare(
         helix_ast::expr::Expr::val(1),
@@ -179,9 +181,11 @@ fn seed_rule_set_explores_catalog_indexed_access_filters_before_implementation()
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default().with_node_eq(key),
+        indexes: std::borrow::Cow::Owned(
+            catalog::IndexCatalogSnapshot::default().with_node_eq(key),
+        ),
     };
     let expr = node_access_filter_expr(
         ir::NodeAccessPlan::LabelScan {
@@ -216,14 +220,16 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_intersections() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile {
             default_equality_index_rows: cost::EstimatedRows::rows(2_000),
             ..Default::default()
         },
-        indexes: catalog::IndexCatalogSnapshot::default()
-            .with_node_range(age_key)
-            .with_node_eq(score_key),
+        indexes: std::borrow::Cow::Owned(
+            catalog::IndexCatalogSnapshot::default()
+                .with_node_range(age_key)
+                .with_node_eq(score_key),
+        ),
     };
     let expr = node_access_filter_expr(
         ir::NodeAccessPlan::LabelScan {
@@ -266,9 +272,11 @@ fn seed_rule_set_explores_catalog_indexed_access_filter_unions() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default().with_node_eq(age_key),
+        indexes: std::borrow::Cow::Owned(
+            catalog::IndexCatalogSnapshot::default().with_node_eq(age_key),
+        ),
     };
     let expr = node_access_filter_expr(
         ir::NodeAccessPlan::LabelScan {
@@ -318,7 +326,8 @@ fn indexed_conjunction_offers_only_the_full_intersection() {
     let config = optimizer::OptimizerConfig::from_context(&crate::context::PlannerContext {
         indexes,
         ..Default::default()
-    });
+    })
+    .into_owned();
     let expr = node_access_filter_expr(
         ir::NodeAccessPlan::LabelScan {
             label: name("Fixture"),

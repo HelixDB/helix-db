@@ -18,7 +18,7 @@ use crate::{context, error, exec, optimizer, rules};
 pub(super) struct SelectedCascadesPlanner<'a> {
     ctx: &'a context::PlannerContext,
     rules: rules::SeedRuleSet,
-    config: optimizer::OptimizerConfig,
+    config: optimizer::OptimizerConfig<'a>,
     selected_roots: cache::SelectedRunRootCache,
 }
 

@@ -10,9 +10,9 @@ fn seed_rule_set_runs_through_cascades_optimizer() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
 
     let result = optimize(&optimizer, source(properties::ElementKind::Edge), &config);
