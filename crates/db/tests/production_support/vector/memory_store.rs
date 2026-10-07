@@ -724,18 +724,23 @@ async fn run_slab_layout_contracts() {
         .append(&[], VectorMemoryAdmissionBudget::Bounded(0))
         .unwrap();
     assert_eq!(slab.read(empty.row), Some(Bytes::new()));
+    let handle = SLAB_CHUNK_HANDLE_BYTES;
     assert_eq!(
-        slab.append(b"row", VectorMemoryAdmissionBudget::Bounded(2)),
+        slab.append(b"row", VectorMemoryAdmissionBudget::Bounded(1)),
+        None
+    );
+    assert_eq!(
+        slab.append(b"row", VectorMemoryAdmissionBudget::Bounded(handle + 2)),
         None
     );
     let exact = slab
-        .append(b"row", VectorMemoryAdmissionBudget::Bounded(3))
+        .append(b"row", VectorMemoryAdmissionBudget::Bounded(handle + 3))
         .unwrap();
-    assert_eq!(exact.allocated, 3);
+    assert_eq!(exact.allocated, handle + 3);
     let halved = slab
-        .append(b"next", VectorMemoryAdmissionBudget::Bounded(64))
+        .append(b"next", VectorMemoryAdmissionBudget::Bounded(handle + 64))
         .unwrap();
-    assert_eq!(halved.allocated, 32);
+    assert_eq!(halved.allocated, handle + 32);
     let fits = slab
         .append(b"fits", VectorMemoryAdmissionBudget::Bounded(0))
         .unwrap();
@@ -747,15 +752,19 @@ async fn run_slab_layout_contracts() {
     let open = slab
         .append(b"open", VectorMemoryAdmissionBudget::Unbounded)
         .unwrap();
-    assert_eq!(open.allocated, VECTOR_MEMORY_SLAB_CHUNK_BYTES as u64);
+    assert_eq!(
+        open.allocated,
+        VECTOR_MEMORY_SLAB_CHUNK_BYTES as u64 + handle
+    );
     let past_open = SlabRow {
         chunk: open.row.chunk + 1,
         ..open.row
     };
     assert_eq!(slab.read(past_open), None);
     slab.clear();
+    slab.clear();
     assert_eq!(slab.read(open.row), None);
-    assert_eq!(slab.read(exact.row), None);
+    assert_eq!(slab.read(exact.row), Some(Bytes::from_static(b"row")));
     let after = slab
         .append(b"after", VectorMemoryAdmissionBudget::Unbounded)
         .unwrap();
@@ -806,8 +815,11 @@ async fn run_slab_layout_contracts() {
         )
         .await
         .unwrap();
-    let full_charge =
-        UPPER_NODE_INDEX_ENTRY_BYTES + 2 * UPPER_LAYER_SLOT_BYTES + SIMHASH_INDEX_ENTRY_BYTES + 60;
+    let full_charge = UPPER_NODE_INDEX_ENTRY_BYTES
+        + 2 * UPPER_LAYER_SLOT_BYTES
+        + SIMHASH_INDEX_ENTRY_BYTES
+        + handle
+        + 60;
     assert_eq!(summary.estimated_bytes, full_charge);
 
     let refreshed = VectorMemoryStore::new(keyspace.scope(), index_id, 1);
@@ -823,8 +835,9 @@ async fn run_slab_layout_contracts() {
         .await
         .unwrap();
     assert_eq!(
-        summary.estimated_bytes, 60,
-        "updated entries charge only bytes"
+        summary.estimated_bytes,
+        handle + 60,
+        "updated entries charge only their chunk"
     );
     assert_eq!(refreshed.get_simhash(5), Some(SimHash::from_bits(5)));
     assert_eq!(
@@ -835,7 +848,7 @@ async fn run_slab_layout_contracts() {
     for (budget, loaded) in [
         (UPPER_NODE_INDEX_ENTRY_BYTES - 1, 0),
         (
-            UPPER_NODE_INDEX_ENTRY_BYTES + 10 + 2 * UPPER_LAYER_SLOT_BYTES - 1,
+            UPPER_NODE_INDEX_ENTRY_BYTES + handle + 10 + 2 * UPPER_LAYER_SLOT_BYTES - 1,
             1,
         ),
         (full_charge - 31, 2),
