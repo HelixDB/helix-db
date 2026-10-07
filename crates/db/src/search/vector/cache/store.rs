@@ -930,6 +930,10 @@ impl VectorMemoryHydrationRow {
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
+#[path = "store_tests.rs"]
+mod oracle_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
