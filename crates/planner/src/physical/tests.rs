@@ -24,7 +24,7 @@ fn physical_alternative_preserves_delivered_properties_and_cost() {
     assert_eq!(alternative.cost, cost::CostVector::ZERO);
     assert_eq!(
         alternative.digest,
-        digest::PlanDigest::for_tagged_value(
+        digest::PlanDigest::for_tie_break(
             "physical_alternative:v1",
             &(
                 PhysicalExpr::Sort,

@@ -24,7 +24,7 @@ impl PhysicalAlternative {
         cost: cost::CostVector,
     ) -> Self {
         let digest =
-            digest::PlanDigest::for_tagged_value("physical_alternative:v1", &(&expr, &delivered));
+            digest::PlanDigest::for_tie_break("physical_alternative:v1", &(&expr, &delivered));
         Self {
             expr,
             delivered,
