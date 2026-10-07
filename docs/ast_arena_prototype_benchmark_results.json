@@ -360,7 +360,6 @@
     }
    ]
   },
-  "measured": "2026-10-07",
   "memory": {
    "baseline": {
     "lifecycle: freed early (current) (sonic)": [
@@ -6444,7 +6443,6 @@
   },
   "verification": "fmt, workspace clippy, all-target clippy of the AST and planner crates, and the helix-ast, derive, bench, planner, db lib (2,545 tests), server and production-contract suites pass on Graviton4."
  },
- "measured": "2026-10-07",
  "memory": {
   "lifecycle: freed early (current) (sonic)": [
    {

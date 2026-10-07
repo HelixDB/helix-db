@@ -1,6 +1,6 @@
 # Native request parsing and planning: arena prototype, Graviton4 results and follow-ups
 
-Measured 2026-10-07 on an Apple M4 Pro (macOS) and an AWS i8g.8xlarge (Graviton4, Linux).
+Measured on an Apple M4 Pro (macOS) and an AWS i8g.8xlarge (Graviton4, Linux).
 
 ## Summary
 
@@ -486,14 +486,18 @@ The migration sketch:
    most of that parse time, which neither the arena nor a JSON backend can do.
 7. **F3. The embedded `query_json_scoped(&[u8])` has no body-size cap** and borrows the body through
    execution. **F8.** The Rust SDK's embedded path serializes the request and then parses it again.
-8. **F7. Possible follow-up arenas.** A planner scratch arena, and an arena for the Cypher syntax tree
-   (`crates/cypher/src/syntax.rs`).
+8. **F7. Planner arena: measured in [PLANNER_ARENA_BENCHMARK.md](PLANNER_ARENA_BENCHMARK.md).** It
+   would save at most about a tenth of planning time with mimalloc. Sharing planner names saves more on
+   the slowest plans. An arena for the Cypher syntax tree (`crates/cypher/src/syntax.rs`) is still
+   unmeasured.
 9. **F9. A parameter arena needs exact length hints.** simd-json provides them; sonic-rs does not. Without
    them, large arrays waste up to 2× through doubling inside the arena (see §2).
 
 Remaining opportunities the Graviton4 profiles point to:
 
-- **Planner allocation volume.** About 40–50% of small-request planning is spent in malloc and free.
+- **Planner allocation volume.** About 40–50% of small-request planning was spent in malloc and free in a
+  macOS profile taken before the switch to mimalloc. With mimalloc, a bump arena saves about 10%
+  ([PLANNER_ARENA_BENCHMARK.md](PLANNER_ARENA_BENCHMARK.md)).
 - **Memo identity.** Digests are computed by serializing every explored expression to JSON (about 8%).
 - **Executable-plan assembly for wide batches.** It uses `BTreeMap`s keyed by step id.
 

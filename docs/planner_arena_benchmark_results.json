@@ -1,0 +1,3662 @@
+{
+ "allocation_sites": {
+  "after": {
+   "deep_chain/123": {
+    "by_container": "Vec 38%, BTreeMap/BTreeSet 27%, String 12%, Box 10%, Arc 7%, other 6%, HashMap/HashSet 0%",
+    "rows": [
+     {
+      "KiB": "115.3",
+      "allocations": "2109",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`clone<helix_planner::ir::expr::predicate::ResolvedPredicate> (relational/selection.rs)`",
+      "share": "20.5%"
+     },
+     {
+      "KiB": "280.3",
+      "allocations": "1920",
+      "container": "Vec",
+      "innermost planner function": "`access_stream_parts (planning/selected/native/pipeline/expr.rs)`",
+      "share": "18.7%"
+     },
+     {
+      "KiB": "1.7",
+      "allocations": "312",
+      "container": "String",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "14.5",
+      "allocations": "309",
+      "container": "Box",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "64.5",
+      "allocations": "294",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "2.9%"
+     },
+     {
+      "KiB": "4.4",
+      "allocations": "279",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::ir::contracts::non_empty_string::NonEmptyString, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "33.1",
+      "allocations": "249",
+      "container": "Arc",
+      "innermost planner function": "`new (ir/expr/predicate.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "5.4",
+      "allocations": "225",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "2.2%"
+     },
+     {
+      "KiB": "5.2",
+      "allocations": "219",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<&str> (ir/contracts/non_empty_string.rs)`",
+      "share": "2.1%"
+     },
+     {
+      "KiB": "622.3",
+      "allocations": "216",
+      "container": "Vec",
+      "innermost planner function": "`from_one_and_rest<helix_planner::logical::access::pipeline::op::StreamPipelineOp> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.1%"
+     },
+     {
+      "KiB": "3.7",
+      "allocations": "198",
+      "container": "Vec",
+      "innermost planner function": "`new (exec/plan/subplan.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "3.7",
+      "allocations": "198",
+      "container": "Vec",
+      "innermost planner function": "`new (exec/plan/top_level.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "5.8",
+      "allocations": "186",
+      "container": "Vec",
+      "innermost planner function": "`bounded_peak_memory (cost/profile/parallel.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "26.2",
+      "allocations": "186",
+      "container": "other",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "20.3",
+      "allocations": "186",
+      "container": "Box",
+      "innermost planner function": "`clone (logical/access/pipeline/op.rs)`",
+      "share": "1.8%"
+     }
+    ],
+    "summary": "deep_chain/123: 10280 allocations, one sample per 3"
+   },
+   "dynamic-read": {
+    "by_container": "Vec 28%, String 26%, Box 15%, BTreeMap/BTreeSet 14%, Arc 9%, other 5%, HashMap/HashSet 1%, String (format!) 1%, VecDeque 0%",
+    "rows": [
+     {
+      "KiB": "0.8",
+      "allocations": "66",
+      "container": "String",
+      "innermost planner function": "`property_literal_value (analysis/scalar/extract.rs)`",
+      "share": "10.0%"
+     },
+     {
+      "KiB": "1.8",
+      "allocations": "56",
+      "container": "Vec",
+      "innermost planner function": "`push (optimizer/driver/schedule/candidates/list.rs)`",
+      "share": "8.5%"
+     },
+     {
+      "KiB": "1.7",
+      "allocations": "30",
+      "container": "Vec",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "4.6%"
+     },
+     {
+      "KiB": "1.1",
+      "allocations": "27",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<&str> (ir/contracts/non_empty_string.rs)`",
+      "share": "4.1%"
+     },
+     {
+      "KiB": "0.3",
+      "allocations": "26",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "4.0%"
+     },
+     {
+      "KiB": "0.0",
+      "allocations": "23",
+      "container": "Box",
+      "innermost planner function": "`from_one<helix_planner::logical::core::expr::LogicalExprKind> (ir/contracts/at_least/mod.rs)`",
+      "share": "3.5%"
+     },
+     {
+      "KiB": "0.6",
+      "allocations": "21",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "3.2%"
+     },
+     {
+      "KiB": "2.4",
+      "allocations": "20",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "1.3",
+      "allocations": "18",
+      "container": "Box",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "0.8",
+      "allocations": "14",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`clone<helix_planner::ir::expr::predicate::ResolvedPredicate> (relational/selection.rs)`",
+      "share": "2.1%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "12",
+      "container": "String",
+      "innermost planner function": "`clone (ir/index/range/value.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "0.8",
+      "allocations": "12",
+      "container": "Box",
+      "innermost planner function": "`range_point_source<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "12",
+      "container": "String",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "12",
+      "container": "String",
+      "innermost planner function": "`{closure#0}<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "1.5",
+      "allocations": "11",
+      "container": "other",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "1.7%"
+     }
+    ],
+    "summary": "dynamic-read: 657 allocations, one sample per 1"
+   },
+   "fixture/BranchHeavyQueries/16": {
+    "by_container": "Vec 37%, BTreeMap/BTreeSet 23%, Box 12%, Arc 9%, other 7%, String (format!) 6%, String 4%, HashMap/HashSet 3%, VecDeque 0%",
+    "rows": [
+     {
+      "KiB": "28.9",
+      "allocations": "212",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "9.8%"
+     },
+     {
+      "KiB": "20.4",
+      "allocations": "136",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`new (exec/plan/subplan.rs)`",
+      "share": "6.3%"
+     },
+     {
+      "KiB": "5.7",
+      "allocations": "126",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "5.8%"
+     },
+     {
+      "KiB": "1.9",
+      "allocations": "99",
+      "container": "Vec",
+      "innermost planner function": "`new (exec/plan/subplan.rs)`",
+      "share": "4.6%"
+     },
+     {
+      "KiB": "2.5",
+      "allocations": "88",
+      "container": "String (format!)",
+      "innermost planner function": "`executable_from_read_batch (planning/executable.rs)`",
+      "share": "4.1%"
+     },
+     {
+      "KiB": "18.5",
+      "allocations": "68",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::logical::core::expr::LogicalExpr, 2> (ir/contracts/at_least/mod.rs)`",
+      "share": "3.1%"
+     },
+     {
+      "KiB": "6.0",
+      "allocations": "64",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::logical::access::pipeline::op::StreamPipelineOp, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "1.8",
+      "allocations": "56",
+      "container": "Vec",
+      "innermost planner function": "`push (optimizer/driver/schedule/candidates/list.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "3.8",
+      "allocations": "51",
+      "container": "HashMap/HashSet",
+      "innermost planner function": "`analyze_steps (diagnostics/analyze.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "3.7",
+      "allocations": "51",
+      "container": "other",
+      "innermost planner function": "`new (exec/plan/subplan.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "10.1",
+      "allocations": "48",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::physical::pipeline::PhysicalPipelineOp, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.2%"
+     },
+     {
+      "KiB": "9.0",
+      "allocations": "48",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`pure_subplan (exec/pull/mod.rs)`",
+      "share": "2.2%"
+     },
+     {
+      "KiB": "3.7",
+      "allocations": "36",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`reject_cycles (exec/validation/graph.rs)`",
+      "share": "1.7%"
+     },
+     {
+      "KiB": "2.5",
+      "allocations": "34",
+      "container": "Vec",
+      "innermost planner function": "`canonicalize_stream_pipeline_ops (logical/access/pipeline/canonical.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "16.2",
+      "allocations": "34",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::exec::selected::run::root::SelectedExecutableRunRoot, 2> (ir/contracts/at_least/mod.rs)`",
+      "share": "1.6%"
+     }
+    ],
+    "summary": "fixture/BranchHeavyQueries/16: 2168 allocations, one sample per 1"
+   },
+   "fixture/ManyMemoAlternatives/64": {
+    "by_container": "Box 48%, Vec 21%, String 18%, other 5%, Arc 5%, BTreeMap/BTreeSet 2%, HashMap/HashSet 0%, String (format!) 0%, VecDeque 0%",
+    "rows": [
+     {
+      "KiB": "54.6",
+      "allocations": "388",
+      "container": "Box",
+      "innermost planner function": "`from_unfiltered (ir/access/node/source.rs)`",
+      "share": "9.7%"
+     },
+     {
+      "KiB": "12.0",
+      "allocations": "384",
+      "container": "Box",
+      "innermost planner function": "`{closure#0} (rules/access/filter/atoms/mod.rs)`",
+      "share": "9.6%"
+     },
+     {
+      "KiB": "0.9",
+      "allocations": "332",
+      "container": "String",
+      "innermost planner function": "`property_literal_value (analysis/scalar/extract.rs)`",
+      "share": "8.3%"
+     },
+     {
+      "KiB": "45.0",
+      "allocations": "320",
+      "container": "Box",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "8.0%"
+     },
+     {
+      "KiB": "50.0",
+      "allocations": "320",
+      "container": "Box",
+      "innermost planner function": "`{closure#0} (exec/lowering/secondary_set.rs)`",
+      "share": "8.0%"
+     },
+     {
+      "KiB": "31.0",
+      "allocations": "263",
+      "container": "Vec",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "6.6%"
+     },
+     {
+      "KiB": "12.1",
+      "allocations": "258",
+      "container": "Box",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "6.5%"
+     },
+     {
+      "KiB": "4.7",
+      "allocations": "198",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "5.0%"
+     },
+     {
+      "KiB": "60.0",
+      "allocations": "192",
+      "container": "other",
+      "innermost planner function": "`access_filter_index_atoms (rules/access/filter/atoms/collect.rs)`",
+      "share": "4.8%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "192",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "4.8%"
+     },
+     {
+      "KiB": "6.0",
+      "allocations": "192",
+      "container": "Vec",
+      "innermost planner function": "`try_map_ref<helix_planner::rules::access::filter::atoms::types::AccessFilterIndexAtom, 1, helix_planner::ir::access::node::source::NodeAccessSourcePlan, helix_planner::rules::access::filter::index::contracts::MissingAccessIndex, helix_planner::rules::access::filter::index::shared::index_source_for_atoms::{closure_env#0}<helix_planner::rules::access::filter::index::node::NodeIndexFamily>> (ir/contracts/at_least/ops.rs)`",
+      "share": "4.8%"
+     },
+     {
+      "KiB": "15.8",
+      "allocations": "131",
+      "container": "Vec",
+      "innermost planner function": "`residual_after_label_scope (planning/selected/native/source/lowering/stream.rs)`",
+      "share": "3.3%"
+     },
+     {
+      "KiB": "0.4",
+      "allocations": "130",
+      "container": "String",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "3.3%"
+     },
+     {
+      "KiB": "6.0",
+      "allocations": "129",
+      "container": "Box",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "3.2%"
+     },
+     {
+      "KiB": "7.9",
+      "allocations": "68",
+      "container": "Vec",
+      "innermost planner function": "`new (planning/selected/native/source/lowering/stream.rs)`",
+      "share": "1.7%"
+     }
+    ],
+    "summary": "fixture/ManyMemoAlternatives/64: 3999 allocations, one sample per 1"
+   },
+   "fixture/WideBooleanPredicates/64": {
+    "by_container": "String 38%, Box 36%, Vec 16%, Arc 6%, BTreeMap/BTreeSet 4%, other 1%, HashMap/HashSet 0%, String (format!) 0%, VecDeque 0%",
+    "rows": [
+     {
+      "KiB": "2.3",
+      "allocations": "836",
+      "container": "String",
+      "innermost planner function": "`property_literal_value (analysis/scalar/extract.rs)`",
+      "share": "22.3%"
+     },
+     {
+      "KiB": "45.0",
+      "allocations": "320",
+      "container": "Box",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "8.6%"
+     },
+     {
+      "KiB": "12.1",
+      "allocations": "258",
+      "container": "Box",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "6.9%"
+     },
+     {
+      "KiB": "4.7",
+      "allocations": "198",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "5.3%"
+     },
+     {
+      "KiB": "27.6",
+      "allocations": "196",
+      "container": "Box",
+      "innermost planner function": "`from_unfiltered (ir/access/node/source.rs)`",
+      "share": "5.2%"
+     },
+     {
+      "KiB": "23.0",
+      "allocations": "195",
+      "container": "Vec",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "5.2%"
+     },
+     {
+      "KiB": "9.0",
+      "allocations": "192",
+      "container": "Box",
+      "innermost planner function": "`clone<helix_ast::value::PropertyValue, helix_planner::ir::expr::native::Unary, helix_planner::ir::expr::native::Binary, helix_planner::ir::expr::native::Function, !> (relational/expression.rs)`",
+      "share": "5.1%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "192",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "5.1%"
+     },
+     {
+      "KiB": "0.4",
+      "allocations": "130",
+      "container": "String",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "3.5%"
+     },
+     {
+      "KiB": "6.0",
+      "allocations": "129",
+      "container": "Box",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "20.0",
+      "allocations": "128",
+      "container": "Box",
+      "innermost planner function": "`source_parts (rules/physical_contracts/access/source/node.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "125.6",
+      "allocations": "72",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`constraint (analysis/scalar/constraints/collect.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "7.9",
+      "allocations": "68",
+      "container": "Vec",
+      "innermost planner function": "`new (planning/selected/native/source/lowering/stream.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "66",
+      "container": "String",
+      "innermost planner function": "`expression (planning/selected/native/parameter_specialization.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "66",
+      "container": "Vec",
+      "innermost planner function": "`prune_borrowed (analysis/prune.rs)`",
+      "share": "1.8%"
+     }
+    ],
+    "summary": "fixture/WideBooleanPredicates/64: 3741 allocations, one sample per 1"
+   },
+   "ordered-range-wide-projection": {
+    "by_container": "Vec 32%, String 26%, Box 13%, Arc 12%, BTreeMap/BTreeSet 11%, other 4%, HashMap/HashSet 1%, String (format!) 1%, VecDeque 0%",
+    "rows": [
+     {
+      "KiB": "2.5",
+      "allocations": "87",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "9.8%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "57",
+      "container": "String",
+      "innermost planner function": "`non_empty<&str> (planning/selected/native/names.rs)`",
+      "share": "6.4%"
+     },
+     {
+      "KiB": "1.8",
+      "allocations": "56",
+      "container": "Vec",
+      "innermost planner function": "`push (optimizer/driver/schedule/candidates/list.rs)`",
+      "share": "6.3%"
+     },
+     {
+      "KiB": "0.3",
+      "allocations": "48",
+      "container": "String",
+      "innermost planner function": "`property_literal_value (analysis/scalar/extract.rs)`",
+      "share": "5.4%"
+     },
+     {
+      "KiB": "2.4",
+      "allocations": "42",
+      "container": "Vec",
+      "innermost planner function": "`and<helix_planner::ir::access::node::source::NodeAccessSourcePlan> (rules/access/filter/index/translate.rs)`",
+      "share": "4.7%"
+     },
+     {
+      "KiB": "2.1",
+      "allocations": "32",
+      "container": "Vec",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "3.6%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "28",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "3.2%"
+     },
+     {
+      "KiB": "3.5",
+      "allocations": "24",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "0.0",
+      "allocations": "23",
+      "container": "Box",
+      "innermost planner function": "`from_one<helix_planner::logical::core::expr::LogicalExprKind> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "1.6",
+      "allocations": "21",
+      "container": "Box",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "0.8",
+      "allocations": "18",
+      "container": "Box",
+      "innermost planner function": "`clone<helix_ast::value::PropertyValue, helix_planner::ir::expr::native::Unary, helix_planner::ir::expr::native::Binary, helix_planner::ir::expr::native::Function, !> (relational/expression.rs)`",
+      "share": "2.0%"
+     },
+     {
+      "KiB": "0.4",
+      "allocations": "18",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::ir::order::OrderKey, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.0%"
+     },
+     {
+      "KiB": "0.1",
+      "allocations": "15",
+      "container": "String",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "1.7%"
+     },
+     {
+      "KiB": "0.7",
+      "allocations": "14",
+      "container": "Box",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "0.1",
+      "allocations": "14",
+      "container": "String",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "1.6%"
+     }
+    ],
+    "summary": "ordered-range-wide-projection: 885 allocations, one sample per 1"
+   },
+   "predicate_heavy/1024": {
+    "by_container": "Vec 58%, String 22%, Box 9%, Arc 5%, HashMap/HashSet 4%, BTreeMap/BTreeSet 1%, other 1%",
+    "rows": [
+     {
+      "KiB": "1156.0",
+      "allocations": "21021",
+      "container": "Vec",
+      "innermost planner function": "`and<helix_planner::ir::access::node::source::NodeAccessSourcePlan> (rules/access/filter/index/translate.rs)`",
+      "share": "13.6%"
+     },
+     {
+      "KiB": "1702.8",
+      "allocations": "10998",
+      "container": "Vec",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "7.1%"
+     },
+     {
+      "KiB": "616.3",
+      "allocations": "10608",
+      "container": "Vec",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "6.8%"
+     },
+     {
+      "KiB": "255.6",
+      "allocations": "10257",
+      "container": "Vec",
+      "innermost planner function": "`owned_values (analysis/scalar/values.rs)`",
+      "share": "6.6%"
+     },
+     {
+      "KiB": "228.2",
+      "allocations": "8034",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "5.2%"
+     },
+     {
+      "KiB": "176.1",
+      "allocations": "7371",
+      "container": "Vec",
+      "innermost planner function": "`literal_equality_set (analysis/index_atoms/equality.rs)`",
+      "share": "4.8%"
+     },
+     {
+      "KiB": "53.8",
+      "allocations": "6981",
+      "container": "String",
+      "innermost planner function": "`property_literal_value (analysis/scalar/extract.rs)`",
+      "share": "4.5%"
+     },
+     {
+      "KiB": "543.9",
+      "allocations": "6981",
+      "container": "Box",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "4.5%"
+     },
+     {
+      "KiB": "305.9",
+      "allocations": "5304",
+      "container": "Vec",
+      "innermost planner function": "`filter (planning/selected/native/stream/accumulator/ops.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "36.5",
+      "allocations": "4680",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "192.0",
+      "allocations": "4095",
+      "container": "Box",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "34.5",
+      "allocations": "4056",
+      "container": "String",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "25.7",
+      "allocations": "4056",
+      "container": "String",
+      "innermost planner function": "`{closure#1}<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "536.2",
+      "allocations": "3432",
+      "container": "Vec",
+      "innermost planner function": "`add_lower (analysis/scalar/constraints/property.rs)`",
+      "share": "2.2%"
+     },
+     {
+      "KiB": "6.7",
+      "allocations": "3432",
+      "container": "Vec",
+      "innermost planner function": "`dedup_property_values (analysis/scalar/values.rs)`",
+      "share": "2.2%"
+     }
+    ],
+    "summary": "predicate_heavy/1024: 155041 allocations, one sample per 39"
+   },
+   "wide_batch/1000": {
+    "by_container": "String 28%, Vec 21%, BTreeMap/BTreeSet 16%, Box 13%, other 10%, Arc 9%, String (format!) 2%, HashMap/HashSet 1%",
+    "rows": [
+     {
+      "KiB": "492.6",
+      "allocations": "17040",
+      "container": "Arc",
+      "innermost planner function": "`{closure#0}<alloc::string::String> (ir/contracts/non_empty_string.rs)`",
+      "share": "6.0%"
+     },
+     {
+      "KiB": "100.5",
+      "allocations": "13703",
+      "container": "String",
+      "innermost planner function": "`property_literal_value (analysis/scalar/extract.rs)`",
+      "share": "4.8%"
+     },
+     {
+      "KiB": "105.3",
+      "allocations": "13561",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "4.8%"
+     },
+     {
+      "KiB": "691.1",
+      "allocations": "12638",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`clone<helix_planner::ir::expr::predicate::ResolvedPredicate> (relational/selection.rs)`",
+      "share": "4.5%"
+     },
+     {
+      "KiB": "73.9",
+      "allocations": "10224",
+      "container": "String",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "3.6%"
+     },
+     {
+      "KiB": "1502.6",
+      "allocations": "9585",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "1248.0",
+      "allocations": "8875",
+      "container": "other",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "3.1%"
+     },
+     {
+      "KiB": "154.8",
+      "allocations": "8094",
+      "container": "Vec",
+      "innermost planner function": "`new (exec/plan/subplan.rs)`",
+      "share": "2.9%"
+     },
+     {
+      "KiB": "154.8",
+      "allocations": "7881",
+      "container": "Vec",
+      "innermost planner function": "`new (exec/plan/top_level.rs)`",
+      "share": "2.8%"
+     },
+     {
+      "KiB": "718.9",
+      "allocations": "7668",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::logical::access::pipeline::op::StreamPipelineOp, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "319.5",
+      "allocations": "6816",
+      "container": "Box",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "316.2",
+      "allocations": "6745",
+      "container": "Vec",
+      "innermost planner function": "`clone<helix_planner::ir::contracts::non_empty_string::NonEmptyString, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "403.8",
+      "allocations": "6461",
+      "container": "Box",
+      "innermost planner function": "`range_point_source<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "2.3%"
+     },
+     {
+      "KiB": "47.8",
+      "allocations": "6248",
+      "container": "String",
+      "innermost planner function": "`clone (ir/index/range/value.rs)`",
+      "share": "2.2%"
+     },
+     {
+      "KiB": "46.2",
+      "allocations": "5964",
+      "container": "String",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "2.1%"
+     }
+    ],
+    "summary": "wide_batch/1000: 282772 allocations, one sample per 71"
+   }
+  },
+  "before": {
+   "deep_chain/123": {
+    "by_container": "BTreeMap/BTreeSet 47%, String 24%, other 22%, Vec 5%, Box 2%, HashMap/HashSet 0%, String (format!) 0%",
+    "rows": [
+     {
+      "KiB": "157.5",
+      "allocations": "2880",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`access_stream_parts (planning/selected/native/pipeline/expr.rs)`",
+      "share": "22.7%"
+     },
+     {
+      "KiB": "123.4",
+      "allocations": "2256",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`clone<helix_planner::ir::expr::predicate::ResolvedPredicate> (relational/selection.rs)`",
+      "share": "17.8%"
+     },
+     {
+      "KiB": "6.8",
+      "allocations": "992",
+      "container": "String",
+      "innermost planner function": "`access_stream_parts (planning/selected/native/pipeline/expr.rs)`",
+      "share": "7.8%"
+     },
+     {
+      "KiB": "23.2",
+      "allocations": "496",
+      "container": "other",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "3.9%"
+     },
+     {
+      "KiB": "10.7",
+      "allocations": "472",
+      "container": "other",
+      "innermost planner function": "`execution_order (exec/validation/order.rs)`",
+      "share": "3.7%"
+     },
+     {
+      "KiB": "17.6",
+      "allocations": "376",
+      "container": "other",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "4.3",
+      "allocations": "316",
+      "container": "String",
+      "innermost planner function": "`clone<helix_planner::ir::contracts::non_empty_string::NonEmptyString, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.5%"
+     },
+     {
+      "KiB": "58.1",
+      "allocations": "288",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "2.3%"
+     },
+     {
+      "KiB": "1.8",
+      "allocations": "264",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "2.1%"
+     },
+     {
+      "KiB": "1.2",
+      "allocations": "252",
+      "container": "String",
+      "innermost planner function": "`atomic_predicate_is_statically_impossible (analysis/scalar/constraints/collect.rs)`",
+      "share": "2.0%"
+     },
+     {
+      "KiB": "1.0",
+      "allocations": "244",
+      "container": "String",
+      "innermost planner function": "`new<&str> (ir/contracts/non_empty_string.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "13.1",
+      "allocations": "240",
+      "container": "Box",
+      "innermost planner function": "`access_or_pipeline_root_stream_from_ast (planning/selected/native/root_stream/ast/access_pipeline.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "7.0",
+      "allocations": "224",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`drain_next_ready_stage (exec/validation/order.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "369.2",
+      "allocations": "184",
+      "container": "other",
+      "innermost planner function": "`canonicalize_stream_pipeline_ops (logical/access/pipeline/canonical.rs)`",
+      "share": "1.5%"
+     },
+     {
+      "KiB": "10.7",
+      "allocations": "156",
+      "container": "other",
+      "innermost planner function": "`push_selected_stream_pipeline_op (exec/selected/lowering/access/pipeline.rs)`",
+      "share": "1.2%"
+     }
+    ],
+    "summary": "deep_chain/123: 12665 allocations, one sample per 4"
+   },
+   "dynamic-read": {
+    "by_container": "String 48%, other 34%, BTreeMap/BTreeSet 12%, Vec 4%, HashMap/HashSet 1%, Arc 1%, String (format!) 1%, Box 1%",
+    "rows": [
+     {
+      "KiB": "1.5",
+      "allocations": "100",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "13.1%"
+     },
+     {
+      "KiB": "33.4",
+      "allocations": "57",
+      "container": "String",
+      "innermost planner function": "`atomic_predicate_is_statically_impossible (analysis/scalar/constraints/collect.rs)`",
+      "share": "7.5%"
+     },
+     {
+      "KiB": "1.8",
+      "allocations": "56",
+      "container": "other",
+      "innermost planner function": "`push (optimizer/driver/schedule/candidates/list.rs)`",
+      "share": "7.3%"
+     },
+     {
+      "KiB": "12.5",
+      "allocations": "35",
+      "container": "String",
+      "innermost planner function": "`{closure#0} (analysis/scalar/constraints/collect.rs)`",
+      "share": "4.6%"
+     },
+     {
+      "KiB": "0.4",
+      "allocations": "32",
+      "container": "String",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "4.2%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "27",
+      "container": "String",
+      "innermost planner function": "`new<&str> (ir/contracts/non_empty_string.rs)`",
+      "share": "3.5%"
+     },
+     {
+      "KiB": "0.3",
+      "allocations": "26",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "0.0",
+      "allocations": "23",
+      "container": "other",
+      "innermost planner function": "`from_one<helix_planner::logical::core::expr::LogicalExprKind> (ir/contracts/at_least/mod.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "2.4",
+      "allocations": "20",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "1.3",
+      "allocations": "18",
+      "container": "other",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "0.8",
+      "allocations": "14",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`clone<helix_planner::ir::expr::predicate::ResolvedPredicate> (relational/selection.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "12",
+      "container": "String",
+      "innermost planner function": "`clone (ir/index/range/value.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "1.3",
+      "allocations": "12",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`execution_order (exec/validation/order.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "12",
+      "container": "other",
+      "innermost planner function": "`execution_order (exec/validation/order.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "0.9",
+      "allocations": "12",
+      "container": "other",
+      "innermost planner function": "`range_point_source<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "1.6%"
+     }
+    ],
+    "summary": "dynamic-read: 762 allocations, one sample per 1"
+   },
+   "fixture/BranchHeavyQueries/16": {
+    "by_container": "other 41%, String 26%, BTreeMap/BTreeSet 20%, Vec 6%, String (format!) 3%, HashMap/HashSet 3%, Box 1%, Arc 0%",
+    "rows": [
+     {
+      "KiB": "3.7",
+      "allocations": "509",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "19.6%"
+     },
+     {
+      "KiB": "29.3",
+      "allocations": "228",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "8.8%"
+     },
+     {
+      "KiB": "11.8",
+      "allocations": "108",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`execution_order (exec/validation/order.rs)`",
+      "share": "4.2%"
+     },
+     {
+      "KiB": "4.3",
+      "allocations": "104",
+      "container": "other",
+      "innermost planner function": "`execution_order (exec/validation/order.rs)`",
+      "share": "4.0%"
+     },
+     {
+      "KiB": "2.5",
+      "allocations": "88",
+      "container": "String (format!)",
+      "innermost planner function": "`append_selected_trace (planning/selected/trace/entries.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "18.5",
+      "allocations": "68",
+      "container": "other",
+      "innermost planner function": "`clone<helix_planner::logical::core::expr::LogicalExpr, 2> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "6.0",
+      "allocations": "64",
+      "container": "other",
+      "innermost planner function": "`clone<helix_planner::logical::access::pipeline::op::StreamPipelineOp, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "2.5%"
+     },
+     {
+      "KiB": "1.8",
+      "allocations": "56",
+      "container": "other",
+      "innermost planner function": "`push (optimizer/driver/schedule/candidates/list.rs)`",
+      "share": "2.2%"
+     },
+     {
+      "KiB": "3.8",
+      "allocations": "51",
+      "container": "HashMap/HashSet",
+      "innermost planner function": "`analyze_steps (diagnostics/analyze.rs)`",
+      "share": "2.0%"
+     },
+     {
+      "KiB": "1.6",
+      "allocations": "50",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`drain_next_ready_stage (exec/validation/order.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "11.8",
+      "allocations": "50",
+      "container": "other",
+      "innermost planner function": "`selected_run_root_from_memo_child (planning/selected/lowering/dispatch.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "10.1",
+      "allocations": "48",
+      "container": "other",
+      "innermost planner function": "`clone<helix_planner::physical::pipeline::PhysicalPipelineOp, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "9.0",
+      "allocations": "48",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`pure_subplan (exec/pull/mod.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "3.7",
+      "allocations": "36",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`reject_cycles (exec/validation/graph.rs)`",
+      "share": "1.4%"
+     },
+     {
+      "KiB": "2.5",
+      "allocations": "34",
+      "container": "other",
+      "innermost planner function": "`canonicalize_stream_pipeline_ops (logical/access/pipeline/canonical.rs)`",
+      "share": "1.3%"
+     }
+    ],
+    "summary": "fixture/BranchHeavyQueries/16: 2598 allocations, one sample per 1"
+   },
+   "fixture/ManyMemoAlternatives/64": {
+    "by_container": "String 72%, other 22%, Vec 5%, BTreeMap/BTreeSet 1%, Box 0%, HashMap/HashSet 0%",
+    "rows": [
+     {
+      "KiB": "20.6",
+      "allocations": "3675",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "38.6%"
+     },
+     {
+      "KiB": "7.0",
+      "allocations": "960",
+      "container": "String",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "10.1%"
+     },
+     {
+      "KiB": "2.5",
+      "allocations": "756",
+      "container": "String",
+      "innermost planner function": "`clone<helix_planner::exec::access::node::ExecNodeSecondarySetPlan, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "7.9%"
+     },
+     {
+      "KiB": "568.0",
+      "allocations": "657",
+      "container": "String",
+      "innermost planner function": "`atomic_predicate_is_statically_impossible (analysis/scalar/constraints/collect.rs)`",
+      "share": "6.9%"
+     },
+     {
+      "KiB": "12.2",
+      "allocations": "390",
+      "container": "other",
+      "innermost planner function": "`{closure#0} (rules/access/filter/atoms/mod.rs)`",
+      "share": "4.1%"
+     },
+     {
+      "KiB": "11.9",
+      "allocations": "381",
+      "container": "Vec",
+      "innermost planner function": "`try_map_ref<helix_planner::rules::access::filter::atoms::types::AccessFilterIndexAtom, 1, helix_planner::ir::access::node::source::NodeAccessSourcePlan, helix_planner::rules::access::filter::index::contracts::MissingAccessIndex, helix_planner::rules::access::filter::index::shared::index_source_for_atoms::{closure_env#0}<helix_planner::rules::access::filter::index::node::NodeIndexFamily>> (ir/contracts/at_least/ops.rs)`",
+      "share": "4.0%"
+     },
+     {
+      "KiB": "55.2",
+      "allocations": "321",
+      "container": "other",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "62.1",
+      "allocations": "318",
+      "container": "other",
+      "innermost planner function": "`{closure#0} (exec/lowering/secondary_set.rs)`",
+      "share": "3.3%"
+     },
+     {
+      "KiB": "0.7",
+      "allocations": "264",
+      "container": "String",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "2.8%"
+     },
+     {
+      "KiB": "12.2",
+      "allocations": "261",
+      "container": "other",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "34.5",
+      "allocations": "201",
+      "container": "other",
+      "innermost planner function": "`from_unfiltered (ir/access/node/source.rs)`",
+      "share": "2.1%"
+     },
+     {
+      "KiB": "79.2",
+      "allocations": "195",
+      "container": "other",
+      "innermost planner function": "`access_filter_index_atoms (rules/access/filter/atoms/collect.rs)`",
+      "share": "2.0%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "192",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "2.0%"
+     },
+     {
+      "KiB": "0.4",
+      "allocations": "126",
+      "container": "String",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "1.3%"
+     },
+     {
+      "KiB": "5.9",
+      "allocations": "126",
+      "container": "other",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "1.3%"
+     }
+    ],
+    "summary": "fixture/ManyMemoAlternatives/64: 9523 allocations, one sample per 3"
+   },
+   "fixture/WideBooleanPredicates/64": {
+    "by_container": "String 78%, other 19%, Vec 2%, BTreeMap/BTreeSet 1%, Box 0%, Arc 0%, HashMap/HashSet 0%",
+    "rows": [
+     {
+      "KiB": "19.7",
+      "allocations": "2526",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "31.2%"
+     },
+     {
+      "KiB": "7.1",
+      "allocations": "960",
+      "container": "String",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "11.8%"
+     },
+     {
+      "KiB": "2.7",
+      "allocations": "756",
+      "container": "String",
+      "innermost planner function": "`clone<helix_planner::exec::access::node::ExecNodeSecondarySetPlan, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "9.3%"
+     },
+     {
+      "KiB": "552.4",
+      "allocations": "645",
+      "container": "String",
+      "innermost planner function": "`atomic_predicate_is_statically_impossible (analysis/scalar/constraints/collect.rs)`",
+      "share": "8.0%"
+     },
+     {
+      "KiB": "126.3",
+      "allocations": "582",
+      "container": "String",
+      "innermost planner function": "`{closure#0} (analysis/scalar/constraints/collect.rs)`",
+      "share": "7.2%"
+     },
+     {
+      "KiB": "54.7",
+      "allocations": "318",
+      "container": "other",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "3.9%"
+     },
+     {
+      "KiB": "12.2",
+      "allocations": "261",
+      "container": "other",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "3.2%"
+     },
+     {
+      "KiB": "34.5",
+      "allocations": "201",
+      "container": "other",
+      "innermost planner function": "`from_unfiltered (ir/access/node/source.rs)`",
+      "share": "2.5%"
+     },
+     {
+      "KiB": "8.9",
+      "allocations": "189",
+      "container": "other",
+      "innermost planner function": "`clone<helix_ast::value::PropertyValue, helix_planner::ir::expr::native::Unary, helix_planner::ir::expr::native::Binary, helix_planner::ir::expr::native::Function, !> (relational/expression.rs)`",
+      "share": "2.3%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "189",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "2.3%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "189",
+      "container": "String",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "2.3%"
+     },
+     {
+      "KiB": "6.0",
+      "allocations": "129",
+      "container": "other",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "0.4",
+      "allocations": "126",
+      "container": "String",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "24.6",
+      "allocations": "126",
+      "container": "other",
+      "innermost planner function": "`source_parts (rules/physical_contracts/access/source/node.rs)`",
+      "share": "1.6%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "66",
+      "container": "String",
+      "innermost planner function": "`clone<helix_ast::value::PropertyValue, helix_planner::ir::expr::native::Unary, helix_planner::ir::expr::native::Binary, helix_planner::ir::expr::native::Function, !> (relational/expression.rs)`",
+      "share": "0.8%"
+     }
+    ],
+    "summary": "fixture/WideBooleanPredicates/64: 8105 allocations, one sample per 3"
+   },
+   "ordered-range-wide-projection": {
+    "by_container": "String 63%, other 22%, BTreeMap/BTreeSet 7%, Vec 5%, HashMap/HashSet 1%, Box 1%, Arc 0%, String (format!) 0%",
+    "rows": [
+     {
+      "KiB": "12.9",
+      "allocations": "399",
+      "container": "String",
+      "innermost planner function": "`clone<helix_planner::ir::contracts::non_empty_string::NonEmptyString, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "28.7%"
+     },
+     {
+      "KiB": "1.4",
+      "allocations": "174",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "12.5%"
+     },
+     {
+      "KiB": "0.5",
+      "allocations": "57",
+      "container": "String",
+      "innermost planner function": "`non_empty<&str> (planning/selected/native/names.rs)`",
+      "share": "4.1%"
+     },
+     {
+      "KiB": "1.8",
+      "allocations": "56",
+      "container": "other",
+      "innermost planner function": "`push (optimizer/driver/schedule/candidates/list.rs)`",
+      "share": "4.0%"
+     },
+     {
+      "KiB": "2.4",
+      "allocations": "42",
+      "container": "Vec",
+      "innermost planner function": "`and<helix_planner::ir::access::node::source::NodeAccessSourcePlan> (rules/access/filter/index/translate.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "27.9",
+      "allocations": "38",
+      "container": "String",
+      "innermost planner function": "`atomic_predicate_is_statically_impossible (analysis/scalar/constraints/collect.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "10.6",
+      "allocations": "32",
+      "container": "String",
+      "innermost planner function": "`{closure#0} (analysis/scalar/constraints/collect.rs)`",
+      "share": "2.3%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "28",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "2.0%"
+     },
+     {
+      "KiB": "0.2",
+      "allocations": "27",
+      "container": "String",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "3.6",
+      "allocations": "26",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "1.9%"
+     },
+     {
+      "KiB": "0.0",
+      "allocations": "23",
+      "container": "other",
+      "innermost planner function": "`from_one<helix_planner::logical::core::expr::LogicalExprKind> (ir/contracts/at_least/mod.rs)`",
+      "share": "1.7%"
+     },
+     {
+      "KiB": "1.6",
+      "allocations": "21",
+      "container": "other",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "1.5%"
+     },
+     {
+      "KiB": "0.6",
+      "allocations": "20",
+      "container": "other",
+      "innermost planner function": "`execution_order (exec/validation/order.rs)`",
+      "share": "1.4%"
+     },
+     {
+      "KiB": "0.8",
+      "allocations": "18",
+      "container": "other",
+      "innermost planner function": "`clone<helix_ast::value::PropertyValue, helix_planner::ir::expr::native::Unary, helix_planner::ir::expr::native::Binary, helix_planner::ir::expr::native::Function, !> (relational/expression.rs)`",
+      "share": "1.3%"
+     },
+     {
+      "KiB": "0.6",
+      "allocations": "18",
+      "container": "other",
+      "innermost planner function": "`clone<helix_planner::ir::order::OrderKey, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "1.3%"
+     }
+    ],
+    "summary": "ordered-range-wide-projection: 1389 allocations, one sample per 1"
+   },
+   "predicate_heavy/1024": {
+    "by_container": "String 67%, other 16%, Vec 15%, HashMap/HashSet 2%, BTreeMap/BTreeSet 0%",
+    "rows": [
+     {
+      "KiB": "155.0",
+      "allocations": "25065",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "14.2%"
+     },
+     {
+      "KiB": "668.5",
+      "allocations": "17865",
+      "container": "Vec",
+      "innermost planner function": "`and<helix_planner::ir::access::node::source::NodeAccessSourcePlan> (rules/access/filter/index/translate.rs)`",
+      "share": "10.1%"
+     },
+     {
+      "KiB": "162.9",
+      "allocations": "16110",
+      "container": "String",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "9.1%"
+     },
+     {
+      "KiB": "11340.7",
+      "allocations": "15030",
+      "container": "String",
+      "innermost planner function": "`atomic_predicate_is_statically_impossible (analysis/scalar/constraints/collect.rs)`",
+      "share": "8.5%"
+     },
+     {
+      "KiB": "911.9",
+      "allocations": "9945",
+      "container": "String",
+      "innermost planner function": "`{closure#0} (analysis/scalar/constraints/collect.rs)`",
+      "share": "5.6%"
+     },
+     {
+      "KiB": "127.7",
+      "allocations": "9675",
+      "container": "String",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "5.5%"
+     },
+     {
+      "KiB": "194.8",
+      "allocations": "6705",
+      "container": "String",
+      "innermost planner function": "`literal_equality_set (analysis/index_atoms/equality.rs)`",
+      "share": "3.8%"
+     },
+     {
+      "KiB": "800.5",
+      "allocations": "5940",
+      "container": "other",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "3.4%"
+     },
+     {
+      "KiB": "43.9",
+      "allocations": "5400",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "3.1%"
+     },
+     {
+      "KiB": "32.5",
+      "allocations": "5130",
+      "container": "String",
+      "innermost planner function": "`{closure#1}<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "2.9%"
+     },
+     {
+      "KiB": "63.3",
+      "allocations": "4770",
+      "container": "String",
+      "innermost planner function": "`filter (planning/selected/native/stream/accumulator/ops.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "61.3",
+      "allocations": "4680",
+      "container": "String",
+      "innermost planner function": "`expression (ir/expr/native.rs)`",
+      "share": "2.7%"
+     },
+     {
+      "KiB": "717.2",
+      "allocations": "4590",
+      "container": "other",
+      "innermost planner function": "`add_lower (analysis/scalar/constraints/property.rs)`",
+      "share": "2.6%"
+     },
+     {
+      "KiB": "189.8",
+      "allocations": "4050",
+      "container": "other",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "2.3%"
+     },
+     {
+      "KiB": "181.4",
+      "allocations": "3870",
+      "container": "Vec",
+      "innermost planner function": "`{closure#0}<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "2.2%"
+     }
+    ],
+    "summary": "predicate_heavy/1024: 176581 allocations, one sample per 45"
+   },
+   "wide_batch/1000": {
+    "by_container": "String 53%, other 26%, BTreeMap/BTreeSet 15%, Vec 2%, Box 2%, String (format!) 1%, Arc 1%, HashMap/HashSet 0%",
+    "rows": [
+     {
+      "KiB": "323.7",
+      "allocations": "58240",
+      "container": "String",
+      "innermost planner function": "`clone (ir/contracts/non_empty_string.rs)`",
+      "share": "16.1%"
+     },
+     {
+      "KiB": "501.2",
+      "allocations": "23842",
+      "container": "String",
+      "innermost planner function": "`clone<helix_planner::ir::contracts::non_empty_string::NonEmptyString, 1> (ir/contracts/at_least/mod.rs)`",
+      "share": "6.6%"
+     },
+     {
+      "KiB": "12569.9",
+      "allocations": "21021",
+      "container": "String",
+      "innermost planner function": "`atomic_predicate_is_statically_impossible (analysis/scalar/constraints/collect.rs)`",
+      "share": "5.8%"
+     },
+     {
+      "KiB": "322.8",
+      "allocations": "16744",
+      "container": "other",
+      "innermost planner function": "`execution_order (exec/validation/order.rs)`",
+      "share": "4.6%"
+     },
+     {
+      "KiB": "65.1",
+      "allocations": "16653",
+      "container": "String",
+      "innermost planner function": "`clone (ir/access/node/source.rs)`",
+      "share": "4.6%"
+     },
+     {
+      "KiB": "125.9",
+      "allocations": "16289",
+      "container": "String",
+      "innermost planner function": "`equality_from_operands (analysis/index_atoms/equality.rs)`",
+      "share": "4.5%"
+     },
+     {
+      "KiB": "731.6",
+      "allocations": "13377",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`clone<helix_planner::ir::expr::predicate::ResolvedPredicate> (relational/selection.rs)`",
+      "share": "3.7%"
+     },
+     {
+      "KiB": "1362.2",
+      "allocations": "10829",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`derive (exec/pull/mod.rs)`",
+      "share": "3.0%"
+     },
+     {
+      "KiB": "71.8",
+      "allocations": "10010",
+      "container": "String",
+      "innermost planner function": "`prune_statically_impossible_branches (analysis/prune.rs)`",
+      "share": "2.8%"
+     },
+     {
+      "KiB": "273.0",
+      "allocations": "8736",
+      "container": "BTreeMap/BTreeSet",
+      "innermost planner function": "`drain_next_ready_stage (exec/validation/order.rs)`",
+      "share": "2.4%"
+     },
+     {
+      "KiB": "311.4",
+      "allocations": "6643",
+      "container": "other",
+      "innermost planner function": "`binary (ir/expr/native.rs)`",
+      "share": "1.8%"
+     },
+     {
+      "KiB": "490.5",
+      "allocations": "6279",
+      "container": "other",
+      "innermost planner function": "`range_point_source<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "1.7%"
+     },
+     {
+      "KiB": "479.9",
+      "allocations": "6006",
+      "container": "other",
+      "innermost planner function": "`translate<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/translate.rs)`",
+      "share": "1.7%"
+     },
+     {
+      "KiB": "46.5",
+      "allocations": "6006",
+      "container": "String",
+      "innermost planner function": "`{closure#0}<helix_planner::rules::access::filter::index::node::NodeIndexFamily> (rules/access/filter/index/shared.rs)`",
+      "share": "1.7%"
+     },
+     {
+      "KiB": "45.5",
+      "allocations": "5915",
+      "container": "String",
+      "innermost planner function": "`clone (ir/index/range/value.rs)`",
+      "share": "1.6%"
+     }
+    ],
+    "summary": "wide_batch/1000: 361772 allocations, one sample per 91"
+   }
+  },
+  "before_note": "container labels in this run came from symbol names, which mislabel inlined BTreeMap entries as String; the after run labels by source file"
+ },
+ "allocation_volume": {
+  "after": {
+   "bulk_write_typed/1000x768": {
+    "allocations": "254",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.3",
+    "temporaries": "88.2%"
+   },
+   "bulk_write_typed/100x768": {
+    "allocations": "254",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.3",
+    "temporaries": "88.2%"
+   },
+   "bulk_write_untyped/10000x96": {
+    "allocations": "254",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.3",
+    "temporaries": "88.2%"
+   },
+   "bulk_write_untyped/1000x768": {
+    "allocations": "254",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.3",
+    "temporaries": "88.2%"
+   },
+   "bulk_write_untyped/100x768": {
+    "allocations": "254",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.3",
+    "temporaries": "88.2%"
+   },
+   "count_with_unused_params/0": {
+    "allocations": "240",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.0",
+    "plan holds (allocations)": "17",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "30.1",
+    "temporaries": "92.9%"
+   },
+   "count_with_unused_params/1048576": {
+    "allocations": "240",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.0",
+    "plan holds (allocations)": "17",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "30.1",
+    "temporaries": "92.9%"
+   },
+   "count_with_unused_params/8388608": {
+    "allocations": "240",
+    "bytes/allocation": "126",
+    "leaked bytes": "0",
+    "peak KiB": "12.0",
+    "plan holds (allocations)": "17",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "30.1",
+    "temporaries": "92.9%"
+   },
+   "deep_chain/123": {
+    "allocations": "10280",
+    "bytes/allocation": "191",
+    "leaked bytes": "0",
+    "peak KiB": "114.6",
+    "plan holds (allocations)": "595",
+    "plan holds KiB": "78.2",
+    "reallocations": "56",
+    "requested KiB": "1929.1",
+    "temporaries": "94.2%"
+   },
+   "deep_chain/16": {
+    "allocations": "1113",
+    "bytes/allocation": "130",
+    "leaked bytes": "0",
+    "peak KiB": "23.1",
+    "plan holds (allocations)": "93",
+    "plan holds KiB": "17.4",
+    "reallocations": "31",
+    "requested KiB": "144.9",
+    "temporaries": "91.6%"
+   },
+   "deep_chain/64": {
+    "allocations": "4483",
+    "bytes/allocation": "169",
+    "leaked bytes": "0",
+    "peak KiB": "75.1",
+    "plan holds (allocations)": "316",
+    "plan holds KiB": "65.1",
+    "reallocations": "51",
+    "requested KiB": "747.4",
+    "temporaries": "93.0%"
+   },
+   "dynamic-delete": {
+    "allocations": "285",
+    "bytes/allocation": "137",
+    "leaked bytes": "0",
+    "peak KiB": "15.5",
+    "plan holds (allocations)": "24",
+    "plan holds KiB": "2.9",
+    "reallocations": "9",
+    "requested KiB": "39.4",
+    "temporaries": "91.6%"
+   },
+   "dynamic-read": {
+    "allocations": "657",
+    "bytes/allocation": "102",
+    "leaked bytes": "0",
+    "peak KiB": "14.6",
+    "plan holds (allocations)": "33",
+    "plan holds KiB": "3.3",
+    "reallocations": "5",
+    "requested KiB": "66.0",
+    "temporaries": "95.0%"
+   },
+   "dynamic-write": {
+    "allocations": "229",
+    "bytes/allocation": "121",
+    "leaked bytes": "0",
+    "peak KiB": "11.8",
+    "plan holds (allocations)": "21",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "27.5",
+    "temporaries": "90.8%"
+   },
+   "fixture/BatchedRootReuse/256": {
+    "allocations": "23691",
+    "bytes/allocation": "407",
+    "leaked bytes": "0",
+    "peak KiB": "389.5",
+    "plan holds (allocations)": "2820",
+    "plan holds KiB": "278.0",
+    "reallocations": "1315",
+    "requested KiB": "9948.9",
+    "temporaries": "88.1%"
+   },
+   "fixture/BatchedRootReuse/64": {
+    "allocations": "6071",
+    "bytes/allocation": "181",
+    "leaked bytes": "0",
+    "peak KiB": "98.5",
+    "plan holds (allocations)": "708",
+    "plan holds KiB": "69.5",
+    "reallocations": "341",
+    "requested KiB": "1133.5",
+    "temporaries": "88.3%"
+   },
+   "fixture/BatchedRootReuse/8": {
+    "allocations": "927",
+    "bytes/allocation": "116",
+    "leaked bytes": "0",
+    "peak KiB": "16.3",
+    "plan holds (allocations)": "92",
+    "plan holds KiB": "8.7",
+    "reallocations": "42",
+    "requested KiB": "109.4",
+    "temporaries": "90.1%"
+   },
+   "fixture/BranchHeavyQueries/16": {
+    "allocations": "2168",
+    "bytes/allocation": "173",
+    "leaked bytes": "0",
+    "peak KiB": "92.9",
+    "plan holds (allocations)": "300",
+    "plan holds KiB": "50.3",
+    "reallocations": "117",
+    "requested KiB": "386.4",
+    "temporaries": "86.2%"
+   },
+   "fixture/BranchHeavyQueries/4": {
+    "allocations": "826",
+    "bytes/allocation": "152",
+    "leaked bytes": "0",
+    "peak KiB": "35.5",
+    "plan holds (allocations)": "96",
+    "plan holds KiB": "14.5",
+    "reallocations": "40",
+    "requested KiB": "128.9",
+    "temporaries": "88.4%"
+   },
+   "fixture/BranchHeavyQueries/8": {
+    "allocations": "1270",
+    "bytes/allocation": "163",
+    "leaked bytes": "0",
+    "peak KiB": "53.7",
+    "plan holds (allocations)": "164",
+    "plan holds KiB": "26.4",
+    "reallocations": "68",
+    "requested KiB": "212.5",
+    "temporaries": "87.1%"
+   },
+   "fixture/DeepTraversalChain/16": {
+    "allocations": "690",
+    "bytes/allocation": "201",
+    "leaked bytes": "0",
+    "peak KiB": "18.8",
+    "plan holds (allocations)": "50",
+    "plan holds KiB": "13.9",
+    "reallocations": "32",
+    "requested KiB": "141.4",
+    "temporaries": "92.8%"
+   },
+   "fixture/DeepTraversalChain/32": {
+    "allocations": "1046",
+    "bytes/allocation": "265",
+    "leaked bytes": "0",
+    "peak KiB": "33.8",
+    "plan holds (allocations)": "82",
+    "plan holds KiB": "26.9",
+    "reallocations": "42",
+    "requested KiB": "281.2",
+    "temporaries": "92.2%"
+   },
+   "fixture/DeepTraversalChain/4": {
+    "allocations": "414",
+    "bytes/allocation": "135",
+    "leaked bytes": "0",
+    "peak KiB": "15.4",
+    "plan holds (allocations)": "26",
+    "plan holds KiB": "4.2",
+    "reallocations": "12",
+    "requested KiB": "56.2",
+    "temporaries": "93.7%"
+   },
+   "fixture/ForEachBodyRootReuse/256": {
+    "allocations": "22241",
+    "bytes/allocation": "433",
+    "leaked bytes": "0",
+    "peak KiB": "445.6",
+    "plan holds (allocations)": "2826",
+    "plan holds KiB": "335.7",
+    "reallocations": "1317",
+    "requested KiB": "9963.0",
+    "temporaries": "87.3%"
+   },
+   "fixture/ForEachBodyRootReuse/64": {
+    "allocations": "5749",
+    "bytes/allocation": "192",
+    "leaked bytes": "0",
+    "peak KiB": "112.6",
+    "plan holds (allocations)": "714",
+    "plan holds KiB": "85.2",
+    "reallocations": "347",
+    "requested KiB": "1142.8",
+    "temporaries": "87.6%"
+   },
+   "fixture/ForEachBodyRootReuse/8": {
+    "allocations": "934",
+    "bytes/allocation": "122",
+    "leaked bytes": "0",
+    "peak KiB": "17.0",
+    "plan holds (allocations)": "98",
+    "plan holds KiB": "12.2",
+    "reallocations": "52",
+    "requested KiB": "117.0",
+    "temporaries": "89.5%"
+   },
+   "fixture/ManyAvailableIndexes/1024": {
+    "allocations": "484",
+    "bytes/allocation": "621",
+    "leaked bytes": "0",
+    "peak KiB": "232.4",
+    "plan holds (allocations)": "21",
+    "plan holds KiB": "2.7",
+    "reallocations": "6",
+    "requested KiB": "297.1",
+    "temporaries": "95.7%"
+   },
+   "fixture/ManyAvailableIndexes/256": {
+    "allocations": "484",
+    "bytes/allocation": "263",
+    "leaked bytes": "0",
+    "peak KiB": "61.4",
+    "plan holds (allocations)": "21",
+    "plan holds KiB": "2.7",
+    "reallocations": "6",
+    "requested KiB": "126.1",
+    "temporaries": "95.7%"
+   },
+   "fixture/ManyAvailableIndexes/64": {
+    "allocations": "484",
+    "bytes/allocation": "174",
+    "leaked bytes": "0",
+    "peak KiB": "22.2",
+    "plan holds (allocations)": "21",
+    "plan holds KiB": "2.7",
+    "reallocations": "6",
+    "requested KiB": "83.3",
+    "temporaries": "95.7%"
+   },
+   "fixture/ManyMemoAlternatives/32": {
+    "allocations": "2171",
+    "bytes/allocation": "182",
+    "leaked bytes": "0",
+    "peak KiB": "56.6",
+    "plan holds (allocations)": "51",
+    "plan holds KiB": "8.2",
+    "reallocations": "94",
+    "requested KiB": "402.9",
+    "temporaries": "97.7%"
+   },
+   "fixture/ManyMemoAlternatives/64": {
+    "allocations": "3999",
+    "bytes/allocation": "193",
+    "leaked bytes": "0",
+    "peak KiB": "103.1",
+    "plan holds (allocations)": "83",
+    "plan holds KiB": "13.9",
+    "reallocations": "122",
+    "requested KiB": "778.6",
+    "temporaries": "97.9%"
+   },
+   "fixture/ManyMemoAlternatives/8": {
+    "allocations": "800",
+    "bytes/allocation": "148",
+    "leaked bytes": "0",
+    "peak KiB": "21.7",
+    "plan holds (allocations)": "27",
+    "plan holds KiB": "3.9",
+    "reallocations": "36",
+    "requested KiB": "120.7",
+    "temporaries": "96.6%"
+   },
+   "fixture/MutationHeavyBatches/32": {
+    "allocations": "27139",
+    "bytes/allocation": "155",
+    "leaked bytes": "0",
+    "peak KiB": "1284.4",
+    "plan holds (allocations)": "2946",
+    "plan holds KiB": "263.5",
+    "reallocations": "1236",
+    "requested KiB": "4288.1",
+    "temporaries": "89.1%"
+   },
+   "fixture/MutationHeavyBatches/64": {
+    "allocations": "54124",
+    "bytes/allocation": "156",
+    "leaked bytes": "0",
+    "peak KiB": "2568.0",
+    "plan holds (allocations)": "5890",
+    "plan holds KiB": "527.5",
+    "reallocations": "2464",
+    "requested KiB": "8631.0",
+    "temporaries": "89.1%"
+   },
+   "fixture/MutationHeavyBatches/8": {
+    "allocations": "6891",
+    "bytes/allocation": "152",
+    "leaked bytes": "0",
+    "peak KiB": "321.4",
+    "plan holds (allocations)": "738",
+    "plan holds KiB": "65.7",
+    "reallocations": "318",
+    "requested KiB": "1070.4",
+    "temporaries": "89.3%"
+   },
+   "fixture/OrderedRangeWindowPushdown/32": {
+    "allocations": "4513",
+    "bytes/allocation": "129",
+    "leaked bytes": "0",
+    "peak KiB": "66.3",
+    "plan holds (allocations)": "527",
+    "plan holds KiB": "57.0",
+    "reallocations": "179",
+    "requested KiB": "593.3",
+    "temporaries": "88.3%"
+   },
+   "fixture/OrderedRangeWindowPushdown/64": {
+    "allocations": "8773",
+    "bytes/allocation": "156",
+    "leaked bytes": "0",
+    "peak KiB": "133.1",
+    "plan holds (allocations)": "1049",
+    "plan holds KiB": "113.8",
+    "reallocations": "346",
+    "requested KiB": "1389.5",
+    "temporaries": "88.0%"
+   },
+   "fixture/OrderedRangeWindowPushdown/8": {
+    "allocations": "1335",
+    "bytes/allocation": "112",
+    "leaked bytes": "0",
+    "peak KiB": "18.0",
+    "plan holds (allocations)": "135",
+    "plan holds KiB": "14.1",
+    "reallocations": "47",
+    "requested KiB": "151.3",
+    "temporaries": "89.9%"
+   },
+   "fixture/OverLimitIndexDisjunction/128": {
+    "allocations": "7656",
+    "bytes/allocation": "201",
+    "leaked bytes": "0",
+    "peak KiB": "196.1",
+    "plan holds (allocations)": "147",
+    "plan holds KiB": "25.4",
+    "reallocations": "150",
+    "requested KiB": "1531.1",
+    "temporaries": "98.1%"
+   },
+   "fixture/OverLimitIndexDisjunction/512": {
+    "allocations": "29597",
+    "bytes/allocation": "208",
+    "leaked bytes": "0",
+    "peak KiB": "754.9",
+    "plan holds (allocations)": "531",
+    "plan holds KiB": "94.4",
+    "reallocations": "206",
+    "requested KiB": "6049.3",
+    "temporaries": "98.2%"
+   },
+   "fixture/RuntimeDerivedMixedQueries/16": {
+    "allocations": "17820",
+    "bytes/allocation": "152",
+    "leaked bytes": "0",
+    "peak KiB": "656.1",
+    "plan holds (allocations)": "1984",
+    "plan holds KiB": "229.3",
+    "reallocations": "797",
+    "requested KiB": "2766.8",
+    "temporaries": "88.9%"
+   },
+   "fixture/RuntimeDerivedMixedQueries/4": {
+    "allocations": "4703",
+    "bytes/allocation": "151",
+    "leaked bytes": "0",
+    "peak KiB": "181.0",
+    "plan holds (allocations)": "504",
+    "plan holds KiB": "57.5",
+    "reallocations": "221",
+    "requested KiB": "726.8",
+    "temporaries": "89.3%"
+   },
+   "fixture/RuntimeDerivedMixedQueries/8": {
+    "allocations": "9076",
+    "bytes/allocation": "151",
+    "leaked bytes": "0",
+    "peak KiB": "337.9",
+    "plan holds (allocations)": "996",
+    "plan holds KiB": "114.3",
+    "reallocations": "417",
+    "requested KiB": "1404.2",
+    "temporaries": "89.0%"
+   },
+   "fixture/SearchIndexDdlWorkloads/32": {
+    "allocations": "8704",
+    "bytes/allocation": "301",
+    "leaked bytes": "0",
+    "peak KiB": "1005.2",
+    "plan holds (allocations)": "2402",
+    "plan holds KiB": "232.8",
+    "reallocations": "1024",
+    "requested KiB": "2857.9",
+    "temporaries": "72.4%"
+   },
+   "fixture/SearchIndexDdlWorkloads/64": {
+    "allocations": "17244",
+    "bytes/allocation": "306",
+    "leaked bytes": "0",
+    "peak KiB": "2009.1",
+    "plan holds (allocations)": "4802",
+    "plan holds KiB": "465.8",
+    "reallocations": "1996",
+    "requested KiB": "5755.3",
+    "temporaries": "72.2%"
+   },
+   "fixture/SearchIndexDdlWorkloads/8": {
+    "allocations": "2289",
+    "bytes/allocation": "285",
+    "leaked bytes": "0",
+    "peak KiB": "251.4",
+    "plan holds (allocations)": "602",
+    "plan holds KiB": "58.0",
+    "reallocations": "280",
+    "requested KiB": "715.3",
+    "temporaries": "73.7%"
+   },
+   "fixture/WideBooleanPredicates/32": {
+    "allocations": "2041",
+    "bytes/allocation": "190",
+    "leaked bytes": "0",
+    "peak KiB": "56.6",
+    "plan holds (allocations)": "51",
+    "plan holds KiB": "8.2",
+    "reallocations": "91",
+    "requested KiB": "396.0",
+    "temporaries": "97.5%"
+   },
+   "fixture/WideBooleanPredicates/64": {
+    "allocations": "3741",
+    "bytes/allocation": "200",
+    "leaked bytes": "0",
+    "peak KiB": "103.1",
+    "plan holds (allocations)": "83",
+    "plan holds KiB": "13.9",
+    "reallocations": "118",
+    "requested KiB": "752.2",
+    "temporaries": "97.8%"
+   },
+   "fixture/WideBooleanPredicates/8": {
+    "allocations": "758",
+    "bytes/allocation": "147",
+    "leaked bytes": "0",
+    "peak KiB": "21.7",
+    "plan holds (allocations)": "27",
+    "plan holds KiB": "3.9",
+    "reallocations": "35",
+    "requested KiB": "114.0",
+    "temporaries": "96.4%"
+   },
+   "ordered-range-narrow-projection": {
+    "allocations": "776",
+    "bytes/allocation": "99",
+    "leaked bytes": "0",
+    "peak KiB": "14.6",
+    "plan holds (allocations)": "71",
+    "plan holds KiB": "6.8",
+    "reallocations": "10",
+    "requested KiB": "75.7",
+    "temporaries": "90.9%"
+   },
+   "ordered-range-wide-projection": {
+    "allocations": "885",
+    "bytes/allocation": "98",
+    "leaked bytes": "0",
+    "peak KiB": "18.5",
+    "plan holds (allocations)": "122",
+    "plan holds KiB": "9.0",
+    "reallocations": "13",
+    "requested KiB": "86.3",
+    "temporaries": "86.2%"
+   },
+   "predicate_heavy/1024": {
+    "allocations": "155041",
+    "bytes/allocation": "66",
+    "leaked bytes": "0",
+    "peak KiB": "954.9",
+    "plan holds (allocations)": "9525",
+    "plan holds KiB": "525.2",
+    "reallocations": "70",
+    "requested KiB": "10063.0",
+    "temporaries": "93.9%"
+   },
+   "predicate_heavy/64": {
+    "allocations": "10079",
+    "bytes/allocation": "68",
+    "leaked bytes": "0",
+    "peak KiB": "68.1",
+    "plan holds (allocations)": "637",
+    "plan holds KiB": "36.1",
+    "reallocations": "26",
+    "requested KiB": "666.6",
+    "temporaries": "93.7%"
+   },
+   "string_heavy_projection/256x64": {
+    "allocations": "1996",
+    "bytes/allocation": "171",
+    "leaked bytes": "0",
+    "peak KiB": "149.0",
+    "plan holds (allocations)": "586",
+    "plan holds KiB": "60.0",
+    "reallocations": "10",
+    "requested KiB": "334.3",
+    "temporaries": "70.6%"
+   },
+   "wide_batch/100": {
+    "allocations": "28437",
+    "bytes/allocation": "128",
+    "leaked bytes": "0",
+    "peak KiB": "847.0",
+    "plan holds (allocations)": "3175",
+    "plan holds KiB": "356.0",
+    "reallocations": "572",
+    "requested KiB": "3618.4",
+    "temporaries": "88.8%"
+   },
+   "wide_batch/1000": {
+    "allocations": "282772",
+    "bytes/allocation": "125",
+    "leaked bytes": "0",
+    "peak KiB": "8348.8",
+    "plan holds (allocations)": "31673",
+    "plan holds KiB": "3099.9",
+    "reallocations": "5114",
+    "requested KiB": "35275.6",
+    "temporaries": "88.8%"
+   }
+  },
+  "before": {
+   "bulk_write_typed/1000x768": {
+    "allocations": "272",
+    "bytes/allocation": "120",
+    "leaked bytes": "0",
+    "peak KiB": "12.3",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.8",
+    "temporaries": "89.0%"
+   },
+   "bulk_write_typed/100x768": {
+    "allocations": "272",
+    "bytes/allocation": "120",
+    "leaked bytes": "0",
+    "peak KiB": "12.3",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.8",
+    "temporaries": "89.0%"
+   },
+   "bulk_write_untyped/10000x96": {
+    "allocations": "272",
+    "bytes/allocation": "120",
+    "leaked bytes": "0",
+    "peak KiB": "12.3",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.8",
+    "temporaries": "89.0%"
+   },
+   "bulk_write_untyped/1000x768": {
+    "allocations": "272",
+    "bytes/allocation": "120",
+    "leaked bytes": "0",
+    "peak KiB": "12.3",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.8",
+    "temporaries": "89.0%"
+   },
+   "bulk_write_untyped/100x768": {
+    "allocations": "272",
+    "bytes/allocation": "120",
+    "leaked bytes": "0",
+    "peak KiB": "12.3",
+    "plan holds (allocations)": "30",
+    "plan holds KiB": "4.5",
+    "reallocations": "9",
+    "requested KiB": "32.8",
+    "temporaries": "89.0%"
+   },
+   "count_with_unused_params/0": {
+    "allocations": "250",
+    "bytes/allocation": "131",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "18",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "32.5",
+    "temporaries": "92.8%"
+   },
+   "count_with_unused_params/1048576": {
+    "allocations": "250",
+    "bytes/allocation": "131",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "18",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "32.5",
+    "temporaries": "92.8%"
+   },
+   "count_with_unused_params/8388608": {
+    "allocations": "250",
+    "bytes/allocation": "131",
+    "leaked bytes": "0",
+    "peak KiB": "12.2",
+    "plan holds (allocations)": "18",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "32.5",
+    "temporaries": "92.8%"
+   },
+   "deep_chain/123": {
+    "allocations": "12665",
+    "bytes/allocation": "171",
+    "leaked bytes": "0",
+    "peak KiB": "116.0",
+    "plan holds (allocations)": "596",
+    "plan holds KiB": "79.8",
+    "reallocations": "56",
+    "requested KiB": "2119.0",
+    "temporaries": "95.3%"
+   },
+   "deep_chain/16": {
+    "allocations": "1207",
+    "bytes/allocation": "140",
+    "leaked bytes": "0",
+    "peak KiB": "23.8",
+    "plan holds (allocations)": "94",
+    "plan holds KiB": "17.8",
+    "reallocations": "31",
+    "requested KiB": "168.7",
+    "temporaries": "92.2%"
+   },
+   "deep_chain/64": {
+    "allocations": "5249",
+    "bytes/allocation": "163",
+    "leaked bytes": "0",
+    "peak KiB": "76.3",
+    "plan holds (allocations)": "317",
+    "plan holds KiB": "66.5",
+    "reallocations": "51",
+    "requested KiB": "843.4",
+    "temporaries": "94.0%"
+   },
+   "dynamic-delete": {
+    "allocations": "289",
+    "bytes/allocation": "144",
+    "leaked bytes": "0",
+    "peak KiB": "15.8",
+    "plan holds (allocations)": "25",
+    "plan holds KiB": "3.0",
+    "reallocations": "9",
+    "requested KiB": "41.8",
+    "temporaries": "91.3%"
+   },
+   "dynamic-read": {
+    "allocations": "762",
+    "bytes/allocation": "136",
+    "leaked bytes": "0",
+    "peak KiB": "15.2",
+    "plan holds (allocations)": "36",
+    "plan holds KiB": "3.4",
+    "reallocations": "5",
+    "requested KiB": "101.9",
+    "temporaries": "95.3%"
+   },
+   "dynamic-write": {
+    "allocations": "248",
+    "bytes/allocation": "114",
+    "leaked bytes": "0",
+    "peak KiB": "12.0",
+    "plan holds (allocations)": "22",
+    "plan holds KiB": "2.5",
+    "reallocations": "4",
+    "requested KiB": "28.1",
+    "temporaries": "91.1%"
+   },
+   "fixture/BatchedRootReuse/256": {
+    "allocations": "225980",
+    "bytes/allocation": "70",
+    "leaked bytes": "0",
+    "peak KiB": "415.8",
+    "plan holds (allocations)": "3586",
+    "plan holds KiB": "286.9",
+    "reallocations": "1315",
+    "requested KiB": "15541.0",
+    "temporaries": "98.4%"
+   },
+   "fixture/BatchedRootReuse/64": {
+    "allocations": "19816",
+    "bytes/allocation": "85",
+    "leaked bytes": "0",
+    "peak KiB": "104.8",
+    "plan holds (allocations)": "898",
+    "plan holds KiB": "71.4",
+    "reallocations": "341",
+    "requested KiB": "1668.6",
+    "temporaries": "95.5%"
+   },
+   "fixture/BatchedRootReuse/8": {
+    "allocations": "1344",
+    "bytes/allocation": "115",
+    "leaked bytes": "0",
+    "peak KiB": "17.4",
+    "plan holds (allocations)": "114",
+    "plan holds KiB": "8.9",
+    "reallocations": "42",
+    "requested KiB": "155.4",
+    "temporaries": "91.5%"
+   },
+   "fixture/BranchHeavyQueries/16": {
+    "allocations": "2598",
+    "bytes/allocation": "153",
+    "leaked bytes": "0",
+    "peak KiB": "94.8",
+    "plan holds (allocations)": "302",
+    "plan holds KiB": "51.6",
+    "reallocations": "117",
+    "requested KiB": "405.2",
+    "temporaries": "88.4%"
+   },
+   "fixture/BranchHeavyQueries/4": {
+    "allocations": "1004",
+    "bytes/allocation": "143",
+    "leaked bytes": "0",
+    "peak KiB": "36.6",
+    "plan holds (allocations)": "98",
+    "plan holds KiB": "14.8",
+    "reallocations": "40",
+    "requested KiB": "145.6",
+    "temporaries": "90.2%"
+   },
+   "fixture/BranchHeavyQueries/8": {
+    "allocations": "1532",
+    "bytes/allocation": "147",
+    "leaked bytes": "0",
+    "peak KiB": "55.0",
+    "plan holds (allocations)": "166",
+    "plan holds KiB": "27.0",
+    "reallocations": "68",
+    "requested KiB": "229.9",
+    "temporaries": "89.2%"
+   },
+   "fixture/DeepTraversalChain/16": {
+    "allocations": "1110",
+    "bytes/allocation": "141",
+    "leaked bytes": "0",
+    "peak KiB": "19.6",
+    "plan holds (allocations)": "52",
+    "plan holds KiB": "13.9",
+    "reallocations": "32",
+    "requested KiB": "157.1",
+    "temporaries": "95.3%"
+   },
+   "fixture/DeepTraversalChain/32": {
+    "allocations": "2034",
+    "bytes/allocation": "149",
+    "leaked bytes": "0",
+    "peak KiB": "33.8",
+    "plan holds (allocations)": "84",
+    "plan holds KiB": "26.9",
+    "reallocations": "42",
+    "requested KiB": "301.4",
+    "temporaries": "95.9%"
+   },
+   "fixture/DeepTraversalChain/4": {
+    "allocations": "576",
+    "bytes/allocation": "121",
+    "leaked bytes": "0",
+    "peak KiB": "16.1",
+    "plan holds (allocations)": "28",
+    "plan holds KiB": "4.2",
+    "reallocations": "12",
+    "requested KiB": "69.6",
+    "temporaries": "95.1%"
+   },
+   "fixture/ForEachBodyRootReuse/256": {
+    "allocations": "224786",
+    "bytes/allocation": "71",
+    "leaked bytes": "0",
+    "peak KiB": "493.8",
+    "plan holds (allocations)": "3592",
+    "plan holds KiB": "366.6",
+    "reallocations": "1317",
+    "requested KiB": "15604.3",
+    "temporaries": "98.4%"
+   },
+   "fixture/ForEachBodyRootReuse/64": {
+    "allocations": "19558",
+    "bytes/allocation": "87",
+    "leaked bytes": "0",
+    "peak KiB": "124.3",
+    "plan holds (allocations)": "904",
+    "plan holds KiB": "92.6",
+    "reallocations": "347",
+    "requested KiB": "1690.3",
+    "temporaries": "95.4%"
+   },
+   "fixture/ForEachBodyRootReuse/8": {
+    "allocations": "1359",
+    "bytes/allocation": "119",
+    "leaked bytes": "0",
+    "peak KiB": "18.3",
+    "plan holds (allocations)": "120",
+    "plan holds KiB": "13.0",
+    "reallocations": "52",
+    "requested KiB": "164.6",
+    "temporaries": "91.2%"
+   },
+   "fixture/ManyAvailableIndexes/1024": {
+    "allocations": "6784",
+    "bytes/allocation": "71",
+    "leaked bytes": "0",
+    "peak KiB": "378.5",
+    "plan holds (allocations)": "26",
+    "plan holds KiB": "2.8",
+    "reallocations": "6",
+    "requested KiB": "468.1",
+    "temporaries": "99.6%"
+   },
+   "fixture/ManyAvailableIndexes/256": {
+    "allocations": "2176",
+    "bytes/allocation": "88",
+    "leaked bytes": "0",
+    "peak KiB": "97.9",
+    "plan holds (allocations)": "26",
+    "plan holds KiB": "2.8",
+    "reallocations": "6",
+    "requested KiB": "187.5",
+    "temporaries": "98.8%"
+   },
+   "fixture/ManyAvailableIndexes/64": {
+    "allocations": "1024",
+    "bytes/allocation": "117",
+    "leaked bytes": "0",
+    "peak KiB": "27.9",
+    "plan holds (allocations)": "26",
+    "plan holds KiB": "2.8",
+    "reallocations": "6",
+    "requested KiB": "117.5",
+    "temporaries": "97.5%"
+   },
+   "fixture/ManyMemoAlternatives/32": {
+    "allocations": "4943",
+    "bytes/allocation": "159",
+    "leaked bytes": "0",
+    "peak KiB": "66.7",
+    "plan holds (allocations)": "115",
+    "plan holds KiB": "9.5",
+    "reallocations": "94",
+    "requested KiB": "781.7",
+    "temporaries": "97.7%"
+   },
+   "fixture/ManyMemoAlternatives/64": {
+    "allocations": "9523",
+    "bytes/allocation": "162",
+    "leaked bytes": "0",
+    "peak KiB": "122.8",
+    "plan holds (allocations)": "211",
+    "plan holds KiB": "16.4",
+    "reallocations": "122",
+    "requested KiB": "1522.2",
+    "temporaries": "97.8%"
+   },
+   "fixture/ManyMemoAlternatives/8": {
+    "allocations": "1508",
+    "bytes/allocation": "150",
+    "leaked bytes": "0",
+    "peak KiB": "24.8",
+    "plan holds (allocations)": "43",
+    "plan holds KiB": "4.2",
+    "reallocations": "36",
+    "requested KiB": "226.1",
+    "temporaries": "97.1%"
+   },
+   "fixture/MutationHeavyBatches/32": {
+    "allocations": "36047",
+    "bytes/allocation": "160",
+    "leaked bytes": "0",
+    "peak KiB": "1348.2",
+    "plan holds (allocations)": "3042",
+    "plan holds KiB": "262.6",
+    "reallocations": "1236",
+    "requested KiB": "5841.5",
+    "temporaries": "91.6%"
+   },
+   "fixture/MutationHeavyBatches/64": {
+    "allocations": "71928",
+    "bytes/allocation": "162",
+    "leaked bytes": "0",
+    "peak KiB": "2695.5",
+    "plan holds (allocations)": "6082",
+    "plan holds KiB": "526.7",
+    "reallocations": "2464",
+    "requested KiB": "11737.3",
+    "temporaries": "91.5%"
+   },
+   "fixture/MutationHeavyBatches/8": {
+    "allocations": "9127",
+    "bytes/allocation": "158",
+    "leaked bytes": "0",
+    "peak KiB": "337.6",
+    "plan holds (allocations)": "762",
+    "plan holds KiB": "65.4",
+    "reallocations": "318",
+    "requested KiB": "1459.1",
+    "temporaries": "91.7%"
+   },
+   "fixture/OrderedRangeWindowPushdown/32": {
+    "allocations": "9069",
+    "bytes/allocation": "89",
+    "leaked bytes": "0",
+    "peak KiB": "69.6",
+    "plan holds (allocations)": "684",
+    "plan holds KiB": "60.3",
+    "reallocations": "179",
+    "requested KiB": "801.9",
+    "temporaries": "92.5%"
+   },
+   "fixture/OrderedRangeWindowPushdown/64": {
+    "allocations": "23953",
+    "bytes/allocation": "82",
+    "leaked bytes": "0",
+    "peak KiB": "139.8",
+    "plan holds (allocations)": "1366",
+    "plan holds KiB": "120.5",
+    "reallocations": "346",
+    "requested KiB": "1940.1",
+    "temporaries": "94.3%"
+   },
+   "fixture/OrderedRangeWindowPushdown/8": {
+    "allocations": "1955",
+    "bytes/allocation": "101",
+    "leaked bytes": "0",
+    "peak KiB": "19.6",
+    "plan holds (allocations)": "172",
+    "plan holds KiB": "14.9",
+    "reallocations": "47",
+    "requested KiB": "196.6",
+    "temporaries": "91.2%"
+   },
+   "fixture/OverLimitIndexDisjunction/128": {
+    "allocations": "18684",
+    "bytes/allocation": "163",
+    "leaked bytes": "0",
+    "peak KiB": "235.3",
+    "plan holds (allocations)": "403",
+    "plan holds KiB": "30.4",
+    "reallocations": "150",
+    "requested KiB": "3005.8",
+    "temporaries": "97.8%"
+   },
+   "fixture/OverLimitIndexDisjunction/512": {
+    "allocations": "73649",
+    "bytes/allocation": "165",
+    "leaked bytes": "0",
+    "peak KiB": "913.7",
+    "plan holds (allocations)": "1555",
+    "plan holds KiB": "114.8",
+    "reallocations": "206",
+    "requested KiB": "11922.7",
+    "temporaries": "97.9%"
+   },
+   "fixture/RuntimeDerivedMixedQueries/16": {
+    "allocations": "25425",
+    "bytes/allocation": "142",
+    "leaked bytes": "0",
+    "peak KiB": "687.4",
+    "plan holds (allocations)": "2232",
+    "plan holds KiB": "238.5",
+    "reallocations": "797",
+    "requested KiB": "3647.6",
+    "temporaries": "91.2%"
+   },
+   "fixture/RuntimeDerivedMixedQueries/4": {
+    "allocations": "6740",
+    "bytes/allocation": "141",
+    "leaked bytes": "0",
+    "peak KiB": "190.4",
+    "plan holds (allocations)": "560",
+    "plan holds KiB": "59.6",
+    "reallocations": "221",
+    "requested KiB": "955.2",
+    "temporaries": "91.7%"
+   },
+   "fixture/RuntimeDerivedMixedQueries/8": {
+    "allocations": "12969",
+    "bytes/allocation": "142",
+    "leaked bytes": "0",
+    "peak KiB": "354.5",
+    "plan holds (allocations)": "1116",
+    "plan holds KiB": "118.8",
+    "reallocations": "417",
+    "requested KiB": "1850.0",
+    "temporaries": "91.4%"
+   },
+   "fixture/SearchIndexDdlWorkloads/32": {
+    "allocations": "11008",
+    "bytes/allocation": "245",
+    "leaked bytes": "0",
+    "peak KiB": "1022.9",
+    "plan holds (allocations)": "2402",
+    "plan holds KiB": "220.8",
+    "reallocations": "1024",
+    "requested KiB": "2884.6",
+    "temporaries": "78.2%"
+   },
+   "fixture/SearchIndexDdlWorkloads/64": {
+    "allocations": "21852",
+    "bytes/allocation": "249",
+    "leaked bytes": "0",
+    "peak KiB": "2045.0",
+    "plan holds (allocations)": "4802",
+    "plan holds KiB": "442.6",
+    "reallocations": "1996",
+    "requested KiB": "5809.0",
+    "temporaries": "78.0%"
+   },
+   "fixture/SearchIndexDdlWorkloads/8": {
+    "allocations": "2865",
+    "bytes/allocation": "235",
+    "leaked bytes": "0",
+    "peak KiB": "255.7",
+    "plan holds (allocations)": "602",
+    "plan holds KiB": "54.9",
+    "reallocations": "280",
+    "requested KiB": "721.7",
+    "temporaries": "79.0%"
+   },
+   "fixture/WideBooleanPredicates/32": {
+    "allocations": "4229",
+    "bytes/allocation": "175",
+    "leaked bytes": "0",
+    "peak KiB": "66.7",
+    "plan holds (allocations)": "115",
+    "plan holds KiB": "9.5",
+    "reallocations": "91",
+    "requested KiB": "736.5",
+    "temporaries": "97.3%"
+   },
+   "fixture/WideBooleanPredicates/64": {
+    "allocations": "8105",
+    "bytes/allocation": "178",
+    "leaked bytes": "0",
+    "peak KiB": "122.8",
+    "plan holds (allocations)": "211",
+    "plan holds KiB": "16.4",
+    "reallocations": "118",
+    "requested KiB": "1432.5",
+    "temporaries": "97.4%"
+   },
+   "fixture/WideBooleanPredicates/8": {
+    "allocations": "1314",
+    "bytes/allocation": "152",
+    "leaked bytes": "0",
+    "peak KiB": "24.8",
+    "plan holds (allocations)": "43",
+    "plan holds KiB": "4.2",
+    "reallocations": "35",
+    "requested KiB": "199.6",
+    "temporaries": "96.7%"
+   },
+   "ordered-range-narrow-projection": {
+    "allocations": "923",
+    "bytes/allocation": "116",
+    "leaked bytes": "0",
+    "peak KiB": "14.9",
+    "plan holds (allocations)": "79",
+    "plan holds KiB": "6.9",
+    "reallocations": "10",
+    "requested KiB": "106.1",
+    "temporaries": "91.4%"
+   },
+   "ordered-range-wide-projection": {
+    "allocations": "1389",
+    "bytes/allocation": "90",
+    "leaked bytes": "0",
+    "peak KiB": "20.9",
+    "plan holds (allocations)": "130",
+    "plan holds KiB": "8.6",
+    "reallocations": "13",
+    "requested KiB": "123.6",
+    "temporaries": "90.6%"
+   },
+   "predicate_heavy/1024": {
+    "allocations": "176581",
+    "bytes/allocation": "112",
+    "leaked bytes": "0",
+    "peak KiB": "955.1",
+    "plan holds (allocations)": "9542",
+    "plan holds KiB": "528.7",
+    "reallocations": "70",
+    "requested KiB": "19327.6",
+    "temporaries": "94.6%"
+   },
+   "predicate_heavy/64": {
+    "allocations": "11459",
+    "bytes/allocation": "111",
+    "leaked bytes": "0",
+    "peak KiB": "68.3",
+    "plan holds (allocations)": "654",
+    "plan holds KiB": "36.4",
+    "reallocations": "26",
+    "requested KiB": "1247.4",
+    "temporaries": "94.3%"
+   },
+   "string_heavy_projection/256x64": {
+    "allocations": "7398",
+    "bytes/allocation": "70",
+    "leaked bytes": "0",
+    "peak KiB": "218.0",
+    "plan holds (allocations)": "847",
+    "plan holds KiB": "54.9",
+    "reallocations": "10",
+    "requested KiB": "506.9",
+    "temporaries": "88.6%"
+   },
+   "wide_batch/100": {
+    "allocations": "36337",
+    "bytes/allocation": "139",
+    "leaked bytes": "0",
+    "peak KiB": "870.5",
+    "plan holds (allocations)": "3277",
+    "plan holds KiB": "357.6",
+    "reallocations": "572",
+    "requested KiB": "5009.9",
+    "temporaries": "91.0%"
+   },
+   "wide_batch/1000": {
+    "allocations": "361772",
+    "bytes/allocation": "137",
+    "leaked bytes": "0",
+    "peak KiB": "8580.5",
+    "plan holds (allocations)": "32675",
+    "plan holds KiB": "3095.8",
+    "reallocations": "5114",
+    "requested KiB": "49160.2",
+    "temporaries": "91.0%"
+   }
+  }
+ },
+ "environment": {
+  "allocator": "mimalloc",
+  "machine": "Apple M4 Pro, 10 performance + 4 efficiency cores, macOS",
+  "rustc": "1.101.0-nightly (75a75c3e0 2026-09-26), release bench profile"
+ },
+ "protocol": "planner_arena: divan medians, max_time 1 s per arm, threads 1 and 14, each thread planning its own copy of the workload; planner_alloc: calling-thread counting allocator over mimalloc, sampled backtraces built with line tables.",
+ "revisions": {
+  "after": "b74a1a4b plus the working-tree changes in PLANNER_ARENA_BENCHMARK.md",
+  "before": "b74a1a4b (String names, per-predicate BTreeMap)"
+ },
+ "timings_fields": {
+  "arena_after": "bump region, after, 1 thread",
+  "arena_after_t14": "bump region, after, 14 threads",
+  "arena_before": "bump region, before, 1 thread",
+  "arena_before_t14": "bump region, before, 14 threads",
+  "heap_after": "mimalloc, after, 1 thread",
+  "heap_after_t14": "mimalloc, after, 14 threads",
+  "heap_before": "mimalloc, before the changes, 1 thread",
+  "heap_before_t14": "mimalloc, before, 14 threads",
+  "plan_clone_after": "clone and free a finished plan on the heap, after, 1 thread"
+ },
+ "timings_seconds": {
+  "bulk_write_typed/1000x768": {
+   "arena_after": 5.1239999999999996e-06,
+   "arena_after_t14": 9.061999999999999e-06,
+   "arena_before": 5.208e-06,
+   "arena_before_t14": 8.541e-06,
+   "heap_after": 5.708e-06,
+   "heap_after_t14": 1.097e-05,
+   "heap_before": 5.7489999999999995e-06,
+   "heap_before_t14": 1.0199999999999999e-05,
+   "plan_clone_after": 1.54e-07
+  },
+  "bulk_write_typed/100x768": {
+   "arena_after": 5.1239999999999996e-06,
+   "arena_after_t14": 9.75e-06,
+   "arena_before": 5.166e-06,
+   "arena_before_t14": 9.061999999999999e-06,
+   "heap_after": 5.791e-06,
+   "heap_after_t14": 1.222e-05,
+   "heap_before": 5.831999999999999e-06,
+   "heap_before_t14": 1.1949999999999999e-05,
+   "plan_clone_after": 1.872e-07
+  },
+  "bulk_write_untyped/10000x96": {
+   "arena_after": 4.666e-06,
+   "arena_after_t14": 8.541e-06,
+   "arena_before": 4.666e-06,
+   "arena_before_t14": 8.458e-06,
+   "heap_after": 5.7489999999999995e-06,
+   "heap_after_t14": 1.041e-05,
+   "heap_before": 5.833e-06,
+   "heap_before_t14": 1.041e-05,
+   "plan_clone_after": 1.547e-07
+  },
+  "bulk_write_untyped/1000x768": {
+   "arena_after": 5.1239999999999996e-06,
+   "arena_after_t14": 8.937e-06,
+   "arena_before": 5.1239999999999996e-06,
+   "arena_before_t14": 8.436999999999999e-06,
+   "heap_after": 5.7489999999999995e-06,
+   "heap_after_t14": 1.056e-05,
+   "heap_before": 5.831999999999999e-06,
+   "heap_before_t14": 1.0769999999999999e-05,
+   "plan_clone_after": 1.5600000000000002e-07
+  },
+  "bulk_write_untyped/100x768": {
+   "arena_after": 5.166e-06,
+   "arena_after_t14": 8.958e-06,
+   "arena_before": 5.166e-06,
+   "arena_before_t14": 8.749e-06,
+   "heap_after": 5.7489999999999995e-06,
+   "heap_after_t14": 1.07e-05,
+   "heap_before": 5.791e-06,
+   "heap_before_t14": 1.0179999999999999e-05,
+   "plan_clone_after": 1.482e-07
+  },
+  "count_with_unused_params/0": {
+   "arena_after": 4.541e-06,
+   "arena_after_t14": 9.458e-06,
+   "arena_before": 5.082e-06,
+   "arena_before_t14": 8.75e-06,
+   "heap_after": 5.6660000000000005e-06,
+   "heap_after_t14": 1.087e-05,
+   "heap_before": 5.6660000000000005e-06,
+   "heap_before_t14": 1.0909999999999999e-05,
+   "plan_clone_after": 1.0320000000000001e-07
+  },
+  "count_with_unused_params/1048576": {
+   "arena_after": 5.04e-06,
+   "arena_after_t14": 8.458e-06,
+   "arena_before": 5.1239999999999996e-06,
+   "arena_before_t14": 8.707e-06,
+   "heap_after": 5.623999999999999e-06,
+   "heap_after_t14": 1.047e-05,
+   "heap_before": 5.458e-06,
+   "heap_before_t14": 1.0369999999999999e-05,
+   "plan_clone_after": 1.045e-07
+  },
+  "count_with_unused_params/8388608": {
+   "arena_after": 4.998999999999999e-06,
+   "arena_after_t14": 9.727999999999999e-06,
+   "arena_before": 5.166e-06,
+   "arena_before_t14": 8.332000000000001e-06,
+   "heap_after": 5.623999999999999e-06,
+   "heap_after_t14": 1.022e-05,
+   "heap_before": 5.437e-06,
+   "heap_before_t14": 9.936999999999998e-06,
+   "plan_clone_after": 1.0650000000000001e-07
+  },
+  "deep_chain/123": {
+   "arena_after": 0.0003543,
+   "arena_after_t14": 0.0003936,
+   "arena_before": 0.0003616,
+   "arena_before_t14": 0.0003986,
+   "heap_after": 0.0003703,
+   "heap_after_t14": 0.0004274,
+   "heap_before": 0.0003801,
+   "heap_before_t14": 0.00043349999999999997,
+   "plan_clone_after": 4.165e-06
+  },
+  "deep_chain/16": {
+   "arena_after": 3.441e-05,
+   "arena_after_t14": 4.643e-05,
+   "arena_before": 3.437e-05,
+   "arena_before_t14": 4.599e-05,
+   "heap_after": 3.691e-05,
+   "heap_after_t14": 5.9329999999999996e-05,
+   "heap_before": 4.2289999999999997e-05,
+   "heap_before_t14": 5.129e-05,
+   "plan_clone_after": 6.821000000000001e-07
+  },
+  "deep_chain/64": {
+   "arena_after": 0.00015309999999999998,
+   "arena_after_t14": 0.0001816,
+   "arena_before": 0.0001553,
+   "arena_before_t14": 0.00018209999999999998,
+   "heap_after": 0.0001609,
+   "heap_after_t14": 0.00019409999999999997,
+   "heap_before": 0.00016519999999999998,
+   "heap_before_t14": 0.0001935,
+   "plan_clone_after": 2.124e-06
+  },
+  "dynamic-delete": {
+   "arena_after": 6.915e-06,
+   "arena_after_t14": 1.1249999999999999e-05,
+   "arena_before": 6.874e-06,
+   "arena_before_t14": 1.085e-05,
+   "heap_after": 7.707e-06,
+   "heap_after_t14": 1.433e-05,
+   "heap_before": 6.998999999999999e-06,
+   "heap_before_t14": 1.4699999999999998e-05,
+   "plan_clone_after": 1.364e-07
+  },
+  "dynamic-read": {
+   "arena_after": 1.541e-05,
+   "arena_after_t14": 2.452e-05,
+   "arena_before": 1.6199999999999997e-05,
+   "arena_before_t14": 2.1989999999999998e-05,
+   "heap_after": 1.7489999999999997e-05,
+   "heap_after_t14": 0.00015269999999999997,
+   "heap_before": 1.812e-05,
+   "heap_before_t14": 2.952e-05,
+   "plan_clone_after": 1.892e-07
+  },
+  "dynamic-write": {
+   "arena_after": 4.291e-06,
+   "arena_after_t14": 8.582999999999999e-06,
+   "arena_before": 4.333e-06,
+   "arena_before_t14": 7.937e-06,
+   "heap_after": 5.333e-06,
+   "heap_after_t14": 1.2869999999999999e-05,
+   "heap_before": 5.498999999999999e-06,
+   "heap_before_t14": 1.0039999999999999e-05,
+   "plan_clone_after": 1.2990000000000002e-07
+  },
+  "fixture/BatchedRootReuse/256": {
+   "arena_after": 0.0009988999999999998,
+   "arena_after_t14": 0.001369,
+   "arena_before": 0.002337,
+   "arena_before_t14": 0.002633,
+   "heap_after": 0.001071,
+   "heap_after_t14": 0.001256,
+   "heap_before": 0.002719,
+   "heap_before_t14": 0.003062,
+   "plan_clone_after": 1.558e-05
+  },
+  "fixture/BatchedRootReuse/64": {
+   "arena_after": 0.0001833,
+   "arena_after_t14": 0.00020069999999999997,
+   "arena_before": 0.0002647,
+   "arena_before_t14": 0.0002896,
+   "heap_after": 0.0001992,
+   "heap_after_t14": 0.00025269999999999996,
+   "heap_before": 0.0003056,
+   "heap_before_t14": 0.00034669999999999997,
+   "plan_clone_after": 3.458e-06
+  },
+  "fixture/BatchedRootReuse/8": {
+   "arena_after": 2.266e-05,
+   "arena_after_t14": 4.227e-05,
+   "arena_before": 2.7159999999999997e-05,
+   "arena_before_t14": 3.3119999999999995e-05,
+   "heap_after": 2.7079999999999998e-05,
+   "heap_after_t14": 4.406e-05,
+   "heap_before": 3.12e-05,
+   "heap_before_t14": 4.204e-05,
+   "plan_clone_after": 4.6850000000000005e-07
+  },
+  "fixture/BranchHeavyQueries/16": {
+   "arena_after": 9.179e-05,
+   "arena_after_t14": 0.00010209999999999999,
+   "arena_before": 9.339e-05,
+   "arena_before_t14": 0.0001042,
+   "heap_after": 9.787e-05,
+   "heap_after_t14": 0.0001217,
+   "heap_before": 0.0001014,
+   "heap_before_t14": 0.00012509999999999998,
+   "plan_clone_after": 2.1869999999999996e-06
+  },
+  "fixture/BranchHeavyQueries/4": {
+   "arena_after": 3.249e-05,
+   "arena_after_t14": 4.106e-05,
+   "arena_before": 3.343e-05,
+   "arena_before_t14": 3.972e-05,
+   "heap_after": 3.4450000000000004e-05,
+   "heap_after_t14": 5.133e-05,
+   "heap_before": 3.645e-05,
+   "heap_before_t14": 4.995e-05,
+   "plan_clone_after": 9.321e-07
+  },
+  "fixture/BranchHeavyQueries/8": {
+   "arena_after": 5.2159999999999995e-05,
+   "arena_after_t14": 6.268e-05,
+   "arena_before": 5.290999999999999e-05,
+   "arena_before_t14": 6.484999999999999e-05,
+   "heap_after": 5.652e-05,
+   "heap_after_t14": 7.593e-05,
+   "heap_before": 5.745e-05,
+   "heap_before_t14": 7.309999999999999e-05,
+   "plan_clone_after": 1.187e-06
+  },
+  "fixture/DeepTraversalChain/16": {
+   "arena_after": 3.57e-05,
+   "arena_after_t14": 4.2539999999999996e-05,
+   "arena_before": 3.724e-05,
+   "arena_before_t14": 4.4829999999999996e-05,
+   "heap_after": 3.6950000000000004e-05,
+   "heap_after_t14": 5.468e-05,
+   "heap_before": 4.095e-05,
+   "heap_before_t14": 5.835e-05,
+   "plan_clone_after": 4.242e-07
+  },
+  "fixture/DeepTraversalChain/32": {
+   "arena_after": 6.691e-05,
+   "arena_after_t14": 7.523999999999999e-05,
+   "arena_before": 7.065999999999999e-05,
+   "arena_before_t14": 8.723999999999998e-05,
+   "heap_after": 6.943e-05,
+   "heap_after_t14": 8.909999999999998e-05,
+   "heap_before": 7.649e-05,
+   "heap_before_t14": 0.00010049999999999999,
+   "plan_clone_after": 7.445e-07
+  },
+  "fixture/DeepTraversalChain/4": {
+   "arena_after": 1.4039999999999998e-05,
+   "arena_after_t14": 1.9489999999999998e-05,
+   "arena_before": 1.589e-05,
+   "arena_before_t14": 2.3489999999999997e-05,
+   "heap_after": 1.477e-05,
+   "heap_after_t14": 2.764e-05,
+   "heap_before": 1.7429999999999997e-05,
+   "heap_before_t14": 2.8579999999999997e-05,
+   "plan_clone_after": 1.8590000000000002e-07
+  },
+  "fixture/ForEachBodyRootReuse/256": {
+   "arena_after": 0.0009232999999999999,
+   "arena_after_t14": 0.0012540000000000001,
+   "arena_before": 0.0022400000000000002,
+   "arena_before_t14": 0.002532,
+   "heap_after": 0.0009854,
+   "heap_after_t14": 0.001168,
+   "heap_before": 0.002608,
+   "heap_before_t14": 0.003038,
+   "plan_clone_after": 1.579e-05
+  },
+  "fixture/ForEachBodyRootReuse/64": {
+   "arena_after": 0.000167,
+   "arena_after_t14": 0.00018559999999999998,
+   "arena_before": 0.0002517,
+   "arena_before_t14": 0.0002746,
+   "heap_after": 0.000179,
+   "heap_after_t14": 0.000233,
+   "heap_before": 0.0002852,
+   "heap_before_t14": 0.0003418,
+   "plan_clone_after": 3.2069999999999995e-06
+  },
+  "fixture/ForEachBodyRootReuse/8": {
+   "arena_after": 2.166e-05,
+   "arena_after_t14": 3.390999999999999e-05,
+   "arena_before": 2.6219999999999996e-05,
+   "arena_before_t14": 3.235e-05,
+   "heap_after": 2.587e-05,
+   "heap_after_t14": 4.5079999999999995e-05,
+   "heap_before": 3.0539999999999996e-05,
+   "heap_before_t14": 4.474e-05,
+   "plan_clone_after": 4.841000000000001e-07
+  },
+  "fixture/ManyAvailableIndexes/1024": {
+   "arena_after": 2.8739999999999996e-05,
+   "arena_after_t14": 5.4409999999999996e-05,
+   "arena_before": 6.543e-05,
+   "arena_before_t14": 7.297e-05,
+   "heap_after": 3.199e-05,
+   "heap_after_t14": 6.552e-05,
+   "heap_before": 7.839e-05,
+   "heap_before_t14": 0.0001013,
+   "plan_clone_after": 1.208e-07
+  },
+  "fixture/ManyAvailableIndexes/256": {
+   "arena_after": 1.741e-05,
+   "arena_after_t14": 2.7519999999999997e-05,
+   "arena_before": 2.795e-05,
+   "arena_before_t14": 3.929e-05,
+   "heap_after": 1.887e-05,
+   "heap_after_t14": 3.993e-05,
+   "heap_before": 3.472e-05,
+   "heap_before_t14": 4.697e-05,
+   "plan_clone_after": 1.1170000000000001e-07
+  },
+  "fixture/ManyAvailableIndexes/64": {
+   "arena_after": 1.366e-05,
+   "arena_after_t14": 2.2100000000000002e-05,
+   "arena_before": 1.854e-05,
+   "arena_before_t14": 2.995e-05,
+   "heap_after": 1.695e-05,
+   "heap_after_t14": 4.227e-05,
+   "heap_before": 2.204e-05,
+   "heap_before_t14": 3.447e-05,
+   "plan_clone_after": 1.277e-07
+  },
+  "fixture/ManyMemoAlternatives/32": {
+   "arena_after": 0.0001077,
+   "arena_after_t14": 0.00012119999999999999,
+   "arena_before": 0.000125,
+   "arena_before_t14": 0.0001446,
+   "heap_after": 0.0001146,
+   "heap_after_t14": 0.0001379,
+   "heap_before": 0.0001356,
+   "heap_before_t14": 0.0001661,
+   "plan_clone_after": 5.284e-07
+  },
+  "fixture/ManyMemoAlternatives/64": {
+   "arena_after": 0.0002228,
+   "arena_after_t14": 0.0002393,
+   "arena_before": 0.00025499999999999996,
+   "arena_before_t14": 0.0002761,
+   "heap_after": 0.0002344,
+   "heap_after_t14": 0.0002701,
+   "heap_before": 0.0002712,
+   "heap_before_t14": 0.0003203,
+   "plan_clone_after": 9.632000000000002e-07
+  },
+  "fixture/ManyMemoAlternatives/8": {
+   "arena_after": 3.17e-05,
+   "arena_after_t14": 3.752e-05,
+   "arena_before": 3.493e-05,
+   "arena_before_t14": 4.385e-05,
+   "heap_after": 3.387e-05,
+   "heap_after_t14": 4.497e-05,
+   "heap_before": 4.02e-05,
+   "heap_before_t14": 5.7619999999999994e-05,
+   "plan_clone_after": 2.1200000000000002e-07
+  },
+  "fixture/MutationHeavyBatches/32": {
+   "arena_after": 0.0011359999999999999,
+   "arena_after_t14": 0.001252,
+   "arena_before": 0.0011790000000000001,
+   "arena_before_t14": 0.0013000000000000002,
+   "heap_after": 0.001244,
+   "heap_after_t14": 0.001503,
+   "heap_before": 0.001305,
+   "heap_before_t14": 0.001567,
+   "plan_clone_after": 1.4119999999999999e-05
+  },
+  "fixture/MutationHeavyBatches/64": {
+   "arena_after": 0.002392,
+   "arena_after_t14": 0.002883,
+   "arena_before": 0.0025099999999999996,
+   "arena_before_t14": 0.002989,
+   "heap_after": 0.002614,
+   "heap_after_t14": 0.0033610000000000003,
+   "heap_before": 0.0027860000000000003,
+   "heap_before_t14": 0.003801,
+   "plan_clone_after": 2.916e-05
+  },
+  "fixture/MutationHeavyBatches/8": {
+   "arena_after": 0.0002758,
+   "arena_after_t14": 0.0003061,
+   "arena_before": 0.00028429999999999997,
+   "arena_before_t14": 0.00031549999999999997,
+   "heap_after": 0.00029439999999999995,
+   "heap_after_t14": 0.0003647,
+   "heap_before": 0.00031549999999999997,
+   "heap_before_t14": 0.00037549999999999997,
+   "plan_clone_after": 3.374e-06
+  },
+  "fixture/OrderedRangeWindowPushdown/32": {
+   "arena_after": 0.0001379,
+   "arena_after_t14": 0.00015719999999999997,
+   "arena_before": 0.0001643,
+   "arena_before_t14": 0.00018119999999999999,
+   "heap_after": 0.0001502,
+   "heap_after_t14": 0.0001944,
+   "heap_before": 0.00018409999999999998,
+   "heap_before_t14": 0.0002327,
+   "plan_clone_after": 3.9569999999999996e-06
+  },
+  "fixture/OrderedRangeWindowPushdown/64": {
+   "arena_after": 0.00028739999999999994,
+   "arena_after_t14": 0.0003159,
+   "arena_before": 0.0003738,
+   "arena_before_t14": 0.0004088,
+   "heap_after": 0.0003111,
+   "heap_after_t14": 0.00037039999999999995,
+   "heap_before": 0.0004221,
+   "heap_before_t14": 0.0004942,
+   "plan_clone_after": 7.957e-06
+  },
+  "fixture/OrderedRangeWindowPushdown/8": {
+   "arena_after": 3.8079999999999995e-05,
+   "arena_after_t14": 5.0579999999999993e-05,
+   "arena_before": 4.187e-05,
+   "arena_before_t14": 5.406e-05,
+   "heap_after": 4.115999999999999e-05,
+   "heap_after_t14": 6.214e-05,
+   "heap_before": 4.672e-05,
+   "heap_before_t14": 6.947e-05,
+   "plan_clone_after": 8.8e-07
+  },
+  "fixture/OverLimitIndexDisjunction/128": {
+   "arena_after": 0.00048249999999999996,
+   "arena_after_t14": 0.0005142,
+   "arena_before": 0.0005342999999999999,
+   "arena_before_t14": 0.0005903999999999999,
+   "heap_after": 0.0005017,
+   "heap_after_t14": 0.0005571,
+   "heap_before": 0.0005757999999999999,
+   "heap_before_t14": 0.0006432,
+   "plan_clone_after": 1.8219999999999999e-06
+  },
+  "fixture/OverLimitIndexDisjunction/512": {
+   "arena_after": 0.003006,
+   "arena_after_t14": 0.003251,
+   "arena_before": 0.003206,
+   "arena_before_t14": 0.0034820000000000003,
+   "heap_after": 0.003072,
+   "heap_after_t14": 0.0034720000000000003,
+   "heap_before": 0.003401,
+   "heap_before_t14": 0.003732,
+   "plan_clone_after": 7.623999999999999e-06
+  },
+  "fixture/RuntimeDerivedMixedQueries/16": {
+   "arena_after": 0.0007214999999999999,
+   "arena_after_t14": 0.0007978999999999999,
+   "arena_before": 0.0007593999999999999,
+   "arena_before_t14": 0.0008241,
+   "heap_after": 0.0007823999999999999,
+   "heap_after_t14": 0.0009557,
+   "heap_before": 0.0008458,
+   "heap_before_t14": 0.0009737,
+   "plan_clone_after": 1.12e-05
+  },
+  "fixture/RuntimeDerivedMixedQueries/4": {
+   "arena_after": 0.0001833,
+   "arena_after_t14": 0.000205,
+   "arena_before": 0.00019580000000000002,
+   "arena_before_t14": 0.00021409999999999997,
+   "heap_after": 0.0001985,
+   "heap_after_t14": 0.0002553,
+   "heap_before": 0.00021559999999999998,
+   "heap_before_t14": 0.00026419999999999997,
+   "plan_clone_after": 2.332e-06
+  },
+  "fixture/RuntimeDerivedMixedQueries/8": {
+   "arena_after": 0.00035539999999999997,
+   "arena_after_t14": 0.00039289999999999996,
+   "arena_before": 0.00038089999999999993,
+   "arena_before_t14": 0.00041299999999999996,
+   "heap_after": 0.0003876,
+   "heap_after_t14": 0.00046499999999999997,
+   "heap_before": 0.0004139,
+   "heap_before_t14": 0.0004938,
+   "plan_clone_after": 5.457e-06
+  },
+  "fixture/SearchIndexDdlWorkloads/32": {
+   "arena_after": 0.0005687,
+   "arena_after_t14": 0.0006265,
+   "arena_before": 0.0005842,
+   "arena_before_t14": 0.0006361,
+   "heap_after": 0.0006172999999999999,
+   "heap_after_t14": 0.0007667,
+   "heap_before": 0.0006309999999999999,
+   "heap_before_t14": 0.0007662,
+   "plan_clone_after": 9.083e-06
+  },
+  "fixture/SearchIndexDdlWorkloads/64": {
+   "arena_after": 0.001192,
+   "arena_after_t14": 0.001367,
+   "arena_before": 0.00121,
+   "arena_before_t14": 0.001391,
+   "heap_after": 0.001299,
+   "heap_after_t14": 0.0017430000000000002,
+   "heap_before": 0.0013289999999999999,
+   "heap_before_t14": 0.001691,
+   "plan_clone_after": 1.812e-05
+  },
+  "fixture/SearchIndexDdlWorkloads/8": {
+   "arena_after": 0.0001412,
+   "arena_after_t14": 0.00015439999999999999,
+   "arena_before": 0.00014,
+   "arena_before_t14": 0.00015749999999999998,
+   "heap_after": 0.00014659999999999999,
+   "heap_after_t14": 0.0001903,
+   "heap_before": 0.00014959999999999998,
+   "heap_before_t14": 0.0001888,
+   "plan_clone_after": 1.8529999999999999e-06
+  },
+  "fixture/WideBooleanPredicates/32": {
+   "arena_after": 0.00011169999999999999,
+   "arena_after_t14": 0.00012209999999999999,
+   "arena_before": 0.000125,
+   "arena_before_t14": 0.0001481,
+   "heap_after": 0.0001174,
+   "heap_after_t14": 0.0001479,
+   "heap_before": 0.0001355,
+   "heap_before_t14": 0.00016230000000000001,
+   "plan_clone_after": 5.362e-07
+  },
+  "fixture/WideBooleanPredicates/64": {
+   "arena_after": 0.0002337,
+   "arena_after_t14": 0.00026289999999999994,
+   "arena_before": 0.0002618,
+   "arena_before_t14": 0.00028460000000000003,
+   "heap_after": 0.0002458,
+   "heap_after_t14": 0.0002823,
+   "heap_before": 0.00028460000000000003,
+   "heap_before_t14": 0.00031999999999999997,
+   "plan_clone_after": 9.685000000000001e-07
+  },
+  "fixture/WideBooleanPredicates/8": {
+   "arena_after": 3.106e-05,
+   "arena_after_t14": 3.890999999999999e-05,
+   "arena_before": 3.472e-05,
+   "arena_before_t14": 4.747e-05,
+   "heap_after": 3.324e-05,
+   "heap_after_t14": 5.249e-05,
+   "heap_before": 3.9869999999999996e-05,
+   "heap_before_t14": 5.6219999999999994e-05,
+   "plan_clone_after": 1.937e-07
+  },
+  "ordered-range-narrow-projection": {
+   "arena_after": 1.822e-05,
+   "arena_after_t14": 2.5929999999999997e-05,
+   "arena_before": 1.8739999999999997e-05,
+   "arena_before_t14": 2.56e-05,
+   "heap_after": 2.049e-05,
+   "heap_after_t14": 3.729e-05,
+   "heap_before": 2.1239999999999997e-05,
+   "heap_before_t14": 3.943e-05,
+   "plan_clone_after": 2.758e-07
+  },
+  "ordered-range-wide-projection": {
+   "arena_after": 2.304e-05,
+   "arena_after_t14": 3.26e-05,
+   "arena_before": 2.5889999999999998e-05,
+   "arena_before_t14": 3.968e-05,
+   "heap_after": 2.4789999999999998e-05,
+   "heap_after_t14": 4.195e-05,
+   "heap_before": 2.985e-05,
+   "heap_before_t14": 4.539e-05,
+   "plan_clone_after": 3.514e-07
+  },
+  "predicate_heavy/1024": {
+   "arena_after": 0.003622,
+   "arena_after_t14": 0.003803,
+   "arena_before": 0.003654,
+   "arena_before_t14": 0.004041,
+   "heap_after": 0.003993,
+   "heap_after_t14": 0.00444,
+   "heap_before": 0.004078,
+   "heap_before_t14": 0.004755,
+   "plan_clone_after": 4.665e-06
+  },
+  "predicate_heavy/64": {
+   "arena_after": 0.0002148,
+   "arena_after_t14": 0.0002315,
+   "arena_before": 0.00021769999999999998,
+   "arena_before_t14": 0.000245,
+   "heap_after": 0.00023689999999999998,
+   "heap_after_t14": 0.0002786,
+   "heap_before": 0.00024209999999999998,
+   "heap_before_t14": 0.0002831,
+   "plan_clone_after": 4.997000000000001e-07
+  },
+  "string_heavy_projection/256x64": {
+   "arena_after": 0.0001494,
+   "arena_after_t14": 0.00017619999999999997,
+   "arena_before": 0.00017669999999999999,
+   "arena_before_t14": 0.0001993,
+   "heap_after": 0.0001574,
+   "heap_after_t14": 0.00018649999999999998,
+   "heap_before": 0.00019169999999999997,
+   "heap_before_t14": 0.00022319999999999998,
+   "plan_clone_after": 2.614e-06
+  },
+  "wide_batch/100": {
+   "arena_after": 0.0011200000000000001,
+   "arena_after_t14": 0.0013640000000000002,
+   "arena_before": 0.0011439999999999998,
+   "arena_before_t14": 0.001277,
+   "heap_after": 0.001224,
+   "heap_after_t14": 0.0015660000000000001,
+   "heap_before": 0.0012350000000000002,
+   "heap_before_t14": 0.001544,
+   "plan_clone_after": 1.7199999999999998e-05
+  },
+  "wide_batch/1000": {
+   "arena_after": 0.0181,
+   "arena_after_t14": 0.02649,
+   "arena_before": 0.01828,
+   "arena_before_t14": 0.0269,
+   "heap_after": 0.01921,
+   "heap_after_t14": 0.02759,
+   "heap_before": 0.01927,
+   "heap_before_t14": 0.027800000000000002,
+   "plan_clone_after": 0.0001726
+  }
+ }
+}
