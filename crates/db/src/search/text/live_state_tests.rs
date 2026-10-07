@@ -66,7 +66,8 @@ impl Model {
             .map(|(entity_id, state)| {
                 let state = match state {
                     ModelState::Missing => ModelState::Live(1),
-                    state => *state,
+                    ModelState::Live(version) => ModelState::Live(*version),
+                    ModelState::Dead(version) => ModelState::Dead(*version),
                 };
                 (*entity_id, state)
             })
