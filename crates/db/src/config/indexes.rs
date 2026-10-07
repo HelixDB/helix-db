@@ -899,16 +899,13 @@ impl RuntimeIndexCatalog {
     }
 
     /// Build the planner-visible index snapshot from the DB runtime catalog.
-    ///
-    /// Every request builds its own snapshot, so names are detached from the
-    /// catalog's: concurrent requests then never share reference counts.
     pub(crate) fn planner_snapshot(&self) -> catalog::IndexCatalogSnapshot {
         let mut snapshot = catalog::IndexCatalogSnapshot::default();
         snapshot
             .node_eq
             .extend(self.node_equality.iter().map(|(key, uniqueness)| {
                 (
-                    catalog::ScopedPropertyKey::new(key.label.detached(), key.property.detached()),
+                    key.clone(),
                     catalog::NodeEqualityIndexMeta::new(ir::NonEmptyString::from_prefixed_display(
                         "node_eq:", key,
                     ))
@@ -919,11 +916,7 @@ impl RuntimeIndexCatalog {
             .node_range
             .extend(self.node_range.iter().map(|key| {
                 (
-                    catalog::ScopedPropertyDirectionKey::new(
-                        key.label.detached(),
-                        key.property.detached(),
-                        key.direction,
-                    ),
+                    key.clone(),
                     catalog::NodeRangeIndexMeta::new(ir::NonEmptyString::from_prefixed_display(
                         "node_range:",
                         key,
@@ -934,7 +927,7 @@ impl RuntimeIndexCatalog {
             .edge_eq
             .extend(self.edge_equality.iter().map(|key| {
                 (
-                    catalog::ScopedPropertyKey::new(key.label.detached(), key.property.detached()),
+                    key.clone(),
                     catalog::EdgeEqualityIndexMeta::new(ir::NonEmptyString::from_prefixed_display(
                         "edge_eq:", key,
                     )),
@@ -944,11 +937,7 @@ impl RuntimeIndexCatalog {
             .edge_range
             .extend(self.edge_range.iter().map(|key| {
                 (
-                    catalog::ScopedPropertyDirectionKey::new(
-                        key.label.detached(),
-                        key.property.detached(),
-                        key.direction,
-                    ),
+                    key.clone(),
                     catalog::EdgeRangeIndexMeta::new(ir::NonEmptyString::from_prefixed_display(
                         "edge_range:",
                         key,
