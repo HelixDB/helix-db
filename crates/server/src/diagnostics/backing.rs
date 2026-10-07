@@ -3,17 +3,19 @@
 //!
 //! Linux only. The filesystem is the mount in `/proc/self/mountinfo` whose
 //! device number is the directory's; the disk comes from `/sys/dev/block`.
-//! A partition reports its whole disk. A device-mapper or RAID device
-//! reports the slowest disk it is built on, ranked rotational, then
-//! network-attached, then local SSD, then instance storage.
+//! A partition reports its whole disk. Speed and durability are reported
+//! apart: a device-mapper or RAID device is as slow as its slowest disk,
+//! ranked rotational, then network-attached, then local SSD, and as
+//! ephemeral as any one of its disks.
 //!
-//! A disk is instance storage when its model is a cloud's ephemeral local
-//! NVMe (Amazon EC2 instance store, Google Cloud Local SSD, Azure NVMe Direct
-//! Disk) and network-attached when it is a cloud block-storage model (Amazon
-//! EBS, Google Persistent Disk, Azure managed disks). Any other disk with a
-//! model is a local SSD unless it is rotational. A disk without a model,
-//! such as a Xen or virtio disk, could be either, and virtio disks report
-//! themselves rotational whatever backs them, so it is [`Backing::Unknown`].
+//! A disk is a local SSD the cloud erases when the instance stops when its
+//! model is a cloud's ephemeral local NVMe (Amazon EC2 instance store, Google
+//! Cloud Local SSD, Azure NVMe Direct Disk), and network-attached when it is
+//! a cloud block-storage model (Amazon EBS, Google Persistent Disk, Azure
+//! managed disks). Any other disk with a model is a local SSD unless it is
+//! rotational. A disk without a model, such as a Xen or virtio disk, could be
+//! either, and virtio disks report themselves rotational whatever backs
+//! them, so it is [`Backing::Unknown`].
 
 use std::path::{Path, PathBuf};
 
@@ -29,24 +31,26 @@ pub(crate) enum Backing {
     /// A network, FUSE, or VM-shared filesystem.
     Remote { filesystem: String },
     /// A filesystem on block devices, named by the device it is mounted
-    /// from.
-    Block { device: String, disk: Disk },
+    /// from: `disk` is its slowest disk, and `ephemeral` the model of a disk
+    /// the cloud erases when the instance stops, if it is built on one.
+    Block {
+        device: String,
+        disk: Disk,
+        ephemeral: Option<String>,
+    },
     /// The backing could not be determined.
     Unknown { reason: String },
 }
 
-/// The kind of disk under a block filesystem, slowest first.
+/// How fast a disk under a block filesystem is, slowest first.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Disk {
     /// A rotational hard disk.
     Rotational,
     /// Network-attached block storage, such as Amazon EBS.
     Network { model: String },
-    /// A local SSD or NVMe drive other than instance storage.
+    /// A local SSD or NVMe drive, including a cloud's instance storage.
     LocalSsd { model: String },
-    /// A cloud's local NVMe, erased when the instance stops: Amazon EC2
-    /// instance storage, Google Cloud Local SSD, or Azure NVMe Direct Disk.
-    InstanceStore { model: String },
 }
 
 /// Classifies the storage behind `path`.
@@ -125,8 +129,12 @@ fn classify_device(device: (u32, u32), mountinfo: &str, sys: &Path) -> Backing {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or(number);
-    match slowest_disk(&device_dir) {
-        Ok(disk) => Backing::Block { device, disk },
+    match disks(&device_dir) {
+        Ok((disk, ephemeral)) => Backing::Block {
+            device,
+            disk,
+            ephemeral,
+        },
         Err(reason) => Backing::Unknown { reason },
     }
 }
@@ -141,9 +149,9 @@ fn whole_disk(device_dir: PathBuf) -> PathBuf {
         .map_or(device_dir.clone(), Path::to_path_buf)
 }
 
-/// The slowest disk under `device_dir`: the device itself, or the slowest
-/// of the devices it is built on.
-fn slowest_disk(device_dir: &Path) -> Result<Disk, String> {
+/// The slowest disk under `device_dir`, and the model of an ephemeral one:
+/// the device itself, or the devices it is built on.
+fn disks(device_dir: &Path) -> Result<(Disk, Option<String>), String> {
     let members = std::fs::read_dir(device_dir.join("slaves"))
         .map(|entries| {
             entries
@@ -158,18 +166,23 @@ fn slowest_disk(device_dir: &Path) -> Result<Disk, String> {
     }
     members
         .iter()
-        .map(|member| slowest_disk(member))
+        .map(|member| disks(member))
         .collect::<Result<Vec<_>, _>>()
-        .map(|disks| {
-            disks
-                .into_iter()
-                .min()
-                .expect("a device built on others has at least one member")
+        .map(|members| {
+            let (speeds, ephemeral): (Vec<_>, Vec<_>) = members.into_iter().unzip();
+            (
+                speeds
+                    .into_iter()
+                    .min()
+                    .expect("a device built on others has at least one member"),
+                ephemeral.into_iter().flatten().next(),
+            )
         })
 }
 
-/// The kind of one disk, from its model and rotational flag.
-fn disk(disk_dir: &Path) -> Result<Disk, String> {
+/// How fast one disk is and, when the cloud erases it with the instance,
+/// its model; from its model and rotational flag.
+fn disk(disk_dir: &Path) -> Result<(Disk, Option<String>), String> {
     /// Model names of network-attached cloud block storage.
     const NETWORK_MODELS: [&str; 5] = [
         "Amazon Elastic Block Store",
@@ -189,9 +202,14 @@ fn disk(disk_dir: &Path) -> Result<Disk, String> {
         || model.contains("NVMe Direct Disk")
         || model == "nvme_card"
     {
-        Ok(Disk::InstanceStore { model })
+        Ok((
+            Disk::LocalSsd {
+                model: model.clone(),
+            },
+            Some(model),
+        ))
     } else if NETWORK_MODELS.iter().any(|network| model.contains(network)) {
-        Ok(Disk::Network { model })
+        Ok((Disk::Network { model }, None))
     } else if model.is_empty() {
         Err(format!(
             "cannot tell whether disk `{}` is local or network-attached: it reports no model",
@@ -201,9 +219,9 @@ fn disk(disk_dir: &Path) -> Result<Disk, String> {
                 .to_string_lossy()
         ))
     } else if read("queue/rotational") == "1" {
-        Ok(Disk::Rotational)
+        Ok((Disk::Rotational, None))
     } else {
-        Ok(Disk::LocalSsd { model })
+        Ok((Disk::LocalSsd { model }, None))
     }
 }
 
@@ -349,87 +367,54 @@ mod tests {
     #[test]
     fn cloud_disk_models_are_instance_storage_or_network_attached() {
         let sys = Sysfs::new();
-        sys.disk(
-            "nvme1n1",
-            "259:1",
-            Some("Amazon EC2 NVMe Instance Storage"),
-            false,
-        );
-        sys.disk(
-            "nvme0n1",
-            "259:0",
-            Some("Amazon Elastic Block Store"),
-            false,
-        );
-        sys.disk("sdb", "8:16", Some("PersistentDisk"), false);
-        sys.disk("sdc", "8:32", Some("Virtual Disk"), false);
-        sys.disk("nvme2n1", "259:2", Some("Samsung SSD 990 PRO 2TB"), false);
-        sys.disk("sda", "8:0", Some("WDC WD40EFRX"), true);
-        sys.disk("nvme3n1", "259:3", Some("nvme_card"), false);
-        sys.disk("nvme4n1", "259:4", Some("nvme_card-pd"), false);
-        sys.disk(
-            "nvme5n1",
-            "259:5",
-            Some("Microsoft NVMe Direct Disk v2"),
-            false,
-        );
-        for (number, device, disk) in [
+        for (name, number, model, rotational) in [
+            (
+                "nvme1n1",
+                "259:1",
+                "Amazon EC2 NVMe Instance Storage",
+                false,
+            ),
+            ("nvme0n1", "259:0", "Amazon Elastic Block Store", false),
+            ("sdb", "8:16", "PersistentDisk", false),
+            ("sdc", "8:32", "Virtual Disk", false),
+            ("nvme2n1", "259:2", "Samsung SSD 990 PRO 2TB", false),
+            ("sda", "8:0", "WDC WD40EFRX", true),
+            ("nvme3n1", "259:3", "nvme_card", false),
+            ("nvme4n1", "259:4", "nvme_card-pd", false),
+            ("nvme5n1", "259:5", "Microsoft NVMe Direct Disk v2", false),
+        ] {
+            sys.disk(name, number, Some(model), rotational);
+        }
+        let local = |model: &str| Disk::LocalSsd {
+            model: model.into(),
+        };
+        let network = |model: &str| Disk::Network {
+            model: model.into(),
+        };
+        for (number, device, disk, ephemeral) in [
             (
                 "259:1",
                 "nvme1n1",
-                Disk::InstanceStore {
-                    model: "Amazon EC2 NVMe Instance Storage".into(),
-                },
+                local("Amazon EC2 NVMe Instance Storage"),
+                Some("Amazon EC2 NVMe Instance Storage"),
             ),
             (
                 "259:0",
                 "nvme0n1",
-                Disk::Network {
-                    model: "Amazon Elastic Block Store".into(),
-                },
+                network("Amazon Elastic Block Store"),
+                None,
             ),
-            (
-                "8:16",
-                "sdb",
-                Disk::Network {
-                    model: "PersistentDisk".into(),
-                },
-            ),
-            (
-                "8:32",
-                "sdc",
-                Disk::Network {
-                    model: "Virtual Disk".into(),
-                },
-            ),
-            (
-                "259:2",
-                "nvme2n1",
-                Disk::LocalSsd {
-                    model: "Samsung SSD 990 PRO 2TB".into(),
-                },
-            ),
-            ("8:0", "sda", Disk::Rotational),
-            (
-                "259:3",
-                "nvme3n1",
-                Disk::InstanceStore {
-                    model: "nvme_card".into(),
-                },
-            ),
-            (
-                "259:4",
-                "nvme4n1",
-                Disk::Network {
-                    model: "nvme_card-pd".into(),
-                },
-            ),
+            ("8:16", "sdb", network("PersistentDisk"), None),
+            ("8:32", "sdc", network("Virtual Disk"), None),
+            ("259:2", "nvme2n1", local("Samsung SSD 990 PRO 2TB"), None),
+            ("8:0", "sda", Disk::Rotational, None),
+            ("259:3", "nvme3n1", local("nvme_card"), Some("nvme_card")),
+            ("259:4", "nvme4n1", network("nvme_card-pd"), None),
             (
                 "259:5",
                 "nvme5n1",
-                Disk::InstanceStore {
-                    model: "Microsoft NVMe Direct Disk v2".into(),
-                },
+                local("Microsoft NVMe Direct Disk v2"),
+                Some("Microsoft NVMe Direct Disk v2"),
             ),
         ] {
             let (major, minor) = number.split_once(':').unwrap();
@@ -441,7 +426,8 @@ mod tests {
                 ),
                 Backing::Block {
                     device: device.into(),
-                    disk
+                    disk,
+                    ephemeral: ephemeral.map(str::to_owned),
                 },
                 "{device}"
             );
@@ -472,6 +458,7 @@ mod tests {
                 disk: Disk::Network {
                     model: "Amazon Elastic Block Store".into()
                 },
+                ephemeral: None,
             }
         );
         assert!(matches!(
@@ -487,23 +474,20 @@ mod tests {
     }
 
     #[test]
-    fn arrays_report_their_slowest_member() {
+    fn arrays_are_as_slow_as_their_slowest_disk_and_ephemeral_if_any_disk_is() {
         let sys = Sysfs::new();
-        let store_a = sys.disk(
-            "nvme1n1",
-            "259:1",
-            Some("Amazon EC2 NVMe Instance Storage"),
-            false,
-        );
-        let store_b = sys.disk(
-            "nvme2n1",
-            "259:2",
-            Some("Amazon EC2 NVMe Instance Storage"),
-            false,
-        );
+        const STORE: &str = "Amazon EC2 NVMe Instance Storage";
+        let store_a = sys.disk("nvme1n1", "259:1", Some(STORE), false);
+        let store_b = sys.disk("nvme2n1", "259:2", Some(STORE), false);
         let ebs = sys.disk(
             "nvme3n1",
             "259:3",
+            Some("Amazon Elastic Block Store"),
+            false,
+        );
+        let ebs_b = sys.disk(
+            "nvme4n1",
+            "259:4",
             Some("Amazon Elastic Block Store"),
             false,
         );
@@ -511,6 +495,7 @@ mod tests {
         sys.array("md0", "9:0", &[&store_a, &store_b]);
         sys.array("md1", "9:1", &[&store_a, &ebs]);
         sys.array("md2", "9:2", &[&store_a, &bare]);
+        sys.array("md3", "9:3", &[&ebs, &ebs_b]);
         sys.array("dm-0", "253:0", &[]);
 
         let classify = |number: &str| {
@@ -525,11 +510,14 @@ mod tests {
             classify("9:0"),
             Backing::Block {
                 device: "md0".into(),
-                disk: Disk::InstanceStore {
-                    model: "Amazon EC2 NVMe Instance Storage".into()
+                disk: Disk::LocalSsd {
+                    model: STORE.into()
                 },
+                ephemeral: Some(STORE.into()),
             }
         );
+        // EBS is the slower disk, but losing the instance-store half still
+        // loses the array.
         assert_eq!(
             classify("9:1"),
             Backing::Block {
@@ -537,6 +525,17 @@ mod tests {
                 disk: Disk::Network {
                     model: "Amazon Elastic Block Store".into()
                 },
+                ephemeral: Some(STORE.into()),
+            }
+        );
+        assert_eq!(
+            classify("9:3"),
+            Backing::Block {
+                device: "md3".into(),
+                disk: Disk::Network {
+                    model: "Amazon Elastic Block Store".into()
+                },
+                ephemeral: None,
             }
         );
         assert!(matches!(classify("9:2"), Backing::Unknown { reason } if reason.contains("`vdb`")));

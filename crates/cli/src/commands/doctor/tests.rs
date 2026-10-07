@@ -127,35 +127,66 @@ fn server_urls_must_be_http_and_lose_their_trailing_slash() {
 
 #[test]
 fn container_states_map_to_pass_fail_or_skip() {
-    let status = |status: &str| {
+    let status = |status: &str, ports: &str| {
         Ok(Some(LocalStatus {
             instance_name: "dev".into(),
             container_name: "helix-app-dev".into(),
             status: status.into(),
-            ports: "0.0.0.0:6969->8080/tcp".into(),
+            ports: ports.into(),
         }))
     };
-    let (running, up) = container_check("dev", status("Up 3 hours"));
-    assert!(up);
+    // `helix start dev --port 7777` without --persist: the container serves
+    // on the port it publishes, not the configured one.
+    let (running, port) = container_check(
+        "dev",
+        status("Up 3 hours", "0.0.0.0:7777->8080/tcp, [::]:7777->8080/tcp"),
+        6969,
+    );
+    assert_eq!(port, Some(7777));
     assert_eq!(running.status, Status::Pass);
     assert_eq!(running.summary, "Container helix-app-dev is running");
-    assert_eq!(running.detail.as_deref(), Some("Up 3 hours"));
+    assert_eq!(
+        running.detail.as_deref(),
+        Some("Up 3 hours, serving on port 7777.")
+    );
+    let (_, port) = container_check("dev", status("Up 1 second", ""), 6969);
+    assert_eq!(
+        port,
+        Some(6969),
+        "unpublished ports fall back to the configured one"
+    );
 
-    let (stopped, up) = container_check("dev", status("Exited (0) 2 minutes ago"));
-    assert!(!up);
+    let (stopped, port) = container_check("dev", status("Exited (0) 2 minutes ago", ""), 6969);
+    assert_eq!(port, None);
     assert_eq!(stopped.status, Status::Fail);
     assert_eq!(stopped.summary, "dev is stopped");
     assert_eq!(stopped.fix.as_deref(), Some("Run `helix start dev`."));
 
-    let (missing, up) = container_check("dev", Ok(None));
-    assert!(!up);
+    let (missing, port) = container_check("dev", Ok(None), 6969);
+    assert_eq!(port, None);
     assert_eq!(missing.status, Status::Fail);
     assert_eq!(missing.summary, "dev has not been started");
 
-    let (unreadable, up) = container_check("dev", Err(eyre::eyre!("ps exploded")));
-    assert!(!up);
+    let (unreadable, port) = container_check("dev", Err(eyre::eyre!("ps exploded")), 6969);
+    assert_eq!(port, None);
     assert_eq!(unreadable.status, Status::Skip);
     assert!(unreadable.detail.unwrap().contains("ps exploded"));
+}
+
+#[test]
+fn published_ports_are_read_from_the_ps_ports_column() {
+    for (ports, expected) in [
+        ("0.0.0.0:7777->8080/tcp, [::]:7777->8080/tcp", Some(7777)),
+        ("[::]:6970->8080/tcp", Some(6970)),
+        ("127.0.0.1:6969->8080/tcp", Some(6969)),
+        ("0.0.0.0:9000->9000/tcp, 0.0.0.0:7000->8080/tcp", Some(7000)),
+        ("8080/tcp", None),
+        ("0.0.0.0:0->8080/tcp", None),
+        ("0.0.0.0:http->8080/tcp", None),
+        ("", None),
+    ] {
+        assert_eq!(published_port(ports), expected, "{ports:?}");
+    }
 }
 
 #[test]

@@ -379,14 +379,15 @@ fn data_device(root: &Path, backing: &Backing) -> Check {
         ),
         Backing::Block {
             device,
-            disk: Disk::InstanceStore { model },
+            ephemeral: Some(model),
+            ..
         } => Check::new(
             CheckId::DataDevice,
             "HELIX_DATA_DIR is on ephemeral instance storage",
             Outcome::Fail {
                 detail: format!(
-                    "{root} is on {device} ({model}): its data is lost when the instance stops \
-                     or is replaced."
+                    "{root} is on {device}, which uses {model}: its data is lost when the \
+                     instance stops or is replaced."
                 ),
                 fix: "Keep data on a network volume (EBS, Persistent Disk, a managed disk) or in \
                       S3. Instance storage suits the disk cache (HELIX_DISK_CACHE_DIR)."
@@ -396,6 +397,7 @@ fn data_device(root: &Path, backing: &Backing) -> Check {
         Backing::Block {
             device,
             disk: Disk::Rotational,
+            ephemeral: None,
         } => Check::new(
             CheckId::DataDevice,
             "HELIX_DATA_DIR is on a spinning disk",
@@ -407,6 +409,7 @@ fn data_device(root: &Path, backing: &Backing) -> Check {
         Backing::Block {
             device,
             disk: Disk::Network { model },
+            ephemeral: None,
         } => Check::new(
             CheckId::DataDevice,
             "HELIX_DATA_DIR is on network block storage",
@@ -417,6 +420,7 @@ fn data_device(root: &Path, backing: &Backing) -> Check {
         Backing::Block {
             device,
             disk: Disk::LocalSsd { model },
+            ephemeral: None,
         } => Check::new(
             CheckId::DataDevice,
             "HELIX_DATA_DIR is on a local SSD",
@@ -593,7 +597,8 @@ fn cache_device(root: &Path, backing: &Backing) -> Check {
         ),
         Backing::Block {
             device,
-            disk: Disk::InstanceStore { model },
+            disk: Disk::LocalSsd { model },
+            ephemeral: Some(_),
         } => Check::new(
             CheckId::CacheDevice,
             "The disk cache is on local NVMe instance storage",
@@ -604,6 +609,7 @@ fn cache_device(root: &Path, backing: &Backing) -> Check {
         Backing::Block {
             device,
             disk: Disk::LocalSsd { model },
+            ephemeral: None,
         } => Check::new(
             CheckId::CacheDevice,
             "The disk cache is on a local SSD",
@@ -614,6 +620,7 @@ fn cache_device(root: &Path, backing: &Backing) -> Check {
         Backing::Block {
             device,
             disk: Disk::Network { model },
+            ..
         } => Check::new(
             CheckId::CacheDevice,
             "The disk cache is on network block storage",
@@ -629,6 +636,7 @@ fn cache_device(root: &Path, backing: &Backing) -> Check {
         Backing::Block {
             device,
             disk: Disk::Rotational,
+            ..
         } => Check::new(
             CheckId::CacheDevice,
             "The disk cache is on a spinning disk",
@@ -891,6 +899,7 @@ fn missing_indexes(snapshot: &InsightSnapshot) -> Check {
         })
         .chain(more(missing.len()))
         .chain(evicted(snapshot.evicted_insights))
+        .chain(untallied(snapshot.untallied_insights))
         .collect::<Vec<_>>()
         .join("\n");
     let fix = std::iter::once(
@@ -990,6 +999,7 @@ fn unbounded_scans(snapshot: &InsightSnapshot) -> Check {
         })
         .chain(more(scans.len()))
         .chain(evicted(snapshot.evicted_insights))
+        .chain(untallied(snapshot.untallied_insights))
         .collect::<Vec<_>>()
         .join("\n");
     Check::new(
@@ -1019,6 +1029,19 @@ fn evicted(evicted: u64) -> Option<String> {
         format!(
             "({evicted} older {} dropped from the tally while it was full)",
             plural(evicted, "insight was", "insights were")
+        )
+    })
+}
+
+/// A note that insights naming an oversized label or property were not
+/// tallied.
+fn untallied(untallied: u64) -> Option<String> {
+    (untallied > 0).then(|| {
+        format!(
+            "({untallied} {} a label or property name over {} bytes and {} not tallied)",
+            plural(untallied, "insight named", "insights named"),
+            db::query_service::insight_tally::MAX_TALLIED_NAME_BYTES,
+            plural(untallied, "was", "were")
         )
     })
 }

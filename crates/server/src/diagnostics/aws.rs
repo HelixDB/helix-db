@@ -47,7 +47,7 @@ async fn region_from(ecs: Option<&str>, imds: Option<&str>) -> Option<String> {
     /// One client for every lookup, built on first use. It keeps no idle
     /// connections: lookups are rare, and a pooled connection would outlive
     /// the runtime that opened it.
-    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    static CLIENT: OnceLock<Option<reqwest::Client>> = const { OnceLock::new() };
     // Metadata endpoints are link-local: a proxy would only break them.
     let client = CLIENT
         .get_or_init(|| {

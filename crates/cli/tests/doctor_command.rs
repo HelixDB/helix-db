@@ -206,6 +206,43 @@ async fn doctor_checks_a_running_local_instance_and_names_it_in_fixes() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_follows_the_port_the_running_container_publishes() {
+    let server = server_reporting(serde_json::json!([])).await;
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = fixture.root().join("port-project");
+    // helix.toml keeps the default port, as after `helix start dev --port`
+    // without --persist.
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--no-skills"])
+        .assert()
+        .success();
+
+    let port = server.address().port();
+    let ps_output = format!(
+        "helix-port-project-dev\tUp 2 minutes\t0.0.0.0:{port}->8080/tcp, [::]:{port}->8080/tcp"
+    );
+    let assert = fixture
+        .command()
+        .current_dir(&project)
+        .args(["doctor", "--json"])
+        .env("HELIX_TEST_RUNTIME_PS_OUTPUT", &ps_output)
+        .assert()
+        .success();
+    let report: serde_json::Value = serde_json::from_str(&stdout(&assert)).unwrap();
+    assert_eq!(report["target"]["url"], format!("http://localhost:{port}"));
+    let reachable = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "server.reachable")
+        .unwrap();
+    assert_eq!(reachable["status"], "pass", "{report}");
+}
+
 #[test]
 fn a_stopped_local_instance_fails_without_contacting_the_server() {
     let fixture = CliFixture::new_with_fake_runtime();

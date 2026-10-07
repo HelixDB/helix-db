@@ -12,8 +12,10 @@
 //! forgets an insight [`INSIGHT_WINDOW`] after it was last seen, and a new
 //! insight arriving while it is full evicts the least recently seen one.
 //! Insights carry label and property names only, never values, and the
-//! names any client sends are bounded: each is cut to
-//! [`MAX_TALLIED_NAME_BYTES`], and a scan keeps its first
+//! names any client sends are bounded without changing them: an insight
+//! naming a label or property longer than [`MAX_TALLIED_NAME_BYTES`] is
+//! counted in [`InsightSnapshot::untallied_insights`] rather than tallied,
+//! so every tallied name is exact, and a scan keeps its first
 //! [`MAX_TALLIED_PROPERTIES`] predicate properties. Recording takes one
 //! short lock, and only for executions with tallied insights.
 //!
@@ -77,9 +79,9 @@ pub const MAX_TALLIED_INSIGHTS: usize = 128;
 /// How long after it was last seen the tally forgets an insight.
 pub const INSIGHT_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Longest label or property name the tally keeps, in bytes; longer names
-/// are cut at a character boundary.
-pub const MAX_TALLIED_NAME_BYTES: usize = 128;
+/// Longest label or property name the tally keeps, in bytes. An insight
+/// with a longer name is counted, not tallied.
+pub const MAX_TALLIED_NAME_BYTES: usize = 1024;
 
 /// Most predicate properties a tallied unbounded scan keeps, in name order.
 pub const MAX_TALLIED_PROPERTIES: usize = 8;
@@ -172,12 +174,16 @@ pub struct InsightSnapshot {
     pub insights: Vec<InsightCount>,
     /// Distinct insights evicted because the tally was full.
     pub evicted_insights: u64,
+    /// Insights not tallied because they named a label or property longer
+    /// than [`MAX_TALLIED_NAME_BYTES`].
+    pub untallied_insights: u64,
 }
 
 /// Bounded, recent tally of planner insights; see the [module docs](self).
 #[derive(Debug, Default)]
 pub struct InsightTally {
     analyzed_queries: AtomicU64,
+    untallied_insights: AtomicU64,
     state: Mutex<TallyState>,
 }
 
@@ -203,33 +209,58 @@ impl InsightTally {
 
     fn record_at(&self, diagnostics: &PlannerDiagnostics, now: Instant) {
         self.analyzed_queries.fetch_add(1, Ordering::Relaxed);
+        let fits = |name: &NonEmptyString| name.as_ref().len() <= MAX_TALLIED_NAME_BYTES;
+        let mut untallied = 0_u64;
         let tallied = diagnostics
             .insights
             .iter()
             .filter_map(|insight| match insight {
-                PlannerInsight::MissingIndex(missing) => Some(TalliedInsight::MissingIndex {
-                    element: missing.element,
-                    label: bounded_name(&missing.label),
-                    property: bounded_name(&missing.property),
-                    index_kind: missing.index_kind,
-                }),
+                PlannerInsight::MissingIndex(missing)
+                    if fits(&missing.label) && fits(&missing.property) =>
+                {
+                    Some(TalliedInsight::MissingIndex {
+                        element: missing.element,
+                        label: missing.label.clone(),
+                        property: missing.property.clone(),
+                        index_kind: missing.index_kind,
+                    })
+                }
                 PlannerInsight::UnboundedScan(scan)
                     if !bounded_by_missing_index(scan, &diagnostics.insights) =>
                 {
+                    let properties = scan
+                        .predicate_properties
+                        .iter()
+                        .take(MAX_TALLIED_PROPERTIES)
+                        .collect::<Vec<_>>();
+                    if !scan
+                        .label
+                        .iter()
+                        .chain(properties.iter().copied())
+                        .all(fits)
+                    {
+                        untallied += 1;
+                        return None;
+                    }
                     Some(TalliedInsight::UnboundedScan {
                         element: scan.element,
-                        label: scan.label.as_ref().map(bounded_name),
+                        label: scan.label.clone(),
                         predicate_properties: PredicatePropertySet::new(
-                            scan.predicate_properties
-                                .iter()
-                                .take(MAX_TALLIED_PROPERTIES)
-                                .map(bounded_name),
+                            properties.into_iter().cloned(),
                         ),
                     })
+                }
+                PlannerInsight::MissingIndex(_) => {
+                    untallied += 1;
+                    None
                 }
                 PlannerInsight::UnboundedScan(_) | PlannerInsight::DeepTraversal(_) => None,
             })
             .collect::<Vec<_>>();
+        if untallied > 0 {
+            self.untallied_insights
+                .fetch_add(untallied, Ordering::Relaxed);
+        }
         if tallied.is_empty() {
             return;
         }
@@ -283,6 +314,7 @@ impl InsightTally {
             analyzed_queries: self.analyzed_queries.load(Ordering::Relaxed),
             insights,
             evicted_insights,
+            untallied_insights: self.untallied_insights.load(Ordering::Relaxed),
         }
     }
 }
@@ -325,16 +357,6 @@ impl TallyState {
             last: now,
         };
     }
-}
-
-/// `name` cut to at most [`MAX_TALLIED_NAME_BYTES`] at a character boundary.
-fn bounded_name(name: &NonEmptyString) -> NonEmptyString {
-    let name = name.as_ref();
-    let end = (1..=MAX_TALLIED_NAME_BYTES.min(name.len()))
-        .rev()
-        .find(|&end| name.is_char_boundary(end))
-        .expect("a non-empty name has a first character within the limit");
-    NonEmptyString::new(&name[..end]).expect("a cut name keeps its first character")
 }
 
 /// Whether a missing index of the same plan would bound `scan`.
@@ -687,36 +709,48 @@ mod tests {
     }
 
     #[test]
-    fn client_supplied_names_and_property_sets_are_bounded() {
+    fn oversized_names_are_counted_rather_than_tallied_and_wide_scans_are_capped() {
         let tally = InsightTally::default();
-        // Two-byte characters, so the byte limit falls between characters.
-        let long = "é".repeat(MAX_TALLIED_NAME_BYTES);
+        let longest = "é".repeat(MAX_TALLIED_NAME_BYTES / 2);
+        let too_long = format!("{longest}x");
         let wide = (0..MAX_TALLIED_PROPERTIES + 3)
             .map(|index| format!("p{index:02}"))
             .collect::<Vec<_>>();
         tally.record(&diagnostics(vec![
             missing(
                 ElementKind::Node,
-                &long,
+                &longest,
                 "email",
+                SecondaryIndexKind::Equality,
+            ),
+            missing(
+                ElementKind::Node,
+                "User",
+                &too_long,
                 SecondaryIndexKind::Equality,
             ),
             scan(
                 Some("Post"),
                 &wide.iter().map(String::as_str).collect::<Vec<_>>(),
             ),
+            scan(Some(&too_long), &[]),
+            scan(Some("Tag"), &[too_long.as_str()]),
         ]));
 
-        let insights = tally.snapshot(&IndexCatalogSnapshot::default()).insights;
-        let cut = "é".repeat(MAX_TALLIED_NAME_BYTES / 2);
-        assert!(insights.iter().any(|count| count.insight
-            == TalliedInsight::MissingIndex {
-                element: ElementKind::Node,
-                label: name(&cut),
-                property: name("email"),
-                index_kind: SecondaryIndexKind::Equality,
-            }));
-        assert!(insights.iter().any(|count| count.insight
+        let snapshot = tally.snapshot(&IndexCatalogSnapshot::default());
+        assert_eq!(snapshot.untallied_insights, 3);
+        assert_eq!(snapshot.insights.len(), 2, "{:?}", snapshot.insights);
+        assert!(
+            snapshot.insights.iter().any(|count| count.insight
+                == TalliedInsight::MissingIndex {
+                    element: ElementKind::Node,
+                    label: name(&longest),
+                    property: name("email"),
+                    index_kind: SecondaryIndexKind::Equality,
+                }),
+            "a name at the limit is kept exactly"
+        );
+        assert!(snapshot.insights.iter().any(|count| count.insight
             == TalliedInsight::UnboundedScan {
                 element: ElementKind::Node,
                 label: Some(name("Post")),
@@ -726,7 +760,6 @@ mod tests {
                         .map(|property| name(property)),
                 ),
             }));
-        assert_eq!(bounded_name(&name("short")), name("short"));
     }
 
     #[test]

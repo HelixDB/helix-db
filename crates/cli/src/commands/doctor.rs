@@ -131,16 +131,20 @@ pub async fn run(instance: Option<String>, url: Option<String>) -> Result<()> {
             config,
             runtime,
         } => {
-            let url = format!("http://localhost:{}", config.port);
-            let uptime = if local_checks(&name, &config, &runtime, &mut checks) {
-                server_checks(&url, Some(&name), &mut checks).await
-            } else {
-                checks.push(Check::new(
-                    "server.reachable",
-                    "Server checks need a running instance",
-                    Verdict::Skip(format!("{name}'s container is not running.")),
-                ));
-                None
+            // The running container's port, which `helix start --port` can
+            // set without saving it, else the configured one.
+            let running = local_checks(&name, &config, &runtime, &mut checks);
+            let url = format!("http://localhost:{}", running.unwrap_or(config.port));
+            let uptime = match running {
+                Some(_) => server_checks(&url, Some(&name), &mut checks).await,
+                None => {
+                    checks.push(Check::new(
+                        "server.reachable",
+                        "Server checks need a running instance",
+                        Verdict::Skip(format!("{name}'s container is not running.")),
+                    ));
+                    None
+                }
             };
             (Diagnosed::Local { name, url }, uptime)
         }
@@ -279,14 +283,14 @@ fn cli_version(current: &str, latest: &LatestRelease) -> Check {
     }
 }
 
-/// Checks the container runtime, the container, and its image; returns
-/// whether the container is running, so the server can be asked too.
+/// Checks the container runtime, the container, and its image; returns the
+/// port a running container serves on, so the server can be asked too.
 fn local_checks(
     name: &str,
     config: &LocalInstanceConfig,
     runtime: &LocalRuntime,
     checks: &mut Vec<Check>,
-) -> bool {
+) -> Option<u16> {
     let label = runtime.runtime().label();
     let (running, container) = if LocalRuntime::is_running(runtime.runtime()) {
         checks.push(Check::new(
@@ -294,7 +298,7 @@ fn local_checks(
             format!("{label} is running"),
             Verdict::Pass(None),
         ));
-        let (container, running) = container_check(name, runtime.status(name));
+        let (container, running) = container_check(name, runtime.status(name), config.port);
         (running, container)
     } else {
         checks.push(Check::new(
@@ -313,27 +317,33 @@ fn local_checks(
             format!("{name}'s container"),
             Verdict::Skip(format!("{label} is not running.")),
         );
-        (false, container)
+        (None, container)
     };
     checks.push(container);
     checks.push(image_check(name, config));
     running
 }
 
+/// The container's state, and the port it serves on while running: the one
+/// it publishes, else `configured`.
 fn container_check(
     name: &str,
     status: Result<Option<crate::local_runtime::LocalStatus>>,
-) -> (Check, bool) {
+    configured: u16,
+) -> (Check, Option<u16>) {
     let start = format!("Run `helix start {name}`.");
     match status {
-        Ok(Some(status)) if status.status.starts_with("Up") => (
-            Check::new(
-                "runtime.container",
-                format!("Container {} is running", status.container_name),
-                Verdict::Pass(Some(status.status)),
-            ),
-            true,
-        ),
+        Ok(Some(status)) if status.status.starts_with("Up") => {
+            let port = published_port(&status.ports).unwrap_or(configured);
+            (
+                Check::new(
+                    "runtime.container",
+                    format!("Container {} is running", status.container_name),
+                    Verdict::Pass(Some(format!("{}, serving on port {port}.", status.status))),
+                ),
+                Some(port),
+            )
+        }
         Ok(Some(status)) => (
             Check::new(
                 "runtime.container",
@@ -346,7 +356,7 @@ fn container_check(
                     fix: start,
                 },
             ),
-            false,
+            None,
         ),
         Ok(None) => (
             Check::new(
@@ -357,7 +367,7 @@ fn container_check(
                     fix: start,
                 },
             ),
-            false,
+            None,
         ),
         Err(error) => (
             Check::new(
@@ -365,9 +375,24 @@ fn container_check(
                 format!("Could not read {name}'s container"),
                 Verdict::Skip(CliError::from_report(&error).message),
             ),
-            false,
+            None,
         ),
     }
+}
+
+/// The host port a `ps` Ports column publishes the server's container port
+/// on, e.g. `0.0.0.0:7777->8080/tcp, [::]:7777->8080/tcp`.
+fn published_port(ports: &str) -> Option<u16> {
+    let container = format!("->{}/tcp", crate::local_runtime::CONTAINER_PORT);
+    ports.split(", ").find_map(|mapping| {
+        mapping
+            .strip_suffix(&container)?
+            .rsplit_once(':')?
+            .1
+            .parse()
+            .ok()
+            .filter(|port| *port != 0)
+    })
 }
 
 fn image_check(name: &str, config: &LocalInstanceConfig) -> Check {

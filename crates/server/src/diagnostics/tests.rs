@@ -100,6 +100,29 @@ fn missing(
     }
 }
 
+/// One NVMe instance-store disk.
+fn instance_storage() -> Backing {
+    Backing::Block {
+        device: "nvme1n1".into(),
+        disk: Disk::LocalSsd {
+            model: "Amazon EC2 NVMe Instance Storage".into(),
+        },
+        ephemeral: Some("Amazon EC2 NVMe Instance Storage".into()),
+    }
+}
+
+/// A RAID0 of EBS and instance storage: as slow as EBS, as ephemeral as
+/// instance storage.
+fn ebs_and_instance_storage() -> Backing {
+    Backing::Block {
+        device: "md1".into(),
+        disk: Disk::Network {
+            model: "Amazon Elastic Block Store".into(),
+        },
+        ephemeral: Some("Amazon EC2 NVMe Instance Storage".into()),
+    }
+}
+
 fn scan(label: Option<&str>, properties: &[&str]) -> TalliedInsight {
     TalliedInsight::UnboundedScan {
         element: ElementKind::Node,
@@ -254,6 +277,7 @@ fn data_on_ephemeral_or_container_storage_fails() {
     let block = |disk| Backing::Block {
         device: "nvme1n1".into(),
         disk,
+        ephemeral: None,
     };
     for (backing, expected, summary) in [
         (
@@ -278,9 +302,12 @@ fn data_on_ephemeral_or_container_storage_fails() {
             "HELIX_DATA_DIR is on a network filesystem",
         ),
         (
-            block(Disk::InstanceStore {
-                model: "Amazon EC2 NVMe Instance Storage".into(),
-            }),
+            instance_storage(),
+            "fail",
+            "HELIX_DATA_DIR is on ephemeral instance storage",
+        ),
+        (
+            ebs_and_instance_storage(),
             "fail",
             "HELIX_DATA_DIR is on ephemeral instance storage",
         ),
@@ -314,6 +341,7 @@ fn data_on_ephemeral_or_container_storage_fails() {
         let check = data_device(root, &backing);
         assert_eq!(status(&check), expected, "{backing:?}");
         assert_eq!(check.summary, summary);
+
         assert_eq!(check.id, CheckId::DataDevice);
         match &backing {
             Backing::Unknown { reason } => assert_eq!(detail(&check), reason),
@@ -323,6 +351,11 @@ fn data_on_ephemeral_or_container_storage_fails() {
             | Backing::Block { .. } => assert!(detail(&check).contains("/var/lib/helix")),
         }
     }
+    assert_eq!(
+        detail(&data_device(root, &ebs_and_instance_storage())),
+        "/var/lib/helix is on md1, which uses Amazon EC2 NVMe Instance Storage: its data is \
+         lost when the instance stops or is replaced."
+    );
 }
 
 #[test]
@@ -384,6 +417,7 @@ fn the_disk_cache_belongs_on_local_ssd() {
     let block = |disk| Backing::Block {
         device: "nvme1n1".into(),
         disk,
+        ephemeral: None,
     };
     for (backing, expected) in [
         (
@@ -404,12 +438,8 @@ fn the_disk_cache_belongs_on_local_ssd() {
             },
             "warn",
         ),
-        (
-            block(Disk::InstanceStore {
-                model: "Amazon EC2 NVMe Instance Storage".into(),
-            }),
-            "pass",
-        ),
+        (instance_storage(), "pass"),
+        (ebs_and_instance_storage(), "warn"),
         (
             block(Disk::LocalSsd {
                 model: "Samsung SSD".into(),
@@ -440,13 +470,7 @@ fn the_disk_cache_belongs_on_local_ssd() {
         }
     }
     assert_eq!(
-        cache_device(
-            root,
-            &block(Disk::InstanceStore {
-                model: "Amazon EC2 NVMe Instance Storage".into(),
-            }),
-        )
-        .summary,
+        cache_device(root, &instance_storage()).summary,
         "The disk cache is on local NVMe instance storage"
     );
     let ebs = cache_device(
@@ -668,6 +692,7 @@ fn missing_indexes_list_each_index_with_a_runnable_fix() {
             ),
         ],
         evicted_insights: 0,
+        untallied_insights: 0,
     };
     let check = missing_indexes(&snapshot);
     assert_eq!(status(&check), "warn");
@@ -710,6 +735,7 @@ fn missing_indexes_list_each_index_with_a_runnable_fix() {
             0,
         )],
         evicted_insights: 0,
+        untallied_insights: 0,
     });
     assert_eq!(single.summary, "1 filter scans without an index");
     assert!(detail(&single).ends_with("1 query, last seen 0 ms ago"));
@@ -739,14 +765,19 @@ fn long_insight_lists_are_truncated_and_note_evictions() {
         analyzed_queries: 50,
         insights,
         evicted_insights: 3,
+        untallied_insights: 1,
     };
     let missing = missing_indexes(&snapshot);
     let lines = detail(&missing).lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), LISTED_INSIGHTS + 2);
+    assert_eq!(lines.len(), LISTED_INSIGHTS + 3);
     assert_eq!(lines[LISTED_INSIGHTS], "… and 2 more");
     assert_eq!(
         lines[LISTED_INSIGHTS + 1],
         "(3 older insights were dropped from the tally while it was full)"
+    );
+    assert_eq!(
+        lines[LISTED_INSIGHTS + 2],
+        "(1 insight named a label or property name over 1024 bytes and was not tallied)"
     );
     assert_eq!(fix(&missing).unwrap().lines().count(), LISTED_INSIGHTS + 1);
 
@@ -786,6 +817,7 @@ fn unbounded_scans_describe_what_each_reads() {
             count(scan(None, &[]), 1, 3_600),
         ],
         evicted_insights: 1,
+        untallied_insights: 0,
     });
     assert_eq!(status(&check), "warn");
     assert_eq!(
@@ -806,6 +838,7 @@ fn unbounded_scans_describe_what_each_reads() {
             analyzed_queries: 1,
             insights: vec![count(scan(Some("User"), &[]), 1, 0)],
             evicted_insights: 0,
+            untallied_insights: 0,
         })
         .summary,
         "1 query shape reads every element of a label"
