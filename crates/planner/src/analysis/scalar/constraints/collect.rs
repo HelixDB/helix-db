@@ -47,48 +47,56 @@ fn add_conjunctive_constraint(
     }
 }
 
+/// One atomic predicate constrains at most one property, so it needs no map.
 fn atomic_predicate_is_statically_impossible(predicate: &Predicate) -> bool {
-    let mut constraints = BTreeMap::new();
-    add_atomic_constraint(predicate, &mut constraints)
+    add_atomic_constraint(predicate, &mut ScalarPropertyConstraint::default())
 }
 
-fn add_atomic_constraint(
-    predicate: &Predicate,
-    constraints: &mut BTreeMap<String, ScalarPropertyConstraint>,
-) -> bool {
+/// Where atomic constraints accumulate: one per property across a
+/// conjunction, or the single property one atomic predicate constrains.
+trait ConstraintSink {
+    fn constraint(&mut self, property: String) -> &mut ScalarPropertyConstraint;
+}
+
+impl ConstraintSink for BTreeMap<String, ScalarPropertyConstraint> {
+    fn constraint(&mut self, property: String) -> &mut ScalarPropertyConstraint {
+        self.entry(property).or_default()
+    }
+}
+
+impl ConstraintSink for ScalarPropertyConstraint {
+    fn constraint(&mut self, _property: String) -> &mut ScalarPropertyConstraint {
+        self
+    }
+}
+
+fn add_atomic_constraint(predicate: &Predicate, constraints: &mut impl ConstraintSink) -> bool {
     if is_in_empty_literal_collection(predicate) || incomparable_range_literal(predicate) {
         return true;
     }
     if let Some((property, nullability)) = nullability_constraint(predicate) {
         return constraints
-            .entry(property)
-            .or_default()
+            .constraint(property)
             .add_nullability(nullability);
     }
     if let Some((property, values)) = literal_in_values(predicate) {
-        return constraints
-            .entry(property)
-            .or_default()
-            .add_allowed_values(values);
+        return constraints.constraint(property).add_allowed_values(values);
     }
     if let Some((property, value)) = equality_literal(predicate) {
-        return constraints.entry(property).or_default().add_equality(value);
+        return constraints.constraint(property).add_equality(value);
     }
     if let Some((property, value)) = inequality_literal(predicate) {
-        return constraints
-            .entry(property)
-            .or_default()
-            .add_inequality(value);
+        return constraints.constraint(property).add_inequality(value);
     }
     if let Some((property, kind, bound)) = range_bound_literal(predicate) {
-        let constraint = constraints.entry(property).or_default();
+        let constraint = constraints.constraint(property);
         return match kind {
             BoundKind::Lower => constraint.add_lower(bound),
             BoundKind::Upper => constraint.add_upper(bound),
         };
     }
     if let Some((property, lower, upper)) = between_literal_bounds(predicate) {
-        let constraint = constraints.entry(property).or_default();
+        let constraint = constraints.constraint(property);
         return constraint.add_lower(lower) || constraint.add_upper(upper);
     }
     false

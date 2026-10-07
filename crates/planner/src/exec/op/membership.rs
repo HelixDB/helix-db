@@ -8,10 +8,6 @@ use crate::{exec, ir};
 /// [`ir::NodeMembershipSet`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "every executable membership plan is already boxed in its operator"
-)]
 pub enum ExecNodeMembershipSet {
     /// Nodes of `label` satisfying the decided conjuncts, read from secondary
     /// indexes.

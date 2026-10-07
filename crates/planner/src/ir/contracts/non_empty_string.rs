@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -9,6 +10,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// interpreted as a valid name. Constructors preserve the invariant, and
 /// deserialization rejects invalid external payloads.
 ///
+/// The text is shared: planning copies names into many intermediate plans,
+/// and a clone only counts a reference instead of allocating a copy.
+///
 /// ```
 /// use helix_planner::ir::NonEmptyString;
 ///
@@ -17,14 +21,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NonEmptyString {
-    value: String,
+    value: Arc<str>,
 }
 
 impl NonEmptyString {
     /// Build a string-backed identifier, returning `None` when it is empty.
     pub fn new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
-        (!value.is_empty()).then_some(Self { value })
+        (!value.is_empty()).then(|| Self {
+            value: value.into(),
+        })
     }
 
     /// Build a string-backed identifier from an internal static string.
@@ -49,7 +55,7 @@ impl NonEmptyString {
             "static NonEmptyString values must not be empty"
         );
         Self {
-            value: value.to_owned(),
+            value: value.into(),
         }
     }
 
@@ -79,7 +85,28 @@ impl NonEmptyString {
             "generated NonEmptyString prefixes must not be empty"
         );
         Self {
-            value: format!("{prefix}{suffix}"),
+            value: format!("{prefix}{suffix}").into(),
+        }
+    }
+
+    /// Copy the text into a new allocation that shares no reference count
+    /// with `self`.
+    ///
+    /// Clones share one count, so a value that concurrent requests all clone,
+    /// such as a name in the database's index catalog, gives each request a
+    /// detached copy rather than having every core write the same counter.
+    ///
+    /// ```
+    /// use helix_planner::ir::NonEmptyString;
+    ///
+    /// let shared = NonEmptyString::new("users").unwrap();
+    /// let detached = shared.detached();
+    /// assert_eq!(detached, shared);
+    /// assert!(!std::ptr::eq(detached.as_ptr(), shared.as_ptr()));
+    /// ```
+    pub fn detached(&self) -> Self {
+        Self {
+            value: Arc::from(&*self.value),
         }
     }
 
@@ -92,7 +119,7 @@ impl NonEmptyString {
     /// assert_eq!(name.into_string(), "users");
     /// ```
     pub fn into_string(self) -> String {
-        self.value
+        self.value.as_ref().to_owned()
     }
 }
 
@@ -110,13 +137,13 @@ impl std::borrow::Borrow<str> for NonEmptyString {
 
 impl PartialEq<str> for NonEmptyString {
     fn eq(&self, other: &str) -> bool {
-        self.value == other
+        *self.value == *other
     }
 }
 
 impl PartialEq<&str> for NonEmptyString {
     fn eq(&self, other: &&str) -> bool {
-        self.value == *other
+        *self.value == **other
     }
 }
 
