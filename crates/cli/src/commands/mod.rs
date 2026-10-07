@@ -4,6 +4,7 @@ pub mod chef;
 pub mod cloud;
 pub mod cypher;
 pub mod delete;
+pub mod explorer;
 pub mod feedback;
 pub mod init;
 pub mod logs;
