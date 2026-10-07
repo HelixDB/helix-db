@@ -286,13 +286,7 @@ impl Fixture {
             let entity = node_entity(entity_id);
             transaction
                 .put(
-                    scoped(
-                        &authority,
-                        index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
-                            root: root_key,
-                            entity,
-                        }),
-                    ),
+                    state_key(&authority, entity_id),
                     index_values::encode_text_entity_state(&work::TextEntityStateValue {
                         index_id: authority.index_id(),
                         generation: authority.generation(),
@@ -462,6 +456,21 @@ fn node_entity(entity_id: u64) -> index_keys::IndexEntity {
         kind: crate::index_lifecycle::IndexElementKind::Node,
         id: crate::index_lifecycle::IndexEntityId::new(entity_id),
     }
+}
+
+/// Key of an entity's V2 state row under the unpartitioned root.
+fn state_key(authority: &serving::ActiveTextServingAuthority, entity_id: u64) -> Bytes {
+    scoped(
+        authority,
+        index_keys::ScopedKey::TextEntityState(index_keys::TextEntityStateKey {
+            root: index_keys::TextManifestRootKey {
+                index_id: authority.index_id(),
+                generation: authority.generation(),
+                partition: work::TextPartition::Unpartitioned.fingerprint(),
+            },
+            entity: node_entity(entity_id),
+        }),
+    )
 }
 
 fn marker_key(authority: &serving::ActiveTextServingAuthority, entity_id: u64) -> Bytes {
@@ -754,11 +763,25 @@ async fn state_batches_are_clamped_between_64_and_512() {
             assert_eq!(batches, expected, "k={k} v2={v2}");
         }
     }
+
+    // Two exhausted splits queue 600 candidates, so once 512 hits are known
+    // the last hit is resolved in a batch raised to 64.
+    let model = all_live_model(&[300, 300]);
+    let fixture = Fixture::new(&model).await;
+    let reference = fixture
+        .exhaustive(&model.states, 513, &TextSearchScope::Unrestricted)
+        .await;
+    for v2 in [false, true] {
+        let (hits, batches) =
+            counted_search(&fixture, v2, 513, TextSearchScope::Unrestricted).await;
+        assert_eq!(hits.unwrap(), reference, "v2={v2}");
+        assert_eq!(batches, [512, 64], "v2={v2}");
+    }
 }
 
-/// Dead and stale candidates above the live ones are resolved in rounds
-/// until `k` live hits are known; when no candidate is live every candidate
-/// is resolved once and nothing is served.
+/// With two of every three entities dead or stale at every score, candidates
+/// are resolved until `k` live hits are known; when no candidate is live
+/// every candidate is resolved once and nothing is served.
 #[tokio::test]
 async fn dead_and_stale_candidates_are_resolved_until_k_live_hits_exist() {
     let mut model = all_live_model(&[150, 150]);
@@ -866,6 +889,127 @@ async fn served_hit_markers_fail_closed_with_the_eager_errors() {
             .await
             .unwrap();
     }
+}
+
+/// A V2 candidate without a state row fails the search with the eager
+/// search's error once it is resolved, served or not. One ranked below every
+/// resolved batch is never read, so its missing row goes unreported, although
+/// the eager search read it as one of its split's top `k`.
+#[tokio::test]
+async fn missing_v2_state_fails_only_when_its_candidate_is_resolved() {
+    const NO_STATE: &str = "Active V2 text split candidate has no entity state";
+    let model = all_live_model(&[20; 12]);
+    let fixture = Fixture::new(&model).await;
+    let ranked = fixture
+        .exhaustive(&model.states, usize::MAX, &TextSearchScope::Unrestricted)
+        .await;
+    let mut split_positions = model.splits[0]
+        .iter()
+        .map(|(entity_id, _, _)| {
+            ranked
+                .iter()
+                .position(|hit| hit.entity_id == *entity_id)
+                .expect("every entity is live")
+        })
+        .collect::<Vec<_>>();
+    split_positions.sort_unstable();
+    // The tenth candidate of split 0: an eager `k = 10` search read it, but
+    // it ranks below the one 64-state batch the lazy search resolves.
+    assert!(split_positions[9] >= 64);
+    for (position, resolved) in [
+        (9, true),
+        (10, true),
+        (63, true),
+        (split_positions[9], false),
+    ] {
+        let key = state_key(&fixture.authority, ranked[position].entity_id);
+        let state = fixture.db.get(&key).await.unwrap().expect("state row");
+        fixture.db.delete(&key).await.unwrap();
+        let (result, batches) =
+            counted_search(&fixture, true, 10, TextSearchScope::Unrestricted).await;
+        assert_eq!(batches, [64], "position {position}");
+        if resolved {
+            assert!(
+                matches!(
+                    &result,
+                    Err(HelixDbError::IndexCatalogCorruption(reason)) if reason == NO_STATE
+                ),
+                "position {position}: {result:?}"
+            );
+        } else {
+            assert_eq!(result.unwrap(), ranked[..10], "position {position}");
+        }
+        fixture.db.put(&key, state).await.unwrap();
+    }
+}
+
+/// A V2 search whose served hit fails marker validation is not successful,
+/// so it records no split demand: only a split's second successful search
+/// admits it to the disk tier.
+#[tokio::test]
+async fn failed_marker_validation_records_no_split_demand() {
+    let model = all_live_model(&[4]);
+    let fixture = Fixture::new(&model).await;
+    let disk = tempfile::tempdir().unwrap();
+    let cache = Arc::new(
+        FtsCache::new(
+            DB_PATH,
+            Arc::clone(&fixture.store),
+            FtsCacheConfig::Hybrid(
+                crate::config::FtsHybridCacheConfig::try_new(
+                    1 << 30,
+                    disk.path(),
+                    1 << 30,
+                    crate::config::FtsWarmConfig::background(1, None).unwrap(),
+                    1,
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap(),
+    );
+    let search = || {
+        search_manifest_with_state_source(
+            &fixture.db,
+            TextSearchRuntime::new(&fixture.store, DB_PATH, Some(&cache)),
+            &fixture.manifest,
+            TextLiveStateSource::V2(&fixture.root),
+            Some(&fixture.statistics),
+            TextSearchRequest::new(QUERY, 1, TextSearchScope::Unrestricted),
+        )
+    };
+    // Hydration runs on a spawned task. On this current-thread runtime a
+    // task spawned after it runs after its first poll, which counts the
+    // attempt, so awaiting one makes the count exact.
+    let hydration_attempts = || async {
+        tokio::spawn(async {}).await.unwrap();
+        cache.snapshot().hydration_attempts
+    };
+    let served = fixture
+        .exhaustive(&model.states, 1, &TextSearchScope::Unrestricted)
+        .await[0]
+        .entity_id;
+    let marker = marker_key(&fixture.authority, served);
+    let value = fixture.db.get(&marker).await.unwrap().expect("marker");
+    fixture.db.delete(&marker).await.unwrap();
+    assert!(matches!(
+        search().await,
+        Err(HelixDbError::IndexCatalogCorruption(reason)) if reason == NO_MARKER
+    ));
+    fixture.db.put(&marker, value).await.unwrap();
+    search().await.unwrap();
+    assert_eq!(
+        hydration_attempts().await,
+        0,
+        "the failed search recorded no demand"
+    );
+    search().await.unwrap();
+    assert_eq!(
+        hydration_attempts().await,
+        1,
+        "the second successful search admits the split"
+    );
+    cache.close().await;
 }
 
 /// Live copies of one version in several splits merge into one hit, and two
