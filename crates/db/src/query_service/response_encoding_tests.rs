@@ -18,7 +18,9 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::encoding::property::property_value::PropertyValue;
-use crate::execution::interpreter::{ExecutionRow, FoldedStream, RowVirtualProperties};
+use crate::execution::interpreter::{
+    ExecutionRow, FoldedStream, RowPath, RowSack, RowVirtualProperties,
+};
 use crate::index_lifecycle as lifecycle;
 use crate::HelixDbSource;
 
@@ -247,19 +249,28 @@ fn plain(current: ElementRef) -> ExecutionRow {
 
 fn ranked(current: ElementRef, properties: Vec<(&str, PropertyValue)>) -> ExecutionRow {
     let mut row = plain(current);
-    let mut virtual_properties = RowVirtualProperties::empty();
-    for (property, value) in properties {
-        virtual_properties.insert(name(property), value);
-    }
-    row.virtual_properties = virtual_properties;
+    row.virtual_properties = properties
+        .into_iter()
+        .map(|(property, value)| (name(property), value))
+        .collect();
     row
 }
 
+/// A row that walked `path`, as successive interpreter hops leave it.
 fn traversed(path: Vec<ElementRef>) -> ExecutionRow {
     let mut row = ExecutionRow::empty();
-    for element in path {
-        row.set_current(element);
-    }
+    row.current = path.last().cloned();
+    row.path = RowPath::from_elements(path);
+    row
+}
+
+fn path_visible(mut row: ExecutionRow) -> ExecutionRow {
+    row.path_visible = true;
+    row
+}
+
+fn with_sack(mut row: ExecutionRow, value: Option<PropertyValue>, visible: bool) -> ExecutionRow {
+    row.sack = RowSack::fixture(value, visible);
     row
 }
 
@@ -540,28 +551,27 @@ fn cases() -> Vec<(&'static str, ExecutionResult)> {
                         )]);
                         row
                     },
-                    traversed(vec![
+                    path_visible(traversed(vec![
                         ElementRef::Node(1),
                         ElementRef::Edge(2),
                         ElementRef::Node(3),
-                    ])
-                    .mark_path_visible(),
-                    {
-                        let mut row = traversed(vec![ElementRef::Node(5)]);
-                        row.set_sack(PropertyValue::F32Array(vec![0.1]));
-                        row.mark_sack_visible()
-                    },
-                    plain(ElementRef::Node(6)).mark_sack_visible(),
-                    {
-                        let mut row = plain(ElementRef::Node(10));
-                        row.set_sack(PropertyValue::String("hidden".to_string()));
-                        row
-                    },
-                    {
-                        let mut row = ExecutionRow::empty().mark_path_visible();
-                        row.set_sack(PropertyValue::Null);
-                        row.mark_sack_visible()
-                    },
+                    ])),
+                    with_sack(
+                        traversed(vec![ElementRef::Node(5)]),
+                        Some(PropertyValue::F32Array(vec![0.1])),
+                        true,
+                    ),
+                    with_sack(plain(ElementRef::Node(6)), None, true),
+                    with_sack(
+                        plain(ElementRef::Node(10)),
+                        Some(PropertyValue::String("hidden".to_string())),
+                        false,
+                    ),
+                    with_sack(
+                        path_visible(ExecutionRow::empty()),
+                        Some(PropertyValue::Null),
+                        true,
+                    ),
                 ]),
             )]),
         ),
@@ -571,7 +581,7 @@ fn cases() -> Vec<(&'static str, ExecutionResult)> {
                 "folded",
                 present(ExecutionValue::FoldedStream(FoldedStream::new(vec![
                     plain(ElementRef::Edge(11)),
-                    traversed(vec![ElementRef::Node(1)]).mark_path_visible(),
+                    path_visible(traversed(vec![ElementRef::Node(1)])),
                 ]))),
             )]),
         ),
@@ -676,11 +686,11 @@ fn cases() -> Vec<(&'static str, ExecutionResult)> {
             "invalid_datetime_in_sack",
             result(vec![(
                 "rows",
-                stream(vec![{
-                    let mut row = plain(ElementRef::Node(1));
-                    row.set_sack(invalid_datetime.clone());
-                    row.mark_sack_visible()
-                }]),
+                stream(vec![with_sack(
+                    plain(ElementRef::Node(1)),
+                    Some(invalid_datetime.clone()),
+                    true,
+                )]),
             )]),
         ),
         (
@@ -709,11 +719,7 @@ fn cases() -> Vec<(&'static str, ExecutionResult)> {
                         ElementRef::Node(1),
                         vec![("hidden", invalid_datetime.clone())],
                     ),
-                    {
-                        let mut row = plain(ElementRef::Node(2));
-                        row.set_sack(invalid_datetime);
-                        row
-                    },
+                    with_sack(plain(ElementRef::Node(2)), Some(invalid_datetime), false),
                 ]),
             )]),
         ),
@@ -944,13 +950,8 @@ fn arb_element() -> impl Strategy<Value = ElementRef> {
 }
 
 fn arb_virtual_properties() -> impl Strategy<Value = RowVirtualProperties> {
-    vec((arb_name(), arb_property()), 0..3).prop_map(|entries| {
-        let mut properties = RowVirtualProperties::empty();
-        for (property, value) in entries {
-            properties.insert(property, value);
-        }
-        properties
-    })
+    vec((arb_name(), arb_property()), 0..3)
+        .prop_map(|entries| entries.into_iter().collect::<RowVirtualProperties>())
 }
 
 fn arb_row() -> impl Strategy<Value = ExecutionRow> {
@@ -982,15 +983,8 @@ fn arb_row() -> impl Strategy<Value = ExecutionRow> {
                 row.virtual_properties = virtual_properties;
                 row.bindings = bindings;
                 row.binding_virtual_properties = binding_virtual_properties;
-                if path_visible {
-                    row = row.mark_path_visible();
-                }
-                if let Some(sack) = sack {
-                    row.set_sack(sack);
-                }
-                if sack_visible {
-                    row = row.mark_sack_visible();
-                }
+                row.path_visible = path_visible;
+                row.sack = RowSack::fixture(sack, sack_visible);
                 row
             },
         )

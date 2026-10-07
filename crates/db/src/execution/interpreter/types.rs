@@ -104,7 +104,7 @@ impl ExecutionRow {
         }
     }
 
-    pub(crate) fn set_current(&mut self, current: ElementRef) {
+    pub(super) fn set_current(&mut self, current: ElementRef) {
         self.current = Some(current.clone());
         self.virtual_properties = RowVirtualProperties::empty();
         self.path.push(current);
@@ -125,7 +125,7 @@ impl ExecutionRow {
         }
     }
 
-    pub(crate) fn mark_path_visible(mut self) -> Self {
+    pub(super) fn mark_path_visible(mut self) -> Self {
         self.path_visible = true;
         self
     }
@@ -134,7 +134,7 @@ impl ExecutionRow {
         self.path.is_simple()
     }
 
-    pub(crate) fn set_sack(&mut self, value: DbPropertyValue) {
+    pub(super) fn set_sack(&mut self, value: DbPropertyValue) {
         self.sack.set(value);
     }
 
@@ -142,7 +142,7 @@ impl ExecutionRow {
         self.sack.clear();
     }
 
-    pub(crate) fn mark_sack_visible(mut self) -> Self {
+    pub(super) fn mark_sack_visible(mut self) -> Self {
         self.sack.mark_visible();
         self
     }
@@ -185,7 +185,7 @@ impl RowVirtualProperties {
     }
 
     /// Sets one runtime-only property while preserving existing row annotations.
-    pub(crate) fn insert(&mut self, name: ir::NonEmptyString, value: DbPropertyValue) {
+    pub(super) fn insert(&mut self, name: ir::NonEmptyString, value: DbPropertyValue) {
         self.values.insert(name, value);
     }
 }
@@ -249,6 +249,34 @@ impl RowSack {
 
     fn mark_visible(&mut self) {
         self.visible = true;
+    }
+}
+
+// Fixture constructors for encoding tests outside the interpreter. Production
+// rows gain paths, sacks and virtual properties only through interpreter
+// operators, so these stay test-only.
+#[cfg(test)]
+impl RowPath {
+    pub(crate) fn from_elements(elements: Vec<ElementRef>) -> Self {
+        Self { elements }
+    }
+}
+
+#[cfg(test)]
+impl RowSack {
+    pub(crate) fn fixture(value: Option<DbPropertyValue>, visible: bool) -> Self {
+        Self { value, visible }
+    }
+}
+
+#[cfg(test)]
+impl FromIterator<(ir::NonEmptyString, DbPropertyValue)> for RowVirtualProperties {
+    fn from_iter<I: IntoIterator<Item = (ir::NonEmptyString, DbPropertyValue)>>(
+        entries: I,
+    ) -> Self {
+        Self {
+            values: entries.into_iter().collect(),
+        }
     }
 }
 
