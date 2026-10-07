@@ -29,7 +29,7 @@ impl PhysicalAlternative {
             expr,
             delivered,
             cost,
-            tie_break: std::sync::OnceLock::new(),
+            tie_break: const { std::sync::OnceLock::new() },
         }
     }
 

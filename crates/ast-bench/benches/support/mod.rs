@@ -17,7 +17,7 @@ use helix_planner::{exec, experiments, planning};
 
 /// Every request shape, built once per benchmark process.
 pub fn shapes() -> &'static [Shape] {
-    static SHAPES: OnceLock<Vec<Shape>> = OnceLock::new();
+    static SHAPES: OnceLock<Vec<Shape>> = const { OnceLock::new() };
     SHAPES.get_or_init(testing::all)
 }
 
@@ -40,7 +40,7 @@ pub fn shape_names() -> impl Iterator<Item = &'static str> {
 
 /// Names of the shapes the planner accepts with an empty catalog.
 pub fn plannable_shape_names() -> impl Iterator<Item = &'static str> {
-    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    static NAMES: OnceLock<Vec<&'static str>> = const { OnceLock::new() };
     NAMES
         .get_or_init(|| {
             shapes()
@@ -121,7 +121,7 @@ impl PlanInput {
 /// Every plannable corpus shape, then every planner scalability fixture
 /// (named `fixture/<shape>/<scale>`), built once per benchmark process.
 pub fn plan_inputs() -> &'static [(String, PlanInput)] {
-    static INPUTS: OnceLock<Vec<(String, PlanInput)>> = OnceLock::new();
+    static INPUTS: OnceLock<Vec<(String, PlanInput)>> = const { OnceLock::new() };
     INPUTS.get_or_init(|| {
         plannable_shape_names()
             .map(str::to_owned)

@@ -352,6 +352,33 @@ fn the_pool_keeps_small_arenas_and_frees_oversized_ones() {
 }
 
 #[test]
+fn a_pooled_arena_stays_under_a_limit_smaller_than_its_first_chunk() {
+    const LIMIT: usize = 64 * 1024;
+    let pool = Pool::new(PoolConfig {
+        initial_chunk_bytes: 1 << 20,
+        retain_bytes: 1 << 20,
+        max_idle: 2,
+        allocation_limit: NonZeroUsize::new(LIMIT),
+    });
+    for _ in 0..2 {
+        let bump = pool.checkout();
+        assert!(
+            bump.allocated_bytes() <= LIMIT,
+            "{}",
+            bump.allocated_bytes()
+        );
+        assert!(bump.try_alloc_slice_fill_copy(LIMIT / 2, 0_u8).is_ok());
+        assert!(bump.try_alloc_slice_fill_copy(LIMIT, 0_u8).is_err());
+        assert!(
+            bump.allocated_bytes() <= LIMIT,
+            "{}",
+            bump.allocated_bytes()
+        );
+    }
+    assert_eq!(pool.idle(), 1, "the limited arena is reused");
+}
+
+#[test]
 fn mirrors_are_send_sync_and_copy() {
     fn assert_thread_safe_copy<T: Send + Sync + Copy>() {}
     assert_thread_safe_copy::<arena::AstNode<'static>>();

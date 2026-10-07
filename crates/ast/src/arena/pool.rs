@@ -17,7 +17,9 @@ pub struct PoolConfig {
     /// Most arenas kept idle; more returning at once are freed.
     pub max_idle: usize,
     /// Per-request cap on arena memory, enforced by every allocation; `None`
-    /// leaves arenas unbounded.
+    /// leaves arenas unbounded. The first chunk counts against it: when
+    /// `initial_chunk_bytes` does not fit, a new arena starts empty and sizes
+    /// its chunks under the limit.
     pub allocation_limit: Option<NonZeroUsize>,
 }
 
@@ -63,7 +65,15 @@ impl Pool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop();
-        let bump = idle.unwrap_or_else(|| Bump::with_capacity(self.config.initial_chunk_bytes));
+        let bump = idle.unwrap_or_else(|| {
+            let bump = Bump::with_capacity(self.config.initial_chunk_bytes);
+            // bumpalo checks the limit only when it adds a chunk, and rounds
+            // chunk sizes up, so an oversized first chunk is checked here.
+            match self.config.allocation_limit {
+                Some(limit) if bump.allocated_bytes() > limit.get() => Bump::new(),
+                _ => bump,
+            }
+        });
         bump.set_allocation_limit(self.config.allocation_limit.map(NonZeroUsize::get));
         PooledBump { bump, pool: self }
     }
