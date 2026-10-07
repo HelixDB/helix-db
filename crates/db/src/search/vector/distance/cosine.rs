@@ -236,7 +236,8 @@ mod tests {
             16_777_217_u64.pow(2)
         );
         // Scaling by 2^k keeps the legs exact and the hypotenuse a midpoint from
-        // the smallest normal f32 binade (k = -149) up to the largest (k = 103).
+        // k = -149 (subnormal short leg, hypotenuse in the second normal binade)
+        // up to the largest binade (k = 103).
         for exponent in [-149, -140, -126, -100, -50, -24, -1, 0, 1, 24, 50, 100, 103] {
             let scale = 2.0_f64.powi(exponent);
             let legs = MIDPOINT_LEGS.map(|leg| (f64::from(leg) * scale) as f32);
@@ -255,15 +256,82 @@ mod tests {
 
     #[test]
     fn fast_norm_rejects_inside_its_bound_and_accepts_just_outside() {
-        // A third component of 1 moves the norm 2^-49 relative above the
-        // midpoint, inside the 4 * 2^-49 tolerance for three components.
+        // A third component of c moves the norm about c^2 * 2^-49 relative above
+        // the midpoint, against a tolerance of 4 * 2^-49 for three components:
+        // c = 1 sits at a quarter of the bound, c = 3 at 2.25 times it.
         let inside = [MIDPOINT_LEGS[0], MIDPOINT_LEGS[1], 1.0];
         assert_eq!(assert_reference_bits(&inside), None);
-
-        // A third component of 16 moves it 2^-41 relative above: outside the
-        // tolerance, yet still far below the next f32, so the fast path answers.
-        let outside = [MIDPOINT_LEGS[0], MIDPOINT_LEGS[1], 16.0];
+        let outside = [MIDPOINT_LEGS[0], MIDPOINT_LEGS[1], 3.0];
         assert_eq!(assert_reference_bits(&outside), Some(16_777_218.0));
+
+        // The bound grows with the component count: c = 16 is 64 times outside
+        // the three-component bound, yet inside the 1537 * 2^-49 bound once
+        // zero padding stretches the same norm over the 1536-wide SIMD path.
+        let mut values = vec![0.0; 1536];
+        values[..3].copy_from_slice(&[MIDPOINT_LEGS[0], MIDPOINT_LEGS[1], 16.0]);
+        assert_eq!(assert_reference_bits(&values[..3]), Some(16_777_218.0));
+        assert_eq!(assert_reference_bits(&values), None);
+    }
+
+    /// The guard is load-bearing: here the exact norm lies just above the
+    /// midpoint `2^24 + 1`, the fast sum sees that and rounds up, yet the
+    /// reference loop lands on the midpoint itself and ties to even below.
+    /// Without the guard the stored norm would change. Scaling by `2^k` keeps
+    /// every operation exact relative to the unscaled case, so the same split
+    /// recurs in every normal binade, and zero padding keeps it on the SIMD path.
+    #[test]
+    fn fast_norm_falls_back_where_the_fast_sum_rounds_away_from_the_reference() {
+        let values = [MIDPOINT_LEGS[1], 9.0 / 32.0, MIDPOINT_LEGS[0]];
+        for exponent in [-100, -50, -1, 0, 1, 50, 103] {
+            let scale = 2.0_f64.powi(exponent);
+            let scaled = values.map(|value| (f64::from(value) * scale) as f32);
+            let vector = UnalignedVector::from_slice(&scaled);
+            let unguarded = simple::squared_l2_norm(&vector).sqrt() as f32;
+            assert_eq!(f64::from(unguarded) / scale, 16_777_218.0, "2^{exponent}");
+            assert_eq!(
+                f64::from(reference_norm(&vector)) / scale,
+                16_777_216.0,
+                "2^{exponent}"
+            );
+            assert_eq!(assert_reference_bits(&scaled), None, "2^{exponent}");
+        }
+        for dimension in [16, 33, 1536] {
+            let mut padded = vec![0.0; dimension];
+            padded[..3].copy_from_slice(&values);
+            assert_eq!(
+                assert_reference_bits(&padded),
+                None,
+                "{dimension} dimensions"
+            );
+            assert_eq!(
+                Cosine::norm_no_header(&UnalignedVector::from_slice(&padded)),
+                16_777_216.0
+            );
+        }
+    }
+
+    /// Zero padding leaves both norms unchanged but sends the fast sum through
+    /// every SIMD main loop and tail and the reference through its zero skip,
+    /// so exact midpoints must still fall back whichever kernel runs.
+    #[test]
+    fn fast_norm_rejects_zero_padded_midpoints_on_every_kernel_path() {
+        for exponent in [-149, 0, 103] {
+            let scale = 2.0_f64.powi(exponent);
+            let legs = MIDPOINT_LEGS.map(|leg| (f64::from(leg) * scale) as f32);
+            for dimension in [16, 17, 31, 32, 33, 63, 64, 65, 768, 1536, 4096] {
+                for first in [0, dimension / 2 - 1, dimension - 2] {
+                    let mut values = (0..dimension)
+                        .map(|index| if index % 2 == 0 { 0.0 } else { -0.0 })
+                        .collect::<Vec<f32>>();
+                    values[first..first + 2].copy_from_slice(&legs);
+                    assert_eq!(
+                        assert_reference_bits(&values),
+                        None,
+                        "midpoint at 2^{exponent}, {dimension} dimensions, legs at {first}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -327,7 +395,8 @@ mod tests {
 
     /// Seeded sweep over the shapes stored vectors take: embedding-like unit
     /// components, one shared random binade (subnormal through near MAX), fully
-    /// arbitrary finite bits, and unit vectors with a few wild components.
+    /// arbitrary finite bits, unit vectors with a few wild components, and
+    /// sparse unit vectors. Every dimension cycles through every shape.
     #[test]
     fn fast_norm_matches_reference_bits_on_seeded_sweep() {
         let vectors = if cfg!(debug_assertions) {
@@ -354,7 +423,7 @@ mod tests {
         let mut fallbacks = 0_usize;
         for index in 0..vectors {
             let dimension = dimensions[index % dimensions.len()];
-            let values = match index % 4 {
+            let values = match (index / dimensions.len()) % 5 {
                 0 => rng.vector(dimension),
                 1 => {
                     let binade = next_bits(&mut rng) % 255;
@@ -367,12 +436,19 @@ mod tests {
                         .collect()
                 }
                 2 => (0..dimension).map(|_| random_finite(&mut rng)).collect(),
-                _ => {
+                3 => {
                     let mut values = rng.vector(dimension);
                     let slot = next_bits(&mut rng) as usize % dimension;
                     values[slot] = random_finite(&mut rng);
                     values
                 }
+                _ => (0..dimension)
+                    .map(|_| match next_bits(&mut rng) % 4 {
+                        0 => 0.0,
+                        1 => -0.0,
+                        _ => rng.next_f32(),
+                    })
+                    .collect(),
             };
             if assert_reference_bits(&values).is_none() {
                 fallbacks += 1;
@@ -384,10 +460,16 @@ mod tests {
         );
     }
 
+    /// Arbitrary finite components, with signed zeros frequent enough to
+    /// exercise the reference's zero skip inside non-zero vectors.
     fn finite_component() -> impl Strategy<Value = f32> {
-        any::<u32>()
-            .prop_map(f32::from_bits)
-            .prop_filter("stored components are finite", |value| value.is_finite())
+        prop_oneof![
+            6 => any::<u32>()
+                .prop_map(f32::from_bits)
+                .prop_filter("stored components are finite", |value| value.is_finite()),
+            1 => Just(0.0_f32),
+            1 => Just(-0.0_f32),
+        ]
     }
 
     proptest! {
