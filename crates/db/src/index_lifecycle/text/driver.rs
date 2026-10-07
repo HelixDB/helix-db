@@ -1921,15 +1921,10 @@ async fn scan_partition_documents(
         };
         let document = match &graph_read.value {
             Some(value) if state.live => {
-                let Some(document) = property::view::decode_selected(value, &mut scratch, |name| {
-                    name == "$label"
-                        || name == definition.property().as_str()
-                        || definition
-                            .tenant_property()
-                            .is_some_and(|tenant| name == tenant.as_str())
-                })
-                .ok()
-                .and_then(|properties| text_document(definition, &properties, &state).ok()) else {
+                let Some(document) = decode_source(definition, value, &mut scratch)
+                    .ok()
+                    .and_then(|properties| text_document(definition, &properties, &state).ok())
+                else {
                     return Ok(PartitionScanSelection::Blocked(
                         invalid_source,
                         Some(graph_read),
@@ -2397,6 +2392,26 @@ fn decode_entity_state(
 }
 
 /// Builds one document only when current graph state still owns this partition.
+/// Decodes the fields of a stored source row that text projection reads:
+/// the label, the indexed property and the tenant property.
+///
+/// Validation and errors are those of [`property::decode_properties`], and
+/// [`super::projection::project`] answers on the result exactly as on the
+/// complete row, since it reads only first matches of these names.
+fn decode_source(
+    definition: &ValidatedTextIndexDefinition,
+    value: &[u8],
+    scratch: &mut property::view::Scratch,
+) -> std::result::Result<Vec<property::Property>, crate::encoding::error::EncodingError> {
+    property::view::decode_selected(value, scratch, |name| {
+        name == "$label"
+            || name == definition.property().as_str()
+            || definition
+                .tenant_property()
+                .is_some_and(|tenant| name == tenant.as_str())
+    })
+}
+
 fn text_document(
     definition: &ValidatedTextIndexDefinition,
     properties: &[property::Property],
@@ -2547,15 +2562,9 @@ async fn scan_source(
             let Some(entity_id) = entity_id else {
                 break 'stage_entity;
             };
-            let projection = property::view::decode_selected(&row.value, &mut scratch, |name| {
-                name == "$label"
-                    || name == definition.property().as_str()
-                    || definition
-                        .tenant_property()
-                        .is_some_and(|tenant| name == tenant.as_str())
-            })
-            .ok()
-            .and_then(|properties| super::projection::project(definition, &properties).ok());
+            let projection = decode_source(definition, &row.value, &mut scratch)
+                .ok()
+                .and_then(|properties| super::projection::project(definition, &properties).ok());
             let (partition, text) = match projection {
                 Some(super::projection::TextSourceProjection::NotIndexed) => break 'stage_entity,
                 Some(super::projection::TextSourceProjection::Indexed { partition, text }) => {
@@ -2997,6 +3006,85 @@ mod tests {
         IndexGenerationId, IndexId, IndexOperationId, IndexOperationKind, IndexOperationRevision,
         IndexRevision,
     };
+
+    /// Text projection of the selectively decoded source equals projection
+    /// of the complete row for every membership, tenant and value shape, and
+    /// corrupt rows fail with the complete decoder's error.
+    #[test]
+    fn selective_source_decode_projects_like_the_complete_row() {
+        use property::{property_value::PropertyValue as V, Property};
+        let label = |label: &str| Property::string("$label", label);
+        let noise = || Property::bytes("blob", vec![7; 8_192]);
+        let bodies = [
+            V::String("hello world".into()),
+            V::String(String::new()),
+            V::I64(5),
+            V::Null,
+            V::Array(vec![V::String("x".into())]),
+            V::F32Array(vec![0.5; 768]),
+        ];
+        let tenants = [
+            None,
+            Some(V::Null),
+            Some(V::I64(7)),
+            Some(V::String("acme".into())),
+            Some(V::String("t".repeat(70_000))),
+        ];
+        let mut rows = vec![Vec::new(), vec![label("Document")], vec![noise()]];
+        for body in &bodies {
+            for tenant in &tenants {
+                let mut row = vec![
+                    noise(),
+                    label("Document"),
+                    Property::new("body", body.clone()),
+                ];
+                row.extend(tenant.clone().map(|tenant| Property::new("tenant", tenant)));
+                row.push(Property::string("body", "shadowed"));
+                row.push(Property::string("tenant", "shadowed"));
+                rows.push(row.clone());
+                row.insert(0, label("Other"));
+                rows.push(row.clone());
+                row[0] = Property::new("$label", V::I64(1));
+                rows.push(row);
+            }
+        }
+        let definitions = [None, Some("tenant")].map(|tenant| {
+            ValidatedTextIndexDefinition::try_new(
+                IndexElementKind::Node,
+                "Document",
+                "body",
+                tenant,
+                crate::config::TextAnalyzerKind::Standard,
+                false,
+            )
+            .unwrap()
+        });
+        let mut scratch = property::view::Scratch::new();
+        for definition in &definitions {
+            for row in &rows {
+                let selected =
+                    decode_source(definition, &property::encode_properties(row), &mut scratch)
+                        .unwrap();
+                assert_eq!(
+                    super::super::projection::project(definition, &selected),
+                    super::super::projection::project(definition, row),
+                    "{row:?}"
+                );
+            }
+            // Rkyv messages carry buffer addresses under debug assertions,
+            // so only the error kind is compared.
+            for corrupt in [&b"corrupt"[..], &[0; 3], &[0xff; 64]] {
+                assert!(matches!(
+                    property::decode_properties(corrupt),
+                    Err(crate::encoding::error::EncodingError::Rkyv(_))
+                ));
+                assert!(matches!(
+                    decode_source(definition, corrupt, &mut scratch),
+                    Err(crate::encoding::error::EncodingError::Rkyv(_))
+                ));
+            }
+        }
+    }
 
     fn operation() -> IndexOperationRecord {
         let runtime = crate::config::TextIndexDefinition::new_node("Document", "body")
