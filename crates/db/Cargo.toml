@@ -113,6 +113,11 @@ harness = false
 required-features = ["production-coverage"]
 
 [[bench]]
+name = "vector_memory_store"
+harness = false
+required-features = ["production-coverage"]
+
+[[bench]]
 name = "text_transaction_batching"
 harness = false
 required-features = [
