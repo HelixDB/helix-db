@@ -7966,6 +7966,190 @@ mod tests {
         );
         db.close().await.expect("reopen test database closes");
     }
+
+    /// Authoritative verification reads only the label and indexed property,
+    /// with any-label and first-property semantics over duplicate names, and
+    /// fails on a corrupt row exactly when it reads one.
+    #[tokio::test]
+    async fn authoritative_verification_reads_label_and_property_like_the_full_decoder() {
+        let db = test_db("secondary-authoritative-verification-golden").await;
+        let scope = DataScope::LegacyUnscoped;
+        let key = |id: u64| {
+            authoritative_property_key(
+                scope,
+                IndexEntity {
+                    kind: IndexElementKind::Node,
+                    id: IndexEntityId::new(id),
+                },
+            )
+        };
+        let a = PropertyValue::String("a".into());
+        let rows = [
+            vec![Property::string("$label", "User"), Property::string("email", "a")],
+            vec![
+                Property::string("$label", "Other"),
+                Property::string("$label", "User"),
+                Property::string("email", "a"),
+            ],
+            vec![
+                Property::string("$label", "User"),
+                Property::string("email", "b"),
+                Property::string("email", "a"),
+            ],
+            vec![Property::string("$label", "User")],
+            vec![Property::string("email", "a")],
+            Vec::new(),
+            vec![Property::string("$label", "User"), Property::i64("email", 5)],
+            vec![
+                Property::f32_array("embedding", vec![0.25; 1536]),
+                Property::string("email", "a"),
+                Property::bytes("blob", vec![9; 10_000]),
+                Property::string("$label", "User"),
+            ],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.put(key(id), encode_properties(properties)).await.unwrap();
+        }
+        db.put(key(9), Bytes::from_static(b"corrupt authority"))
+            .await
+            .unwrap();
+        let label = UnindexedLabel {
+            scope,
+            kind: IndexElementKind::Node,
+            label: "User",
+            property: "email",
+        };
+        let deadline = || Ok(());
+        let verified = |accept: fn(Option<&PropertyValue>) -> bool, ids: Vec<u64>| {
+            verified_unindexed_rows(
+                &db,
+                UnindexedLabel { ..label },
+                roaring::RoaringTreemap::from_iter(ids),
+                accept,
+                &deadline,
+                None,
+            )
+        };
+        let rows_of = |bitmap: crate::query_resources::bitmap::Bitmap| {
+            bitmap.iter().collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows_of(
+                verified(
+                    |value| value == Some(&PropertyValue::String("a".into())),
+                    (1..=8).chain([10]).collect()
+                )
+                .await
+                .unwrap()
+            ),
+            vec![1, 2, 8]
+        );
+        assert_eq!(
+            rows_of(verified(|value| value.is_none(), (1..=8).collect()).await.unwrap()),
+            vec![4]
+        );
+        assert!(matches!(
+            verified(|_| true, (1..=9).collect()).await,
+            Err(HelixDbError::Encoding(_))
+        ));
+
+        let ValidatedDynamicIndexDefinition::Secondary(equality) =
+            validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap())
+        else {
+            unreachable!("equality definition is secondary");
+        };
+        let ValidatedDynamicIndexDefinition::Secondary(range) =
+            validated(SecondaryIndexDefinition::node_range("User", "email").unwrap())
+        else {
+            unreachable!("range definition is secondary");
+        };
+        let RangeValueProjection::Indexed(range_a) =
+            project_range_value(&a, StorageRangeIndexDirection::Asc)
+        else {
+            unreachable!("strings are range indexed");
+        };
+        let mut equal = Vec::new();
+        let mut in_range = Vec::new();
+        for id in (1..=8).chain([10]) {
+            let entity = IndexEntityId::new(id);
+            if authoritative_equality_matches(&db, scope, &equality, entity, &a, None)
+                .await
+                .unwrap()
+            {
+                equal.push(id);
+            }
+            if authoritative_range_matches(
+                &db,
+                scope,
+                &range,
+                entity,
+                StorageRangeIndexDirection::Asc,
+                &range_a,
+                None,
+                &exact::UnobservedRangeScan,
+            )
+            .await
+            .unwrap()
+            {
+                in_range.push(id);
+            }
+        }
+        assert_eq!(equal, vec![1, 2, 8]);
+        assert_eq!(in_range, vec![1, 2, 8]);
+        let corrupt = IndexEntityId::new(9);
+        assert!(matches!(
+            authoritative_equality_matches(&db, scope, &equality, corrupt, &a, None).await,
+            Err(HelixDbError::Encoding(_))
+        ));
+        assert!(matches!(
+            authoritative_range_matches(
+                &db,
+                scope,
+                &range,
+                corrupt,
+                StorageRangeIndexDirection::Asc,
+                &range_a,
+                None,
+                &exact::UnobservedRangeScan,
+            )
+            .await,
+            Err(HelixDbError::Encoding(_))
+        ));
+        let entity = |id: u64| IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(id),
+        };
+        for id in 1..=8 {
+            let stored = db.get(key(id)).await.unwrap().unwrap();
+            let decoded = decode_properties(&stored).unwrap();
+            let read = read_authoritative_properties(&db, scope, entity(id))
+                .await
+                .unwrap()
+                .unwrap();
+            for definition in [&equality, &range] {
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        canonical_value(definition, &read, IndexEntityId::new(id))
+                    ),
+                    format!(
+                        "{:?}",
+                        canonical_value(definition, &decoded, IndexEntityId::new(id))
+                    ),
+                    "{id}"
+                );
+            }
+        }
+        assert!(read_authoritative_properties(&db, scope, entity(10))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            read_authoritative_properties(&db, scope, entity(9)).await,
+            Err(HelixDbError::Encoding(_))
+        ));
+        db.close().await.unwrap();
+    }
 }
 
 #[cfg(test)]
