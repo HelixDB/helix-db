@@ -121,7 +121,12 @@ async fn resumable_cursors_keep_scope_snapshot_and_transaction_visibility() {
     let mut transaction =
         ExecutionContext::new_scoped(&writer, context::ParamBindings::default(), *scope);
     transaction.enable_request_write_scope().await.unwrap();
-    let staged = node_id(transaction.execute_step(&create_node()).await.unwrap());
+    let staged = node_id(
+        transaction
+            .execute_step(&create_node(), None)
+            .await
+            .unwrap(),
+    );
     for (ctx, expected) in [
         (&snapshot, ids.clone()),
         (
