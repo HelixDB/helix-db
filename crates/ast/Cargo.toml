@@ -5,11 +5,19 @@ edition = "2024"
 
 [features]
 test-utils = []
+# simd-json backend; the parser picks AVX2, SSE4.2, NEON or its portable
+# implementation for the running CPU (`runtime-detection`).
+simd-json = ["dep:simd-json"]
 
 [dependencies]
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 sonic-rs = "0.5.8"
+simd-json = { version = "0.18.1", optional = true, default-features = false, features = [
+    "runtime-detection",
+    "serde_impl",
+    "swar-number-parsing",
+] }
 
 [dev-dependencies]
 serde_json = "1"

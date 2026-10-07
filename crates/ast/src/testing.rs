@@ -264,6 +264,19 @@ pub fn count_with_unused_params(bytes: usize) -> Shape {
     Shape::new(format!("count_with_unused_params/{bytes}"), &request)
 }
 
+/// Whether `bytes` passes the flat nesting pre-scan every JSON entry point
+/// runs before parsing, exposed so benchmarks can time that stage alone.
+///
+/// ```
+/// use helix_ast::testing;
+///
+/// assert!(testing::json_depth_within_limit(&testing::deep_chain(16).json));
+/// assert!(!testing::json_depth_within_limit(&[b'['; 300]));
+/// ```
+pub fn json_depth_within_limit(bytes: &[u8]) -> bool {
+    crate::query::check_json_depth::<sonic_rs::Error>(bytes).is_ok()
+}
+
 /// Every shape the benchmarks measure, smallest first within each family.
 pub fn all() -> Vec<Shape> {
     fixtures()
@@ -337,6 +350,21 @@ mod tests {
                     .contains(&MAX_REQUEST_JSON_DEPTH.to_string()),
                 "{error}"
             );
+        });
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn simd_json_parses_every_shape_to_the_sonic_tree() {
+        on_large_stack(|| {
+            for shape in all() {
+                let sonic = QueryRequest::from_json_slice(&shape.json)
+                    .unwrap_or_else(|error| panic!("{} must parse: {error}", shape.name));
+                let mut body = shape.json.clone();
+                let simd = QueryRequest::from_json_slice_mut(&mut body)
+                    .unwrap_or_else(|error| panic!("{} must parse: {error}", shape.name));
+                assert!(sonic == simd, "{} parses differently", shape.name);
+            }
         });
     }
 

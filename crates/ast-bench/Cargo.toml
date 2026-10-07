@@ -1,0 +1,40 @@
+[package]
+name = "helix-ast-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# Measure with mimalloc as the global allocator instead of the system one.
+mimalloc = ["dep:mimalloc"]
+
+[dependencies]
+helix-ast = { path = "../ast", features = ["simd-json"] }
+helix-planner = { path = "../planner" }
+simd-json = { version = "0.18.1", default-features = false, features = [
+    "runtime-detection",
+    "serde_impl",
+    "swar-number-parsing",
+] }
+sonic-rs = "0.5.8"
+mimalloc = { version = "0.1.52", optional = true }
+
+[dev-dependencies]
+helix-ast = { path = "../ast", features = ["simd-json", "test-utils"] }
+divan = "0.1.21"
+libc = "0.2.186"
+
+[[bench]]
+name = "ast_parse"
+harness = false
+
+[[bench]]
+name = "ast_throughput"
+harness = false
+
+[[bench]]
+name = "ast_memory"
+harness = false
+
+[lints]
+workspace = true

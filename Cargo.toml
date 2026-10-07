@@ -2,6 +2,7 @@
 members = [
     "bindings/uniffi",
     "crates/ast",
+    "crates/ast-bench",
     "crates/graph-algorithms",
     "crates/planner",
     "crates/cypher",

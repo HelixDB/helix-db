@@ -390,8 +390,9 @@ pub struct QueryRequest {
 pub const MAX_REQUEST_JSON_DEPTH: usize = 255;
 
 /// Reject JSON nested deeper than [`MAX_REQUEST_JSON_DEPTH`] with one flat
-/// pass that tracks only the depth.
-fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
+/// pass that tracks only the depth. Every JSON backend runs it first, so the
+/// bound does not depend on which parser reads the body.
+pub(crate) fn check_json_depth<E: serde::de::Error>(bytes: &[u8]) -> Result<(), E> {
     // Nesting never exceeds the number of `[` and `{` bytes, wherever they
     // appear, so one count settles almost every request. `byte | 0x20` maps
     // exactly `[` and `{` to `{`; counting 255-byte chunks in `u8` lanes
@@ -435,7 +436,7 @@ fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
         rest = tail;
         match byte {
             b'[' | b'{' if depth == MAX_REQUEST_JSON_DEPTH => {
-                return Err(<sonic_rs::Error as serde::de::Error>::custom(format!(
+                return Err(E::custom(format!(
                     "JSON nesting exceeds {MAX_REQUEST_JSON_DEPTH} levels"
                 )));
             }
@@ -475,8 +476,49 @@ impl QueryRequest {
     ///     .contains("nesting"));
     /// ```
     pub fn from_json_slice(bytes: &[u8]) -> sonic_rs::Result<Self> {
-        check_json_depth(bytes)?;
+        check_json_depth::<sonic_rs::Error>(bytes)?;
         sonic_rs::from_slice(bytes)
+    }
+
+    /// Parse a request with simd-json, which selects its SIMD implementation
+    /// for the running CPU at runtime rather than at compile time. The same
+    /// flat scan bounds the nesting first. simd-json rewrites `bytes` in
+    /// place while it unescapes strings, so the body is not reusable after.
+    ///
+    /// ```
+    /// use helix_ast::query::QueryRequest;
+    ///
+    /// let mut body = br#"{"request_type":"read","query":{"read":{"entries":[]}}}"#.to_vec();
+    /// let request = QueryRequest::from_json_slice_mut(&mut body).unwrap();
+    /// assert_eq!(request, QueryRequest::from_json_slice(
+    ///     br#"{"request_type":"read","query":{"read":{"entries":[]}}}"#,
+    /// ).unwrap());
+    /// ```
+    #[cfg(feature = "simd-json")]
+    pub fn from_json_slice_mut(bytes: &mut [u8]) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        simd_json::serde::from_slice(bytes)
+    }
+
+    /// [`Self::from_json_slice_mut`] reusing simd-json's padding, structural
+    /// index and string buffers across requests.
+    ///
+    /// ```
+    /// use helix_ast::query::QueryRequest;
+    ///
+    /// let mut buffers = simd_json::Buffers::default();
+    /// for _ in 0..2 {
+    ///     let mut body = br#"{"request_type":"read","query":{"read":{"entries":[]}}}"#.to_vec();
+    ///     assert!(QueryRequest::from_json_slice_mut_with_buffers(&mut body, &mut buffers).is_ok());
+    /// }
+    /// ```
+    #[cfg(feature = "simd-json")]
+    pub fn from_json_slice_mut_with_buffers(
+        bytes: &mut [u8],
+        buffers: &mut simd_json::Buffers,
+    ) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        simd_json::serde::from_slice_with_buffers(bytes, buffers)
     }
 
     /// Check with one iterative pass that no batch entry, step, predicate,
@@ -1102,12 +1144,18 @@ mod tests {
                 "]".repeat(levels - 1)
             )
         };
-        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok());
-        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes()).is_err());
-        // Brackets and escaped quotes inside strings are not structure.
         assert!(
-            check_json_depth(format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()).is_ok()
+            check_json_depth::<sonic_rs::Error>(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok()
         );
+        assert!(
+            check_json_depth::<sonic_rs::Error>(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes())
+                .is_err()
+        );
+        // Brackets and escaped quotes inside strings are not structure.
+        assert!(check_json_depth::<sonic_rs::Error>(
+            format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()
+        )
+        .is_ok());
         // Word skipping agrees with a byte-at-a-time scan, with quotes,
         // escapes and brackets at every offset around word boundaries.
         let oracle = |bytes: &[u8]| {
@@ -1154,16 +1202,17 @@ mod tests {
                 body.extend_from_slice(fragments[(seed >> 33) as usize % fragments.len()]);
             }
             assert_eq!(
-                check_json_depth(&body).is_ok(),
+                check_json_depth::<sonic_rs::Error>(&body).is_ok(),
                 oracle(&body),
                 "{:?}",
                 String::from_utf8_lossy(&body)
             );
         }
         // Many shallow siblings pass the full scan.
-        assert!(
-            check_json_depth(format!("{{\"x\":[{}[]]}}", "[],".repeat(1_000)).as_bytes()).is_ok()
-        );
+        assert!(check_json_depth::<sonic_rs::Error>(
+            format!("{{\"x\":[{}[]]}}", "[],".repeat(1_000)).as_bytes()
+        )
+        .is_ok());
         let request = QueryRequest::read(read_batch());
         assert_eq!(
             QueryRequest::from_json_slice(&sonic_rs::to_vec(&request).unwrap()).unwrap(),
