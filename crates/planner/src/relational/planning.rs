@@ -601,8 +601,8 @@ fn plan_accesses(
                                 .clone(),
                         )
                     })
-                    .min_by_key(|(_, a)| {
-                        crate::optimizer::ordering::alternative_key_for_cost(a, a.cost)
+                    .min_by(|(_, a), (_, b)| {
+                        crate::optimizer::ordering::compare_alternatives((a, a.cost), (b, b.cost))
                     })
                     .expect("every source has an access candidate");
                 PatternSource {
@@ -847,9 +847,7 @@ fn plan_accesses(
                     .map(|alternative| (*index, alternative.clone()))
             })
             .min_by(|(_, a), (_, b)| {
-                crate::optimizer::ordering::alternative_key_for_cost(a, a.cost).cmp(
-                    &crate::optimizer::ordering::alternative_key_for_cost(b, b.cost),
-                )
+                crate::optimizer::ordering::compare_alternatives((a, a.cost), (b, b.cost))
             });
         let (index, alternative) = match selected {
             Some(selected) => selected,
