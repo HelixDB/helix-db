@@ -1,30 +1,156 @@
-# Arena-backed native request parsing: prototype and benchmark
+# Native request parsing and planning: arena prototype, Graviton4 results and follow-ups
 
-Measured 2026-10-07.
+Measured 2026-10-07 on an Apple M4 Pro (macOS) and an AWS i8g.8xlarge (Graviton4, Linux).
 
-**Verdict.** Arena parsing works and is proven equivalent to owned parsing. Measured on its own:
+## Summary
 
-- single-threaded parsing is 1.05–1.4× faster;
-- freeing a parsed tree costs a few chunk frees whatever the tree's size. That is 3× faster than dropping a
-  1 KB request's owned tree and 240× faster for a 1,000-entry batch;
-- parsing makes a handful of allocations instead of one per node (14,018 → 12 for a 1,000-entry batch);
-- arena parsing scales almost linearly across cores. On a 1,000-entry batch, scaling efficiency at 14
-  threads is 0.93 for the arena against 0.68 for owned parsing on the system allocator.
+**Arena parsing.** Arena parsing works and is proven equivalent to owned parsing. Measured on its own:
 
-None of that moves the front end much. For typical requests parsing is 3–13% of the time to parse and plan
-a request, so the arena saves only **0.9–2.8%** of that front-end CPU. Bulk writes save up to 7%, and most
-of that is the nesting check, which can be dropped without an arena. The arena also does not reduce
-retained memory. Go/no-go criteria D1 and D3 fail, so moving the planner onto arena types is **not
-recommended yet**.
+- it parses 1.05–1.4× faster;
+- freeing a parsed tree costs a few chunk frees whatever its size;
+- it makes a handful of allocations instead of one per node.
 
-The larger wins are:
+Parsing is only 3–13% of the time to parse and plan a typical request, so it saves 1–3% of that front end.
+It is **not wired into the planner**; Part 2 has the evidence and the migration sketch.
 
-- the two fixes this branch already makes, 4× faster bulk-write parsing and half the heap held during
-  execution;
-- three more it reports: the planner's parameter copies (F1), mimalloc (F4) and SIMD on x86_64 (F5).
+**What moved the numbers** were six fixes the benchmarks pointed to, plus mimalloc as the server's
+allocator. Measured on Graviton4, from `main` to this branch:
+
+| Request | Front end (parse + check + plan), main → branch | Peak heap, main → branch |
+| --- | --- | --- |
+| `dynamic-read` (1 KB read) | 47.7 → **32.6 µs** (1.46×) | 0.017 → 0.016 MiB |
+| `ordered-range-wide-projection` | 88.1 → **54.2 µs** (1.62×) | 0.031 → 0.026 MiB |
+| `wide_batch/1000` (1,000 lookups) | 36.9 → **30.8 ms** (1.20×) | 10.1 → 9.7 MiB |
+| bulk insert, 1,000 rows × 768 floats (9.1 MiB) | 45.5 → **30.5 ms** (1.49×) | 113.3 → **33.2 MiB** (−71%) |
+| bulk insert, 10,000 rows × 96 floats | 66.4 → **42.8 ms** (1.55×) | 165.2 → **47.8 MiB** (−71%) |
+| count carrying 8 MiB of unused parameters | 159 → **24.7 ms** (6.45×) | 171.2 → **43.2 MiB** (−75%) |
+
+The heap held while the bulk insert executes fell from 65.1 to 24.1 MiB. With 32 cores each running parse
++ plan + free, throughput rose 1.36–1.83×: `dynamic-read` 58.8 → 39.1 µs per request, and the bulk insert
+63.2 → 34.7 ms.
+
+Peak heap figures are requested bytes. "main" is `main`'s stage order: the body and AST are held through
+execution and the parameters are copied. Front-end times are single-threaded medians of three runs.
 
 The complete numbers are in
-[ast_arena_prototype_benchmark_results.json](ast_arena_prototype_benchmark_results.json).
+[ast_arena_prototype_benchmark_results.json](ast_arena_prototype_benchmark_results.json), under `linux`
+and the macOS top level.
+
+## Part 1. Follow-up optimisations, measured on Graviton4
+
+### Changes
+
+| Commit | Change | Effect on Graviton4 |
+| --- | --- | --- |
+| `c09f74ab` | Parameter validation renders a path only for the error it reports, instead of one `format!` per array element. | Bulk insert parse 4× faster (measured on macOS before Linux runs). |
+| `8a6923a1` | HTTP and gRPC free the body once parsed. `query_service` frees the AST once planned, and planning and execution share one parameter copy. | Bulk insert heap held during execution halves. |
+| `262f870e` | The planner shares request parameters (`SharedParamBindings`, one `Arc`) instead of copying them into every cardinality expression and rewrite. Memo digests stop serializing them. | Planning the bulk insert: 12.5 ms → 73 µs. Planning the 8 MiB count: 132 ms → 78 µs. Its transient planning heap is gone. |
+| `5dbfe0c3` | Parameter nesting is bounded when parameters are inserted, now counting a typed parameter's declared array levels, so `check_nesting` walks only the batch. | `check_nesting` on bulk requests: 2.6–3.1 ms → about 2 µs. |
+| `e46d3a23` | Parameter arrays keep exactly their length: they reserve from a length hint and shrink after parsing. | Bulk insert retained heap: 31.9 → 24.1 MiB (−24%). The 8 MiB count: −33%. |
+| `577956d7` | The seed rule registry is validated once per process, not on every optimisation. | Planning small reads 16–34% faster on macOS. |
+| `9b75409c` | The server allocates through mimalloc. | See "Allocator" below. |
+| `a1571d5a` | A test from `main` that overflowed the 2 MiB test stack on aarch64 Linux debug builds now runs on 8 MiB. | — |
+
+The `SharedParamBindings` change keeps `PlannerContext`'s wire format unchanged. All 1,438 planner tests
+pass unchanged, including the plan-shape ones, so leaving parameters out of memo identity changed no plan.
+The Cypher transfer test still proves that execution receives the original parameter allocation with no
+copy, and a new planner test proves the same for native counts.
+
+### Front end, per request, single thread (median of 3 runs)
+
+`main` is `7630cd43` (the arena commits) with glibc malloc. The branch is `9b75409c` with mimalloc.
+
+| Shape | Parse | `check_nesting` | Plan | Front end |
+| --- | --- | --- | --- | --- |
+| dynamic-read | 1.46 → 1.49 µs | 83 → 45 ns | 46.2 → 31.1 µs | 47.7 → 32.6 µs |
+| dynamic-write | 1.25 → 1.25 µs | 78 → 43 ns | 18.1 → 9.52 µs | 19.4 → 10.8 µs |
+| ordered-range-wide-projection | 7.81 → 6.99 µs | 109 → 98 ns | 80.2 → 47.1 µs | 88.1 → 54.2 µs |
+| deep_chain/123 | 23.9 → 21.3 µs | 837 → 525 ns | 1.02 ms → 801 µs | 1.05 ms → 823 µs |
+| wide_batch/1000 | 1.75 → 1.50 ms | 41 → 30 µs | 35.1 → 29.3 ms | 36.9 → 30.8 ms |
+| predicate_heavy/1024 | 411 → 367 µs | 10.6 → 10.8 µs | 9.09 → 6.88 ms | 9.51 → 7.26 ms |
+| bulk insert 1000 × 768 | 30.3 → 30.4 ms | 2.58 ms → 2.3 µs | 12.5 ms → 73 µs | 45.5 → 30.5 ms |
+| bulk insert 10000 × 96 | 43.5 → 42.7 ms | 3.13 ms → 2.4 µs | 19.8 ms → 73 µs | 66.4 → 42.8 ms |
+| count + 1 MiB unused params | 2.99 → 3.00 ms | 345 µs → 0.4 µs | 14.6 ms → 33 µs | 18.0 → 3.03 ms |
+| count + 8 MiB unused params | 24.3 → 24.6 ms | 2.76 ms → 0.5 µs | 132 ms → 78 µs | 159 → 24.7 ms |
+
+- **Bulk inserts are now bound by the parser.** A profile shows about 76% of bulk parse time is sonic-rs
+  turning numbers into `QueryValue`s; validation and the depth scan take 8% and 6.5%.
+- **Small requests are bound by planning.** About 40–50% of their planning time is allocation (macOS
+  profile).
+
+### Throughput across 32 cores (median per-request time; E = t(1) / t(32))
+
+| Shape | Parse + plan + free, main | Parse + plan + free, branch |
+| --- | --- | --- |
+| dynamic-read | 51.6 µs → 58.8 µs at 32 threads (E 0.88) | 33.5 µs → 39.1 µs (E 0.86) |
+| ordered-range-wide-projection | 101 → 115 µs (E 0.88) | 55 → 63 µs (E 0.87) |
+| wide_batch/1000 | 40.6 → 47.3 ms (E 0.86) | 31.1 → 34.8 ms (E 0.89) |
+| bulk insert 1000 × 768 | 53.2 → 63.2 ms (E 0.84) | 32.4 → 34.7 ms (E 0.93) |
+
+- **glibc scales well on Graviton4.** Owned parsing alone scales at E 0.92–0.99. The allocator contention
+  seen on macOS mostly does not apply here.
+- **The arena's scaling advantage is small on Linux.** On `wide_batch/1000` the arena reaches 0.97–0.99
+  and owned parsing 0.95–0.99.
+
+### Memory
+
+Requested heap during the request, from the stage-boundary simulation in `ast_memory`.
+
+| Shape | Held during execution, main → branch | Peak, main → branch |
+| --- | --- | --- |
+| wide_batch/1000 | 4.75 → 3.02 MiB | 10.1 → 9.7 MiB |
+| bulk insert 1000 × 768 | 65.1 → 24.1 MiB | 113.3 → 33.2 MiB |
+| bulk insert 10000 × 96 | 93.5 → 35.9 MiB | 165.2 → 47.8 MiB |
+| count + 8 MiB unused params | 64.5 → 21.3 MiB | 171.2 → 43.2 MiB |
+
+The bulk insert's peak is now the body plus its parsed parameters, both live during parsing. Nothing else
+remains.
+
+### Allocator
+
+The server now uses mimalloc, as requested. One measurement is useful for operating it. The `ast_rss`
+workload has 32 threads running parse, plan and free over small reads, a 1,000-entry batch, the bulk
+insert and the 8 MiB count.
+
+| Allocator | Throughput | Peak RSS | RSS after the work |
+| --- | ---: | ---: | ---: |
+| glibc (round 2) | 1,315 requests/s | 1.50 GiB | 1.16 GiB |
+| mimalloc, final branch | 1,688 requests/s | 2.29 GiB | 1.4–2.2 GiB |
+| mimalloc with `MIMALLOC_PURGE_DELAY=0` | about 870 requests/s | 0.65 GiB | 0.08 GiB |
+
+mimalloc's default holds freed pages for reuse. `MIMALLOC_PURGE_DELAY` is the runtime setting that trades
+that throughput for resident memory, if memory ever matters more than throughput.
+
+### JSON backends on Graviton4
+
+Owned parsing, final branch:
+
+| Shape | sonic-rs | simd-json | simd-json, reused buffers |
+| --- | ---: | ---: | ---: |
+| dynamic-read | 1.49 µs | 1.33 µs | 1.06 µs |
+| ordered-range-wide-projection | 6.99 µs | 5.29 µs | 5.09 µs |
+| wide_batch/1000 | 1.50 ms | 1.46 ms | 1.44 ms |
+| bulk insert 1000 × 768 | 30.4 ms | 32.9 ms | 32.6 ms |
+| bulk insert 10000 × 96 | 42.7 ms | 44.7 ms | 44.4 ms |
+| count + 8 MiB unused params | 24.6 ms | 29.0 ms | 29.2 ms |
+
+- **simd-json wins on small and structural requests** (up to 1.4×).
+- **It loses 5–18% on float-heavy bodies.** That is where parse time matters most, so sonic-rs stays the
+  backend.
+- **x86_64 is still unmeasured.** The production image builds sonic-rs without its AVX2 fast path (F5).
+
+### Verification on Graviton4
+
+Every check passes on Linux aarch64:
+
+- fmt, workspace clippy, and all-target clippy of the AST, planner and bench crates;
+- the helix-ast suites, with and without features;
+- the derive and bench crates;
+- the planner (1,438 tests);
+- the full db lib suite (2,545 tests);
+- the server tests and the 73 production contracts.
+
+## Part 2. The arena prototype (macOS investigation)
 
 ## What was built
 
@@ -65,7 +191,7 @@ The complete numbers are in
   bytes. It does not see malloc's per-allocation overhead, so owned-tree figures are understated relative
   to RSS.
 - **Stack:** the smallest thread stack that survives, found by binary search in child processes.
-- **No Linux or x86_64 machine was available.** Every number is from macOS on aarch64; see Limitations.
+- **Linux results are in Part 1.** Every number in Part 2 is from macOS on aarch64.
 
 ## 1. Fixes already on this branch
 
@@ -298,9 +424,9 @@ The migration sketch:
    `into_owned()`. The plan and the interpreter are unchanged.
 4. The arena is reset after planning.
 
-## 8. Findings, ranked by expected throughput impact
+## 8. Findings from the macOS investigation, and their status
 
-1. **F1. The planner deep-copies every parameter, even unused ones.** A count query carrying 8 MiB of
+1. **F1. Done in `262f870e`.** The planner deep-copied every parameter, even unused ones. A count query carrying 8 MiB of
    unused parameters plans in 47 ms, against 12 µs with none. That is 4,000× slower, and it adds 107 MiB
    of transient heap. Copies happen at:
    - `optimizer/config.rs:37`, once per planning session;
@@ -309,18 +435,20 @@ The migration sketch:
 
    Sharing them (`Arc<ParamBindings>`) or borrowing would remove most of the bulk-write peak (80 MiB peak
    against 32 MiB live).
-2. **F4. Switch the server's global allocator to mimalloc.** Parse + plan throughput at 14 threads rises
+2. **F4. Done in `9b75409c`.** Switch the server's global allocator to mimalloc. Parse + plan throughput at 14 threads rises
    1.2–2.6×, and single-threaded planning speeds up 1.2–1.6×. It is a one-line change, though it adds a C
    dependency to the image.
 3. **Done on this branch.** Lazy parameter paths (4× faster bulk parsing) and early freeing (half the heap
    held during execution).
-4. **F2. Skip `check_nesting` for parsed JSON.** It costs 1–4 ms per bulk request and is redundant once
+4. **F2. Done in `5dbfe0c3`,** by bounding parameters when inserted rather than with a JSON-only proof.
+   Skip `check_nesting` for parsed JSON. It costs 1–4 ms per bulk request and is redundant once
    the 255-level text scan has run. A type-level "parsed from bounded JSON" proof can let
    `query_service` skip it.
-5. **F5. sonic-rs runs without its x86 SIMD fast path in the production image.** Measure simd-json with
+5. **F5. Open.** sonic-rs runs without its x86 SIMD fast path in the production image. Measure simd-json with
    runtime detection, or build with `+avx2,+pclmulqdq` on a known CPU baseline. Note that `x86-64-v3`
    alone does not include `pclmulqdq`.
-6. **F6. Bulk float parameters cost 24–32 bytes per value plus one allocation per row.** A dense typed
+6. **F6. Open; now the largest remaining bulk-insert lever.** Bulk float parameters cost 24–32 bytes per
+   value plus one allocation per row. A dense typed
    vector parameter (4 bytes per `f32`) would cut bulk-insert parameter memory by roughly 8× and remove
    most of that parse time, which neither the arena nor a JSON backend can do.
 7. **F3. The embedded `query_json_scoped(&[u8])` has no body-size cap** and borrows the body through
@@ -330,11 +458,15 @@ The migration sketch:
 9. **F9. A parameter arena needs exact length hints.** simd-json provides them; sonic-rs does not. Without
    them, large arrays waste up to 2× through doubling inside the arena (see §2).
 
+Remaining opportunities the Graviton4 profiles point to:
+
+- **Planner allocation volume.** About 40–50% of small-request planning is spent in malloc and free.
+- **Memo identity.** Digests are computed by serializing every explored expression to JSON (about 8%).
+- **Executable-plan assembly for wide batches.** It uses `BTreeMap`s keyed by step id.
+
 ## Limitations
 
-- **One machine.** Every number is from one aarch64 macOS machine. glibc malloc (production) and x86_64
-  SIMD paths may change the scaling and backend conclusions; the allocator-heavy results especially should
-  be re-run on the production host.
-- **Efficiency cores.** Thread counts above 10 include efficiency cores.
+- **No x86_64 host.** Both machines are aarch64, so the x86_64 SIMD paths (F5) are unmeasured.
+- **Efficiency cores.** Thread counts above 10 on macOS include efficiency cores; Graviton4 has none.
 - **Divan's thread synchronisation.** It limits what the sub-microsecond scaling results can show.
 - **Memory counts requested bytes, not RSS.**
