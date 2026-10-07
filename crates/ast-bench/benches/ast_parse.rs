@@ -18,11 +18,7 @@ use helix_ast::testing;
 
 mod support;
 
-#[cfg(not(feature = "mimalloc"))]
-#[global_allocator]
-static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
-
-#[cfg(feature = "mimalloc")]
+/// The server's allocator, profiled.
 #[global_allocator]
 static ALLOC: divan::AllocProfiler<mimalloc::MiMalloc> =
     divan::AllocProfiler::new(mimalloc::MiMalloc);

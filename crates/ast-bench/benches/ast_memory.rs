@@ -18,7 +18,7 @@
 //!   accepted chain, found by re-running this binary in a child process,
 //!   because a stack overflow aborts the process.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::process::Command;
 
@@ -57,12 +57,13 @@ fn record(allocated: usize, released: usize) {
 
 struct CountingAllocator;
 
-// SAFETY: Every operation forwards its caller's valid arguments to System
-// unchanged; counting is allocation-free thread-local arithmetic.
+// SAFETY: Every operation forwards its caller's valid arguments to mimalloc,
+// the server's allocator, unchanged; counting is allocation-free thread-local
+// arithmetic.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: The caller upholds `GlobalAlloc::alloc`'s contract.
-        let pointer = unsafe { System.alloc(layout) };
+        let pointer = unsafe { mimalloc::MiMalloc.alloc(layout) };
         if !pointer.is_null() {
             record(layout.size(), 0);
         }
@@ -71,7 +72,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: The caller upholds `GlobalAlloc::alloc_zeroed`'s contract.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
+        let pointer = unsafe { mimalloc::MiMalloc.alloc_zeroed(layout) };
         if !pointer.is_null() {
             record(layout.size(), 0);
         }
@@ -80,7 +81,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         // SAFETY: The caller upholds `GlobalAlloc::realloc`'s contract.
-        let resized = unsafe { System.realloc(pointer, layout, size) };
+        let resized = unsafe { mimalloc::MiMalloc.realloc(pointer, layout, size) };
         if !resized.is_null() {
             record(size, layout.size());
         }
@@ -90,7 +91,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         record(0, layout.size());
         // SAFETY: The caller upholds `GlobalAlloc::dealloc`'s contract.
-        unsafe { System.dealloc(pointer, layout) };
+        unsafe { mimalloc::MiMalloc.dealloc(pointer, layout) };
     }
 }
 

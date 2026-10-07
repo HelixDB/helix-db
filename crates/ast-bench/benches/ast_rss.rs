@@ -1,13 +1,13 @@
-//! Resident memory and wall time of a server-like front-end workload under the
-//! build's global allocator (`--features mimalloc` for mimalloc).
+//! Resident memory and wall time of a server-like front-end workload, with
+//! the server's allocator (mimalloc).
 //!
 //! Every core runs the native front end as `query_service` does (parse, bound
 //! the nesting, bind parameters, plan, free the batch, take the parameters
 //! back) over a rotation of request shapes. Requested bytes are allocator
-//! independent; resident memory is what an allocator's caching and
-//! fragmentation add on top, so this compares allocators on what a server
-//! process actually holds. Linux reads `VmHWM`/`VmRSS` from
-//! `/proc/self/status`; other platforms report the peak only.
+//! independent; resident memory is what the allocator's caching and
+//! fragmentation add on top, so this measures what a server process actually
+//! holds. Linux reads `VmHWM`/`VmRSS` from `/proc/self/status`; other
+//! platforms report the peak only.
 
 use std::time::Instant;
 
@@ -15,7 +15,6 @@ use helix_ast::query::QueryRequest;
 
 mod support;
 
-#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

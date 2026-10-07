@@ -8,7 +8,7 @@
 //! comes only from JSON, whose depth was bounded before parsing.
 //!
 //! Scaling efficiency at `N` threads is `t(1) / t(N)`; 1.0 is perfect
-//! scaling. Build with `--features mimalloc` to compare allocators.
+//! scaling. Like the server, the benchmark allocates through mimalloc.
 
 use std::cell::RefCell;
 
@@ -18,7 +18,6 @@ use helix_ast::query::{ArenaQueryRequest, QueryRequest};
 
 mod support;
 
-#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

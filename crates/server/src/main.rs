@@ -1,5 +1,9 @@
 use std::process::ExitCode;
 
+/// The server allocates through mimalloc rather than the platform allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Runs the server, printing a failure as its message and every cause
 /// beneath it rather than its debug form.
 #[tokio::main]

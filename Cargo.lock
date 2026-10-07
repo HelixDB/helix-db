@@ -4711,6 +4711,7 @@ dependencies = [
  "helix-metrics",
  "helix-planner",
  "libc",
+ "mimalloc",
  "object_store 0.14.1",
  "prost",
  "prost-build",

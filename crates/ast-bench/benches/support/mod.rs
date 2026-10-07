@@ -78,13 +78,8 @@ pub fn print_environment() {
         (false, true) => "aarch64 NEON (compile time)",
         (false, false) => "portable fallback (compile time)",
     };
-    let allocator = if cfg!(feature = "mimalloc") {
-        "mimalloc"
-    } else {
-        "system"
-    };
     eprintln!(
-        "sonic-rs: {sonic}; simd-json: {:?} (runtime); allocator: {allocator}",
+        "sonic-rs: {sonic}; simd-json: {:?} (runtime); allocator: mimalloc",
         simd_json::Deserializer::algorithm()
     );
 }
