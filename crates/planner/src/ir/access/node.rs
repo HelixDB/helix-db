@@ -488,4 +488,37 @@ mod tests {
         assert!(intersection.has_set_subsumption_candidate());
         assert!(!ordinary.has_set_subsumption_candidate());
     }
+
+    /// Sets wider than the digest threshold find the same candidates.
+    #[test]
+    fn wide_sets_find_duplicate_and_structural_subsumption_candidates() {
+        let email = |value: i64| {
+            source(NodeAccessPlan::EqualityIndex {
+                index: catalog::NodeEqualityIndexMeta::try_new("user_email").unwrap(),
+                key: catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+                value: ir::IndexValue::Literal(
+                    ir::SecondaryIndexLiteral::new(PropertyValue::I64(value)).unwrap(),
+                ),
+            })
+        };
+        let distinct = (0..12).map(email).collect::<Vec<_>>();
+        let set = |sources: Vec<NodeAccessSourcePlan>| {
+            let union = source(NodeAccessPlan::Union(
+                ir::AtLeast::<_, 2>::try_from_vec(sources.clone()).unwrap(),
+            ));
+            let intersection = source(NodeAccessPlan::Intersect(
+                ir::AtLeast::<_, 2>::try_from_vec(sources).unwrap(),
+            ));
+            (
+                union.has_set_subsumption_candidate(),
+                intersection.has_set_subsumption_candidate(),
+            )
+        };
+
+        assert_eq!(set(distinct.clone()), (false, false));
+        let duplicated = [distinct.clone(), vec![email(5)]].concat();
+        assert_eq!(set(duplicated), (true, true));
+        let covered = [distinct, vec![label_scan("User")]].concat();
+        assert_eq!(set(covered), (true, true));
+    }
 }
