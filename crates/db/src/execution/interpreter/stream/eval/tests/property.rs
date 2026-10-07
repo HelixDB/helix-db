@@ -461,7 +461,12 @@ async fn resolver_reads_every_stored_shape_exactly_as_the_full_row_decoder() {
         .collect::<Vec<_>>();
     batch.prefetch(&elements).await.unwrap();
     for (id, properties) in (1_u64..).zip(&shapes) {
-        let stored = db.inner_db().get(node_property_key(id)).await.unwrap().unwrap();
+        let stored = db
+            .inner_db()
+            .get(node_property_key(id))
+            .await
+            .unwrap()
+            .unwrap();
         let decoded = crate::encoding::property::decode_properties(&stored).unwrap();
         assert_eq!(decoded.len(), properties.len());
         assert!(decoded
@@ -573,6 +578,122 @@ async fn resolver_rejects_corrupt_rows_lazily_with_the_decoder_error() {
             .await
             .unwrap(),
         Vec::new()
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_read() {
+    let db = test_support::open_db("stream-eval-resolver-scanned-record").await;
+    let stored =
+        crate::encoding::property::encode_properties(&[Property::string("name", "stored")]);
+    db.inner_db()
+        .put(node_property_key(1), stored)
+        .await
+        .unwrap();
+    db.inner_db()
+        .put(node_property_key(2), bytes::Bytes::from_static(b"corrupt"))
+        .await
+        .unwrap();
+    let scanned = crate::encoding::property::encode_properties(&[
+        Property::string("name", "scanned"),
+        Property::f32_array("embedding", vec![1.5; 8]),
+    ]);
+    // An unaligned copy of the record exercises the aligned scratch copy.
+    let mut padded = vec![0];
+    padded.extend_from_slice(&scanned);
+    let unaligned = bytes::Bytes::from(padded).slice(1..);
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let buffers = crate::encoding::v2::values::property::view::Buffers::default();
+    for record in [scanned.clone(), unaligned] {
+        let mut resolver =
+            RowValueResolver::with_record(&ctx, ElementRef::Node(1), record, Default::default());
+        let before = ctx.projection_read_snapshot();
+        assert_eq!(
+            resolver
+                .row_property(&current_node(1), &name("name"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::String("scanned".into()))
+        );
+        assert_eq!(
+            resolver
+                .row_property(&current_node(1), &name("embedding"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::F32Array(vec![1.5; 8]))
+        );
+        let after = ctx.projection_read_snapshot();
+        assert_eq!(after.property_gets, before.property_gets);
+        assert_eq!(after.property_decodes, before.property_decodes + 1);
+        // Another element still reads storage.
+        assert_eq!(
+            resolver
+                .row_property(&current_node(2), &name("$id"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::I64(2))
+        );
+        assert!(resolver
+            .row_property(&current_node(2), &name("name"))
+            .await
+            .is_err());
+        assert_eq!(
+            ctx.projection_read_snapshot().property_gets,
+            before.property_gets + 1
+        );
+        drop(resolver.into_buffers());
+    }
+    // A corrupt scanned record fails only when it is read.
+    let mut resolver = RowValueResolver::with_record(
+        &ctx,
+        ElementRef::Node(1),
+        bytes::Bytes::from_static(b"corrupt"),
+        buffers,
+    );
+    let before = ctx.projection_read_snapshot();
+    assert_eq!(
+        resolver
+            .row_property(&current_node(1), &name("$id"))
+            .await
+            .unwrap(),
+        Some(DbPropertyValue::I64(1))
+    );
+    assert_eq!(ctx.projection_read_snapshot(), before);
+    assert!(matches!(
+        resolver.row_property(&current_node(1), &name("name")).await,
+        Err(HelixDbError::Encoding(
+            crate::encoding::error::EncodingError::Rkyv(_)
+        ))
+    ));
+    // The full row of a scanned record decodes like the stored decoder.
+    let mut resolver = RowValueResolver::with_record(
+        &ctx,
+        ElementRef::Node(1),
+        scanned.clone(),
+        Default::default(),
+    );
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), false)
+            .await
+            .unwrap(),
+        crate::encoding::property::decode_properties(&scanned).unwrap()
+    );
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), true)
+            .await
+            .unwrap(),
+        crate::encoding::property::decode_properties(&scanned).unwrap()
+    );
+    // After its last use the record is read from storage again.
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), true)
+            .await
+            .unwrap(),
+        vec![Property::string("name", "stored")]
     );
     db.close().await.unwrap();
 }
