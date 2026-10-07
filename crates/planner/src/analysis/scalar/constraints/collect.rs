@@ -6,7 +6,7 @@ use helix_ast::expr::{Expr, Predicate};
 
 use super::super::extract::{
     between_literal_bounds, equality_literal, incomparable_range_literal, inequality_literal,
-    literal_in_values, nullability_constraint, range_bound_literal, BoundKind,
+    literal_in_collection, nullability_constraint, range_bound_literal, BoundKind,
 };
 use super::super::truth::static_predicate_value;
 use super::super::values::literal_collection_is_empty;
@@ -32,9 +32,9 @@ fn conjunction_is_statically_impossible(predicates: &[Predicate]) -> bool {
         .any(|predicate| add_conjunctive_constraint(predicate, &mut constraints))
 }
 
-fn add_conjunctive_constraint(
-    predicate: &Predicate,
-    constraints: &mut BTreeMap<String, ScalarPropertyConstraint>,
+fn add_conjunctive_constraint<'p>(
+    predicate: &'p Predicate,
+    constraints: &mut BTreeMap<&'p str, ScalarPropertyConstraint>,
 ) -> bool {
     match predicate {
         Predicate::And { predicates } => predicates
@@ -53,24 +53,28 @@ fn atomic_predicate_is_statically_impossible(predicate: &Predicate) -> bool {
 }
 
 /// Where atomic constraints accumulate: one per property across a
-/// conjunction, or the single property one atomic predicate constrains.
-trait ConstraintSink {
-    fn constraint(&mut self, property: String) -> &mut ScalarPropertyConstraint;
+/// conjunction, keyed by the property name the predicates hold, or the single
+/// property one atomic predicate constrains.
+trait ConstraintSink<'p> {
+    fn constraint(&mut self, property: &'p str) -> &mut ScalarPropertyConstraint;
 }
 
-impl ConstraintSink for BTreeMap<String, ScalarPropertyConstraint> {
-    fn constraint(&mut self, property: String) -> &mut ScalarPropertyConstraint {
+impl<'p> ConstraintSink<'p> for BTreeMap<&'p str, ScalarPropertyConstraint> {
+    fn constraint(&mut self, property: &'p str) -> &mut ScalarPropertyConstraint {
         self.entry(property).or_default()
     }
 }
 
-impl ConstraintSink for ScalarPropertyConstraint {
-    fn constraint(&mut self, _property: String) -> &mut ScalarPropertyConstraint {
+impl<'p> ConstraintSink<'p> for ScalarPropertyConstraint {
+    fn constraint(&mut self, _property: &'p str) -> &mut ScalarPropertyConstraint {
         self
     }
 }
 
-fn add_atomic_constraint(predicate: &Predicate, constraints: &mut impl ConstraintSink) -> bool {
+fn add_atomic_constraint<'p>(
+    predicate: &'p Predicate,
+    constraints: &mut impl ConstraintSink<'p>,
+) -> bool {
     if is_in_empty_literal_collection(predicate) || incomparable_range_literal(predicate) {
         return true;
     }
@@ -79,7 +83,8 @@ fn add_atomic_constraint(predicate: &Predicate, constraints: &mut impl Constrain
             .constraint(property)
             .add_nullability(nullability);
     }
-    if let Some((property, values)) = literal_in_values(predicate) {
+    if let Some((property, values)) = literal_in_collection(predicate) {
+        let values = values.owned_values();
         return constraints.constraint(property).add_allowed_values(values);
     }
     if let Some((property, value)) = equality_literal(predicate) {
