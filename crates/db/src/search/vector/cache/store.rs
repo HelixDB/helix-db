@@ -2087,7 +2087,9 @@ mod tests {
             9_000,
             512,
         ];
-        let mut rows: Vec<(Bytes, Bytes, Option<(NodeId, UpperRowKind)>)> = Vec::new();
+        // Persisted key, value, and the upper row it fills (none for SimHashes).
+        type ScanRow = (Bytes, Bytes, Option<(NodeId, UpperRowKind)>);
+        let mut rows: Vec<ScanRow> = Vec::new();
         for (node_id, len) in (0u64..).zip(lens) {
             for layer in 1..=u16::try_from(node_id % 3).unwrap() + 1 {
                 let key = VectorUpperNeighborsKey::new(index_id, layer, node_id);
