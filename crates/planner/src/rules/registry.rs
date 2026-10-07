@@ -75,7 +75,7 @@ impl SeedRuleSet {
 
     /// Build the validated optimizer registry over the seed rules.
     pub fn registry(&self) -> optimizer::OptimizerRuleRegistry<'_> {
-        let registry = optimizer::OptimizerRuleRegistry::try_from_known_rules(vec![
+        let rules: Vec<&dyn optimizer::OptimizerRule> = vec![
             &self.static_predicate,
             &self.filter_merge,
             &self.filter_pushdown,
@@ -128,10 +128,17 @@ impl SeedRuleSet {
             &self.stream,
             &self.order,
             &self.barrier,
-        ]);
+        ];
         // The seed registry is a closed static field inventory. The validator
-        // still runs here so future duplicate, custom, or missing built-in
-        // rule IDs fail before they can corrupt provenance/scheduling.
-        registry.expect("built-in seed rule registry must match the complete known rule inventory")
+        // still runs, once per process rather than once per optimization, so
+        // future duplicate, custom, or missing built-in rule IDs fail before
+        // they can corrupt provenance/scheduling. Every seed rule set lists
+        // the same rules in the same order, so one validation covers them all.
+        static VALIDATED: std::sync::Once = std::sync::Once::new();
+        VALIDATED.call_once(|| {
+            optimizer::OptimizerRuleRegistry::try_from_known_rules(rules.clone())
+                .expect("built-in seed rule registry must match the complete known rule inventory");
+        });
+        optimizer::OptimizerRuleRegistry::from_validated_rules(rules)
     }
 }
