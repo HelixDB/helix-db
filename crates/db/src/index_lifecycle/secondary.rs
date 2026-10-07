@@ -1074,9 +1074,7 @@ async fn scan_source(
             candidate_input_bytes = candidate_input_bytes.saturating_add(input_bytes);
             continue;
         };
-        let properties = match view::decode_selected(&row.value, &mut scratch, |name| {
-            name == "$label" || name == definition.property().as_str()
-        }) {
+        let properties = match decode_indexed_source(definition, &row.value, &mut scratch) {
             Ok(properties) => properties,
             Err(_) => {
                 return Ok(IndexOperationStepResult::Blocked(
@@ -1504,9 +1502,7 @@ async fn catch_up_exact(
     {
         let next_value = match property_value.as_ref() {
             Some(properties) => {
-                let properties = view::decode_selected(properties, &mut scratch, |name| {
-                    name == "$label" || name == definition.property().as_str()
-                })?;
+                let properties = decode_indexed_source(definition, properties, &mut scratch)?;
                 match storable_value(
                     scope,
                     operation.index_id(),
@@ -3254,14 +3250,30 @@ async fn authoritative_equality_matches(
     let _properties_memory = budget
         .map(|budget| budget.reserve(bytes.len().saturating_mul(33)))
         .transpose()?;
-    let properties = view::decode_selected(&bytes, &mut view::Scratch::new(), |name| {
-        name == "$label" || name == definition.property().as_str()
-    })?;
+    let properties = decode_indexed_source(definition, &bytes, &mut view::Scratch::new())?;
     Ok(properties_match_definition(definition, &properties)
         && properties
             .iter()
             .find(|property| property.name == definition.property().as_str())
             .is_some_and(|property| property.value.eq_value(query)))
+}
+
+/// Decodes the properties of a stored source row that [`canonical_value`]
+/// and [`properties_match_definition`] read, the label and the indexed
+/// property, in stored order with duplicates. Every other property is left
+/// undecoded.
+///
+/// Validation and errors are those of the full row decoder, and both
+/// readers answer on the result exactly as on the complete row. A change to
+/// what they read must change this selection with it.
+fn decode_indexed_source(
+    definition: &ValidatedSecondaryIndexDefinition,
+    bytes: &[u8],
+    scratch: &mut view::Scratch,
+) -> std::result::Result<Vec<Property>, crate::encoding::error::EncodingError> {
+    view::decode_selected(bytes, scratch, |name| {
+        name == "$label" || name == definition.property().as_str()
+    })
 }
 
 fn properties_match_definition(
@@ -3496,9 +3508,7 @@ async fn authoritative_range_matches(
         return Ok(false);
     };
     progress.authoritative_decode();
-    let properties = view::decode_selected(&bytes, &mut view::Scratch::new(), |name| {
-        name == "$label" || name == definition.property().as_str()
-    })?;
+    let properties = decode_indexed_source(definition, &bytes, &mut view::Scratch::new())?;
     if !properties_match_definition(definition, &properties) {
         return Ok(false);
     }
@@ -3702,10 +3712,8 @@ async fn read_authoritative_properties(
         .get(authoritative_property_key(scope, entity))
         .await?
         .map(|bytes| {
-            view::decode_selected(&bytes, &mut view::Scratch::new(), |name| {
-                name == "$label" || name == definition.property().as_str()
-            })
-            .map_err(HelixDbError::from)
+            decode_indexed_source(definition, &bytes, &mut view::Scratch::new())
+                .map_err(HelixDbError::from)
         })
         .transpose()
 }

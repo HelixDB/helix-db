@@ -58,7 +58,7 @@ use crate::search::vector::{
 
 #[cfg(any(test, feature = "production-coverage"))]
 use super::vector_document;
-use super::{owned_vector_document, VectorIndexedDocument};
+use super::{stored_vector_document, VectorIndexedDocument};
 use crate::index_lifecycle::outbox::{
     CommittedOperationStep, CommittedStepState, IndexOperationDriver, IndexOperationStepExecution,
     IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep,
@@ -2844,15 +2844,7 @@ async fn scan_source<D: Distance>(
             cursor = Some(complete_cursor);
             continue;
         };
-        let Some(document) = view::decode_selected(&row.value, &mut scratch, |name| {
-            name == "$label"
-                || name == definition.property().as_str()
-                || definition
-                    .tenant_property()
-                    .is_some_and(|tenant| name == tenant.as_str())
-        })
-        .ok()
-        .and_then(|properties| owned_vector_document(definition, properties).ok()) else {
+        let Ok(document) = stored_vector_document(definition, &row.value, &mut scratch) else {
             if !accounting.is_empty() {
                 exhausted = false;
                 break;

@@ -18,7 +18,7 @@ use std::borrow::Cow;
 
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
-use crate::encoding::v2::values::property::encode_index_partition_value;
+use crate::encoding::v2::values::property::{encode_index_partition_value, view};
 use crate::error::{HelixDbError, Result};
 use crate::search;
 use crate::search::vector::{ValidatedMetricVector, VectorDimension};
@@ -199,13 +199,24 @@ pub(crate) fn vector_document(
     validated_document(definition, partition, vector)
 }
 
-/// [`vector_document`] over owned properties: an `f32` vector moves into the
-/// document instead of being copied. `properties` needs only the label,
-/// tenant and vector properties, in stored order.
-pub(crate) fn owned_vector_document(
+/// [`vector_document`] read straight from a stored property row.
+///
+/// Only the properties [`document_source`] reads are decoded: the label, the
+/// vector property and the tenant property, in stored order with duplicates.
+/// An `f32` vector then moves into the document instead of being copied. A
+/// row the full decoder rejects fails here with the same error.
+pub(crate) fn stored_vector_document(
     definition: &ValidatedVectorIndexDefinition,
-    mut properties: Vec<Property>,
+    row: &[u8],
+    scratch: &mut view::Scratch,
 ) -> Result<Option<VectorIndexedDocument>> {
+    let mut properties = view::decode_selected(row, scratch, |name| {
+        name == "$label"
+            || name == definition.property().as_str()
+            || definition
+                .tenant_property()
+                .is_some_and(|tenant| name == tenant.as_str())
+    })?;
     let Some((position, partition)) = document_source(definition, &properties)? else {
         return Ok(None);
     };
@@ -275,8 +286,7 @@ fn vector_partition(
 fn property_vector_to_f32(value: Cow<'_, PropertyValue>) -> Result<Vec<f32>> {
     let value = match value {
         Cow::Owned(PropertyValue::F32Array(values)) => return Ok(values),
-        Cow::Owned(value) => Cow::Owned(value),
-        Cow::Borrowed(value) => Cow::Borrowed(value),
+        value @ (Cow::Owned(_) | Cow::Borrowed(_)) => value,
     };
     match value.as_ref() {
         PropertyValue::F32Array(values) => Ok(values.clone()),
@@ -2058,11 +2068,11 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// The owned projection a backfill builds from selectively decoded rows
-    /// equals the borrowed projection of the complete row, for every vector
-    /// shape, partition and failure.
+    /// The document a backfill builds from a stored row equals the borrowed
+    /// projection of the complete row, for every vector shape, partition and
+    /// failure.
     #[test]
-    fn owned_selective_documents_match_borrowed_complete_documents() {
+    fn stored_documents_match_borrowed_complete_documents() {
         use crate::encoding::v2::values::property::{encode_properties, view};
         let label = |label: &str| property("$label", PropertyValue::String(label.to_string()));
         let noise = || property("body", PropertyValue::String("x".repeat(512)));
@@ -2114,20 +2124,15 @@ mod tests {
             validated_definition(Some("account_id"), VectorDistanceMetric::Euclidean),
         ] {
             for row in &rows {
-                let selected = view::decode_selected(
-                    &encode_properties(row),
-                    &mut view::Scratch::new(),
-                    |name| {
-                        name == "$label"
-                            || name == definition.property().as_str()
-                            || definition
-                                .tenant_property()
-                                .is_some_and(|tenant| name == tenant.as_str())
-                    },
-                )
-                .unwrap();
                 assert_eq!(
-                    format!("{:?}", owned_vector_document(&definition, selected)),
+                    format!(
+                        "{:?}",
+                        stored_vector_document(
+                            &definition,
+                            &encode_properties(row),
+                            &mut view::Scratch::new()
+                        )
+                    ),
                     format!("{:?}", vector_document(&definition, row)),
                     "{row:?}"
                 );
