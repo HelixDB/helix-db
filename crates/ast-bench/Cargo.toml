@@ -37,5 +37,9 @@ harness = false
 name = "ast_memory"
 harness = false
 
+[[bench]]
+name = "ast_rss"
+harness = false
+
 [lints]
 workspace = true
