@@ -18,6 +18,7 @@ fn memory_config(name: &str) -> ServerConfig {
         db_path: name.to_string(),
         storage: StorageConfig::Memory,
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+        cypher: crate::CypherEndpoints::Disabled,
     }
 }
 
@@ -507,6 +508,7 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
             cache: CacheConfig::Hybrid(Box::new(cache)),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let write = query::QueryRequest::write(
         batch::write_batch()
@@ -661,6 +663,7 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
             )),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let search = query::QueryRequest::read(
         batch::read_batch()
@@ -816,6 +819,7 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
             )),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let first = open_database(&config(128 * MIB)).await.unwrap();
     let partitions = files_below(&cache_root.join("slate"));
@@ -887,6 +891,7 @@ async fn a_benchmark_writer_holds_its_hybrid_cache_directory_like_the_server() {
             )),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+        cypher: crate::CypherEndpoints::Disabled,
     };
     let benchmark = crate::benchmark::open_database(
         crate::benchmark::Role::Writer,

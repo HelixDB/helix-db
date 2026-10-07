@@ -13,7 +13,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Bound;
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::config::{SearchIndexBatchLimits, TextBackfillCompactionLimits};
 use crate::encoding::v2::keys as index_keys;
@@ -77,7 +76,7 @@ pub(super) struct ResolvedLiveVersions {
 /// final-manifest inputs; compaction is an optimization and must not turn a
 /// valid immutable split into permanently blocked build work.
 pub(super) async fn select_artifacts(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     progress: &PrefixScanProgress,
@@ -236,7 +235,7 @@ pub(super) async fn select_artifacts(
 /// compaction instead of allowing a split built from a stale state snapshot to
 /// retire its exact inputs.
 pub(super) async fn resolve_live_versions(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     partition: &work::TextPartition,
@@ -296,7 +295,7 @@ pub(super) async fn resolve_live_versions(
 
 /// Atomically retires exact replaced artifact metadata.
 pub(super) async fn stage_input_retirement(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     input_artifact_keys: &[IndexCursor],

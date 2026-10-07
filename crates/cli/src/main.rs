@@ -231,6 +231,9 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         warm: bool,
     },
 
+    /// Execute or explain Cypher against a local Helix instance
+    Cypher(commands::cypher::Args),
+
     /// Open an interactive v3 JSON query shell
     Shell {
         /// Instance or typed database; defaults to dev or the sole linked target
@@ -663,6 +666,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Some(Commands::Cypher(args)) => commands::cypher::run(args).await,
         Some(Commands::Shell { instance }) => commands::shell::run(instance).await,
         Some(Commands::Auth { action }) => commands::auth::run(action).await,
         Some(Commands::Workspace { action }) => commands::cloud::workspace::run(action).await,

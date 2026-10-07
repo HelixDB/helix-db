@@ -28,7 +28,7 @@ pub(super) struct Source<'a> {
 
 enum Ids {
     Values(std::vec::IntoIter<u64>),
-    Bitmap(Box<roaring::treemap::IntoIter>),
+    Bitmap(Box<crate::query_resources::bitmap::IntoIter>),
 }
 
 impl Iterator for Ids {
@@ -71,7 +71,7 @@ enum State {
 impl<'a> Source<'a> {
     /// Retain compressed membership and expand only requested identifiers.
     pub(super) fn bitmap(
-        ids: roaring::RoaringTreemap,
+        ids: crate::query_resources::bitmap::Bitmap,
         keyspace: exec::ElementKeyspace,
         verified: bool,
     ) -> Self {
@@ -444,9 +444,9 @@ impl<'a> Source<'a> {
         key: &helix_planner::catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
         iteration: ir::RangeScanIteration,
-        membership: Vec<roaring::RoaringTreemap>,
+        membership: Vec<crate::query_resources::bitmap::Bitmap>,
     ) -> Result<State> {
-        if membership.iter().any(roaring::RoaringTreemap::is_empty) {
+        if membership.iter().any(|ids| ids.is_empty()) {
             return Ok(State::Done);
         }
         let element = match keyspace {
@@ -462,7 +462,10 @@ impl<'a> Source<'a> {
                     key,
                     range,
                     iteration,
-                    &membership,
+                    &membership
+                        .iter()
+                        .map(|bitmap| &**bitmap)
+                        .collect::<Vec<_>>(),
                     properties::PositiveUsize::new(limit.get()),
                 )
                 .await?;
@@ -590,6 +593,12 @@ impl<'a> Source<'a> {
                         self.state = State::Done;
                         continue;
                     };
+                    if let Some(budget) = &ctx.row_memory {
+                        budget.record_reads(crate::query_resources::StorageReadUsage {
+                            scan_rows: 1,
+                            ..Default::default()
+                        });
+                    }
                     #[cfg(test)]
                     ctx.pull_work
                         .source_visits
@@ -629,7 +638,7 @@ impl<'a> Source<'a> {
                                 exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
                             ),
                     },
-                )) => ctx.eval_predicate(&row, predicate.predicate()).await?,
+                )) => ctx.eval_predicate_plan(&row, predicate).await?,
                 Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => true,
             };
             if !accepted {
@@ -1022,7 +1031,11 @@ mod tests {
             exec::ElementKeyspace::EdgeEndpoints,
         ] {
             let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
-            let mut source = Source::bitmap(roaring::RoaringTreemap::new(), keyspace, false);
+            let mut source = Source::bitmap(
+                crate::query_resources::bitmap::Bitmap::empty(None).unwrap(),
+                keyspace,
+                false,
+            );
             assert!(source.next(&mut ctx).await.unwrap().is_none());
             assert_eq!(ctx.pull_work.snapshot().source_visits, 0);
         }
@@ -1161,8 +1174,12 @@ mod tests {
                                 &ir::IndexRange::All,
                                 iteration,
                                 vec![
-                                    ids.iter().copied().collect(),
-                                    roaring::RoaringTreemap::new(),
+                                    crate::query_resources::bitmap::Bitmap::retain_legacy(
+                                        ids.iter().copied().collect(),
+                                        None,
+                                    )
+                                    .unwrap(),
+                                    crate::query_resources::bitmap::Bitmap::empty(None).unwrap(),
                                 ],
                             )
                             .await
@@ -1177,11 +1194,13 @@ mod tests {
                                 crate::index_lifecycle::IndexElementKind::Edge
                             }
                         };
-                        let mut cursor = ctx
-                            .open_range_cursor(element, &key, &ir::IndexRange::All, iteration)
-                            .await
-                            .unwrap()
-                            .with_membership(vec![roaring::RoaringTreemap::new()]);
+                        let mut cursor =
+                            ctx.open_range_cursor(element, &key, &ir::IndexRange::All, iteration)
+                                .await
+                                .unwrap()
+                                .with_membership(vec![
+                                    crate::query_resources::bitmap::Bitmap::empty(None).unwrap(),
+                                ]);
                         // Also cover direct cursor users and repeated polls of an exhausted cursor.
                         for _ in 0..2 {
                             assert!(ctx.next_range_cursor(&mut cursor).await.unwrap().is_none());
@@ -1215,7 +1234,16 @@ mod tests {
                                 &key,
                                 &ir::IndexRange::All,
                                 ir::RangeScanIteration::Reverse,
-                                membership.clone(),
+                                membership
+                                    .iter()
+                                    .cloned()
+                                    .map(|ids| {
+                                        crate::query_resources::bitmap::Bitmap::retain_legacy(
+                                            ids, None,
+                                        )
+                                        .unwrap()
+                                    })
+                                    .collect(),
                             )
                             .await
                             .unwrap();

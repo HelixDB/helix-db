@@ -300,11 +300,48 @@ mod tests {
         let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
 
         let rows = ctx
-            .node_rows(vec![bob, u64::MAX, alice])
+            .node_rows(vec![bob, u64::MAX, alice, bob])
             .await
             .expect("node rows materialize");
 
-        assert_eq!(current_node_ids(rows), vec![bob, alice]);
+        assert_eq!(current_node_ids(rows), vec![bob, alice, bob]);
+    }
+
+    #[tokio::test]
+    async fn existence_reads_use_bounded_batches_and_preserve_duplicate_ids() {
+        let db = test_support::open_db("access-batched-existence").await;
+        let alice = test_support::add_user(&db, "alice").await;
+        let bob = test_support::add_user(&db, "bob").await;
+        let edge = test_support::add_edge(&db, alice, bob, "R").await;
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let budget = super::super::super::rows::memory::Budget::new(1024 * 1024);
+        ctx.row_memory = Some(budget.clone());
+        let ids = [alice, u64::MAX, bob]
+            .into_iter()
+            .cycle()
+            .take(1025)
+            .collect::<Vec<_>>();
+        let expected = ids
+            .iter()
+            .copied()
+            .filter(|id| *id != u64::MAX)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            current_node_ids(ctx.node_rows(ids).await.unwrap()),
+            expected
+        );
+        assert_eq!(
+            current_edge_ids(ctx.edge_rows(vec![edge; 513]).await.unwrap()),
+            vec![edge; 513]
+        );
+        let reads = budget.reads();
+        assert_eq!(reads.point_gets, 0);
+        assert_eq!(
+            reads.multi_get_batches,
+            1025_usize.div_ceil(EXISTENCE_BATCH_ROWS) + 513_usize.div_ceil(EXISTENCE_BATCH_ROWS)
+        );
+        assert_eq!(reads.multi_get_keys, 1538);
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -318,11 +355,11 @@ mod tests {
         let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
 
         let rows = ctx
-            .edge_rows(vec![knows, u64::MAX, follows])
+            .edge_rows(vec![knows, u64::MAX, follows, knows])
             .await
             .expect("edge rows materialize");
 
-        assert_eq!(current_edge_ids(rows), vec![knows, follows]);
+        assert_eq!(current_edge_ids(rows), vec![knows, follows, knows]);
     }
 
     #[tokio::test]

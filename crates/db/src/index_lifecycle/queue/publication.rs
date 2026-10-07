@@ -2171,7 +2171,10 @@ impl FailureKind {
             | HelixDbError::IndexBusy { .. }
             | HelixDbError::IndexBackpressure { .. }
             | HelixDbError::IndexBuildBlocked { .. }
-            | HelixDbError::IdentifierAllocationFailed { .. } => Self::Transient,
+            | HelixDbError::IdentifierAllocationFailed { .. }
+            // A request's memory budget never bounds publication; a limit is
+            // a resource condition a later attempt may not meet.
+            | HelixDbError::QueryMemoryLimitExceeded => Self::Transient,
             HelixDbError::Encoding(_)
             | HelixDbError::InvalidNodeId(_)
             | HelixDbError::NodeNotFound(_)

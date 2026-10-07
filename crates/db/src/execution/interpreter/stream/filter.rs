@@ -16,18 +16,10 @@
 
 use std::sync::Arc;
 
-use futures::FutureExt;
+use helix_ast::expr::{Expr, Predicate};
 
 use super::eval::RowValueResolver;
 use super::*;
-
-/// Rows evaluated per stored-record batch. This bounds the decoded records a
-/// filter holds at once while amortizing one multi-get over many rows, and
-/// sizes the multi-get batches of every row-preserving filter.
-///
-/// The value comes from `helix_planner::cost::RECORD_BATCH_ROWS`, so pricing
-/// and execution batch alike.
-pub(super) const RECORD_BATCH_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
 
 /// Decision for one row of a row-preserving filter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,7 +29,7 @@ pub(in crate::execution::interpreter) enum RowDecision<'p> {
     /// Drop the row without evaluating a predicate.
     Drop,
     /// Keep the row exactly when it satisfies this predicate.
-    Evaluate(&'p Predicate),
+    Evaluate(&'p ir::PredicatePlan),
 }
 
 /// Membership state resolved once per operator execution.
@@ -81,22 +73,20 @@ impl PreparedIndexMembership {
         let (Self::Indexed { matches, outside }, Some(ElementRef::Node(id))) =
             (self, row.current.as_ref())
         else {
-            return RowDecision::Evaluate(plan.predicate.predicate());
+            return RowDecision::Evaluate(&plan.predicate);
         };
         if matches.contains(*id) {
             return plan
                 .residual
                 .as_ref()
-                .map_or(RowDecision::Keep, |residual| {
-                    RowDecision::Evaluate(residual.predicate())
-                });
+                .map_or(RowDecision::Keep, RowDecision::Evaluate);
         }
         match outside {
             OutsideMatches::Reject => RowDecision::Drop,
             OutsideMatches::Evaluate { label_nodes } if label_nodes.contains(*id) => {
                 RowDecision::Drop
             }
-            OutsideMatches::Evaluate { .. } => RowDecision::Evaluate(plan.predicate.predicate()),
+            OutsideMatches::Evaluate { .. } => RowDecision::Evaluate(&plan.predicate),
         }
     }
 }
@@ -133,7 +123,7 @@ impl MembershipCursor {
                 Ok(decision)
             }
             (Self::Unresolved, Some(ElementRef::Edge(_)) | None) => {
-                Ok(RowDecision::Evaluate(plan.predicate.predicate()))
+                Ok(RowDecision::Evaluate(&plan.predicate))
             }
         }
     }
@@ -146,7 +136,7 @@ impl<'db> ExecutionContext<'db> {
         predicate: &ir::PredicatePlan,
     ) -> Result<ExecutionValue> {
         let rows = self.stream_rows(input, "filter")?;
-        self.retain_rows(rows, |_| RowDecision::Evaluate(predicate.predicate()))
+        self.retain_rows(rows, |_| RowDecision::Evaluate(predicate))
             .await
             .map(ExecutionValue::Stream)
     }
@@ -226,29 +216,31 @@ impl<'db> ExecutionContext<'db> {
                                 &DbPropertyValue::String(label.to_string()),
                             )
                             .await
-                            .map(|label_nodes| OutsideMatches::Evaluate { label_nodes }),
+                            .map(|label_nodes| OutsideMatches::Evaluate {
+                                label_nodes: label_nodes.into_unbudgeted(),
+                            }),
                     }
                 };
                 futures::try_join!(self.node_secondary_set_bitmap(set), outside)
                     .map(|(matches, outside)| PreparedIndexMembership::Indexed { matches, outside })
             }
-            exec::ExecNodeMembershipSet::Labels(labels) => access::union(self.read_children(
-                labels.iter().collect(),
-                access::PARALLEL_INDEX_READS,
-                |label, _| {
-                    async move {
+            exec::ExecNodeMembershipSet::Labels(labels) => access::union(
+                self.read_children(
+                    labels.iter().collect(),
+                    access::PARALLEL_INDEX_READS,
+                    |label, _| async move {
                         self.lookup_equality_index_set(
                             "$label",
                             &DbPropertyValue::String(label.to_string()),
                         )
                         .await
-                    }
-                    .boxed()
-                },
-            ))
+                    },
+                ),
+                self.row_memory.as_ref(),
+            )
             .await
             .map(|matches| PreparedIndexMembership::Indexed {
-                matches,
+                matches: matches.into_unbudgeted(),
                 outside: OutsideMatches::Reject,
             }),
         };
@@ -282,7 +274,7 @@ impl<'db> ExecutionContext<'db> {
         decide: impl Fn(&ExecutionRow) -> RowDecision<'p>,
     ) -> Result<Vec<ExecutionRow>> {
         let mut kept = Vec::new();
-        let mut always_reads = Vec::<(&'p Predicate, bool)>::new();
+        let mut always_reads = Vec::<(&'p ir::PredicatePlan, bool)>::new();
         let mut rows = rows.into_iter().map(|row| (decide(&row), row));
         loop {
             let batch = rows.by_ref().take(RECORD_BATCH_ROWS).collect::<Vec<_>>();
@@ -303,7 +295,7 @@ impl<'db> ExecutionContext<'db> {
                                 .find(|(known, _)| core::ptr::eq(*known, *predicate))
                                 .map(|(_, reads)| *reads)
                                 .unwrap_or_else(|| {
-                                    let reads = always_reads_element_record(predicate);
+                                    let reads = always_reads_element_record(predicate.predicate());
                                     always_reads.push((predicate, reads));
                                     reads
                                 })
@@ -311,20 +303,7 @@ impl<'db> ExecutionContext<'db> {
                         .filter_map(|(_, row)| row.current.as_ref()),
                 )
                 .await?;
-            for (decision, row) in batch {
-                self.check_execution_deadline()?;
-                let keep = match decision {
-                    RowDecision::Keep => true,
-                    RowDecision::Drop => false,
-                    RowDecision::Evaluate(predicate) => {
-                        self.eval_predicate_with_resolver(&row, predicate, &mut resolver)
-                            .await?
-                    }
-                };
-                if keep {
-                    kept.push(row);
-                }
-            }
+            kept.extend(self.select_native_rows(batch, resolver).await?);
         }
     }
 }

@@ -38,12 +38,19 @@ pub async fn serve(
 }
 
 pub(crate) fn router(state: ServerState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v2/diagnostics", get(diagnostics))
-        .route("/v2/query", post(execute_query))
-        .with_state(state)
+        .route("/v2/query", post(execute_query));
+    // Unrouted Cypher paths fall through to 404, as on a server without Cypher.
+    let router = match state.cypher_endpoints() {
+        crate::CypherEndpoints::Enabled => router
+            .route("/v2/cypher", post(execute_cypher))
+            .route("/v2/cypher/explain", post(explain_cypher)),
+        crate::CypherEndpoints::Disabled => router,
+    };
+    router.with_state(state)
 }
 
 async fn healthz(State(state): State<ServerState>) -> Response {
@@ -89,7 +96,7 @@ async fn execute_query(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
-    let request = match sonic_rs::from_slice::<QueryRequest>(&bytes) {
+    let request = match QueryRequest::from_json_slice(&bytes) {
         Ok(request) => request,
         Err(error) => {
             return error_response(
@@ -132,6 +139,119 @@ async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
             format!("failed to read request body: {error}"),
         ))
     })
+}
+
+async fn read_cypher_request(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<(RequestOptions, db::cypher::Request), Box<Response>> {
+    let options =
+        RequestOptions::from_headers(headers).map_err(|error| Box::new(error.into_response()))?;
+    let bytes = read_body(body).await?;
+    let request = serde_json::from_slice::<db::cypher::Request>(&bytes).map_err(|error| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            error_code::QueryErrorCode::InvalidQueryJson,
+            error.to_string(),
+        ))
+    })?;
+    Ok((options, request))
+}
+
+async fn explain_cypher(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (options, request) = match read_cypher_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    if let Err(error) = options.validate_for_request_type(QueryRequestType::Read, state.db_mode()) {
+        return error.into_response();
+    }
+    match state
+        .query_service()
+        .explain_cypher_scoped_controlled(
+            request,
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::execution_control::ExecutionControl::from_timeout(std::time::Duration::from_secs(
+                30,
+            )),
+            db::cypher::Limits::default(),
+        )
+        .await
+    {
+        Ok(explanation) => json_response(StatusCode::OK, &explanation),
+        Err(error) => cypher_error_response(error),
+    }
+}
+
+async fn execute_cypher(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (options, request) = match read_cypher_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    let request = match request.compile() {
+        Ok(request) => request,
+        Err(error) => return cypher_error_response(error.into()),
+    };
+    if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
+        return error.into_response();
+    }
+    let result = state
+        .query_service()
+        .execute_compiled_cypher_json_scoped_controlled(
+            request,
+            options.query_mode(),
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::execution_control::ExecutionControl::from_timeout(std::time::Duration::from_secs(
+                30,
+            )),
+            db::cypher::Limits::default(),
+        )
+        .await;
+    match result {
+        Ok(response) => {
+            if options.await_durable == Some(true)
+                && let Err(error) = state.flush_writer().await
+            {
+                return service_error_response(error.into());
+            }
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                response.into_bytes(),
+            )
+                .into_response()
+        }
+        Err(error) => cypher_error_response(error),
+    }
+}
+
+fn cypher_error_response(error: db::cypher::Error) -> Response {
+    match error {
+        db::cypher::Error::Query(error) => {
+            let status = match error.category.as_str() {
+                "ResourceLimit" => StatusCode::TOO_MANY_REQUESTS,
+                "AccessModeError" => StatusCode::SERVICE_UNAVAILABLE,
+                "InternalPlannerError" => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            json_response(
+                status,
+                &serde_json::json!({"error":error.category,"msg":error.message,"details":{"detail":error.detail,"phase":error.phase,"span":error.span}}),
+            )
+        }
+        db::cypher::Error::Storage(error) => service_error_response(error.into()),
+        db::cypher::Error::Json(error) => {
+            service_error_response(QueryServiceError::JsonSerialize(error))
+        }
+    }
 }
 
 fn query_response(response: QueryResponse) -> Response {

@@ -1,0 +1,71 @@
+{
+  "name": "binary-tree-1",
+  "scripts": [
+    "binary-tree-1"
+  ],
+  "nodes": [
+    {
+      "label": "",
+      "key": "",
+      "count": 13,
+      "distinct": 1
+    },
+    {
+      "label": "",
+      "key": "name",
+      "count": 13,
+      "distinct": 13
+    },
+    {
+      "label": "A",
+      "key": "",
+      "count": 1,
+      "distinct": 1
+    },
+    {
+      "label": "A",
+      "key": "name",
+      "count": 1,
+      "distinct": 1
+    },
+    {
+      "label": "X",
+      "key": "",
+      "count": 12,
+      "distinct": 1
+    },
+    {
+      "label": "X",
+      "key": "name",
+      "count": 12,
+      "distinct": 12
+    }
+  ],
+  "relationships": [
+    {
+      "type": "",
+      "key": "",
+      "count": 16,
+      "distinct": 1
+    },
+    {
+      "type": "FOLLOWS",
+      "key": "",
+      "count": 2,
+      "distinct": 1
+    },
+    {
+      "type": "FRIEND",
+      "key": "",
+      "count": 12,
+      "distinct": 1
+    },
+    {
+      "type": "KNOWS",
+      "key": "",
+      "count": 2,
+      "distinct": 1
+    }
+  ],
+  "labels": []
+}

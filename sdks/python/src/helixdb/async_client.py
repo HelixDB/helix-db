@@ -228,6 +228,50 @@ class AsyncClient:
 
         return await self.request_builder().query(request).send(timeout=timeout)
 
+    async def cypher(
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        query_name: str | None = None,
+        timeout: Timeout = None,
+    ) -> Any:
+        """Execute Cypher with the existing owned asynchronous transport."""
+        from urllib.parse import urljoin
+
+        from ._client_common import serialize_cypher
+
+        backend = self._request_backend()
+        body = serialize_cypher(query, parameters, query_name)
+        if isinstance(backend, _EmbeddedRequestBackend):
+            if not hasattr(backend.native, "cypher_json"):
+                raise HelixError(
+                    "EmbeddedUnavailable", "rebuild native bindings with Cypher support"
+                )
+            try:
+                return decode_response(bytes(await backend.native.cypher_json(body)))
+            except Exception as exc:
+                raise HelixError.from_embedded(exc) from exc
+        headers = {"content-type": "application/json"}
+        if backend.api_key:
+            headers["authorization"] = "Bearer " + backend.api_key
+        try:
+            async with backend.http_client.stream(
+                "POST",
+                urljoin(backend.base_url, "/v2/cypher"),
+                headers=headers,
+                content=body,
+                timeout=backend.timeout if timeout is None else timeout,
+            ) as response:
+                data = await response.aread()
+                if response.status_code != 200:
+                    raise remote_error(
+                        data, response.reason_phrase, status_code=response.status_code
+                    )
+                return decode_response(data)
+        except httpx.RequestError as exc:
+            raise HelixError.network(str(exc), cause=exc) from exc
+
     async def execute(self, request: QueryRequest, **options: Any) -> Any:
         """Execute one query with server routing and timeout options."""
 

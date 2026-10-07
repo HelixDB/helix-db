@@ -4,6 +4,11 @@
 //! interpreter boundary that turns those physical read requests into SlateDB
 //! raw `get`/`scan` calls and enforces writer-only execution modes.
 
+pub(in crate::execution::interpreter) mod read_cache;
+
+#[cfg(test)]
+mod read_admission_tests;
+
 use bytes::Bytes;
 use slatedb::DbReadOps;
 
@@ -40,26 +45,48 @@ impl<'db> ExecutionContext<'db> {
         self.pull_work
             .raw_gets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let key = Bytes::copy_from_slice(key);
-        if let Some(active) = self.active_write_tx() {
-            return Ok(active.txn.get(&key).await?);
-        }
-        if let Some(view) = self.request_read_view() {
-            return Ok(view.get(&key).await?);
-        }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => Ok(reader.get(&key).await?),
-                HelixStorage::Writer(writer) => Ok(writer.get(&key).await?),
+        let cache = self.request_read_cache();
+        let Some(cached) = cache.and_then(|cache| cache.get(key)) else {
+            let _request_memory = self
+                .row_memory
+                .as_ref()
+                .map(|budget| budget.reserve(key.len().saturating_add(size_of::<Bytes>())))
+                .transpose()?;
+            if let Some(budget) = &self.row_memory {
+                budget.record_reads(crate::cypher::StorageReadUsage {
+                    point_gets: 1,
+                    ..Default::default()
+                });
             }
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
-                "storage read escaped its request read view".to_string(),
-            ))
-        }
+            let key = Bytes::copy_from_slice(key);
+            let value = match (
+                self.active_write_tx(),
+                self.request_read_view(),
+                self.db.storage(),
+            ) {
+                (Some(active), _, _) => active.txn.get(&key).await?,
+                (None, Some(view), _) => view.get(&key).await?,
+                #[cfg(test)]
+                (None, None, HelixStorage::Reader(reader)) => reader.get(&key).await?,
+                #[cfg(test)]
+                (None, None, HelixStorage::Writer(writer)) => writer.get(&key).await?,
+                #[cfg(not(test))]
+                (None, None, _) => {
+                    return Err(HelixDbError::InvariantViolation(
+                        "storage read escaped its request read view".to_string(),
+                    ))
+                }
+            };
+            let value = value
+                .map(|bytes| retain_read(bytes, self.row_memory.as_ref()))
+                .transpose()?;
+            let Some(cache) = cache else {
+                return Ok(value);
+            };
+            cache.insert(&key, &value);
+            return Ok(value);
+        };
+        Ok(cached)
     }
 
     pub(in crate::execution::interpreter) async fn multi_get_raw<K>(
@@ -74,24 +101,89 @@ impl<'db> ExecutionContext<'db> {
         self.pull_work
             .multi_get_keys
             .fetch_add(keys.len(), std::sync::atomic::Ordering::Relaxed);
+        let Some(cache) = self.request_read_cache() else {
+            return self.multi_get_uncached(keys).await;
+        };
+        let budget = self.row_budget();
+        let _scratch = budget.reserve(keys.len().saturating_mul(
+            2 * size_of::<Option<Bytes>>() + size_of::<&K>() + size_of::<usize>(),
+        ))?;
+        let mut output = Vec::with_capacity(keys.len());
+        let mut missing = Vec::with_capacity(keys.len());
+        let mut positions = Vec::with_capacity(keys.len());
+        for (position, key) in keys.iter().enumerate() {
+            match cache.get(key.as_ref()) {
+                Some(value) => output.push(value),
+                None => {
+                    output.push(None);
+                    missing.push(key);
+                    positions.push(position);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(output);
+        }
+        let values = self.multi_get_uncached(&missing).await?;
+        assert_eq!(
+            values.len(),
+            positions.len(),
+            "one raw result per requested key"
+        );
+        for (position, value) in positions.into_iter().zip(values) {
+            cache.insert(keys[position].as_ref(), &value);
+            output[position] = value;
+        }
+        Ok(output)
+    }
+
+    async fn multi_get_uncached<K>(&self, keys: &[K]) -> Result<Vec<Option<Bytes>>>
+    where
+        K: AsRef<[u8]> + Send + Sync,
+    {
+        self.check_execution_deadline()?;
+        // Bound the request/result handle vectors before backend allocation,
+        // including all-missing batches that have no value owner to charge.
+        let _request_memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| budget.reserve(keys.len().saturating_mul(2 * size_of::<Option<Bytes>>())))
+            .transpose()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                multi_get_batches: usize::from(!keys.is_empty()),
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            });
+        }
         let batch_reads = self.db.batch_reads();
-        match (
+        let values = match (
             self.active_write_tx(),
             self.request_read_view(),
             self.db.storage(),
         ) {
-            (Some(active), _, _) => batch_reads.multi_get(&active.txn, keys).await,
-            (None, Some(view), _) => batch_reads.multi_get(view, keys).await,
+            (Some(active), _, _) => batch_reads.multi_get(&active.txn, keys).await?,
+            (None, Some(view), _) => batch_reads.multi_get(view, keys).await?,
             // Live handles are not one view, so tests read them with one call.
             #[cfg(test)]
-            (None, None, HelixStorage::Reader(reader)) => Ok(reader.multi_get(keys).await?),
+            (None, None, HelixStorage::Reader(reader)) => reader.multi_get(keys).await?,
             #[cfg(test)]
-            (None, None, HelixStorage::Writer(writer)) => Ok(writer.multi_get(keys).await?),
+            (None, None, HelixStorage::Writer(writer)) => writer.multi_get(keys).await?,
             #[cfg(not(test))]
-            (None, None, _) => Err(HelixDbError::InvariantViolation(
-                "storage multi-get escaped its request read view".to_string(),
-            )),
-        }
+            (None, None, _) => {
+                return Err(HelixDbError::InvariantViolation(
+                    "storage multi-get escaped its request read view".to_string(),
+                ))
+            }
+        };
+        values
+            .into_iter()
+            .map(|value| {
+                value
+                    .map(|bytes| retain_read(bytes, self.row_memory.as_ref()))
+                    .transpose()
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -112,36 +204,50 @@ impl<'db> ExecutionContext<'db> {
         if limit == Some(0) {
             return Ok(Vec::new());
         }
-        let mut iter = self.open_raw_range(start, end).await?;
-        collect_limited(
-            &mut iter,
-            limit,
-            self.tenant_scope,
-            self.execution_control.clone(),
-        )
-        .await
-    }
-
-    /// Opens a resumable scan in the same request snapshot or write transaction.
-    pub(in crate::execution::interpreter) async fn open_raw_range(
-        &self,
-        start: Bytes,
-        end: Bytes,
-    ) -> Result<slatedb::DbIterator> {
         self.check_execution_deadline()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
         let (start, end) = keys::DataKey::data_range(self.tenant_scope, start, end);
         if let Some(active) = self.active_write_tx() {
-            return Ok(active.txn.scan(start..end).await?);
+            let mut iter = active.txn.scan(start..end).await?;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+                self.row_memory.as_ref(),
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
-            return Ok(view.scan(start..end).await?);
+            let mut iter = view.scan(start..end).await?;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+                self.row_memory.as_ref(),
+            )
+            .await;
         }
         #[cfg(test)]
         {
-            Ok(match self.db.storage() {
+            let mut iter = match self.db.storage() {
                 HelixStorage::Reader(reader) => reader.scan(start..end).await?,
                 HelixStorage::Writer(writer) => writer.scan(start..end).await?,
-            })
+            };
+            collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+                self.row_memory.as_ref(),
+            )
+            .await
         }
         #[cfg(not(test))]
         {
@@ -167,14 +273,92 @@ impl<'db> ExecutionContext<'db> {
         if limit == Some(0) {
             return Ok(Vec::new());
         }
-        let mut iter = self.open_raw_prefix(prefix).await?;
-        collect_limited(
-            &mut iter,
-            limit,
-            self.tenant_scope,
-            self.execution_control.clone(),
-        )
-        .await
+        self.check_execution_deadline()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
+        let prefix = keys::DataKey::data_prefix(self.tenant_scope, prefix);
+        if let Some(active) = self.active_write_tx() {
+            let mut iter = active.txn.scan_prefix(prefix, ..).await?;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+                self.row_memory.as_ref(),
+            )
+            .await;
+        }
+        if let Some(view) = self.request_read_view() {
+            let mut iter = view.scan_prefix(prefix, ..).await?;
+            return collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+                self.row_memory.as_ref(),
+            )
+            .await;
+        }
+        #[cfg(test)]
+        {
+            let mut iter = match self.db.storage() {
+                HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
+                HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
+            };
+            collect_limited(
+                &mut iter,
+                limit,
+                self.tenant_scope,
+                self.execution_control.clone(),
+                self.row_memory.as_ref(),
+            )
+            .await
+        }
+        #[cfg(not(test))]
+        {
+            Err(HelixDbError::InvariantViolation(
+                "storage prefix scan escaped its request read view".to_string(),
+            ))
+        }
+    }
+
+    /// Opens a resumable scan in the same request snapshot or write transaction.
+    pub(in crate::execution::interpreter) async fn open_raw_range(
+        &self,
+        start: Bytes,
+        end: Bytes,
+    ) -> Result<slatedb::DbIterator> {
+        self.check_execution_deadline()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
+        let (start, end) = keys::DataKey::data_range(self.tenant_scope, start, end);
+        if let Some(active) = self.active_write_tx() {
+            return Ok(active.txn.scan(start..end).await?);
+        }
+        if let Some(view) = self.request_read_view() {
+            return Ok(view.scan(start..end).await?);
+        }
+        #[cfg(test)]
+        {
+            Ok(match self.db.storage() {
+                HelixStorage::Reader(reader) => reader.scan(start..end).await?,
+                HelixStorage::Writer(writer) => writer.scan(start..end).await?,
+            })
+        }
+        #[cfg(not(test))]
+        {
+            Err(HelixDbError::InvariantViolation(
+                "storage range scan escaped its request read view".to_string(),
+            ))
+        }
     }
 
     /// Opens a resumable scan in the same request snapshot or write transaction.
@@ -183,6 +367,12 @@ impl<'db> ExecutionContext<'db> {
         prefix: Bytes,
     ) -> Result<slatedb::DbIterator> {
         self.check_execution_deadline()?;
+        if let Some(budget) = &self.row_memory {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            });
+        }
         let prefix = keys::DataKey::data_prefix(self.tenant_scope, prefix);
         if let Some(active) = self.active_write_tx() {
             return Ok(active.txn.scan_prefix(prefix, ..).await?);
@@ -215,21 +405,37 @@ async fn collect_limited(
     limit: Option<usize>,
     tenant_scope: crate::encoding::keys::scope::DataScope,
     execution_control: crate::execution_control::ExecutionControl,
+    budget: Option<&super::rows::memory::Budget>,
 ) -> Result<Vec<(Bytes, Bytes)>> {
     let mut rows = Vec::new();
     while let Some(kv) = iter.next().await? {
         execution_control.check()?;
+        if let Some(budget) = budget {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scan_rows: 1,
+                ..Default::default()
+            });
+        }
         let Some(key) = tenant_scope.strip_key(&kv.key) else {
             return Err(HelixDbError::InvariantViolation(
                 "tenant-scoped scan returned key outside tenant prefix".to_string(),
             ));
         };
-        rows.push((Bytes::copy_from_slice(key), kv.value));
+        let key = retain_read(kv.key.slice(kv.key.len() - key.len()..), budget)?;
+        let value = retain_read(kv.value, budget)?;
+        rows.push((key, value));
         if limit.is_some_and(|limit| rows.len() >= limit) {
             break;
         }
     }
     Ok(rows)
+}
+
+fn retain_read(bytes: Bytes, budget: Option<&super::rows::memory::Budget>) -> Result<Bytes> {
+    let Some(budget) = budget else {
+        return Ok(bytes);
+    };
+    budget.retain_read(bytes)
 }
 
 fn writer_from_storage(db: &HelixDB) -> std::result::Result<&HelixWriter, crate::HelixDbMode> {
@@ -247,6 +453,7 @@ fn writer_mode_required(mode: crate::HelixDbMode) -> HelixDbError {
 
 #[cfg(test)]
 mod tests {
+    use crate::transaction::Mutation;
     use helix_planner::context;
 
     use super::test_support;
@@ -292,6 +499,31 @@ mod tests {
             Some(Bytes::from_static(b"value"))
         );
         assert_eq!(ctx.get_raw(b"storage/get/missing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn limited_scans_return_nothing_for_a_zero_limit_and_check_the_deadline_first() {
+        let db = test_support::open_db("storage-limited-scan").await;
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let (start, end) = (Bytes::from_static(b"a"), Bytes::from_static(b"z"));
+        ctx.fail_deadline_after(0);
+        // A zero limit reads nothing, so an expired deadline never fails it.
+        assert!(ctx
+            .scan_raw_range_limited(start.clone(), end.clone(), Some(0))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(ctx
+            .scan_raw_prefix_limited(start.clone(), Some(0))
+            .await
+            .unwrap()
+            .is_empty());
+        // Otherwise an expired deadline fails before the scan opens.
+        assert!(ctx
+            .scan_raw_range_limited(start.clone(), end, Some(1))
+            .await
+            .is_err());
+        assert!(ctx.scan_raw_prefix_limited(start, None).await.is_err());
     }
 
     #[tokio::test]
@@ -562,6 +794,56 @@ mod tests {
         assert_eq!(limited.len(), 2);
         assert_eq!(limited[0].0, Bytes::from_static(b"storage/range/1"));
         assert_eq!(limited[1].0, Bytes::from_static(b"storage/range/2"));
+
+        // An admitted request records one scan and each returned row, and
+        // retains the rows only while the caller holds them.
+        let mut admitted = ExecutionContext::new(&db, context::ParamBindings::default());
+        let budget = crate::query_resources::Budget::new(1024 * 1024);
+        admitted.row_memory = Some(budget.clone());
+        let rows = admitted
+            .scan_raw_range_limited(
+                Bytes::from_static(b"storage/range/1"),
+                Bytes::from_static(b"storage/range/4"),
+                Some(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows, limited);
+        assert_eq!((budget.reads().scans, budget.reads().scan_rows), (1, 2));
+        assert!(budget.available() < 1024 * 1024);
+        drop(rows);
+        assert_eq!(budget.available(), 1024 * 1024);
+    }
+
+    /// With read reuse enabled, a multi-get first admits its lookup scratch.
+    /// A batch whose scratch exceeds the budget fails before storage is read
+    /// and releases the attempted admission.
+    #[tokio::test]
+    async fn reused_multi_get_admits_its_scratch_before_reading() {
+        let db = test_support::open_db("storage-reused-multi-get-scratch").await;
+        let budget = crate::query_resources::Budget::new(4 * 1024);
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.row_memory = Some(budget.clone());
+        ctx.enable_request_read_view().await.unwrap();
+        ctx.enable_request_read_cache(128 * 1024);
+        assert!(ctx.request_read_cache().is_some());
+        let admitted = budget.available();
+        let keys = (0..1024)
+            .map(|id| {
+                ctx.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                    id,
+                )))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            ctx.multi_get_raw(&keys).await,
+            Err(HelixDbError::QueryMemoryLimitExceeded)
+        ));
+        assert_eq!(budget.available(), admitted);
+        assert_eq!(budget.reads().multi_get_batches, 0);
+        ctx.close_request_read_view().unwrap();
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

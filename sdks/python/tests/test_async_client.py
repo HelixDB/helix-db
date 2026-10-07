@@ -109,6 +109,7 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
                 "with_api_key",
                 "request_builder",
                 "query",
+                "cypher",
                 "execute",
                 "base_url",
                 "close",

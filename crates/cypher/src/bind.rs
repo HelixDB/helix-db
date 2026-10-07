@@ -1,0 +1,1222 @@
+mod aggregation;
+use crate::syntax::{self as s, ExprKind as E};
+use helix_planner::relational::{self as r, QueryError, Result};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
+
+type Scope = BTreeMap<String, r::Slot>;
+
+/// Borrow an input scope or a projection overlay. Projection aliases take
+/// precedence, while DISTINCT/aggregation can restrict visibility to outputs.
+#[derive(Clone, Copy)]
+enum ScopeRef<'a> {
+    Single(&'a Scope),
+    Overlay {
+        primary: &'a Scope,
+        fallback: &'a Scope,
+    },
+}
+impl<'a> ScopeRef<'a> {
+    fn aggregate_input(self) -> Self {
+        match self {
+            Self::Single(_) => self,
+            Self::Overlay { fallback, .. } => Self::Single(fallback),
+        }
+    }
+    fn get(self, name: &str) -> Option<&'a r::Slot> {
+        match self {
+            Self::Single(scope) => scope.get(name),
+            Self::Overlay { primary, fallback } => primary.get(name).or_else(|| fallback.get(name)),
+        }
+    }
+}
+
+pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
+    if statement.clauses.is_empty() || statement.clauses.len() > 4096 {
+        return Err(QueryError::compile(
+            "SyntaxError",
+            "InvalidStatement",
+            "statement must contain between one and 4096 clauses",
+        ));
+    }
+    for clause in &statement.clauses {
+        let patterns = match clause {
+            s::Clause::Match { patterns, .. } | s::Clause::Create(patterns) => patterns,
+            s::Clause::Project { .. }
+            | s::Clause::Unwind { .. }
+            | s::Clause::Set(_)
+            | s::Clause::Remove(_)
+            | s::Clause::Delete { .. } => continue,
+        };
+        if patterns.is_empty()
+            || patterns
+                .iter()
+                .any(|pattern| pattern.nodes.len() != pattern.relationships.len().saturating_add(1))
+        {
+            return Err(QueryError::compile(
+                "SyntaxError",
+                "InvalidRelationshipPattern",
+                "patterns must alternate nodes and relationships",
+            ));
+        }
+    }
+    let mut binder = Binder {
+        bindings: Vec::new(),
+        scope: Scope::new(),
+        anonymous: 0,
+        deferred: None,
+    };
+    let result = bind_clauses(&mut binder, statement);
+    // Standard syntax and semantic errors take precedence over a deferred
+    // capability error, which in turn precedes any later capability error.
+    let Some(deferred) = binder.deferred else {
+        return result;
+    };
+    match result {
+        Err(error) if error.category != "UnsupportedFeature" => Err(error),
+        Ok(_) | Err(_) => Err(deferred),
+    }
+}
+
+fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Query> {
+    let mut operators = Vec::new();
+    let mut returns = Vec::new();
+    let mut anonymous_at_projection = 0;
+    for (position, clause) in statement.clauses.iter().enumerate() {
+        match clause {
+            s::Clause::Match {
+                patterns,
+                optional,
+                predicate,
+            } => {
+                let pattern = binder.pattern(patterns, *optional, false)?;
+                let predicate = predicate
+                    .as_ref()
+                    .map(|e| {
+                        binder
+                            .predicate(e, ScopeRef::Single(&binder.scope))
+                            .and_then(r::SelectionProgram::new)
+                    })
+                    .transpose()?;
+                operators.push(r::Operator::Match {
+                    pattern,
+                    optional: *optional,
+                    predicate,
+                });
+            }
+            s::Clause::Create(patterns) => {
+                operators.push(r::Operator::Create(binder.pattern(patterns, false, true)?))
+            }
+            s::Clause::Unwind { expression, name } => {
+                let expression =
+                    binder.expression(expression, ScopeRef::Single(&binder.scope), false)?;
+                if binder.scope.contains_key(name) {
+                    return Err(semantic(
+                        "VariableAlreadyBound",
+                        format!("{name} is already bound"),
+                    ));
+                }
+                let slot = binder.allocate(name.clone(), r::BindingType::Scalar, true)?;
+                binder.scope.insert(name.clone(), slot);
+                operators.push(r::Operator::Unwind { expression, slot });
+            }
+            s::Clause::Project {
+                returning,
+                items,
+                distinct,
+                ordering,
+                skip,
+                limit,
+                predicate,
+            } => {
+                if *returning && position + 1 != statement.clauses.len() {
+                    return Err(semantic(
+                        "InvalidClauseComposition",
+                        "RETURN must finish the statement",
+                    ));
+                }
+                // WITH * also discards anonymous pattern bindings. Only omit
+                // it when no such bindings have entered the row since the last
+                // projection; preserve modifiers and terminal RETURN handling.
+                if !returning
+                    && matches!(items.as_slice(), [s::Item::Wildcard])
+                    && !binder.scope.is_empty()
+                    && binder.anonymous == anonymous_at_projection
+                    && !distinct
+                    && ordering.is_empty()
+                    && skip.is_none()
+                    && limit.is_none()
+                    && predicate.is_none()
+                {
+                    continue;
+                }
+                let mut projections = Vec::new();
+                let mut output = Scope::new();
+                let first_output_binding = binder.bindings.len();
+                let mut columns = Vec::new();
+                let mut missing_alias = false;
+                for item in items {
+                    match item {
+                        s::Item::Wildcard => {
+                            if binder.scope.is_empty() {
+                                return Err(semantic(
+                                    "NoVariablesInScope",
+                                    "wildcard projection requires an input binding",
+                                ));
+                            }
+                            for (name, &slot) in &binder.scope {
+                                if output.insert(name.clone(), slot).is_some() {
+                                    return Err(semantic(
+                                        "ColumnNameConflict",
+                                        "duplicate projection name",
+                                    ));
+                                }
+                                projections.push(r::Projection {
+                                    slot,
+                                    expression: r::Expression::Slot(slot),
+                                });
+                                columns.push((name.clone(), slot));
+                            }
+                        }
+                        s::Item::Expression {
+                            expression,
+                            alias,
+                            text,
+                        } => {
+                            let name = match (alias, &expression.kind) {
+                                (Some(name), _) => name.clone(),
+                                (None, E::Variable(name)) => name.clone(),
+                                (None, _) if *returning => text.clone(),
+                                (None, _) => {
+                                    missing_alias = true;
+                                    text.clone()
+                                }
+                            };
+                            if output.contains_key(&name) {
+                                return Err(semantic(
+                                    "ColumnNameConflict",
+                                    format!("duplicate projection name {name}"),
+                                ));
+                            }
+                            let expression = binder.expression(
+                                expression,
+                                ScopeRef::Single(&binder.scope),
+                                true,
+                            )?;
+                            let value_type = expression.value_type(&binder.bindings)?;
+                            let kind = match &expression {
+                                r::Expression::Slot(slot) => binder.bindings[slot.0 as usize].kind,
+                                r::Expression::Literal(_)
+                                | r::Expression::Parameter(_)
+                                | r::Expression::Property(..)
+                                | r::Expression::Index(..)
+                                | r::Expression::Slice { .. }
+                                | r::Expression::Unary(..)
+                                | r::Expression::Binary(..)
+                                | r::Expression::Connective(..)
+                                | r::Expression::Function(..)
+                                | r::Expression::Aggregate { .. }
+                                | r::Expression::List(_)
+                                | r::Expression::Map(_)
+                                | r::Expression::Case { .. }
+                                | r::Expression::SimpleCase(_)
+                                | r::Expression::HasLabel(..) => match value_type {
+                                    r::ValueType::Node => r::BindingType::Node,
+                                    r::ValueType::Relationship => r::BindingType::Relationship,
+                                    r::ValueType::Path => r::BindingType::Path,
+                                    r::ValueType::Any
+                                    | r::ValueType::Null
+                                    | r::ValueType::Boolean
+                                    | r::ValueType::Integer
+                                    | r::ValueType::Float
+                                    | r::ValueType::String
+                                    | r::ValueType::List
+                                    | r::ValueType::Map => r::BindingType::Scalar,
+                                },
+                            };
+                            let slot = binder.allocate(name.clone(), kind, true)?;
+                            binder.bindings[slot.0 as usize].value_type = value_type;
+                            output.insert(name.clone(), slot);
+                            columns.push((name, slot));
+                            projections.push(r::Projection { slot, expression });
+                        }
+                    }
+                }
+                let aggregated = projections.iter().any(|p| p.expression.has_aggregate());
+                let mixed = projections.iter().any(|p| {
+                    p.expression.has_aggregate()
+                        && !matches!(p.expression, r::Expression::Aggregate { .. })
+                });
+                let full_scope = ScopeRef::Overlay {
+                    primary: &output,
+                    fallback: &binder.scope,
+                };
+                let order_scope = if *distinct || aggregated {
+                    ScopeRef::Single(&output)
+                } else {
+                    full_scope
+                };
+                let grouping = projections
+                    .iter()
+                    .filter(|p| !p.expression.has_aggregate())
+                    .map(|p| &p.expression)
+                    .collect::<Vec<_>>();
+                // M23 recognizes only variables and direct property/map access
+                // as grouping dependencies. Nested access must reach one of
+                // those keys; an arbitrary projected expression is insufficient.
+                for item in projections.iter().filter(|p| p.expression.has_aggregate()) {
+                    item.expression.try_visit_pruned(&mut |expression| {
+                        if matches!(expression, r::Expression::Aggregate { .. })
+                            || grouping.contains(&expression)
+                                && (matches!(expression, r::Expression::Slot(_))
+                                    || matches!(expression, r::Expression::Property(base, _) if matches!(base.as_ref(), r::Expression::Slot(_))))
+                        {
+                            return Ok(r::TraversalControl::Prune);
+                        }
+                        // Label predicates keep their node reference directly in the
+                        // variant; there is no Slot child for the visitor to find.
+                        let ungrouped = matches!(expression, r::Expression::Slot(_))
+                            || matches!(expression, r::Expression::HasLabel(slot, _) if !grouping.contains(&&r::Expression::Slot(*slot)));
+                        if ungrouped {
+                            return Err(semantic(
+                                "AmbiguousAggregationExpression",
+                                "aggregate expression references an ungrouped binding",
+                            ));
+                        }
+                        Ok(r::TraversalControl::Descend)
+                    })?;
+                }
+                let mut projected_index = None;
+                let mut aggregate_arguments = Vec::new();
+                if mixed && !ordering.is_empty() {
+                    for item in &projections {
+                        item.expression.try_visit_pruned(&mut |expression| {
+                            if matches!(expression, r::Expression::Aggregate { .. }) {
+                                aggregate_arguments.push((expression, ()));
+                                return Ok::<_, QueryError>(r::TraversalControl::Prune);
+                            }
+                            Ok(r::TraversalControl::Descend)
+                        })?;
+                    }
+                }
+                let available_aggregates =
+                    aggregation::ExpressionIndex::new(aggregate_arguments.into_iter())?;
+                let ordering = ordering
+                    .iter()
+                    .map(|(expression, descending)| {
+                        let expression = binder.expression(expression, full_scope, true)?;
+                        let has_aggregate = expression.has_aggregate();
+                        let expression = expression.rewrite_owned(&mut |e| {
+                            // Newly allocated outputs cannot occur in expressions
+                            // resolved against the incoming projection scope.
+                            if matches!(&e, r::Expression::Slot(slot)
+                                if slot.0 as usize >= first_output_binding)
+                            {
+                                return Ok(ControlFlow::Break(e));
+                            }
+                            let projected_index = match &mut projected_index {
+                                Some(index) => index,
+                                vacant @ None => vacant.insert(aggregation::ExpressionIndex::new(
+                                    projections.iter().map(|item| (&item.expression, item.slot)),
+                                )?),
+                            };
+                            let projected = if !has_aggregate
+                                || e.has_aggregate()
+                                || matches!(e, r::Expression::Slot(_) | r::Expression::Property(..))
+                            {
+                                projected_index.find(&e)?
+                            } else {
+                                None
+                            };
+                            let Some(projected) = projected else {
+                                if matches!(e, r::Expression::Aggregate { .. }) {
+                                    if mixed && available_aggregates.find(&e)?.is_some() {
+                                        return Ok(ControlFlow::Break(e));
+                                    }
+                                    return Err(semantic(
+                                        if aggregated {
+                                            "UndefinedVariable"
+                                        } else {
+                                            "InvalidAggregation"
+                                        },
+                                        "ORDER BY aggregate must be projected",
+                                    ));
+                                }
+                                let r::Expression::HasLabel(slot, label) = e else {
+                                    return Ok(ControlFlow::Continue(e));
+                                };
+                                let Some(projected) =
+                                    projected_index.find(&r::Expression::Slot(slot))?
+                                else {
+                                    return Ok(ControlFlow::Continue(r::Expression::HasLabel(
+                                        slot, label,
+                                    )));
+                                };
+                                return Ok(ControlFlow::Break(r::Expression::HasLabel(
+                                    projected, label,
+                                )));
+                            };
+                            Ok(ControlFlow::Break(r::Expression::Slot(projected)))
+                        })?;
+                        let mut unprojected = false;
+                        expression.try_visit_pruned(&mut |node| {
+                            if matches!(node, r::Expression::Aggregate { .. }) {
+                                return Ok::<_, QueryError>(r::TraversalControl::Prune);
+                            }
+                            let (r::Expression::Slot(slot) | r::Expression::HasLabel(slot, _)) =
+                                node
+                            else {
+                                return Ok(r::TraversalControl::Descend);
+                            };
+                            unprojected |= !output.values().any(|out| out == slot);
+                            Ok(r::TraversalControl::Descend)
+                        })?;
+                        if (*distinct || aggregated) && unprojected {
+                            let detail = if has_aggregate
+                                && grouping.iter().any(|e| {
+                                    !matches!(
+                                        e,
+                                        r::Expression::Slot(_) | r::Expression::Property(..)
+                                    )
+                                }) {
+                                "AmbiguousAggregationExpression"
+                            } else {
+                                "UndefinedVariable"
+                            };
+                            return Err(semantic(
+                                detail,
+                                "ORDER BY references an unprojected binding",
+                            ));
+                        }
+                        Ok(r::Ordering {
+                            expression,
+                            descending: *descending,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if missing_alias {
+                    return Err(semantic(
+                        "NoExpressionAlias",
+                        "WITH expressions require an alias",
+                    ));
+                }
+                let skip = skip.as_ref().map(|e| binder.bound(e)).transpose()?;
+                let limit = limit.as_ref().map(|e| binder.bound(e)).transpose()?;
+                let predicate = predicate
+                    .as_ref()
+                    .map(|e| {
+                        binder
+                            .predicate(e, order_scope)
+                            .and_then(r::SelectionProgram::new)
+                    })
+                    .transpose()?;
+                let (items, ordering) = if mixed {
+                    let (aggregate, post) =
+                        aggregation::split_projection(projections, &mut binder.bindings)?;
+                    let aggregate_index = aggregation::ExpressionIndex::new(
+                        aggregate
+                            .iter()
+                            .filter(|item| !ordering.is_empty() && item.expression.has_aggregate())
+                            .map(|item| (&item.expression, item.slot)),
+                    )?;
+                    let ordering = ordering
+                        .into_iter()
+                        .map(|order| {
+                            let expression = order.expression.rewrite_owned(&mut |node| {
+                                if !matches!(node, r::Expression::Aggregate { .. }) {
+                                    return Ok(ControlFlow::Continue(node));
+                                }
+                                let Some(slot) = aggregate_index.find(&node)? else {
+                                    return Err(semantic(
+                                        "UndefinedVariable",
+                                        "ORDER BY aggregate must be projected",
+                                    ));
+                                };
+                                Ok(ControlFlow::Break(r::Expression::Slot(slot)))
+                            })?;
+                            Ok(r::Ordering {
+                                expression,
+                                descending: order.descending,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    operators.push(r::Operator::Project {
+                        items: aggregate,
+                        distinct: false,
+                        ordering: vec![],
+                        predicate: None,
+                        skip: None,
+                        limit: None,
+                    });
+                    (post, ordering)
+                } else {
+                    (r::ProjectionProgram::new(projections)?, ordering)
+                };
+                // WHERE filters the rows a WITH returns, after its SKIP and
+                // LIMIT. Without a window the order is unobservable and
+                // filtering first is cheaper. After a window only the WITH's
+                // own bindings remain, so the predicate may use no other.
+                let (predicate, filter) = match predicate {
+                    Some(predicate) if skip.is_some() || limit.is_some() => {
+                        if !predicate.references().is_subset(items.outputs()) {
+                            return Err(semantic(
+                                "UndefinedVariable",
+                                "WHERE after SKIP or LIMIT may use only the bindings its WITH projects",
+                            ));
+                        }
+                        (None, Some(predicate))
+                    }
+                    predicate => (predicate, None),
+                };
+                operators.push(r::Operator::Project {
+                    items,
+                    distinct: *distinct,
+                    ordering,
+                    predicate,
+                    skip,
+                    limit,
+                });
+                operators.extend(filter.map(r::Operator::Filter));
+                binder.scope = output;
+                anonymous_at_projection = binder.anonymous;
+                if *returning {
+                    returns = columns;
+                }
+            }
+            s::Clause::Set(assignments) => {
+                let mut updates = Vec::new();
+                for assignment in assignments {
+                    updates.push(match assignment {
+                        s::Assignment::Property(target, value) => {
+                            let (entity, key) = binder.property_target(target)?;
+                            r::PropertyMutation::Set {
+                                entity,
+                                key,
+                                value: binder.expression(
+                                    value,
+                                    ScopeRef::Single(&binder.scope),
+                                    false,
+                                )?,
+                            }
+                        }
+                        s::Assignment::Replace(name, e) => r::PropertyMutation::Replace {
+                            entity: binder.entity(name)?,
+                            properties: binder.expression(
+                                e,
+                                ScopeRef::Single(&binder.scope),
+                                false,
+                            )?,
+                        },
+                        s::Assignment::Extend(name, e) => r::PropertyMutation::Extend {
+                            entity: binder.entity(name)?,
+                            properties: binder.expression(
+                                e,
+                                ScopeRef::Single(&binder.scope),
+                                false,
+                            )?,
+                        },
+                    });
+                }
+                operators.push(r::Operator::Update(updates));
+            }
+            s::Clause::Remove(expressions) => {
+                let updates = expressions
+                    .iter()
+                    .map(|e| {
+                        binder
+                            .property_target(e)
+                            .map(|(entity, key)| r::PropertyMutation::Remove { entity, key })
+                    })
+                    .collect::<Result<_>>()?;
+                operators.push(r::Operator::Update(updates));
+            }
+            s::Clause::Delete {
+                expressions,
+                detach,
+            } => operators.push(r::Operator::Delete {
+                entities: expressions
+                    .iter()
+                    .map(|e| {
+                        let expression =
+                            binder.expression(e, ScopeRef::Single(&binder.scope), false)?;
+                        if matches!(expression, r::Expression::HasLabel(..)) {
+                            return Err(semantic("InvalidDelete", "DELETE cannot remove a label"));
+                        }
+                        if !matches!(
+                            expression.value_type(&binder.bindings)?,
+                            r::ValueType::Any
+                                | r::ValueType::Null
+                                | r::ValueType::Node
+                                | r::ValueType::Relationship
+                                | r::ValueType::Path
+                        ) {
+                            return Err(semantic(
+                                "InvalidArgumentType",
+                                "DELETE requires graph entities or paths",
+                            ));
+                        }
+                        Ok(expression)
+                    })
+                    .collect::<Result<_>>()?,
+                detach: *detach,
+            }),
+        }
+    }
+    if !matches!(
+        statement.clauses.last(),
+        Some(
+            s::Clause::Project {
+                returning: true,
+                ..
+            } | s::Clause::Create(_)
+                | s::Clause::Set(_)
+                | s::Clause::Remove(_)
+                | s::Clause::Delete { .. }
+        )
+    ) {
+        return Err(semantic(
+            "InvalidClauseComposition",
+            "statement must end in RETURN or a mutation",
+        ));
+    }
+    r::Query::new(std::mem::take(&mut binder.bindings), operators, returns)
+}
+
+struct Binder {
+    bindings: Vec<r::Binding>,
+    scope: Scope,
+    anonymous: usize,
+    /// First capability error that does not affect binding. Binding continues
+    /// so that invalid openCypher still reports its standard error.
+    deferred: Option<QueryError>,
+}
+
+impl Binder {
+    fn bound(&self, e: &s::Expr) -> Result<r::Expression> {
+        let expression = self.expression(e, ScopeRef::Single(&self.scope), false)?;
+        if !expression.slots().is_empty() {
+            return Err(semantic(
+                "NonConstantExpression",
+                "SKIP and LIMIT cannot depend on row bindings",
+            ));
+        }
+        let r::Expression::Literal(value) = &expression else {
+            return Ok(expression);
+        };
+        match value {
+            r::Value::Integer(i) if *i >= 0 => {}
+            r::Value::Integer(_) => {
+                return Err(semantic(
+                    "NegativeIntegerArgument",
+                    "SKIP and LIMIT require nonnegative integers",
+                ))
+            }
+            r::Value::Null
+            | r::Value::Boolean(_)
+            | r::Value::Float(_)
+            | r::Value::String(_)
+            | r::Value::List(_)
+            | r::Value::Map(_)
+            | r::Value::Entity(_)
+            | r::Value::Path(_) => {
+                return Err(semantic(
+                    "InvalidArgumentType",
+                    "SKIP and LIMIT require integers",
+                ))
+            }
+        }
+        Ok(expression)
+    }
+    fn predicate(&self, e: &s::Expr, scope: ScopeRef<'_>) -> Result<r::Expression> {
+        let expression = self.boolean_expression(e, scope, false)?;
+        if !matches!(
+            expression.value_type(&self.bindings)?,
+            r::ValueType::Any | r::ValueType::Null | r::ValueType::Boolean
+        ) {
+            return Err(semantic(
+                "InvalidArgumentType",
+                "predicate requires a boolean",
+            ));
+        }
+        Ok(expression)
+    }
+
+    fn boolean_expression(
+        &self,
+        e: &s::Expr,
+        scope: ScopeRef<'_>,
+        allow_aggregate: bool,
+    ) -> Result<r::Expression> {
+        let E::PatternPredicate(variables) = &e.kind else {
+            return self.expression(e, scope, allow_aggregate);
+        };
+        // A pattern predicate cannot introduce variables in openCypher.
+        if let Some(name) = variables.iter().find(|name| scope.get(name).is_none()) {
+            return Err(semantic("UndefinedVariable", format!("{name} is not defined")).at(e.span));
+        }
+        Err(QueryError::unsupported("PatternExpression").at(e.span))
+    }
+
+    fn allocate(&mut self, name: String, kind: r::BindingType, nullable: bool) -> Result<r::Slot> {
+        if self.bindings.len() >= 4096 {
+            return Err(QueryError::compile(
+                "ResourceLimit",
+                "TooManyBindings",
+                "query exceeds 4096 bindings",
+            ));
+        }
+        let slot = r::Slot(self.bindings.len() as u32);
+        let value_type = match kind {
+            r::BindingType::Node => r::ValueType::Node,
+            r::BindingType::Relationship => r::ValueType::Relationship,
+            r::BindingType::Path => r::ValueType::Path,
+            r::BindingType::Scalar => r::ValueType::Any,
+        };
+        self.bindings.push(r::Binding {
+            name,
+            kind,
+            nullable,
+            value_type,
+        });
+        Ok(slot)
+    }
+    fn binding(
+        &mut self,
+        name: &Option<String>,
+        kind: r::BindingType,
+        nullable: bool,
+    ) -> Result<r::Slot> {
+        if let Some(name) = name {
+            if let Some(slot) = self.scope.get(name) {
+                if self.bindings[slot.0 as usize].kind != kind
+                    && !matches!(
+                        self.bindings[slot.0 as usize].value_type,
+                        r::ValueType::Any | r::ValueType::Null
+                    )
+                {
+                    return Err(semantic(
+                        "VariableTypeConflict",
+                        format!("{name} has an incompatible type"),
+                    ));
+                }
+                return Ok(*slot);
+            }
+            let slot = self.allocate(name.clone(), kind, nullable)?;
+            self.scope.insert(name.clone(), slot);
+            return Ok(slot);
+        }
+        let name = format!("@{}", self.anonymous);
+        self.anonymous += 1;
+        self.allocate(name, kind, nullable)
+    }
+    fn entity(&self, name: &str) -> Result<r::Slot> {
+        let Some(slot) = self.scope.get(name).copied() else {
+            return Err(semantic(
+                "UndefinedVariable",
+                format!("{name} is not defined"),
+            ));
+        };
+        if !matches!(
+            self.bindings[slot.0 as usize].kind,
+            r::BindingType::Node | r::BindingType::Relationship | r::BindingType::Scalar
+        ) {
+            return Err(semantic(
+                "InvalidArgumentType",
+                "mutation target must be a graph entity",
+            ));
+        }
+        Ok(slot)
+    }
+    fn property_target(&self, e: &s::Expr) -> Result<(r::Slot, String)> {
+        if matches!(e.kind, E::HasLabel(..)) {
+            return Err(QueryError::unsupported("LabelMutation").at(e.span));
+        }
+        let E::Property(target, key) = &e.kind else {
+            return Err(semantic("InvalidArgumentType", "expected entity.property"));
+        };
+        let E::Variable(name) = &target.kind else {
+            return Err(semantic(
+                "InvalidArgumentType",
+                "expected an entity variable",
+            ));
+        };
+        check_property(key)?;
+        Ok((self.entity(name)?, key.clone()))
+    }
+
+    fn pattern(
+        &mut self,
+        patterns: &[s::Pattern],
+        optional: bool,
+        create: bool,
+    ) -> Result<r::Pattern> {
+        if create
+            && patterns
+                .iter()
+                .flat_map(|p| &p.relationships)
+                .any(|rel| rel.direction == r::Direction::Undirected)
+        {
+            return Err(semantic(
+                "RequiresDirectedRelationship",
+                "CREATE requires a directed relationship",
+            ));
+        }
+        // Binding IDs grow monotonically. A name resolved below the entry
+        // boundary is incoming; a newly allocated or shadowed name is not.
+        let first_new_binding = self.bindings.len();
+        let mut nodes = Vec::new();
+        let mut relationships = Vec::new();
+        let mut paths = Vec::new();
+        for pattern in patterns {
+            let mut path_nodes = Vec::new();
+            let mut path_rels = Vec::new();
+            for node in &pattern.nodes {
+                if node.labels.len() > 1 {
+                    return Err(QueryError::unsupported("MultipleNodeLabels"));
+                }
+                if node.labels.iter().any(String::is_empty) {
+                    return Err(QueryError::unsupported("EmptyLabel"));
+                }
+                let slot = self.binding(&node.name, r::BindingType::Node, optional)?;
+                if create
+                    && slot.0 as usize >= first_new_binding
+                    && !nodes.iter().any(|(s, _)| *s == slot)
+                    && node.labels.len() != 1
+                {
+                    self.deferred
+                        .get_or_insert_with(|| QueryError::unsupported("NodeLabelRequired"));
+                }
+                if create
+                    && ((slot.0 as usize) < first_new_binding
+                        || nodes.iter().any(|(s, _)| *s == slot))
+                    && (!node.labels.is_empty()
+                        || node.has_properties
+                        || pattern.relationships.is_empty())
+                {
+                    return Err(semantic(
+                        "VariableAlreadyBound",
+                        "CREATE cannot redeclare a bound node",
+                    ));
+                }
+                path_nodes.push(slot);
+                nodes.push((slot, node));
+            }
+            for (i, rel) in pattern.relationships.iter().enumerate() {
+                if rel.types.iter().any(String::is_empty) {
+                    return Err(QueryError::unsupported("EmptyRelationshipType"));
+                }
+                if create && rel.direction == r::Direction::Undirected {
+                    return Err(semantic(
+                        "RequiresDirectedRelationship",
+                        "CREATE requires a directed relationship",
+                    ));
+                }
+                let slot = self.binding(&rel.name, r::BindingType::Relationship, optional)?;
+                if create
+                    && ((slot.0 as usize) < first_new_binding
+                        || relationships.iter().any(|(s, _, _, _)| *s == slot))
+                {
+                    return Err(semantic(
+                        "VariableAlreadyBound",
+                        "CREATE cannot redeclare a relationship",
+                    ));
+                }
+                if create && rel.types.len() != 1 {
+                    return Err(semantic(
+                        "NoSingleRelationshipType",
+                        "CREATE requires one type and a directed relationship",
+                    ));
+                }
+                if !create && relationships.iter().any(|(s, _, _, _)| *s == slot) {
+                    return Err(semantic(
+                        "RelationshipUniquenessViolation",
+                        "a relationship variable cannot repeat within one MATCH",
+                    ));
+                }
+                path_rels.push(slot);
+                relationships.push((slot, path_nodes[i], path_nodes[i + 1], rel));
+            }
+            if let Some(name) = &pattern.name {
+                if self.scope.contains_key(name) {
+                    return Err(semantic(
+                        "VariableAlreadyBound",
+                        format!("{name} is already bound"),
+                    ));
+                }
+                let slot = self.binding(&Some(name.clone()), r::BindingType::Path, optional)?;
+                paths.push(r::PathPattern {
+                    slot,
+                    nodes: path_nodes,
+                    relationships: path_rels,
+                });
+            }
+        }
+        let nodes = nodes
+            .into_iter()
+            .map(|(slot, node)| {
+                Ok(r::NodePattern {
+                    slot,
+                    label: node.labels.first().cloned(),
+                    properties: self.properties(&node.properties)?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let relationships = relationships
+            .into_iter()
+            .map(|(slot, from, to, rel)| {
+                Ok(r::RelationshipPattern {
+                    slot,
+                    from,
+                    to,
+                    direction: rel.direction,
+                    types: rel.types.clone(),
+                    properties: self.properties(&rel.properties)?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(r::Pattern {
+            nodes,
+            relationships,
+            paths,
+        })
+    }
+
+    fn properties(&self, properties: &[(String, s::Expr)]) -> Result<Vec<(String, r::Expression)>> {
+        let mut names = BTreeSet::new();
+        properties
+            .iter()
+            .map(|(name, e)| {
+                check_property(name)?;
+                if !names.insert(name) {
+                    return Err(semantic(
+                        "MapElementAccessByNonString",
+                        "duplicate property key",
+                    ));
+                }
+                Ok((
+                    name.clone(),
+                    self.expression(e, ScopeRef::Single(&self.scope), false)?,
+                ))
+            })
+            .collect()
+    }
+
+    fn expression(
+        &self,
+        e: &s::Expr,
+        scope: ScopeRef<'_>,
+        allow_aggregate: bool,
+    ) -> Result<r::Expression> {
+        let resolve = |e: &s::Expr| self.expression(e, scope, allow_aggregate);
+        let expression = match &e.kind {
+            E::Literal(v) => r::Expression::Literal(v.clone()),
+            E::Variable(name) => r::Expression::Slot(*scope.get(name).ok_or_else(|| {
+                semantic("UndefinedVariable", format!("{name} is not defined")).at(e.span)
+            })?),
+            E::Parameter(name) => r::Expression::Parameter(name.clone()),
+            E::PatternPredicate(_) => {
+                return Err(semantic(
+                    "UnexpectedSyntax",
+                    "a pattern predicate cannot be used as a scalar value",
+                )
+                .at(e.span))
+            }
+            E::Property(x, name) => {
+                check_property(name)?;
+                r::Expression::Property(Box::new(resolve(x)?), name.clone())
+            }
+            E::Index(a, b) => r::Expression::Index(Box::new(resolve(a)?), Box::new(resolve(b)?)),
+            E::Slice { value, start, end } => r::Expression::Slice {
+                value: Box::new(resolve(value)?),
+                start: start
+                    .as_ref()
+                    .map(|e| resolve(e).map(Box::new))
+                    .transpose()?,
+                end: end.as_ref().map(|e| resolve(e).map(Box::new)).transpose()?,
+            },
+            E::Unary(op, x) => r::Expression::Unary(
+                *op,
+                Box::new(if *op == r::Unary::Not {
+                    self.boolean_expression(x, scope, allow_aggregate)?
+                } else {
+                    resolve(x)?
+                }),
+            ),
+            E::Binary(op, a, b) => {
+                r::Expression::Binary(*op, Box::new(resolve(a)?), Box::new(resolve(b)?))
+            }
+            E::Connective(op, operands) => {
+                let operand = |e: &s::Expr| self.boolean_expression(e, scope, allow_aggregate);
+                let boolean = |operand: r::Expression| {
+                    let actual = operand.value_type(&self.bindings)?;
+                    if !matches!(
+                        actual,
+                        r::ValueType::Any | r::ValueType::Null | r::ValueType::Boolean
+                    ) {
+                        return Err(semantic(
+                            "InvalidArgumentType",
+                            format!("expected [Boolean], received {actual:?}"),
+                        ));
+                    }
+                    Ok(operand)
+                };
+                let [first, second, rest @ ..] = operands.as_ref() else {
+                    unreachable!("a connective has at least two operands");
+                };
+                // Report the error the left-associated chain this replaces
+                // would: it resolved its first two operands before checking
+                // either's type, then resolved and checked each later one.
+                let (first, second) = (operand(first)?, operand(second)?);
+                let (first, second) = (boolean(first)?, boolean(second)?);
+                let rest = rest
+                    .iter()
+                    .map(|e| boolean(operand(e)?))
+                    .collect::<Result<_>>()?;
+                r::Expression::Connective(
+                    *op,
+                    helix_planner::ir::AtLeast::from_pair_and_rest(first, second, rest),
+                )
+            }
+            E::List(xs) => r::Expression::List(xs.iter().map(resolve).collect::<Result<_>>()?),
+            E::Map(xs) => r::Expression::Map(
+                xs.iter()
+                    .map(|(name, x)| Ok((name.clone(), resolve(x)?)))
+                    .collect::<Result<_>>()?,
+            ),
+            E::HasLabel(x, label) => {
+                let r::Expression::Slot(slot) = resolve(x)? else {
+                    return Err(semantic(
+                        "InvalidArgumentType",
+                        "label predicate requires a node",
+                    ));
+                };
+                if self.bindings[slot.0 as usize].kind != r::BindingType::Node {
+                    return Err(semantic(
+                        "InvalidArgumentType",
+                        "label predicate requires a node",
+                    ));
+                }
+                r::Expression::HasLabel(slot, label.clone())
+            }
+            E::Case {
+                operand,
+                branches,
+                otherwise,
+            } => {
+                let operand = operand.as_ref().map(|e| resolve(e)).transpose()?;
+                let branches = branches
+                    .iter()
+                    .map(|(a, b)| {
+                        let condition = match &operand {
+                            Some(_) => resolve(a)?,
+                            None => self.boolean_expression(a, scope, allow_aggregate)?,
+                        };
+                        Ok((condition, resolve(b)?))
+                    })
+                    .collect::<Result<_>>()?;
+                let otherwise = otherwise
+                    .as_ref()
+                    .map(|e| resolve(e))
+                    .transpose()?
+                    .unwrap_or(r::Expression::Literal(r::Value::Null));
+                match operand {
+                    Some(operand) => r::Expression::SimpleCase(Box::new(r::SimpleCase {
+                        operand,
+                        branches: helix_planner::ir::AtLeast::try_from_vec(branches).ok_or_else(
+                            || semantic("InvalidCase", "CASE requires a WHEN branch"),
+                        )?,
+                        otherwise,
+                    })),
+                    None => r::Expression::Case {
+                        branches,
+                        otherwise: Box::new(otherwise),
+                    },
+                }
+            }
+            E::Call {
+                name,
+                arguments,
+                distinct,
+                star,
+            } => {
+                let name = name.to_ascii_lowercase();
+                let aggregate = match name.as_str() {
+                    "count" => Some(r::Aggregate::Count),
+                    "sum" => Some(r::Aggregate::Sum),
+                    "avg" => Some(r::Aggregate::Avg),
+                    "min" => Some(r::Aggregate::Min),
+                    "max" => Some(r::Aggregate::Max),
+                    "collect" => Some(r::Aggregate::Collect),
+                    _ => None,
+                };
+                if let Some(function) = aggregate {
+                    if !allow_aggregate {
+                        return Err(semantic(
+                            "InvalidAggregation",
+                            "aggregate is not allowed in this context",
+                        ));
+                    }
+                    if (*star && (function != r::Aggregate::Count || *distinct))
+                        || (!*star && arguments.len() != 1)
+                    {
+                        return Err(semantic(
+                            "InvalidNumberOfArguments",
+                            "aggregate requires one argument",
+                        ));
+                    }
+                    let argument = arguments
+                        .first()
+                        .map(|a| {
+                            let expression = self.expression(a, scope.aggregate_input(), true)?;
+                            if expression.has_aggregate() {
+                                return Err(semantic(
+                                    "NestedAggregation",
+                                    "aggregates cannot be nested",
+                                ));
+                            }
+                            Ok(Box::new(expression))
+                        })
+                        .transpose()?;
+                    r::Expression::Aggregate {
+                        function,
+                        argument,
+                        distinct: *distinct,
+                    }
+                } else {
+                    if *distinct || *star {
+                        return Err(semantic(
+                            "InvalidAggregation",
+                            "DISTINCT and * require an aggregate",
+                        ));
+                    }
+                    use r::Function as F;
+                    let (function, min, max) = match name.as_str() {
+                        "id" => (F::Id, 1, 1),
+                        "type" => (F::Type, 1, 1),
+                        "labels" => (F::Labels, 1, 1),
+                        "properties" => (F::Properties, 1, 1),
+                        "keys" => (F::Keys, 1, 1),
+                        "size" => (F::Size, 1, 1),
+                        "length" => (F::Length, 1, 1),
+                        "nodes" => (F::Nodes, 1, 1),
+                        "relationships" => (F::Relationships, 1, 1),
+                        "head" => (F::Head, 1, 1),
+                        "last" => (F::Last, 1, 1),
+                        "coalesce" => (F::Coalesce, 1, usize::MAX),
+                        "tostring" => (F::ToString, 1, 1),
+                        "tointeger" | "toint" => (F::ToInteger, 1, 1),
+                        "tofloat" => (F::ToFloat, 1, 1),
+                        "toboolean" => (F::ToBoolean, 1, 1),
+                        "exists" => (F::Exists, 1, 1),
+                        "abs" => (F::Abs, 1, 1),
+                        "range" => (F::Range, 2, 3),
+                        "reverse" => (F::Reverse, 1, 1),
+                        "trim" => (F::Trim, 1, 1),
+                        "ltrim" => (F::Ltrim, 1, 1),
+                        "rtrim" => (F::Rtrim, 1, 1),
+                        "tolower" => (F::ToLower, 1, 1),
+                        "toupper" => (F::ToUpper, 1, 1),
+                        "substring" => (F::Substring, 2, 3),
+                        _ if DEFERRED_FUNCTIONS.contains(&name.as_str()) => {
+                            return Err(
+                                QueryError::unsupported(&format!("Function:{name}")).at(e.span)
+                            )
+                        }
+                        _ => {
+                            return Err(semantic(
+                                "UnknownFunction",
+                                format!("{name} is not a known function"),
+                            )
+                            .at(e.span))
+                        }
+                    };
+                    if arguments.len() < min || arguments.len() > max {
+                        return Err(semantic(
+                            "InvalidNumberOfArguments",
+                            format!("wrong argument count for {name}"),
+                        ));
+                    }
+                    r::Expression::Function(
+                        function,
+                        arguments
+                            .iter()
+                            .map(|argument| {
+                                if function == F::Exists {
+                                    self.boolean_expression(argument, scope, allow_aggregate)
+                                } else {
+                                    resolve(argument)
+                                }
+                            })
+                            .collect::<Result<_>>()?,
+                    )
+                }
+            }
+        };
+        expression.value_type(&self.bindings)?;
+        Ok(expression)
+    }
+}
+
+/// Lowercase openCypher 9 built-in functions outside this profile. Calling one
+/// reports an unsupported capability; any other unrecognized name is unknown.
+const DEFERRED_FUNCTIONS: [&str; 47] = [
+    "acos",
+    "all",
+    "any",
+    "asin",
+    "atan",
+    "atan2",
+    "ceil",
+    "cos",
+    "cot",
+    "date",
+    "datetime",
+    "degrees",
+    "distance",
+    "duration",
+    "e",
+    "endnode",
+    "exp",
+    "floor",
+    "haversin",
+    "left",
+    "localdatetime",
+    "localtime",
+    "log",
+    "log10",
+    "none",
+    "percentilecont",
+    "percentiledisc",
+    "pi",
+    "point",
+    "radians",
+    "rand",
+    "reduce",
+    "replace",
+    "right",
+    "round",
+    "sign",
+    "sin",
+    "single",
+    "split",
+    "sqrt",
+    "startnode",
+    "stdev",
+    "stdevp",
+    "tail",
+    "tan",
+    "time",
+    "timestamp",
+];
+
+fn semantic(detail: &str, message: impl Into<String>) -> QueryError {
+    QueryError::compile("SyntaxError", detail, message)
+}
+
+fn check_property(name: &str) -> Result<()> {
+    if name.starts_with('$') {
+        Err(QueryError::unsupported("ReservedPropertyName"))
+    } else {
+        Ok(())
+    }
+}

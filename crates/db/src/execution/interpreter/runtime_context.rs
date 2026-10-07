@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arrayvec::ArrayVec;
-use slatedb::DbTransaction;
 
 use super::*;
 
@@ -45,7 +44,7 @@ impl ProjectionReadCounters {
 }
 
 pub(in crate::execution::interpreter) struct ActiveWriteTx {
-    pub(in crate::execution::interpreter) txn: DbTransaction,
+    pub(in crate::execution::interpreter) txn: crate::transaction::Owned,
     pub(in crate::execution::interpreter) index_context: super::mutation::MutationIndexContext,
 }
 
@@ -269,6 +268,11 @@ impl RequestWriteScopeState {
 
 pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) db: &'db HelixDB,
+    pub(in crate::execution::interpreter) row_memory: Option<super::rows::memory::Budget>,
+    /// Immutable relationship types remain observable through references after
+    /// deletion in the same statement. Reservations live with the cached types.
+    pub(in crate::execution::interpreter) row_relationship_types:
+        BTreeMap<u64, (String, super::rows::memory::Reservation)>,
     pub(in crate::execution::interpreter) tenant_scope: crate::encoding::keys::scope::DataScope,
     pub(in crate::execution::interpreter) params: ParamBindingsOwnership,
     pub(in crate::execution::interpreter) variables: ExecutionValueStore<ir::NonEmptyString>,
@@ -360,6 +364,8 @@ impl<'db> ExecutionContext<'db> {
     ) -> Self {
         Self {
             db,
+            row_memory: None,
+            row_relationship_types: BTreeMap::new(),
             tenant_scope,
             params: ParamBindingsOwnership::Unique(params),
             variables: ExecutionValueStore::default(),

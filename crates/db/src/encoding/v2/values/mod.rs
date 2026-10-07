@@ -2,6 +2,8 @@
 
 pub mod adjacency;
 mod codec;
+#[cfg(test)]
+mod delta_encoding_tests;
 pub(crate) mod edge_endpoints;
 mod global;
 pub(crate) mod id_allocation;

@@ -4,6 +4,7 @@ members = [
     "crates/ast",
     "crates/graph-algorithms",
     "crates/planner",
+    "crates/cypher",
     "crates/server",
     "sdks/rust",
     "crates/cli",
@@ -11,6 +12,7 @@ members = [
     "crates/metrics",
     "crates/db-testkit",
     "crates/value-semantics",
+    "tools/opencypher-tck",
 ]
 exclude = ["bindings/uniffi-bindgen"]
 resolver = "3"

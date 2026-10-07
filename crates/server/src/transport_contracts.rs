@@ -965,6 +965,27 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .starts_with("invalid query JSON:"));
     assert_eq!(malformed_json.get("code"), None);
 
+    // A deeply nested value under an unknown key is rejected before parsing
+    // rather than skipped recursively on the handler's stack.
+    let nested = router
+        .clone()
+        .oneshot(
+            HttpRequest::post("/v2/query")
+                .body(Body::from(format!("{{\"x\":{}", "[".repeat(100_000))))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(nested.status(), StatusCode::BAD_REQUEST);
+    let nested_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(nested.into_body(), 4_096).await.unwrap())
+            .expect("nesting error is JSON");
+    assert_eq!(nested_json["error"], "invalid_query_json");
+    assert!(nested_json["msg"]
+        .as_str()
+        .expect("error message is a string")
+        .contains("nesting"));
+
     let oversized = router
         .clone()
         .oneshot(

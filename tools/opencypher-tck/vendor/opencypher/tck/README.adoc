@@ -1,0 +1,259 @@
+ifdef::env-github,env-browser[:outfilesuffix: .adoc]
+= The Cypher Technology Compatibility Kit (TCK)
+
+This subdirectory contains the Cypher TCK.
+The TCK consists of a number of https://cucumber.io/[Cucumber] `.feature` files, which specify four things:
+
+* The required initial state of the graph; i.e. the graph prior to the execution of `Q`, the Cypher query of interest
+* `Q`, along with any required parameter names and values
+* Expected results from executing `Q`, or expected errors if `Q` was an invalid query
+** See <<results-format>> for a description of how the results are formatted
+* Expected side effects from executing `Q`
+
+== Installation instructions
+
+For JVM-based implementations, there is a Scala API which parses and provides the TCK as an in-memory object structure, where the implementation simply has to hook in via implementing a small interface.
+For details, see the link:../tools/tck-api/README.adoc[TCK tools README].
+
+If this API is unavailable on your platform, you can integrate the TCK via Cucumber, either by depending on the TCK via Maven, or by copying the feature files directly from this repository.
+
+.Maven coordinates for the TCK:
+[source, xml]
+----
+<dependency>
+    <groupId>org.opencypher</groupId>
+    <artifactId>tck</artifactId>
+</dependency>
+----
+
+== Format of a TCK scenario
+
+Each TCK feature file is made up of scenarios (see the https://cucumber.io/docs/cucumber[Cucumber documentation] for more on this), and these all follow the schematic setup described here.
+
+[source,gherkin]
+.This scenario illustrates the effects of executing a query `Q` which creates a node with one property, where the property value is given by a parameter.
+----
+Scenario: Creating a node
+    Given an empty graph // <1>
+    And after having executed:
+      """
+      CREATE () // <2>
+      """
+    And parameter values are: // <3>
+      | parameter | 0 |
+    When executing query:
+      """
+      CREATE ({property: $parameter}) // <4>
+      """
+    Then the result should be empty // <5>
+    And the side effects should be: // <6>
+      | +nodes      | 1 |
+      | +properties | 1 |
+----
+[source,gherkin]
+.This scenario illustrates the effects of executing a query `Q` - matching all nodes and returning one of them - on the graph <GRAPH_NAME>.
+----
+Scenario: Returning a single node
+    Given the <GRAPH_NAME> graph // <1>
+    When executing query:
+      """
+      MATCH (n)
+      RETURN n
+      LIMIT 1 // <4>
+      """
+    Then the result should be, in any order: // <5>
+      | n  |
+      | () |
+----
+[source,gherkin]
+.This scenario illustrates the effects of executing a query `Q` - matching all nodes and returning one of them - on the graph <GRAPH_NAME>.
+----
+Scenario: Indexing a list with a string
+    Given any graph // <1>
+    When executing query: WITH [0] AS expr, 'x' AS idx RETURN expr[idx] // <4>
+    Then a TypeError should be raised at runtime: ListElementAccessByNonInteger // <7>
+----
+<1> This step specifies the required initial state of the graph. `<GRAPH_NAME>` is the name of one of the specified graphs for initial states (read more in <<named-graphs>>).
+<2> This step is used to specify an initialization query by scenarios that require certain patterns to exist in the graph.
+<3> If `Q` uses parameters, this step will specify a two-column table detailing the required parameter names and values. The parameter values are in the same format as the expected results.
+<4> The actual Cypher query, `Q`.
+<5> This step specifies the expected results of executing `Q`, represented in a table format if not empty. The first row contains the column names, and subsequent rows contain values. However, if `Q` contains a `RETURN` clause with an `ORDER BY` subclause, then this line should instead be `Then the result should be, in order:`, thus ensuring that the result table will be ordered by the first column appearing after `ORDER BY`.
+<6> This step specifies the expected side effects of executing `Q`, with the side effect name and the relevant quantity. Read about the possible side effects in <<side-effects>>.
+<7> This step specifies the expected error that should be raised by executing the invalid `Q`. This step is described in detail in <<errors>>.
+
+[[named-graphs]]
+=== Graphs for initial states
+
+The keyword `Given` in the TCK's scenarios specifies the required initial state for the scenario.
+In order to not obfuscate the purpose of the scenario - which is to display the behaviour of the query - the initial state is usually simple.
+Certain queries do require a more complex graph structure in order to yield less obvious behavior, and in these cases a named graph included in the TCK must be set up by the implementation before the query is executed.
+
+The TCK currently contains these named graphs:
+
+* binary-tree-1
+** A binary tree of depth 4, with only label `:X` on non-root nodes, and three different relationship types.
+* binary-tree-2
+** A binary tree of depth 4, with labels `:X` or `:Y` on non-root nodes, and three different relationship types.
+
+For instructions on how to use the named graph descriptions and metadata, please see link:graphs/named-graphs.adoc[Named Graphs].
+
+[[side-effects]]
+=== Side effects of executing a query
+
+A Cypher query that contains write clauses may have side effects that are persisted in the graph.
+A side effect is either the addition (denoted by `+`) or the removal (`-`) of one of the following:
+
+* A node, denoted by `nodes`
+* A relationship, denoted by `relationships`
+* A property, denoted by `properties`
+* A label, denoted by `labels`
+
+An unspecified quantity implies that it is expected to be zero.
+If the side effects step reads `And no side effects`, this implies that all quantities are expected to be zero.
+
+For 'negative' tests, where errors are expected (see <<errors>>), it is implied that the graph suffers no side effects.
+
+==== Observability of side effects
+
+In order for a side effect to be reported, it has to be _observable_ from the point of view of a subsequent Cypher query executed against the same graph.
+This means that side effects that are only temporarily in effect during the execution of a query are not measured in this metric.
+
+For example, the query `CREATE (n) DELETE n`, which creates a node only to immediately delete it, may be correctly implemented as a no-op by a Cypher implementation, and a TCK scenario featuring it should not specify any side effects.
+
+Concretely, observability of each metric is defined by one Cypher query per metric, which will present the metric as the difference in returned records from executing the query before and after the query `Q` under test.
+These defining queries are listed in the following.
+
+===== Nodes
+
+.Observability of the `nodes` metric:
+[source, cypher]
+----
+MATCH (n)
+RETURN n
+----
+
+===== Relationships
+
+.Observability of the `relationships` metric:
+[source, cypher]
+----
+MATCH ()-[r]->()
+RETURN r
+----
+
+===== Properties
+
+.Observability of the `properties` metric:
+[source, cypher]
+----
+MATCH (n)
+UNWIND keys(n) AS key
+WITH properties(n) AS properties, key, n
+RETURN n AS entity, key, properties[key] AS value
+UNION ALL
+MATCH ()-[r]->()
+UNWIND keys(r) AS key
+WITH properties(r) AS properties, key, r
+RETURN r AS entity, key, properties[key] AS value
+----
+
+Note that in the definition above, a property is defined as the triple of containing entity, key, and value.
+Therefore the operation of moving a property from one entity to another will be noted as one removal and one addition in the side effects.
+Likewise, the operation of changing the value of a property is noted as one removal and one addition in the side effects.
+
+===== Labels
+
+.Observability of the `labels` metric:
+[source, cypher]
+----
+MATCH (n)
+UNWIND labels(n) AS label
+RETURN DISTINCT label
+----
+
+Note that this definition measures the amount of distinct labels present in the graph, and not the amount of nodes that are assigned these labels.
+
+[[results-format]]
+=== Format of the expected results
+
+Values that can be returned from Cypher can be categorized into three groups: primitives (integers, floats, booleans, and strings), containers (lists and maps), and graph elements (nodes, relationships, and paths).
+Please refer to the https://github.com/opencypher/openCypher/blob/master/cip/1.accepted/CIP2015-09-16-public-type-system-type-annotation.adoc[Cypher Type System specification] for more information about types and values in Cypher.
+
+Unless there is an `ORDER BY` present in the `RETURN` clause of the Cypher query, Cypher provides no guarantees as to the order in which the records are returned.
+In theory, this means that executing the same query twice could yield the same records returned in different orders.
+For this reason, the rows of the expected results table are to be considered a set, rather than a list, unless the above condition on the `RETURN` clause is met.
+
+* Primitives:
+** An integer will be written as a simple string of decimal digits.
+** A float will be written in decimal form with all present decimals, or in scientific form, or with the strings `NaN`, `Inf`, or `-Inf` for the IEEE 754 special values.
+** A string will be written as a string of unicode characters, wrapped in single quotes.
+*** Note that Cypher makes no difference between single and double quotes (when used as string indicators), but the TCK will always use single quotes in the expected values.
+** A boolean will be written as the string `true` or `false`.
+** A null value will be written as the string `null`.
+
+* Containers:
+** A list will be written as `[v~0~, v~1~, ..., v~n~]`, where `v~i~` are the values contained in the list.
+*** Lists in Cypher may contain any combination of values, including lists (nesting).
+** A map will be written as `{k~0~: v~0~, k~1~: v~1~, ..., k~n~: v~n~}`, where `k~i~` are the keys and `v~i~` the values of the map.
+*** Map keys in Cypher are strings (with some constraints), while values may be of any type.
+
+* Graph elements:
+** A node with labels `L1` and `L2`, and properties `p` and `q` with values `0` and `'string'`, respectively, will be written as `(:L1:L2 {p: 0, q: 'string'})`.
+** A relationship with type `T`, and properties as the node above, will be written as `[:T {p: 0, q: 'string'}]`.
+** A path will be written as `<n~0~-r~1~\->n~1~\<-r~2~- ... -r~k~\->n~k~>`, where `n~i~` and `r~i~` are the nodes and relationships, respectively, that make up the path.
+*** Note that the relationship direction is always specified and may be left-to-right or right-to-left, as exemplified in the outline.
+*** Note that the smallest possible path, with length zero, consists of one node and zero relationships.
+
+=== Downloading the TCK
+
+In order to implement the Cypher TCK, you will have to retrieve the full suite of TCK feature files, which are best found at the http://www.opencypher.org/#resources[openCypher website] (stable and snapshot) or in this GitHub repository under `features`.
+
+The TCK feature files are also included in the `resources` path of a Maven JAR archive that is periodically released as part of the openCypher release process.
+Find the latest version via https://search.maven.org/#search%7Cgav%7C1%7Cg%3A%22org.opencypher%22%20AND%20a%3A%22tck%22[Maven Central].
+
+[[errors]]
+=== Cypher errors
+
+The `Then` step used to specify expected errors from running a given invalid query follows this schematic setup:
+
+ Then a TYPE should be raised at PHASE: DETAIL
+
+TYPE will be one of the following error types:
+
+// these are initially taken from Neo4j kernel's Status.Statement class' ClientErrors
+- SyntaxError                    "The statement contains invalid or unsupported syntax."
+- SemanticError                  "The statement is syntactically valid, but expresses something that the database cannot do."
+- ParameterMissing               "The statement refers to a parameter that was not provided in the request."
+- ConstraintVerificationFailed   "A constraint imposed by the statement is violated by the data in the database."
+- ConstraintValidationFailed     "A constraint imposed by the database was violated."
+- EntityNotFound                 "The statement refers to a non-existent entity."
+- PropertyNotFound               "The statement refers to a non-existent property."
+- LabelNotFound                  "The statement refers to a non-existent label."
+- TypeError                      "The statement is attempting to perform operations on values with types that are not supported by the operation."
+- ArgumentError                  "The statement is attempting to perform operations using invalid arguments."
+- ArithmeticError                "Invalid use of an arithmetic operation, such as dividing by zero."
+
+PHASE will be either `runtime` or `compile time`.
+
+DETAIL is a more fine-grained categorization of the error, and will describe the actual circumstance that caused the error to happen.
+
+== Property naming
+
+TCK might be executed on graph databases with a schema. To avoid errors when values with different types are assigned to properties with the same name, following property names are suggested:
+
+|===
+| Type | Property name
+
+| Variable types | `var`
+| Integer | `num`
+| String | `name`
+| Float | `price`
+| Temporal | `date`, `created`
+| Boolean | `ok`
+| List | plural of type e.g. `numbers`, `names`...
+|===
+
+== License
+
+The Cypher TCK is licensed with http://www.apache.org/licenses/LICENSE-2.0[Apache license 2.0], which is inherited from the containing `openCypher` project.
+Read more in the link:../README.adoc[`openCypher` README].

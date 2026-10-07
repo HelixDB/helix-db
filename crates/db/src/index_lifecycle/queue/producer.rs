@@ -11,8 +11,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use slatedb::DbTransaction;
-
 use crate::config::ActiveTextMutationLimits;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
@@ -111,7 +109,7 @@ impl StagedQueueWrites {
     pub(crate) async fn reserve(
         &self,
         backlog: &Arc<IndexOperationBacklog>,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<BacklogReservation> {
         let mut blocked: Vec<BlockedBuild> = Vec::new();
         loop {

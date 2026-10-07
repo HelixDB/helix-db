@@ -1,0 +1,685 @@
+use super::Value;
+use std::{collections::BTreeSet, ops::ControlFlow};
+
+/// A logical Query binding index. RowProgram relocates these fields into its
+/// private execution-cell space; its operators must not be used as a Query.
+/// Both representations resolve references by index, never by runtime name.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct Slot(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Unary {
+    Not,
+    Negate,
+    Positive,
+    IsNull,
+    IsNotNull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Binary {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Power,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    In,
+    StartsWith,
+    EndsWith,
+    Contains,
+}
+
+/// A Boolean connective over two or more operands, evaluated in written order
+/// with Cypher's three-valued logic. A chain of one connective is a single flat
+/// node, so its length never adds nesting depth:
+///
+/// - `And` returns false at the first false operand without evaluating later
+///   ones; otherwise null if any operand was null, else true.
+/// - `Or` returns true at the first true operand without evaluating later
+///   ones; otherwise null if any operand was null, else false.
+/// - `Xor` evaluates every operand and returns null if any was null, else
+///   whether an odd number of operands were true.
+///
+/// ```
+/// use helix_planner::{ir, relational as r};
+/// let expression = r::Expression::Connective(
+///     r::Connective::And,
+///     ir::AtLeast::from_pair_and_rest(
+///         r::Expression::Slot(r::Slot(0)),
+///         r::Expression::Literal(r::Value::Boolean(true)),
+///         vec![r::Expression::Slot(r::Slot(1))],
+///     ),
+/// );
+/// assert_eq!(expression.slots(), [r::Slot(0), r::Slot(1)].into());
+/// expression.validate_shape().unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Connective {
+    And,
+    Or,
+    Xor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Function {
+    Id,
+    Type,
+    Labels,
+    Properties,
+    Keys,
+    Size,
+    Length,
+    Nodes,
+    Relationships,
+    Head,
+    Last,
+    Coalesce,
+    ToString,
+    ToInteger,
+    ToFloat,
+    ToBoolean,
+    Exists,
+    Abs,
+    Range,
+    Reverse,
+    Trim,
+    Ltrim,
+    Rtrim,
+    ToLower,
+    ToUpper,
+    Substring,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Aggregate {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Collect,
+}
+
+/// A simple CASE owns its operand once and requires a first alternative.
+/// Comparison values and selected results remain lazy; the evaluator supplies
+/// its frontend's equality semantics. Boxing this owner keeps ordinary scalar
+/// expression nodes from growing with CASE-specific state.
+///
+/// ```
+/// use helix_planner::{ir, relational as r};
+/// let expression = r::Expression::SimpleCase(Box::new(r::SimpleCase {
+///     operand: r::Expression::Slot(r::Slot(0)),
+///     branches: ir::AtLeast::from_one((
+///         r::Expression::Literal(r::Value::Integer(1)),
+///         r::Expression::Slot(r::Slot(1)),
+///     )),
+///     otherwise: r::Expression::Literal(r::Value::Null),
+/// }));
+/// assert_eq!(expression.slots(), [r::Slot(0), r::Slot(1)].into());
+/// expression.validate_shape().unwrap();
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SimpleCase<E> {
+    pub operand: E,
+    pub branches: crate::ir::AtLeast<(E, E), 1>,
+    pub otherwise: E,
+}
+
+/// Frontend-independent expression shape. The operation and literal domains
+/// encode semantic differences (for example native two-valued comparisons and
+/// Cypher null propagation), without retaining either frontend's syntax tree.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ScalarExpression<L, U, B, F, C = std::convert::Infallible> {
+    Literal(L),
+    Slot(Slot),
+    Parameter(String),
+    Property(Box<Self>, String),
+    Index(Box<Self>, Box<Self>),
+    Slice {
+        value: Box<Self>,
+        start: Option<Box<Self>>,
+        end: Option<Box<Self>>,
+    },
+    Unary(U, Box<Self>),
+    Binary(B, Box<Self>, Box<Self>),
+    /// A flat chain of one connective. Operands are visited, rewritten and
+    /// evaluated in written order; a frontend without connectives uses the
+    /// uninhabited default and cannot construct this variant.
+    Connective(C, crate::ir::AtLeast<Self, 2>),
+    Function(F, Vec<Self>),
+    Aggregate {
+        function: Aggregate,
+        argument: Option<Box<Self>>,
+        distinct: bool,
+    },
+    List(Vec<Self>),
+    Map(Vec<(String, Self)>),
+    Case {
+        branches: Vec<(Self, Self)>,
+        otherwise: Box<Self>,
+    },
+    SimpleCase(Box<SimpleCase<Self>>),
+    HasLabel(Slot, String),
+}
+
+/// Whether a borrowed preorder visitor should descend into this node's children.
+/// Pruning still visits the node itself and continues with its later siblings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalControl {
+    Descend,
+    Prune,
+}
+
+/// Resolved expressions with Cypher's graph-value and scalar semantics.
+pub type Expression = ScalarExpression<Value, Unary, Binary, Function, Connective>;
+
+impl Expression {
+    /// Slots requiring graph hydration. Identity, paths, and ordinary scalar
+    /// operations need no property reads; dynamic property access is conservative.
+    pub fn graph_requirements(&self, out: &mut std::collections::BTreeMap<Slot, PropertyDemand>) {
+        self.try_graph_requirements(|slot, requirement| {
+            let demand = out.entry(slot).or_default();
+            match (demand, requirement) {
+                (PropertyDemand::All, _) => {}
+                (demand, PropertyRequirement::All) => *demand = PropertyDemand::All,
+                (PropertyDemand::Keys(keys), PropertyRequirement::Key(key)) => {
+                    if !keys.contains(key) {
+                        keys.insert(key.to_owned());
+                    }
+                }
+                (PropertyDemand::Keys(_), PropertyRequirement::Metadata) => {}
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("owned requirement collection is infallible");
+    }
+
+    /// Visit borrowed graph demands without allocating transient slot sets or
+    /// copying property names. A slot/key may occur more than once; the consumer
+    /// owns deduplication and can reject growth before allocating its state.
+    /// The first consumer error stops traversal immediately. Callers must use
+    /// validated expressions, as with the other recursive expression visitors.
+    ///
+    /// ```
+    /// use helix_planner::relational::{Expression, PropertyRequirement, Slot};
+    /// let expression = Expression::Property(Box::new(Expression::Slot(Slot(2))), "name".into());
+    /// let mut visited = Vec::new();
+    /// expression.try_graph_requirements(|slot, demand| {
+    ///     visited.push((slot, demand));
+    ///     Ok::<_, ()>(())
+    /// }).unwrap();
+    /// assert_eq!(visited, [(Slot(2), PropertyRequirement::Key("name"))]);
+    /// ```
+    pub fn try_graph_requirements<'a, E>(
+        &'a self,
+        mut visit: impl FnMut(Slot, PropertyRequirement<'a>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.try_visit(&mut |expression| {
+            let mut slots = |value: &'a Self, demand| {
+                value.try_visit(&mut |candidate| match candidate {
+                    Self::Slot(slot) | Self::HasLabel(slot, _) => visit(*slot, demand),
+                    _ => Ok(()),
+                })
+            };
+            match expression {
+                Self::Property(value, key) => slots(value, PropertyRequirement::Key(key)),
+                Self::HasLabel(..) => slots(expression, PropertyRequirement::Metadata),
+                Self::Index(value, index)
+                    if !matches!(index.as_ref(), Self::Literal(Value::Integer(_))) =>
+                {
+                    slots(value, PropertyRequirement::All)
+                }
+                Self::Function(Function::Labels | Function::Type, args) => args
+                    .iter()
+                    .try_for_each(|arg| slots(arg, PropertyRequirement::Metadata)),
+                Self::Function(Function::Properties | Function::Keys, args) => args
+                    .iter()
+                    .try_for_each(|arg| slots(arg, PropertyRequirement::All)),
+                _ => Ok(()),
+            }
+        })
+    }
+
+    /// Check shape before recursive visitors or evaluation cross the plan boundary.
+    pub fn validate_shape(&self) -> super::Result<()> {
+        let mut pending = vec![(self, 0_usize)];
+        let mut count = 0;
+        while let Some((expression, depth)) = pending.pop() {
+            count += 1;
+            if depth >= super::MAX_EXPRESSION_DEPTH || count > super::MAX_EXPRESSION_NODES {
+                return Err(super::QueryError::compile(
+                    "ResourceLimit",
+                    "ExpressionDepth",
+                    "expression exceeds validated structural limits",
+                ));
+            }
+            let mut child = |e| pending.push((e, depth + 1));
+            match expression {
+                Self::Literal(value) => value.validate_shape()?,
+                Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(..) => {}
+                Self::Property(x, _) | Self::Unary(_, x) => child(x.as_ref()),
+                Self::Index(a, b) | Self::Binary(_, a, b) => {
+                    child(a.as_ref());
+                    child(b.as_ref());
+                }
+                Self::Slice { value, start, end } => {
+                    child(value.as_ref());
+                    for e in start.iter().chain(end.iter()) {
+                        child(e.as_ref());
+                    }
+                }
+                Self::List(xs) => xs.iter().for_each(child),
+                Self::Connective(_, xs) => xs.iter().for_each(child),
+                Self::Map(xs) => xs.iter().for_each(|(_, e)| child(e)),
+                Self::Case {
+                    branches,
+                    otherwise,
+                } => {
+                    child(otherwise.as_ref());
+                    for (a, b) in branches {
+                        child(a);
+                        child(b);
+                    }
+                }
+                Self::SimpleCase(case) => {
+                    child(&case.operand);
+                    child(&case.otherwise);
+                    for (when, then) in &case.branches {
+                        child(when);
+                        child(then);
+                    }
+                }
+                Self::Function(function, args) => {
+                    let valid = match function {
+                        Function::Coalesce => !args.is_empty(),
+                        Function::Range | Function::Substring => (2..=3).contains(&args.len()),
+                        _ => args.len() == 1,
+                    };
+                    if !valid {
+                        return Err(super::QueryError::compile(
+                            "InternalPlannerError",
+                            "FunctionArity",
+                            "resolved function has incompatible argument count",
+                        ));
+                    }
+                    args.iter().for_each(child);
+                }
+                Self::Aggregate {
+                    function,
+                    argument,
+                    distinct,
+                } => {
+                    if argument.is_none() && (*function != Aggregate::Count || *distinct) {
+                        return Err(super::QueryError::compile(
+                            "InternalPlannerError",
+                            "AggregateArity",
+                            "only count(*) permits no argument",
+                        ));
+                    }
+                    if let Some(argument) = argument {
+                        child(argument.as_ref());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<L, U, B, F, C> ScalarExpression<L, U, B, F, C> {
+    /// Consume and rewrite nodes in preorder without cloning their payloads.
+    /// `Break(replacement)` replaces the subtree without visiting its children;
+    /// `Continue(node)` descends into that node in the ordinary visitor order.
+    /// The first error stops traversal and drops all remaining owned values.
+    /// Callers must validate input depth and keep returned subtrees within the
+    /// same structural limits before using this recursive operation.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// use std::ops::ControlFlow;
+    /// let expression = r::Expression::List(vec![r::Expression::Slot(r::Slot(0))]);
+    /// let rewritten = expression.rewrite_owned(&mut |node| {
+    ///     let r::Expression::Slot(slot) = node else {
+    ///         return Ok::<_, ()>(ControlFlow::Continue(node));
+    ///     };
+    ///     Ok(ControlFlow::Break(r::Expression::Slot(r::Slot(slot.0 + 1))))
+    /// }).unwrap();
+    /// assert_eq!(rewritten.slots(), std::collections::BTreeSet::from([r::Slot(1)]));
+    /// ```
+    pub fn rewrite_owned<E>(
+        self,
+        replace: &mut impl FnMut(Self) -> Result<ControlFlow<Self, Self>, E>,
+    ) -> Result<Self, E> {
+        let expression = match replace(self)? {
+            ControlFlow::Break(replacement) => return Ok(replacement),
+            ControlFlow::Continue(expression) => expression,
+        };
+        let mut rewrite = |value: Self| value.rewrite_owned(replace);
+        Ok(match expression {
+            leaf @ (Self::Literal(_) | Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(..)) => {
+                leaf
+            }
+            Self::Property(value, key) => Self::Property(Box::new(rewrite(*value)?), key),
+            Self::Index(a, b) => Self::Index(Box::new(rewrite(*a)?), Box::new(rewrite(*b)?)),
+            Self::Slice { value, start, end } => Self::Slice {
+                value: Box::new(rewrite(*value)?),
+                start: start
+                    .map(|value| rewrite(*value).map(Box::new))
+                    .transpose()?,
+                end: end.map(|value| rewrite(*value).map(Box::new)).transpose()?,
+            },
+            Self::Unary(op, value) => Self::Unary(op, Box::new(rewrite(*value)?)),
+            Self::Binary(op, a, b) => {
+                Self::Binary(op, Box::new(rewrite(*a)?), Box::new(rewrite(*b)?))
+            }
+            Self::Connective(op, operands) => Self::Connective(op, operands.try_map(&mut rewrite)?),
+            Self::Function(function, args) => Self::Function(
+                function,
+                args.into_iter()
+                    .map(&mut rewrite)
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::List(values) => Self::List(
+                values
+                    .into_iter()
+                    .map(&mut rewrite)
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Map(values) => Self::Map(
+                values
+                    .into_iter()
+                    .map(|(key, value)| Ok((key, rewrite(value)?)))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Case {
+                branches,
+                otherwise,
+            } => Self::Case {
+                branches: branches
+                    .into_iter()
+                    .map(|(a, b)| Ok((rewrite(a)?, rewrite(b)?)))
+                    .collect::<Result<_, _>>()?,
+                otherwise: Box::new(rewrite(*otherwise)?),
+            },
+            Self::SimpleCase(case) => {
+                let SimpleCase {
+                    operand,
+                    branches,
+                    otherwise,
+                } = *case;
+                Self::SimpleCase(Box::new(SimpleCase {
+                    operand: rewrite(operand)?,
+                    branches: branches
+                        .try_map(|(when, then)| Ok::<_, E>((rewrite(when)?, rewrite(then)?)))?,
+                    otherwise: rewrite(otherwise)?,
+                }))
+            }
+            Self::Aggregate {
+                function,
+                argument,
+                distinct,
+            } => Self::Aggregate {
+                function,
+                argument: argument
+                    .map(|value| rewrite(*value).map(Box::new))
+                    .transpose()?,
+                distinct,
+            },
+        })
+    }
+
+    pub fn visit(&self, f: &mut impl FnMut(&Self)) {
+        self.try_visit(&mut |expression| {
+            f(expression);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("infallible expression visitor");
+    }
+
+    /// Traverse in preorder, stopping at the first visitor error. This visitor
+    /// borrows each expression and allocates no traversal stack on the heap.
+    /// The caller must validate structural depth before recursive traversal.
+    pub fn try_visit<'a, E>(
+        &'a self,
+        f: &mut impl FnMut(&'a Self) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.try_visit_pruned(&mut |expression| f(expression).map(|()| TraversalControl::Descend))
+    }
+
+    /// Borrow nodes in preorder, optionally pruning a subtree. No expression
+    /// payload or heap traversal stack is copied. Errors stop immediately;
+    /// structural depth must be validated before recursive traversal.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// let expression = r::Expression::List(vec![
+    ///     r::Expression::Slot(r::Slot(0)),
+    ///     r::Expression::Aggregate {
+    ///         function: r::Aggregate::Count,
+    ///         argument: Some(Box::new(r::Expression::Slot(r::Slot(1)))),
+    ///         distinct: false,
+    ///     },
+    /// ]);
+    /// let mut slots = Vec::new();
+    /// expression.try_visit_pruned(&mut |node| {
+    ///     if matches!(node, r::Expression::Aggregate { .. }) {
+    ///         return Ok::<_, ()>(r::TraversalControl::Prune);
+    ///     }
+    ///     let r::Expression::Slot(slot) = node else {
+    ///         return Ok(r::TraversalControl::Descend);
+    ///     };
+    ///     slots.push(*slot);
+    ///     Ok(r::TraversalControl::Descend)
+    /// }).unwrap();
+    /// assert_eq!(slots, [r::Slot(0)]);
+    /// ```
+    pub fn try_visit_pruned<'a, E>(
+        &'a self,
+        f: &mut impl FnMut(&'a Self) -> Result<TraversalControl, E>,
+    ) -> Result<(), E> {
+        if f(self)? == TraversalControl::Prune {
+            return Ok(());
+        }
+        match self {
+            Self::Property(x, _) | Self::Unary(_, x) => x.try_visit_pruned(f)?,
+            Self::Index(a, b) | Self::Binary(_, a, b) => {
+                a.try_visit_pruned(f)?;
+                b.try_visit_pruned(f)?;
+            }
+            Self::Slice { value, start, end } => {
+                value.try_visit_pruned(f)?;
+                for x in start.iter().chain(end.iter()) {
+                    x.try_visit_pruned(f)?;
+                }
+            }
+            Self::Function(_, xs) | Self::List(xs) => {
+                for x in xs {
+                    x.try_visit_pruned(f)?;
+                }
+            }
+            Self::Connective(_, xs) => {
+                for x in xs {
+                    x.try_visit_pruned(f)?;
+                }
+            }
+            Self::Aggregate { argument, .. } => {
+                argument.iter().try_for_each(|x| x.try_visit_pruned(f))?;
+            }
+            Self::Map(xs) => {
+                for (_, x) in xs {
+                    x.try_visit_pruned(f)?;
+                }
+            }
+            Self::Case {
+                branches,
+                otherwise,
+            } => {
+                for (a, b) in branches {
+                    a.try_visit_pruned(f)?;
+                    b.try_visit_pruned(f)?;
+                }
+                otherwise.try_visit_pruned(f)?;
+            }
+            Self::SimpleCase(case) => {
+                case.operand.try_visit_pruned(f)?;
+                for (when, then) in &case.branches {
+                    when.try_visit_pruned(f)?;
+                    then.try_visit_pruned(f)?;
+                }
+                case.otherwise.try_visit_pruned(f)?;
+            }
+            Self::Literal(_) | Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(_, _) => {}
+        }
+        Ok(())
+    }
+
+    pub fn slots(&self) -> BTreeSet<Slot> {
+        let mut slots = BTreeSet::new();
+        self.visit(&mut |x| {
+            if let Self::Slot(s) | Self::HasLabel(s, _) = x {
+                slots.insert(*s);
+            }
+        });
+        slots
+    }
+
+    pub fn has_aggregate(&self) -> bool {
+        let mut found = false;
+        self.visit(&mut |x| {
+            found |= matches!(x, Self::Aggregate { .. });
+        });
+        found
+    }
+}
+
+impl<L: Clone, U: Copy, B: Copy, F: Clone, C: Copy> ScalarExpression<L, U, B, F, C> {
+    /// Rewrite resolved expressions without reconstructing frontend syntax.
+    /// Returning a replacement stops traversal into that subtree.
+    pub fn rewrite(
+        &self,
+        replace: &mut impl FnMut(&Self) -> super::Result<Option<Self>>,
+    ) -> super::Result<Self> {
+        if let Some(value) = replace(self)? {
+            return Ok(value);
+        }
+        let mut rewrite = |value: &Self| value.rewrite(replace);
+        Ok(match self {
+            Self::Literal(_) | Self::Slot(_) | Self::Parameter(_) | Self::HasLabel(..) => {
+                self.clone()
+            }
+            Self::Property(value, key) => Self::Property(Box::new(rewrite(value)?), key.clone()),
+            Self::Index(a, b) => Self::Index(Box::new(rewrite(a)?), Box::new(rewrite(b)?)),
+            Self::Slice { value, start, end } => Self::Slice {
+                value: Box::new(rewrite(value)?),
+                start: start
+                    .as_ref()
+                    .map(|e| rewrite(e).map(Box::new))
+                    .transpose()?,
+                end: end.as_ref().map(|e| rewrite(e).map(Box::new)).transpose()?,
+            },
+            Self::Unary(op, x) => Self::Unary(*op, Box::new(rewrite(x)?)),
+            Self::Binary(op, a, b) => {
+                Self::Binary(*op, Box::new(rewrite(a)?), Box::new(rewrite(b)?))
+            }
+            Self::Connective(op, operands) => Self::Connective(*op, operands.try_map_ref(rewrite)?),
+            Self::Function(f, args) => Self::Function(
+                f.clone(),
+                args.iter().map(rewrite).collect::<super::Result<_>>()?,
+            ),
+            Self::List(xs) => Self::List(xs.iter().map(rewrite).collect::<super::Result<_>>()?),
+            Self::Map(xs) => Self::Map(
+                xs.iter()
+                    .map(|(k, v)| Ok((k.clone(), rewrite(v)?)))
+                    .collect::<super::Result<_>>()?,
+            ),
+            Self::Case {
+                branches,
+                otherwise,
+            } => {
+                let branches = branches
+                    .iter()
+                    .map(|(a, b)| Ok((rewrite(a)?, rewrite(b)?)))
+                    .collect::<super::Result<_>>()?;
+                Self::Case {
+                    branches,
+                    otherwise: Box::new(rewrite(otherwise)?),
+                }
+            }
+            Self::SimpleCase(case) => Self::SimpleCase(Box::new(SimpleCase {
+                operand: rewrite(&case.operand)?,
+                branches: case.branches.try_map_ref(|(when, then)| {
+                    Ok::<_, super::QueryError>((rewrite(when)?, rewrite(then)?))
+                })?,
+                otherwise: rewrite(&case.otherwise)?,
+            })),
+            Self::Aggregate {
+                function,
+                argument,
+                distinct,
+            } => Self::Aggregate {
+                function: *function,
+                argument: argument
+                    .as_ref()
+                    .map(|e| rewrite(e).map(Box::new))
+                    .transpose()?,
+                distinct: *distinct,
+            },
+        })
+    }
+}
+
+/// One borrowed hydration requirement. Metadata includes existence and label/type;
+/// All includes metadata and every user property. Consumers may merge duplicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyRequirement<'a> {
+    Metadata,
+    Key(&'a str),
+    All,
+}
+
+/// Property demand permits late hydration without conflating a missing key
+/// with a key that was never requested. Metadata is always decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropertyDemand {
+    Keys(BTreeSet<String>),
+    All,
+}
+
+impl Default for PropertyDemand {
+    fn default() -> Self {
+        Self::Keys(BTreeSet::new())
+    }
+}
+
+impl PropertyDemand {
+    pub fn merge(&mut self, other: &Self) {
+        match (&mut *self, other) {
+            (Self::All, _) => {}
+            (_, Self::All) => *self = Self::All,
+            (Self::Keys(keys), Self::Keys(other)) => {
+                // Do not allocate temporary strings for already requested keys.
+                for key in other {
+                    if keys.contains(key) {
+                        continue;
+                    }
+                    keys.insert(key.clone());
+                }
+            }
+        }
+    }
+    pub fn contains(&self, key: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Keys(keys) => keys.contains(key),
+        }
+    }
+}

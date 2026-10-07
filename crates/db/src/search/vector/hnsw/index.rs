@@ -794,7 +794,7 @@ impl<D: Distance> VectorIndex<D> {
     )]
     pub async fn insert(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: NodeId,
         vector: &[f32],
     ) -> Result<(), HelixDbError> {
@@ -809,7 +809,7 @@ impl<D: Distance> VectorIndex<D> {
     )]
     async fn insert_with_contract(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: NodeId,
         vector: &[f32],
         contract: VectorInsertContract,
@@ -953,7 +953,7 @@ impl<D: Distance> VectorIndex<D> {
     )]
     async fn insert_with_contract_at_layer(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: NodeId,
         vector: &[f32],
         contract: VectorInsertContract,
@@ -980,7 +980,7 @@ impl<D: Distance> VectorIndex<D> {
     /// resolver as multi-item loads, so a cached SimHash avoids its row read.
     pub(in crate::search::vector) async fn get_item_for_layer_cached(
         &self,
-        txn: &DbTransaction,
+        txn: &(impl DbReadOps + Send + Sync),
         layer: u16,
         node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
@@ -1008,7 +1008,7 @@ impl<D: Distance> VectorIndex<D> {
     /// canonical payload tokens through typed storage.
     pub(in crate::search::vector) async fn get_items_for_layer_cached_batch(
         &self,
-        txn: &DbTransaction,
+        txn: &(impl DbReadOps + Send + Sync),
         layer: u16,
         node_ids: &[NodeId],
         mutation_cache: &mut MutationOpCache<D>,
@@ -1051,7 +1051,7 @@ impl<D: Distance> VectorIndex<D> {
     /// authoritative negative lookups. Present items are inserted in `result`.
     async fn load_uncached_items_for_layer(
         &self,
-        txn: &DbTransaction,
+        txn: &(impl DbReadOps + Send + Sync),
         layer: u16,
         mut missing: Vec<NodeId>,
         mutation_cache: &mut MutationOpCache<D>,

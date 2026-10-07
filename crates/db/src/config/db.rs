@@ -168,12 +168,22 @@ impl HelixConfig {
     }
 }
 
+/// Embedded query telemetry is inherited only when explicitly allowed by this
+/// policy. Disabling it takes precedence over persisted and environment settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryTelemetry {
+    FromEnvironment,
+    Disabled,
+}
+
 /// User/runtime DB settings.
 ///
 /// Indexes are deliberately excluded. Dynamic index definitions live in runtime
 /// metadata and are loaded into the DB runtime state when the DB opens.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
+    /// Per-handle embedded telemetry policy; never stored in the database.
+    query_telemetry: QueryTelemetry,
     /// Default encoding type for edges (0 = none, 1 = EFP)
     default_encoding_type: EdgeEncoding,
 
@@ -233,6 +243,7 @@ impl DbConfig {
     /// Create a new configuration with default tuning.
     pub fn new() -> Self {
         Self {
+            query_telemetry: QueryTelemetry::FromEnvironment,
             default_encoding_type: EdgeEncoding::None,
             enable_wal: true,
             max_concurrent_reads: NonZeroUsize::new(64)
@@ -251,6 +262,24 @@ impl DbConfig {
             index_operation_queue: super::IndexOperationQueueTuning::default(),
             open_attribution: None,
         }
+    }
+
+    /// Override embedded query telemetry for this handle. Disabled never reads
+    /// persisted telemetry settings and never starts a telemetry transport.
+    ///
+    /// ```
+    /// use db::{DbConfig, config::QueryTelemetry};
+    /// let config = DbConfig::new().with_query_telemetry(QueryTelemetry::Disabled);
+    /// assert_eq!(config.query_telemetry(), QueryTelemetry::Disabled);
+    /// assert_eq!(DbConfig::new().query_telemetry(), QueryTelemetry::FromEnvironment);
+    /// ```
+    pub fn with_query_telemetry(mut self, policy: QueryTelemetry) -> Self {
+        self.query_telemetry = policy;
+        self
+    }
+
+    pub const fn query_telemetry(&self) -> QueryTelemetry {
+        self.query_telemetry
     }
 
     /// Build source-specific local defaults for an embedded handle.

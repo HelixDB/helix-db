@@ -1,0 +1,1 @@
+{"request_type":"read","query_name":null,"query":{"read":{"entries":[{"query":{"name":"text_hits","root":{"value_map":{"input":{"text_search_nodes":{"label":"ParityUser","property":"bio","query_text":{"value":{"string":"graph"}},"k":{"literal":5}}},"properties":["externalId","bio","$distance"]}}}}],"returns":["text_hits"]}}}

@@ -11,6 +11,9 @@
 // exercising the real encoding sources without creating test-only DTO copies.
 pub use db::{config, error, search};
 
+#[path = "../src/allocation_testing.rs"]
+mod allocation_testing;
+
 #[path = "../src/index_lifecycle/model.rs"]
 mod index_lifecycle_model;
 pub(crate) use index_lifecycle_model::*;

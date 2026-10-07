@@ -199,6 +199,7 @@ mod tests {
                 .with_strong_text_search_max_analysis_bytes(
                     std::num::NonZeroU64::new(2 << 20).unwrap(),
                 ),
+            cypher: crate::CypherEndpoints::Disabled,
         };
         let Err(error) = open_database(Role::Reader, QueueLayout::Map, &config).await else {
             panic!("a memory reader cannot share the writer's storage");
@@ -305,6 +306,7 @@ mod tests {
                 cache: crate::config::CacheConfig::Memory,
             },
             index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+            cypher: crate::CypherEndpoints::Disabled,
         };
         let writer = open_database(Role::Writer, QueueLayout::Map, &config)
             .await

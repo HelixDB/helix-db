@@ -46,7 +46,8 @@ jobs:
   workspace-tests:
     name: Workspace tests
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    # Two build jobs compile the whole workspace before any test runs.
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: "0"

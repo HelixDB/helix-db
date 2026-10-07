@@ -8,7 +8,7 @@ use helix_ast::expr::Predicate;
 use helix_planner::catalog;
 
 use super::super::super::ExecutionContext;
-use super::super::filter::RECORD_BATCH_ROWS;
+use super::super::RECORD_BATCH_ROWS;
 use super::support::*;
 
 async fn run(

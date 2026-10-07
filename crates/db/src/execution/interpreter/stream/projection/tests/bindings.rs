@@ -23,7 +23,10 @@ async fn binding_projection_reads_current_binding_and_coalesced_values() {
 
     assert_eq!(
         ctx.binding_target(&row, &ir::BindingTargetPlan::Current),
-        Some((ElementRef::Node(current), RowVirtualProperties::empty()))
+        Some((
+            &ElementRef::Node(current),
+            Some(&RowVirtualProperties::empty())
+        ))
     );
     assert_eq!(
         ctx.binding_projection(

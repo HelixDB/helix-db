@@ -35,6 +35,10 @@ type HelixError struct {
 	StatusCode int
 	Retryable  *bool
 	Err        error
+	// ServerDetails holds the raw JSON of the server's structured error
+	// details, or is empty when the server sent none. A string keeps
+	// HelixError comparable.
+	ServerDetails string
 }
 
 func (e *HelixError) Error() string {
@@ -396,19 +400,21 @@ func (c *Client) Close() error {
 
 func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError {
 	var envelope struct {
-		Error     string  `json:"error"`
-		Msg       *string `json:"msg"`
-		Code      *string `json:"code"`
-		Retryable *bool   `json:"retryable"`
+		Details   json.RawMessage `json:"details"`
+		Error     string          `json:"error"`
+		Msg       *string         `json:"msg"`
+		Code      *string         `json:"code"`
+		Retryable *bool           `json:"retryable"`
 	}
 	if json.Unmarshal(body, &envelope) == nil && envelope.Error != "" {
 		if envelope.Msg != nil {
 			return &HelixError{
-				Kind:       ErrorRemote,
-				Code:       QueryErrorCode(envelope.Error),
-				Details:    *envelope.Msg,
-				StatusCode: statusCode,
-				Retryable:  envelope.Retryable,
+				Kind:          ErrorRemote,
+				Code:          QueryErrorCode(envelope.Error),
+				Details:       *envelope.Msg,
+				StatusCode:    statusCode,
+				Retryable:     envelope.Retryable,
+				ServerDetails: string(envelope.Details),
 			}
 		}
 		code := QueryErrorCode("")
@@ -416,11 +422,12 @@ func decodeRemoteError(body []byte, fallback string, statusCode int) *HelixError
 			code = QueryErrorCode(*envelope.Code)
 		}
 		return &HelixError{
-			Kind:       ErrorRemote,
-			Code:       code,
-			Details:    envelope.Error,
-			StatusCode: statusCode,
-			Retryable:  envelope.Retryable,
+			Kind:          ErrorRemote,
+			Code:          code,
+			Details:       envelope.Error,
+			StatusCode:    statusCode,
+			Retryable:     envelope.Retryable,
+			ServerDetails: string(envelope.Details),
 		}
 	}
 	details := string(body)

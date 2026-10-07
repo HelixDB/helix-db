@@ -7,6 +7,45 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ir::NonEmptyString;
 
+/// Borrowed comparison domain. Numeric widths remain in owned literals; only
+/// ordering identifies them through the exact common numeric kernel.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RangeLiteralRef<'a> {
+    Number(CanonicalNumber),
+    DateTime(i64),
+    String(&'a str),
+}
+
+impl<'a> RangeLiteralRef<'a> {
+    pub(crate) fn new(value: &'a PropertyValue) -> Option<Self> {
+        match value {
+            PropertyValue::I64(value) => Some(Self::Number(CanonicalNumber::from_i64(*value))),
+            PropertyValue::F64(value) => CanonicalNumber::from_f64(*value).map(Self::Number),
+            PropertyValue::F32(value) => CanonicalNumber::from_f32(*value).map(Self::Number),
+            PropertyValue::DateTime(value) => Some(Self::DateTime(*value)),
+            PropertyValue::String(value) => Some(Self::String(value)),
+            PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::Bytes(_)
+            | PropertyValue::I64Array(_)
+            | PropertyValue::F64Array(_)
+            | PropertyValue::F32Array(_)
+            | PropertyValue::StringArray(_)
+            | PropertyValue::Array(_)
+            | PropertyValue::Object(_) => None,
+        }
+    }
+
+    pub(crate) fn compare(self, other: Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Number(left), Self::Number(right)) => Some(left.cmp(&right)),
+            (Self::DateTime(left), Self::DateTime(right)) => Some(left.cmp(&right)),
+            (Self::String(left), Self::String(right)) => Some(left.cmp(right)),
+            _ => None,
+        }
+    }
+}
+
 /// Range-index lookup value.
 ///
 /// Range indexes can only be bounded by ordered scalar literals or runtime
@@ -201,43 +240,20 @@ impl RangeIndexLiteral {
     }
 
     pub(super) fn partial_cmp_same_type(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (
-                Self::I64(_) | Self::F64(_) | Self::F32(_),
-                Self::I64(_) | Self::F64(_) | Self::F32(_),
-            ) => {
-                let left = match self {
-                    Self::I64(value) => CanonicalNumber::from_i64(*value),
-                    Self::F64(value) => {
-                        CanonicalNumber::from_f64(value.get()).expect("range f64 excludes NaN")
-                    }
-                    Self::F32(value) => {
-                        CanonicalNumber::from_f32(value.get()).expect("range f32 excludes NaN")
-                    }
-                    Self::DateTime(_) | Self::String(_) => {
-                        unreachable!("numeric range arm contains only numbers")
-                    }
-                };
-                let right = match other {
-                    Self::I64(value) => CanonicalNumber::from_i64(*value),
-                    Self::F64(value) => {
-                        CanonicalNumber::from_f64(value.get()).expect("range f64 excludes NaN")
-                    }
-                    Self::F32(value) => {
-                        CanonicalNumber::from_f32(value.get()).expect("range f32 excludes NaN")
-                    }
-                    Self::DateTime(_) | Self::String(_) => {
-                        unreachable!("numeric range arm contains only numbers")
-                    }
-                };
-                Some(left.cmp(&right))
-            }
-            (Self::DateTime(left), Self::DateTime(right)) => Some(left.cmp(right)),
-            (Self::String(left), Self::String(right)) => Some(left.cmp(right)),
-            (
-                Self::I64(_) | Self::DateTime(_) | Self::F64(_) | Self::F32(_) | Self::String(_),
-                _,
-            ) => None,
+        self.as_borrowed().compare(other.as_borrowed())
+    }
+
+    fn as_borrowed(&self) -> RangeLiteralRef<'_> {
+        match self {
+            Self::I64(value) => RangeLiteralRef::Number(CanonicalNumber::from_i64(*value)),
+            Self::F64(value) => RangeLiteralRef::Number(
+                CanonicalNumber::from_f64(value.get()).expect("range f64 excludes NaN"),
+            ),
+            Self::F32(value) => RangeLiteralRef::Number(
+                CanonicalNumber::from_f32(value.get()).expect("range f32 excludes NaN"),
+            ),
+            Self::DateTime(value) => RangeLiteralRef::DateTime(*value),
+            Self::String(value) => RangeLiteralRef::String(value),
         }
     }
 }

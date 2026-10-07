@@ -591,7 +591,7 @@ impl QueueStore {
     /// it.
     pub(crate) fn stage_enqueue(
         &self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         target: QueueTarget,
         operand: QueueOperand,
         operations: &[QueuedOperation],

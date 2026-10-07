@@ -40,5 +40,6 @@ pub mod optimizer;
 pub mod physical;
 pub mod planning;
 pub mod properties;
+pub mod relational;
 pub mod rules;
 pub mod trace;

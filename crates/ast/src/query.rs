@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::de::{MapAccess, Visitor};
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::batch::{BatchQuery, ReadBatch, WriteBatch};
@@ -42,7 +42,33 @@ pub enum QueryRequestType {
 }
 
 /// JSON-compatible query parameter value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Each variant serializes as its bare JSON form. Deserialization maps JSON
+/// back onto the variants: integers become [`QueryValue::I64`] when they fit
+/// and [`QueryValue::F64`] otherwise, other numbers become
+/// [`QueryValue::F64`], and a repeated object key keeps its last value. JSON
+/// never produces [`QueryValue::F32`]; typed `f32` parameters normalize into
+/// it.
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use helix_ast::query::QueryValue;
+/// let value: QueryValue =
+///     sonic_rs::from_str(r#"[null, -1, 18446744073709551615, 0.5, "a\n", {"k": 1, "k": true}]"#)
+///         .unwrap();
+/// assert_eq!(
+///     value,
+///     QueryValue::Array(vec![
+///         QueryValue::Null,
+///         QueryValue::I64(-1),
+///         QueryValue::F64(u64::MAX as f64),
+///         QueryValue::F64(0.5),
+///         QueryValue::String("a\n".to_owned()),
+///         QueryValue::Object(BTreeMap::from([("k".to_owned(), QueryValue::Bool(true))])),
+///     ])
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum QueryValue {
     /// Null.
@@ -61,6 +87,94 @@ pub enum QueryValue {
     Array(Vec<QueryValue>),
     /// Object.
     Object(BTreeMap<String, QueryValue>),
+}
+
+/// Builds each value directly from the deserializer's events. A derived
+/// untagged impl buffers the value and then copies every nested subtree once
+/// per level while it tries variants, so its peak memory grows with depth
+/// times size.
+impl<'de> Deserialize<'de> for QueryValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct QueryValueVisitor;
+
+        impl<'de> Visitor<'de> for QueryValueVisitor {
+            type Value = QueryValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(QueryValue::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(QueryValue::Null)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                QueryValue::deserialize(deserializer)
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(QueryValue::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(QueryValue::I64(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(i64::try_from(value).map_or(QueryValue::F64(value as f64), QueryValue::I64))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(QueryValue::F64(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(QueryValue::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(QueryValue::String(value))
+            }
+
+            // `visit_seq` and `visit_map` recurse once per level of request
+            // nesting, so they use plain loops: iterator adapters here made
+            // each level's release-build stack frame about half again larger.
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element()? {
+                    values.push(value);
+                }
+                Ok(QueryValue::Array(values))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                // Inserting in document order lets a repeated key keep its last value.
+                let mut values = BTreeMap::new();
+                while let Some((name, value)) = map.next_entry()? {
+                    values.insert(name, value);
+                }
+                Ok(QueryValue::Object(values))
+            }
+        }
+
+        deserializer.deserialize_any(QueryValueVisitor)
+    }
 }
 
 impl From<&QueryValue> for PropertyValue {
@@ -116,6 +230,13 @@ pub enum QueryError {
         /// Observed JSON value family.
         actual: &'static str,
     },
+    /// A request or parameter nests deeper than recursive consumers accept.
+    NestingTooDeep {
+        /// The request, or the parameter's path.
+        path: String,
+        /// Deepest accepted nesting.
+        maximum: usize,
+    },
     /// Typed parameter names must exactly match value names.
     ParameterNameMismatch {
         /// Declared names without values.
@@ -170,6 +291,9 @@ impl std::fmt::Display for QueryError {
                 f,
                 "parameter '{path}' expected {expected:?}, but received {actual}"
             ),
+            Self::NestingTooDeep { path, maximum } => {
+                write!(f, "{path} nests deeper than {maximum} levels")
+            }
             Self::ParameterNameMismatch {
                 missing_values,
                 extra_values,
@@ -261,7 +385,133 @@ pub struct QueryRequest {
     search_consistency: SearchConsistency,
 }
 
+/// Deepest JSON nesting a native request may use: sonic-rs's own limit for
+/// the values it deserializes.
+pub const MAX_REQUEST_JSON_DEPTH: usize = 255;
+
+/// Reject JSON nested deeper than [`MAX_REQUEST_JSON_DEPTH`] with one flat
+/// pass that tracks only the depth.
+fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
+    // Nesting never exceeds the number of `[` and `{` bytes, wherever they
+    // appear, so one count settles almost every request. `byte | 0x20` maps
+    // exactly `[` and `{` to `{`; counting 255-byte chunks in `u8` lanes
+    // vectorizes.
+    let opens = bytes
+        .chunks(usize::from(u8::MAX))
+        .map(|chunk| {
+            usize::from(
+                chunk
+                    .iter()
+                    .fold(0_u8, |opens, &byte| opens + u8::from(byte | 0x20 == b'{')),
+            )
+        })
+        .sum::<usize>();
+    if opens <= MAX_REQUEST_JSON_DEPTH {
+        return Ok(());
+    }
+    // An 8-byte word outside strings without a quote or bracket keeps the
+    // depth, so it is skipped whole; numeric arrays such as vectors are
+    // mostly such words. `| 0x20` folds `[`/`{` to `{` and `]`/`}` to `}`.
+    const WORD: usize = size_of::<u64>();
+    const ONES: u64 = u64::from_ne_bytes([0x01; WORD]);
+    let holds = |word: u64, byte: u8| {
+        let equal = word ^ (ONES * u64::from(byte));
+        equal.wrapping_sub(ONES) & !equal & (ONES << 7) != 0
+    };
+    let mut depth = 0_usize;
+    let mut rest = bytes;
+    loop {
+        if let Some(word) = rest.first_chunk::<WORD>() {
+            let word = u64::from_ne_bytes(*word);
+            let folded = word | (ONES * 0x20);
+            if !(holds(word, b'"') || holds(folded, b'{') || holds(folded, b'}')) {
+                rest = &rest[WORD..];
+                continue;
+            }
+        }
+        let Some((&byte, tail)) = rest.split_first() else {
+            return Ok(());
+        };
+        rest = tail;
+        match byte {
+            b'[' | b'{' if depth == MAX_REQUEST_JSON_DEPTH => {
+                return Err(<sonic_rs::Error as serde::de::Error>::custom(format!(
+                    "JSON nesting exceeds {MAX_REQUEST_JSON_DEPTH} levels"
+                )));
+            }
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            // A string ends at its next unescaped quote; nothing inside it
+            // is structure. An unterminated string ends the body.
+            b'"' => loop {
+                let Some(end) = rest.iter().position(|&byte| matches!(byte, b'"' | b'\\')) else {
+                    return Ok(());
+                };
+                let escaped = rest[end] == b'\\';
+                rest = rest
+                    .get(end + 1 + usize::from(escaped)..)
+                    .unwrap_or_default();
+                if !escaped {
+                    break;
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
 impl QueryRequest {
+    /// Parse a request from JSON bytes. A flat scan bounds the nesting first:
+    /// sonic-rs skips the value of an unknown key recursively without its own
+    /// depth limit, so an unchecked body could exhaust the parsing thread's
+    /// stack.
+    ///
+    /// ```
+    /// use helix_ast::query::{QueryRequest, MAX_REQUEST_JSON_DEPTH};
+    /// let deep = format!("{{\"x\":{}", "[".repeat(MAX_REQUEST_JSON_DEPTH));
+    /// assert!(QueryRequest::from_json_slice(deep.as_bytes())
+    ///     .unwrap_err()
+    ///     .to_string()
+    ///     .contains("nesting"));
+    /// ```
+    pub fn from_json_slice(bytes: &[u8]) -> sonic_rs::Result<Self> {
+        check_json_depth(bytes)?;
+        sonic_rs::from_slice(bytes)
+    }
+
+    /// Check with one iterative pass that no batch entry, step, predicate,
+    /// expression or value nests more than [`MAX_REQUEST_JSON_DEPTH`] levels.
+    /// Planning, execution and telemetry walk a request recursively; a JSON
+    /// request is bounded by its text, and this bounds one built in memory.
+    ///
+    /// ```
+    /// use helix_ast::{batch, query::QueryRequest, traversal};
+    /// let chain = (0..10_000).fold(traversal::g().n_with_label("User"), |t, _| t.dedup());
+    /// let request = QueryRequest::read(batch::read_batch().var_as("x", chain).returning(["x"]));
+    /// assert!(request.check_nesting().is_err());
+    /// # std::mem::forget(request);
+    /// ```
+    pub fn check_nesting(&self) -> Result<(), QueryError> {
+        let entries = match &self.query {
+            BatchQuery::Read(batch) => batch.entries(),
+            BatchQuery::Write(batch) => &batch.entries,
+        };
+        let values = match &self.parameters {
+            QueryParameters::Untyped(values) | QueryParameters::Typed { values, .. } => values,
+        };
+        let roots = entries
+            .iter()
+            .map(crate::nesting::Node::Entry)
+            .chain(values.values().map(crate::nesting::Node::Query));
+        match crate::nesting::within(roots, MAX_REQUEST_JSON_DEPTH) {
+            true => Ok(()),
+            false => Err(QueryError::NestingTooDeep {
+                path: "request".to_owned(),
+                maximum: MAX_REQUEST_JSON_DEPTH,
+            }),
+        }
+    }
+
     fn new(query: BatchQuery) -> Self {
         Self {
             query_name: None,
@@ -641,32 +891,55 @@ fn validate_parameter_name(name: &str) -> Result<(), QueryError> {
     }
 }
 
+/// Validate a parameter value with an explicit stack, so neither its size nor
+/// its nesting reaches the call stack; nesting is bounded like a request.
 fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError> {
-    match value {
-        QueryValue::F64(value) if !value.is_finite() => Err(QueryError::ParameterTypeMismatch {
-            path: path.to_owned(),
-            expected: QueryParamType::Value,
-            actual: "non-finite f64",
-        }),
-        QueryValue::F32(value) if !value.is_finite() => Err(QueryError::ParameterTypeMismatch {
-            path: path.to_owned(),
-            expected: QueryParamType::Value,
-            actual: "non-finite f32",
-        }),
-        QueryValue::Array(values) => values
-            .iter()
-            .enumerate()
-            .try_for_each(|(index, value)| validate_json_value(value, &format!("{path}[{index}]"))),
-        QueryValue::Object(values) => values
-            .iter()
-            .try_for_each(|(name, value)| validate_json_value(value, &format!("{path}.{name}"))),
-        QueryValue::Null
-        | QueryValue::Bool(_)
-        | QueryValue::I64(_)
-        | QueryValue::F64(_)
-        | QueryValue::F32(_)
-        | QueryValue::String(_) => Ok(()),
+    let mut pending = vec![(value, path.to_owned(), 1_usize)];
+    while let Some((value, path, depth)) = pending.pop() {
+        if depth > MAX_REQUEST_JSON_DEPTH {
+            return Err(QueryError::NestingTooDeep {
+                path,
+                maximum: MAX_REQUEST_JSON_DEPTH,
+            });
+        }
+        match value {
+            QueryValue::F64(value) if !value.is_finite() => {
+                return Err(QueryError::ParameterTypeMismatch {
+                    path,
+                    expected: QueryParamType::Value,
+                    actual: "non-finite f64",
+                });
+            }
+            QueryValue::F32(value) if !value.is_finite() => {
+                return Err(QueryError::ParameterTypeMismatch {
+                    path,
+                    expected: QueryParamType::Value,
+                    actual: "non-finite f32",
+                });
+            }
+            // Reverse pushes keep the first invalid element in document order.
+            QueryValue::Array(values) => pending.extend(
+                values
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(index, value)| (value, format!("{path}[{index}]"), depth + 1)),
+            ),
+            QueryValue::Object(values) => pending.extend(
+                values
+                    .iter()
+                    .rev()
+                    .map(|(name, value)| (value, format!("{path}.{name}"), depth + 1)),
+            ),
+            QueryValue::Null
+            | QueryValue::Bool(_)
+            | QueryValue::I64(_)
+            | QueryValue::F64(_)
+            | QueryValue::F32(_)
+            | QueryValue::String(_) => {}
+        }
     }
+    Ok(())
 }
 
 fn normalize_typed_value(
@@ -674,6 +947,26 @@ fn normalize_typed_value(
     value: QueryValue,
     path: &str,
 ) -> Result<QueryValue, QueryError> {
+    // Normalization recurses once per array level of the declared type.
+    let type_depth = std::iter::successors(Some(ty), |ty| match ty {
+        QueryParamType::Array(inner) => Some(inner.as_ref()),
+        QueryParamType::Bool
+        | QueryParamType::I64
+        | QueryParamType::F64
+        | QueryParamType::F32
+        | QueryParamType::String
+        | QueryParamType::DateTime
+        | QueryParamType::Bytes
+        | QueryParamType::Value
+        | QueryParamType::Object => None,
+    })
+    .count();
+    if type_depth > MAX_REQUEST_JSON_DEPTH {
+        return Err(QueryError::NestingTooDeep {
+            path: path.to_owned(),
+            maximum: MAX_REQUEST_JSON_DEPTH,
+        });
+    }
     let actual = query_value_kind(&value);
     match (ty, value) {
         (QueryParamType::Bool, value @ QueryValue::Bool(_))
@@ -742,6 +1035,335 @@ fn query_value_kind(value: &QueryValue) -> &'static str {
 mod tests {
     use super::*;
     use crate::batch::{read_batch, write_batch};
+
+    #[test]
+    fn built_requests_and_parameters_are_bounded_without_recursion() {
+        use crate::expr::Predicate;
+        let request = |depth: usize| {
+            let predicate =
+                (0..depth).fold(Predicate::eq("a", 1_i64), |inner, _| Predicate::not(inner));
+            QueryRequest::read(
+                read_batch()
+                    .var_as("x", crate::traversal::g().n_where(predicate))
+                    .returning(["x"]),
+            )
+        };
+        assert!(request(200).check_nesting().is_ok());
+        assert!(matches!(
+            request(300).check_nesting(),
+            Err(QueryError::NestingTooDeep { maximum, .. }) if maximum == MAX_REQUEST_JSON_DEPTH
+        ));
+
+        let value = |depth: usize| {
+            (1..depth).fold(QueryValue::Null, |inner, _| QueryValue::Array(vec![inner]))
+        };
+        let mut request = QueryRequest::read(read_batch());
+        request
+            .try_insert_untyped_parameter("fits", value(MAX_REQUEST_JSON_DEPTH))
+            .unwrap();
+        assert!(request.check_nesting().is_ok());
+        assert!(matches!(
+            request.try_insert_untyped_parameter("deep", value(MAX_REQUEST_JSON_DEPTH + 1)),
+            Err(QueryError::NestingTooDeep { path, .. }) if path.starts_with("deep")
+        ));
+        // Validation is iterative, so a value far past the limit is rejected
+        // rather than walked.
+        assert!(matches!(
+            request.try_insert_untyped_parameter("deeper", value(5_000)),
+            Err(QueryError::NestingTooDeep { .. })
+        ));
+        let ty = (1..=MAX_REQUEST_JSON_DEPTH).fold(QueryParamType::Bool, |inner, _| {
+            QueryParamType::Array(Box::new(inner))
+        });
+        assert!(matches!(
+            QueryRequest::read(read_batch()).try_insert_typed_parameter(
+                "typed",
+                ty,
+                QueryValue::Array(Vec::new())
+            ),
+            Err(QueryError::NestingTooDeep { .. })
+        ));
+    }
+
+    #[test]
+    fn request_json_nesting_is_bounded_before_parsing() {
+        // An unclosed value far deeper than any stack could skip recursively
+        // fails the scan before the parser sees it.
+        assert!(QueryRequest::from_json_slice(
+            format!("{{\"x\":{}", "[".repeat(100_000)).as_bytes()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("nesting"));
+        let depth = |levels: usize| {
+            format!(
+                "{{\"x\":{}{}}}",
+                "[".repeat(levels - 1),
+                "]".repeat(levels - 1)
+            )
+        };
+        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok());
+        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes()).is_err());
+        // Brackets and escaped quotes inside strings are not structure.
+        assert!(
+            check_json_depth(format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()).is_ok()
+        );
+        // Word skipping agrees with a byte-at-a-time scan, with quotes,
+        // escapes and brackets at every offset around word boundaries.
+        let oracle = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .try_fold((0_usize, false, false), |state, &byte| {
+                    match (state, byte) {
+                        ((depth, true, true), _) => Some((depth, true, false)),
+                        ((depth, true, false), b'\\') => Some((depth, true, true)),
+                        ((depth, true, false), b'"') => Some((depth, false, false)),
+                        ((depth, true, false), _) => Some((depth, true, false)),
+                        ((depth, false, _), b'"') => Some((depth, true, false)),
+                        ((depth, false, _), b'[' | b'{') => {
+                            (depth < MAX_REQUEST_JSON_DEPTH).then_some((depth + 1, false, false))
+                        }
+                        ((depth, false, _), b']' | b'}') => {
+                            Some((depth.saturating_sub(1), false, false))
+                        }
+                        ((depth, false, _), _) => Some((depth, false, false)),
+                    }
+                })
+                .is_some()
+        };
+        let fragments: [&[u8]; 12] = [
+            b"[",
+            b"]",
+            b"{",
+            b"}",
+            b"\"",
+            b"\\",
+            b"\\\"",
+            b"|",
+            b"abcdefgh",
+            b"1,",
+            b"[[",
+            b"]]",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for case in 0..4_000 {
+            // Every case has enough brackets to reach the full scan.
+            let mut body = b"[".repeat(250 + case % 8);
+            for _ in 0..(case % 97) {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                body.extend_from_slice(fragments[(seed >> 33) as usize % fragments.len()]);
+            }
+            assert_eq!(
+                check_json_depth(&body).is_ok(),
+                oracle(&body),
+                "{:?}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        // Many shallow siblings pass the full scan.
+        assert!(
+            check_json_depth(format!("{{\"x\":[{}[]]}}", "[],".repeat(1_000)).as_bytes()).is_ok()
+        );
+        let request = QueryRequest::read(read_batch());
+        assert_eq!(
+            QueryRequest::from_json_slice(&sonic_rs::to_vec(&request).unwrap()).unwrap(),
+            request
+        );
+    }
+
+    // Test-only allocator observation delegates unchanged operations to
+    // System. Production code continues to deny unsafe code.
+    #[allow(unsafe_code)]
+    mod heap {
+        struct PeakHeap;
+
+        #[global_allocator]
+        static PEAK_HEAP: PeakHeap = PeakHeap;
+
+        thread_local! {
+            /// Heap bytes this thread holds since the last reset, and their peak.
+            pub(super) static HEAP: std::cell::Cell<(isize, isize)> =
+                const { std::cell::Cell::new((0, 0)) };
+        }
+
+        // SAFETY: Both methods forward their arguments unchanged to `System`.
+        // The bookkeeping touches only a const-initialized thread local, which
+        // never allocates; the default `realloc` and `alloc_zeroed` route
+        // through these methods.
+        unsafe impl std::alloc::GlobalAlloc for PeakHeap {
+            unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+                let _ = HEAP.try_with(|heap| {
+                    let (live, peak) = heap.get();
+                    let live = live + layout.size() as isize;
+                    heap.set((live, peak.max(live)));
+                });
+                // SAFETY: The caller upholds `GlobalAlloc::alloc`'s contract.
+                unsafe { std::alloc::System.alloc(layout) }
+            }
+
+            unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+                let _ = HEAP.try_with(|heap| {
+                    let (live, peak) = heap.get();
+                    heap.set((live - layout.size() as isize, peak));
+                });
+                // SAFETY: `pointer` and `layout` still identify a `System` allocation.
+                unsafe { std::alloc::System.dealloc(pointer, layout) }
+            }
+        }
+    }
+
+    #[test]
+    fn query_values_parse_every_json_shape_as_the_untagged_derive_did() {
+        let object = |entries: Vec<(&str, QueryValue)>| {
+            QueryValue::Object(
+                entries
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value))
+                    .collect(),
+            )
+        };
+        let cases = [
+            ("null", QueryValue::Null),
+            ("true", QueryValue::Bool(true)),
+            ("false", QueryValue::Bool(false)),
+            ("0", QueryValue::I64(0)),
+            ("-1", QueryValue::I64(-1)),
+            ("9223372036854775807", QueryValue::I64(i64::MAX)),
+            ("-9223372036854775808", QueryValue::I64(i64::MIN)),
+            // Integers past i64 were F64, the next variant the derive tried.
+            ("9223372036854775808", QueryValue::F64(2_f64.powi(63))),
+            ("18446744073709551615", QueryValue::F64(u64::MAX as f64)),
+            ("-9223372036854775809", QueryValue::F64(i64::MIN as f64)),
+            ("1.0", QueryValue::F64(1.0)),
+            ("-0.25", QueryValue::F64(-0.25)),
+            ("1e3", QueryValue::F64(1_000.0)),
+            (r#""""#, QueryValue::String(String::new())),
+            (r#""plain""#, QueryValue::String("plain".to_owned())),
+            (
+                r#""q\"b\\s\/n\nt\tu\u00e9\ud83d\ude00""#,
+                QueryValue::String("q\"b\\s/n\nt\tu\u{e9}\u{1f600}".to_owned()),
+            ),
+            ("[]", QueryValue::Array(Vec::new())),
+            ("{}", QueryValue::Object(BTreeMap::new())),
+            (
+                r#"[1, [true, null, []], {"k": "v\n"}, 2.5]"#,
+                QueryValue::Array(vec![
+                    QueryValue::I64(1),
+                    QueryValue::Array(vec![
+                        QueryValue::Bool(true),
+                        QueryValue::Null,
+                        QueryValue::Array(Vec::new()),
+                    ]),
+                    object(vec![("k", QueryValue::String("v\n".to_owned()))]),
+                    QueryValue::F64(2.5),
+                ]),
+            ),
+            (
+                r#"{"b": {"": [{}], "c": -3}, "a": null}"#,
+                object(vec![
+                    ("a", QueryValue::Null),
+                    (
+                        "b",
+                        object(vec![
+                            ("", QueryValue::Array(vec![object(Vec::new())])),
+                            ("c", QueryValue::I64(-3)),
+                        ]),
+                    ),
+                ]),
+            ),
+            // A repeated key keeps its last value, at every level.
+            (
+                r#"{"k": 1, "o": {"x": "first", "x": ["second"]}, "k": 2}"#,
+                object(vec![
+                    ("k", QueryValue::I64(2)),
+                    (
+                        "o",
+                        object(vec![(
+                            "x",
+                            QueryValue::Array(vec![QueryValue::String("second".to_owned())]),
+                        )]),
+                    ),
+                ]),
+            ),
+        ];
+
+        for (json, expected) in cases {
+            assert_eq!(
+                sonic_rs::from_str::<QueryValue>(json).unwrap(),
+                expected,
+                "sonic-rs: {json}"
+            );
+            assert_eq!(
+                serde_json::from_str::<QueryValue>(json).unwrap(),
+                expected,
+                "serde_json: {json}"
+            );
+            assert_eq!(
+                serde_json::from_value::<QueryValue>(serde_json::from_str(json).unwrap()).unwrap(),
+                expected,
+                "serde_json::Value: {json}"
+            );
+            let serialized = sonic_rs::to_string(&expected).unwrap();
+            assert_eq!(
+                sonic_rs::from_str::<QueryValue>(&serialized).unwrap(),
+                expected,
+                "round trip: {serialized}"
+            );
+        }
+
+        for invalid in ["", "[1,", r#"{"k"}"#, "nul", r#""\x""#] {
+            assert!(
+                sonic_rs::from_str::<QueryValue>(invalid).is_err(),
+                "{invalid}"
+            );
+            assert!(
+                serde_json::from_str::<QueryValue>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    /// Debug builds spend about 24 KiB of parser stack per nesting level, more
+    /// than a test thread's stack allows at this depth, so this parses on its
+    /// own thread with a larger stack.
+    #[test]
+    fn deeply_nested_escaped_strings_parse_without_a_copy_per_level() {
+        const DEPTH: usize = 40;
+        const LEN: usize = 1 << 20;
+        // The escape makes the parser hand over an owned copy of the string.
+        let body = read_wire(
+            &format!(
+                r#"{{"p":{}"{}\n"{}}}"#,
+                "[".repeat(DEPTH),
+                "a".repeat(LEN),
+                "]".repeat(DEPTH)
+            ),
+            None,
+        );
+
+        heap::HEAP.with(|heap| heap.set((0, 0)));
+        let request = QueryRequest::from_json_slice(body.as_bytes()).unwrap();
+        let peak = heap::HEAP.with(std::cell::Cell::get).1;
+
+        let innermost =
+            (0..DEPTH).try_fold(
+                &request.parameters().unwrap()["p"],
+                |value, _| match value {
+                    QueryValue::Array(values) => values.first(),
+                    _ => None,
+                },
+            );
+        assert!(matches!(
+            innermost,
+            Some(QueryValue::String(text)) if text.len() == LEN + 1 && text.ends_with('\n')
+        ));
+        // Parser scratch and the owned string take about 3x the string. The
+        // derived untagged impl held a copy per level: about 40x here.
+        assert!(
+            peak < (8 * LEN) as isize,
+            "parsing peaked at {peak} heap bytes"
+        );
+    }
 
     fn typed(ty: QueryParamType, value: QueryValue) -> Result<QueryRequest, QueryError> {
         QueryRequest::read(read_batch()).with_typed_parameter("value", ty, value)
