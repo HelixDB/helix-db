@@ -2111,6 +2111,7 @@ dependencies = [
 name = "helix-ast-bench"
 version = "0.1.0"
 dependencies = [
+ "backtrace",
  "divan",
  "helix-ast",
  "helix-planner",

@@ -20,6 +20,7 @@ helix-ast = { path = "../ast", features = ["test-utils"] }
 divan = "0.1.21"
 serde = "1"
 libc = "0.2.186"
+backtrace = "0.3.76"
 
 [[bench]]
 name = "ast_parse"
@@ -35,6 +36,14 @@ harness = false
 
 [[bench]]
 name = "ast_rss"
+harness = false
+
+[[bench]]
+name = "planner_arena"
+harness = false
+
+[[bench]]
+name = "planner_alloc"
 harness = false
 
 [lints]
