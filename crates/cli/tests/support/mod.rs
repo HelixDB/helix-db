@@ -334,6 +334,11 @@ exit "${{HELIX_TEST_TOOL_EXIT_CODE:-0}}"
 /// `cmd /C call` line that delivered them, so whatever survived that line
 /// survives this one. `echo(` also prints a first argument such as `off` or
 /// `/?` instead of acting on it.
+///
+/// `ps` prints its canned output through delayed expansion. `%VAR%` expands
+/// before `cmd` parses the line, so the `->` in a published port such as
+/// `0.0.0.0:7777->8080/tcp` would become a redirection; `!VAR!` expands after
+/// parsing and prints verbatim.
 #[allow(dead_code)]
 pub const WINDOWS_FAKE_DOCKER: &str = r#"@echo off
 if defined HELIX_TEST_RUNTIME_LOG >>"%HELIX_TEST_RUNTIME_LOG%" echo(%*
@@ -363,7 +368,8 @@ if "%1"=="pull" (
 )
 if "%1"=="info" exit /b 0
 if "%1"=="ps" (
-  if defined HELIX_TEST_RUNTIME_PS_OUTPUT echo %HELIX_TEST_RUNTIME_PS_OUTPUT%
+  setlocal EnableDelayedExpansion
+  if defined HELIX_TEST_RUNTIME_PS_OUTPUT echo(!HELIX_TEST_RUNTIME_PS_OUTPUT!
   exit /b 0
 )
 if "%1"=="logs" (
