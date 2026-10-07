@@ -732,9 +732,11 @@ impl VectorMemoryStore {
         self.upper_nodes.remove(&node_id);
     }
 
-    /// Remove every row from this store and release its slab chunks.
+    /// Remove every row from this store and release its open slab chunk.
     ///
-    /// Bytes already returned by lookups stay valid; they own their chunk.
+    /// Sealed chunks are freed when the store drops; every production clear
+    /// precedes dropping the store. Bytes already returned by lookups stay
+    /// valid; they own their chunk.
     pub fn clear(&self) {
         self.simhashes.clear();
         self.simhashes.shrink_to_fit();
