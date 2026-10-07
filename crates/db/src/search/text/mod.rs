@@ -3,8 +3,8 @@
 //! V2 lifecycle code uploads immutable content-addressed split blobs before a
 //! SlateDB transaction atomically attaches their durable references.
 
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs;
 use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -526,6 +526,19 @@ enum TextLiveStateSource<'a> {
 }
 
 /// Runs the common split search while keeping live-state ownership explicit.
+///
+/// Returns the `k` best live hits in [`HitRank`] order, exactly as an
+/// exhaustive search of every split would after dropping each candidate whose
+/// version is not the entity's live version.
+///
+/// Each split serves its candidates in descending [`HitRank`] and is
+/// re-searched with a doubled limit only while its frontier (last served
+/// candidate) still outranks the `k`-th live hit, so unseen candidates can
+/// never displace a hit. Live state is resolved lazily: candidates wait in a
+/// best-first queue and are resolved in batches only while the best of them
+/// outranks the `k`-th live hit, so a search reads about `k` states (plus dead
+/// or stale candidates above them) however many splits it searches. V2 hits
+/// that are served have their statistics markers validated before return.
 async fn search_manifest_with_state_source(
     reader: &(impl DbReadOps + Send + Sync),
     runtime: TextSearchRuntime<'_>,
@@ -535,7 +548,11 @@ async fn search_manifest_with_state_source(
     request: TextSearchRequest<'_>,
 ) -> Result<Vec<TextSearchHit>, HelixDbError> {
     const SPLIT_READ_CONCURRENCY: usize = 8;
-    const STATE_BATCH_SIZE: usize = 512;
+    /// Largest live-state batch; matches the V2 state loader's bound.
+    const MAX_STATE_BATCH: usize = 512;
+    /// Smallest live-state batch, so a run of dead or stale candidates
+    /// resolves in few round trips once `k` hits are nearly known.
+    const MIN_STATE_BATCH: usize = 64;
     let TextSearchRequest {
         query,
         k,
@@ -546,14 +563,23 @@ async fn search_manifest_with_state_source(
         return Ok(Vec::new());
     }
 
+    /// How much of one split's ranked candidate list has been read.
+    enum SplitProgress {
+        /// Not searched yet.
+        Unsearched,
+        /// Served a full page; unseen candidates rank at or below `frontier`.
+        Partial { frontier: HitRank },
+        /// Served every candidate.
+        Exhausted,
+    }
+
     struct SplitSearchState {
         split_ref: TextSplitRef,
         reader: Arc<SplitSearchReader>,
         total_docs: usize,
         candidate_limit: usize,
         processed_candidates: usize,
-        exhausted: bool,
-        frontier_score: Option<f32>,
+        progress: SplitProgress,
     }
 
     let opened = futures::stream::iter(manifest.split_refs().iter().cloned())
@@ -567,42 +593,92 @@ async fn search_manifest_with_state_source(
                 total_docs,
                 candidate_limit: k.min(total_docs).max(1),
                 processed_candidates: 0,
-                exhausted: total_docs == 0,
-                frontier_score: None,
+                progress: if total_docs == 0 {
+                    SplitProgress::Exhausted
+                } else {
+                    SplitProgress::Unsearched
+                },
             })
         })
         .buffered(SPLIT_READ_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
     let mut splits = opened.into_iter().collect::<Result<Vec<_>, _>>()?;
-    let mut live_states = BTreeMap::new();
-    let mut hits_by_entity = BTreeMap::new();
+    // Resolved live state per entity; `None` is a legacy entity without state.
+    let mut live_states = BTreeMap::<u64, Option<TextIndexLiveState>>::new();
+    // Rank of every resolved live hit, keyed by entity to merge split copies.
+    let mut hit_ranks = BTreeMap::<u64, HitRank>::new();
+    // The best `k` hit ranks, worst on top, so its top is the `k`-th hit.
+    let mut top_k = BinaryHeap::<Reverse<HitRank>>::new();
+    // Served but unresolved candidates as (rank, logical version), best on
+    // top. The version only orders an entity's copies deterministically.
+    let mut unresolved = BinaryHeap::<(HitRank, u64)>::new();
     loop {
-        let kth_score = if hits_by_entity.len() < k {
-            None
-        } else {
-            let mut scores = hits_by_entity
-                .values()
-                .map(|hit: &TextSearchHit| hit.score)
+        let kth = loop {
+            let kth = top_k
+                .peek()
+                .filter(|_| top_k.len() == k)
+                .map(|Reverse(rank)| *rank);
+            let Some(&(best, _)) = unresolved.peek() else {
+                break kth;
+            };
+            if kth.is_some_and(|kth| best <= kth) {
+                break kth;
+            }
+            let batch = std::iter::from_fn(|| unresolved.pop())
+                .take(
+                    k.saturating_sub(hit_ranks.len())
+                        .clamp(MIN_STATE_BATCH, MAX_STATE_BATCH),
+                )
                 .collect::<Vec<_>>();
-            scores.sort_by(|left, right| right.partial_cmp(left).unwrap_or(Ordering::Equal));
-            scores.get(k - 1).copied()
+            let missing = batch
+                .iter()
+                .map(|(rank, _)| rank.entity_id.0)
+                .filter(|entity_id| !live_states.contains_key(entity_id))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                load_text_live_states_batch(reader, state_source, &missing, &mut live_states)
+                    .await?;
+            }
+            for (rank, logical_version) in batch {
+                let state = live_states
+                    .get(&rank.entity_id.0)
+                    .expect("every candidate in a resolved batch has loaded live state");
+                if !state
+                    .as_ref()
+                    .is_none_or(|state| state.live && state.logical_version == logical_version)
+                {
+                    continue;
+                }
+                match hit_ranks.insert(rank.entity_id.0, rank) {
+                    None => {
+                        top_k.push(Reverse(rank));
+                        if top_k.len() > k {
+                            top_k.pop();
+                        }
+                    }
+                    Some(existing) if existing == rank => {}
+                    Some(_) => {
+                        return Err(HelixDbError::IndexCatalogCorruption(
+                            "duplicate live text versions have different BM25 score bits"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
         };
         let selected = splits
             .iter()
             .enumerate()
             .filter_map(|(index, split)| {
-                (!split.exhausted
-                    && kth_score.is_none_or(|score| {
-                        split
-                            .frontier_score
-                            .is_none_or(|frontier| frontier >= score)
-                    }))
-                .then_some((
-                    index,
-                    Arc::clone(&split.reader),
-                    split.candidate_limit,
-                ))
+                let search = match split.progress {
+                    SplitProgress::Unsearched => true,
+                    SplitProgress::Partial { frontier } => kth.is_none_or(|kth| frontier > kth),
+                    SplitProgress::Exhausted => false,
+                };
+                search.then(|| (index, Arc::clone(&split.reader), split.candidate_limit))
             })
             .collect::<Vec<_>>();
         if selected.is_empty() {
@@ -636,51 +712,43 @@ async fn search_manifest_with_state_source(
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut new_candidates = Vec::new();
         for (index, requested, candidates) in searched {
             let split = &mut splits[index];
             let candidate_count = candidates.len();
-            let frontier_score = candidates.last().map(|candidate| candidate.score);
-            let processed = split.processed_candidates.min(candidate_count);
-            new_candidates.extend(candidates.into_iter().skip(processed));
-            split.processed_candidates = candidate_count;
-            split.exhausted = candidate_count < requested || requested >= split.total_docs;
-            split.frontier_score = (!split.exhausted).then_some(frontier_score).flatten();
-            if !split.exhausted {
-                split.candidate_limit = requested.saturating_mul(2).min(split.total_docs);
-            }
-        }
-
-        let missing_ids = new_candidates
-            .iter()
-            .map(|candidate| candidate.entity_id)
-            .filter(|entity_id| !live_states.contains_key(entity_id))
-            .collect::<BTreeSet<_>>();
-        for entity_ids in missing_ids
-            .into_iter()
-            .collect::<Vec<_>>()
-            .chunks(STATE_BATCH_SIZE)
-        {
-            load_text_live_states_batch(reader, state_source, entity_ids, &mut live_states).await?;
-        }
-        for candidate in new_candidates {
-            let state = live_states
-                .get(&candidate.entity_id)
-                .expect("every newly exposed candidate has cached live state");
-            if text_candidate_matches_live_state(&candidate, state.as_ref()) {
-                let hit = TextSearchHit {
-                    entity_id: candidate.entity_id,
-                    score: candidate.score,
-                };
-                if let Some(existing) = hits_by_entity.insert(hit.entity_id, hit.clone())
-                    && existing.score.to_bits() != hit.score.to_bits()
-                {
-                    return Err(HelixDbError::IndexCatalogCorruption(
-                        "duplicate live text versions have different BM25 score bits".to_string(),
-                    ));
+            split.progress = match candidates.last() {
+                Some(last) if candidate_count >= requested && requested < split.total_docs => {
+                    split.candidate_limit = requested.saturating_mul(2).min(split.total_docs);
+                    SplitProgress::Partial {
+                        frontier: HitRank::new(last.score, last.entity_id),
+                    }
                 }
-            }
+                _ => SplitProgress::Exhausted,
+            };
+            let processed = split.processed_candidates.min(candidate_count);
+            split.processed_candidates = candidate_count;
+            unresolved.extend(candidates.into_iter().skip(processed).map(|candidate| {
+                (
+                    HitRank::new(candidate.score, candidate.entity_id),
+                    candidate.logical_version,
+                )
+            }));
         }
+    }
+
+    let hits = top_k
+        .into_sorted_vec()
+        .into_iter()
+        .map(|Reverse(rank)| TextSearchHit {
+            entity_id: rank.entity_id.0,
+            score: f32::from_bits(rank.score_bits),
+        })
+        .collect::<Vec<_>>();
+    if let TextLiveStateSource::V2(root) = state_source {
+        let served = hits.iter().map(|hit| hit.entity_id).collect::<Vec<_>>();
+        crate::index_lifecycle::text::serving::validate_live_entity_contributions(
+            reader, root, &served,
+        )
+        .await?;
     }
     if demand == SplitDemand::Record
         && let Some(cache) = runtime.cache
@@ -691,17 +759,31 @@ async fn search_manifest_with_state_source(
             })
             .await;
     }
-
-    let mut hits = hits_by_entity.into_values().collect::<Vec<_>>();
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| left.entity_id.cmp(&right.entity_id))
-    });
-    hits.truncate(k);
     Ok(hits)
+}
+
+/// Serving rank of one BM25 candidate or hit: a higher score ranks higher,
+/// then a lower entity ID.
+///
+/// The derived order compares the score's bits, which order like the score
+/// for the finite non-negative scores BM25 produces. It is the split
+/// collector's sort key, so a split serves its candidates in descending
+/// `HitRank` and every candidate it has not served ranks at or below its last
+/// served one. Two candidates of one entity with equal scores have equal
+/// ranks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HitRank {
+    score_bits: u32,
+    entity_id: Reverse<u64>,
+}
+
+impl HitRank {
+    const fn new(score: f32, entity_id: u64) -> Self {
+        Self {
+            score_bits: score.to_bits(),
+            entity_id: Reverse(entity_id),
+        }
+    }
 }
 
 enum SplitSearchReader {
@@ -780,6 +862,10 @@ impl SplitSearchReader {
     }
 }
 
+/// Reads the live state of at most 512 distinct entities into `live_states`.
+///
+/// A legacy entity without a state row maps to `None`, which accepts every
+/// version; a V2 entity must have a state row.
 async fn load_text_live_states_batch(
     reader: &(impl DbReadOps + Send + Sync),
     state_source: TextLiveStateSource<'_>,
@@ -818,13 +904,6 @@ async fn load_text_live_states_batch(
         }
     }
     Ok(())
-}
-
-fn text_candidate_matches_live_state(
-    candidate: &TextSearchCandidate,
-    state: Option<&TextIndexLiveState>,
-) -> bool {
-    state.is_none_or(|state| state.live && state.logical_version == candidate.logical_version)
 }
 
 async fn open_manifest_index(
@@ -1965,7 +2044,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
             .first_or_default_col(0);
         move |doc, score: f32| {
             debug_assert!(score.is_finite() && score >= 0.0);
-            (score.to_bits(), Reverse(entity_ids.get_val(doc)))
+            HitRank::new(score, entity_ids.get_val(doc))
         }
     });
     let docs = match scope {
@@ -1993,7 +2072,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
     .map_err(|err| HelixDbError::Config(format!("failed to execute Tantivy search: {err}")))?;
 
     let mut hits = Vec::with_capacity(docs.len());
-    for ((score_bits, Reverse(sort_entity_id)), address) in docs {
+    for (rank, address) in docs {
         let entity_id = entity_id_columns
             .get(address.segment_ord as usize)
             .ok_or_else(|| {
@@ -2008,7 +2087,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
                     "text index document is missing the entity_id field".into(),
                 )
             })?;
-        if entity_id != sort_entity_id {
+        if entity_id != rank.entity_id.0 {
             return Err(HelixDbError::InvariantViolation(
                 "text deterministic collector observed inconsistent entity IDs".to_string(),
             ));
@@ -2037,7 +2116,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
         hits.push(TextSearchCandidate {
             entity_id,
             logical_version,
-            score: f32::from_bits(score_bits),
+            score: f32::from_bits(rank.score_bits),
         });
     }
     Ok(hits)
