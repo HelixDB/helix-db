@@ -1,7 +1,7 @@
 use std::arch::x86_64::*;
 use std::ptr::read_unaligned;
 
-use crate::search::vector::{dimension::SameDimensionPair, unaligned_vector::UnalignedVector};
+use crate::search::vector::{dimension::SameDimensionPair, unaligned_vector};
 
 #[target_feature(enable = "avx")]
 unsafe fn hsum256_ps_avx(x: __m256) -> f32 {
@@ -249,7 +249,7 @@ pub(crate) unsafe fn dot_similarity_avx_fma(pair: SameDimensionPair<'_>) -> f32 
 /// Each square is exact in f64, so the separate multiply never rounds and this
 /// kernel returns the same bits as [`squared_norm_avx_fma`].
 #[target_feature(enable = "avx")]
-pub(crate) unsafe fn squared_norm_avx(vector: &UnalignedVector<f32>) -> f64 {
+pub(crate) unsafe fn squared_norm_avx(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
     // SAFETY: The view holds exactly `n` f32 values. The caller guarantees AVX support,
     // the loads accept unaligned data, and every offset read stays below `n`.
     unsafe {
@@ -287,7 +287,7 @@ pub(crate) unsafe fn squared_norm_avx(vector: &UnalignedVector<f32>) -> f64 {
 /// Sum of squares in f64 with FMA; same layout and result as [`squared_norm_avx`].
 #[target_feature(enable = "avx")]
 #[target_feature(enable = "fma")]
-pub(crate) unsafe fn squared_norm_avx_fma(vector: &UnalignedVector<f32>) -> f64 {
+pub(crate) unsafe fn squared_norm_avx_fma(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
     // SAFETY: The view holds exactly `n` f32 values. The caller guarantees AVX and FMA
     // support, the loads accept unaligned data, and every offset read stays below `n`.
     unsafe {
