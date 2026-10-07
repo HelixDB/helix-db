@@ -16,9 +16,20 @@ use helix_planner::context::PlannerContext;
 use helix_planner::{exec, experiments, planning};
 
 /// Every request shape, built once per benchmark process.
+///
+/// Serializing the deepest chain recurses once per JSON level, which overflows
+/// a debug build's main thread on macOS, so the corpus is built on a thread
+/// with a large stack, as the ast crate's own tests do.
 pub fn shapes() -> &'static [Shape] {
     static SHAPES: OnceLock<Vec<Shape>> = const { OnceLock::new() };
-    SHAPES.get_or_init(testing::all)
+    SHAPES.get_or_init(|| {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(testing::all)
+            .expect("the corpus thread spawns")
+            .join()
+            .expect("the corpus builds")
+    })
 }
 
 /// The shape named `name`.

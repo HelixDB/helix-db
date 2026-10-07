@@ -15,34 +15,46 @@ enum Visit {
     Done,
 }
 
+/// Depth-first, with an explicit stack rather than recursion, so a long
+/// dependency chain cannot overflow the thread's stack. Each frame is a step
+/// in progress and how many of its dependencies it has visited.
 pub(super) fn reject_cycles(index: &ValidatedStepIndex<'_>) -> Result<(), ExecPlanError> {
     let mut states = vec![Visit::New; index.len()];
-    for id in index.ids() {
-        visit(index, id, &mut states)?;
+    let mut stack = Vec::new();
+    for start in 0..index.len() {
+        if !matches!(states[start], Visit::New) {
+            continue;
+        }
+        states[start] = Visit::InProgress;
+        stack.push((start, 0));
+        while let Some((position, visited)) = stack.last_mut() {
+            let step = index.at(*position);
+            let Some(dependency) = step.dependencies.get(*visited) else {
+                states[*position] = Visit::Done;
+                stack.pop();
+                continue;
+            };
+            *visited += 1;
+            index.require_dependency(step.id, *dependency)?;
+            let dependency_position =
+                index
+                    .position(*dependency)
+                    .ok_or(ExecPlanError::MissingDependency {
+                        step: *dependency,
+                        dependency: *dependency,
+                    })?;
+            match states[dependency_position] {
+                Visit::Done => {}
+                Visit::InProgress => {
+                    return Err(ExecPlanError::DependencyCycle { step: *dependency });
+                }
+                Visit::New => {
+                    states[dependency_position] = Visit::InProgress;
+                    stack.push((dependency_position, 0));
+                }
+            }
+        }
     }
-    Ok(())
-}
-
-fn visit(
-    index: &ValidatedStepIndex<'_>,
-    id: ExecStepId,
-    states: &mut [Visit],
-) -> Result<(), ExecPlanError> {
-    let position = index.position(id).ok_or(ExecPlanError::MissingDependency {
-        step: id,
-        dependency: id,
-    })?;
-    match states[position] {
-        Visit::Done => return Ok(()),
-        Visit::InProgress => return Err(ExecPlanError::DependencyCycle { step: id }),
-        Visit::New => states[position] = Visit::InProgress,
-    }
-    let step = index.at(position);
-    for dependency in &step.dependencies {
-        index.require_dependency(step.id, *dependency)?;
-        visit(index, *dependency, states)?;
-    }
-    states[position] = Visit::Done;
     Ok(())
 }
 
@@ -50,7 +62,7 @@ pub(super) fn reject_unreachable_steps(
     index: &ValidatedStepIndex<'_>,
 ) -> Result<(), ExecPlanError> {
     let mut reachable = vec![false; index.len()];
-    collect_reachable(index, index.root(), &mut reachable)?;
+    collect_reachable(index, &mut reachable)?;
     match index
         .ids()
         .zip(&reachable)
@@ -64,48 +76,58 @@ pub(super) fn reject_unreachable_steps(
     }
 }
 
+/// Marks every step the root reaches, depth-first in dependency order with an
+/// explicit stack, as [`reject_cycles`] does.
 fn collect_reachable(
     index: &ValidatedStepIndex<'_>,
-    id: ExecStepId,
     reachable: &mut [bool],
 ) -> Result<(), ExecPlanError> {
-    let position = index
-        .position(id)
-        .ok_or(ExecPlanError::MissingRoot { root: id })?;
-    if reachable[position] {
-        return Ok(());
-    }
-    reachable[position] = true;
-    let step = index.at(position);
-    for dependency in &step.dependencies {
+    let root = index.root();
+    let root_position = index
+        .position(root)
+        .ok_or(ExecPlanError::MissingRoot { root })?;
+    reachable[root_position] = true;
+    let mut stack = vec![(root_position, 0)];
+    while let Some((position, visited)) = stack.last_mut() {
+        let step = index.at(*position);
+        let Some(dependency) = step.dependencies.get(*visited) else {
+            stack.pop();
+            continue;
+        };
+        *visited += 1;
         index.require_dependency(step.id, *dependency)?;
-        collect_reachable(index, *dependency, reachable)?;
+        let dependency_position = index
+            .position(*dependency)
+            .ok_or(ExecPlanError::MissingRoot { root: *dependency })?;
+        if !reachable[dependency_position] {
+            reachable[dependency_position] = true;
+            stack.push((dependency_position, 0));
+        }
     }
     Ok(())
 }
 
 /// Runs once per conditional step, so its state grows with what it visits
-/// rather than with the DAG.
+/// rather than with the DAG. The answer does not depend on visiting order, so
+/// a worklist replaces recursion.
 pub(super) fn dependency_reachable(
     index: &ValidatedStepIndex<'_>,
     dependencies: &[ExecStepId],
     target: ExecStepId,
 ) -> bool {
     let mut seen = BTreeSet::new();
-    dependency_reachable_inner(index, dependencies, target, &mut seen)
-}
-
-fn dependency_reachable_inner(
-    index: &ValidatedStepIndex<'_>,
-    dependencies: &[ExecStepId],
-    target: ExecStepId,
-    seen: &mut BTreeSet<ExecStepId>,
-) -> bool {
-    dependencies.iter().any(|dependency| {
-        *dependency == target
-            || (seen.insert(*dependency)
-                && index.get(*dependency).is_some_and(|step| {
-                    dependency_reachable_inner(index, &step.dependencies, target, seen)
-                }))
-    })
+    let mut pending = dependencies.to_vec();
+    while let Some(dependency) = pending.pop() {
+        if dependency == target {
+            return true;
+        }
+        if !seen.insert(dependency) {
+            continue;
+        }
+        let Some(step) = index.get(dependency) else {
+            continue;
+        };
+        pending.extend(&step.dependencies);
+    }
+    false
 }

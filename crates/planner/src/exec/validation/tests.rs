@@ -48,6 +48,38 @@ fn graph_reachability_supports_transitive_previous_conditions() {
     assert!(!graph::dependency_reachable(&index, &[id(2)], id(99)));
 }
 
+/// Graph validation keeps its traversal state on the heap, so a dependency
+/// chain far longer than the thread's stack could recurse through still
+/// validates, and still names the step that closes a cycle.
+#[test]
+fn long_dependency_chains_validate_on_a_small_stack() {
+    const STEPS: usize = 50_000;
+    let chain = |first_dependency: Option<usize>| {
+        (1..=STEPS)
+            .map(|value| match value {
+                1 => step(value, first_dependency.into_iter().collect()),
+                _ => step(value, vec![value - 1]),
+            })
+            .collect::<Vec<_>>()
+    };
+    std::thread::Builder::new()
+        .stack_size(256 << 10)
+        .spawn(move || {
+            let acyclic = steps(chain(None));
+            let index = index::ValidatedStepIndex::new(&acyclic, id(STEPS)).unwrap();
+            assert!(graph::dependency_reachable(&index, &[id(STEPS - 1)], id(1)));
+
+            let cyclic = steps(chain(Some(STEPS)));
+            let Err(error) = index::ValidatedStepIndex::new(&cyclic, id(STEPS)) else {
+                panic!("a chain closed into a loop must be rejected");
+            };
+            assert_eq!(error, ExecPlanError::DependencyCycle { step: id(1) });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn order_stage_contract_distinguishes_single_parallel_and_empty_sets() {
     assert_eq!(
