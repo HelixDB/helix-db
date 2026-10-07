@@ -266,6 +266,18 @@ pub(crate) fn run() {
         }
     }
 
+    // The stored cosine norm must keep its pre-SIMD bits on every kernel. This
+    // norm sits within an f64 rounding of the f32 midpoint 2^24 + 1: the fast
+    // sum rounds it up while the scaled reference loop ties to even below, so
+    // the guard must fall back. Zero padding to 33 sends the fast sum through
+    // the 16 and 32 wide kernels as well as the scalar one.
+    for dimension in [3, 33] {
+        let mut boundary = vec![0.0_f32; dimension];
+        boundary[..3].copy_from_slice(&[16_777_215.0, 9.0 / 32.0, 8192.0]);
+        let boundary = unaligned_vector::UnalignedVector::<f32>::from_vec(boundary);
+        assert_eq!(distance::Cosine::norm_no_header(&boundary), 16_777_216.0);
+    }
+
     let mismatched = unaligned_vector::UnalignedVector::<f32>::from_slice(&[1.0, 2.0]);
     for rejected in [
         std::panic::catch_unwind(|| spaces::simple::dot_product(&short_left, &mismatched)),
