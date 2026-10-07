@@ -25,16 +25,46 @@ allocator. Measured on Graviton4, from `main` to this branch:
 | bulk insert, 10,000 rows × 96 floats | 66.4 → **42.8 ms** (1.55×) | 165.2 → **47.8 MiB** (−71%) |
 | count carrying 8 MiB of unused parameters | 159 → **24.7 ms** (6.45×) | 171.2 → **43.2 MiB** (−75%) |
 
-The heap held while the bulk insert executes fell from 65.1 to 24.1 MiB. With 32 cores each running parse
+These figures were measured with sonic-rs. The branch has since switched to simd-json (see "JSON backend"
+below), which raises the bulk peaks again. The heap held while the bulk insert executes fell from 65.1 to 24.1 MiB. With 32 cores each running parse
 + plan + free, throughput rose 1.36–1.83×: `dynamic-read` 58.8 → 39.1 µs per request, and the bulk insert
 63.2 → 34.7 ms.
 
 Peak heap figures are requested bytes. "main" is `main`'s stage order: the body and AST are held through
 execution and the parameters are copied. Front-end times are single-threaded medians of three runs.
 
+**JSON backend.** JSON is now parsed and serialised with simd-json instead of sonic-rs (`b74a1a4b`).
+This was a decision, not something the benchmarks below asked for. simd-json picks AVX2, SSE4.2, NEON or a
+portable path at runtime, so one generic x86_64 image runs SIMD code, which closes F5. What it costs:
+
+- **Parsing.** Up to 1.4× faster on small and structural requests, but 5–18% slower on float-heavy bodies
+  (Graviton4).
+- **Peak heap on large bodies.** simd-json first builds a tape of 24 bytes per JSON value. It also copies
+  the body twice (an aligned input buffer and a string buffer), and the tape grows by doubling. Requested
+  bytes across the whole front end, sonic-rs (`9b75409c`) → simd-json (`b74a1a4b`):
+
+  | Request | Peak heap |
+  | --- | --- |
+  | bulk insert, 1,000 rows × 768 floats | 33.2 → **73.5 MiB** |
+  | bulk insert, 10,000 rows × 96 floats | 47.8 → **95.3 MiB** |
+  | count carrying 8 MiB of unused parameters | 43.2 → **75.2 MiB** |
+  | `wide_batch/1000` | 9.7 → 9.7 MiB |
+  | `predicate_heavy/1024` | 1.13 → 1.20 MiB |
+  | small reads and writes | at most 8 KiB more (`ordered-range-wide-projection`: 0.025 → 0.033 MiB) |
+
+  The tape and scratch buffers are freed before planning, so the heap held during execution is unchanged
+  (24.1 MiB for the bulk insert).
+- **Stack.** Less: the deepest accepted request parses in 144 KiB, against 272 KiB. Unoptimized builds need
+  more than 2 MiB on the deepest planner fixtures, so that test runs on an 8 MiB thread.
+- **Behaviour.** Integers outside i64/u64 still parse as f64 (simd-json's `big-int-as-float`). A struct
+  written in sequence form may now carry extra trailing elements (§6).
+
+HTTP and gRPC parse a uniquely owned body in place and copy a shared one. The embedded `query_json(&[u8])`
+copies.
+
 The complete numbers are in
-[ast_arena_prototype_benchmark_results.json](ast_arena_prototype_benchmark_results.json), under `linux`
-and the macOS top level.
+[ast_arena_prototype_benchmark_results.json](ast_arena_prototype_benchmark_results.json), under `linux`,
+`simd_json_switch` and the macOS top level.
 
 ## Part 1. Follow-up optimisations, measured on Graviton4
 
@@ -50,6 +80,7 @@ and the macOS top level.
 | `577956d7` | The seed rule registry is validated once per process, not on every optimisation. | Planning small reads 16–34% faster on macOS. |
 | `9b75409c` | The server allocates through mimalloc. | See "Allocator" below. |
 | `a1571d5a` | A test from `main` that overflowed the 2 MiB test stack on aarch64 Linux debug builds now runs on 8 MiB. | — |
+| `b74a1a4b` | simd-json replaces sonic-rs across the workspace. | See "JSON backend" in the summary. |
 
 The `SharedParamBindings` change keeps `PlannerContext`'s wire format unchanged. All 1,438 planner tests
 pass unchanged, including the plan-shape ones, so leaving parameters out of memo identity changed no plan.
@@ -73,8 +104,8 @@ copy, and a new planner test proves the same for native counts.
 | count + 1 MiB unused params | 2.99 → 3.00 ms | 345 µs → 0.4 µs | 14.6 ms → 33 µs | 18.0 → 3.03 ms |
 | count + 8 MiB unused params | 24.3 → 24.6 ms | 2.76 ms → 0.5 µs | 132 ms → 78 µs | 159 → 24.7 ms |
 
-- **Bulk inserts are now bound by the parser.** A profile shows about 76% of bulk parse time is sonic-rs
-  turning numbers into `QueryValue`s; validation and the depth scan take 8% and 6.5%.
+- **Bulk inserts are now bound by the parser.** A profile (sonic-rs) shows about 76% of bulk parse time is
+  the parser turning numbers into `QueryValue`s; validation and the depth scan take 8% and 6.5%.
 - **Small requests are bound by planning.** About 40–50% of their planning time is allocation (macOS
   profile).
 
@@ -135,9 +166,9 @@ Owned parsing, final branch:
 | count + 8 MiB unused params | 24.6 ms | 29.0 ms | 29.2 ms |
 
 - **simd-json wins on small and structural requests** (up to 1.4×).
-- **It loses 5–18% on float-heavy bodies.** That is where parse time matters most, so sonic-rs stays the
-  backend.
-- **x86_64 is still unmeasured.** The production image builds sonic-rs without its AVX2 fast path (F5).
+- **It loses 5–18% on float-heavy bodies.**
+- **simd-json is now the only backend** (`b74a1a4b`), chosen for runtime CPU detection rather than these
+  numbers. Its x86_64 paths are still unmeasured.
 
 ### Verification on Graviton4
 
@@ -351,6 +382,8 @@ That is up to 1.25× faster with fresh buffers, and 1.3–1.6× on small request
 Bulk writes are within ±5% either way. Copying the body for simd-json (the embedded path) costs 1–2%. simd-json's tape doubles peak parse memory (67 MiB against
 32 MiB for the 1000 × 768 bulk write).
 
+**Decided in `b74a1a4b`: simd-json.** The rest of this section is the analysis as it stood before.
+
 **The production-relevant comparison was not measured.** sonic-rs enables its x86_64 SIMD fast path only
 at compile time (`avx2 + pclmulqdq`). The Docker image sets neither feature, so production x86_64 servers
 most likely run sonic-rs's portable fallback, while simd-json would detect AVX2 at runtime.
@@ -393,6 +426,7 @@ Use a separate `CARGO_TARGET_DIR` for each build.
 - **Bugs found.** The suite found one bug in the generator: serde says "with 1 element", singular. It also
   pinned one backend difference: simd-json accepts a struct in sequence form with extra trailing elements,
   which sonic-rs rejects. Owned and arena parsing agree within each backend, so the arena is not involved.
+- **Since `b74a1a4b`** the suite and the fuzz target compare owned and arena parsing on simd-json alone.
 
 ## 7. Go/no-go
 
@@ -403,7 +437,7 @@ Use a separate `CARGO_TARGET_DIR` for each build.
 | D3 memory | ≥30% lower lifecycle peak beyond the P3 fixes | retained 0.9–1.5× owned; peak set by planning | **fail** |
 | D4 single parser | arena + `into_owned` ≤ owned parse | from 15% faster (`dynamic-read`, 728 ns against 853 ns) to 4% slower (`predicate_heavy/1024`) | roughly met, no gain |
 | D5 correctness | zero divergences | zero (29k edits, 3.8M fuzz executions) | **pass** |
-| D6 backend | simd-json ≥15% faster under production flags | up to 25% faster on aarch64 (up to 60% with reused buffers); x86_64 unmeasured | open |
+| D6 backend | simd-json ≥15% faster under production flags | up to 25% faster on aarch64 (up to 60% with reused buffers); 5–18% slower on float-heavy bodies on Graviton4; x86_64 unmeasured | simd-json adopted anyway (`b74a1a4b`) |
 
 **Recommendation.** Do not move the planner onto arena types now. That migration would touch about 62
 non-test planner files that match on `AstNode` today, plus the builders and about 127 planner test files,
@@ -444,9 +478,8 @@ The migration sketch:
    Skip `check_nesting` for parsed JSON. It costs 1–4 ms per bulk request and is redundant once
    the 255-level text scan has run. A type-level "parsed from bounded JSON" proof can let
    `query_service` skip it.
-5. **F5. Open.** sonic-rs runs without its x86 SIMD fast path in the production image. Measure simd-json with
-   runtime detection, or build with `+avx2,+pclmulqdq` on a known CPU baseline. Note that `x86-64-v3`
-   alone does not include `pclmulqdq`.
+5. **F5. Closed by `b74a1a4b`.** sonic-rs ran without its x86 SIMD fast path in the production image.
+   simd-json detects AVX2 or SSE4.2 at runtime instead.
 6. **F6. Open; now the largest remaining bulk-insert lever.** Bulk float parameters cost 24–32 bytes per
    value plus one allocation per row. A dense typed
    vector parameter (4 bytes per `f32`) would cut bulk-insert parameter memory by roughly 8× and remove
@@ -466,7 +499,7 @@ Remaining opportunities the Graviton4 profiles point to:
 
 ## Limitations
 
-- **No x86_64 host.** Both machines are aarch64, so the x86_64 SIMD paths (F5) are unmeasured.
+- **No x86_64 host.** Both machines are aarch64, so simd-json's AVX2 and SSE4.2 paths are unmeasured.
 - **Efficiency cores.** Thread counts above 10 on macOS include efficiency cores; Graviton4 has none.
 - **Divan's thread synchronisation.** It limits what the sub-microsecond scaling results can show.
 - **Memory counts requested bytes, not RSS.**
