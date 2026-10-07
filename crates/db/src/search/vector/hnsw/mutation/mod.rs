@@ -1243,10 +1243,10 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Computes the exact linear reverse-locator delta between canonical rows.
-    pub(in crate::search::vector) fn neighbor_deltas(
-        old_neighbors: &NeighborSet,
-        new_neighbors: &NeighborSet,
-    ) -> Result<NeighborDifference, HelixDbError> {
+    pub(in crate::search::vector) fn neighbor_deltas<'set>(
+        old_neighbors: &'set NeighborSet,
+        new_neighbors: &'set NeighborSet,
+    ) -> Result<NeighborDifference<'set>, HelixDbError> {
         old_neighbors
             .difference(new_neighbors)
             .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))
@@ -1281,11 +1281,11 @@ impl<D: Distance> VectorIndex<D> {
             NeighborRowValue::KnownAbsent => &empty,
             NeighborRowValue::Present(neighbors) => neighbors,
         });
-        let (removed, added) = Self::neighbor_deltas(baseline_links, current_links)?.into_parts();
-        for target_node_id in removed {
+        let difference = Self::neighbor_deltas(baseline_links, current_links)?;
+        for target_node_id in difference.removed() {
             rows.delete_reverse_locator(target_node_id, layer, node_id)?;
         }
-        for target_node_id in added {
+        for target_node_id in difference.added() {
             rows.put_reverse_locator(target_node_id, layer, node_id)?;
         }
         match (layer, current) {
@@ -3068,8 +3068,9 @@ impl<D: Distance> MutationOpCache<D> {
         }
         let touch = self.take_touch();
         let cached = CachedNeighbor::clean(value, touch);
-        let payload_bytes = cached_neighbor_payload_bytes(row, &cached)
-            .expect("validated vector neighbor cache state has measurable payload");
+        let payload_bytes =
+            retained_neighbor_payload_bytes(row.layer.number(), cached.current(), None)
+                .expect("validated vector neighbor cache state has measurable payload");
         self.replace_retained_payload(0, payload_bytes)
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(row, cached).is_none());
@@ -3091,19 +3092,15 @@ impl<D: Distance> MutationOpCache<D> {
         };
         let (last_touch, dirty) = (previous.last_touch(), previous.is_dirty());
         let layer = row.layer.number();
-        let previous_payload = cached_neighbor_payload_bytes(row, previous)?;
+        let previous_payload =
+            retained_neighbor_payload_bytes(layer, previous.current(), previous.original())?;
         // Staging keeps a dirty row's original and makes a clean row's
         // current value its original.
-        let staged_payload = neighbor_payload_bytes(layer, &value)?
-            .checked_add(neighbor_payload_bytes(
-                layer,
-                previous.original().unwrap_or(previous.current()),
-            )?)
-            .ok_or_else(|| {
-                HelixDbError::InvariantViolation(
-                    "vector build neighbor-cache payload accounting overflowed".to_string(),
-                )
-            })?;
+        let staged_payload = retained_neighbor_payload_bytes(
+            layer,
+            &value,
+            Some(previous.original().unwrap_or(previous.current())),
+        )?;
         if previous.current() != &value {
             self.entity_changed_neighbors.insert(row);
         }
@@ -3149,8 +3146,12 @@ impl<D: Distance> MutationOpCache<D> {
         let touch = self.take_touch();
         let mut cached = CachedNeighbor::clean(NeighborRowValue::KnownAbsent, touch);
         cached.stage(value, touch);
-        let payload_bytes = cached_neighbor_payload_bytes(proof.row, &cached)
-            .expect("validated new vector neighbor cache state has measurable payload");
+        let payload_bytes = retained_neighbor_payload_bytes(
+            proof.row.layer.number(),
+            cached.current(),
+            cached.original(),
+        )
+        .expect("validated new vector neighbor cache state has measurable payload");
         self.replace_retained_payload(0, payload_bytes)
             .expect("bounded vector neighbor cache payload cannot overflow");
         assert!(self.neighbor_rows.insert(proof.row, cached).is_none());
@@ -3167,8 +3168,12 @@ impl<D: Distance> MutationOpCache<D> {
         row: NeighborRowId,
     ) -> Option<CachedNeighbor> {
         let cached = self.neighbor_rows.get(&row)?;
-        let payload_bytes = cached_neighbor_payload_bytes(row, cached)
-            .expect("validated vector neighbor cache state has measurable payload");
+        let payload_bytes = retained_neighbor_payload_bytes(
+            row.layer.number(),
+            cached.current(),
+            cached.original(),
+        )
+        .expect("validated vector neighbor cache state has measurable payload");
         self.replace_retained_payload(payload_bytes, 0)
             .expect("retained vector neighbor payload covers every cached row");
         let removed = self
@@ -3195,10 +3200,12 @@ impl<D: Distance> MutationOpCache<D> {
             return;
         };
         let last_touch = previous.last_touch();
-        let previous_payload = cached_neighbor_payload_bytes(row, previous)
-            .expect("validated dirty vector neighbor has measurable payload");
+        let layer = row.layer.number();
+        let previous_payload =
+            retained_neighbor_payload_bytes(layer, previous.current(), previous.original())
+                .expect("validated dirty vector neighbor has measurable payload");
         // A flushed row retains only its current value.
-        let flushed_payload = neighbor_payload_bytes(row.layer.number(), previous.current())
+        let flushed_payload = retained_neighbor_payload_bytes(layer, previous.current(), None)
             .expect("validated flushed vector neighbor has measurable payload");
         self.replace_retained_payload(previous_payload, flushed_payload)
             .expect("flushing a vector neighbor cannot overflow cache payload");
@@ -4225,14 +4232,16 @@ fn neighbor_payload_bytes(layer: u16, value: &NeighborRowValue) -> Result<usize,
     encoded_upper_neighbors_len(count).map_err(HelixDbError::from)
 }
 
-fn cached_neighbor_payload_bytes(
-    row: NeighborRowId,
-    cached: &CachedNeighbor,
+/// Returns the payload one cached row of `layer` retains: its current value,
+/// plus its original while a write is pending.
+fn retained_neighbor_payload_bytes(
+    layer: u16,
+    current: &NeighborRowValue,
+    original: Option<&NeighborRowValue>,
 ) -> Result<usize, HelixDbError> {
-    let current = neighbor_payload_bytes(row.layer.number(), cached.current())?;
-    let original = cached
-        .original()
-        .map(|value| neighbor_payload_bytes(row.layer.number(), value))
+    let current = neighbor_payload_bytes(layer, current)?;
+    let original = original
+        .map(|value| neighbor_payload_bytes(layer, value))
         .transpose()?
         .unwrap_or(0);
     let Some(payload_bytes) = current.checked_add(original) else {
@@ -6024,6 +6033,12 @@ mod tests {
         Older(NodeId),
         Remove(NodeId),
         Renumber,
+        /// Changes a key's value in place, restamping it newer than every
+        /// other, as staging a neighbor row does.
+        Restamp(NodeId),
+        /// Changes a key's value in place without restamping it, as marking
+        /// a neighbor row flushed does.
+        Rewrite(NodeId),
     }
 
     fn recency_op() -> impl Strategy<Value = RecencyOp> {
@@ -6033,6 +6048,8 @@ mod tests {
             (0_u64..24).prop_map(RecencyOp::Older),
             (0_u64..24).prop_map(RecencyOp::Remove),
             Just(RecencyOp::Renumber),
+            (0_u64..24).prop_map(RecencyOp::Restamp),
+            (0_u64..24).prop_map(RecencyOp::Rewrite),
         ]
     }
 
@@ -6086,6 +6103,26 @@ mod tests {
                             .map(|(touch, (_, key))| (key, touch))
                             .collect();
                         map.renumber(|key| model[key]);
+                    }
+                    RecencyOp::Restamp(key) => {
+                        let touch = CacheSequence(newer);
+                        newer += 1;
+                        let modified = map.modify(&key, |cached| {
+                            cached.value = Some(crate::search::vector::SimHash::from_bits(key));
+                            cached.last_touch = touch;
+                        });
+                        let expected = model.get_mut(&key).map(|last_touch| *last_touch = touch);
+                        prop_assert_eq!(modified, expected.is_some());
+                        if modified {
+                            prop_assert_eq!(
+                                map.get(&key).unwrap().value,
+                                Some(crate::search::vector::SimHash::from_bits(key))
+                            );
+                        }
+                    }
+                    RecencyOp::Rewrite(key) => {
+                        let modified = map.modify(&key, |cached| cached.value = None);
+                        prop_assert_eq!(modified, model.contains_key(&key));
                     }
                 }
                 let expected = model

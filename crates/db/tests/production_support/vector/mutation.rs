@@ -603,6 +603,16 @@ async fn run_neighbor_write_contracts(db: &Db) {
         .await
         .unwrap()
         .is_empty());
+    // Removing a link from an absent row, or one a row lacks, stages nothing.
+    assert!(!index
+        .remove_edge_from_neighbor(&measured, 0, 999, 1, &mut cache)
+        .await
+        .unwrap());
+    assert!(!index
+        .remove_edge_from_neighbor(&measured, 0, 1, 123_456, &mut cache)
+        .await
+        .unwrap());
+    assert!(cache.oldest_dirty_neighbor().is_none());
     assert_eq!(
         index
             .prefetch_layer0_neighbors_for_mutation(&measured, &[], &mut cache)
@@ -1709,6 +1719,35 @@ fn run_build_session_discard_contract() {
     ));
 }
 
+/// A session lends its one scratch set to the namespace cache it hands out
+/// and takes it back on restore, so namespaces at rest hold none, and
+/// releases every buffer once a mutation grew one past the retained bound.
+fn run_build_session_scratch_contract() {
+    use crate::encoding::v2::keys::scope::DataScope;
+
+    let first = session_identity(DataScope::LegacyUnscoped, 81);
+    let second = session_identity(DataScope::LegacyUnscoped, 82);
+    let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+    let mut cache = session.take_cache(&first, 8, 4).unwrap();
+    cache.scratch.frontier.reserve(64);
+    let lent = cache.scratch.frontier.capacity();
+    cache.put_simhash(1, None);
+    session.restore_cache(first.clone(), cache);
+    assert_eq!(session.caches[&first].scratch.frontier.capacity(), 0);
+    assert_eq!(session.scratch.frontier.capacity(), lent);
+
+    let mut cache = session.take_cache(&second, 8, 4).unwrap();
+    assert_eq!(cache.scratch.frontier.capacity(), lent);
+    assert_eq!(session.scratch.frontier.capacity(), 0);
+    cache
+        .scratch
+        .visited
+        .reserve(MUTATION_SCRATCH_RETAINED_CAPACITY + 1);
+    session.restore_cache(second, cache);
+    assert_eq!(session.scratch.visited.capacity(), 0);
+    assert_eq!(session.scratch.frontier.capacity(), 0);
+}
+
 async fn run_unbound_metric_rejection_contract() {
     let db = session_test_db("production-vector-unbound-mutation").await;
     let index_name = "production-vector-unbound-mutation-index";
@@ -1778,6 +1817,7 @@ pub(crate) async fn run() {
     run_build_session_flush_edge_contract::<Cosine>().await;
     run_build_session_reuse_contract().await;
     run_build_session_discard_contract();
+    run_build_session_scratch_contract();
     run_unbound_metric_rejection_contract().await;
     let db = Db::open(
         "production-vector-mutation-contracts",
