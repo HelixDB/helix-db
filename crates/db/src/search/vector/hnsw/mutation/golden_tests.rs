@@ -218,8 +218,53 @@ async fn digest_state<D: Distance>(
     }
 }
 
-/// Runs one seeded workload and returns its hex digest.
-async fn run<D: Distance>(seed: u64, planner: Planner) -> String {
+/// Folds a session's telemetry and retained footprint into `digest`.
+fn digest_session<D: Distance>(session: &VectorBuildSession<D>, digest: &mut Sha256) {
+    let stats = session.stats();
+    for counter in [
+        stats.item_hits(),
+        stats.item_misses(),
+        stats.neighbor_hits(),
+        stats.neighbor_misses(),
+        stats.simhash_hits(),
+        stats.simhash_misses(),
+        stats.item_evictions(),
+        stats.neighbor_evictions(),
+        stats.simhash_evictions(),
+        stats.dirty_neighbor_flushes(),
+        stats.max_retained_payload_bytes(),
+    ]
+    .into_iter()
+    .chain(
+        [
+            session.item_count(),
+            session.neighbor_count(),
+            session.simhash_count(),
+            session.retained_bytes().unwrap(),
+        ]
+        .map(|count| u64::try_from(count).unwrap()),
+    ) {
+        digest.update(counter.to_be_bytes());
+    }
+}
+
+/// Hex digests of one workload: its committed rows and search results, and
+/// its build session's cache behavior after every operation.
+struct Digests {
+    rows: String,
+    cache: String,
+}
+
+fn hex(digest: Sha256) -> String {
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Runs one seeded workload and returns its digests.
+async fn run<D: Distance>(seed: u64, planner: Planner) -> Digests {
     let mut rng = StdRng::seed_from_u64(seed);
     // Planners of one seed share a namespace, so their digests compare.
     let name = format!("golden-{}-{seed}", D::name());
@@ -228,6 +273,7 @@ async fn run<D: Distance>(seed: u64, planner: Planner) -> String {
     let mut live = BTreeMap::new();
     let mut session = planner.session::<D>();
     let mut digest = Sha256::new();
+    let mut cache_digest = Sha256::new();
     let fresh_only = matches!(planner, Planner::Backfill);
     let operations = if fresh_only {
         usize::try_from(NODES).unwrap()
@@ -298,33 +344,57 @@ async fn run<D: Distance>(seed: u64, planner: Planner) -> String {
             session.flush_all(&measured).unwrap();
             session.enforce_limits(&measured).unwrap();
             session.admit_entity();
+            digest_session(&session, &mut cache_digest);
         }
         txn.commit().await.unwrap();
         digest_state(&db, &index, &queries, &mut digest).await;
     }
     db.close().await.unwrap();
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    Digests {
+        rows: hex(digest),
+        cache: hex(cache_digest),
+    }
 }
 
 /// Asserts every `(label, actual)` digest equals its recorded golden value,
 /// reporting all of them at once so a deliberate change can update them.
-fn assert_golden(actual: &[(&str, String)], expected: &[(&str, &str)]) {
-    let mismatched = actual
-        .iter()
-        .zip(expected)
-        .filter(|((label, digest), (expected_label, expected_digest))| {
-            assert_eq!(label, expected_label);
-            digest != expected_digest
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        mismatched.is_empty(),
-        "graph mutation digests changed: {actual:#?}"
+fn assert_golden(kind: &str, actual: &[(&str, String)], expected: &[(&str, &str)]) {
+    assert_eq!(
+        actual.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+        expected.iter().map(|(label, _)| *label).collect::<Vec<_>>()
     );
+    assert!(
+        actual
+            .iter()
+            .zip(expected)
+            .all(|((_, digest), (_, expected))| digest == expected),
+        "{kind} digests changed: {actual:#?}"
+    );
+}
+
+/// Runs every `(label, seed, planner)` workload and asserts its row digest,
+/// and its session cache digest when `cache` lists the label.
+///
+/// Only a cache that never evicts, or a workload that never deletes, has a
+/// deterministic cache digest: deletion relinking reads candidates in hash
+/// order, which orders their cache touches and so what a tight budget evicts
+/// (never what is stored, which the row digests pin).
+async fn assert_workloads<D: Distance>(
+    workloads: &[(&str, u64, Planner)],
+    rows: &[(&str, &str)],
+    cache: &[(&str, &str)],
+) {
+    let mut actual_rows = Vec::new();
+    let mut actual_cache = Vec::new();
+    for &(label, seed, planner) in workloads {
+        let digests = run::<D>(seed, planner).await;
+        actual_rows.push((label, digests.rows));
+        if cache.iter().any(|(cached, _)| *cached == label) {
+            actual_cache.push((label, digests.cache));
+        }
+    }
+    assert_golden("row", &actual_rows, rows);
+    assert_golden("cache", &actual_cache, cache);
 }
 
 /// Every planner of one seed stores the same rows: eviction and cache
@@ -332,17 +402,19 @@ fn assert_golden(actual: &[(&str, String)], expected: &[(&str, &str)]) {
 const EUCLIDEAN_SEED_1: &str = "8a8268fc073bdc4a82d573624a62767ba4275dd83cab24b312160a49f2b66090";
 const MANHATTAN_SEED_4: &str = "f0d2b874474a7b5e4c1df05e2b97447ee257eec8aaeb918d7cc42030c7f9d485";
 
+/// Session cache behavior (hits, misses, evictions, flushes, and retained
+/// footprint after every operation) is pinned too, where it is deterministic:
+/// buffer reuse must not change what is cached, touched, or evicted.
 #[tokio::test(flavor = "multi_thread")]
-async fn seeded_euclidean_workloads_store_golden_rows() {
-    let actual = vec![
-        ("tiny", run::<Euclidean>(1, Planner::TinySession).await),
-        ("large", run::<Euclidean>(1, Planner::LargeSession).await),
-        ("one-off", run::<Euclidean>(1, Planner::OneOff).await),
-        ("backfill", run::<Euclidean>(2, Planner::Backfill).await),
-        ("tiny-3", run::<Euclidean>(3, Planner::TinySession).await),
-    ];
-    assert_golden(
-        &actual,
+async fn seeded_euclidean_workloads_keep_golden_rows_and_cache_behavior() {
+    assert_workloads::<Euclidean>(
+        &[
+            ("tiny", 1, Planner::TinySession),
+            ("large", 1, Planner::LargeSession),
+            ("one-off", 1, Planner::OneOff),
+            ("backfill", 2, Planner::Backfill),
+            ("tiny-3", 3, Planner::TinySession),
+        ],
         &[
             ("tiny", EUCLIDEAN_SEED_1),
             ("large", EUCLIDEAN_SEED_1),
@@ -350,22 +422,37 @@ async fn seeded_euclidean_workloads_store_golden_rows() {
             ("backfill", "a03743504040462fad25621372320c0c20530d3669d87eb2d7c7c9ed9d1a86e7"),
             ("tiny-3", "262debfb7b3ffd696a8381955784d1a0a92554b38806c53f37a35368904d215d"),
         ],
-    );
+        &[
+            (
+                "large",
+                "d6463777480b42ee26e3bbcfa0f4f3d6bf6984623ff87d1b24b855c1ef042ccf",
+            ),
+            (
+                "backfill",
+                "aa05ee91553659bfe819929f34ebe00cb74cb6776d6949a1bbe80abd93332fcc",
+            ),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn seeded_manhattan_workloads_store_golden_rows() {
-    let actual = vec![
-        ("tiny", run::<Manhattan>(4, Planner::TinySession).await),
-        ("one-off", run::<Manhattan>(4, Planner::OneOff).await),
-        ("backfill", run::<Manhattan>(5, Planner::Backfill).await),
-    ];
-    assert_golden(
-        &actual,
+async fn seeded_manhattan_workloads_keep_golden_rows_and_cache_behavior() {
+    assert_workloads::<Manhattan>(
+        &[
+            ("tiny", 4, Planner::TinySession),
+            ("one-off", 4, Planner::OneOff),
+            ("backfill", 5, Planner::Backfill),
+        ],
         &[
             ("tiny", MANHATTAN_SEED_4),
             ("one-off", MANHATTAN_SEED_4),
             ("backfill", "62acf336d1752c0f2ab1fa659716895a7333a00cdc36144258e5ab544501643c"),
         ],
-    );
+        &[(
+            "backfill",
+            "c6e2550acb0d3f934cc249d789605fd5eb96f6fcd7e5fbaefc5c8546425605eb",
+        )],
+    )
+    .await;
 }
