@@ -14,6 +14,8 @@
 //! cosine zero vectors, metric-specific component magnitude, and type-preserving
 //! tenant identity before any HNSW or lifecycle row is staged.
 
+use std::borrow::Cow;
+
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
 use crate::encoding::v2::values::property::encode_index_partition_value;
@@ -190,16 +192,51 @@ pub(crate) fn vector_document(
     definition: &ValidatedVectorIndexDefinition,
     properties: &[Property],
 ) -> Result<Option<VectorIndexedDocument>> {
-    let Some(property) = properties
+    let Some((position, partition)) = document_source(definition, properties)? else {
+        return Ok(None);
+    };
+    let vector = property_vector_to_f32(Cow::Borrowed(&properties[position].value))?;
+    validated_document(definition, partition, vector)
+}
+
+/// [`vector_document`] over owned properties: an `f32` vector moves into the
+/// document instead of being copied. `properties` needs only the label,
+/// tenant and vector properties, in stored order.
+pub(crate) fn owned_vector_document(
+    definition: &ValidatedVectorIndexDefinition,
+    mut properties: Vec<Property>,
+) -> Result<Option<VectorIndexedDocument>> {
+    let Some((position, partition)) = document_source(definition, &properties)? else {
+        return Ok(None);
+    };
+    let value = std::mem::replace(&mut properties[position].value, PropertyValue::Null);
+    let vector = property_vector_to_f32(Cow::Owned(value))?;
+    validated_document(definition, partition, vector)
+}
+
+/// The position of the vector property and the document's partition, or
+/// `None` when the source is not indexed.
+fn document_source(
+    definition: &ValidatedVectorIndexDefinition,
+    properties: &[Property],
+) -> Result<Option<(usize, TextPartition)>> {
+    let Some(position) = properties
         .iter()
-        .find(|property| property.name == definition.property().as_str())
+        .position(|property| property.name == definition.property().as_str())
     else {
         return Ok(None);
     };
     let Some(partition) = vector_partition(definition, properties)? else {
         return Ok(None);
     };
-    let vector = property_vector_to_f32(&property.value)?;
+    Ok(Some((position, partition)))
+}
+
+fn validated_document(
+    definition: &ValidatedVectorIndexDefinition,
+    partition: TextPartition,
+    vector: Vec<f32>,
+) -> Result<Option<VectorIndexedDocument>> {
     let dimension = VectorDimension::try_new(definition.dimension() as usize)
         .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
     ValidatedMetricVector::try_from_slice(&vector, definition.metric(), dimension)
@@ -235,8 +272,13 @@ fn vector_partition(
     Ok(Some(partition))
 }
 
-fn property_vector_to_f32(value: &PropertyValue) -> Result<Vec<f32>> {
-    match value {
+fn property_vector_to_f32(value: Cow<'_, PropertyValue>) -> Result<Vec<f32>> {
+    let value = match value {
+        Cow::Owned(PropertyValue::F32Array(values)) => return Ok(values),
+        Cow::Owned(value) => Cow::Owned(value),
+        Cow::Borrowed(value) => Cow::Borrowed(value),
+    };
+    match value.as_ref() {
         PropertyValue::F32Array(values) => Ok(values.clone()),
         PropertyValue::F64Array(values) => Ok(values.iter().map(|value| *value as f32).collect()),
         PropertyValue::I64Array(values) => Ok(values.iter().map(|value| *value as f32).collect()),
@@ -2014,5 +2056,82 @@ mod tests {
         let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
         assert!(index.get_item(&db, 62).await.unwrap().is_some());
         db.close().await.unwrap();
+    }
+
+    /// The owned projection a backfill builds from selectively decoded rows
+    /// equals the borrowed projection of the complete row, for every vector
+    /// shape, partition and failure.
+    #[test]
+    fn owned_selective_documents_match_borrowed_complete_documents() {
+        use crate::encoding::v2::values::property::{encode_properties, view};
+        let label = |label: &str| property("$label", PropertyValue::String(label.to_string()));
+        let noise = || property("body", PropertyValue::String("x".repeat(512)));
+        let vectors = [
+            PropertyValue::F32Array(vec![1.0, 2.0, 3.0]),
+            PropertyValue::F64Array(vec![1.0, 2.5, 3.0]),
+            PropertyValue::I64Array(vec![1, 2, 3]),
+            PropertyValue::Array(vec![
+                PropertyValue::I64(1),
+                PropertyValue::F64(2.0),
+                PropertyValue::F32(3.0),
+            ]),
+            PropertyValue::Array(vec![PropertyValue::String("x".into())]),
+            PropertyValue::F32Array(vec![0.0, 0.0, 0.0]),
+            PropertyValue::F32Array(vec![1.0, 2.0]),
+            PropertyValue::F32Array(vec![f32::NAN, 1.0, 1.0]),
+            PropertyValue::String("not a vector".into()),
+            PropertyValue::Null,
+        ];
+        let mut rows = Vec::new();
+        for vector in vectors {
+            rows.push(vec![
+                label("Document"),
+                noise(),
+                property("embedding", vector.clone()),
+            ]);
+            rows.push(vec![
+                property("embedding", vector.clone()),
+                label("Other"),
+                property("account_id", PropertyValue::I64(7)),
+                label("Document"),
+                property("embedding", PropertyValue::F32Array(vec![9.0, 9.0, 9.0])),
+            ]);
+            rows.push(vec![
+                label("Document"),
+                property("account_id", PropertyValue::Null),
+                property("embedding", vector.clone()),
+            ]);
+            rows.push(vec![
+                label("Document"),
+                property("account_id", PropertyValue::String("a".repeat(70_000))),
+                property("embedding", vector),
+            ]);
+        }
+        rows.push(vec![label("Document")]);
+        rows.push(Vec::new());
+        for definition in [
+            validated_definition(None, VectorDistanceMetric::Cosine),
+            validated_definition(Some("account_id"), VectorDistanceMetric::Euclidean),
+        ] {
+            for row in &rows {
+                let selected = view::decode_selected(
+                    &encode_properties(row),
+                    &mut view::Scratch::new(),
+                    |name| {
+                        name == "$label"
+                            || name == definition.property().as_str()
+                            || definition
+                                .tenant_property()
+                                .is_some_and(|tenant| name == tenant.as_str())
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    format!("{:?}", owned_vector_document(&definition, selected)),
+                    format!("{:?}", vector_document(&definition, row)),
+                    "{row:?}"
+                );
+            }
+        }
     }
 }
