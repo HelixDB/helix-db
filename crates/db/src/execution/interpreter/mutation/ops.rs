@@ -151,7 +151,10 @@ impl<'db> ExecutionContext<'db> {
             source_rows_and_properties.push((
                 row,
                 from,
-                crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new(properties),
+                crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new_with_budget(
+                    properties,
+                    self.row_memory.as_ref(),
+                )?,
             ));
         }
         let ids = self
@@ -551,6 +554,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response, serde_json::json!({"nodes": 1}));
+    }
+
+    /// Edge creation admits each source row's canonical properties before it
+    /// allocates edge IDs or opens a write, so a refusal consumes no IDs.
+    #[tokio::test]
+    async fn add_edges_admit_canonical_properties_before_allocating_ids() {
+        let db = test_support::open_db("mutation-add-edge-admission").await;
+        let from = test_support::add_user(&db, "source").await;
+        let to = test_support::add_user(&db, "target").await;
+        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        context.row_memory = Some(crate::query_resources::Budget::new(0));
+        let error = context
+            .execute_mutation(
+                ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(from))]),
+                &exec::ExecMutationPlan::AddEdge {
+                    label: test_support::name("FOLLOWS"),
+                    to: ir::NodeTargetPlan::PointIds {
+                        ids: test_support::ids(vec![to]),
+                    },
+                    properties: ir::PropertyAssignments::default(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, HelixDbError::QueryMemoryLimitExceeded),
+            "{error:?}"
+        );
+        // Node and edge IDs start from the same value in separate namespaces.
+        assert_eq!(test_support::add_edge(&db, from, to, "FOLLOWS").await, from);
     }
 
     #[tokio::test]

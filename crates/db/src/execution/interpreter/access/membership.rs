@@ -8,6 +8,7 @@ use helix_planner::{catalog, ir};
 use super::super::ExecutionContext;
 use crate::encoding::v2::values::property::{equality_index_value, property_value::PropertyValue};
 use crate::error::Result;
+use crate::query_resources::bitmap;
 
 /// Runtime classification of an equality-domain parameter.
 #[derive(Debug, PartialEq)]
@@ -50,7 +51,7 @@ impl<'db> ExecutionContext<'db> {
         plan: &ir::RuntimeEqualitySet,
         reads: NonZeroUsize,
         within: Option<&roaring::RoaringTreemap>,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         let (indexed, unindexed) = match self.runtime_equality_domain(plan)? {
             RuntimeEqualityDomain::Indexed(indexed) => (indexed, None),
             RuntimeEqualityDomain::WithUnindexed { indexed, domain } => (indexed, Some(domain)),
@@ -79,10 +80,13 @@ impl<'db> ExecutionContext<'db> {
                     )
                     .boxed(),
             }),
+            self.row_memory.as_ref(),
         )
         .await?;
         Ok(match within {
-            Some(within) => ids & within,
+            Some(within) => {
+                bitmap::Bitmap::retain_legacy(&*ids & within, self.row_memory.as_ref())?
+            }
             None => ids,
         })
     }

@@ -56,6 +56,10 @@ pub enum EncodingError {
     #[error("Property serialization error: {0}")]
     Rkyv(String),
 
+    /// A resource-aware property reader stopped before descending further.
+    #[error("Stored property archive exceeds the decoder nesting limit")]
+    PropertyNestingLimit,
+
     /// Custom error message
     #[error("{0}")]
     Custom(String),

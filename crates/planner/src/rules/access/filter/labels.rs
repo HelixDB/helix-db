@@ -23,5 +23,5 @@ pub(super) fn label_equality_matches(
     predicate: &helix_ast::expr::Predicate,
     label: &ir::NonEmptyString,
 ) -> bool {
-    analysis::label_equality_atom(predicate).as_deref() == Some(label.as_ref())
+    analysis::label_equality_atom(predicate) == Some(label.as_ref())
 }

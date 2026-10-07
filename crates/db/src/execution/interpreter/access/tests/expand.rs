@@ -169,7 +169,7 @@ mod whole_value {
                         label: label.clone(),
                         output,
                     };
-                    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+                    let context = ExecutionContext::new(&db, context::ParamBindings::default());
                     let expanded = context
                         .expand(ExecutionValue::Stream(rows.clone()), &plan)
                         .await
@@ -214,7 +214,7 @@ mod whole_value {
         let (db, rows) = fixture("access-expand-concurrency").await;
         let peak = &db.inner.peak_index_child_reads;
         peak.store(0, Ordering::SeqCst);
-        let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
         context
             .expand(
                 ExecutionValue::Stream(rows),
@@ -238,7 +238,7 @@ mod whole_value {
     async fn expansion_respects_the_deadline() {
         let (db, rows) = fixture("access-expand-deadline").await;
         for successful_checks in [0, 1, 5, 20] {
-            let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+            let context = ExecutionContext::new(&db, context::ParamBindings::default());
             context.fail_deadline_after(successful_checks);
             assert!(
                 matches!(

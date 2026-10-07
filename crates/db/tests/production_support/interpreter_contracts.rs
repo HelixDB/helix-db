@@ -273,8 +273,8 @@ pub async fn run_membership_retention_contracts() {
     let key =
         catalog::ScopedPropertyDirectionKey::try_new("Item", "rank", RangeIndexDirection::Asc)
             .expect("range key is valid");
-    let predicate =
-        ir::PredicatePlan::new(Predicate::gte("rank", 3_i64)).expect("range predicate is valid");
+    let predicate = ir::PredicatePlan::new(helix_ast::expr::Predicate::gte("rank", 3_i64))
+        .expect("range predicate is valid");
     let range = exec::ExecOp::IndexMembership {
         plan: Box::new(exec::ExecNodeIndexMembershipPlan {
             set: exec::ExecNodeMembershipSet::Index {
@@ -356,7 +356,7 @@ pub async fn run_membership_retention_contracts() {
                         set: exec::ExecNodeMembershipSet::Labels(ir::AtLeast::from_one(
                             label.clone(),
                         )),
-                        predicate: ir::PredicatePlan::new(Predicate::eq(
+                        predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq(
                             "$label",
                             label.to_string(),
                         ))
@@ -860,17 +860,28 @@ async fn run_value_dependency_and_row_contracts() {
         context.row_property(&empty_row, &label).await.unwrap(),
         None
     );
-    assert!(context.row_properties(&empty_row).await.unwrap().is_empty());
     let missing_node = ExecutionRow::current(ElementRef::Node(u64::MAX));
     assert_eq!(
         context.row_property(&missing_node, &label).await.unwrap(),
         None
     );
-    assert!(context
-        .row_properties(&missing_node)
-        .await
-        .unwrap()
-        .is_empty());
+    // Neither an empty row nor a missing record has stored properties.
+    assert_eq!(
+        context
+            .project(
+                ExecutionValue::Stream(vec![empty_row, missing_node]),
+                &ir::ProjectionPlan::ValueMap(ir::PropertySelection::All),
+            )
+            .await
+            .unwrap(),
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::Object(std::collections::BTreeMap::new()),
+            ExecutionScalar::Object(std::collections::BTreeMap::from([(
+                "$id".to_string(),
+                DbPropertyValue::I64(i64::MAX),
+            )])),
+        ])
+    );
     let missing_edge = ExecutionRow::current(ElementRef::Edge(u64::MAX));
     for property in ["$from", "$to", "$from.$id", "$to.$label"] {
         let property = ir::NonEmptyString::new(property).unwrap();
@@ -1330,6 +1341,25 @@ pub(crate) async fn run_request_read_view_guards() {
                 .scan_raw_prefix_limited(Bytes::from_static(b"guard-prefix"), None)
                 .await
                 .expect_err("prefix scans require a request view"),
+            "storage prefix scan escaped its request read view",
+        ),
+        (
+            context
+                .open_raw_range(
+                    Bytes::from_static(b"guard-range-start"),
+                    Bytes::from_static(b"guard-range-end"),
+                )
+                .await
+                .err()
+                .expect("resumable range scans require a request view"),
+            "storage range scan escaped its request read view",
+        ),
+        (
+            context
+                .open_raw_prefix(Bytes::from_static(b"guard-prefix"))
+                .await
+                .err()
+                .expect("resumable prefix scans require a request view"),
             "storage prefix scan escaped its request read view",
         ),
     ] {

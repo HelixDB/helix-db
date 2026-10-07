@@ -257,6 +257,10 @@ async fn general_projection_mixes_stored_properties_and_expressions() {
             alias: name("omitted"),
         },
         ir::ProjectionItem::Expr {
+            alias: name("explicit_null"),
+            expr: ir::ExprPlan::new(Expr::prop("missing")).expect("valid property expression"),
+        },
+        ir::ProjectionItem::Expr {
             alias: name("constant"),
             expr: ir::ExprPlan::new(Expr::val(42)).expect("valid constant expression"),
         },
@@ -288,8 +292,12 @@ async fn general_projection_mixes_stored_properties_and_expressions() {
                     DbPropertyValue::String("ada".to_string()),
                 ),
                 ("constant".to_string(), DbPropertyValue::I64(42)),
+                ("explicit_null".to_string(), DbPropertyValue::Null),
             ]),
-            BTreeMap::from([("constant".to_string(), DbPropertyValue::I64(42))]),
+            BTreeMap::from([
+                ("constant".to_string(), DbPropertyValue::I64(42)),
+                ("explicit_null".to_string(), DbPropertyValue::Null),
+            ]),
         ]
     );
 }
@@ -463,7 +471,7 @@ async fn missing_property_blobs_are_cached_for_the_record_batch() {
             alias: name("second"),
         },
     ]));
-    let batch = crate::execution::interpreter::stream::filter::RECORD_BATCH_ROWS;
+    let batch = crate::execution::interpreter::stream::RECORD_BATCH_ROWS;
     for (rows, reads) in [(2, 1), (batch, 1), (batch + 1, 2)] {
         let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
         let result = ctx
@@ -486,7 +494,7 @@ async fn missing_property_blobs_are_cached_for_the_record_batch() {
 }
 
 #[tokio::test]
-async fn missing_edge_endpoints_are_negative_cached_for_the_current_row() {
+async fn missing_edge_endpoints_are_negative_cached_within_a_record_batch() {
     let db = test_support::open_db("projection-missing-endpoint-row-scope").await;
     let projection = ir::ProjectionPlan::Project(projection_items(
         [
@@ -1037,13 +1045,100 @@ async fn project_rejects_folded_stream_inputs() {
         .contains("project expected stream input, got folded stream"));
 }
 
+/// A coalesce prefetches only its first bound reference and reads a later
+/// reference on demand when earlier values are null. A row binding none of
+/// its references projects no column, and a corrupt fallback record fails
+/// the projection only once it is reached.
+#[tokio::test]
+async fn coalesce_bindings_read_fallback_records_on_demand() {
+    use crate::encoding::keys;
+    let db = test_support::open_db("projection-coalesce-fallback").await;
+    let named = test_support::add_user(&db, "ada").await;
+    let unnamed = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("nickname", PropertyValue::from("anon"))],
+    )
+    .await;
+    let corrupt = test_support::add_user(&db, "corrupt").await;
+    db.inner_db()
+        .put(
+            keys::DataKey::Data {
+                scope: keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(corrupt)),
+            }
+            .to_bytes(),
+            bytes::Bytes::from_static(b"corrupt fallback record"),
+        )
+        .await
+        .unwrap();
+    let (first, second) = (name("first"), name("second"));
+    let projection = ir::ProjectionPlan::ProjectBindings {
+        projections: binding_projection_items(vec![ir::BindingProjectionPlan::Coalesce {
+            refs: binding_refs(vec![
+                ir::BindingValueRefPlan {
+                    target: ir::BindingTargetPlan::Binding(first.clone()),
+                    source: name("name"),
+                },
+                ir::BindingValueRefPlan {
+                    target: ir::BindingTargetPlan::Binding(second.clone()),
+                    source: name("name"),
+                },
+            ]),
+            alias: name("display"),
+        }]),
+        dedup: ir::ProjectionDedupMode::All,
+    };
+    let mut named_first = ExecutionRow::empty();
+    named_first
+        .bindings
+        .insert(first.clone(), ElementRef::Node(named));
+    named_first
+        .bindings
+        .insert(second.clone(), ElementRef::Node(corrupt));
+    let mut unnamed_first = ExecutionRow::empty();
+    unnamed_first
+        .bindings
+        .insert(first, ElementRef::Node(unnamed));
+    unnamed_first
+        .bindings
+        .insert(second, ElementRef::Node(corrupt));
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let ExecutionValue::Scalars(scalars) = ctx
+        .project(
+            ExecutionValue::Stream(vec![named_first, ExecutionRow::empty()]),
+            &projection,
+        )
+        .await
+        .expect("the corrupt fallback is never reached")
+    else {
+        panic!("binding projection emits scalars");
+    };
+    assert_eq!(
+        scalars.into_iter().map(object).collect::<Vec<_>>(),
+        vec![
+            BTreeMap::from([(
+                "display".to_string(),
+                DbPropertyValue::String("ada".to_string()),
+            )]),
+            BTreeMap::new(),
+        ]
+    );
+    assert!(ctx
+        .project(ExecutionValue::Stream(vec![unnamed_first]), &projection)
+        .await
+        .is_err());
+    db.close().await.unwrap();
+}
+
 /// Property projections over many rows load each record batch with one
 /// multi-get and no per-row reads, keep row order and each row's own virtual
 /// values, and read nothing for row-local items.
 #[tokio::test]
 async fn projections_prefetch_each_record_batch_with_one_multi_get() {
     let db = test_support::open_db("projection-batch-prefetch").await;
-    let batch = crate::execution::interpreter::stream::filter::RECORD_BATCH_ROWS;
+    let batch = crate::execution::interpreter::stream::RECORD_BATCH_ROWS;
     let mut users = Vec::new();
     for index in 0..batch + 20 {
         users.push(test_support::add_user(&db, &format!("user-{index}")).await);
@@ -1217,7 +1312,11 @@ async fn record_read_matches_the_current_record_row_property_reads() {
     ] {
         let property = name(property);
         assert_eq!(
-            eval::record_read(row, &property),
+            eval::record_read(
+                row.current.as_ref(),
+                Some(&row.virtual_properties),
+                &property
+            ),
             reads_current.then_some(row.current.as_ref()).flatten(),
             "{property:?}"
         );

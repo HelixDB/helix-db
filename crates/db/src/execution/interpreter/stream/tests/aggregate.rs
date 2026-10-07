@@ -318,3 +318,52 @@ async fn group_identity_is_canonical_and_typed() {
         ])
     );
 }
+
+/// Grouping edges by an endpoint property reads the endpoint's record on
+/// demand, after the batch prefetch of the edges themselves. A corrupt
+/// endpoint record fails the aggregate instead of grouping under null.
+#[tokio::test]
+async fn endpoint_property_groups_fail_on_a_corrupt_endpoint_record() {
+    use crate::encoding::keys;
+    let db = test_support::open_db("stream-group-corrupt-endpoint").await;
+    let alice = test_support::add_user(&db, "alice").await;
+    let bob = test_support::add_user(&db, "bob").await;
+    let edge = test_support::add_edge(&db, alice, bob, "KNOWS").await;
+    let edges = || ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Edge(edge))]);
+    let mut ctx =
+        super::super::super::ExecutionContext::new(&db, context::ParamBindings::default());
+    assert_eq!(
+        ctx.aggregate(edges(), &ir::AggregatePlan::GroupCount(name("$from.name")))
+            .await
+            .unwrap(),
+        ExecutionValue::Scalars(vec![ExecutionScalar::Object(BTreeMap::from([
+            (
+                "$from.name".to_string(),
+                DbPropertyValue::String("alice".to_string()),
+            ),
+            ("count".to_string(), DbPropertyValue::I64(1)),
+        ]))])
+    );
+
+    db.inner_db()
+        .put(
+            keys::DataKey::Data {
+                scope: keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(alice)),
+            }
+            .to_bytes(),
+            bytes::Bytes::from_static(b"corrupt endpoint record"),
+        )
+        .await
+        .unwrap();
+    for aggregate in [
+        ir::AggregatePlan::Group(name("$from.name")),
+        ir::AggregatePlan::GroupCount(name("$from.name")),
+    ] {
+        assert!(
+            ctx.aggregate(edges(), &aggregate).await.is_err(),
+            "{aggregate:?}"
+        );
+    }
+    db.close().await.unwrap();
+}

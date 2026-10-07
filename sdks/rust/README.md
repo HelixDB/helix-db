@@ -683,3 +683,10 @@ spring layout through the storage-independent Rust crate.
 ## License
 
 Licensed under Apache-2.0.
+
+## Cypher
+
+Clients built from this checkout expose an additive Cypher method for local HTTP
+and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
+the language profile, method signatures, parameters, lossless values, and
+transaction behavior. Native DSL query methods keep their existing contract.

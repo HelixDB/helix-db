@@ -23,6 +23,12 @@ mod serde_impl;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KnownRuleId {
+    /// Implement a common row pipeline.
+    SeedRows,
+    /// Implement a common graph pattern.
+    SeedGraphPattern,
+    /// Explore alternative graph starting points and expansion orders.
+    GraphPatternOrder,
     /// Transpose filters below safe pure stream-preserving operators.
     FilterPushdown,
     /// Simplify no-op and idempotent side-effect-free pipeline operators.

@@ -1,0 +1,60 @@
+ifdef::env-github,env-browser[:outfilesuffix: .adoc]
+
+= The Cypher Property Graph Query Language
+
+This repository holds the specification of Cypher, a declarative property graph query language.
+Its purpose is to be central to the process of evolving the specification and standardisation of Cypher as a graph query language.
+
+* https://github.com/opencypher/openCypher/issues?q=is%3Aissue+is%3Aopen+label%3ACIR[Open Cypher Improvement Requests] (CIRs)
+* https://github.com/opencypher/openCypher/pulls?q=is%3Apr+is%3Aopen+label%3ACIP[Open Cypher Improvement Proposals] (CIPs)
+
+== Overview of the process
+
+Changes to openCypher are made through consensus in the openCypher Implementers Group (oCIG).
+The process for proposing changes, voting on proposals and measuring consensus is described in https://docs.google.com/presentation/d/1OHMxiz9xW6rINiJcCdm28a8uNcZEtCsMPfhFSIA-XXE/edit[this set of slides].
+
+Refer to the link:CIP-PROCESS.adoc[Cypher Improvement Process] document for more details on CIPs, CIRs, their structure and lifecycle.
+
+== The structure of this repository
+
+* Cypher Improvement Proposals (CIP), `/cip`
+** Contains a list of accepted CIP documents.
+* Cypher grammar, `/grammar`
+** Contains the Cypher grammar specification, in XML source format.
+** A more readily consumable form of the grammar is generated as output from the build and https://opencypher.org/resources/[can be found here]:
+*** Railroad diagrams
+*** EBNF
+*** ANTLR4 Grammar
+* Cypher Technology Compatibility Kit (TCK), `/tck`
+** Contains a set of Cucumber features that define Cypher behaviour, and documentation on how to use it.
+* openCypher developer tools, `/tools`
+** Contains code that tests the integrity of the repository, generates release artifacts, and aids implementers of openCypher.
+
+== Building
+
+This repository uses a Maven build and supports cross building for Scala 2.12 and Scala 2.13:
+
+* For Scala 2.12, use `mvn -U clean install -P scala-212`
+
+* For Scala 2.13 use `mvn -U clean install -P scala-213`
+
+== Contact us
+
+There are several ways to get in touch with the openCypher project and its participants:
+
+* Are you interested in implementing openCypher for your platform, but you have general questions and want to reach out to other community members with similar interests? Post to our Google Groups mailing list: https://groups.google.com/forum/#!forum/opencypher
+* For specific feature requests or bug reports, please open an issue on this repository.
+* Do you have a particular contribution in mind, and concrete ideas on how to implement them? Open a pull request.
+
+== Copyright
+
+© Copyright 2015-2017 Neo Technology, Inc.
+
+== Feedback
+
+Any feedback you provide to Neo Technology, Inc. through this repository shall be deemed to be non-confidential. You grant Neo Technology, Inc. a perpetual, irrevocable, worldwide, royalty-free license to use, reproduce, modify, publicly perform, publicly display and distribute such feedback on an unrestricted basis.
+
+== License
+
+The `openCypher` project is licensed under the http://www.apache.org/licenses/LICENSE-2.0[Apache license 2.0].
+// TODO: I feel like we should flesh this section out a bit -- not sure how

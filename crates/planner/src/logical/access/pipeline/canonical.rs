@@ -1,6 +1,5 @@
 //! Canonical non-empty stream-pipeline operator storage.
 
-use helix_ast::expr::Predicate;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -67,39 +66,29 @@ pub(crate) fn canonicalize_stream_pipeline_ops(
 fn flush_filters(ops: &mut Vec<StreamPipelineOp>, filters: &mut Vec<ir::PredicatePlan>) {
     match filters.as_slice() {
         [] => {}
-        [predicate] if !matches!(predicate.as_ref(), Predicate::And { .. }) => {
+        [predicate]
+            if !matches!(
+                predicate.resolved(),
+                ir::native::Expression::Function(ir::native::Function::All, _)
+            ) =>
+        {
             ops.push(StreamPipelineOp::Filter {
                 predicate: predicate.clone(),
             })
         }
-        _ => {
-            let mut predicates = Vec::new();
-            for predicate in filters.iter() {
-                flatten_conjunction(predicate.as_ref(), &mut predicates);
-            }
+        [first, rest @ ..] => {
             ops.push(StreamPipelineOp::Filter {
-                predicate: ir::PredicatePlan::new(Predicate::and(predicates))
-                    .expect("flattening validated predicates preserves predicate validity"),
+                predicate: ir::PredicatePlan::flattened_conjunction(first, rest),
             });
         }
     }
     filters.clear();
 }
 
-fn flatten_conjunction(predicate: &Predicate, predicates: &mut Vec<Predicate>) {
-    match predicate {
-        Predicate::And { predicates: nested } => {
-            for predicate in nested {
-                flatten_conjunction(predicate, predicates);
-            }
-        }
-        predicate => predicates.push(predicate.clone()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helix_ast::expr::Predicate;
 
     #[test]
     fn canonicalization_preserves_empty_and_single_filter_inputs() {
@@ -134,5 +123,59 @@ mod tests {
                     Predicate::eq("organization_type", "company"),
                 ])
         ));
+    }
+
+    #[test]
+    fn resolved_filter_runs_preserve_order_and_semantic_boundaries() {
+        use crate::logical::variables::StreamVariableWriteOp;
+        let first =
+            ir::PredicatePlan::new(Predicate::and(vec![Predicate::eq("first", 1)])).unwrap();
+        let second = ir::PredicatePlan::new(Predicate::eq("second", 2)).unwrap();
+        let expected = ir::PredicatePlan::new(Predicate::and(vec![
+            Predicate::eq("first", 1),
+            Predicate::eq("second", 2),
+        ]))
+        .unwrap();
+        for boundary in [
+            StreamPipelineOp::Limit {
+                count: ir::StreamBoundPlan::Literal(1),
+            },
+            StreamPipelineOp::Distinct,
+            StreamPipelineOp::VariableWrite {
+                op: StreamVariableWriteOp::Store(ir::NonEmptyString::new("saved").unwrap()),
+            },
+        ] {
+            let actual = canonicalize_stream_pipeline_ops(vec![
+                StreamPipelineOp::Filter {
+                    predicate: first.clone(),
+                },
+                StreamPipelineOp::Filter {
+                    predicate: second.clone(),
+                },
+                boundary.clone(),
+                StreamPipelineOp::Filter {
+                    predicate: second.clone(),
+                },
+            ]);
+            assert_eq!(
+                actual,
+                vec![
+                    StreamPipelineOp::Filter {
+                        predicate: expected.clone()
+                    },
+                    boundary,
+                    StreamPipelineOp::Filter {
+                        predicate: second.clone()
+                    }
+                ]
+            );
+            let StreamPipelineOp::Filter { predicate: last } = &actual[2] else {
+                panic!("last filter")
+            };
+            assert!(
+                std::ptr::eq(last.program().expression(), second.program().expression()),
+                "a lone filter retains its shared program"
+            );
+        }
     }
 }

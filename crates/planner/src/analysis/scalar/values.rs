@@ -9,6 +9,14 @@ use std::cmp::Ordering;
 use helix_ast::value::PropertyValue;
 use helix_value_semantics::CanonicalNumber;
 
+#[cfg(test)]
+#[path = "../tests/scalar/stable_set.rs"]
+mod stable_set_tests;
+
+#[cfg(test)]
+#[path = "../tests/scalar/constant_membership.rs"]
+mod constant_membership_tests;
+
 pub(super) fn literal_collection_is_empty(value: &PropertyValue) -> bool {
     match value {
         PropertyValue::I64Array(values) => values.is_empty(),
@@ -28,47 +36,103 @@ pub(super) fn literal_collection_is_empty(value: &PropertyValue) -> bool {
     }
 }
 
-pub(super) fn literal_collection_values(value: &PropertyValue) -> Option<Vec<PropertyValue>> {
-    let values = match value {
-        PropertyValue::I64Array(values) => values
-            .iter()
-            .copied()
-            .map(PropertyValue::I64)
-            .collect::<Vec<_>>(),
-        PropertyValue::F64Array(values) if values.iter().all(|value| !value.is_nan()) => values
-            .iter()
-            .copied()
-            .map(PropertyValue::F64)
-            .collect::<Vec<_>>(),
-        PropertyValue::F32Array(values) if values.iter().all(|value| !value.is_nan()) => values
-            .iter()
-            .copied()
-            .map(PropertyValue::F32)
-            .collect::<Vec<_>>(),
-        PropertyValue::StringArray(values) => values
-            .iter()
-            .cloned()
-            .map(PropertyValue::String)
-            .collect::<Vec<_>>(),
-        PropertyValue::Array(values)
-            if values.iter().all(property_value_has_reflexive_equality) =>
-        {
-            values.clone()
+/// Validated borrowed finite collection. Only this module can construct the
+/// private slice variants, preserving the existing scalar-proof eligibility.
+#[derive(Clone, Copy)]
+pub(super) struct LiteralCollection<'a>(CollectionSlice<'a>);
+
+#[derive(Clone, Copy)]
+enum CollectionSlice<'a> {
+    I64(&'a [i64]),
+    F64(&'a [f64]),
+    F32(&'a [f32]),
+    Strings(&'a [String]),
+    Values(&'a [PropertyValue]),
+}
+
+impl<'a> LiteralCollection<'a> {
+    pub(super) fn new(value: &'a PropertyValue) -> Option<Self> {
+        let values = match value {
+            PropertyValue::I64Array(values) => CollectionSlice::I64(values),
+            PropertyValue::F64Array(values) if values.iter().all(|value| !value.is_nan()) => {
+                CollectionSlice::F64(values)
+            }
+            PropertyValue::F32Array(values) if values.iter().all(|value| !value.is_nan()) => {
+                CollectionSlice::F32(values)
+            }
+            PropertyValue::StringArray(values) => CollectionSlice::Strings(values),
+            PropertyValue::Array(values)
+                if values.iter().all(property_value_has_reflexive_equality) =>
+            {
+                CollectionSlice::Values(values)
+            }
+            PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::I64(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::F64(_)
+            | PropertyValue::F32(_)
+            | PropertyValue::String(_)
+            | PropertyValue::Bytes(_)
+            | PropertyValue::Object(_)
+            | PropertyValue::F64Array(_)
+            | PropertyValue::F32Array(_)
+            | PropertyValue::Array(_) => return None,
+        };
+        Some(Self(values))
+    }
+
+    /// Test membership without materializing or deduplicating the domain.
+    /// Construction validates the complete collection before any early match.
+    /// Numeric scalars share the native equality kernel; nested values retain
+    /// their existing typed equality.
+    pub(super) fn contains(self, needle: &PropertyValue) -> bool {
+        match self.0 {
+            CollectionSlice::I64(values) => values
+                .iter()
+                .any(|value| property_values_equal(&PropertyValue::I64(*value), needle)),
+            CollectionSlice::F64(values) => values
+                .iter()
+                .any(|value| property_values_equal(&PropertyValue::F64(*value), needle)),
+            CollectionSlice::F32(values) => values
+                .iter()
+                .any(|value| property_values_equal(&PropertyValue::F32(*value), needle)),
+            CollectionSlice::Strings(values) => {
+                let PropertyValue::String(needle) = needle else {
+                    return false;
+                };
+                values.iter().any(|value| value == needle)
+            }
+            CollectionSlice::Values(values) => values
+                .iter()
+                .any(|value| property_values_equal(value, needle)),
         }
-        PropertyValue::Null
-        | PropertyValue::Bool(_)
-        | PropertyValue::I64(_)
-        | PropertyValue::DateTime(_)
-        | PropertyValue::F64(_)
-        | PropertyValue::F32(_)
-        | PropertyValue::String(_)
-        | PropertyValue::Bytes(_)
-        | PropertyValue::Object(_)
-        | PropertyValue::F64Array(_)
-        | PropertyValue::F32Array(_)
-        | PropertyValue::Array(_) => return None,
-    };
-    Some(dedup_property_values(values))
+    }
+
+    /// Materialize only for an authoritative proof that needs the actual domain.
+    pub(super) fn owned_values(self) -> Vec<PropertyValue> {
+        let values = match self.0 {
+            CollectionSlice::I64(values) => {
+                values.iter().copied().map(PropertyValue::I64).collect()
+            }
+            CollectionSlice::F64(values) => {
+                values.iter().copied().map(PropertyValue::F64).collect()
+            }
+            CollectionSlice::F32(values) => {
+                values.iter().copied().map(PropertyValue::F32).collect()
+            }
+            CollectionSlice::Strings(values) => {
+                values.iter().cloned().map(PropertyValue::String).collect()
+            }
+            CollectionSlice::Values(values) => values.to_vec(),
+        };
+        dedup_property_values(values)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn literal_collection_values(value: &PropertyValue) -> Option<Vec<PropertyValue>> {
+    LiteralCollection::new(value).map(LiteralCollection::owned_values)
 }
 
 pub(super) fn property_value_has_reflexive_equality(value: &PropertyValue) -> bool {
@@ -176,11 +240,15 @@ fn dedup_property_values(values: Vec<PropertyValue>) -> Vec<PropertyValue> {
         .iter()
         .map(|value| property_value_identity(value).is_none_or(|identity| seen.insert(identity)))
         .collect::<Vec<_>>();
-    values
+    let mut values = values
         .into_iter()
         .zip(first_seen)
         .filter_map(|(value, first_seen)| first_seen.then_some(value))
-        .collect()
+        .collect::<Vec<_>>();
+    // Collecting reuses the input allocation; a duplicate-heavy list must not
+    // keep the original wide capacity in the plan.
+    values.shrink_to_fit();
+    values
 }
 
 /// Hashable identity of a property value under [`property_values_equal`]:

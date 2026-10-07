@@ -60,24 +60,34 @@ impl<'db> ExecutionContext<'db> {
         match aggregate {
             ir::AggregatePlan::Group(property) => {
                 let mut groups = BTreeMap::<GroupKey, Vec<i64>>::new();
-                for row in &rows {
-                    self.check_execution_deadline()?;
-                    let element_id = row
-                        .current
-                        .as_ref()
-                        .ok_or_else(|| {
-                            HelixDbError::Query(
-                                "group expected element stream input, got empty row".to_string(),
-                            )
-                        })?
-                        .id()
-                        .try_into()
-                        .unwrap_or(i64::MAX);
-                    let value = self
-                        .row_property(row, property)
-                        .await?
-                        .unwrap_or(DbPropertyValue::Null);
-                    groups.entry(GroupKey(value)).or_default().push(element_id);
+                for batch in rows.chunks(RECORD_BATCH_ROWS) {
+                    let mut resolver = eval::RowValueResolver::new(self);
+                    // An empty row fails the query, so rows after it are never read.
+                    let readable = batch
+                        .split(|row| row.current.is_none())
+                        .next()
+                        .unwrap_or_default();
+                    resolver.prefetch_rows(readable, &[property]).await?;
+                    for row in batch {
+                        self.check_execution_deadline()?;
+                        let element_id = row
+                            .current
+                            .as_ref()
+                            .ok_or_else(|| {
+                                HelixDbError::Query(
+                                    "group expected element stream input, got empty row"
+                                        .to_string(),
+                                )
+                            })?
+                            .id()
+                            .try_into()
+                            .unwrap_or(i64::MAX);
+                        let value = resolver
+                            .row_property(row, property)
+                            .await?
+                            .unwrap_or(DbPropertyValue::Null);
+                        groups.entry(GroupKey(value)).or_default().push(element_id);
+                    }
                 }
                 Ok(ExecutionValue::Scalars(
                     groups
@@ -94,18 +104,28 @@ impl<'db> ExecutionContext<'db> {
             }
             ir::AggregatePlan::GroupCount(property) => {
                 let mut groups = BTreeMap::<GroupKey, i64>::new();
-                for row in &rows {
-                    self.check_execution_deadline()?;
-                    if row.current.is_none() {
-                        return Err(HelixDbError::Query(
-                            "groupCount expected element stream input, got empty row".to_string(),
-                        ));
+                for batch in rows.chunks(RECORD_BATCH_ROWS) {
+                    let mut resolver = eval::RowValueResolver::new(self);
+                    // An empty row fails the query, so rows after it are never read.
+                    let readable = batch
+                        .split(|row| row.current.is_none())
+                        .next()
+                        .unwrap_or_default();
+                    resolver.prefetch_rows(readable, &[property]).await?;
+                    for row in batch {
+                        self.check_execution_deadline()?;
+                        if row.current.is_none() {
+                            return Err(HelixDbError::Query(
+                                "groupCount expected element stream input, got empty row"
+                                    .to_string(),
+                            ));
+                        }
+                        let value = resolver
+                            .row_property(row, property)
+                            .await?
+                            .unwrap_or(DbPropertyValue::Null);
+                        *groups.entry(GroupKey(value)).or_default() += 1;
                     }
-                    let value = self
-                        .row_property(row, property)
-                        .await?
-                        .unwrap_or(DbPropertyValue::Null);
-                    *groups.entry(GroupKey(value)).or_default() += 1;
                 }
                 Ok(ExecutionValue::Scalars(
                     groups
@@ -132,18 +152,27 @@ impl<'db> ExecutionContext<'db> {
         property: &ir::NonEmptyString,
     ) -> Result<ExecutionValue> {
         let mut values = Vec::new();
-        for row in &rows {
-            self.check_execution_deadline()?;
-            if row.current.is_none() {
-                return Err(HelixDbError::Query(
-                    "aggregateBy expected element stream input, got empty row".to_string(),
-                ));
-            }
-            let Some(value) = self.row_property(row, property).await? else {
-                continue;
-            };
-            if let Some(value) = aggregate_numeric_value(&value) {
-                values.push(value);
+        for batch in rows.chunks(RECORD_BATCH_ROWS) {
+            let mut resolver = eval::RowValueResolver::new(self);
+            // An empty row fails the query, so rows after it are never read.
+            let readable = batch
+                .split(|row| row.current.is_none())
+                .next()
+                .unwrap_or_default();
+            resolver.prefetch_rows(readable, &[property]).await?;
+            for row in batch {
+                self.check_execution_deadline()?;
+                if row.current.is_none() {
+                    return Err(HelixDbError::Query(
+                        "aggregateBy expected element stream input, got empty row".to_string(),
+                    ));
+                }
+                let Some(value) = resolver.row_property(row, property).await? else {
+                    continue;
+                };
+                if let Some(value) = aggregate_numeric_value(&value) {
+                    values.push(value);
+                }
             }
         }
         let value = match function {

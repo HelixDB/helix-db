@@ -22,6 +22,12 @@ impl<'db> ExecutionContext<'db> {
         range: &ir::IndexRange,
         iteration: ir::RangeScanIteration,
     ) -> Result<crate::index_lifecycle::secondary::OrderedRangeCursor> {
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::cypher::StorageReadUsage {
+                scans: 1,
+                ..Default::default()
+            })
+        });
         let identity =
             secondary_range_identity(element, key.label.as_ref(), key.property.as_ref())?;
         let direction = storage_range_direction(key.direction);
@@ -109,7 +115,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<usize>,
     ) -> Result<usize> {
         self.range_index_count_with_membership(
@@ -126,7 +132,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<usize>,
     ) -> Result<usize> {
         self.range_index_count_with_membership(
@@ -144,7 +150,7 @@ impl<'db> ExecutionContext<'db> {
         element_kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<usize>,
     ) -> Result<usize> {
         let direction = storage_range_direction(key.direction);
@@ -214,7 +220,7 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyDirectionKey,
         range: &ir::IndexRange,
         iteration: ir::RangeScanIteration,
-        membership: &[roaring::RoaringTreemap],
+        membership: &[&roaring::RoaringTreemap],
         limit: Option<properties::PositiveUsize>,
     ) -> Result<Vec<u64>> {
         self.check_execution_deadline()?;
@@ -320,7 +326,7 @@ async fn scan_managed_range_in_view(
     query: Option<&crate::index_lifecycle::secondary::SecondaryRangeQuery>,
     requested_direction: StorageRangeIndexDirection,
     iteration: ir::RangeScanIteration,
-    membership: &[roaring::RoaringTreemap],
+    membership: &[&roaring::RoaringTreemap],
     limit: Option<usize>,
 ) -> Result<Vec<u64>> {
     let active =
@@ -381,7 +387,7 @@ async fn count_range_with_membership_in_view(
     query: &OwnedRangeQuery,
     requested_direction: StorageRangeIndexDirection,
     limit: Option<usize>,
-    membership: &[roaring::RoaringTreemap],
+    membership: &[&roaring::RoaringTreemap],
 ) -> Result<usize> {
     let managed_query = match query {
         OwnedRangeQuery::All => None,
@@ -473,13 +479,29 @@ impl crate::index_lifecycle::secondary::ExactRangeScanProgress for ExecutionCont
     fn checkpoint(&self) -> Result<()> {
         self.check_execution_deadline()
     }
-    #[cfg(test)]
+    // A Cypher request reports each index entry as a scanned row and each
+    // authoritative verification as a point read.
     fn entry_visited(&self) {
+        #[cfg(test)]
         self.range_reads.entry_visited();
+        let Some(budget) = &self.row_memory else {
+            return;
+        };
+        budget.record_reads(crate::cypher::StorageReadUsage {
+            scan_rows: 1,
+            ..Default::default()
+        });
     }
-    #[cfg(test)]
     fn authoritative_read(&self) {
+        #[cfg(test)]
         self.range_reads.authoritative_read();
+        let Some(budget) = &self.row_memory else {
+            return;
+        };
+        budget.record_reads(crate::cypher::StorageReadUsage {
+            point_gets: 1,
+            ..Default::default()
+        });
     }
     #[cfg(test)]
     fn authoritative_decode(&self) {

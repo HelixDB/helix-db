@@ -4,6 +4,8 @@ package helixdb.server.v1;
 
 service HelixDbServer {
   rpc ExecuteQuery(QueryJsonRequest) returns (QueryJsonResponse);
+  // body is the same lossless JSON request/result contract as POST /v2/cypher.
+  rpc ExecuteCypher(QueryJsonRequest) returns (QueryJsonResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }
 

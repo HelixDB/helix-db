@@ -35,6 +35,9 @@ use helix_ast::value::{PropertyInput, PropertyValue};
 use helix_planner::{catalog, context, cost, exec, ir, planning, properties, trace};
 use slatedb::object_store::memory::InMemory;
 
+#[path = "production_contracts/pull_paths.rs"]
+mod pull_paths;
+
 fn run_high_stack_contract<F, Fut>(name: &'static str, contract: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -6613,6 +6616,179 @@ async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
         assert_eq!(actual, expected);
     }
 
+    db.close().await.unwrap();
+}
+
+#[test]
+fn public_query_boundary_keeps_limits_for_multi_owner_unique_lookups() {
+    run_high_stack_contract(
+        "public-unique-multi-owner-limits",
+        public_query_boundary_keeps_limits_for_multi_owner_unique_lookups_contract,
+    );
+}
+
+/// A unique index bounds only an indexed lookup value. Null equality scans for
+/// owners lacking the property and runtime parameters can bind null or a set,
+/// so limits over those lookups must survive planning. Results before the index
+/// exists are the independent reference.
+async fn public_query_boundary_keeps_limits_for_multi_owner_unique_lookups_contract() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-unique-multi-owner-limits".to_owned(),
+    })
+    .await
+    .expect("unique lookup limit fixture opens");
+    let mut fixture = batch::write_batch();
+    for (name, email, age) in [
+        ("a", Some("a"), 30_i64),
+        ("b", Some("b"), 10),
+        ("c", Some("c"), 20),
+        ("x", None, 50),
+        ("y", None, 51),
+        ("z", None, 52),
+    ] {
+        let mut properties = vec![("age", PropertyInput::from(age))];
+        properties.extend(email.map(|email| ("email", PropertyInput::from(email))));
+        fixture = fixture.var_as(name, traversal::g().add_n("User", properties));
+    }
+    db.query(QueryRequest::write(fixture.returning(Vec::<String>::new())))
+        .await
+        .unwrap();
+
+    let null = || Predicate::eq("email", PropertyValue::Null);
+    let users = |predicate| traversal::g().n_with_label_where("User", predicate);
+    let read = batch::read_batch()
+        .var_as(
+            "null_limited",
+            users(null())
+                .limit(StreamBound::literal(1))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "null_window",
+            users(null())
+                .range(StreamBound::literal(1), StreamBound::literal(3))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "null_ordered",
+            users(null())
+                .order_by("age", traversal::Order::Desc)
+                .values(vec!["age"]),
+        )
+        .var_as("null_count", users(null()).count())
+        .var_as(
+            "param_limited",
+            users(Predicate::eq_param("email", "missing"))
+                .limit(StreamBound::literal(2))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "set_limited",
+            users(Predicate::is_in_param("email", "emails"))
+                .limit(StreamBound::literal(2))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "set_ordered",
+            users(Predicate::is_in_param("email", "emails"))
+                .order_by("age", traversal::Order::Asc)
+                .values(vec!["age"]),
+        )
+        .returning([
+            "null_limited",
+            "null_window",
+            "null_ordered",
+            "null_count",
+            "param_limited",
+            "set_limited",
+            "set_ordered",
+        ]);
+    let request = || {
+        QueryRequest::read(read.clone())
+            .with_parameter_value("missing", QueryValue::Null)
+            .with_parameter_value(
+                "emails",
+                QueryValue::Array(vec![QueryValue::String("a".to_owned()), QueryValue::Null]),
+            )
+    };
+    let ages = |value: &serde_json::Value| {
+        value
+            .as_array()
+            .expect("projected rows are a list")
+            .iter()
+            .map(|row| row["age"].as_i64().expect("age is an integer"))
+            .collect::<Vec<_>>()
+    };
+    let check = |result: &serde_json::Value| {
+        let nulls = [50, 51, 52];
+        let null_limited = ages(&result["null_limited"]);
+        assert_eq!(null_limited.len(), 1, "{result}");
+        assert!(null_limited.iter().all(|age| nulls.contains(age)));
+        assert_eq!(ages(&result["null_window"]).len(), 2, "{result}");
+        assert_eq!(ages(&result["null_ordered"]), vec![52, 51, 50]);
+        assert_eq!(result["null_count"], 3);
+        let param_limited = ages(&result["param_limited"]);
+        assert_eq!(param_limited.len(), 2, "{result}");
+        assert!(param_limited.iter().all(|age| nulls.contains(age)));
+        let set_limited = ages(&result["set_limited"]);
+        assert_eq!(set_limited.len(), 2, "{result}");
+        assert!(set_limited
+            .iter()
+            .all(|age| *age == 30 || nulls.contains(age)));
+        assert_eq!(ages(&result["set_ordered"]), vec![30, 50, 51, 52]);
+    };
+    let reference = db.query(request()).await.unwrap();
+    check(&reference);
+
+    let receipt = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(
+                        index::IndexSpec::node_unique_equality("User", "email"),
+                    ),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .unwrap();
+    await_index_operation_success(
+        &db,
+        receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted unique index operation has an ID"),
+        "unique node equality index",
+    )
+    .await;
+
+    let plan = planning::plan_read_batch(&read, &db.planner_context(Default::default()))
+        .expect("unique lookup batch plans");
+    let unique_lookup = |plan: &exec::ExecAccessPlan| match plan {
+        exec::ExecAccessPlan::Node(node) => matches!(
+            node,
+            exec::ExecNodeAccessPlan::AuthoritativeScan { .. }
+                | exec::ExecNodeAccessPlan::DynamicEquality { .. }
+                | exec::ExecNodeAccessPlan::DynamicMembership { .. }
+        ),
+        exec::ExecAccessPlan::Edge(_) | exec::ExecAccessPlan::Limited(_) => false,
+    };
+    let limited_lookups = plan
+        .steps()
+        .iter()
+        .filter(|step| {
+            matches!(&step.op, exec::ExecOp::Access { plan: access }
+                if matches!(access.as_ref(), exec::ExecAccessPlan::Limited(limited)
+                    if unique_lookup(limited.source())))
+        })
+        .count();
+    // Limit, window end, parameter limit and set limit each keep a read bound.
+    assert_eq!(limited_lookups, 4, "{:?}", plan.steps());
+
+    let indexed = db.query(request()).await.unwrap();
+    check(&indexed);
+    assert_eq!(indexed["null_ordered"], reference["null_ordered"]);
+    assert_eq!(indexed["set_ordered"], reference["set_ordered"]);
     db.close().await.unwrap();
 }
 

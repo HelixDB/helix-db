@@ -48,6 +48,9 @@ impl KnownRuleId {
 
     /// Root pipeline, mutation, DDL, control-flow, and terminal rule IDs.
     pub const ROOT: &'static [Self] = &[
+        Self::SeedRows,
+        Self::SeedGraphPattern,
+        Self::GraphPatternOrder,
         Self::SeedRootPipeline,
         Self::SeedRootMutation,
         Self::SeedRootIndexDdl,
@@ -102,6 +105,9 @@ impl KnownRuleId {
         Self::AccessPipelineOrder,
         Self::AccessPipelineSimplification,
         Self::SeedAccessPipeline,
+        Self::SeedRows,
+        Self::SeedGraphPattern,
+        Self::GraphPatternOrder,
         Self::SeedRootPipeline,
         Self::SeedRootMutation,
         Self::SeedRootIndexDdl,

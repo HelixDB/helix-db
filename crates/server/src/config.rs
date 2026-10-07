@@ -69,6 +69,23 @@ pub struct ServerConfig {
     /// bounds from `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` and
     /// `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES`.
     pub index_operation_queue: db::config::IndexOperationQueueTuning,
+    /// Whether Cypher requests are routed.
+    pub cypher: CypherEndpoints,
+}
+
+/// Whether the server routes Cypher requests.
+///
+/// Cypher is opt-in: `HELIX_ENABLE_CYPHER=true` (or `1`) routes
+/// `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`.
+/// Otherwise they answer 404 and `Unimplemented`, as a server without Cypher
+/// does, and only native queries are served.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CypherEndpoints {
+    /// Cypher requests are not routed.
+    #[default]
+    Disabled,
+    /// Cypher requests are served.
+    Enabled,
 }
 
 impl ServerConfig {
@@ -114,6 +131,16 @@ impl ServerConfig {
                 .map_or(tuning, |bytes| {
                     tuning.with_strong_text_search_max_analysis_bytes(bytes)
                 });
+        let cypher = match text(&mut lookup, &["HELIX_ENABLE_CYPHER"])? {
+            None => CypherEndpoints::Disabled,
+            Some((_, value)) if value.eq_ignore_ascii_case("true") || value == "1" => {
+                CypherEndpoints::Enabled
+            }
+            Some((_, value)) if value.eq_ignore_ascii_case("false") || value == "0" => {
+                CypherEndpoints::Disabled
+            }
+            Some((variable, value)) => return Err(ServerConfigError::Switch { variable, value }),
+        };
         // Last, so every other variable is valid before a cache directory is
         // created.
         let storage = StorageConfig::from_lookup(&mut lookup)?;
@@ -124,6 +151,7 @@ impl ServerConfig {
             db_path,
             storage,
             index_operation_queue,
+            cypher,
         })
     }
 
@@ -182,6 +210,7 @@ impl ServerConfig {
     ///         db_path: "db/".to_string(),
     ///         storage,
     ///         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+    ///         cypher: server::CypherEndpoints::Disabled,
     ///     };
     ///     let db::config::CacheMode::Hybrid { object_store, .. } =
     ///         config.db_config().cache().mode().clone()
@@ -237,6 +266,7 @@ impl ServerConfig {
     ///     db_path: "db/".to_string(),
     ///     storage: StorageConfig::Memory,
     ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+    ///     cypher: server::CypherEndpoints::Disabled,
     /// };
     /// assert_eq!(config.required_open_files(), None);
     /// ```
@@ -829,6 +859,14 @@ pub enum ServerConfigError {
         /// Variable found.
         variable: &'static str,
     },
+    /// An on/off variable was not `true`, `false`, `1` or `0`.
+    #[error("invalid {variable} `{value}`: expected true, false, 1 or 0")]
+    Switch {
+        /// Switch variable.
+        variable: &'static str,
+        /// Raw value.
+        value: String,
+    },
     /// Two mutually exclusive storage backends were configured.
     #[error("HELIX_DATA_DIR and S3_BUCKET cannot be set together")]
     ConflictingStorageConfiguration,
@@ -995,6 +1033,7 @@ mod tests {
         );
         assert_eq!(config.db_path, "db/");
         assert_eq!(config.storage, StorageConfig::Memory);
+        assert_eq!(config.cypher, CypherEndpoints::Disabled);
         assert_eq!(config.db_config().cache(), db::DbConfig::new().cache());
         assert_eq!(
             config.db_config().index_operation_queue(),
@@ -1076,6 +1115,43 @@ mod tests {
             Tuning::default()
                 .with_strong_vector_search_max_pending_bytes(NonZeroU64::new(1 << 20).unwrap())
                 .with_strong_text_search_max_analysis_bytes(NonZeroU64::new(2 << 20).unwrap())
+        );
+    }
+
+    #[test]
+    fn cypher_endpoints_are_opt_in_with_a_strict_switch() {
+        let cypher = |value: &str| {
+            ServerConfig::from_lookup(|name| {
+                (name == "HELIX_ENABLE_CYPHER").then(|| OsString::from(value))
+            })
+            .map(|config| config.cypher)
+        };
+        for value in ["true", "TRUE", "1"] {
+            assert_eq!(cypher(value).unwrap(), CypherEndpoints::Enabled);
+        }
+        for value in ["false", "False", "0"] {
+            assert_eq!(cypher(value).unwrap(), CypherEndpoints::Disabled);
+        }
+        for value in ["", "yes", "on", "2"] {
+            let error = cypher(value).unwrap_err();
+            assert!(matches!(
+                &error,
+                ServerConfigError::Switch { variable: "HELIX_ENABLE_CYPHER", value: found }
+                    if found == value
+            ));
+            assert!(error.to_string().starts_with("invalid HELIX_ENABLE_CYPHER"));
+        }
+        // Rejected before storage creates a cache directory.
+        let error = ServerConfig::from_lookup(|name| match name {
+            "S3_BUCKET" => Some(OsString::from("bucket")),
+            "HELIX_DISK_CACHE_DIR" => Some(OsString::from("")),
+            "HELIX_ENABLE_CYPHER" => Some(OsString::from("yes")),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, ServerConfigError::Switch { .. }),
+            "{error:?}"
         );
     }
 

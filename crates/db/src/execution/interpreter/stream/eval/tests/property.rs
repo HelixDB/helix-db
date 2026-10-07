@@ -56,14 +56,30 @@ async fn row_property_reads_id_stored_properties_and_missing_values() {
         ctx.row_property(&row, &name("missing")).await.unwrap(),
         None
     );
-    assert_eq!(
-        ctx.row_properties(&ExecutionRow::empty()).await.unwrap(),
-        Vec::new()
-    );
-    assert_eq!(
-        ctx.row_properties(&current_node(u64::MAX)).await.unwrap(),
-        Vec::new()
-    );
+    let mut resolver = RowValueResolver::new(&ctx);
+    for last_use in [false, true] {
+        assert_eq!(
+            resolver
+                .row_properties(&ExecutionRow::empty(), last_use)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            resolver
+                .row_properties(&current_node(u64::MAX), last_use)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+    }
+    // Earlier uses copy the cached record, the last use moves it out, and a
+    // use after that reads the record again.
+    resolver.prefetch([&ElementRef::Node(id)]).await.unwrap();
+    let copied = resolver.row_properties(&row, false).await.unwrap();
+    assert!(!copied.is_empty());
+    assert_eq!(resolver.row_properties(&row, true).await.unwrap(), copied);
+    assert_eq!(resolver.row_properties(&row, true).await.unwrap(), copied);
 }
 
 #[tokio::test]

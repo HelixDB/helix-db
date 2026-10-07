@@ -3,6 +3,7 @@
 #![recursion_limit = "256"]
 
 #[allow(dead_code)]
+#[path = "production_support/text_correctness.rs"]
 mod text_correctness_support;
 
 use std::collections::{BTreeMap, BTreeSet};

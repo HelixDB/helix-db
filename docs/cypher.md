@@ -1,0 +1,477 @@
+# Cypher
+
+Helix supports the Cypher profile below alongside the native DSL. Both frontends
+use the existing graph storage, transactions, and indexes. Existing databases do
+not need a storage migration. This is a supported language profile, not full
+openCypher compatibility. Use a server or embedded build containing this implementation;
+cloud gateway deployment is separate.
+
+## Execute a statement
+
+Cypher is off by default. Start the server with `HELIX_ENABLE_CYPHER=true` to
+route `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`;
+without it they return 404 and `Unimplemented`, and only native queries are
+served.
+
+Send one statement to a local server's `POST /v2/cypher` endpoint:
+
+```sh
+curl http://localhost:6969/v2/cypher \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"RETURN $name AS name, $age AS age","parameters":{"name":"Ada","age":30}}'
+```
+
+```json
+{"columns":["name","age"],"rows":[["Ada",30]]}
+```
+
+Use the host and port of your configured instance. Existing server authentication
+and tenant routing apply. `query` is required; `parameters` and `query_name` are
+optional. Each row has one value per column in column order. Duplicates are
+preserved unless the query uses `DISTINCT`. Use `ORDER BY` when row order matters.
+
+Create and read a graph:
+
+```cypher
+CREATE (a:Person {name:'Ada', age:30})-[:KNOWS]->(b:Person {name:'Bob', age:40})
+RETURN a.name AS person, b.name AS friend
+```
+
+```cypher
+MATCH (a:Person)-[:KNOWS]->(b:Person)
+WHERE a.age >= $minimumAge
+RETURN a.name AS person, collect(b.name) AS friends
+ORDER BY person
+```
+
+Parameters are values; labels, relationship types, and variable names are query
+syntax. Keep values in parameters rather than interpolating them into query text.
+The existing `POST /v2/query` endpoint continues to accept the native DSL contract.
+
+## SDK and embedded entry points
+
+Use an existing configured client and its normal connection lifecycle:
+
+| Client | Method |
+|---|---|
+| TypeScript | `await client.cypher(query, parameters, queryName)` |
+| Rust SDK | `client.cypher(query, parameters, query_name).await` |
+| Go | `client.Cypher(ctx, helix.CypherRequest{Query: query, Parameters: parameters})` |
+| Python | `client.cypher(query, parameters, query_name="example")` |
+| Async Python | `await client.cypher(query, parameters, query_name="example")` |
+
+TypeScript and Python default omitted parameters to an empty map. Rust SDK
+parameters are a `BTreeMap<String, serde_json::Value>` and `query_name` is
+`Option<&str>`. Go returns `(*CypherResponse, error)`. Each client preserves tagged
+lossless values in the response. See the [Rust](../sdks/rust/README.md),
+[TypeScript](../sdks/typescript/README.md), [Go](../sdks/go/README.md), and
+[Python](../sdks/python/README.md) guides for client construction and embedded
+build prerequisites. Use SDK and server builds from this checkout for Cypher.
+
+The database crate also exposes `database.cypher(db::cypher::Request::new(query)).await`.
+The lower-level `db::cypher::execute` accepts explicit scope, execution control,
+query mode, and resource limits. These use the caller's existing database handle.
+For a prepared JSON body, use `database.cypher_json(request).await` or
+`db::cypher::execute_json` with explicit scope and limits. JSON preparation runs
+before a modifying statement commits, so an encoding resource failure rolls back
+the statement. `EncodedResponse::body()` borrows the JSON, `into_bytes()` transfers
+it to shared transport ownership, and `into_vec()` moves its allocation to an
+embedded caller. None of these methods serializes the result again.
+Transport adapters that check read/write policy before execution can consume
+`Request::compile()` once, inspect `CompiledRequest::request_type()`, and pass the
+owned result to `HelixQueryService::execute_compiled_cypher_json_scoped_controlled`.
+HTTP and gRPC use this path. Compilation retains no database or catalog snapshot;
+execution still acquires the current scoped catalog, validates parameters, and
+applies the attempt's limits and cancellation control.
+
+The additive gRPC `ExecuteCypher(QueryJsonRequest)` method accepts the same JSON
+body and existing request options, returning a `QueryJsonResponse`.
+
+From a linked local Helix project:
+
+```sh
+helix cypher -e 'RETURN 1 AS value'
+helix cypher -e 'RETURN $name AS name' --parameters '{"name":"Ada"}'
+helix cypher --file query.cypher --parameters '{"minimumAge":30}'
+```
+
+An optional instance name selects a linked local instance. `--host` and `--port`
+control the connection, and `--explain` shows the selected plans without
+executing the statement. Responses print as highlighted JSON, or as compact
+JSON with the global `--json` flag. The CLI currently requires a local instance
+configuration.
+
+## Supported language profile
+
+| Area | Supported |
+|---|---|
+| Patterns | `MATCH`, `OPTIONAL MATCH`, fixed-length directed and undirected relationships, multiple patterns, repeated variables, named paths |
+| Rows | `WHERE`, `WITH`, `RETURN`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
+| Expressions | Parameters, scalar/list/map literals, property and index access, arithmetic, comparisons, boolean operators, null tests, `IN`, string predicates, `CASE` |
+| Graph/list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` for properties, `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
+| Scalar functions | `coalesce`, `abs`, `toString`, `toInteger`/`toInt`, `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
+| Aggregation | `count`, `sum`, `avg`, `min`, `max`, `collect`, including distinct arguments |
+| Writes | `CREATE`, property and map `SET`, property `REMOVE`, `DELETE`, `DETACH DELETE` |
+
+The `WHERE` of a `WITH` filters the rows the clause returns, after its
+`DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
+keeps at most the third row. After `SKIP` or `LIMIT` only the variables the `WITH`
+projects remain, so such a `WHERE` that reads any other variable is rejected with
+`UndefinedVariable`.
+
+`MERGE`, variable-length and shortest paths, `UNION`, subqueries, comprehensions,
+procedures, schema DDL, temporal/spatial functions, and Bolt are outside this
+profile. Unsupported syntax receives a specific `UnsupportedFeature` error. A
+statement that is also invalid openCypher reports the standard compile error
+instead, such as `VariableAlreadyBound` for a CREATE that redeclares a variable
+or `UndefinedVariable` for a pattern predicate that introduces one. Other
+openCypher built-in functions, such as `sqrt` or `date`, are unsupported, while
+an unrecognized function name is a `SyntaxError` with `UnknownFunction`. A
+parameter map in a MATCH pattern, such as `(n $props)`, is an
+`InvalidParameterUse` syntax error; in CREATE it is unsupported. Use the
+existing native index-management API to create indexes; Cypher planning can
+select existing compatible indexes.
+
+A label test in WHERE, such as `MATCH (n) WHERE n:User`, labels the node for
+this purpose, and every occurrence of a repeated node variable contributes its
+property map. An equality with null matches nothing, so it reads no nodes. With
+only a range index on a property, an equality reads the closed range `[v, v]`.
+`id(n) = v` and `id(n) IN [...]` with integer literals or parameters read those
+nodes directly, labelled or not; the pattern still checks each node's label.
+For a labeled node, a WHERE conjunct such as `n.email = $email` or
+`n.key IN [1, 2, 3]` can read a native equality index on that property instead
+of scanning the label, and so can equalities of one property joined by `OR`,
+such as `n.key = 1 OR n.key = 2`. An `IN` list may be a literal, a list of
+literals and parameters, or a parameter bound to a list. A property or element
+of a parameter, such as `$p.email`, `$p['email']` or `$ids[0]`, counts as the
+value it holds, and a missing key or an element beyond the list is null. Such
+access on a value without properties or elements keeps the label scan, so it
+fails only where a scan would. Null and NaN members never match, so
+they need no lookup. A list with a nested member, or with more than 64 distinct
+values, scans the label instead. An indexed unique equality on the same node,
+or an equality on the list's own property, takes precedence, and the `IN` list
+is then checked as a filter. Another equality wins unless statistics estimate
+fewer rows for the list, since without them one value is taken to match fewer
+nodes than several. A string too large
+to index, about 1 MiB, cannot equal an indexed value, so a lookup of one keeps
+the label scan. A comparison such as `n.age >= 21 AND n.age < $max` against a
+number or string literal or parameter can read a native range index on that
+property, with bounds on one property combined. It reads and verifies index
+entries in index order only as far as the query consumes them, so a `LIMIT`
+reads a few entries rather than the whole range. A later clause or cartesian
+step that replays a range for each input row keeps up to 65,536 of its entries
+in index order and reads the rest of the range at once when it needs more. `ORDER BY` that property alone
+in the index's own direction with a `LIMIT`, directly after a single-node
+`MATCH`, as in `MATCH (u:User) WHERE u.rank >= 0 WITH u ORDER BY u.rank DESC
+LIMIT 10 RETURN u.name` with a descending index on `rank`, reads the index in
+order and stops after the window. As for any window, the ordered clause may
+only pass variables, literals and parameters along, because reading another
+stored property could fail on a row it no longer reads; return properties
+from a later clause. The range bound is required: without it, nodes that lack
+the property sort first in descending order and values of other types sort by
+type, which the index does not deliver. The opposite direction still reads
+and sorts the whole range. A
+boolean, list, null or NaN bound, or a string too large to index, keeps the
+label scan, because such a comparison is null or unindexable rather than a
+range. Index access also requires every other
+conjunct and every property constraint in the pattern to be unable to fail.
+Comparisons, string predicates, label and null tests, and `AND`, `OR`, `XOR`
+and `NOT` over them cannot fail when their operands are literals, parameters,
+variables, or properties of nodes, relationships and maps, including those bound
+by earlier clauses, or list and map literals of those, because mismatched types
+compare as null. A boolean parameter or variable is such a condition too; any
+other value fails as a condition. Arithmetic, a
+function call, or a property of a value of unknown type, such as an `UNWIND`
+element, keeps the label scan. The WHERE of a later `WITH` counts
+too when every clause in between is a `WITH` that only passes variables,
+properties, literals or parameters along, without `DISTINCT`, `ORDER BY`,
+`SKIP`, `LIMIT` or aggregation, so `MATCH (n:User) WITH n AS m WHERE m.email = $e`
+reads the index; it still filters where it is written. A later non-optional
+`MATCH` in that chain counts as well when its constraints and WHERE cannot fail:
+the conditions it places on nodes bound before it, as in
+`MATCH (a:User) MATCH (a {uid: 5})-[:FOLLOWS]->(b)`, select the earlier index,
+and its new variables end the chain. A later `WHERE` that can
+fail ends that chain, so it and anything after it select no index. An
+equality with a variable bound by an earlier clause, as in
+`UNWIND $ids AS k MATCH (u:User {uid: k})`, or with a property of a node,
+relationship or map bound by one, as in
+`MATCH (p:Post) MATCH (u:User {uid: p.author})`, can probe an equality index
+once per incoming row. So can a property of another node or relationship in
+the same pattern, as in `MATCH (p:Post {pid: 10}), (u:User {uid: p.author})`,
+once the plan has bound it. `IN` over a variable that holds a list, as in
+`WITH collect(f.uid) AS ids MATCH (p:Post) WHERE p.author IN ids`, reads the
+index for every member of the list in one batched lookup per row; a member
+the index cannot answer, such as a nested list, scans the label for that row.
+IN over a variable that may hold something other than a list keeps the scan,
+because it would fail. A probe property that cannot be read, such as a
+property of a deleted node, scans the label instead, so it fails only where a
+scan would. With several such equalities, a unique index keys the probe, since
+it matches at most one node per row, whichever equality is written first.
+Every candidate is still checked against the complete predicate. Nodes the
+index excludes are not read, so their unsupported stored values, such as
+temporal or binary data, cannot fail the query, and an `IN` list that is never
+evaluated is not charged against collection limits.
+
+## Numeric conversions
+
+`toInteger()` and its `toInt()` alias convert decimal strings exactly, including
+scientific notation, and truncate fractions toward zero. For example,
+`toInteger('9007199254740993.0')` returns `9007199254740993`. Invalid text and
+values outside the signed 64-bit range return null, including a fractional
+amount beyond either boundary. Floating-point inputs retain their existing
+binary precision; conversion cannot recover digits already lost in a float.
+
+## Numeric aggregates
+
+`avg()` ignores nulls and returns null for an empty group. Numeric averages
+return floating-point values. An intermediate total does not cause integer
+overflow or an infinite result when all inputs are finite. Floating-point
+rounding and cancellation still apply. `sum()` retains checked signed-integer
+addition and reports integer overflow.
+
+## Grouping expressions
+
+Projected expressions without aggregates define the groups. Inside an expression
+that mixes aggregation with other operations, dependencies outside aggregate
+arguments must be constants, parameters, grouped variables, or projected direct
+property/map accesses:
+
+```cypher
+MATCH (n:N)
+RETURN n.key AS key, n.key + count(*) AS total
+```
+
+Within a mixed aggregation expression, group by `n` before using `n:N` outside
+an aggregate argument. For nested access such as `b.dim.x`, group by `b` or
+`b.dim`; projecting only `b.dim.x` does not make it a recognized grouping
+dependency. Ambiguous aggregation is rejected during
+compilation, before any graph changes. These restrictions follow the pinned
+[openCypher M23 grouping rules](https://github.com/opencypher/openCypher/blob/007895aff5f33097d67b2e48a0a2babd6bd18590/cip/1.accepted/CIP2021-07-07-Grouping-keys-and-aggregation-expressions.adoc).
+
+Mixed expressions compute aggregate states first, then evaluate their scalar
+operations. For example, `1 + sum(x)` retains a sum state instead of retaining
+all input rows. Aggregate arguments are evaluated even inside an outer `CASE`
+branch that is not selected; an argument error fails the statement and rolls
+back its writes. Ordinary scalar `CASE` branches remain lazy. Group state and
+`collect` results are charged against query limits.
+
+Simple `CASE value WHEN ...` evaluates `value` once and tests alternatives in
+order. Only the selected result expression is evaluated. Null does not match
+null in a simple `CASE`; use `CASE WHEN value IS NULL THEN ...` to test for a
+missing value. Node and relationship results keep their graph type when assigned
+to aliases, so they can be used in subsequent patterns and property updates.
+For example, `WITH CASE WHEN condition THEN n END AS selected` keeps the node
+type of `n` even when the result can be null. Path results remain path values.
+
+`ORDER BY` can reuse a projected aggregate or an aggregate contained in a mixed
+projection without exposing another result column:
+
+```cypher
+UNWIND $amounts AS amount
+RETURN 1 + sum(amount) AS total
+ORDER BY 2 - sum(amount)
+```
+
+Outside aggregate arguments, ordering names refer to output aliases first.
+Aggregate arguments refer to the incoming rows: in
+`RETURN sum(x) AS x ORDER BY x + sum(x)`, the first `x` is the result alias and
+the `x` inside `sum` is the input value.
+
+## Storage and mutation rules
+
+New nodes require exactly one nonempty label; new relationships require exactly
+one nonempty type. Unlabeled `MATCH` scans existing nodes. Multiple node labels and
+label changes are unsupported. Property names must be nonempty and cannot begin
+with `$`; that namespace contains internal metadata and is omitted from Cypher
+property maps.
+
+Stored properties support scalars and homogeneous scalar lists. Maps and nested
+lists can be expression values but cannot be stored as properties. Native index
+value restrictions also apply; an incompatible indexed value fails the statement
+atomically, as does one whose index key would exceed the storage key limit of
+65,535 bytes: a string of more than 65,499 bytes for an equality index or
+65,505 bytes for a range index, and 17 bytes less in a tenant scope. Creating an
+index over such an existing value leaves the index blocked.
+
+```cypher
+MATCH (n:Person {name:'Ada'})
+SET n += {age:31, nickname:null}
+RETURN properties(n)
+```
+
+`+=` updates the supplied keys and preserves other properties. `=` replaces all
+user properties with the supplied map. Either form preserves internal labels and
+types. A null property assignment removes that property. Separate SET items execute
+in order; later items can read earlier changes. Native DSL null behavior is preserved.
+
+Each modifying statement runs in one write transaction, including index changes.
+Plain `DELETE` of a node with attached relationships fails and rolls back the
+statement. `DETACH DELETE` removes those relationships and the node. An error in a
+later clause also rolls back earlier writes. Do not automatically retry an
+uncertain commit outcome; follow the existing transaction error contract.
+
+Once commit starts, dropping the caller does not stop commit finalization. The
+engine retains mutation guards, pending property admission, and cache fences
+until finalization completes. `HelixDB::close()` stops new commit admission and
+waits for started commits before closing shared resources; dropping the close
+waiter does not abandon shutdown. Keep the async runtime alive until close
+finishes. A cancelled transport request does not prove that its write rolled back.
+
+## Lossless values
+
+Nulls, booleans, strings, lists, maps, and finite floats use ordinary JSON values.
+Signed integers in the JavaScript safe-integer range use JSON numbers. Larger
+integers and nonfinite floats use tagged values:
+
+```json
+{"$type":"integer","value":"9223372036854775807"}
+```
+
+```json
+{"$type":"float","value":"Infinity"}
+```
+
+Float tags also support `NaN` and `-Infinity`. These tags are accepted in parameters.
+Wrap a literal map containing a `$type` key as
+`{"$type":"map","value":{"$type":"literal"}}` to disambiguate it from a tag.
+
+Graph results use these tags:
+
+| `$type` | Fields |
+|---|---|
+| `node` | `id`, `labels`, `properties` |
+| `relationship` | `id`, `start`, `end`, `type`, `properties` |
+| `path` | Ordered `nodes` and `relationships`, containing full tagged graph objects |
+
+Node IDs and relationship IDs are unsigned
+decimal strings and occupy separate namespaces. Nodes include `labels` and
+`properties`; relationships include `start`, `end`, `type`, and `properties`.
+Paths include ordered `nodes` and `relationships`. Relationship endpoints retain
+their stored direction even when a path traverses them in reverse. Preserve IDs
+as strings; `id()` separately checks conversion to a signed integer and reports
+overflow when it cannot be represented.
+
+## Explain and limits
+
+`POST /v2/cypher/explain` accepts the same request body and returns a separate
+planning response without executing the statement. It describes selected access
+paths, cardinality estimates, blocking work, Cartesian products, and optimizer
+budget warnings. The embedded equivalent is `HelixDB::explain_cypher`; the CLI
+uses `--explain`.
+
+Successful result JSON contains only `columns` and `rows`. Embedded response
+objects expose local diagnostics separately. Resource-limit failures return an
+error instead of truncating a successful result. The advanced embedded API can
+set query memory, result-size, batch-size, and collection-item limits. The memory
+budget is an admission estimate, not a process RSS ceiling. HTTP, gRPC and
+embedded SDK bindings prepare their JSON within that budget before commit,
+including the overlap between typed values and the encoded buffer. Shared body
+clones and slices retain the body's admission until their final owner is dropped.
+An embedded caller taking a Vec assumes its memory ownership and accounting.
+Transport framing, TLS queues, shared storage caches and caller allocations are
+outside this engine estimate. Disk spilling is not implemented.
+An expression may nest at most 48 levels, which a `ResourceLimit` error with
+`ExpressionDepth` reports. A chain of one Boolean operator, such as
+`a OR b OR c OR ...`, and a comparison chain such as `a < b < c` are flat: the
+chain is one level over all of its operands, however many there are, so its
+length does not count toward the nesting depth. The operands are still
+evaluated in written order with the short-circuits and errors of the chain
+associated to the left. Parentheses, `NOT` and a change of operator nest as
+usual.
+Peak admission includes temporary expression buffers alongside retained rows
+and operator state. Consuming a large intermediate value can raise the peak even
+when a query returns one number. Scalar aggregation accounts for an incoming
+value while retained state grows, including `DISTINCT` key copies.
+Scalar `range()` checks its complete collection size before reserving output.
+After its arguments are evaluated, an excessive item count returns
+`CollectionLimit` before output-memory admission; otherwise an oversized buffer
+returns `MemoryLimit`. Direct `UNWIND range(...)` remains a streaming generator
+and can consume a bounded prefix without materialising the full range.
+`collection_items` bounds each materialized expression list, including lists
+nested in maps, and retained `DISTINCT` aggregate sets. It does not count map
+entries, function arguments, or streamed rows. The evaluator checks parameter
+and property lists before copying them; lazy branches that are not
+evaluated do not consume this limit. For example, a cap of one permits
+`substring('abc',0,1)` and `range(7,7)`, but rejects `[1] + [2]`. Raising this cap
+does not raise the independent memory budget.
+Graph and path result snapshots use the memory and result-byte budgets.
+
+Read-only queries with uncorrelated multi-hop patterns may reuse raw values
+within their pinned storage snapshot. The cache owns compact copies and caps
+retained entries at one eighth of the query budget (at most 32 MiB). Its header
+is charged separately. It releases optional entries under memory pressure.
+Outstanding result references remain charged until dropped. Small query budgets
+skip reuse; writes always bypass it. Reported peak admission includes retained
+cache entries, so it is not the minimum memory needed to execute the query.
+Nonaggregate `DISTINCT` without `ORDER BY` consumes batches and retains one row
+per distinct projected value. With `LIMIT`, it retains at most `SKIP + LIMIT`
+values in its deterministic value order; `LIMIT 0` retains none. Without a limit,
+retention scales with unique results. All input is still evaluated, preserving
+late errors and the same subset as materialised execution. This bounds retained
+state, not path enumeration or storage work.
+Initial fixed-length matches with literal or parameter property constraints, and
+a `WHERE` that cannot fail, can stop at a downstream limit when intervening
+projections preserve rows and cannot fail. A `WHERE` cannot fail under the same
+rule as index selection: comparisons, string predicates, label and null tests,
+and their boolean combinations over literals, parameters, variables and
+properties of nodes, relationships and maps. The engine evaluates enough input to validate those constraints even
+for `LIMIT 0`; correlated inputs and potentially failing expressions remain
+barriers. Candidate batches start at the remaining demand and double up to the
+batch width, so a selective `WHERE` needs only a few more batches than a scan.
+Consecutive total `WITH`/`RETURN` windows can stop when any earlier or later
+limit is exhausted. Literal windows compose their skips and caps into a tighter
+source bound. Later parameterized windows keep their existing validation point
+and stop at batch boundaries; they are not evaluated early during source setup.
+For example, `WITH n LIMIT 1000000 RETURN n LIMIT 5` needs only the smaller
+window when the projections satisfy that proof. The proof also crosses an
+OPTIONAL MATCH with no WHERE clause or property constraints whose bound
+variables come from earlier matches, because it keeps every input row and
+cannot fail. `MATCH (a:User) OPTIONAL MATCH (a)-[:FOLLOWS]->(b) RETURN a, b
+LIMIT 10` therefore expands only enough users for ten rows, and stops a user
+with many followers once the limit is reached. Returning `a.name` instead of
+`a` keeps the full scan, because reading a stored property can fail; write
+`WITH a, b LIMIT 10 RETURN a.name, b` to read properties only for kept rows. A proven zero limit needs no
+candidate rows regardless of preceding skips; sources that require initial
+validation still run, and invalid offsets still fail. Filters, ordering, aggregation
+and mutations still end the proof.
+An expansion reads the adjacency of each relationship type it names, so
+`-[:WROTE|LIVES_IN]->` does not read a node's other relationships; a step
+without a type reads them all.
+Rows reuse execution cells after bindings leave scope, so successive `WITH`
+aliases do not widen every retained row. Logical binding IDs remain stable in
+validation and explain output. Simultaneous inputs, outputs and sort expressions
+keep distinct cells. The retained compiled layout is admitted before execution
+storage access and remains charged through result preparation and commit;
+compilation itself still precedes this admission.
+Logical scope snapshots share binding types and store compact membership and
+optional-match nullability. Both growing scopes and long alias chains have local
+allocation regression tests. The Rust schema API offers allocation-free lookup
+and iteration; its existing `columns()` map is materialized only when requested
+and shared by clones. Diagnostic formatting and serialization stream the same
+column facts without retaining that map. Compilation remains bounded by the
+binding and operator limits and is outside the execution memory budget.
+For an initial single-node label match, candidate validation also checks node
+existence, avoiding a separate storage probe. Stale label postings are skipped;
+corrupt stored values still fail the query. Property expressions may require a
+later hydration pass. Joins, expansions and correlated sources retain their
+existing validation contracts.
+Modifying statements admit boxed transaction read operations before allocation,
+including measured vector reads and calls that are dropped without being polled.
+Vector dispatch forwards the underlying reader's future without another wrapper
+allocation. They also admit the serializable transaction's retained read keys and requested
+scan ranges, including empty scans. Repeated keys share one
+retained payload allowance; table growth and commit-time read-state copies are
+included. This admission lasts through backend commit or transaction abort, so
+a write that streams a small result can still reach its budget through a large
+read set. Graph topology collection also admits its membership deltas and bitmap
+growth. Repeated additions and removals share a bounded allowance within each
+collection epoch. Checked bitmap and adjacency merges admit canonical key and
+operand construction, token buffers and batch containers. Encoded key aliases
+retain their own admission. Backend operand history and conflict metadata stay
+charged across flushes until commit or abort; repeated writes use a conservative
+bound proportional to the submitted history. The backend's untracked reads of
+existing merge rows and full validation decode buffers remain outside this
+bound, as does upstream secondary-index collection. A memory failure before
+commit rolls back the complete statement.
+Frontend/planner allocations and some native storage working buffers still need
+memory accounting; the current budget covers the integrated execution buffers.

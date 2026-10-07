@@ -207,6 +207,31 @@ impl HelixDB {
         Ok(runtime::run(async move { inner.query_json(&request).await }).await??)
     }
 
+    /// Execute the Cypher JSON contract without a network transport.
+    pub async fn cypher_json(&self, request: Vec<u8>) -> Result<Vec<u8>, HelixError> {
+        let request = serde_json::from_slice::<db::cypher::Request>(&request).map_err(|e| {
+            HelixError::InvalidRequest {
+                error: "invalid_cypher_json".into(),
+                msg: e.to_string(),
+            }
+        })?;
+        let inner = Arc::clone(&self.inner);
+        let response = runtime::run(async move { inner.cypher_json(request).await })
+            .await?
+            .map_err(|e| match e {
+                db::cypher::Error::Storage(e) => HelixError::from(e),
+                db::cypher::Error::Query(e) => HelixError::InvalidRequest {
+                    error: format!("{}:{:?}:{}", e.category, e.phase, e.detail),
+                    msg: e.message,
+                },
+                db::cypher::Error::Json(e) => HelixError::Internal {
+                    error: "response_serialization_error".into(),
+                    msg: e.to_string(),
+                },
+            })?;
+        Ok(response.into_vec())
+    }
+
     /// Execute one ordinary read request and construct a reusable native graph.
     pub async fn graph(
         &self,

@@ -340,6 +340,36 @@ mod tests {
     }
 
     #[test]
+    fn node_source_unique_equality_bound_depends_on_lookup_value() {
+        let unique = |value| {
+            source(NodeAccessPlan::EqualityIndex {
+                index: catalog::NodeEqualityIndexMeta::try_new("user_email")
+                    .unwrap()
+                    .with_uniqueness(catalog::IndexUniqueness::Unique),
+                key: catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+                value,
+            })
+            .hard_cardinality_upper_bound()
+        };
+        let literal =
+            |value| ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(value).unwrap());
+        let param = || ir::NonEmptyString::new("email").unwrap();
+
+        assert_eq!(unique(literal(PropertyValue::F64(f64::NAN))), Some(0));
+        // Null equality is an authoritative scan of every owner lacking the
+        // property, and a runtime parameter can bind null or many values.
+        assert_eq!(unique(literal(PropertyValue::Null)), None);
+        assert_eq!(unique(ir::IndexValue::Param(param())), None);
+        assert_eq!(
+            unique(ir::IndexValue::ParamSet(ir::RuntimeEqualitySet::new(
+                param(),
+                NonZeroUsize::new(64).unwrap(),
+            ))),
+            None
+        );
+    }
+
+    #[test]
     fn node_source_hard_cardinality_upper_bound_preserves_unknown_sources() {
         let dynamic_limit = ir::SearchLimitPlan::Expr(
             ir::SearchLimitExprPlan::new(helix_ast::expr::Expr::param("k")).unwrap(),

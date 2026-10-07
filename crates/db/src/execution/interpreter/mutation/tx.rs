@@ -14,8 +14,6 @@
 
 use std::sync::Arc;
 
-use slatedb::{DbTransaction, IsolationLevel};
-
 use super::super::runtime_context::{
     ActiveWriteTx, PendingCatalogFreshness, RequestWriteScopeState,
 };
@@ -23,7 +21,7 @@ use super::*;
 
 /// Temporarily extracted mutation state returned after one operation finishes.
 pub(super) struct MutationWriteScope {
-    pub(super) txn: DbTransaction,
+    pub(super) txn: crate::transaction::Owned,
     pub(super) index_context: MutationIndexContext,
     request_scoped: bool,
 }
@@ -81,7 +79,9 @@ impl<'db> ExecutionContext<'db> {
     }
 
     /// Opens the one snapshot transaction owned by the request scope.
-    pub(super) async fn begin_write_tx(&mut self) -> Result<(DbTransaction, MutationIndexContext)> {
+    pub(super) async fn begin_write_tx(
+        &mut self,
+    ) -> Result<(crate::transaction::Owned, MutationIndexContext)> {
         self.check_execution_deadline()?;
         let catalog_freshness = std::mem::replace(
             &mut self.pending_catalog_freshness,
@@ -105,11 +105,8 @@ impl<'db> ExecutionContext<'db> {
         self.check_execution_deadline()?;
         let scope_permit = self.db.index_mutation_scope_permit(self.tenant_scope).await;
         self.check_execution_deadline()?;
-        let transaction = self
-            .writer()?
-            .db()
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await?;
+        let transaction =
+            crate::transaction::Owned::begin(self.writer()?.db(), self.row_memory.as_ref()).await?;
         self.check_execution_deadline()?;
         let mutation_catalog =
             crate::index_lifecycle::mutation_catalog::MutationIndexCatalog::load(
@@ -121,7 +118,12 @@ impl<'db> ExecutionContext<'db> {
         self.check_execution_deadline()?;
         Ok((
             transaction,
-            MutationIndexContext::new(scope_permit, mutation_catalog, self.tenant_scope),
+            MutationIndexContext::new(
+                scope_permit,
+                mutation_catalog,
+                self.tenant_scope,
+                self.row_memory.as_ref(),
+            ),
         ))
     }
 
@@ -183,24 +185,33 @@ impl<'db> ExecutionContext<'db> {
         .await
     }
 
-    /// Flushes only deferred families consumed by the next operation.
-    pub(in crate::execution::interpreter) async fn flush_required_mutations(
+    /// Flushes only deferred families consumed by the next operation. Every
+    /// executed step checks this, so a step needing no flush gets a ready
+    /// future and the flush's large state is boxed only when it runs. Never
+    /// inlined, so building that state stays out of the calling step's frame.
+    #[inline(never)]
+    pub(in crate::execution::interpreter) fn flush_required_mutations(
         &mut self,
         required: super::visibility::RequiredMutationVisibility,
-    ) -> Result<()> {
+    ) -> futures::future::Either<
+        std::future::Ready<Result<()>>,
+        futures::future::BoxFuture<'_, Result<()>>,
+    > {
         if required.is_empty() || !self.request_write_scope.is_active() {
-            return Ok(());
+            return futures::future::Either::Left(std::future::ready(Ok(())));
         }
-        let RequestWriteScopeState::Active(active) = &mut self.request_write_scope else {
-            return Ok(());
-        };
-        if required.contains(super::visibility::DeferredMutationFamily::Topology) {
-            active.index_context.flush_topology(&active.txn).await?;
-        }
-        if required.contains(super::visibility::DeferredMutationFamily::Secondary) {
-            active.index_context.flush_secondary(&active.txn).await?;
-        }
-        Ok(())
+        futures::future::Either::Right(Box::pin(async move {
+            let RequestWriteScopeState::Active(active) = &mut self.request_write_scope else {
+                return Ok(());
+            };
+            if required.contains(super::visibility::DeferredMutationFamily::Topology) {
+                active.index_context.flush_topology(&active.txn).await?;
+            }
+            if required.contains(super::visibility::DeferredMutationFamily::Secondary) {
+                active.index_context.flush_secondary(&active.txn).await?;
+            }
+            Ok(())
+        }))
     }
 
     /// Preserves the production-linked conservative barrier oracle.
@@ -230,6 +241,8 @@ impl<'db> ExecutionContext<'db> {
         let prepared_index_context = index_context.into_prepared()?;
         // Reserve every touched index atomically, then stage one blind
         // operand per queue key in the same transaction as the graph change.
+        // A request dropped before the commit starts drops the reservation,
+        // which releases it as aborted.
         let mut reservation = if staged_queue.is_empty() {
             None
         } else {
@@ -246,12 +259,23 @@ impl<'db> ExecutionContext<'db> {
             }
             Some(reservation)
         };
-        if let Some(reservation) = reservation.as_mut() {
-            reservation.begin_commit();
-        }
-        match txn.commit().await {
-            Ok(_) => {}
-            Err(error) => {
+        // Commit runs in this request's task but may outlive it: a request
+        // dropped mid-commit hands the rest to a spawned task, so the queue
+        // reservation is always settled from the commit outcome. The
+        // completion retains the exact runtime and mutation permit until
+        // finalization. The tracker owns no task handles, so this Arc creates
+        // no ownership cycle.
+        let db = HelixDB {
+            inner: std::sync::Arc::clone(&self.db.inner),
+        };
+        let complete = async move {
+            let crate::HelixStorage::Writer(writer) = db.storage() else {
+                unreachable!("a prepared write retains its original writer runtime");
+            };
+            if let Some(reservation) = reservation.as_mut() {
+                reservation.begin_commit();
+            }
+            if let Err(error) = txn.commit().await {
                 // Only a definite conflict proves nothing committed; any other
                 // failure keeps the capacity charged until reconciliation.
                 if let Some(reservation) = reservation {
@@ -262,24 +286,27 @@ impl<'db> ExecutionContext<'db> {
                     }
                 }
                 return Err(prepared_index_context
-                    .classify_commit_error(self.writer()?.db(), error)
+                    .classify_commit_error(writer.db(), error)
                     .await);
             }
-        };
-        let queued_committed = reservation.is_some();
-        if let Some(reservation) = reservation {
+            let Some(reservation) = reservation else {
+                return Ok(());
+            };
             reservation.committed();
-        }
-        if queued_committed {
-            self.db.wake_index_worker().await;
-        }
-        Ok(())
+            db.wake_index_worker().await;
+            Ok(())
+        };
+        let complete = match self.row_memory.as_ref() {
+            Some(budget) => futures::future::Either::Left(budget.admitted_future(complete)?),
+            None => futures::future::Either::Right(complete),
+        };
+        self.db.inner.commit_completions.run(complete)?.await
     }
 }
 
 #[cfg(test)]
 mod additional_tests {
-
+    use crate::transaction::Mutation;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -808,5 +835,55 @@ mod additional_tests {
         .to_bytes();
         assert!(db.inner_db().get(staged_graph_key).await.unwrap().is_none());
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_commit_submission_rolls_back_before_spawning() {
+        for shutting_down in [false, true] {
+            let db = test_support::open_db("commit-submission-rejected").await;
+            let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+            context.enable_request_write_scope().await.unwrap();
+            let row =
+                crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::new_with_budget(
+                    vec![crate::encoding::v2::values::property::Property::i64(
+                        "value", 1,
+                    )],
+                    None,
+                )
+                .unwrap();
+            let entity = crate::index_lifecycle::graph_mutation::GraphEntity::node(99);
+            let mut scope = context.take_or_begin_write_scope().await.unwrap();
+            scope
+                .index_context
+                .property_writes
+                .stage(
+                    &scope.txn,
+                    context.tenant_scope,
+                    entity,
+                    Some(row.write_payload()),
+                    None,
+                )
+                .unwrap();
+            drop(row);
+            context.finish_write_scope(scope).await.unwrap();
+            if shutting_down {
+                db.inner.commit_completions.seal();
+            } else {
+                context.row_memory = Some(crate::query_resources::Budget::new(0));
+            }
+            let error = context.commit_request_write_scope().await.unwrap_err();
+            assert!(matches!(
+                (error, shutting_down),
+                (HelixDbError::DatabaseClosed, true)
+                    | (HelixDbError::QueryMemoryLimitExceeded, false)
+            ));
+            assert!(db
+                .inner_db()
+                .get(entity.property_key(context.tenant_scope))
+                .await
+                .unwrap()
+                .is_none());
+            db.close().await.unwrap();
+        }
     }
 }

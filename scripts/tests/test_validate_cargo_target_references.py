@@ -44,6 +44,42 @@ class CargoTargetReferenceTests(unittest.TestCase):
             ["workflow.yml: unknown Cargo test target 'removed_contracts'"],
         )
 
+    def test_examples_are_catalogued_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.catalog.add_metadata(
+                {
+                    "packages": [{
+                        "name": "db",
+                        "targets": [{
+                            "name": "scaling",
+                            "kind": ["example"],
+                            "src_path": str(root / "crates/db/examples/scaling.rs"),
+                            "required-features": ["diagnostics"],
+                        }],
+                    }],
+                },
+                root,
+            )
+        self.assertIn("scaling", self.catalog.targets.get("example", set()))
+        self.assertIn(
+            MODULE.Target("db", "scaling", "example", "crates/db/examples/scaling.rs"),
+            self.catalog.db_targets,
+        )
+        self.assertEqual(
+            self.catalog.required_features[("db", "example", "scaling")],
+            ("diagnostics",),
+        )
+        for separator in (" ", "="):
+            with self.subTest(separator=separator):
+                self.assertEqual(
+                    self.validate(f"cargo run -p db --example{separator}scaling"), [],
+                )
+                self.assertEqual(
+                    self.validate(f"cargo run -p db --example{separator}missing"),
+                    ["workflow.yml: unknown Cargo example target 'missing'"],
+                )
+
     def test_inventory_reports_missing_and_stale_rows(self):
         catalog = MODULE.Catalog()
         catalog.db_targets.add(

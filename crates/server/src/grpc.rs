@@ -58,6 +58,56 @@ pub(crate) fn server_service(state: ServerState) -> HelixDbServerServer<GrpcServ
 
 #[tonic::async_trait]
 impl HelixDbServer for GrpcService {
+    async fn execute_cypher(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let crate::CypherEndpoints::Enabled = self.state.cypher_endpoints() else {
+            return Err(Status::unimplemented(
+                "Cypher is not enabled on this server",
+            ));
+        };
+        let request = request.into_inner();
+        if request.body.len() > MAX_QUERY_BODY_BYTES {
+            return Err(Status::resource_exhausted(
+                "Cypher request body exceeds the byte limit",
+            ));
+        }
+        let query: db::cypher::Request = serde_json::from_slice(&request.body)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let query = query.compile().map_err(|e| cypher_status(e.into()))?;
+        validate_options_for_request_type(
+            request.warm_only,
+            request.require_writer,
+            request.await_durable,
+            query.request_type(),
+            self.state.db_mode(),
+        )?;
+        let response = self
+            .state
+            .query_service()
+            .execute_compiled_cypher_json_scoped_controlled(
+                query,
+                query_mode(request.warm_only),
+                db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                db::execution_control::ExecutionControl::from_timeout(
+                    std::time::Duration::from_secs(30),
+                ),
+                db::cypher::Limits::default(),
+            )
+            .await
+            .map_err(cypher_status)?;
+        if request.await_durable {
+            self.state
+                .flush_writer()
+                .await
+                .map_err(|e| status_from_service_error(e.into()))?;
+        }
+        Ok(Response::new(QueryJsonResponse {
+            body: response.into_bytes(),
+        }))
+    }
+
     async fn execute_query(
         &self,
         request: Request<QueryJsonRequest>,
@@ -76,7 +126,7 @@ impl HelixDbServer for GrpcService {
                 format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
             ));
         }
-        let query = sonic_rs::from_slice::<QueryRequest>(&request.body).map_err(|error| {
+        let query = QueryRequest::from_json_slice(&request.body).map_err(|error| {
             status_with_error_code(
                 tonic::Code::InvalidArgument,
                 error_code::QueryErrorCode::InvalidQueryJson,
@@ -132,6 +182,28 @@ fn query_mode(warm_only: bool) -> QueryMode {
         QueryMode::Warm
     } else {
         QueryMode::Execute
+    }
+}
+
+fn cypher_status(error: db::cypher::Error) -> Status {
+    match error {
+        db::cypher::Error::Query(error) => {
+            let code = match error.category.as_str() {
+                "ResourceLimit" => tonic::Code::ResourceExhausted,
+                "AccessModeError" => tonic::Code::Unavailable,
+                "InternalPlannerError" => tonic::Code::Internal,
+                _ => tonic::Code::InvalidArgument,
+            };
+            Status::with_details(
+                code,
+                error.message.clone(),
+                serde_json::to_vec(&error)
+                    .expect("Cypher error serializes")
+                    .into(),
+            )
+        }
+        db::cypher::Error::Storage(error) => status_from_service_error(error.into()),
+        db::cypher::Error::Json(error) => Status::internal(error.to_string()),
     }
 }
 

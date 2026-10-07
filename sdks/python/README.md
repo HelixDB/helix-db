@@ -290,3 +290,10 @@ python -m pip install -e './sdks/python[dev]'
 python -c 'import doctest, helixdb.async_client as module; raise SystemExit(doctest.testmod(module).failed)'
 python -m unittest discover -s sdks/python/tests
 ```
+
+## Cypher
+
+Clients built from this checkout expose an additive Cypher method for local HTTP
+and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
+the language profile, method signatures, parameters, lossless values, and
+transaction behavior. Native DSL query methods keep their existing contract.

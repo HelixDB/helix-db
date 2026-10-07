@@ -11,6 +11,7 @@ pub struct ServerState {
     query_service: HelixQueryService,
     db_mode: HelixDbMode,
     index_readiness: IndexRuntimeReadiness,
+    cypher: crate::CypherEndpoints,
 }
 
 impl ServerState {
@@ -29,7 +30,18 @@ impl ServerState {
             query_service,
             db_mode,
             index_readiness,
+            cypher: crate::CypherEndpoints::Disabled,
         }
+    }
+
+    /// Route or refuse Cypher requests; new state refuses them.
+    pub fn with_cypher_endpoints(self, cypher: crate::CypherEndpoints) -> Self {
+        Self { cypher, ..self }
+    }
+
+    /// Return whether Cypher requests are routed.
+    pub const fn cypher_endpoints(&self) -> crate::CypherEndpoints {
+        self.cypher
     }
 
     /// Borrow the query service.

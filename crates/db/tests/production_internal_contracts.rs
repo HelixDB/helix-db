@@ -440,6 +440,12 @@ fn process_local_runtime_dependencies_preserve_identity_and_readiness() {
     assert!(!debug.contains("object_store"));
 }
 
+/// Shared mixed aggregates execute through the production-linked row interpreter.
+#[tokio::test]
+async fn mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values() {
+    db::production_coverage::mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values().await;
+}
+
 /// Exercises the production unique batch reader, including its failure boundaries.
 #[tokio::test]
 async fn secondary_unique_batch_validates_inputs_storage_and_owners() {

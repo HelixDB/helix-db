@@ -2,11 +2,17 @@
 
 use helix_ast::value::PropertyValue;
 
+use crate::analysis::literal_set;
+
 use super::super::extract::{LiteralBound, NullabilityConstraint};
 use super::super::values::property_values_equal;
 use super::bounds::{
     lower_bound_allows_value, range_bounds_are_disjoint, upper_bound_allows_value,
 };
+
+#[cfg(test)]
+#[path = "../../tests/scalar/intersection.rs"]
+mod intersection_tests;
 
 #[derive(Debug, Default)]
 pub(super) struct ScalarPropertyConstraint {
@@ -170,12 +176,14 @@ fn intersect_property_values(
     left: &[PropertyValue],
     right: &[PropertyValue],
 ) -> Vec<PropertyValue> {
+    let contains = literal_set::membership_by(
+        right,
+        left.len(),
+        |left, right| literal_set::LiteralOrder::ScalarNumeric.compare(left, right),
+        property_values_equal,
+    );
     left.iter()
-        .filter(|value| {
-            right
-                .iter()
-                .any(|other| property_values_equal(value, other))
-        })
+        .filter(|value| contains(value))
         .cloned()
         .collect()
 }

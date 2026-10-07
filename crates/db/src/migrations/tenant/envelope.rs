@@ -13,7 +13,7 @@ use crate::encoding::v2::keys::scope::DataScope;
 #[cfg(test)]
 use crate::encoding::v2::keys::scope::{TenantId, TENANT_ID_LEN, TENANT_KEY_PREFIX};
 use crate::encoding::v2::keys::DataKeyKind;
-use crate::encoding::v2::keys::{GlobalKey, ScopedKey};
+use crate::encoding::v2::keys::{GlobalKey, ScopedKey, STORAGE_KEY_MAX_LEN};
 use crate::encoding::v2::legacy::tenant_envelope::LegacyTenantEnvelope;
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_artifact, decode_build_delta, decode_corpus_statistics,
@@ -22,7 +22,7 @@ use crate::encoding::v2::values::{
     decode_term_statistics, decode_text_entity_state, encode_operation_record,
     SecondaryEqualityBitmapValue,
 };
-use crate::error::{HelixDbError, Result};
+use crate::error::{HelixDbError, Result, SecondaryIndexValueError};
 
 use crate::index_lifecycle::IndexCursor;
 
@@ -205,6 +205,15 @@ fn migration_row(key: Bytes, value: Bytes) -> Result<Option<TenantKeyMigrationRo
     let mut destination_key = Vec::with_capacity(core::mem::size_of::<u8>() + key.len());
     scope.encode_key_prefix(&mut destination_key);
     destination_key.put_slice(envelope.logical_key());
+    // The envelope is one byte longer than the legacy tenant prefix, so an
+    // index key already at the storage limit cannot move.
+    if destination_key.len() > STORAGE_KEY_MAX_LEN {
+        return Err(SecondaryIndexValueError::EncodedKeyTooLarge {
+            encoded_len: destination_key.len(),
+            maximum: STORAGE_KEY_MAX_LEN,
+        }
+        .into());
+    }
     Ok(Some(TenantKeyMigrationRow {
         source_key: key,
         destination_key: Bytes::from(destination_key),
@@ -728,6 +737,65 @@ mod tests {
             db.get(&old).await.unwrap(),
             Some(Bytes::from_static(b"source"))
         );
+        assert!(!crate::migrations::tenant_key_envelope_ready(&db)
+            .await
+            .unwrap());
+        db.close().await.unwrap();
+    }
+
+    /// A legacy tenant key of exactly `u16::MAX` bytes was writable, but its
+    /// enveloped form is one byte longer, so the migration stops with an
+    /// error instead of panicking in the write batch or dropping the row.
+    #[tokio::test]
+    async fn keys_at_the_storage_limit_fail_the_migration_cleanly() {
+        let db = Db::builder("one-byte-tenant-key-limit", Arc::new(InMemory::new()))
+            .build()
+            .await
+            .unwrap();
+        let scope = DataScope::Tenant(TenantId::from_u128(0x0A0B));
+        let entry = |length: usize| {
+            let lane = SecondaryEntryLane::NodeRangeAscending;
+            let key = SecondaryEntryKey::try_new(
+                index_id(),
+                generation(),
+                lane,
+                CanonicalSecondaryValue::range_string(
+                    RangeIndexDirection::Asc,
+                    &"x".repeat(length),
+                ),
+                Some(IndexEntityId::new(11)),
+            )
+            .unwrap();
+            let value = crate::encoding::v2::values::encode_secondary_entry(
+                &crate::index_lifecycle::work::SecondaryEntryValue {
+                    index_id: index_id(),
+                    generation: generation(),
+                    lane,
+                    entity_id: IndexEntityId::new(11),
+                },
+            );
+            (
+                legacy_data_key(scope, ScopedKey::SecondaryEntry(key)),
+                value,
+            )
+        };
+        let (fitting, fitting_value) = entry(65_488);
+        assert_eq!(fitting.len(), STORAGE_KEY_MAX_LEN - 1);
+        let (longest, longest_value) = entry(65_489);
+        assert_eq!(longest.len(), STORAGE_KEY_MAX_LEN);
+        assert!(migration_row(fitting, fitting_value).unwrap().is_some());
+        db.put(&longest, longest_value).await.unwrap();
+
+        assert!(matches!(
+            migrate_all_tenant_keys(&db).await,
+            Err(HelixDbError::SecondaryIndexValue(
+                SecondaryIndexValueError::EncodedKeyTooLarge {
+                    encoded_len,
+                    maximum: STORAGE_KEY_MAX_LEN,
+                }
+            )) if encoded_len == STORAGE_KEY_MAX_LEN + 1
+        ));
+        assert!(db.get(&longest).await.unwrap().is_some());
         assert!(!crate::migrations::tenant_key_envelope_ready(&db)
             .await
             .unwrap());

@@ -31,6 +31,13 @@ struct CheckedEntry {
     value: CanonicalRangeValue,
 }
 
+// The incremental cursor retains admitted owners; eager callers borrow their
+// existing sets. Both representations test membership without per-row allocation.
+enum Membership<'a> {
+    Borrowed(&'a [&'a roaring::RoaringTreemap]),
+    Owned(&'a [bitmap::Bitmap]),
+}
+
 /// All phases, including stale-entry recovery, share this exact read view.
 struct RangeScan<'a, R> {
     reader: &'a R,
@@ -39,7 +46,7 @@ struct RangeScan<'a, R> {
     direction: StorageRangeIndexDirection,
     lane: SecondaryEntryLane,
     query: Option<&'a SecondaryRangeQuery>,
-    membership: &'a [roaring::RoaringTreemap],
+    membership: Membership<'a>,
     progress: &'a dyn ExactRangeScanProgress,
 }
 
@@ -87,9 +94,12 @@ impl<R: DbReadOps + Sync> RangeScan<'_, R> {
     }
 
     fn contains(&self, owner: IndexEntityId) -> bool {
-        self.membership
-            .iter()
-            .all(|bitmap| bitmap.contains(owner.get()))
+        match self.membership {
+            Membership::Borrowed(bitmaps) => {
+                bitmaps.iter().all(|bitmap| bitmap.contains(owner.get()))
+            }
+            Membership::Owned(bitmaps) => bitmaps.iter().all(|bitmap| bitmap.contains(owner.get())),
+        }
     }
 
     async fn verify(&self, owner: IndexEntityId, value: &CanonicalRangeValue) -> Result<bool> {
@@ -176,7 +186,7 @@ pub(crate) async fn scan_active_range_generation_ordered(
     query: Option<&SecondaryRangeQuery>,
     iteration: RangeScanIteration,
     limit: Option<usize>,
-    membership: &[roaring::RoaringTreemap],
+    membership: &[&roaring::RoaringTreemap],
     progress: &dyn ExactRangeScanProgress,
 ) -> Result<Vec<u64>> {
     progress.checkpoint()?;
@@ -207,7 +217,7 @@ pub(crate) async fn scan_active_range_generation_ordered(
         }
         None => (Bound::Unbounded, Bound::Unbounded),
     };
-    if limit == Some(0) || membership.iter().any(roaring::RoaringTreemap::is_empty) {
+    if limit == Some(0) || membership.iter().any(|bitmap| bitmap.is_empty()) {
         return Ok(Vec::new());
     }
     let scan = RangeScan {
@@ -217,7 +227,7 @@ pub(crate) async fn scan_active_range_generation_ordered(
         direction,
         lane: definition_lane(definition),
         query,
-        membership,
+        membership: Membership::Borrowed(membership),
         progress,
     };
     let prefix = IndexKey::data_prefix(
@@ -341,12 +351,12 @@ pub(crate) struct OrderedRangeCursor {
     rows: Option<slatedb::DbIterator>,
     pending: Vec<CheckedEntry>,
     lookahead: Option<CheckedEntry>,
-    membership: Vec<roaring::RoaringTreemap>,
+    membership: Vec<bitmap::Bitmap>,
 }
 
 impl OrderedRangeCursor {
-    pub(crate) fn with_membership(mut self, membership: Vec<roaring::RoaringTreemap>) -> Self {
-        if membership.iter().any(roaring::RoaringTreemap::is_empty) {
+    pub(crate) fn with_membership(mut self, membership: Vec<bitmap::Bitmap>) -> Self {
+        if membership.iter().any(|bitmap| bitmap.is_empty()) {
             self.rows = None;
             self.pending.clear();
             self.lookahead = None;
@@ -434,7 +444,7 @@ impl OrderedRangeCursor {
             direction,
             lane: definition_lane(definition),
             query: self.query.as_ref(),
-            membership: &self.membership,
+            membership: Membership::Owned(&self.membership),
             progress,
         };
         loop {

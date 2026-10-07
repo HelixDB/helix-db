@@ -11,6 +11,10 @@ use std::path::Path;
 use helix_db::dsl::prelude::*;
 use helix_db::{Empty, OnNodes, QueryParamType, ReadOnly, Traversal};
 
+#[cfg(feature = "embedded")]
+#[path = "support/cypher_parity.rs"]
+mod cypher_parity;
+
 struct Fixture {
     bucket: &'static str,
     name: String,
@@ -30,6 +34,19 @@ struct UserProps {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "embedded")]
+    match env::var("HELIX_CYPHER_PARITY_URL") {
+        Ok(url) => {
+            return cypher_parity::run_http(
+                &url,
+                Path::new(&env::var("HELIX_CYPHER_PARITY_RESULTS")?),
+                &env::var("HELIX_CYPHER_PARITY_PHASE")?,
+            )
+            .await;
+        }
+        Err(env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
     let out = env::args()
         .nth(1)
         .unwrap_or_else(|| "tests/parity/generated/rust".to_string());
@@ -164,6 +181,7 @@ async fn execute_embedded_fixtures(
         }
     }
     client.close().await?;
+    cypher_parity::run(source(), results).await?;
     Ok(())
 }
 
