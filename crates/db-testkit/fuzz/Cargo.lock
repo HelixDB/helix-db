@@ -623,9 +623,11 @@ dependencies = [
  "chrono",
  "dashmap",
  "divan",
+ "foldhash",
  "foyer",
  "futures",
  "helix-ast",
+ "helix-cypher",
  "helix-metrics",
  "helix-planner",
  "helix-value-semantics",
@@ -633,6 +635,7 @@ dependencies = [
  "libc",
  "object_store 0.12.5",
  "parking_lot",
+ "pin-project-lite",
  "rand 0.10.2",
  "range-cache",
  "rayon",
@@ -908,6 +911,15 @@ checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
 dependencies = [
  "bitflags",
  "rustc_version",
+]
+
+[[package]]
+name = "float-cmp"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -1241,6 +1253,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "halfbrown"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c7ed2f2edad8a14c8186b847909a41fbb9c3eafa44f88bd891114ed5019da09"
+dependencies = [
+ "hashbrown 0.16.1",
+ "serde",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1284,9 +1306,30 @@ checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 name = "helix-ast"
 version = "0.1.0"
 dependencies = [
+ "bumpalo",
  "chrono",
+ "helix-ast-arena-derive",
  "serde",
+ "simd-json",
  "sonic-rs",
+]
+
+[[package]]
+name = "helix-ast-arena-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "helix-cypher"
+version = "0.1.0"
+dependencies = [
+ "helix-planner",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3101,6 +3144,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "simd-json"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ebe141eb4a23ecc4d5de93fa5b139ac65dc07c38037a2fe9a8fb7c9d36bd832"
+dependencies = [
+ "halfbrown",
+ "ref-cast",
+ "serde",
+ "serde_json",
+ "simdutf8",
+ "value-trait",
+]
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3145,8 +3202,8 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slatedb"
-version = "0.15.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=099067afda1294e80308687d4ae41cdf6e5d01df#099067afda1294e80308687d4ae41cdf6e5d01df"
+version = "0.16.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
 dependencies = [
  "ahash",
  "async-channel",
@@ -3191,8 +3248,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.15.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=099067afda1294e80308687d4ae41cdf6e5d01df#099067afda1294e80308687d4ae41cdf6e5d01df"
+version = "0.16.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
 dependencies = [
  "chrono",
  "log",
@@ -3206,8 +3263,8 @@ dependencies = [
 
 [[package]]
 name = "slatedb-txn-obj"
-version = "0.15.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=099067afda1294e80308687d4ae41cdf6e5d01df#099067afda1294e80308687d4ae41cdf6e5d01df"
+version = "0.16.0"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3976,6 +4033,18 @@ dependencies = [
  "rand 0.10.2",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "value-trait"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3f4b4a98dfe54bc9ed3641af7ffcb837240269627dbd5cb047d13daa39736cc"
+dependencies = [
+ "float-cmp",
+ "halfbrown",
+ "itoa",
+ "ryu",
 ]
 
 [[package]]

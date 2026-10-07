@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 db = { path = "../../db" }
-helix-ast = { path = "../../ast" }
+helix-ast = { path = "../../ast", features = ["simd-json"] }
 helix-db-testkit = { path = ".." }
 helix-planner = { path = "../../planner" }
 libfuzzer-sys = "0.4"
@@ -20,6 +20,13 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 [[bin]]
 name = "query_json"
 path = "fuzz_targets/query_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query_json_arena"
+path = "fuzz_targets/query_json_arena.rs"
 test = false
 doc = false
 bench = false
