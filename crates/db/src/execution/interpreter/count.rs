@@ -655,6 +655,7 @@ impl<'db> ExecutionContext<'db> {
             )
             .await?;
         let mut accepted = 0usize;
+        let mut buffers = crate::encoding::v2::values::property::view::Buffers::default();
         while !threshold.is_some_and(|threshold| accepted >= threshold) {
             self.check_execution_deadline()?;
             let Some(entry) = iter.next().await? else {
@@ -669,7 +670,10 @@ impl<'db> ExecutionContext<'db> {
                 continue;
             };
             let row = ExecutionRow::current(ElementRef::Node(id));
-            let read = self.eval_predicate_plan(&row, predicate);
+            // Nothing writes between the scan and this read, so the scanned
+            // record is the one storage would return.
+            let read =
+                self.eval_predicate_plan_on_record(&row, predicate, entry.value, &mut buffers);
             if read.await? {
                 accepted = accepted.saturating_add(1);
             }
@@ -1469,12 +1473,29 @@ impl<'db> ExecutionContext<'db> {
                 CountCursorLeaf::NodeAuthoritativeScan(
                     exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
                 ) => {
-                    let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
-                    let ids = read.await?;
+                    let keyspace = exec::ElementKeyspace::NodeProperty;
+                    let read = self.scan_raw_range_limited(
+                        access::kv::element_prefix(keyspace).into(),
+                        access::kv::element_prefix_end(keyspace).into(),
+                        None,
+                    );
+                    let records = read.await?;
                     let mut rows = Vec::new();
-                    for id in ids {
+                    let mut buffers =
+                        crate::encoding::v2::values::property::view::Buffers::default();
+                    // The scanned records are the ones storage would return:
+                    // nothing writes before they are evaluated.
+                    for (key, record) in records {
+                        let Some(id) = access::kv::parse_element_id(keyspace, &key) else {
+                            continue;
+                        };
                         let row = ExecutionRow::current(ElementRef::Node(id));
-                        let read = self.eval_predicate_plan(&row, predicate);
+                        let read = self.eval_predicate_plan_on_record(
+                            &row,
+                            predicate,
+                            record,
+                            &mut buffers,
+                        );
                         if read.await? {
                             rows.push(row);
                         }
@@ -5816,7 +5837,10 @@ mod tests {
                 Property::i64("score", 5),
                 Property::new("meta", V::Object([("score".into(), V::I64(9))].into())),
             ],
-            vec![Property::string("status", "inactive"), Property::f64("score", 7.5)],
+            vec![
+                Property::string("status", "inactive"),
+                Property::f64("score", 7.5),
+            ],
             vec![
                 Property::string("status", "active"),
                 Property::f32_array("embedding", vec![0.5; 1536]),
@@ -5902,6 +5926,56 @@ mod tests {
                     crate::encoding::error::EncodingError::Rkyv(_)
                 ))
             ));
+        }
+        db.close().await.unwrap();
+    }
+
+    /// Direct and cursor scan counts evaluate predicates on the records the
+    /// scan returned instead of reading each one again.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_do_not_read_scanned_records_again() {
+        let db = test_support::open_db("count-scan-predicate-record-reuse").await;
+        for (n, status) in ["active", "inactive", "active"].into_iter().enumerate() {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                            n as u64 + 1,
+                        )),
+                    }
+                    .to_bytes(),
+                    crate::encoding::property::encode_properties(&[
+                        crate::encoding::property::Property::string("status", status),
+                    ]),
+                )
+                .await
+                .unwrap();
+        }
+        let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+            ir::PredicatePlan::new(Predicate::eq("status", "active")).unwrap(),
+        );
+        for plan in [
+            exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                predicate: predicate.clone(),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+        ] {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(2)
+            );
+            assert_eq!(execution.pull_work.snapshot().raw_gets, 0);
         }
         db.close().await.unwrap();
     }

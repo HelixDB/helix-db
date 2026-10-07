@@ -1,6 +1,7 @@
 //! Resumable graph sources. Stored bitmaps are prepared once; storage scans keep
 //! their original iterator in the request's read view until demand ends.
 use super::*;
+use crate::encoding::v2::values::property::view;
 use access::kv;
 use bytes::Bytes;
 use helix_planner::properties;
@@ -24,6 +25,8 @@ pub(super) struct Source<'a> {
     plan: Plan<'a>,
     state: State,
     remaining: Demand,
+    /// Aligned property-record copies a predicate scan reuses across rows.
+    buffers: view::Buffers,
 }
 
 enum Ids {
@@ -85,6 +88,7 @@ impl<'a> Source<'a> {
                 batch: 1,
             },
             remaining: Demand::All,
+            buffers: view::Buffers::default(),
         }
     }
 
@@ -99,6 +103,7 @@ impl<'a> Source<'a> {
                 batch: 1,
             },
             remaining: Demand::All,
+            buffers: view::Buffers::default(),
         }
     }
 
@@ -134,6 +139,7 @@ impl<'a> Source<'a> {
             plan,
             state: State::Unopened,
             remaining: limit.map_or(Demand::All, Demand::take),
+            buffers: view::Buffers::default(),
         })
     }
 
@@ -502,7 +508,8 @@ impl<'a> Source<'a> {
             if matches!(self.remaining, Demand::Done) {
                 return Ok(None);
             }
-            let row = match &mut self.state {
+            // A node scan also yields the element's property record.
+            let (row, record) = match &mut self.state {
                 State::Unopened => {
                     self.state = Box::pin(self.open(ctx)).await?;
                     continue;
@@ -514,7 +521,7 @@ impl<'a> Source<'a> {
                         continue;
                     };
                     self.remaining.consume();
-                    ExecutionRow::current(kv::element_ref(*keyspace, id))
+                    (ExecutionRow::current(kv::element_ref(*keyspace, id)), None)
                 }
                 State::Rows(items) => {
                     let item = items.next();
@@ -586,7 +593,7 @@ impl<'a> Source<'a> {
                     if !exists {
                         continue;
                     }
-                    ExecutionRow::current(kv::element_ref(*keyspace, id))
+                    (ExecutionRow::current(kv::element_ref(*keyspace, id)), None)
                 }
                 State::Scan { iter, keyspace } => {
                     let Some(entry) = iter.next().await? else {
@@ -611,7 +618,16 @@ impl<'a> Source<'a> {
                     let Some(id) = kv::parse_element_id(*keyspace, key) else {
                         continue;
                     };
-                    ExecutionRow::current(kv::element_ref(*keyspace, id))
+                    // Inside a write transaction a consumer may write a later
+                    // row after this scan read it, so only read-only requests
+                    // reuse the scanned record instead of reading it again.
+                    let record = (*keyspace == exec::ElementKeyspace::NodeProperty
+                        && ctx.active_write_tx().is_none())
+                    .then_some(entry.value);
+                    (
+                        ExecutionRow::current(kv::element_ref(*keyspace, id)),
+                        record,
+                    )
                 }
             };
             // Null equality opens as verified label rows; only a predicate
@@ -638,7 +654,18 @@ impl<'a> Source<'a> {
                                 exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
                             ),
                     },
-                )) => ctx.eval_predicate_plan(&row, predicate).await?,
+                )) => match record {
+                    Some(record) => {
+                        ctx.eval_predicate_plan_on_record(
+                            &row,
+                            predicate,
+                            record,
+                            &mut self.buffers,
+                        )
+                        .await?
+                    }
+                    None => ctx.eval_predicate_plan(&row, predicate).await?,
+                },
                 Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => true,
             };
             if !accepted {
@@ -1165,6 +1192,7 @@ mod tests {
                             plan: Plan::Prepared,
                             state: State::Done,
                             remaining,
+                            buffers: view::Buffers::default(),
                         };
                         source.state = source
                             .open_range(
@@ -1226,6 +1254,7 @@ mod tests {
                             plan: Plan::Prepared,
                             state: State::Done,
                             remaining: Demand::take(take),
+                            buffers: view::Buffers::default(),
                         };
                         source.state = source
                             .open_range(
@@ -1275,7 +1304,9 @@ mod tests {
     /// Rows written straight to the node keyspace: varied value types,
     /// duplicate and dotted names, an empty row and a large payload.
     async fn scan_predicate_fixture(db: &crate::HelixDB) {
-        use crate::encoding::property::{encode_properties, property_value::PropertyValue as V, Property};
+        use crate::encoding::property::{
+            encode_properties, property_value::PropertyValue as V, Property,
+        };
         let object = |score: i64| V::Object([("score".to_string(), V::I64(score))].into());
         let rows = [
             vec![
@@ -1295,7 +1326,10 @@ mod tests {
                 Property::i64("score", 11),
                 Property::string("status", "inactive"),
             ],
-            vec![Property::string("$label", "User"), Property::new("score", V::Null)],
+            vec![
+                Property::string("$label", "User"),
+                Property::new("score", V::Null),
+            ],
             Vec::new(),
             vec![
                 Property::string("status", "active"),
@@ -1422,12 +1456,74 @@ mod tests {
         }
         assert!(matches!(
             error,
-            Some(HelixDbError::Encoding(crate::encoding::error::EncodingError::Rkyv(_)))
+            Some(HelixDbError::Encoding(
+                crate::encoding::error::EncodingError::Rkyv(_)
+            ))
         ));
         let id_only = node_scan_plan(helix_ast::expr::Predicate::eq("$id", 4_i64));
         let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
         ctx.enable_request_read_view().await.unwrap();
         assert_eq!(scan_ids(&mut ctx, &id_only).await.unwrap(), vec![4]);
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_only_predicate_scans_evaluate_the_scanned_record_without_reading_it_again() {
+        let db = test_support::open_db("pull-scan-predicate-record-reuse").await;
+        scan_predicate_fixture(&db).await;
+        for (predicate, expected) in scan_predicate_cases() {
+            let plan = node_scan_plan(predicate.clone());
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.enable_request_read_view().await.unwrap();
+            assert_eq!(scan_ids(&mut ctx, &plan).await.unwrap(), expected);
+            let work = ctx.pull_work.snapshot();
+            assert_eq!(work.raw_gets, 0, "{predicate:?}");
+            assert_eq!(work.multi_get_keys, 0, "{predicate:?}");
+        }
+        db.close().await.unwrap();
+    }
+
+    /// In a write transaction a consumer can write a row the scan already
+    /// passed over; each predicate reads its row through the transaction.
+    #[tokio::test]
+    async fn write_transaction_scans_read_rows_written_after_the_scan_opened() {
+        use crate::encoding::property::{encode_properties, Property};
+        use crate::transaction::Mutation;
+        let db = test_support::open_db("pull-scan-predicate-write-tx").await;
+        scan_predicate_fixture(&db).await;
+        let plan = node_scan_plan(helix_ast::expr::Predicate::eq("status", "active"));
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_write_scope().await.unwrap();
+        let mut source = Source::new(&ctx, Plan::Access(&plan)).unwrap();
+        let first = source.next(&mut ctx).await.unwrap().unwrap();
+        assert_eq!(
+            ctx.stream_rows(first, "test").unwrap()[0].current,
+            Some(ElementRef::Node(1))
+        );
+        ctx.active_write_tx()
+            .unwrap()
+            .txn
+            .put(
+                keys::DataKey::Data {
+                    scope: keys::scope::DataScope::LegacyUnscoped,
+                    kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(3)),
+                }
+                .to_bytes(),
+                encode_properties(&[Property::string("status", "inactive")]),
+            )
+            .unwrap();
+        let mut rest = Vec::new();
+        while let Some(value) = source.next(&mut ctx).await.unwrap() {
+            rest.extend(
+                ctx.stream_rows(value, "test")
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.current.unwrap().id()),
+            );
+        }
+        assert_eq!(rest, vec![6]);
+        assert!(ctx.pull_work.snapshot().raw_gets > 0);
+        ctx.abort_request_write_scope();
         db.close().await.unwrap();
     }
 }
