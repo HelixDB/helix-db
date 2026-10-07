@@ -20,6 +20,10 @@ use crate::query::{QueryParamType, QueryRequest, QueryValue};
 use crate::traversal::{g, Order};
 use crate::value::PropertyInput;
 
+mod variants;
+
+pub use variants::{ast_nodes, every_variant, exprs, index_specs, predicates, property_values};
+
 /// One request body to measure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {

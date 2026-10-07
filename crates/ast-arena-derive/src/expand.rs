@@ -170,6 +170,14 @@ fn enum_definition(
     Ok(quote!(#vis enum #mirror<'a> { #(#variants,)* }))
 }
 
+/// serde_derive's `invalid_length` expectation, singular for one element.
+fn invalid_length_message(expecting: &str, count: usize) -> String {
+    match count {
+        1 => format!("{expecting} with 1 element"),
+        count => format!("{expecting} with {count} elements"),
+    }
+}
+
 /// Where a visitor reads a field's value from.
 enum Access {
     /// The next element of `seq`, for the sequence form.
@@ -209,7 +217,7 @@ fn struct_visitor(
     expecting: &str,
     fields: &[Field],
 ) -> syn::Result<TokenStream> {
-    let length = format!("{expecting} with {} elements", fields.len());
+    let length = invalid_length_message(expecting, fields.len());
     let types = fields
         .iter()
         .map(|field| mirror_type(&field.ty, &field.mode))
@@ -451,7 +459,7 @@ fn enum_deserialize(
                 }
                 VariantFields::Tuple(fields) => {
                     let expecting = expecting("tuple");
-                    let length = format!("{expecting} with {} elements", fields.len());
+                    let length = invalid_length_message(&expecting, fields.len());
                     let count = fields.len();
                     let slots = (0..fields.len())
                         .map(|index| format_ident!("__field{index}"))
