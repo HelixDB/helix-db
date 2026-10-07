@@ -327,7 +327,8 @@ async fn exercise_page_rejections() {
     db.close().await.expect("page-error database closes");
 }
 
-/// Proves entity-state presence, value-kind, ownership, and revision checks.
+/// Proves entity-state presence, value-kind, ownership, revision, and live
+/// statistics-marker checks.
 async fn exercise_entity_state_rejections() {
     let db = raw_db("production-text-serving-state-errors").await;
     let authority = text_authority(None);
@@ -374,11 +375,11 @@ async fn exercise_entity_state_rejections() {
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
     db.put(
-        state_key,
+        state_key.clone(),
         index_values::encode_text_entity_state(&work::TextEntityStateValue {
             index_id: authority.index_id(),
             generation: authority.generation(),
-            partition,
+            partition: partition.clone(),
             entity_kind: entity.kind,
             entity_id: entity.id,
             logical_version: TextLogicalVersion::new(2).expect("logical version is non-zero"),
@@ -392,6 +393,27 @@ async fn exercise_entity_state_rejections() {
         .expect("owned state loads");
     assert_eq!(state.logical_version(), 2);
     assert!(!state.is_live());
+    // A live state also needs the statistics marker that counts its document,
+    // and this root has none.
+    db.put(
+        state_key,
+        index_values::encode_text_entity_state(&work::TextEntityStateValue {
+            index_id: authority.index_id(),
+            generation: authority.generation(),
+            partition,
+            entity_kind: entity.kind,
+            entity_id: entity.id,
+            logical_version: TextLogicalVersion::new(2).expect("logical version is non-zero"),
+            live: true,
+        }),
+    )
+    .await
+    .expect("live state value writes");
+    assert!(matches!(
+        load_active_entity_state(&db, &root, 42).await,
+        Err(HelixDbError::IndexCatalogCorruption(message))
+            if message.contains("no statistics marker")
+    ));
     db.close().await.expect("state-error database closes");
 }
 
