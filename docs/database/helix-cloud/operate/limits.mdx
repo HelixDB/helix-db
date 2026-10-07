@@ -162,6 +162,13 @@ bucket was exhausted.
 | Result count              | Effective `k` is capped at 800. [Prefiltered](/database/helix-db/query-guides/prefiltering#result-limits) text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
 | Tenant partitioning      | Optional. Tenant-partitioned text indexes currently require the partition property name to be `tenant_id`, and tenant-scoped searches require a tenant value. |
 
+After upgrading past the change that keeps combining marks inside `standard` and
+`standard_stem_en` tokens, rebuild text indexes that use those analyzers and contain
+non-ASCII or Indic text. Drop the index and create it again. Reopening the database
+or compacting splits leaves the stored terms in place, and the persisted analyzer
+name stays the same. See
+[Analyzers](/database/helix-db/query-guides/text-indexes#analyzers).
+
 ## Secondary indexes
 
 | Limit            | Value                                                                                                      |

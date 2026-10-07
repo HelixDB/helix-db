@@ -43,6 +43,19 @@ you want cleanup instead of activation.
 Do not create repeated definitions to work around a blocker:
 `existing_operation` deliberately points callers at the durable in-flight operation.
 
+## Non-ASCII text search misses words after an upgrade
+
+**Symptoms:** A search for an Indic or other non-ASCII word misses the document, or
+hits a different word, on a text index that already existed when `standard` and
+`standard_stem_en` started keeping combining marks inside tokens. ASCII queries on
+the same index still match.
+
+**Fix:** Rebuild that index before query terms and stored terms agree. Drop it with
+`dropIndex` and create it again. Reopening the database or compacting splits leaves
+the old terms in place, and the persisted analyzer name is still `standard` or
+`standard_stem_en`. See
+[Analyzers](/database/helix-db/query-guides/text-indexes#analyzers).
+
 ## Vector dimension mismatch
 
 The stored vector and query vector must have exactly the dimension declared by the

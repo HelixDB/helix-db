@@ -4302,6 +4302,25 @@ for both modes, searches in write batches, and `index_backpressure`.
 The server caps the effective result count of a whole-index search at 800.
 Prefiltered searches have their own [limits](/database/helix-db/query-guides/prefiltering#result-limits).
 
+## Analyzers
+
+A text index uses one preset. `standard` is the default. `standard` and
+`standard_stem_en` split on whitespace and punctuation, lowercase each token, and
+keep Unicode combining marks, ZWJ, and ZWNJ inside the token, so an Indic word such
+as क्या is one term. `standard_stem_en` also applies an English stemmer.
+`whitespace_lowercase` splits only on whitespace and then lowercases.
+
+After upgrading past the change that keeps combining marks inside `standard` and
+`standard_stem_en` tokens, rebuild every text index that uses one of those analyzers
+and contains non-ASCII or Indic text. Until the rebuild finishes, a query tokenizes
+क्या as one term while an older split still stores क and या, so the query misses the
+word. Drop the index with `dropIndex` and create it again; creation backfills the
+new terms from the graph. Reopening the database or compacting splits leaves the
+stored terms in place. The persisted analyzer name stays `standard` or
+`standard_stem_en`, so the upgrade does not start a rebuild on its own. ASCII-only
+text produces the same tokens as before, and `whitespace_lowercase` indexes are
+unchanged.
+
 ## Indexed values
 
 - Store searchable text in a top-level `String` or `StringArray` property.
@@ -5600,6 +5619,19 @@ you want cleanup instead of activation.
 Do not create repeated definitions to work around a blocker:
 `existing_operation` deliberately points callers at the durable in-flight operation.
 
+## Non-ASCII text search misses words after an upgrade
+
+**Symptoms:** A search for an Indic or other non-ASCII word misses the document, or
+hits a different word, on a text index that already existed when `standard` and
+`standard_stem_en` started keeping combining marks inside tokens. ASCII queries on
+the same index still match.
+
+**Fix:** Rebuild that index before query terms and stored terms agree. Drop it with
+`dropIndex` and create it again. Reopening the database or compacting splits leaves
+the old terms in place, and the persisted analyzer name is still `standard` or
+`standard_stem_en`. See
+[Analyzers](/database/helix-db/query-guides/text-indexes#analyzers).
+
 ## Vector dimension mismatch
 
 The stored vector and query vector must have exactly the dimension declared by the
@@ -6670,6 +6702,13 @@ bucket was exhausted.
 | Term positions           | Optional                                                                                                                                                      |
 | Result count              | Effective `k` is capped at 800. [Prefiltered](/database/helix-db/query-guides/prefiltering#result-limits) text search returns at most `min(unique candidates, k, 800)` rows; more than 1,000,000 unique candidates is a query error. |
 | Tenant partitioning      | Optional. Tenant-partitioned text indexes currently require the partition property name to be `tenant_id`, and tenant-scoped searches require a tenant value. |
+
+After upgrading past the change that keeps combining marks inside `standard` and
+`standard_stem_en` tokens, rebuild text indexes that use those analyzers and contain
+non-ASCII or Indic text. Drop the index and create it again. Reopening the database
+or compacting splits leaves the stored terms in place, and the persisted analyzer
+name stays the same. See
+[Analyzers](/database/helix-db/query-guides/text-indexes#analyzers).
 
 ## Secondary indexes
 
@@ -11707,7 +11746,14 @@ nodes (entities) and edges (relationships):
 - A text index provides BM25-ranked search over a top-level string or string-array
   property of a node label or an edge label. Results are ordered by BM25 score, then ID.
 - Each index uses one of three analyzers: `standard`, `standard_stem_en`, or
-  `whitespace_lowercase`. Term positions are optional.
+  `whitespace_lowercase`. `standard` and `standard_stem_en` split on whitespace
+  and punctuation, and they keep Unicode combining marks inside the token, so a
+  Devanagari word such as क्या is one term rather than a break at the virama.
+  An index built before that change still stores the older split terms. Rebuild
+  `standard` and `standard_stem_en` indexes that contain non-ASCII or Indic text,
+  as described in [Text indexes](/database/helix-db/query-guides/text-indexes#analyzers).
+  Reopening the database or compacting splits leaves those terms in place, and the
+  persisted analyzer name stays the same. Term positions are optional.
 - Text indexes can be partitioned by tenant, which keeps a separate index per tenant
   value.
 - [Prefiltered search](/learn/vector-search/filtered-vector-search) ranks only the nodes

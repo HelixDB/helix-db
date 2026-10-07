@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use db::config::TextAnalyzerKind;
+use db::search::text::UnicodeSimpleTokenizer;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use slatedb::object_store::memory::InMemory;
@@ -15,9 +16,7 @@ use slatedb::object_store::{
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, TermQuery};
 use tantivy::schema::{IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions};
-use tantivy::tokenizer::{
-    Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, WhitespaceTokenizer,
-};
+use tantivy::tokenizer::{Language, LowerCaser, Stemmer, TextAnalyzer, WhitespaceTokenizer};
 use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 use tokio::sync::Notify;
 
@@ -149,13 +148,15 @@ pub fn search_live_corpus(
 
 fn oracle_analyzer(kind: TextAnalyzerKind) -> TextAnalyzer {
     match kind {
-        TextAnalyzerKind::Standard => TextAnalyzer::builder(SimpleTokenizer::default())
+        TextAnalyzerKind::Standard => TextAnalyzer::builder(UnicodeSimpleTokenizer::default())
             .filter(LowerCaser)
             .build(),
-        TextAnalyzerKind::StandardStemEn => TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(LowerCaser)
-            .filter(Stemmer::new(Language::English))
-            .build(),
+        TextAnalyzerKind::StandardStemEn => {
+            TextAnalyzer::builder(UnicodeSimpleTokenizer::default())
+                .filter(LowerCaser)
+                .filter(Stemmer::new(Language::English))
+                .build()
+        }
         TextAnalyzerKind::WhitespaceLowercase => {
             TextAnalyzer::builder(WhitespaceTokenizer::default())
                 .filter(LowerCaser)
