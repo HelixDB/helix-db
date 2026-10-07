@@ -140,7 +140,11 @@ async fn vector_memory_benchmark_hydrates_every_memory_row() {
         hydrated.lookup(fixture.upper_nodes()) > fixture.upper_nodes().len() * vector_bytes,
         "every upper node returns its vector, layer-1 neighbors, and SimHash"
     );
-    assert_eq!(hydrated.lookup(&[u64::MAX]), 0, "unknown nodes read nothing");
+    assert_eq!(
+        hydrated.lookup(&[u64::MAX]),
+        0,
+        "unknown nodes read nothing"
+    );
     drop(hydrated);
     fixture.close().await.expect("fixture closes");
 }
