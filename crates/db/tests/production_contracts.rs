@@ -681,24 +681,102 @@ async fn public_execute_boundary_logs_every_executed_step() {
     let logs = QUERY_STEP_LOGS.take().expect("this thread records");
 
     assert_eq!(result.last, Some(ExecutionValue::Count(1)));
-    let steps = logs
-        .iter()
-        .map(|record| {
-            let field = |name: &str| {
-                record
-                    .split(' ')
-                    .find_map(|token| token.strip_prefix(name))
-                    .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
-            };
-            field("elapsed_us=")
-                .parse::<u64>()
-                .expect("latency is whole microseconds");
-            (field("op="), field("rows="))
-        })
-        .collect::<Vec<_>>();
+    let steps = |logs: &[String]| {
+        logs.iter()
+            .map(|record| {
+                let field = |name: &str| {
+                    record
+                        .split(' ')
+                        .find_map(|token| token.strip_prefix(name))
+                        .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
+                        .to_owned()
+                };
+                field("elapsed_us=")
+                    .parse::<u64>()
+                    .expect("latency is whole microseconds");
+                (field("op="), field("rows="))
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        steps,
-        [("\"mutation()\"", "1"), ("\"count()\"", "0")],
+        steps(&logs),
+        [
+            ("\"mutation()\"".to_owned(), "1".to_owned()),
+            ("\"count()\"".to_owned(), "0".to_owned())
+        ],
+        "{logs:?}"
+    );
+
+    // A label-filtered vector search runs its access and its search as one
+    // step pair: the search ranks the label's ID set, the access builds no
+    // rows, and both steps still log.
+    let operation = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(index::IndexSpec::node_vector(
+                        "Logged",
+                        "embedding",
+                        NonZeroUsize::new(2).expect("dimension is positive"),
+                        index::VectorDistanceMetric::Euclidean,
+                        None::<String>,
+                    )),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .expect("vector index DDL is accepted");
+    await_index_operation_success(
+        &db,
+        operation["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted vector-index operation has an ID"),
+        "logged vector index",
+    )
+    .await;
+    db.query(QueryRequest::write(
+        [[1.0_f32, 0.0], [2.0, 0.0]].into_iter().enumerate().fold(
+            batch::write_batch(),
+            |write, (index, embedding)| {
+                write.var_as(
+                    &format!("embedded{index}"),
+                    traversal::g().add_n(
+                        "Logged",
+                        vec![("embedding", PropertyInput::from(embedding.to_vec()))],
+                    ),
+                )
+            },
+        ),
+    ))
+    .await
+    .expect("embedded nodes commit");
+    QUERY_STEP_LOGS.set(Some(Vec::new()));
+    let searched = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g().n_with_label("Logged").vector_search(
+                        "Logged",
+                        "embedding",
+                        vec![0.0, 0.0],
+                        2,
+                        None,
+                    ),
+                )
+                .returning(["hits"]),
+        ))
+        .await
+        .expect("logged search executes");
+    let logs = QUERY_STEP_LOGS.take().expect("this thread records");
+    assert_eq!(searched["hits"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        steps(&logs),
+        [
+            ("\"source()\"".to_owned(), "0".to_owned()),
+            ("\"vector_search()\"".to_owned(), "2".to_owned())
+        ],
         "{logs:?}"
     );
     db.close().await.unwrap();

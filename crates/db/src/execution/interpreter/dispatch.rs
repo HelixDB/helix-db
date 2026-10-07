@@ -14,7 +14,7 @@ impl<'db> ExecutionContext<'db> {
     /// `fused` is the step's part in an index-set vector search the scheduler
     /// runs as one (see [`super::scheduler::fusion`]): its access produces an
     /// empty stream that nothing reads, and its search releases that stream
-    /// and ranks the access's ID set itself.
+    /// and ranks the access's ID set itself. Both still log their step event.
     pub(in crate::execution::interpreter) fn execute_step<'a>(
         &'a mut self,
         step: &'a exec::ExecStep,
@@ -34,7 +34,9 @@ impl<'db> ExecutionContext<'db> {
                 None => {}
                 Some(super::scheduler::fusion::Role::Source) => {
                     self.release_dependency_references(&step.dependencies);
-                    return Ok(ExecutionValue::Stream(Vec::new()));
+                    let value = ExecutionValue::Stream(Vec::new());
+                    trace_step(&step.op, &value, std::time::Instant::now());
+                    return Ok(value);
                 }
                 Some(super::scheduler::fusion::Role::Search(search)) => {
                     self.release_dependency_references(&step.dependencies);
