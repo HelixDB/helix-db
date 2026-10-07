@@ -91,6 +91,10 @@ pub enum QueryValue {
     Object(BTreeMap<String, QueryValue>),
 }
 
+/// Most parameter values an array reserves from a deserializer's length hint
+/// before seeing them: serde's own 1 MiB cap for 32-byte values.
+const MAX_HINTED_VALUES: usize = 1024 * 1024 / size_of::<QueryValue>();
+
 /// Builds each value directly from the deserializer's events. A derived
 /// untagged impl buffers the value and then copies every nested subtree once
 /// per level while it tries variants, so its peak memory grows with depth
@@ -155,9 +159,18 @@ impl<'de> Deserialize<'de> for QueryValue {
             where
                 A: SeqAccess<'de>,
             {
-                let mut values = Vec::new();
+                // Trust a length hint (simd-json gives exact ones) only as
+                // far as serde does, so a hostile hint cannot reserve much.
+                let hint = seq.size_hint().unwrap_or(0).min(MAX_HINTED_VALUES);
+                let mut values = Vec::with_capacity(hint);
                 while let Some(value) = seq.next_element()? {
                     values.push(value);
+                }
+                // Parameters live through execution, and growth by doubling
+                // leaves up to half of a long array (a bulk insert's
+                // embeddings) unused, so arrays keep exactly their length.
+                if values.capacity() > values.len() {
+                    values.shrink_to_fit();
                 }
                 Ok(QueryValue::Array(values))
             }
