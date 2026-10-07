@@ -68,6 +68,27 @@ pub struct SeedRuleSet {
 }
 
 impl SeedRuleSet {
+    /// The seed rules' optimizer, built once per process. The rules are
+    /// immutable and the optimizer's compiled schedule depends only on them,
+    /// so every planning session can share one instead of rebuilding the rule
+    /// metadata and candidate lists each time.
+    ///
+    /// ```
+    /// use helix_planner::rules::SeedRuleSet;
+    ///
+    /// assert!(std::ptr::eq(
+    ///     SeedRuleSet::shared_optimizer(),
+    ///     SeedRuleSet::shared_optimizer(),
+    /// ));
+    /// ```
+    pub fn shared_optimizer() -> &'static optimizer::CascadesOptimizer<'static> {
+        static SEED: std::sync::LazyLock<SeedRuleSet> =
+            std::sync::LazyLock::new(SeedRuleSet::default);
+        static OPTIMIZER: std::sync::LazyLock<optimizer::CascadesOptimizer<'static>> =
+            std::sync::LazyLock::new(|| SEED.optimizer());
+        &OPTIMIZER
+    }
+
     /// Build the optimizer view over the seed rule registry.
     pub fn optimizer(&self) -> optimizer::CascadesOptimizer<'_> {
         optimizer::CascadesOptimizer::new(self.registry())

@@ -17,7 +17,6 @@ use crate::{context, error, exec, optimizer, rules};
 /// are always checked with full logical-expression equality before reuse.
 pub(super) struct SelectedCascadesPlanner<'a> {
     ctx: &'a context::PlannerContext,
-    rules: rules::SeedRuleSet,
     config: optimizer::OptimizerConfig<'a>,
     selected_roots: cache::SelectedRunRootCache,
 }
@@ -26,7 +25,6 @@ impl<'a> SelectedCascadesPlanner<'a> {
     pub(super) fn new(ctx: &'a context::PlannerContext) -> Self {
         Self {
             ctx,
-            rules: rules::SeedRuleSet::default(),
             config: optimizer::OptimizerConfig::from_context(ctx),
             selected_roots: cache::SelectedRunRootCache::default(),
         }
@@ -47,7 +45,7 @@ impl<'a> SelectedCascadesPlanner<'a> {
 
         let root_expr = logical_root.expr().clone();
         let result = {
-            let optimizer = self.rules.optimizer();
+            let optimizer = rules::SeedRuleSet::shared_optimizer();
             optimizer.optimize(root_expr.clone(), &self.config)
         }
         .map_err(optimizer_error)?;
@@ -81,7 +79,7 @@ impl<'a> SelectedCascadesPlanner<'a> {
         let pending_len = pending.len();
         let (root_exprs, pending_entries) = pending.into_parts();
         let result = {
-            let optimizer = self.rules.optimizer();
+            let optimizer = rules::SeedRuleSet::shared_optimizer();
             optimizer.optimize_many(root_exprs, &self.config)
         }
         .map_err(optimizer_error)?;

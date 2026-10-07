@@ -827,8 +827,7 @@ fn plan_accesses(
     }
     let pipeline_index = roots.len();
     roots.push(logical::LogicalExpr::Rows(std::sync::Arc::clone(query)));
-    let seed = rules::SeedRuleSet::default();
-    let optimizer = seed.optimizer();
+    let optimizer = rules::SeedRuleSet::shared_optimizer();
     let result = optimizer
         .optimize_many(
             ir::AtLeast::try_from_vec(roots.clone()).expect("nonempty roots"),
