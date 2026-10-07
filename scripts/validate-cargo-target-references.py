@@ -117,6 +117,8 @@ V2_SOURCE_FILES = {
     "values/property/prepared/mod.rs",
     "values/property/prepared/tests.rs",
     "values/property/prepared/validation.rs",
+    "values/property/view/mod.rs",
+    "values/property/view/tests.rs",
     "values/property/write/mod.rs",
     "values/property/write/tests.rs",
     "values/property/range_index_value.rs",
