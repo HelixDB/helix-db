@@ -103,13 +103,13 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 346,
+    "line": 348,
     "reason": "After exact legacy metadata validation, transcoding changes only the physical name to the canonical name used to construct the comparison descriptor; every other compared field is unchanged.",
     "evidence": "vector_index_exercises_facade_and_row_safety_contracts and populated_legacy_vector_is_adopted_in_place"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 355,
+    "line": 357,
     "reason": "One metadata replacement cannot exceed the measured-write operation or byte domains on supported 64-bit targets.",
     "evidence": "populated_legacy_vector_is_adopted_in_place and db-vector-production-coverage architecture matrix"
   },
@@ -595,19 +595,19 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3736,
+    "line": 4017,
     "reason": "Only shrink_to evicts without a transaction, and it runs only on sessions the lifecycle driver retained. The driver retains a session only when it holds no unflushed rows, after flush_all has written every dirty neighbor for the step, so this arm cannot meet a dirty neighbor row.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3832,
+    "line": 4113,
     "reason": "This error value belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3835,
+    "line": 4116,
     "reason": "This closing edge belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },
@@ -625,8 +625,8 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 1790,
-    "reason": "load_neighbors_for_mutation has just cached this row, so staging cannot reach the unloaded-row guard. The staged known-absent value encodes nothing, and the loaded row re-encodes within the degree bound it was decoded under, so payload accounting cannot fail.",
+    "line": 1829,
+    "reason": "load_neighbors_for_mutation has just cached this row, so staging cannot reach the unloaded-row guard. The staged known-absent value encodes nothing, and the loaded row's encoded length is computed within the degree bound it was decoded under, so payload accounting cannot fail.",
     "evidence": "vector_mutation_cache_exercises_closed_state_transitions"
   }
 ]
