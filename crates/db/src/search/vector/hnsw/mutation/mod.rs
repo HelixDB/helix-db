@@ -2140,10 +2140,8 @@ impl<D: Distance> VectorIndex<D> {
             let Some(item) = item.as_ref().filter(|_| *candidate_id != neighbor_id) else {
                 continue;
             };
-            distances.push(Candidate::try_new(
-                *candidate_id,
-                D::distance(neighbor_item.as_ref(), item.as_ref()),
-            )?);
+            let distance = D::distance(neighbor_item.as_ref(), item.as_ref());
+            distances.push(Candidate::try_new(*candidate_id, distance)?);
         }
         // Candidates have distinct node IDs and `Candidate` orders by distance
         // then node ID, so the partitioned prefix holds exactly the nearest
@@ -2733,16 +2731,21 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
 
     /// Caches `value` at the touch it records, returning the value it replaces.
     ///
-    /// A replacement stamped with the replaced value's touch keeps its place.
+    /// # Panics
+    ///
+    /// When the replaced value records the same touch: every insertion takes a
+    /// fresh touch, and a change that keeps its place goes through
+    /// [`Self::modify`].
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         let touch = value.last_touch();
         let replaced = self.values.insert(key, value);
-        if replaced
-            .as_ref()
-            .is_none_or(|replaced| replaced.last_touch() != touch)
-        {
-            self.record(touch, key);
-        }
+        assert!(
+            replaced
+                .as_ref()
+                .is_none_or(|replaced| replaced.last_touch() != touch),
+            "a recency-map replacement records a fresh touch"
+        );
+        self.record(touch, key);
         replaced
     }
 
@@ -2753,22 +2756,25 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
         Some(removed)
     }
 
-    /// Changes the cached value of `key` in place, returning whether it was
-    /// cached.
+    /// Changes the cached value of `key` in place.
     ///
-    /// The order ends exactly as [`Self::insert`] of the changed value would
-    /// leave it: a change that restamps the value records its new touch.
-    fn modify(&mut self, key: &K, change: impl FnOnce(&mut V)) -> bool {
-        let Some(value) = self.values.get_mut(key) else {
-            return false;
-        };
+    /// A change that restamps the value records its new touch, as
+    /// [`Self::insert`] would; one that keeps its touch keeps its place.
+    ///
+    /// # Panics
+    ///
+    /// When `key` is not cached: callers change only a value they just read.
+    fn modify(&mut self, key: &K, change: impl FnOnce(&mut V)) {
+        let value = self
+            .values
+            .get_mut(key)
+            .expect("a modified recency-map value is cached");
         let touch = value.last_touch();
         change(value);
         let changed_touch = value.last_touch();
         if changed_touch != touch {
             self.record(changed_touch, *key);
         }
-        true
     }
 
     /// Restamps every value with `renumbered`, which must keep their order.
@@ -3096,11 +3102,8 @@ impl<D: Distance> MutationOpCache<D> {
             retained_neighbor_payload_bytes(layer, previous.current(), previous.original())?;
         // Staging keeps a dirty row's original and makes a clean row's
         // current value its original.
-        let staged_payload = retained_neighbor_payload_bytes(
-            layer,
-            &value,
-            Some(previous.original().unwrap_or(previous.current())),
-        )?;
+        let staged_original = previous.original().unwrap_or(previous.current());
+        let staged_payload = retained_neighbor_payload_bytes(layer, &value, Some(staged_original))?;
         if previous.current() != &value {
             self.entity_changed_neighbors.insert(row);
         }
@@ -3115,11 +3118,8 @@ impl<D: Distance> MutationOpCache<D> {
             self.dirty_neighbor_recency.insert((touch, row)),
             "vector neighbor recency is unique"
         );
-        assert!(
-            self.neighbor_rows
-                .modify(&row, |cached| cached.stage(value, touch)),
-            "loaded vector neighbor remains cached while staging"
-        );
+        self.neighbor_rows
+            .modify(&row, |cached| cached.stage(value, touch));
         Ok(())
     }
 
@@ -3213,11 +3213,8 @@ impl<D: Distance> MutationOpCache<D> {
             self.dirty_neighbor_recency.remove(&(last_touch, row)),
             "dirty vector neighbor retains one recency entry"
         );
-        assert!(
-            self.neighbor_rows
-                .modify(&row, CachedNeighbor::mark_flushed),
-            "flushed vector neighbor remains cached"
-        );
+        self.neighbor_rows
+            .modify(&row, CachedNeighbor::mark_flushed);
     }
 
     /// Removes every layer-specific neighbor state for one entity.
@@ -6033,12 +6030,30 @@ mod tests {
         Older(NodeId),
         Remove(NodeId),
         Renumber,
-        /// Changes a key's value in place, restamping it newer than every
-        /// other, as staging a neighbor row does.
+        /// Changes a cached key's value in place, restamping it newer than
+        /// every other, as staging a neighbor row does.
         Restamp(NodeId),
-        /// Changes a key's value in place without restamping it, as marking
-        /// a neighbor row flushed does.
+        /// Changes a cached key's value in place without restamping it, as
+        /// marking a neighbor row flushed does.
         Rewrite(NodeId),
+    }
+
+    #[test]
+    #[should_panic(expected = "a modified recency-map value is cached")]
+    fn recency_map_refuses_to_modify_an_uncached_value() {
+        RecencyMap::<NodeId, CachedSimHash>::default().modify(&7, |_| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "a recency-map replacement records a fresh touch")]
+    fn recency_map_refuses_a_replacement_at_the_replaced_touch() {
+        let mut map = RecencyMap::<NodeId, CachedSimHash>::default();
+        let cached = CachedSimHash {
+            value: None,
+            last_touch: CacheSequence(3),
+        };
+        assert!(map.insert(7, cached).is_none());
+        map.insert(7, cached);
     }
 
     fn recency_op() -> impl Strategy<Value = RecencyOp> {
@@ -6107,13 +6122,13 @@ mod tests {
                     RecencyOp::Restamp(key) => {
                         let touch = CacheSequence(newer);
                         newer += 1;
-                        let modified = map.modify(&key, |cached| {
-                            cached.value = Some(crate::search::vector::SimHash::from_bits(key));
-                            cached.last_touch = touch;
-                        });
-                        let expected = model.get_mut(&key).map(|last_touch| *last_touch = touch);
-                        prop_assert_eq!(modified, expected.is_some());
-                        if modified {
+                        if let Some(last_touch) = model.get_mut(&key) {
+                            *last_touch = touch;
+                            map.modify(&key, |cached| {
+                                cached.value =
+                                    Some(crate::search::vector::SimHash::from_bits(key));
+                                cached.last_touch = touch;
+                            });
                             prop_assert_eq!(
                                 map.get(&key).unwrap().value,
                                 Some(crate::search::vector::SimHash::from_bits(key))
@@ -6121,8 +6136,10 @@ mod tests {
                         }
                     }
                     RecencyOp::Rewrite(key) => {
-                        let modified = map.modify(&key, |cached| cached.value = None);
-                        prop_assert_eq!(modified, model.contains_key(&key));
+                        if model.contains_key(&key) {
+                            map.modify(&key, |cached| cached.value = None);
+                            prop_assert_eq!(map.get(&key).unwrap().value, None);
+                        }
                     }
                 }
                 let expected = model
