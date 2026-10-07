@@ -41,6 +41,8 @@ mod nesting;
 pub mod prelude;
 pub mod projection;
 pub mod query;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testing;
 pub mod traversal;
 pub mod value;
 
