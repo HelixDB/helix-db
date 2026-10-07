@@ -1,15 +1,24 @@
 //! Executable DAG dependency graph validation.
+//!
+//! Traversal state is one entry per step position, visited in the same ID and
+//! dependency order as before, so errors name the same steps.
 
 use std::collections::BTreeSet;
 
 use super::index::ValidatedStepIndex;
 use crate::exec::{ExecPlanError, ExecStepId};
 
+#[derive(Clone, Copy)]
+enum Visit {
+    New,
+    InProgress,
+    Done,
+}
+
 pub(super) fn reject_cycles(index: &ValidatedStepIndex<'_>) -> Result<(), ExecPlanError> {
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
+    let mut states = vec![Visit::New; index.len()];
     for id in index.ids() {
-        visit(index, id, &mut visiting, &mut visited)?;
+        visit(index, id, &mut states)?;
     }
     Ok(())
 }
@@ -17,55 +26,57 @@ pub(super) fn reject_cycles(index: &ValidatedStepIndex<'_>) -> Result<(), ExecPl
 fn visit(
     index: &ValidatedStepIndex<'_>,
     id: ExecStepId,
-    visiting: &mut BTreeSet<ExecStepId>,
-    visited: &mut BTreeSet<ExecStepId>,
+    states: &mut [Visit],
 ) -> Result<(), ExecPlanError> {
-    if visited.contains(&id) {
-        return Ok(());
-    }
-    if !visiting.insert(id) {
-        return Err(ExecPlanError::DependencyCycle { step: id });
-    }
-    let step = index.get(id).ok_or(ExecPlanError::MissingDependency {
+    let position = index.position(id).ok_or(ExecPlanError::MissingDependency {
         step: id,
         dependency: id,
     })?;
+    match states[position] {
+        Visit::Done => return Ok(()),
+        Visit::InProgress => return Err(ExecPlanError::DependencyCycle { step: id }),
+        Visit::New => states[position] = Visit::InProgress,
+    }
+    let step = index.at(position);
     for dependency in &step.dependencies {
         index.require_dependency(step.id, *dependency)?;
-        visit(index, *dependency, visiting, visited)?;
+        visit(index, *dependency, states)?;
     }
-    visiting.remove(&id);
-    visited.insert(id);
+    states[position] = Visit::Done;
     Ok(())
 }
 
 pub(super) fn reject_unreachable_steps(
     index: &ValidatedStepIndex<'_>,
 ) -> Result<(), ExecPlanError> {
-    let mut reachable = BTreeSet::new();
+    let mut reachable = vec![false; index.len()];
     collect_reachable(index, index.root(), &mut reachable)?;
-    for id in index.ids() {
-        if !reachable.contains(&id) {
-            return Err(ExecPlanError::UnreachableStep {
-                step: id,
-                root: index.root(),
-            });
-        }
+    match index
+        .ids()
+        .zip(&reachable)
+        .find_map(|(id, reachable)| (!reachable).then_some(id))
+    {
+        Some(step) => Err(ExecPlanError::UnreachableStep {
+            step,
+            root: index.root(),
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn collect_reachable(
     index: &ValidatedStepIndex<'_>,
     id: ExecStepId,
-    reachable: &mut BTreeSet<ExecStepId>,
+    reachable: &mut [bool],
 ) -> Result<(), ExecPlanError> {
-    if !reachable.insert(id) {
+    let position = index
+        .position(id)
+        .ok_or(ExecPlanError::MissingRoot { root: id })?;
+    if reachable[position] {
         return Ok(());
     }
-    let step = index
-        .get(id)
-        .ok_or(ExecPlanError::MissingRoot { root: id })?;
+    reachable[position] = true;
+    let step = index.at(position);
     for dependency in &step.dependencies {
         index.require_dependency(step.id, *dependency)?;
         collect_reachable(index, *dependency, reachable)?;
@@ -73,6 +84,8 @@ fn collect_reachable(
     Ok(())
 }
 
+/// Runs once per conditional step, so its state grows with what it visits
+/// rather than with the DAG.
 pub(super) fn dependency_reachable(
     index: &ValidatedStepIndex<'_>,
     dependencies: &[ExecStepId],
