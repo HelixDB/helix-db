@@ -555,7 +555,8 @@ impl ExecutionValue {
 pub struct ExecutionResult {
     /// Root step result.
     pub last: Option<ExecutionValue>,
-    /// Values bound by batch outputs and variable operations.
+    /// Values bound by batch outputs and variable operations that are not
+    /// requested returns. Requested values move into [`Self::returns`].
     pub variables: BTreeMap<ir::NonEmptyString, ExecutionValue>,
     /// Requested return values, keyed by the planner return list.
     pub returns: BTreeMap<ir::NonEmptyString, ReturnedValue>,

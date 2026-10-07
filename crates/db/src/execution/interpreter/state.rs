@@ -17,6 +17,9 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<ExecutionResult> {
         self.step_output_uses.remove(&root);
         let last = self.step_outputs.remove(&root);
+        // Returned values move out of the table: the result becomes their only
+        // owner, so a uniquely owned value is never copied.
+        let mut variables = std::mem::take(&mut self.variables);
         let returns = match returns {
             exec::ExecutableReturns::None => BTreeMap::new(),
             exec::ExecutableReturns::Variables(returns) => returns
@@ -28,7 +31,7 @@ impl<'db> ExecutionContext<'db> {
                         .get(planned.name())
                         .copied()
                         .unwrap_or_else(|| planned.shape());
-                    let value = match self.variables.get(planned.name()).cloned() {
+                    let value = match variables.remove(planned.name()) {
                         Some(value) if value.is_empty() => match shape {
                             exec::ReturnShape::List => ReturnedValue::EmptyList,
                             exec::ReturnShape::Object => ReturnedValue::EmptyObject,
@@ -49,7 +52,7 @@ impl<'db> ExecutionContext<'db> {
         };
         Ok(ExecutionResult {
             last,
-            variables: std::mem::take(&mut self.variables).into_values(),
+            variables: variables.into_values(),
             returns,
         })
     }
@@ -177,7 +180,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_returns_root_output_all_variables_and_requested_returns() {
+    async fn finish_returns_root_output_unreturned_variables_and_requested_returns() {
         let db = test_support::open_db("state-finish-returns").await;
         let root = step_id(2);
         let all = name("all");
@@ -203,10 +206,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.last, Some(ExecutionValue::Stream(vec![row(7)])));
-        assert_eq!(result.variables.len(), 3);
         assert_eq!(
-            result.variables.get(&ignored),
-            Some(&ExecutionValue::Stream(Vec::new()))
+            result.variables,
+            BTreeMap::from([(ignored.clone(), ExecutionValue::Stream(Vec::new()))])
         );
         assert_eq!(result.returns.len(), 2);
         assert_eq!(
@@ -253,6 +255,32 @@ mod tests {
         );
         assert_eq!(ctx.step_outputs.get(&retained), Some(&rows));
         assert_eq!(snapshot.get(&forked), Some(&rows));
+    }
+
+    #[tokio::test]
+    async fn finish_moves_uniquely_owned_returns_without_copying() {
+        let db = test_support::open_db("state-finish-moves-returns").await;
+        let returned = name("returned");
+        let rows = vec![row(1), row(2)];
+        let allocation = rows.as_ptr();
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.variables
+            .insert(returned.clone(), ExecutionValue::Stream(rows));
+
+        let result = ctx
+            .finish(
+                step_id(1),
+                &return_variables(vec![("returned", exec::ReturnShape::List)]),
+            )
+            .unwrap();
+
+        let Some(ReturnedValue::Present(ExecutionValue::Stream(rows))) =
+            result.returns.get(&returned)
+        else {
+            panic!("returned stream is present");
+        };
+        assert_eq!(rows.as_ptr(), allocation);
+        assert!(result.variables.is_empty());
     }
 
     #[tokio::test]
