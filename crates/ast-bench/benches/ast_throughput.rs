@@ -50,7 +50,8 @@ fn simd_json_parse_drop(bencher: Bencher, name: &str) {
     });
 }
 
-/// The front end up to and including planning, as `query_service` runs it.
+/// The front end up to and including planning, as `query_service` runs it:
+/// the batch is dropped once planned and the parameters move to execution.
 #[divan::bench(args = support::THROUGHPUT_SHAPES, threads = THREADS, max_time = 2)]
 fn sonic_parse_plan_drop(bencher: Bencher, name: &str) {
     let json = &support::shape(name).json;
@@ -58,11 +59,13 @@ fn sonic_parse_plan_drop(bencher: Bencher, name: &str) {
         let request = QueryRequest::from_json_slice(json).expect("corpus shapes parse");
         request.check_nesting().expect("corpus shapes are bounded");
         let (batch, parameters) = request.into_query();
-        let params = helix_ast_bench::param_bindings(parameters);
-        let context = helix_ast_bench::planner_context(params.clone());
+        let context = helix_ast_bench::planner_context(helix_ast_bench::param_bindings(parameters));
         let planning = helix_planner::planning::plan_with_diagnostics(&batch, &context)
             .expect("throughput shapes plan");
-        drop((batch, params, context, planning));
+        drop(batch);
+        // Execution takes the parameters back from the context.
+        let params = context.params.into_inner();
+        drop((params, planning));
     });
 }
 

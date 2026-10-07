@@ -201,7 +201,7 @@ fn values() -> Vec<QueryValue> {
 fn lazy_value_validation_matches_the_eager_oracle() {
     for value in values() {
         assert_eq!(
-            format!("{:?}", super::validate_json_value(&value, "param")),
+            format!("{:?}", super::validate_json_value(&value, "param", 0)),
             format!("{:?}", validate_json_value(&value, "param")),
             "{value:?}"
         );

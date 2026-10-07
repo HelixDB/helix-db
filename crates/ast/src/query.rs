@@ -527,6 +527,9 @@ impl QueryRequest {
     /// expression or value nests more than [`MAX_REQUEST_JSON_DEPTH`] levels.
     /// Planning, execution and telemetry walk a request recursively; a JSON
     /// request is bounded by its text, and this bounds one built in memory.
+    /// Parameter values are bounded when they enter the request (parsing and
+    /// every insert builder check them), so the pass walks only the batch:
+    /// a bulk insert's parameters are most of its size.
     ///
     /// ```
     /// use helix_ast::{batch, query::QueryRequest, traversal};
@@ -540,14 +543,10 @@ impl QueryRequest {
             BatchQuery::Read(batch) => batch.entries(),
             BatchQuery::Write(batch) => &batch.entries,
         };
-        let values = match &self.parameters {
-            QueryParameters::Untyped(values) | QueryParameters::Typed { values, .. } => values,
-        };
-        let roots = entries
-            .iter()
-            .map(crate::nesting::Node::Entry)
-            .chain(values.values().map(crate::nesting::Node::Query));
-        match crate::nesting::within(roots, MAX_REQUEST_JSON_DEPTH) {
+        match crate::nesting::within(
+            entries.iter().map(crate::nesting::Node::Entry),
+            MAX_REQUEST_JSON_DEPTH,
+        ) {
             true => Ok(()),
             false => Err(QueryError::NestingTooDeep {
                 path: "request".to_owned(),
@@ -667,7 +666,7 @@ impl QueryRequest {
     ) -> Result<(), QueryError> {
         let name = name.into();
         validate_parameter_name(&name)?;
-        validate_json_value(&value, &name)?;
+        validate_json_value(&value, &name, 0)?;
         match &mut self.parameters {
             QueryParameters::Untyped(values) => {
                 if values.contains_key(&name) {
@@ -925,7 +924,7 @@ fn validate_raw_request(
         None => {
             for (name, value) in &values {
                 validate_parameter_name(name).map_err(RawRequestError::Query)?;
-                validate_json_value(value, name).map_err(RawRequestError::Query)?;
+                validate_json_value(value, name, 0).map_err(RawRequestError::Query)?;
             }
             QueryParameters::Untyped(values)
         }
@@ -1279,14 +1278,21 @@ impl std::fmt::Display for ParamPath<'_> {
 }
 
 /// Validate a parameter value with an explicit stack, so neither its size nor
-/// its nesting reaches the call stack; nesting is bounded like a request.
+/// its nesting reaches the call stack; nesting is bounded like a request,
+/// counting the `levels_above` the value already sits under (the declared
+/// array levels of a typed parameter). Every parameter a request holds has
+/// passed this check, so [`QueryRequest::check_nesting`] need not walk them.
 ///
 /// The walk visits values in document order and keeps one frame per open
 /// array or object, holding its remaining children and the key or index of
 /// the child being visited. An error renders its path from those frames, so
 /// a valid value costs no path formatting and the stack stays as deep as the
 /// value rather than as wide.
-fn validate_json_value(value: &QueryValue, path: impl std::fmt::Display) -> Result<(), QueryError> {
+fn validate_json_value(
+    value: &QueryValue,
+    path: impl std::fmt::Display,
+    levels_above: usize,
+) -> Result<(), QueryError> {
     enum Children<'a> {
         Array(std::iter::Enumerate<std::slice::Iter<'a, QueryValue>>),
         Object(std::collections::btree_map::Iter<'a, String, QueryValue>),
@@ -1319,7 +1325,7 @@ fn validate_json_value(value: &QueryValue, path: impl std::fmt::Display) -> Resu
     let mut visit = value;
     loop {
         // Every open frame is an ancestor of `visit`.
-        if frames.len() + 1 > MAX_REQUEST_JSON_DEPTH {
+        if levels_above + frames.len() + 1 > MAX_REQUEST_JSON_DEPTH {
             return Err(QueryError::NestingTooDeep {
                 path: render(&frames),
                 maximum: MAX_REQUEST_JSON_DEPTH,
@@ -1447,11 +1453,11 @@ fn normalize_typed_value_at(
             Ok(QueryValue::String(datetime))
         }
         (QueryParamType::Value, value) => {
-            validate_json_value(&value, ParamPath { name, indices })?;
+            validate_json_value(&value, ParamPath { name, indices }, indices.len())?;
             Ok(value)
         }
         (QueryParamType::Object, value @ QueryValue::Object(_)) => {
-            validate_json_value(&value, ParamPath { name, indices })?;
+            validate_json_value(&value, ParamPath { name, indices }, indices.len())?;
             Ok(value)
         }
         (QueryParamType::Array(inner), QueryValue::Array(values)) => values
@@ -1541,6 +1547,30 @@ mod tests {
                 QueryValue::Array(Vec::new())
             ),
             Err(QueryError::NestingTooDeep { .. })
+        ));
+    }
+
+    /// A typed parameter's declared array levels count toward the nesting
+    /// bound of the values inside them, so every parameter a request holds is
+    /// bounded when inserted and `check_nesting` need not walk parameters.
+    #[test]
+    fn typed_array_levels_count_toward_the_nesting_bound() {
+        let declared = |levels: usize| {
+            (0..levels).fold(QueryParamType::Value, |inner, _| {
+                QueryParamType::Array(Box::new(inner))
+            })
+        };
+        let nested = |levels: usize, leaf: QueryValue| {
+            (0..levels).fold(leaf, |inner, _| QueryValue::Array(vec![inner]))
+        };
+        // 100 declared levels around a 155-level value reach the limit exactly.
+        let at_limit = typed(declared(100), nested(100, nested(154, QueryValue::Null)))
+            .expect("a parameter at the limit is accepted");
+        assert!(at_limit.check_nesting().is_ok());
+        assert!(matches!(
+            typed(declared(100), nested(100, nested(155, QueryValue::Null))),
+            Err(QueryError::NestingTooDeep { path, maximum })
+                if maximum == MAX_REQUEST_JSON_DEPTH && path.starts_with("value[0][0]")
         ));
     }
 
