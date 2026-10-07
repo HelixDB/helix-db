@@ -933,46 +933,94 @@ fn validate_parameter_name(name: &str) -> Result<(), QueryError> {
     }
 }
 
+/// A parameter's path below its name: one array index per declared array
+/// level. It renders (`name[3][0]`) only when an error reports it, so
+/// accepting a large parameter formats no paths.
+#[derive(Clone, Copy)]
+struct ParamPath<'p> {
+    name: &'p str,
+    indices: &'p [usize],
+}
+
+impl std::fmt::Display for ParamPath<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)?;
+        self.indices
+            .iter()
+            .try_for_each(|index| write!(f, "[{index}]"))
+    }
+}
+
 /// Validate a parameter value with an explicit stack, so neither its size nor
 /// its nesting reaches the call stack; nesting is bounded like a request.
-fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError> {
-    let mut pending = vec![(value, path.to_owned(), 1_usize)];
-    while let Some((value, path, depth)) = pending.pop() {
-        if depth > MAX_REQUEST_JSON_DEPTH {
+///
+/// The walk visits values in document order and keeps one frame per open
+/// array or object, holding its remaining children and the key or index of
+/// the child being visited. An error renders its path from those frames, so
+/// a valid value costs no path formatting and the stack stays as deep as the
+/// value rather than as wide.
+fn validate_json_value(value: &QueryValue, path: impl std::fmt::Display) -> Result<(), QueryError> {
+    enum Children<'a> {
+        Array(std::iter::Enumerate<std::slice::Iter<'a, QueryValue>>),
+        Object(std::collections::btree_map::Iter<'a, String, QueryValue>),
+    }
+    #[derive(Clone, Copy)]
+    enum Segment<'a> {
+        Index(usize),
+        Key(&'a str),
+    }
+    struct Frame<'a> {
+        children: Children<'a>,
+        visiting: Option<Segment<'a>>,
+    }
+    let render = |frames: &[Frame<'_>]| {
+        frames.iter().filter_map(|frame| frame.visiting).fold(
+            path.to_string(),
+            |mut rendered, segment| {
+                match segment {
+                    Segment::Index(index) => rendered.push_str(&format!("[{index}]")),
+                    Segment::Key(name) => {
+                        rendered.push('.');
+                        rendered.push_str(name);
+                    }
+                }
+                rendered
+            },
+        )
+    };
+    let mut frames = Vec::<Frame<'_>>::new();
+    let mut visit = value;
+    loop {
+        // Every open frame is an ancestor of `visit`.
+        if frames.len() + 1 > MAX_REQUEST_JSON_DEPTH {
             return Err(QueryError::NestingTooDeep {
-                path,
+                path: render(&frames),
                 maximum: MAX_REQUEST_JSON_DEPTH,
             });
         }
-        match value {
+        match visit {
             QueryValue::F64(value) if !value.is_finite() => {
                 return Err(QueryError::ParameterTypeMismatch {
-                    path,
+                    path: render(&frames),
                     expected: QueryParamType::Value,
                     actual: "non-finite f64",
                 });
             }
             QueryValue::F32(value) if !value.is_finite() => {
                 return Err(QueryError::ParameterTypeMismatch {
-                    path,
+                    path: render(&frames),
                     expected: QueryParamType::Value,
                     actual: "non-finite f32",
                 });
             }
-            // Reverse pushes keep the first invalid element in document order.
-            QueryValue::Array(values) => pending.extend(
-                values
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(index, value)| (value, format!("{path}[{index}]"), depth + 1)),
-            ),
-            QueryValue::Object(values) => pending.extend(
-                values
-                    .iter()
-                    .rev()
-                    .map(|(name, value)| (value, format!("{path}.{name}"), depth + 1)),
-            ),
+            QueryValue::Array(values) => frames.push(Frame {
+                children: Children::Array(values.iter().enumerate()),
+                visiting: None,
+            }),
+            QueryValue::Object(values) => frames.push(Frame {
+                children: Children::Object(values.iter()),
+                visiting: None,
+            }),
             QueryValue::Null
             | QueryValue::Bool(_)
             | QueryValue::I64(_)
@@ -980,14 +1028,36 @@ fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError>
             | QueryValue::F32(_)
             | QueryValue::String(_) => {}
         }
+        // Move to the next value in document order, closing finished frames.
+        visit = loop {
+            let Some(frame) = frames.last_mut() else {
+                return Ok(());
+            };
+            let next = match &mut frame.children {
+                Children::Array(values) => values
+                    .next()
+                    .map(|(index, value)| (Segment::Index(index), value)),
+                Children::Object(values) => values
+                    .next()
+                    .map(|(name, value)| (Segment::Key(name.as_str()), value)),
+            };
+            let Some((segment, value)) = next else {
+                frames.pop();
+                continue;
+            };
+            frame.visiting = Some(segment);
+            break value;
+        };
     }
-    Ok(())
 }
 
+/// Normalize a typed parameter to its declared schema. The declared type
+/// bounds the recursion, so its depth is checked once here rather than at
+/// every element.
 fn normalize_typed_value(
     ty: &QueryParamType,
     value: QueryValue,
-    path: &str,
+    name: &str,
 ) -> Result<QueryValue, QueryError> {
     // Normalization recurses once per array level of the declared type.
     let type_depth = std::iter::successors(Some(ty), |ty| match ty {
@@ -1005,10 +1075,22 @@ fn normalize_typed_value(
     .count();
     if type_depth > MAX_REQUEST_JSON_DEPTH {
         return Err(QueryError::NestingTooDeep {
-            path: path.to_owned(),
+            path: name.to_owned(),
             maximum: MAX_REQUEST_JSON_DEPTH,
         });
     }
+    normalize_typed_value_at(ty, value, name, &mut Vec::with_capacity(type_depth))
+}
+
+/// [`normalize_typed_value`] below `indices`, the array positions leading to
+/// `value`, which render into a path only when an error reports one.
+fn normalize_typed_value_at(
+    ty: &QueryParamType,
+    value: QueryValue,
+    name: &str,
+    indices: &mut Vec<usize>,
+) -> Result<QueryValue, QueryError> {
+    let path = || ParamPath { name, indices }.to_string();
     let actual = query_value_kind(&value);
     match (ty, value) {
         (QueryParamType::Bool, value @ QueryValue::Bool(_))
@@ -1038,22 +1120,27 @@ fn normalize_typed_value(
             Ok(QueryValue::String(datetime))
         }
         (QueryParamType::Value, value) => {
-            validate_json_value(&value, path)?;
+            validate_json_value(&value, ParamPath { name, indices })?;
             Ok(value)
         }
         (QueryParamType::Object, value @ QueryValue::Object(_)) => {
-            validate_json_value(&value, path)?;
+            validate_json_value(&value, ParamPath { name, indices })?;
             Ok(value)
         }
         (QueryParamType::Array(inner), QueryValue::Array(values)) => values
             .into_iter()
             .enumerate()
-            .map(|(index, value)| normalize_typed_value(inner, value, &format!("{path}[{index}]")))
+            .map(|(index, value)| {
+                indices.push(index);
+                let normalized = normalize_typed_value_at(inner, value, name, indices);
+                indices.pop();
+                normalized
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(QueryValue::Array),
-        (QueryParamType::Bytes, _) => Err(QueryError::unsupported_bytes(path)),
+        (QueryParamType::Bytes, _) => Err(QueryError::unsupported_bytes(path())),
         (expected, _) => Err(QueryError::ParameterTypeMismatch {
-            path: path.to_owned(),
+            path: path(),
             expected: expected.clone(),
             actual,
         }),
@@ -1072,6 +1159,9 @@ fn query_value_kind(value: &QueryValue) -> &'static str {
         QueryValue::Object(_) => "object",
     }
 }
+
+#[cfg(test)]
+mod validation_oracle;
 
 #[cfg(test)]
 mod tests {
