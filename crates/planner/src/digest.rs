@@ -4,9 +4,11 @@ use serde::{ser, Deserialize, Serialize};
 ///
 /// A digest hashes a compact encoding of the value's `serde` serialization:
 /// every value is tagged with its kind, strings and byte arrays carry their
-/// length, enum variants their index, struct fields their name, and compound
-/// values are bracketed, so different shapes of the same bytes digest
-/// differently. Nothing depends on addresses or randomized hashers, so
+/// length, enum variants their index, and compound values are bracketed, so
+/// different shapes of the same bytes digest differently. Struct fields are
+/// hashed by position, with a marker for each skipped field, so two struct
+/// types with the same field values digest alike; digests only compare values
+/// of one type. Nothing depends on addresses or randomized hashers, so
 /// optimizer ordering is the same in every process run. Equal values
 /// serialize equally and so digest equally; callers confirm a digest match
 /// with `==` wherever identity matters.
@@ -193,6 +195,8 @@ enum Tag {
     Map,
     Struct,
     StructVariant,
+    /// Stands for a struct field its `Serialize` implementation skipped.
+    Skipped,
     /// Closes a sequence, map or struct.
     End,
 }
@@ -564,12 +568,16 @@ impl ser::SerializeStruct for &mut DigestSerializer<'_> {
     type Ok = ();
     type Error = DigestError;
 
-    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), DigestError>
+    fn serialize_field<T>(&mut self, _key: &'static str, value: &T) -> Result<(), DigestError>
     where
         T: ?Sized + Serialize,
     {
-        self.hasher.bytes(key.as_bytes());
         value.serialize(&mut **self)
+    }
+
+    fn skip_field(&mut self, _key: &'static str) -> Result<(), DigestError> {
+        self.tag(Tag::Skipped);
+        Ok(())
     }
 
     fn end(self) -> Result<(), DigestError> {
@@ -582,12 +590,16 @@ impl ser::SerializeStructVariant for &mut DigestSerializer<'_> {
     type Ok = ();
     type Error = DigestError;
 
-    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), DigestError>
+    fn serialize_field<T>(&mut self, _key: &'static str, value: &T) -> Result<(), DigestError>
     where
         T: ?Sized + Serialize,
     {
-        self.hasher.bytes(key.as_bytes());
         value.serialize(&mut **self)
+    }
+
+    fn skip_field(&mut self, _key: &'static str) -> Result<(), DigestError> {
+        self.tag(Tag::Skipped);
+        Ok(())
     }
 
     fn end(self) -> Result<(), DigestError> {
@@ -622,9 +634,11 @@ mod tests {
     }
 
     #[derive(Serialize)]
-    struct Swapped {
-        right: u8,
-        left: u8,
+    struct Sparse {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        left: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        right: Option<u8>,
     }
 
     #[derive(Serialize)]
@@ -657,7 +671,19 @@ mod tests {
             PlanDigest::for_value(&'a'),
             PlanDigest::for_value(&"a"),
             PlanDigest::for_value(&Pair { left: 1, right: 2 }),
-            PlanDigest::for_value(&Swapped { right: 1, left: 2 }),
+            PlanDigest::for_value(&Pair { left: 2, right: 1 }),
+            PlanDigest::for_value(&Sparse {
+                left: Some(1),
+                right: None,
+            }),
+            PlanDigest::for_value(&Sparse {
+                left: None,
+                right: Some(1),
+            }),
+            PlanDigest::for_value(&Sparse {
+                left: None,
+                right: None,
+            }),
             PlanDigest::for_value(&BTreeMap::from([("left", 1_u8), ("right", 2)])),
             PlanDigest::for_value(&Shape::Unit),
             PlanDigest::for_value(&Shape::Other),
