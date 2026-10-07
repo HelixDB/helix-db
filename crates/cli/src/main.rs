@@ -218,6 +218,9 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         instance: Option<String>,
     },
 
+    /// Open the graph Explorer for a running local instance
+    Explorer(commands::explorer::Args),
+
     /// Log in to Helix Cloud and inspect the session
     Auth {
         #[command(subcommand)]
@@ -499,6 +502,11 @@ fn print_help() {
     print_command("logs", "View or follow instance logs", W);
     print_command("query", "Send a query to a local or Cloud instance", W);
     print_command("shell", "Open an interactive JSON query shell", W);
+    print_command(
+        "explorer",
+        "Browse a local instance in the graph Explorer",
+        W,
+    );
     print_command("prune", "Remove Helix-owned local containers and state", W);
     print_command("delete", "Delete an instance from helix.toml", W);
 
@@ -643,6 +651,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Cypher(args)) => commands::cypher::run(args).await,
         Some(Commands::Shell { instance }) => commands::shell::run(instance).await,
+        Some(Commands::Explorer(args)) => commands::explorer::run(args).await,
         Some(Commands::Auth { action }) => commands::auth::run(action).await,
         Some(Commands::Workspace { action }) => commands::cloud::workspace::run(action).await,
         Some(Commands::Project { action }) => commands::cloud::project::run(action).await,
@@ -1402,6 +1411,82 @@ mod tests {
             "{}",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn explorer_defaults_to_opening_the_default_instance() {
+        let cli = Cli::parse_from(["helix", "explorer"]);
+        let Some(Commands::Explorer(args)) = cli.command else {
+            panic!("expected explorer command");
+        };
+        assert!(args.instance.is_none());
+        assert!(args.port.is_none());
+        assert!(!args.no_open);
+        assert!(args.image.is_none());
+        assert!(!args.stop);
+    }
+
+    #[test]
+    fn explorer_accepts_an_instance_port_image_and_no_open() {
+        let cli = Cli::parse_from([
+            "helix",
+            "explorer",
+            "qa",
+            "--port",
+            "7100",
+            "--no-open",
+            "--image",
+            "helix-explorer:local",
+        ]);
+        let Some(Commands::Explorer(args)) = cli.command else {
+            panic!("expected explorer command");
+        };
+        assert_eq!(args.instance.as_deref(), Some("qa"));
+        assert_eq!(args.port, Some(7100));
+        assert!(args.no_open);
+        assert_eq!(args.image.as_deref(), Some("helix-explorer:local"));
+    }
+
+    #[test]
+    fn explorer_stop_conflicts_with_the_options_that_start_one() {
+        let cli = Cli::parse_from(["helix", "explorer", "qa", "--stop"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Explorer(commands::explorer::Args {
+                stop: true,
+                ..
+            }))
+        ));
+        for flag in [
+            &["--port", "7100"][..],
+            &["--no-open"][..],
+            &["--image", "helix-explorer:local"][..],
+        ] {
+            let args = [&["helix", "explorer", "--stop"][..], flag].concat();
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn explorer_help_names_the_default_image_and_its_override() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let explorer = cmd
+            .get_subcommands_mut()
+            .find(|c| c.get_name() == "explorer")
+            .expect("explorer subcommand should exist");
+        let help = explorer.render_help().to_string();
+        let default_image = format!(
+            "{}:{}",
+            helix_cli::config::DEFAULT_EXPLORER_IMAGE,
+            helix_cli::config::DEFAULT_EXPLORER_IMAGE_TAG
+        );
+        assert!(help.contains(&default_image), "{help}");
+        assert!(
+            help.contains(helix_cli::commands::explorer::EXPLORER_IMAGE_ENV),
+            "{help}"
+        );
+        assert!(help.contains("Examples:"), "{help}");
     }
 
     #[test]

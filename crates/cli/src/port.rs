@@ -1,15 +1,26 @@
 use crate::errors::PortError;
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::time::Duration;
 
 pub const DEFAULT_PORT: u16 = 6969;
 const MAX_PORT_ATTEMPTS: u16 = 100;
+/// A listener on loopback answers well within this; a free port is refused
+/// at once everywhere but Windows, which retries the connection until it.
+const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Probes whether the IPv4 loopback address can bind `port` right now.
+/// Probes whether the IPv4 loopback address can bind `port` right now and
+/// nothing already accepts connections on it.
+///
+/// The second check catches a wildcard listener, such as a port Docker
+/// publishes on `0.0.0.0`: macOS lets a loopback bind share the port with it,
+/// though a container could not then publish the port.
 ///
 /// The probe does not reserve the port; callers must still handle a later bind
 /// losing the race to another process.
 pub fn is_port_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+        && TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), CONNECT_PROBE_TIMEOUT)
+            .is_err()
 }
 
 /// Finds the first currently available port in a bounded ascending search.
@@ -66,6 +77,16 @@ fn ensure_port_available_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_port_bound_on_every_address_is_not_available() {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!is_port_available(port));
+        drop(listener);
+        let loopback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        assert!(!is_port_available(loopback.local_addr().unwrap().port()));
+    }
 
     #[test]
     fn available_port_is_returned_without_change() {
