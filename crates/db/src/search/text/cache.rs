@@ -459,7 +459,9 @@ impl FtsCache {
             return Ok(entry);
         }
 
-        let opened = match self.try_open_disk(split, &key).await {
+        let disk = self.try_open_disk(split, &key).await;
+        let missed_disk = matches!(disk, Ok(None));
+        let opened = match disk {
             Ok(Some(opened)) => Ok(opened),
             Ok(None) => self.open_remote(split).await,
             Err(error) => {
@@ -479,10 +481,13 @@ impl FtsCache {
         };
         let opened = Arc::new(opened);
         self.insert_memory(key.clone(), Arc::clone(&opened));
-        // A hydration that published the artifact while this open read the
-        // object store dropped remote entries before this one existed, so
-        // this one is dropped here and the next search opens the artifact.
-        if matches!(opened.backing, SplitBacking::Remote)
+        // A hydration that published the artifact after this open missed it
+        // dropped remote splits before this one was retained, so this one is
+        // dropped here and the next search opens the artifact. A fallback
+        // from an artifact that failed to open stays retained: that artifact
+        // may survive its removal, and every search would then rehash it and
+        // reopen the split remotely.
+        if missed_disk
             && let Some(path) = self.artifact_path(key.sha256)
             && tokio_fs::try_exists(&path).await.unwrap_or(false)
         {
@@ -710,9 +715,9 @@ impl FtsCache {
     ///
     /// Called once the artifact is published: by [`Self::ensure_artifact`]
     /// for splits retained before it, and by [`Self::get_or_open_split`] for
-    /// a remote open that raced the publication. A split already reopened
-    /// from disk stays retained, and searches still holding a dropped split
-    /// finish on it.
+    /// a remote open that missed the disk before the publication. A split
+    /// already reopened from disk stays retained, and searches still holding
+    /// a dropped split finish on it.
     fn evict_remote_entry(&self, key: &TextSplitCacheKey) {
         let mut memory = self.memory.lock();
         let hash_map::Entry::Occupied(entry) = memory.entries.entry(key.clone()) else {
@@ -3004,5 +3009,53 @@ mod tests {
             (1, 1, 1)
         );
         assert_exact_memory_bytes(&holding);
+    }
+
+    /// A remote fallback from an artifact that fails to open stays retained
+    /// even when the artifact cannot be removed (a directory stands in its
+    /// place here, as a read-only disk would keep a file). Dropping it would
+    /// rehash the artifact and reopen the split remotely on every search.
+    #[tokio::test]
+    async fn remote_fallback_from_an_unremovable_artifact_stays_retained() {
+        let database = "fts-cache-unremovable-artifact";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(33);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let cache = cache(
+            database,
+            store,
+            Some(disk.path().to_path_buf()),
+            split.total_size_bytes,
+            split.total_size_bytes * 2,
+            Duration::from_secs(300),
+        );
+        let artifact = cache
+            .artifact_path(split.blob.sha256)
+            .expect("artifact path");
+        tokio_fs::create_dir(&artifact)
+            .await
+            .expect("unremovable artifact");
+
+        let remote = cache
+            .get_or_open_split(&split)
+            .await
+            .expect("remote fallback");
+        assert!(matches!(remote.backing, SplitBacking::Remote));
+        assert!(Arc::ptr_eq(
+            &remote,
+            &cache.get_or_open_split(&split).await.expect("memory hit")
+        ));
+        let state = cache.snapshot();
+        assert_eq!(
+            (
+                state.disk_corruptions,
+                state.remote_opens,
+                state.memory_hits
+            ),
+            (1, 1, 1)
+        );
+        assert!(artifact.is_dir(), "the artifact could not be removed");
+        assert_exact_memory_bytes(&cache);
     }
 }
