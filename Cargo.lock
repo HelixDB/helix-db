@@ -2129,6 +2129,7 @@ dependencies = [
  "helix-planner",
  "libc",
  "mimalloc",
+ "serde",
  "simd-json",
  "sonic-rs",
 ]

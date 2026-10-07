@@ -22,6 +22,7 @@ mimalloc = { version = "0.1.52", optional = true }
 [dev-dependencies]
 helix-ast = { path = "../ast", features = ["simd-json", "test-utils"] }
 divan = "0.1.21"
+serde = "1"
 libc = "0.2.186"
 
 [[bench]]

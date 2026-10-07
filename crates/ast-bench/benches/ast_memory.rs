@@ -7,7 +7,10 @@
 //!
 //! - `sizes`: in-memory size of the AST's core types.
 //! - `parse`: what parsing each shape allocates, its peak, what it retains,
-//!   and that dropping the request returns every byte.
+//!   and that dropping the request returns every byte, owned and into an
+//!   arena; for arena rows, the arena's chunk bytes and how many it filled.
+//! - `parameters`: a body read as one generic JSON value, owned against in an
+//!   arena: what a separate parameter arena would hold instead of the heap.
 //! - `lifecycle`: live heap at each `query_service` stage boundary, while
 //!   execution would run, and the peak across the request, for the order
 //!   values were freed in before this change and the order they are now.
@@ -19,7 +22,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::process::Command;
 
-use helix_ast::query::QueryRequest;
+use helix_ast::arena::{self, Bump};
+use helix_ast::query::{ArenaQueryRequest, QueryRequest, QueryValue};
 use helix_ast::testing;
 
 mod support;
@@ -133,6 +137,18 @@ impl Backend {
             Self::SimdJson => QueryRequest::from_json_slice_mut(body).expect("corpus shapes parse"),
         }
     }
+
+    /// Parse `body` into `bump`.
+    fn parse_arena<'a>(self, bump: &'a Bump, body: &mut [u8]) -> ArenaQueryRequest<'a> {
+        match self {
+            Self::Sonic => {
+                ArenaQueryRequest::from_json_slice(bump, body).expect("corpus shapes parse")
+            }
+            Self::SimdJson => {
+                ArenaQueryRequest::from_json_slice_mut(bump, body).expect("corpus shapes parse")
+            }
+        }
+    }
 }
 
 fn mib(bytes: isize) -> String {
@@ -165,27 +181,92 @@ fn sizes() {
 fn parse() {
     println!("\n## parse\n");
     println!(
-        "| shape | backend | body MiB | allocations | allocated MiB | peak MiB | retained MiB | retained/body | leaked bytes |"
+        "| shape | parser | body MiB | allocations | allocated MiB | peak MiB | retained MiB | retained/body | arena chunks MiB | arena filled MiB | leaked bytes |"
     );
-    println!("|---|---|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    let row = |shape: &testing::Shape,
+               parser: String,
+               parsed: Count,
+               arena: Option<(usize, usize)>,
+               leaked: isize| {
+        let (chunks, filled) = arena.map_or(
+            (String::from("–"), String::from("–")),
+            |(chunks, filled)| (mib(chunks as isize), mib(filled as isize)),
+        );
+        println!(
+            "| {} | {parser} | {} | {} | {} | {} | {} | {:.2} | {chunks} | {filled} | {leaked} |",
+            shape.name,
+            mib(shape.json.len() as isize),
+            parsed.allocations,
+            mib(parsed.bytes as isize),
+            mib(parsed.peak),
+            mib(parsed.live),
+            parsed.live as f64 / shape.json.len() as f64,
+        );
+    };
     for shape in support::shapes() {
         for backend in Backend::ALL {
             let mut body = shape.json.clone();
             let (request, parsed) = observe(|| backend.parse(&mut body));
             let ((), dropped) = observe(|| drop(request));
-            let leaked = parsed.live + dropped.live;
-            println!(
-                "| {} | {} | {} | {} | {} | {} | {} | {:.2} | {leaked} |",
-                shape.name,
-                backend.name(),
-                mib(shape.json.len() as isize),
-                parsed.allocations,
-                mib(parsed.bytes as isize),
-                mib(parsed.peak),
-                mib(parsed.live),
-                parsed.live as f64 / shape.json.len() as f64,
+            row(
+                shape,
+                backend.name().to_owned(),
+                parsed,
+                None,
+                parsed.live + dropped.live,
             );
         }
+        for backend in Backend::ALL {
+            let mut body = shape.json.clone();
+            let bump = Bump::new();
+            let (request, parsed) = observe(|| backend.parse_arena(&bump, &mut body));
+            let chunks = bump.allocated_bytes();
+            let filled = chunks - bump.chunk_capacity();
+            let ((), dropped_request) = observe(|| drop(request));
+            let ((), dropped_arena) = observe(|| drop(bump));
+            row(
+                shape,
+                format!("{}_arena", backend.name()),
+                parsed,
+                Some((chunks, filled)),
+                parsed.live + dropped_request.live + dropped_arena.live,
+            );
+        }
+    }
+}
+
+fn parameters() {
+    println!("\n## parameters (whole body as one JSON value)\n");
+    println!(
+        "| shape | body MiB | owned allocations | owned retained MiB | arena allocations | arena chunks MiB | arena filled MiB |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|---:|");
+    for shape in support::shapes() {
+        let (value, owned) = observe(|| {
+            sonic_rs::from_slice::<QueryValue>(&shape.json).expect("corpus shapes are JSON")
+        });
+        drop(value);
+        let bump = Bump::new();
+        let ((), parsed) = observe(|| {
+            let text = std::str::from_utf8(&shape.json).expect("corpus shapes are UTF-8");
+            let mut deserializer = sonic_rs::Deserializer::from_str(text);
+            let value: arena::QueryValue<'_> =
+                serde::de::DeserializeSeed::deserialize(arena::Seed::new(&bump), &mut deserializer)
+                    .expect("corpus shapes are JSON");
+            std::hint::black_box(value);
+        });
+        let chunks = bump.allocated_bytes();
+        println!(
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            shape.name,
+            mib(shape.json.len() as isize),
+            owned.allocations,
+            mib(owned.live),
+            parsed.allocations,
+            mib(chunks as isize),
+            mib((chunks - bump.chunk_capacity()) as isize),
+        );
     }
 }
 
@@ -283,13 +364,17 @@ const STACK_PROBE: &str = "HELIX_AST_STACK_PROBE";
 enum StackStage {
     Parse,
     Drop,
+    ArenaParse,
 }
 
 impl StackStage {
+    const ALL: [Self; 3] = [Self::Parse, Self::Drop, Self::ArenaParse];
+
     fn name(self) -> &'static str {
         match self {
             Self::Parse => "parse",
             Self::Drop => "drop",
+            Self::ArenaParse => "arena_parse",
         }
     }
 }
@@ -332,21 +417,27 @@ fn stack_probe_child(probe: &str) {
         .into_iter()
         .find(|candidate| candidate.name() == backend)
         .expect("known backend");
-    let stage = [StackStage::Parse, StackStage::Drop]
+    let stage = StackStage::ALL
         .into_iter()
         .find(|candidate| candidate.name() == stage)
         .expect("known stage");
     let kib = kib.parse::<usize>().expect("stack size in KiB");
     let mut body = testing::deep_chain(testing::MAX_DEEP_CHAIN_STEPS).json;
     let prepared = match stage {
-        StackStage::Parse => None,
+        StackStage::Parse | StackStage::ArenaParse => None,
         StackStage::Drop => Some(backend.parse(&mut body.clone())),
     };
     std::thread::Builder::new()
         .stack_size(kib << 10)
-        .spawn(move || match prepared {
-            None => std::mem::forget(backend.parse(&mut body)),
-            Some(request) => drop(request),
+        .spawn(move || match (stage, prepared) {
+            (StackStage::ArenaParse, _) => {
+                let bump = Bump::new();
+                std::hint::black_box(backend.parse_arena(&bump, &mut body).request_type());
+            }
+            (StackStage::Parse | StackStage::Drop, None) => {
+                std::mem::forget(backend.parse(&mut body))
+            }
+            (StackStage::Parse | StackStage::Drop, Some(request)) => drop(request),
         })
         .expect("probe thread spawns")
         .join()
@@ -377,7 +468,7 @@ fn stack() {
             })
     };
     for backend in Backend::ALL {
-        for stage in [StackStage::Parse, StackStage::Drop] {
+        for stage in StackStage::ALL {
             // Binary search in 16 KiB steps between 16 KiB and 16 MiB.
             let (mut low, mut high) = (1_usize, 1_024_usize);
             if !fits(backend, stage, high * 16) {
@@ -408,6 +499,7 @@ fn main() {
             support::print_environment();
             sizes();
             parse();
+            parameters();
             lifecycle(Retention::HeldUntilExecution);
             lifecycle(Retention::FreedEarly);
             stack();
