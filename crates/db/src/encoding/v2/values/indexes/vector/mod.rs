@@ -14,6 +14,7 @@ pub(super) use super::super::codec::{
     take_u8, ENCODING_TYPE_LEN, U32_LEN, U64_LEN,
 };
 pub(crate) use generation::*;
+pub(crate) use layer0::encoded_layer0_neighbors_len;
 pub use layer0::{
     decode_layer0_neighbors, decode_layer0_neighbors_and_simhash, encode_layer0_neighbors,
     encode_layer0_record, ENCODING_TYPE_LAYER0_NEIGHBORS, ENCODING_TYPE_LAYER0_RECORD,
