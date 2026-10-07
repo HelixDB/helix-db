@@ -108,6 +108,43 @@ async fn vector_batch_benchmark_exercises_all_metrics_and_workloads() {
     }
 }
 
+/// Exercises the feature-gated vector-memory hydration harness end to end:
+/// a fixture large enough to flush mid-build, a hydration that admits every
+/// upper and SimHash row, and lookups that read each upper node back.
+#[tokio::test]
+async fn vector_memory_benchmark_hydrates_every_memory_row() {
+    use db::production_coverage::{VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape};
+
+    let directory = tempfile::tempdir().expect("benchmark directory");
+    let shape = VectorMemoryBenchmarkShape {
+        nodes: 5_000,
+        dimensions: 4,
+        max_neighbors: 4,
+    };
+    let fixture = VectorMemoryBenchmarkFixture::build(directory.path(), shape)
+        .await
+        .expect("small vector-memory fixture builds");
+    assert!(!fixture.upper_nodes().is_empty());
+    assert!(fixture.upper_nodes().is_sorted());
+    assert!(fixture.upper_rows() > fixture.upper_nodes().len());
+
+    let hydrated = fixture.hydrate().await.expect("fixture hydrates");
+    assert_eq!(
+        hydrated.loaded_entries,
+        fixture.upper_rows() + 5_000,
+        "every upper row and SimHash is admitted; layer-0 rows are skipped"
+    );
+    assert!(hydrated.charged_bytes > 0);
+    let vector_bytes = 4 + 4 * 4;
+    assert!(
+        hydrated.lookup(fixture.upper_nodes()) > fixture.upper_nodes().len() * vector_bytes,
+        "every upper node returns its vector, layer-1 neighbors, and SimHash"
+    );
+    assert_eq!(hydrated.lookup(&[u64::MAX]), 0, "unknown nodes read nothing");
+    drop(hydrated);
+    fixture.close().await.expect("fixture closes");
+}
+
 /// Verifies every descriptor-bound memory-registry lifecycle transition.
 #[tokio::test]
 async fn vector_memory_registry_exercises_every_lifecycle_transition() {
