@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use slatedb::DbReadOps;
 
-use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
-use crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors;
+use crate::encoding::v2::values::indexes::vector::encoded_layer0_neighbors_len;
+use crate::encoding::v2::values::indexes::vector::neighbors::encoded_upper_neighbors_len;
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 use crate::search::vector::unaligned_vector::UnalignedVector;
@@ -52,6 +52,11 @@ const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_MUTATION: usize = 8;
 pub(in crate::search::vector) const VECTOR_BUILD_ITEM_CACHE_LIMIT: usize = 4_096;
 pub(in crate::search::vector) const VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT: usize = 2_048;
 pub(in crate::search::vector) const VECTOR_BUILD_SIMHASH_CACHE_LIMIT: usize = 4_096;
+/// Entries any one scratch buffer may hold capacity for between mutations.
+///
+/// [`MutationScratch`] is not charged to a session's byte budget: a session
+/// keeps one, and drops every buffer once a mutation grew one past this bound.
+const MUTATION_SCRATCH_RETAINED_CAPACITY: usize = 1 << 14;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -265,35 +270,43 @@ struct PopulatedHnswInsertion<'item, 'vector, D: Distance> {
     metadata: &'item VectorIndexMetadata,
 }
 
-/// Selects the nearest unloaded layer-0 rows within a mutation read budget.
+/// Replaces `targets` with the nearest unloaded layer-0 rows of
+/// `newly_admitted_neighbors` within a mutation read budget, ranking them in
+/// the caller's reusable `ranked` buffer.
 ///
 /// Mutation prefetch consults the authoritative neighbor-row ADT, so a dirty,
 /// clean-present, or clean-absent entry is never overwritten by speculative I/O.
+/// Ranking is by distance, then node ID. Admitted neighbors are unique, so an
+/// unstable sort orders them exactly as a stable one would, without the
+/// stable sort's temporary allocation; a repeated node is skipped by scanning
+/// the at most [`LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP`] targets.
 pub(in crate::search::vector) fn select_layer0_neighbor_prefetch_targets<D: Distance>(
     newly_admitted_neighbors: &[(NodeId, f32)],
     mutation_cache: &MutationOpCache<D>,
     remaining_prefetch_budget: usize,
-) -> Vec<NodeId> {
+    ranked: &mut Vec<(NodeId, f32)>,
+    targets: &mut Vec<NodeId>,
+) {
+    targets.clear();
     if newly_admitted_neighbors.len() < LAYER0_NEIGHBOR_PREFETCH_MIN_TARGETS
         || remaining_prefetch_budget == 0
     {
-        return Vec::new();
+        return;
     }
 
     let target_limit = LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP.min(remaining_prefetch_budget);
-    let mut ranked = newly_admitted_neighbors.to_vec();
-    ranked.sort_by(|(left_id, left_dist), (right_id, right_dist)| {
+    ranked.clear();
+    ranked.extend_from_slice(newly_admitted_neighbors);
+    ranked.sort_unstable_by(|(left_id, left_dist), (right_id, right_dist)| {
         left_dist
             .partial_cmp(right_dist)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left_id.cmp(right_id))
     });
 
-    let mut targets = Vec::with_capacity(target_limit);
-    let mut seen = HashSet::with_capacity(ranked.len());
-    for (node_id, _) in ranked {
+    for &(node_id, _) in ranked.iter() {
         let row = MutationOpCache::<D>::node_row_id(0, node_id);
-        if !seen.insert(node_id) || mutation_cache.contains_neighbor(row) {
+        if targets.contains(&node_id) || mutation_cache.contains_neighbor(row) {
             continue;
         }
         targets.push(node_id);
@@ -301,7 +314,6 @@ pub(in crate::search::vector) fn select_layer0_neighbor_prefetch_targets<D: Dist
             break;
         }
     }
-    targets
 }
 
 impl<D: Distance> VectorIndex<D> {
@@ -507,8 +519,8 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Resolves a live traversal root before mutation beam expansion.
     ///
-    /// Missing items fall through to the writable candidate index and return an
-    /// owned item, or `None` when insertion must continue with an empty candidate
+    /// Missing items fall through to the writable candidate index and return a
+    /// shared item, or `None` when insertion must continue with an empty candidate
     /// set. The inserting node is never a root, even when stale metadata names
     /// it: its item is already staged, so it would be its own nearest neighbor.
     /// Any candidate cleanup remains staged in the caller's measured
@@ -520,13 +532,13 @@ impl<D: Distance> VectorIndex<D> {
         layer: u16,
         inserting_node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
-    ) -> Result<Option<(NodeId, Item<'static, D>)>, HelixDbError> {
+    ) -> Result<Option<(NodeId, Arc<Item<'static, D>>)>, HelixDbError> {
         if entry_point != inserting_node_id
             && let Some(item) = self
                 .get_item_for_layer_cached(txn, layer, entry_point, mutation_cache)
                 .await?
         {
-            return Ok(Some((entry_point, item.as_ref().clone())));
+            return Ok(Some((entry_point, item)));
         }
 
         if let Some((replacement_entry_point, replacement_layer)) = self
@@ -549,7 +561,7 @@ impl<D: Distance> VectorIndex<D> {
                 replacement_candidate_layer = replacement_layer,
                 "recovered missing HNSW traversal entry point during insert"
             );
-            return Ok(Some((replacement_entry_point, item.as_ref().clone())));
+            return Ok(Some((replacement_entry_point, item)));
         }
 
         tracing::warn!(
@@ -693,7 +705,7 @@ impl<D: Distance> VectorIndex<D> {
             .await;
         let changed = mutation_cache.finish_entity_changes();
         session.restore_cache(identity.clone(), mutation_cache);
-        session.record_entity_changes(&identity, node_id, changed.into_keys());
+        session.record_entity_changes(&identity, node_id, changed);
         result
     }
 
@@ -791,14 +803,8 @@ impl<D: Distance> VectorIndex<D> {
             metadata.count = 1;
 
             for layer in 0..=node_layer {
-                self.stage_new_neighbors_for_mutation(
-                    txn,
-                    layer,
-                    node_id,
-                    Vec::new(),
-                    mutation_cache,
-                )
-                .await?;
+                self.stage_new_neighbors_for_mutation(txn, layer, node_id, &[], mutation_cache)
+                    .await?;
             }
             match contract {
                 VectorInsertContract::Upsert => {
@@ -862,12 +868,15 @@ impl<D: Distance> VectorIndex<D> {
     /// The caller supplies metadata whose populated state yielded `entry_point`.
     /// This operation owns traversal, bounded neighbor selection, reciprocal-link
     /// staging, and the final cache flush, while typed storage owns row encoding.
+    /// It borrows the cache's [`MutationScratch`] for its duration; a failed
+    /// insert drops it, and the next mutation starts with empty buffers.
     async fn insert_hnsw(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         insertion: PopulatedHnswInsertion<'_, '_, D>,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<(), HelixDbError> {
+        let mut scratch = core::mem::take(&mut mutation_cache.scratch);
         let PopulatedHnswInsertion {
             node_id,
             item,
@@ -892,6 +901,7 @@ impl<D: Distance> VectorIndex<D> {
                         layer,
                         node_id,
                         mutation_cache,
+                        &mut scratch,
                     )
                     .await?;
             }
@@ -913,6 +923,7 @@ impl<D: Distance> VectorIndex<D> {
                     ef,
                     node_id,
                     mutation_cache,
+                    &mut scratch,
                 )
                 .await?;
             let maximum_neighbors = if layer == 0 {
@@ -928,17 +939,12 @@ impl<D: Distance> VectorIndex<D> {
                     maximum_neighbors,
                     layer,
                     mutation_cache,
+                    &mut scratch,
                 )
                 .await?;
 
-            self.stage_new_neighbors_for_mutation(
-                txn,
-                layer,
-                node_id,
-                neighbors.clone(),
-                mutation_cache,
-            )
-            .await?;
+            self.stage_new_neighbors_for_mutation(txn, layer, node_id, &neighbors, mutation_cache)
+                .await?;
             for neighbor_id in neighbors {
                 self.add_bidirectional_link(
                     txn,
@@ -948,6 +954,7 @@ impl<D: Distance> VectorIndex<D> {
                     item,
                     maximum_neighbors,
                     mutation_cache,
+                    &mut scratch,
                 )
                 .await?;
             }
@@ -959,17 +966,12 @@ impl<D: Distance> VectorIndex<D> {
 
         if node_layer > old_max_layer {
             for layer in old_max_layer + 1..=node_layer {
-                self.stage_new_neighbors_for_mutation(
-                    txn,
-                    layer,
-                    node_id,
-                    Vec::new(),
-                    mutation_cache,
-                )
-                .await?;
+                self.stage_new_neighbors_for_mutation(txn, layer, node_id, &[], mutation_cache)
+                    .await?;
             }
         }
 
+        mutation_cache.scratch = scratch;
         Ok(())
     }
 
@@ -995,10 +997,22 @@ impl<D: Distance> VectorIndex<D> {
         ef: usize,
         inserting_node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
+        scratch: &mut MutationScratch<D>,
     ) -> Result<Vec<Candidate>, HelixDbError> {
-        let mut visited = foldhash::HashSet::default();
-        let mut candidates = BinaryHeap::new();
-        let mut w = BinaryHeap::new();
+        let MutationScratch {
+            visited,
+            beam: candidates,
+            nearest: w,
+            frontier,
+            admitted: newly_admitted_neighbors,
+            prefetch_ranked,
+            prefetch: prefetch_targets,
+            items: neighbor_items,
+            ..
+        } = scratch;
+        visited.clear();
+        candidates.clear();
+        w.clear();
         let mut remaining_layer0_neighbor_prefetch_budget = if layer == 0 {
             LAYER0_NEIGHBOR_PREFETCH_MAX_PER_MUTATION
         } else {
@@ -1018,7 +1032,7 @@ impl<D: Distance> VectorIndex<D> {
             return Ok(Vec::new());
         };
         visited.insert(inserting_node_id);
-        let entry_distance = D::distance(query, &entry_item);
+        let entry_distance = D::distance(query, entry_item.as_ref());
         candidates.push(Reverse(Candidate::try_new(
             resolved_entry_point,
             entry_distance,
@@ -1026,34 +1040,34 @@ impl<D: Distance> VectorIndex<D> {
         w.push(Candidate::try_new(resolved_entry_point, entry_distance)?);
         visited.insert(resolved_entry_point);
 
-        while !candidates.is_empty() {
-            let Reverse(current) = candidates.pop().unwrap();
+        while let Some(Reverse(current)) = candidates.pop() {
             let current_distance = current.score();
             if w.len() >= ef && current_distance > w.peek().unwrap().score() {
                 break;
             }
 
-            let neighbors = self
-                .load_neighbors_for_mutation(txn, layer, current.node_id, mutation_cache)
-                .await?;
-            let mut frontier = Vec::new();
-            for &neighbor_id in &neighbors {
-                if visited.contains(&neighbor_id) {
-                    continue;
-                }
-                visited.insert(neighbor_id);
-                frontier.push(neighbor_id);
-            }
-            let neighbor_items = self
-                .get_items_for_layer_cached_batch(txn, layer, &frontier, mutation_cache)
-                .await?;
-            let mut newly_admitted_neighbors = Vec::new();
-            for neighbor_id in frontier {
-                let Some(neighbor_item) = neighbor_items.get(&neighbor_id) else {
+            frontier.clear();
+            frontier.extend(
+                self.load_neighbors_for_mutation(txn, layer, current.node_id, mutation_cache)
+                    .await?
+                    .iter()
+                    .copied()
+                    .filter(|neighbor_id| visited.insert(*neighbor_id)),
+            );
+            self.get_items_for_layer_cached_batch(
+                txn,
+                layer,
+                frontier,
+                mutation_cache,
+                neighbor_items,
+            )
+            .await?;
+            newly_admitted_neighbors.clear();
+            for &neighbor_id in frontier.iter() {
+                let Some(neighbor_item) = neighbor_items.get(neighbor_id) else {
                     continue;
                 };
-                let candidate =
-                    Candidate::try_new(neighbor_id, D::distance(query, neighbor_item.as_ref()))?;
+                let candidate = Candidate::try_new(neighbor_id, D::distance(query, neighbor_item))?;
                 let distance = candidate.score();
                 if w.len() < ef || distance < w.peek().unwrap().score() {
                     candidates.push(Reverse(candidate));
@@ -1066,16 +1080,18 @@ impl<D: Distance> VectorIndex<D> {
             }
 
             if remaining_layer0_neighbor_prefetch_budget > 0 {
-                let prefetch_targets = select_layer0_neighbor_prefetch_targets(
-                    &newly_admitted_neighbors,
+                select_layer0_neighbor_prefetch_targets(
+                    newly_admitted_neighbors,
                     mutation_cache,
                     remaining_layer0_neighbor_prefetch_budget,
+                    prefetch_ranked,
+                    prefetch_targets,
                 );
                 if !prefetch_targets.is_empty() {
                     let fetched = self
                         .prefetch_layer0_neighbors_for_mutation(
                             txn,
-                            &prefetch_targets,
+                            prefetch_targets,
                             mutation_cache,
                         )
                         .await?;
@@ -1085,8 +1101,10 @@ impl<D: Distance> VectorIndex<D> {
             }
         }
 
-        let mut results = w.into_iter().collect::<Vec<_>>();
-        results.sort();
+        // Every node enters the beam at most once, so candidates are unique
+        // and an unstable sort orders them exactly as a stable one would.
+        let mut results = w.drain().collect::<Vec<_>>();
+        results.sort_unstable();
         Ok(results)
     }
 
@@ -1094,6 +1112,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Like [`Self::search_layer_beam`], it never moves to
     /// `inserting_node_id`, whose item is already staged.
+    #[allow(clippy::too_many_arguments)]
     async fn search_layer_greedy_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1102,8 +1121,15 @@ impl<D: Distance> VectorIndex<D> {
         layer: u16,
         inserting_node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
+        scratch: &mut MutationScratch<D>,
     ) -> Result<NodeId, HelixDbError> {
-        let mut visited = foldhash::HashSet::default();
+        let MutationScratch {
+            visited,
+            frontier,
+            items,
+            ..
+        } = scratch;
+        visited.clear();
         visited.insert(inserting_node_id);
         let mut current = entry_point;
         let Some(current_item) = self
@@ -1125,23 +1151,22 @@ impl<D: Distance> VectorIndex<D> {
         visited.insert(current);
 
         loop {
-            let neighbors = self
-                .load_neighbors_for_mutation(txn, layer, current, mutation_cache)
-                .await?;
-            let frontier = neighbors
-                .into_iter()
-                .filter(|neighbor_id| visited.insert(*neighbor_id))
-                .collect::<Vec<_>>();
-            let items = self
-                .get_items_for_layer_cached_batch(txn, layer, &frontier, mutation_cache)
+            frontier.clear();
+            frontier.extend(
+                self.load_neighbors_for_mutation(txn, layer, current, mutation_cache)
+                    .await?
+                    .iter()
+                    .copied()
+                    .filter(|neighbor_id| visited.insert(*neighbor_id)),
+            );
+            self.get_items_for_layer_cached_batch(txn, layer, frontier, mutation_cache, items)
                 .await?;
             let mut changed = false;
-            for neighbor_id in frontier {
-                let Some(item) = items.get(&neighbor_id) else {
+            for &neighbor_id in frontier.iter() {
+                let Some(item) = items.get(neighbor_id) else {
                     continue;
                 };
-                let distance =
-                    Candidate::try_new(neighbor_id, D::distance(query, item.as_ref()))?.score();
+                let distance = Candidate::try_new(neighbor_id, D::distance(query, item))?.score();
                 if distance < current_distance {
                     current = neighbor_id;
                     current_distance = distance;
@@ -1160,6 +1185,7 @@ impl<D: Distance> VectorIndex<D> {
     /// before applying HNSW Algorithm 4. The method owns graph-selection policy
     /// only; row encoding and write staging remain behind the index storage
     /// primitives used by the surrounding mutation session.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::search::vector) async fn select_neighbors_heuristic(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
@@ -1168,19 +1194,26 @@ impl<D: Distance> VectorIndex<D> {
         maximum_neighbors: usize,
         layer: u16,
         mutation_cache: &mut MutationOpCache<D>,
+        scratch: &mut MutationScratch<D>,
     ) -> Result<Vec<NodeId>, HelixDbError> {
-        let candidate_ids = candidates
-            .iter()
-            .take(maximum_neighbors * 2)
-            .map(|candidate| candidate.node_id)
-            .collect::<Vec<_>>();
-        let items = self
-            .get_items_for_layer_cached_batch(txn, layer, &candidate_ids, mutation_cache)
+        let MutationScratch {
+            node_ids: candidate_ids,
+            items,
+            ..
+        } = scratch;
+        candidate_ids.clear();
+        candidate_ids.extend(
+            candidates
+                .iter()
+                .take(maximum_neighbors * 2)
+                .map(|candidate| candidate.node_id),
+        );
+        self.get_items_for_layer_cached_batch(txn, layer, candidate_ids, mutation_cache, items)
             .await?;
         select_diverse(
             query,
             candidates,
-            &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+            &|node_id| items.get(node_id),
             maximum_neighbors,
         )
     }
@@ -1279,27 +1312,28 @@ impl<D: Distance> VectorIndex<D> {
             .await
     }
 
-    /// Loads one neighbor row into the authoritative mutation cache on demand.
+    /// Loads one neighbor row into the authoritative mutation cache on demand
+    /// and returns its current neighbors, borrowed from the cache.
     ///
     /// Cache absence means only “not loaded.” A storage miss is installed as
-    /// `KnownAbsent`, while a present row is validated against its layer degree
-    /// before use. Admission then enforces the operation cache bound.
-    pub(in crate::search::vector) async fn load_neighbors_for_mutation(
+    /// `KnownAbsent` and returns no neighbors, while a present row is validated
+    /// against its layer degree before use. Admission then enforces the
+    /// operation cache bound, which never evicts the row just installed: it is
+    /// the most recently used row, and the bound stops evicting before the
+    /// last row. Callers that change the cache copy the neighbors first.
+    pub(in crate::search::vector) async fn load_neighbors_for_mutation<'cache>(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
         node_id: NodeId,
-        mutation_cache: &mut MutationOpCache<D>,
-    ) -> Result<Vec<NodeId>, HelixDbError> {
+        mutation_cache: &'cache mut MutationOpCache<D>,
+    ) -> Result<&'cache [NodeId], HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
         if mutation_cache.contains_neighbor(row) {
-            let cached = mutation_cache
+            mutation_cache
                 .touched_neighbor(row)
                 .expect("contained vector neighbor row has authoritative cache state");
-            return Ok(match cached.current() {
-                NeighborRowValue::KnownAbsent => Vec::new(),
-                NeighborRowValue::Present(neighbors) => neighbors.to_vec(),
-            });
+            return Ok(mutation_cache.current_neighbors(row));
         }
 
         let loaded = if layer == 0 {
@@ -1309,23 +1343,17 @@ impl<D: Distance> VectorIndex<D> {
         } else {
             self.load_upper_neighbors(txn, layer, node_id).await?
         };
-        let (value, result) = match loaded {
-            Some(loaded) => {
-                let loaded = NeighborSet::try_from_deployed(
-                    node_id,
-                    mutation_cache.degree_limit(layer),
-                    loaded,
-                )
-                .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
-                let result = loaded.to_vec();
-                (NeighborRowValue::Present(loaded), result)
-            }
-            None => (NeighborRowValue::KnownAbsent, Vec::new()),
+        let value = match loaded {
+            Some(loaded) => NeighborRowValue::Present(
+                NeighborSet::try_from_deployed(node_id, mutation_cache.degree_limit(layer), loaded)
+                    .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?,
+            ),
+            None => NeighborRowValue::KnownAbsent,
         };
         mutation_cache.install_loaded_neighbor(row, value);
         self.enforce_mutation_cache_bounds(txn, mutation_cache)
             .await?;
-        Ok(result)
+        Ok(mutation_cache.current_neighbors(row))
     }
 
     /// Prefetches unique unloaded layer-0 rows without overwriting cached state.
@@ -1382,7 +1410,11 @@ impl<D: Distance> VectorIndex<D> {
         Ok(loaded_count)
     }
 
-    /// Copies borrowed algorithm output into the canonical staging boundary.
+    /// Canonicalizes algorithm output under the validated layer degree limit.
+    ///
+    /// Distance-ranked output is copied into the row's one exactly sized
+    /// allocation and sorted into stable node-ID order there. Duplicate,
+    /// self-neighbor, or excessive-degree states fail before cache or DB writes.
     pub(in crate::search::vector) async fn stage_neighbors_for_mutation(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1391,32 +1423,11 @@ impl<D: Distance> VectorIndex<D> {
         neighbors: &[NodeId],
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<(), HelixDbError> {
-        self.stage_neighbors_vec_for_mutation(
-            txn,
-            layer,
-            node_id,
-            neighbors.to_vec(),
-            mutation_cache,
-        )
-        .await
-    }
-
-    /// Canonicalizes algorithm output under the validated layer degree limit.
-    ///
-    /// Distance-ranked output is sorted into stable node-ID order. Duplicate,
-    /// self-neighbor, or excessive-degree states fail before cache or DB writes.
-    pub(in crate::search::vector) async fn stage_neighbors_vec_for_mutation(
-        &self,
-        txn: &MeasuredVectorTransaction<'_>,
-        layer: u16,
-        node_id: NodeId,
-        mut neighbors: Vec<NodeId>,
-        mutation_cache: &mut MutationOpCache<D>,
-    ) -> Result<(), HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-        neighbors.sort_unstable();
+        let mut nodes = Box::<[NodeId]>::from(neighbors);
+        nodes.sort_unstable();
         let neighbors =
-            NeighborSet::try_from_canonical(node_id, mutation_cache.degree_limit(layer), neighbors)
+            NeighborSet::try_from_canonical(node_id, mutation_cache.degree_limit(layer), nodes)
                 .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
         mutation_cache.stage_loaded_neighbor(row, NeighborRowValue::Present(neighbors))?;
         self.enforce_mutation_cache_bounds(txn, mutation_cache)
@@ -1435,13 +1446,14 @@ impl<D: Distance> VectorIndex<D> {
         txn: &MeasuredVectorTransaction<'_>,
         layer: u16,
         node_id: NodeId,
-        mut neighbors: Vec<NodeId>,
+        neighbors: &[NodeId],
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<(), HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-        neighbors.sort_unstable();
+        let mut nodes = Box::<[NodeId]>::from(neighbors);
+        nodes.sort_unstable();
         let neighbors =
-            NeighborSet::try_from_canonical(node_id, mutation_cache.degree_limit(layer), neighbors)
+            NeighborSet::try_from_canonical(node_id, mutation_cache.degree_limit(layer), nodes)
                 .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
         let value = NeighborRowValue::Present(neighbors);
         if mutation_cache.contains_neighbor(row) {
@@ -1578,57 +1590,78 @@ impl<D: Distance> VectorIndex<D> {
         from_item: &Item<'_, D>,
         maximum_neighbors: usize,
         mutation_cache: &mut MutationOpCache<D>,
+        scratch: &mut MutationScratch<D>,
     ) -> Result<(), HelixDbError> {
-        let mut to_neighbors = self
-            .load_neighbors_for_mutation(txn, layer, to_node, mutation_cache)
-            .await?;
+        let MutationScratch {
+            neighbors: to_neighbors,
+            node_ids: candidate_neighbors,
+            frontier: hydrate,
+            items,
+            ranked: distances,
+            rejected,
+            ..
+        } = scratch;
+        to_neighbors.clear();
+        to_neighbors.extend_from_slice(
+            self.load_neighbors_for_mutation(txn, layer, to_node, mutation_cache)
+                .await?,
+        );
         if !to_neighbors.contains(&from_node) {
             to_neighbors.push(from_node);
         }
-        let candidate_neighbors = to_neighbors.clone();
+        candidate_neighbors.clear();
+        candidate_neighbors.extend_from_slice(to_neighbors);
 
+        let mut selected = None;
         if to_neighbors.len() > maximum_neighbors {
             // One batched read hydrates the destination and every candidate,
             // including the inserting node whose cached item feeds selection.
-            let hydrate = core::iter::once(to_node)
-                .chain(to_neighbors.iter().copied())
-                .collect::<Vec<_>>();
-            let items = self
-                .get_items_for_layer_cached_batch(txn, layer, &hydrate, mutation_cache)
+            hydrate.clear();
+            hydrate.push(to_node);
+            hydrate.extend_from_slice(to_neighbors);
+            self.get_items_for_layer_cached_batch(txn, layer, hydrate, mutation_cache, items)
                 .await?;
-            match items.get(&to_node) {
+            match items.get(to_node) {
                 Some(to_item) => {
-                    let mut distances = Vec::with_capacity(to_neighbors.len());
-                    for &neighbor_id in &to_neighbors {
+                    distances.clear();
+                    for &neighbor_id in to_neighbors.iter() {
                         if neighbor_id == from_node {
                             distances.push(Candidate::try_new(
                                 neighbor_id,
-                                D::distance(to_item.as_ref(), from_item),
+                                D::distance(to_item, from_item),
                             )?);
                             continue;
                         }
-                        let Some(neighbor_item) = items.get(&neighbor_id) else {
+                        let Some(neighbor_item) = items.get(neighbor_id) else {
                             continue;
                         };
                         distances.push(Candidate::try_new(
                             neighbor_id,
-                            D::distance(to_item.as_ref(), neighbor_item.as_ref()),
+                            D::distance(to_item, neighbor_item),
                         )?);
                     }
-                    distances.sort();
-                    to_neighbors = select_diverse(
-                        to_item.as_ref(),
-                        &distances,
-                        &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+                    // Neighbors are unique, so an unstable sort orders them
+                    // exactly as a stable one would.
+                    distances.sort_unstable();
+                    selected = Some(select_diverse(
+                        to_item,
+                        distances,
+                        &|node_id| items.get(node_id),
                         maximum_neighbors,
-                    )?;
+                    )?);
                 }
                 None => to_neighbors.truncate(maximum_neighbors),
             }
         }
 
-        self.stage_neighbors_vec_for_mutation(txn, layer, to_node, to_neighbors, mutation_cache)
-            .await?;
+        self.stage_neighbors_for_mutation(
+            txn,
+            layer,
+            to_node,
+            selected.as_deref().unwrap_or(to_neighbors.as_slice()),
+            mutation_cache,
+        )
+        .await?;
         let retained_row = MutationOpCache::<D>::node_row_id(layer, to_node);
         let NeighborRowValue::Present(retained_neighbors) = mutation_cache
             .neighbor(retained_row)
@@ -1639,11 +1672,14 @@ impl<D: Distance> VectorIndex<D> {
                 "staged vector neighbor row cannot be absent".to_string(),
             ));
         };
-        let retained_neighbors = retained_neighbors.clone();
-        for rejected_neighbor in candidate_neighbors
-            .into_iter()
-            .filter(|neighbor| !retained_neighbors.contains(*neighbor))
-        {
+        rejected.clear();
+        rejected.extend(
+            candidate_neighbors
+                .iter()
+                .copied()
+                .filter(|neighbor| !retained_neighbors.contains(*neighbor)),
+        );
+        for &rejected_neighbor in rejected.iter() {
             self.remove_edge_from_neighbor(txn, layer, rejected_neighbor, to_node, mutation_cache)
                 .await?;
         }
@@ -1712,7 +1748,7 @@ impl<D: Distance> VectorIndex<D> {
             .map(|_| ());
         let changed = mutation_cache.finish_entity_changes();
         session.restore_cache(identity.clone(), mutation_cache);
-        session.record_entity_changes(&identity, node_id, changed.into_keys());
+        session.record_entity_changes(&identity, node_id, changed);
         result
     }
 
@@ -1741,6 +1777,8 @@ impl<D: Distance> VectorIndex<D> {
         metadata: &mut VectorIndexMetadata,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<bool, HelixDbError> {
+        // Borrowed for the deletion; a failed one drops it like `insert_hnsw`.
+        let mut scratch = core::mem::take(&mut mutation_cache.scratch);
         let item_existed = self
             .get_item_for_layer_cached(txn, 0, node_id, mutation_cache)
             .await?
@@ -1778,6 +1816,7 @@ impl<D: Distance> VectorIndex<D> {
                 maximum_neighbors,
                 reverse_sources.sources_at(layer),
                 mutation_cache,
+                &mut scratch,
             )
             .await?;
             // Loading again restores the row should bounded eviction have
@@ -1848,6 +1887,7 @@ impl<D: Distance> VectorIndex<D> {
             self.update_metadata(txn, metadata).await?;
         }
 
+        mutation_cache.scratch = scratch;
         Ok(item_existed)
     }
 
@@ -1904,10 +1944,12 @@ impl<D: Distance> VectorIndex<D> {
         maximum_neighbors: usize,
         extra_sources: &[NodeId],
         mutation_cache: &mut MutationOpCache<D>,
+        scratch: &mut MutationScratch<D>,
     ) -> Result<Vec<NodeId>, HelixDbError> {
         let outgoing_neighbors = self
             .load_neighbors_for_mutation(txn, layer, node_id, mutation_cache)
-            .await?;
+            .await?
+            .to_vec();
         let mandatory_relink = outgoing_neighbors
             .iter()
             .copied()
@@ -1948,17 +1990,22 @@ impl<D: Distance> VectorIndex<D> {
                 .await?;
             candidates.extend(
                 neighbors
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|candidate| *candidate != node_id && *candidate != neighbor_id),
             );
         }
         // A source without an item relinks nothing, so candidates are read
         // only once some source can use them.
-        if self
-            .get_items_for_layer_cached_batch(txn, layer, &relink_sources, mutation_cache)
-            .await?
-            .is_empty()
-        {
+        self.get_items_for_layer_cached_batch(
+            txn,
+            layer,
+            &relink_sources,
+            mutation_cache,
+            &mut scratch.items,
+        )
+        .await?;
+        if scratch.items.is_empty() {
             return Ok(outgoing_neighbors);
         }
         let candidates = self
@@ -1971,6 +2018,7 @@ impl<D: Distance> VectorIndex<D> {
                 &candidates,
                 maximum_neighbors,
                 mutation_cache,
+                scratch,
             )
             .await?;
         }
@@ -1989,14 +2037,14 @@ impl<D: Distance> VectorIndex<D> {
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<RelinkCandidates<D>, HelixDbError> {
         let node_ids = candidates.iter().copied().collect::<Vec<_>>();
-        let mut loaded = self
-            .get_items_for_layer_cached_batch(txn, layer, &node_ids, mutation_cache)
+        let mut loaded = ItemBatch::default();
+        self.get_items_for_layer_cached_batch(txn, layer, &node_ids, mutation_cache, &mut loaded)
             .await?;
         Ok(RelinkCandidates {
             layer,
             items: node_ids
                 .into_iter()
-                .map(|node_id| (node_id, loaded.remove(&node_id)))
+                .map(|node_id| (node_id, loaded.remove(node_id)))
                 .collect(),
         })
     }
@@ -2019,6 +2067,10 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Removes one reciprocal reference and stages the row only when changed.
+    ///
+    /// Removing a member keeps the row canonical, so the reduced set is staged
+    /// without the copy and validation [`Self::stage_neighbors_for_mutation`]
+    /// applies to algorithm output.
     pub(in crate::search::vector) async fn remove_edge_from_neighbor(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -2027,14 +2079,21 @@ impl<D: Distance> VectorIndex<D> {
         node_to_remove: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
     ) -> Result<bool, HelixDbError> {
-        let mut neighbors = self
-            .load_neighbors_for_mutation(txn, layer, neighbor_id, mutation_cache)
+        self.load_neighbors_for_mutation(txn, layer, neighbor_id, mutation_cache)
             .await?;
-        if !neighbors.contains(&node_to_remove) {
+        let row = MutationOpCache::<D>::node_row_id(layer, neighbor_id);
+        let NeighborRowValue::Present(neighbors) = mutation_cache
+            .neighbor(row)
+            .expect("a loaded vector neighbor row stays cached until the cache next changes")
+            .current()
+        else {
             return Ok(false);
-        }
-        neighbors.retain(|neighbor| *neighbor != node_to_remove);
-        self.stage_neighbors_vec_for_mutation(txn, layer, neighbor_id, neighbors, mutation_cache)
+        };
+        let Some(remaining) = neighbors.without(node_to_remove) else {
+            return Ok(false);
+        };
+        mutation_cache.stage_loaded_neighbor(row, NeighborRowValue::Present(remaining))?;
+        self.enforce_mutation_cache_bounds(txn, mutation_cache)
             .await?;
         Ok(true)
     }
@@ -2052,7 +2111,16 @@ impl<D: Distance> VectorIndex<D> {
         candidates: &RelinkCandidates<D>,
         maximum_neighbors: usize,
         mutation_cache: &mut MutationOpCache<D>,
+        scratch: &mut MutationScratch<D>,
     ) -> Result<(), HelixDbError> {
+        let MutationScratch {
+            neighbors: old_neighbors,
+            node_ids: current_neighbors,
+            frontier: reverse_neighbors,
+            ranked: distances,
+            scored: items,
+            ..
+        } = scratch;
         let layer = candidates.layer;
         let Some(neighbor_item) = self
             .relink_item(txn, candidates, neighbor_id, mutation_cache)
@@ -2060,41 +2128,42 @@ impl<D: Distance> VectorIndex<D> {
         else {
             return Ok(());
         };
-        let old_neighbors = self
-            .load_neighbors_for_mutation(txn, layer, neighbor_id, mutation_cache)
-            .await?;
-        let mut current_neighbors = old_neighbors.clone();
-        let mut nearest = candidates
-            .items
-            .iter()
-            .filter(|(candidate_id, _)| **candidate_id != neighbor_id)
-            .filter_map(|(candidate_id, item)| {
-                item.as_ref().map(|item| {
-                    Candidate::try_new(
-                        *candidate_id,
-                        D::distance(neighbor_item.as_ref(), item.as_ref()),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        old_neighbors.clear();
+        old_neighbors.extend_from_slice(
+            self.load_neighbors_for_mutation(txn, layer, neighbor_id, mutation_cache)
+                .await?,
+        );
+        current_neighbors.clear();
+        current_neighbors.extend_from_slice(old_neighbors);
+        distances.clear();
+        for (candidate_id, item) in &candidates.items {
+            let Some(item) = item.as_ref().filter(|_| *candidate_id != neighbor_id) else {
+                continue;
+            };
+            distances.push(Candidate::try_new(
+                *candidate_id,
+                D::distance(neighbor_item.as_ref(), item.as_ref()),
+            )?);
+        }
         // Candidates have distinct node IDs and `Candidate` orders by distance
         // then node ID, so the partitioned prefix holds exactly the nearest
         // `maximum_neighbors` a full sort would keep.
-        if nearest.len() > maximum_neighbors {
-            nearest.select_nth_unstable(maximum_neighbors);
-            nearest.truncate(maximum_neighbors);
+        if distances.len() > maximum_neighbors {
+            distances.select_nth_unstable(maximum_neighbors);
+            distances.truncate(maximum_neighbors);
         }
-        nearest.sort_unstable();
-        for candidate in &nearest {
+        distances.sort_unstable();
+        for candidate in distances.iter() {
             if !current_neighbors.contains(&candidate.node_id) {
                 current_neighbors.push(candidate.node_id);
             }
         }
 
+        let mut selected = None;
         if current_neighbors.len() > maximum_neighbors {
-            let mut distances = Vec::new();
-            let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
-            for &node_id in &current_neighbors {
+            distances.clear();
+            items.clear();
+            for &node_id in current_neighbors.iter() {
                 let Some(item) = self
                     .relink_item(txn, candidates, node_id, mutation_cache)
                     .await?
@@ -2107,77 +2176,77 @@ impl<D: Distance> VectorIndex<D> {
                 )?);
                 items.insert(node_id, item);
             }
-            distances.sort();
-            current_neighbors = select_diverse(
+            // Current neighbors are unique, so an unstable sort orders them
+            // exactly as a stable one would.
+            distances.sort_unstable();
+            selected = Some(select_diverse(
                 neighbor_item.as_ref(),
-                &distances,
+                distances,
                 &|node_id| items.get(&node_id).map(|item| item.as_ref()),
                 maximum_neighbors,
-            )?;
+            )?);
         }
+        let current_neighbors = selected.as_deref().unwrap_or(current_neighbors.as_slice());
 
         self.stage_neighbors_for_mutation(
             txn,
             layer,
             neighbor_id,
-            &current_neighbors,
+            current_neighbors,
             mutation_cache,
         )
         .await?;
-        for &new_neighbor_id in &current_neighbors {
+        for &new_neighbor_id in current_neighbors {
             if old_neighbors.contains(&new_neighbor_id) {
                 continue;
             }
-            let mut reverse_neighbors = self
-                .load_neighbors_for_mutation(txn, layer, new_neighbor_id, mutation_cache)
-                .await?;
+            reverse_neighbors.clear();
+            reverse_neighbors.extend_from_slice(
+                self.load_neighbors_for_mutation(txn, layer, new_neighbor_id, mutation_cache)
+                    .await?,
+            );
             if reverse_neighbors.contains(&neighbor_id) {
                 continue;
             }
             reverse_neighbors.push(neighbor_id);
-            if reverse_neighbors.len() > maximum_neighbors {
-                let Some(reverse_item) = self
+            let mut reverse_selected = None;
+            if reverse_neighbors.len() > maximum_neighbors
+                && let Some(reverse_item) = self
                     .relink_item(txn, candidates, new_neighbor_id, mutation_cache)
                     .await?
-                else {
-                    self.stage_neighbors_vec_for_mutation(
-                        txn,
-                        layer,
-                        new_neighbor_id,
-                        reverse_neighbors,
-                        mutation_cache,
-                    )
-                    .await?;
-                    continue;
-                };
-                let mut reverse_distances = Vec::new();
-                let mut items = HashMap::<NodeId, Arc<Item<'static, D>>>::new();
-                for &node_id in &reverse_neighbors {
+            {
+                distances.clear();
+                items.clear();
+                for &node_id in reverse_neighbors.iter() {
                     let Some(item) = self
                         .relink_item(txn, candidates, node_id, mutation_cache)
                         .await?
                     else {
                         continue;
                     };
-                    reverse_distances.push(Candidate::try_new(
+                    distances.push(Candidate::try_new(
                         node_id,
                         D::distance(reverse_item.as_ref(), item.as_ref()),
                     )?);
                     items.insert(node_id, item);
                 }
-                reverse_distances.sort();
-                reverse_neighbors = select_diverse(
+                // The pushed source is not yet a reverse neighbor, so they
+                // stay unique and an unstable sort is exact.
+                distances.sort_unstable();
+                reverse_selected = Some(select_diverse(
                     reverse_item.as_ref(),
-                    &reverse_distances,
+                    distances,
                     &|node_id| items.get(&node_id).map(|item| item.as_ref()),
                     maximum_neighbors,
-                )?;
+                )?);
             }
-            self.stage_neighbors_vec_for_mutation(
+            self.stage_neighbors_for_mutation(
                 txn,
                 layer,
                 new_neighbor_id,
-                reverse_neighbors,
+                reverse_selected
+                    .as_deref()
+                    .unwrap_or(reverse_neighbors.as_slice()),
                 mutation_cache,
             )
             .await?;
@@ -2193,6 +2262,160 @@ impl<D: Distance> VectorIndex<D> {
 pub(in crate::search::vector) struct RelinkCandidates<D: Distance> {
     layer: u16,
     items: HashMap<NodeId, Option<Arc<Item<'static, D>>>>,
+}
+
+/// Items of the nodes one batched lookup found, reused across lookups.
+///
+/// [`VectorIndex::get_items_for_layer_cached_batch`] clears and refills it,
+/// so it holds exactly the requested nodes that have an item at the layer.
+/// Absent nodes are omitted, and a node requested twice is held once.
+#[derive(Debug)]
+pub(in crate::search::vector) struct ItemBatch<D: Distance> {
+    pub(super) found: foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
+    /// Unique cache misses of the current lookup, in request order.
+    pub(super) missing: Vec<NodeId>,
+    pub(super) seen_missing: foldhash::HashSet<NodeId>,
+}
+
+impl<D: Distance> Default for ItemBatch<D> {
+    fn default() -> Self {
+        Self {
+            found: foldhash::HashMap::default(),
+            missing: Vec::new(),
+            seen_missing: foldhash::HashSet::default(),
+        }
+    }
+}
+
+impl<D: Distance> ItemBatch<D> {
+    /// Empties the batch, keeping its capacity.
+    pub(super) fn clear(&mut self) {
+        self.found.clear();
+        self.missing.clear();
+        self.seen_missing.clear();
+    }
+
+    /// Returns the item found for `node_id`.
+    pub(in crate::search::vector) fn get(&self, node_id: NodeId) -> Option<&Item<'static, D>> {
+        self.found.get(&node_id).map(Arc::as_ref)
+    }
+
+    /// Takes the item found for `node_id` out of the batch.
+    pub(in crate::search::vector) fn remove(
+        &mut self,
+        node_id: NodeId,
+    ) -> Option<Arc<Item<'static, D>>> {
+        self.found.remove(&node_id)
+    }
+
+    /// Returns whether an item was found for `node_id`.
+    #[cfg(any(test, feature = "production-coverage"))]
+    pub(in crate::search::vector) fn contains(&self, node_id: NodeId) -> bool {
+        self.found.contains_key(&node_id)
+    }
+
+    /// Returns how many requested nodes have an item.
+    #[cfg(feature = "production-coverage")]
+    pub(in crate::search::vector) fn len(&self) -> usize {
+        self.found.len()
+    }
+
+    /// Returns whether no requested node has an item.
+    pub(in crate::search::vector) fn is_empty(&self) -> bool {
+        self.found.is_empty()
+    }
+}
+
+/// Buffers one graph mutation reuses across its layers, expansions, and
+/// links instead of allocating them per step.
+///
+/// Contents are meaningless between uses: every user clears a buffer before
+/// filling it, and two users never hold the same buffer at once. Searches,
+/// selection, and linking borrow it from [`VectorIndex::insert_hnsw`] or
+/// [`VectorIndex::stage_delete_with_metadata`], which take it from the
+/// mutation cache. Mutation futures await storage while holding it, so it
+/// is plain owned state rather than an arena.
+#[derive(Debug)]
+pub(in crate::search::vector) struct MutationScratch<D: Distance> {
+    /// Nodes one traversal visited.
+    visited: foldhash::HashSet<NodeId>,
+    /// Beam candidates still to expand, nearest first.
+    beam: BinaryHeap<Reverse<Candidate>>,
+    /// The beam's best candidates, farthest first.
+    nearest: BinaryHeap<Candidate>,
+    /// Unvisited neighbors of one expansion, or the nodes one link hydrates,
+    /// or one relink's reverse neighbors.
+    frontier: Vec<NodeId>,
+    /// Neighbors one expansion admitted, with their distances.
+    admitted: Vec<(NodeId, f32)>,
+    /// Admitted neighbors ranked for layer-0 prefetch.
+    prefetch_ranked: Vec<(NodeId, f32)>,
+    /// Layer-0 rows one expansion prefetches.
+    prefetch: Vec<NodeId>,
+    /// Items one lookup found.
+    items: ItemBatch<D>,
+    /// The neighbor row one link or relink edits.
+    neighbors: Vec<NodeId>,
+    /// Selection candidates, a link's neighbors before pruning, or one
+    /// relink's current neighbors.
+    node_ids: Vec<NodeId>,
+    /// Distance-ranked candidates of one selection.
+    ranked: Vec<Candidate>,
+    /// Neighbors one link's pruning dropped.
+    rejected: Vec<NodeId>,
+    /// Items one relink selection scores.
+    scored: foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
+}
+
+impl<D: Distance> Default for MutationScratch<D> {
+    fn default() -> Self {
+        Self {
+            visited: foldhash::HashSet::default(),
+            beam: BinaryHeap::new(),
+            nearest: BinaryHeap::new(),
+            frontier: Vec::new(),
+            admitted: Vec::new(),
+            prefetch_ranked: Vec::new(),
+            prefetch: Vec::new(),
+            items: ItemBatch::default(),
+            neighbors: Vec::new(),
+            node_ids: Vec::new(),
+            ranked: Vec::new(),
+            rejected: Vec::new(),
+            scored: foldhash::HashMap::default(),
+        }
+    }
+}
+
+impl<D: Distance> MutationScratch<D> {
+    /// Releases every buffer once any of them holds capacity for more than
+    /// [`MUTATION_SCRATCH_RETAINED_CAPACITY`] entries, so one unusually wide
+    /// traversal cannot pin its memory for a session's lifetime.
+    fn release_oversized(&mut self) {
+        let capacities = [
+            self.visited.capacity(),
+            self.beam.capacity(),
+            self.nearest.capacity(),
+            self.frontier.capacity(),
+            self.admitted.capacity(),
+            self.prefetch_ranked.capacity(),
+            self.prefetch.capacity(),
+            self.items.found.capacity(),
+            self.items.missing.capacity(),
+            self.items.seen_missing.capacity(),
+            self.neighbors.capacity(),
+            self.node_ids.capacity(),
+            self.ranked.capacity(),
+            self.rejected.capacity(),
+            self.scored.capacity(),
+        ];
+        if capacities
+            .into_iter()
+            .any(|capacity| capacity > MUTATION_SCRATCH_RETAINED_CAPACITY)
+        {
+            *self = Self::default();
+        }
+    }
 }
 
 /// Physical HNSW layer bound into one cached neighbor-row identity.
@@ -2530,6 +2753,24 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
         Some(removed)
     }
 
+    /// Changes the cached value of `key` in place, returning whether it was
+    /// cached.
+    ///
+    /// The order ends exactly as [`Self::insert`] of the changed value would
+    /// leave it: a change that restamps the value records its new touch.
+    fn modify(&mut self, key: &K, change: impl FnOnce(&mut V)) -> bool {
+        let Some(value) = self.values.get_mut(key) else {
+            return false;
+        };
+        let touch = value.last_touch();
+        change(value);
+        let changed_touch = value.last_touch();
+        if changed_touch != touch {
+            self.record(changed_touch, *key);
+        }
+        true
+    }
+
     /// Restamps every value with `renumbered`, which must keep their order.
     fn renumber(&mut self, mut renumbered: impl FnMut(&K) -> CacheSequence) {
         for (key, value) in &mut self.values {
@@ -2627,11 +2868,16 @@ pub(in crate::search::vector) struct MutationOpCache<D: Distance> {
     next_touch: CacheSequence,
     stats: VectorBuildSessionStats,
     enforce_local_limits: bool,
-    entity_changed_neighbors: BTreeMap<NeighborRowId, NeighborRowValue>,
+    /// Rows whose logical value changed during the current entity.
+    entity_changed_neighbors: BTreeSet<NeighborRowId>,
     /// Highest layer ever installed in `items`; bounds targeted invalidation.
     max_item_layer: u16,
     /// Highest layer ever installed in `neighbor_rows`; bounds targeted invalidation.
     max_neighbor_layer: u16,
+    /// Traversal buffers lent to one mutation at a time. A session moves its
+    /// one scratch set into the cache it lends out, so caches at rest in a
+    /// session hold none.
+    scratch: MutationScratch<D>,
 }
 
 impl<D: Distance> Default for MutationOpCache<D> {
@@ -2658,9 +2904,10 @@ impl<D: Distance> MutationOpCache<D> {
             next_touch: CacheSequence::initial(),
             stats: VectorBuildSessionStats::default(),
             enforce_local_limits: true,
-            entity_changed_neighbors: BTreeMap::new(),
+            entity_changed_neighbors: BTreeSet::new(),
             max_item_layer: 0,
             max_neighbor_layer: 0,
+            scratch: MutationScratch::default(),
         })
     }
 
@@ -2681,18 +2928,12 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Records that one canonical row changed logically during this entity.
-    pub(in crate::search::vector) fn record_neighbor_change(
-        &mut self,
-        row: NeighborRowId,
-        original: NeighborRowValue,
-    ) {
-        self.entity_changed_neighbors.entry(row).or_insert(original);
+    pub(in crate::search::vector) fn record_neighbor_change(&mut self, row: NeighborRowId) {
+        self.entity_changed_neighbors.insert(row);
     }
 
     /// Finishes one entity and returns every canonical row that changed.
-    pub(in crate::search::vector) fn finish_entity_changes(
-        &mut self,
-    ) -> BTreeMap<NeighborRowId, NeighborRowValue> {
+    pub(in crate::search::vector) fn finish_entity_changes(&mut self) -> BTreeSet<NeighborRowId> {
         core::mem::take(&mut self.entity_changed_neighbors)
     }
 
@@ -2780,6 +3021,23 @@ impl<D: Distance> MutationOpCache<D> {
         self.neighbor_rows.contains_key(&row)
     }
 
+    /// Returns the current neighbors of a loaded row, none when it is absent.
+    ///
+    /// # Panics
+    ///
+    /// When `row` is not loaded: callers read only a row they just loaded.
+    fn current_neighbors(&self, row: NeighborRowId) -> &[NodeId] {
+        match self
+            .neighbor_rows
+            .get(&row)
+            .expect("a loaded vector neighbor row stays cached until the cache next changes")
+            .current()
+        {
+            NeighborRowValue::KnownAbsent => &[],
+            NeighborRowValue::Present(neighbors) => neighbors.as_slice(),
+        }
+    }
+
     /// Returns whether the loaded row's baseline links `target`: the value
     /// the transaction holds for it until its next flush, whose locators the
     /// transaction therefore holds too.
@@ -2832,15 +3090,23 @@ impl<D: Distance> MutationOpCache<D> {
             ));
         };
         let (last_touch, dirty) = (previous.last_touch(), previous.is_dirty());
-        let changed = previous.current() != &value;
-        let boundary_original = previous.current().clone();
+        let layer = row.layer.number();
         let previous_payload = cached_neighbor_payload_bytes(row, previous)?;
-        let mut staged = previous.clone();
-        if changed {
-            self.record_neighbor_change(row, boundary_original);
+        // Staging keeps a dirty row's original and makes a clean row's
+        // current value its original.
+        let staged_payload = neighbor_payload_bytes(layer, &value)?
+            .checked_add(neighbor_payload_bytes(
+                layer,
+                previous.original().unwrap_or(previous.current()),
+            )?)
+            .ok_or_else(|| {
+                HelixDbError::InvariantViolation(
+                    "vector build neighbor-cache payload accounting overflowed".to_string(),
+                )
+            })?;
+        if previous.current() != &value {
+            self.entity_changed_neighbors.insert(row);
         }
-        staged.stage(value, touch);
-        let staged_payload = cached_neighbor_payload_bytes(row, &staged)?;
         self.replace_retained_payload(previous_payload, staged_payload)?;
         if dirty {
             assert!(
@@ -2852,11 +3118,11 @@ impl<D: Distance> MutationOpCache<D> {
             self.dirty_neighbor_recency.insert((touch, row)),
             "vector neighbor recency is unique"
         );
-        let replaced = self
-            .neighbor_rows
-            .insert(row, staged)
-            .expect("loaded vector neighbor remains cached while staging");
-        debug_assert_eq!(replaced.last_touch(), last_touch);
+        assert!(
+            self.neighbor_rows
+                .modify(&row, |cached| cached.stage(value, touch)),
+            "loaded vector neighbor remains cached while staging"
+        );
         Ok(())
     }
 
@@ -2879,7 +3145,7 @@ impl<D: Distance> MutationOpCache<D> {
         proof: NewNeighborRowProof,
         value: NeighborRowValue,
     ) {
-        self.record_neighbor_change(proof.row, NeighborRowValue::KnownAbsent);
+        self.record_neighbor_change(proof.row);
         let touch = self.take_touch();
         let mut cached = CachedNeighbor::clean(NeighborRowValue::KnownAbsent, touch);
         cached.stage(value, touch);
@@ -2931,9 +3197,8 @@ impl<D: Distance> MutationOpCache<D> {
         let last_touch = previous.last_touch();
         let previous_payload = cached_neighbor_payload_bytes(row, previous)
             .expect("validated dirty vector neighbor has measurable payload");
-        let mut flushed = previous.clone();
-        flushed.mark_flushed();
-        let flushed_payload = cached_neighbor_payload_bytes(row, &flushed)
+        // A flushed row retains only its current value.
+        let flushed_payload = neighbor_payload_bytes(row.layer.number(), previous.current())
             .expect("validated flushed vector neighbor has measurable payload");
         self.replace_retained_payload(previous_payload, flushed_payload)
             .expect("flushing a vector neighbor cannot overflow cache payload");
@@ -2941,11 +3206,11 @@ impl<D: Distance> MutationOpCache<D> {
             self.dirty_neighbor_recency.remove(&(last_touch, row)),
             "dirty vector neighbor retains one recency entry"
         );
-        let replaced = self
-            .neighbor_rows
-            .insert(row, flushed)
-            .expect("flushed vector neighbor remains cached");
-        debug_assert!(replaced.is_dirty());
+        assert!(
+            self.neighbor_rows
+                .modify(&row, CachedNeighbor::mark_flushed),
+            "flushed vector neighbor remains cached"
+        );
     }
 
     /// Removes every layer-specific neighbor state for one entity.
@@ -3246,6 +3511,8 @@ pub(crate) struct VectorBuildSession<D: Distance> {
     victims: SessionVictims,
     /// Attached namespaces holding at least one dirty neighbor row.
     dirty: BTreeSet<VectorGenerationIdentity>,
+    /// Traversal buffers lent to whichever namespace cache is taken.
+    scratch: MutationScratch<D>,
 }
 
 /// Cache state one planned entity changed inside one generation namespace.
@@ -3309,6 +3576,7 @@ impl<D: Distance> VectorBuildSession<D> {
             footprint: SessionFootprint::default(),
             victims: SessionVictims::default(),
             dirty: BTreeSet::new(),
+            scratch: MutationScratch::default(),
         };
         session.set_max_retained_bytes(max_retained_bytes);
         session
@@ -3516,18 +3784,23 @@ impl<D: Distance> VectorBuildSession<D> {
             }
         };
         cache.next_touch = self.next_touch;
+        cache.scratch = core::mem::take(&mut self.scratch);
         Ok(cache)
     }
 
     /// Restores one detached identity cache even when mutation planning failed.
     ///
-    /// A namespace left without entries is dropped rather than restored.
+    /// A namespace left without entries is dropped rather than restored. The
+    /// session takes back the cache's scratch buffers, so a namespace at rest
+    /// holds none.
     pub(in crate::search::vector) fn restore_cache(
         &mut self,
         identity: VectorGenerationIdentity,
-        cache: MutationOpCache<D>,
+        mut cache: MutationOpCache<D>,
     ) {
         self.next_touch = cache.next_touch;
+        self.scratch = core::mem::take(&mut cache.scratch);
+        self.scratch.release_oversized();
         assert!(
             !self.caches.contains_key(&identity),
             "a vector build session cannot restore one identity twice"
@@ -3612,11 +3885,12 @@ impl<D: Distance> VectorBuildSession<D> {
             let mut cache = self
                 .detach(&identity)
                 .expect("dirty vector build namespace is attached");
+            let keyspace = session_keyspace(&identity);
             let flushed = loop {
                 let Some(row) = cache.oldest_dirty_neighbor() else {
                     break Ok(());
                 };
-                match flush_build_session_neighbor(txn, &identity, &mut cache, row) {
+                match flush_build_session_neighbor(txn, &keyspace, &mut cache, row) {
                     Ok(()) => {
                         self.session_stats.dirty_neighbor_flushes =
                             self.session_stats.dirty_neighbor_flushes.saturating_add(1);
@@ -3730,9 +4004,12 @@ impl<D: Distance> VectorBuildSession<D> {
                     let dirty = cache.neighbor(row).is_some_and(CachedNeighbor::is_dirty);
                     let flushed = match (dirty, txn) {
                         (false, _) => Ok(()),
-                        (true, Some(txn)) => {
-                            flush_build_session_neighbor(txn, &victim.identity, &mut cache, row)
-                        }
+                        (true, Some(txn)) => flush_build_session_neighbor(
+                            txn,
+                            &session_keyspace(&victim.identity),
+                            &mut cache,
+                            row,
+                        ),
                         (true, None) => Err(HelixDbError::InvariantViolation(
                             "vector build session eviction met a dirty neighbor row without a \
                              transaction to flush it"
@@ -3904,25 +4181,29 @@ struct SessionEvictionOrder {
     identity: VectorGenerationIdentity,
 }
 
+/// Returns the row keyspace of one build-session namespace.
+fn session_keyspace(identity: &VectorGenerationIdentity) -> VectorRowKeyspace {
+    VectorRowKeyspace::from_allocated(
+        identity.physical_name().to_string(),
+        identity.physical_index_id(),
+        identity.scope(),
+    )
+}
+
 /// Flushes one dirty row of a build-session namespace through
 /// [`VectorIndex::stage_neighbor_row_transition`], leaving it clean only once
 /// every write succeeded.
 fn flush_build_session_neighbor<D: Distance>(
     txn: &MeasuredVectorTransaction<'_>,
-    identity: &VectorGenerationIdentity,
+    keyspace: &VectorRowKeyspace,
     cache: &mut MutationOpCache<D>,
     row: NeighborRowId,
 ) -> Result<(), HelixDbError> {
     let Some(cached) = cache.neighbor(row).filter(|cached| cached.is_dirty()) else {
         return Ok(());
     };
-    let keyspace = VectorRowKeyspace::from_allocated(
-        identity.physical_name().to_string(),
-        identity.physical_index_id(),
-        identity.scope(),
-    );
     VectorIndex::<D>::stage_neighbor_row_transition(
-        &VectorWriteRows::new(txn, &keyspace),
+        &VectorWriteRows::new(txn, keyspace),
         row,
         cached,
         cache.degree_limit(row.layer.number()),
@@ -3931,16 +4212,17 @@ fn flush_build_session_neighbor<D: Distance>(
     Ok(())
 }
 
+/// Returns the encoded length of a row value, computed from its canonical
+/// neighbor count rather than by encoding it.
 fn neighbor_payload_bytes(layer: u16, value: &NeighborRowValue) -> Result<usize, HelixDbError> {
     let NeighborRowValue::Present(neighbors) = value else {
         return Ok(0);
     };
+    let count = neighbors.as_slice().len();
     if layer == 0 {
-        return Ok(encode_layer0_neighbors(neighbors.as_slice()).len());
+        return Ok(encoded_layer0_neighbors_len(count));
     }
-    encode_upper_neighbors(neighbors.as_slice())
-        .map(|encoded| encoded.len())
-        .map_err(HelixDbError::from)
+    encoded_upper_neighbors_len(count).map_err(HelixDbError::from)
 }
 
 fn cached_neighbor_payload_bytes(
@@ -4805,8 +5087,8 @@ mod tests {
                 NeighborRowValue::KnownAbsent,
             );
         }
-        cache.record_neighbor_change(Cache::node_row_id(3, 1), NeighborRowValue::KnownAbsent);
-        cache.record_neighbor_change(Cache::node_row_id(0, 2), NeighborRowValue::KnownAbsent);
+        cache.record_neighbor_change(Cache::node_row_id(3, 1));
+        cache.record_neighbor_change(Cache::node_row_id(0, 2));
 
         cache.invalidate_items(1);
         cache.invalidate_neighbors(1);
@@ -4826,7 +5108,7 @@ mod tests {
         assert_eq!(
             cache
                 .finish_entity_changes()
-                .into_keys()
+                .into_iter()
                 .collect::<Vec<_>>(),
             vec![Cache::node_row_id(0, 2)]
         );
@@ -4869,7 +5151,7 @@ mod tests {
         cache.mark_neighbor_flushed(row_2);
         let changed = cache.finish_entity_changes();
         session.restore_cache(existing.clone(), cache);
-        session.record_entity_changes(&existing, 3, changed.into_keys());
+        session.record_entity_changes(&existing, 3, changed);
         let mut created_cache = session.take_cache(&created, 8, 4).unwrap();
         created_cache.put_item(0, 3, None, 8);
         session.restore_cache(created.clone(), created_cache);
@@ -5511,7 +5793,7 @@ mod tests {
         mutate(&mut cache);
         let changed = cache.finish_entity_changes();
         session.restore_cache(identity.clone(), cache);
-        session.record_entity_changes(&identity, node_id, changed.into_keys());
+        session.record_entity_changes(&identity, node_id, changed);
     }
 
     proptest! {

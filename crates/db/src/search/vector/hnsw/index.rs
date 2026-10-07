@@ -48,9 +48,11 @@ use slatedb::DbReadOps;
 
 #[cfg(test)]
 use super::model::Candidate;
+#[cfg(any(test, feature = "production-coverage"))]
+use super::mutation::MutationScratch;
 #[cfg(test)]
 use super::mutation::NeighborRowValue;
-use super::mutation::{MutationOpCache, VectorBuildSession, VectorInsertContract};
+use super::mutation::{ItemBatch, MutationOpCache, VectorBuildSession, VectorInsertContract};
 #[cfg(test)]
 use super::neighbor_set::{NeighborDegreeLimit, NeighborSet};
 #[cfg(any(test, feature = "production-coverage"))]
@@ -995,27 +997,36 @@ impl<D: Distance> VectorIndex<D> {
         if let Some(cached) = mutation_cache.item(layer, node_id) {
             return Ok(cached);
         }
-        let mut loaded = HashMap::with_capacity(1);
-        self.load_uncached_items_for_layer(txn, layer, vec![node_id], mutation_cache, &mut loaded)
-            .await?;
+        let mut loaded = foldhash::HashMap::default();
+        self.load_uncached_items_for_layer(
+            txn,
+            layer,
+            core::slice::from_ref(&node_id),
+            mutation_cache,
+            &mut loaded,
+        )
+        .await?;
         Ok(loaded.remove(&node_id))
     }
 
     /// Batch-loads layer-specific items without overwriting staged cache state.
     ///
-    /// The result omits absent nodes and deduplicates physical reads. Upper
+    /// Clears `batch`, then fills it with the requested nodes that have an
+    /// item, omitting absent nodes and deduplicating physical reads. Upper
     /// layers may use validated hot rows, while layer zero resolves opaque
-    /// canonical payload tokens through typed storage.
+    /// canonical payload tokens through typed storage. A caller reusing one
+    /// batch across lookups allocates only when a lookup outgrows it.
     pub(in crate::search::vector) async fn get_items_for_layer_cached_batch(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         layer: u16,
         node_ids: &[NodeId],
         mutation_cache: &mut MutationOpCache<D>,
-    ) -> Result<HashMap<NodeId, Arc<Item<'static, D>>>, HelixDbError> {
-        let mut result = HashMap::new();
+        batch: &mut ItemBatch<D>,
+    ) -> Result<(), HelixDbError> {
+        batch.clear();
         if node_ids.is_empty() {
-            return Ok(result);
+            return Ok(());
         }
         while mutation_cache.enforces_local_limits()
             && mutation_cache.item_count() > super::mutation::VECTOR_BUILD_ITEM_CACHE_LIMIT
@@ -1025,23 +1036,27 @@ impl<D: Distance> VectorIndex<D> {
             }
         }
 
-        let mut missing = Vec::new();
-        let mut seen_missing = HashSet::new();
         for &node_id in node_ids {
-            if let Some(cached) = mutation_cache.item(layer, node_id) {
-                if let Some(item) = cached {
-                    result.insert(node_id, item);
+            match mutation_cache.item(layer, node_id) {
+                Some(Some(item)) => {
+                    batch.found.insert(node_id, item);
                 }
-                continue;
-            }
-
-            if seen_missing.insert(node_id) {
-                missing.push(node_id);
+                Some(None) => {}
+                None => {
+                    if batch.seen_missing.insert(node_id) {
+                        batch.missing.push(node_id);
+                    }
+                }
             }
         }
-        self.load_uncached_items_for_layer(txn, layer, missing, mutation_cache, &mut result)
-            .await?;
-        Ok(result)
+        self.load_uncached_items_for_layer(
+            txn,
+            layer,
+            &batch.missing,
+            mutation_cache,
+            &mut batch.found,
+        )
+        .await
     }
 
     /// Reads unique cache-missed items with one bounded I/O chain and caches them.
@@ -1053,22 +1068,22 @@ impl<D: Distance> VectorIndex<D> {
         &self,
         txn: &(impl DbReadOps + Send + Sync),
         layer: u16,
-        mut missing: Vec<NodeId>,
+        missing: &[NodeId],
         mutation_cache: &mut MutationOpCache<D>,
-        result: &mut HashMap<NodeId, Arc<Item<'static, D>>>,
+        result: &mut foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
     ) -> Result<(), HelixDbError> {
         if missing.is_empty() {
             return Ok(());
         }
         let expected_dimension = self.expected_dimension(txn).await?;
 
-        if layer > 0 {
+        let mut layer_zero_fallback = Vec::new();
+        let missing = if layer > 0 {
             let upper_rows = self
                 .memory_access
-                .read_upper_vector_rows(txn, &self.rows, &missing)
+                .read_upper_vector_rows(txn, &self.rows, missing)
                 .await?;
-            let mut layer_zero_fallback = Vec::new();
-            for (node_id, maybe_row) in missing.into_iter().zip(upper_rows) {
+            for (&node_id, maybe_row) in missing.iter().zip(upper_rows) {
                 let Some(data) = maybe_row else {
                     layer_zero_fallback.push(node_id);
                     continue;
@@ -1086,17 +1101,18 @@ impl<D: Distance> VectorIndex<D> {
                 mutation_cache.put_item(layer, node_id, Some(item.clone()), payload_bytes);
                 result.insert(node_id, item);
             }
-            missing = layer_zero_fallback;
-
-            if missing.is_empty() {
+            if layer_zero_fallback.is_empty() {
                 return Ok(());
             }
-        }
+            layer_zero_fallback.as_slice()
+        } else {
+            missing
+        };
 
         let (canonical_keys, _) = self
             .resolve_canonical_vector_keys_batch_cached(
                 txn,
-                &missing,
+                missing,
                 mutation_cache,
                 "resolving canonical vector key",
             )
@@ -2731,23 +2747,11 @@ mod tests {
         install_clean_test_neighbors(&mut mutation_cache, key.0, key.1, vec![1, 2]);
 
         index
-            .stage_neighbors_vec_for_mutation(
-                &measured,
-                key.0,
-                key.1,
-                vec![1, 2, 3],
-                &mut mutation_cache,
-            )
+            .stage_neighbors_for_mutation(&measured, key.0, key.1, &[1, 2, 3], &mut mutation_cache)
             .await
             .unwrap();
         index
-            .stage_neighbors_vec_for_mutation(
-                &measured,
-                key.0,
-                key.1,
-                vec![3, 4],
-                &mut mutation_cache,
-            )
+            .stage_neighbors_for_mutation(&measured, key.0, key.1, &[3, 4], &mut mutation_cache)
             .await
             .unwrap();
 
@@ -2770,7 +2774,7 @@ mod tests {
         let mut mutation_cache = MutationOpCache::<Cosine>::with_degree_limits(2, 1).unwrap();
 
         let unloaded = index
-            .stage_neighbors_vec_for_mutation(&measured, 0, 42, vec![3, 2], &mut mutation_cache)
+            .stage_neighbors_for_mutation(&measured, 0, 42, &[3, 2], &mut mutation_cache)
             .await
             .unwrap_err();
         assert!(
@@ -2778,7 +2782,7 @@ mod tests {
         );
 
         index
-            .stage_new_neighbors_for_mutation(&measured, 0, 42, vec![3, 2], &mut mutation_cache)
+            .stage_new_neighbors_for_mutation(&measured, 0, 42, &[3, 2], &mut mutation_cache)
             .await
             .unwrap();
         assert_eq!(
@@ -2789,11 +2793,11 @@ mod tests {
         for (layer, owner, invalid) in [(0, 42, vec![2, 2]), (0, 42, vec![42]), (1, 42, vec![2, 3])]
         {
             let error = index
-                .stage_neighbors_vec_for_mutation(
+                .stage_neighbors_for_mutation(
                     &measured,
                     layer,
                     owner,
-                    invalid,
+                    &invalid,
                     &mut mutation_cache,
                 )
                 .await
@@ -3133,8 +3137,15 @@ mod tests {
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let node_ids = [1, 2, 999, 2, 3];
         let mut batch_cache = MutationOpCache::<Cosine>::default();
-        let batch_items = index
-            .get_items_for_layer_cached_batch(&txn, 0, &node_ids, &mut batch_cache)
+        let mut batch_items = ItemBatch::default();
+        index
+            .get_items_for_layer_cached_batch(
+                &txn,
+                0,
+                &node_ids,
+                &mut batch_cache,
+                &mut batch_items,
+            )
             .await
             .unwrap();
 
@@ -3148,13 +3159,13 @@ mod tests {
             match single {
                 Some(single_item) => {
                     let batch_item = batch_items
-                        .get(&node_id)
+                        .get(node_id)
                         .expect("batch fetch should return every item returned by single fetch");
-                    assert_cosine_items_match(single_item.as_ref(), batch_item.as_ref());
+                    assert_cosine_items_match(single_item.as_ref(), batch_item);
                 }
                 None => {
                     assert!(
-                        !batch_items.contains_key(&node_id),
+                        !batch_items.contains(node_id),
                         "batch fetch should omit missing node {node_id}"
                     );
                     assert!(
@@ -3215,13 +3226,7 @@ mod tests {
         assert_eq!(cached_original_neighbors(&mutation_cache, 0, 3), None);
 
         index
-            .stage_neighbors_vec_for_mutation(
-                &measured,
-                0,
-                3,
-                vec![30, 31, 32],
-                &mut mutation_cache,
-            )
+            .stage_neighbors_for_mutation(&measured, 0, 3, &[30, 31, 32], &mut mutation_cache)
             .await
             .unwrap();
         assert_eq!(
@@ -3319,8 +3324,15 @@ mod tests {
 
         let node_ids = [11, 12, 13, 12, 11];
         let mut batch_cache = MutationOpCache::<Cosine>::default();
-        let batch_items = index
-            .get_items_for_layer_cached_batch(&txn, 2, &node_ids, &mut batch_cache)
+        let mut batch_items = ItemBatch::default();
+        index
+            .get_items_for_layer_cached_batch(
+                &txn,
+                2,
+                &node_ids,
+                &mut batch_cache,
+                &mut batch_items,
+            )
             .await
             .unwrap();
 
@@ -3333,14 +3345,14 @@ mod tests {
 
             match single {
                 Some(single_item) => {
-                    let batch_item = batch_items.get(&node_id).expect(
+                    let batch_item = batch_items.get(node_id).expect(
                         "batch fetch should return every upper item returned by single fetch",
                     );
-                    assert_cosine_items_match(single_item.as_ref(), batch_item.as_ref());
+                    assert_cosine_items_match(single_item.as_ref(), batch_item);
                 }
                 None => {
                     assert!(
-                        !batch_items.contains_key(&node_id),
+                        !batch_items.contains(node_id),
                         "batch fetch should omit missing upper node {node_id}"
                     );
                     assert!(
@@ -3351,8 +3363,8 @@ mod tests {
             }
         }
 
-        assert_cosine_items_match(&cached_item, batch_items.get(&11).unwrap().as_ref());
-        assert_cosine_items_match(&pending_item, batch_items.get(&12).unwrap().as_ref());
+        assert_cosine_items_match(&cached_item, batch_items.get(11).unwrap());
+        assert_cosine_items_match(&pending_item, batch_items.get(12).unwrap());
     }
 
     #[test]
@@ -3746,6 +3758,7 @@ mod tests {
                 8,
                 42,
                 &mut mutation_cache,
+                &mut MutationScratch::default(),
             )
             .await
             .unwrap();

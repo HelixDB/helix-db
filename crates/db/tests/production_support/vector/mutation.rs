@@ -173,18 +173,26 @@ fn run_cache_contracts<D: Distance>() {
     assert_eq!(cache.neighbor_count(), 2);
     assert!(cache.contains_neighbor(first));
 
-    assert!(select_layer0_neighbor_prefetch_targets::<D>(&[(4, 1.0)], &cache, 8).is_empty());
-    assert!(
-        select_layer0_neighbor_prefetch_targets::<D>(&[(4, 1.0), (5, 2.0)], &cache, 0).is_empty()
-    );
-    assert_eq!(
+    // Reused buffers hold stale entries, which every selection replaces.
+    let mut ranked = vec![(77, 0.0)];
+    let mut targets = vec![77];
+    let mut select = |admitted: &[(NodeId, f32)], budget| {
         select_layer0_neighbor_prefetch_targets::<D>(
-            &[(2, 0.1), (4, 0.4), (4, 0.4), (5, 0.5), (6, 0.6)],
+            admitted,
             &cache,
-            2,
-        ),
+            budget,
+            &mut ranked,
+            &mut targets,
+        );
+        targets.clone()
+    };
+    assert!(select(&[(4, 1.0)], 8).is_empty());
+    assert!(select(&[(4, 1.0), (5, 2.0)], 0).is_empty());
+    assert_eq!(
+        select(&[(6, 0.6), (4, 0.4), (2, 0.1), (5, 0.5), (4, 0.4)], 2),
         vec![4, 5]
     );
+    assert_eq!(select(&[(6, 0.5), (5, 0.5)], 8), vec![5, 6]);
 
     let missing_row = MutationOpCache::<D>::node_row_id(0, 999);
     cache.mark_neighbor_flushed(missing_row);
@@ -508,6 +516,7 @@ async fn run_neighbor_write_contracts(db: &Db) {
                 0,
                 600,
                 &mut mutation_cache,
+                &mut MutationScratch::default(),
             )
             .await
             .unwrap(),
@@ -575,7 +584,8 @@ async fn run_neighbor_write_contracts(db: &Db) {
     let stored = index
         .load_neighbors_for_mutation(&measured, 0, 1, &mut cache)
         .await
-        .unwrap();
+        .unwrap()
+        .to_vec();
     assert_eq!(
         index
             .load_neighbors_for_mutation(&measured, 0, 1, &mut cache)
@@ -620,12 +630,12 @@ async fn run_neighbor_write_contracts(db: &Db) {
         .await
         .is_err());
     index
-        .stage_new_neighbors_for_mutation(&measured, 0, 700, Vec::new(), &mut cache)
+        .stage_new_neighbors_for_mutation(&measured, 0, 700, &[], &mut cache)
         .await
         .unwrap();
     // A loaded row is staged over and keeps its absent baseline.
     index
-        .stage_new_neighbors_for_mutation(&measured, 0, 700, vec![2], &mut cache)
+        .stage_new_neighbors_for_mutation(&measured, 0, 700, &[2], &mut cache)
         .await
         .unwrap();
     let restaged = cache
@@ -634,11 +644,11 @@ async fn run_neighbor_write_contracts(db: &Db) {
     assert_eq!(restaged.original(), Some(&NeighborRowValue::KnownAbsent));
     assert_eq!(restaged.current(), &neighbors(700, vec![2]));
     assert!(index
-        .stage_neighbors_vec_for_mutation(&measured, 0, 700, vec![700], &mut cache)
+        .stage_neighbors_for_mutation(&measured, 0, 700, &[700], &mut cache)
         .await
         .is_err());
     index
-        .stage_neighbors_vec_for_mutation(&measured, 0, 700, vec![3, 2], &mut cache)
+        .stage_neighbors_for_mutation(&measured, 0, 700, &[3, 2], &mut cache)
         .await
         .unwrap();
 
@@ -687,7 +697,7 @@ async fn run_neighbor_write_contracts(db: &Db) {
 
     let mut malformed_new = MutationOpCache::<Cosine>::with_degree_limits(8, 4).unwrap();
     assert!(index
-        .stage_new_neighbors_for_mutation(&measured, 0, 703, vec![703], &mut malformed_new)
+        .stage_new_neighbors_for_mutation(&measured, 0, 703, &[703], &mut malformed_new)
         .await
         .is_err());
 
@@ -967,6 +977,7 @@ async fn run_graph_delete_contracts(db: &Db) {
             2,
             0,
             &mut corrupt,
+            &mut MutationScratch::default(),
         )
         .await
         .is_err());
@@ -983,17 +994,43 @@ async fn run_graph_delete_contracts(db: &Db) {
     let query = Item::<Cosine>::new(vec![1.0, 0.0, 0.0]);
     let mut cache = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
     let layer0 = index
-        .search_layer_beam(&measured, &query, entry, 0, 4, 999, &mut cache)
+        .search_layer_beam(
+            &measured,
+            &query,
+            entry,
+            0,
+            4,
+            999,
+            &mut cache,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
     assert!(!layer0.is_empty());
     assert!(!index
-        .select_neighbors_heuristic(&txn, &query, &layer0, 2, 0, &mut cache)
+        .select_neighbors_heuristic(
+            &txn,
+            &query,
+            &layer0,
+            2,
+            0,
+            &mut cache,
+            &mut MutationScratch::default()
+        )
         .await
         .unwrap()
         .is_empty());
     assert!(!index
-        .search_layer_beam(&measured, &query, entry, 1, 4, 999, &mut cache)
+        .search_layer_beam(
+            &measured,
+            &query,
+            entry,
+            1,
+            4,
+            999,
+            &mut cache,
+            &mut MutationScratch::default()
+        )
         .await
         .unwrap()
         .is_empty());
@@ -1033,14 +1070,31 @@ async fn run_graph_delete_contracts(db: &Db) {
         .unwrap();
     let mut empty_cache = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
     assert!(empty
-        .search_layer_beam(&measured, &query, 999, 0, 4, 1, &mut empty_cache)
+        .search_layer_beam(
+            &measured,
+            &query,
+            999,
+            0,
+            4,
+            1,
+            &mut empty_cache,
+            &mut MutationScratch::default()
+        )
         .await
         .unwrap()
         .is_empty());
 
     let missing_candidate = [Candidate::try_new(999, 0.5).unwrap()];
     assert!(index
-        .select_neighbors_heuristic(&txn, &query, &missing_candidate, 2, 0, &mut cache,)
+        .select_neighbors_heuristic(
+            &txn,
+            &query,
+            &missing_candidate,
+            2,
+            0,
+            &mut cache,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap()
         .is_empty());
@@ -1062,6 +1116,7 @@ async fn run_graph_delete_contracts(db: &Db) {
             &from_item,
             2,
             &mut missing_destination,
+            &mut MutationScratch::default(),
         )
         .await
         .unwrap();
@@ -1076,14 +1131,32 @@ async fn run_graph_delete_contracts(db: &Db) {
     rows.put_layer0_neighbors(998, &[1, 2]).unwrap();
     let mut existing_link = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
     index
-        .add_bidirectional_link(&measured, 0, 1, 998, &from_item, 2, &mut existing_link)
+        .add_bidirectional_link(
+            &measured,
+            0,
+            1,
+            998,
+            &from_item,
+            2,
+            &mut existing_link,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
 
     rows.put_layer0_neighbors(2, &[3, 997]).unwrap();
     let mut pruned_link = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
     index
-        .add_bidirectional_link(&measured, 0, 1, 2, &from_item, 2, &mut pruned_link)
+        .add_bidirectional_link(
+            &measured,
+            0,
+            1,
+            2,
+            &from_item,
+            2,
+            &mut pruned_link,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
 
@@ -1100,7 +1173,14 @@ async fn run_graph_delete_contracts(db: &Db) {
         .await
         .unwrap();
     index
-        .relink_neighbor(&measured, 6, &candidates, 2, &mut relink)
+        .relink_neighbor(
+            &measured,
+            6,
+            &candidates,
+            2,
+            &mut relink,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
     index
@@ -1110,12 +1190,28 @@ async fn run_graph_delete_contracts(db: &Db) {
 
     let mut empty_delete = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
     assert!(index
-        .delete_from_layer(&measured, 995, 0, 4, &[], &mut empty_delete)
+        .delete_from_layer(
+            &measured,
+            995,
+            0,
+            4,
+            &[],
+            &mut empty_delete,
+            &mut MutationScratch::default()
+        )
         .await
         .unwrap()
         .is_empty());
     assert!(index
-        .delete_from_layer(&measured, 994, 0, 4, &[993], &mut empty_delete)
+        .delete_from_layer(
+            &measured,
+            994,
+            0,
+            4,
+            &[993],
+            &mut empty_delete,
+            &mut MutationScratch::default()
+        )
         .await
         .unwrap()
         .is_empty());
@@ -1129,7 +1225,14 @@ async fn run_graph_delete_contracts(db: &Db) {
         .await
         .unwrap();
     index
-        .relink_neighbor(&measured, 992, &candidates, 4, &mut empty_delete)
+        .relink_neighbor(
+            &measured,
+            992,
+            &candidates,
+            4,
+            &mut empty_delete,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
     txn.rollback();
@@ -1410,11 +1513,13 @@ async fn run_build_session_flush_edge_contract<D: Distance>() {
     let mut cache = MutationOpCache::<D>::with_degree_limits(8, 4).unwrap();
 
     let missing = MutationOpCache::<D>::node_row_id(0, 1);
-    flush_build_session_neighbor(&measured, &identity, &mut cache, missing).unwrap();
+    flush_build_session_neighbor(&measured, &session_keyspace(&identity), &mut cache, missing)
+        .unwrap();
 
     let clean = MutationOpCache::<D>::node_row_id(0, 2);
     cache.install_loaded_neighbor(clean, neighbors(2, vec![3]));
-    flush_build_session_neighbor(&measured, &identity, &mut cache, clean).unwrap();
+    flush_build_session_neighbor(&measured, &session_keyspace(&identity), &mut cache, clean)
+        .unwrap();
 
     let deleted = MutationOpCache::<D>::node_row_id(0, 4);
     cache.install_loaded_neighbor(deleted, neighbors(4, vec![5]));
@@ -1422,7 +1527,8 @@ async fn run_build_session_flush_edge_contract<D: Distance>() {
         .stage_loaded_neighbor(deleted, NeighborRowValue::KnownAbsent)
         .unwrap();
     let before = measured.measurement().unwrap().operations();
-    flush_build_session_neighbor(&measured, &identity, &mut cache, deleted).unwrap();
+    flush_build_session_neighbor(&measured, &session_keyspace(&identity), &mut cache, deleted)
+        .unwrap();
     assert!(!cache.neighbor(deleted).unwrap().is_dirty());
     assert_eq!(
         measured.measurement().unwrap().operations(),
@@ -1435,7 +1541,8 @@ async fn run_build_session_flush_edge_contract<D: Distance>() {
     cache
         .stage_loaded_neighbor(upper, neighbors(6, vec![8, 9]))
         .unwrap();
-    flush_build_session_neighbor(&measured, &identity, &mut cache, upper).unwrap();
+    flush_build_session_neighbor(&measured, &session_keyspace(&identity), &mut cache, upper)
+        .unwrap();
     assert!(!cache.neighbor(upper).unwrap().is_dirty());
 }
 
@@ -1559,7 +1666,7 @@ fn run_build_session_discard_contract() {
     cache.mark_neighbor_flushed(row_2);
     let changed = cache.finish_entity_changes();
     session.restore_cache(existing.clone(), cache);
-    session.record_entity_changes(&existing, 3, changed.into_keys());
+    session.record_entity_changes(&existing, 3, changed);
     let mut created_cache = session.take_cache(&created, 8, 4).unwrap();
     created_cache.put_item(0, 3, None, 8);
     session.restore_cache(created.clone(), created_cache);

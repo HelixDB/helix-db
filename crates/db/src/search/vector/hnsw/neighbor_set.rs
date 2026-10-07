@@ -81,11 +81,14 @@ impl NeighborSet {
     /// Callers producing new graph state must sort explicitly before crossing
     /// this boundary. This makes accidental quadratic membership and unstable
     /// row ordering visible during development rather than hiding it in a codec.
+    /// The set owns `nodes` exactly: a boxed slice is kept as is, and a `Vec`
+    /// whose capacity exceeds its length is shrunk.
     pub(crate) fn try_from_canonical(
         owner: NodeId,
         degree_limit: NeighborDegreeLimit,
-        nodes: Vec<NodeId>,
+        nodes: impl Into<Box<[NodeId]>>,
     ) -> Result<Self, NeighborSetError> {
+        let nodes = nodes.into();
         if nodes.len() > degree_limit.get() {
             return Err(NeighborSetError::DegreeExceeded {
                 limit: degree_limit.get(),
@@ -107,7 +110,7 @@ impl NeighborSet {
         Ok(Self {
             owner,
             degree_limit,
-            nodes: nodes.into_boxed_slice(),
+            nodes,
         })
     }
 
@@ -141,9 +144,21 @@ impl NeighborSet {
         self.nodes.binary_search(&node_id).is_ok()
     }
 
-    /// Copies canonical IDs for algorithms that intentionally build a candidate superset.
-    pub(crate) fn to_vec(&self) -> Vec<NodeId> {
-        self.nodes.to_vec()
+    /// Returns this set without `node_id`, or `None` when it does not hold it.
+    ///
+    /// Removing a member keeps the set canonical and within its degree, so
+    /// the result needs no validation and owns one exactly sized allocation.
+    pub(crate) fn without(&self, node_id: NodeId) -> Option<Self> {
+        let position = self.nodes.binary_search(&node_id).ok()?;
+        Some(Self {
+            owner: self.owner,
+            degree_limit: self.degree_limit,
+            nodes: self.nodes[..position]
+                .iter()
+                .chain(&self.nodes[position + 1..])
+                .copied()
+                .collect(),
+        })
     }
 
     /// Computes removed and added IDs with at most `old.len() + new.len()` comparisons.
@@ -299,6 +314,52 @@ mod tests {
                 actual: 4
             })
         );
+    }
+
+    #[test]
+    fn canonical_construction_accepts_slices_and_vectors_alike() {
+        let from_vec = NeighborSet::try_from_canonical(9, limit(3), vec![1, 2]).unwrap();
+        let from_slice = NeighborSet::try_from_canonical(9, limit(3), &[1_u64, 2][..]).unwrap();
+        assert_eq!(from_vec, from_slice);
+        assert_eq!(
+            NeighborSet::try_from_canonical(9, limit(3), &[2_u64, 1][..]),
+            Err(NeighborSetError::Unsorted)
+        );
+    }
+
+    #[test]
+    fn without_removes_exactly_one_member() {
+        let set = NeighborSet::try_from_canonical(9, limit(3), vec![1, 2, 3]).unwrap();
+        for (removed, rest) in [(1, vec![2, 3]), (2, vec![1, 3]), (3, vec![1, 2])] {
+            let next = set.without(removed).unwrap();
+            assert_eq!(next.as_slice(), rest.as_slice());
+            assert_eq!(
+                next,
+                NeighborSet::try_from_canonical(9, limit(3), rest).unwrap()
+            );
+        }
+        assert!(set.without(4).is_none());
+        assert!(set.without(9).is_none());
+        let single = NeighborSet::try_from_canonical(9, limit(3), vec![5]).unwrap();
+        assert_eq!(single.without(5).unwrap(), NeighborSet::empty(9, limit(3)));
+        assert!(NeighborSet::empty(9, limit(3)).without(5).is_none());
+    }
+
+    proptest::proptest! {
+        /// `without` equals validating the filtered canonical vector.
+        #[test]
+        fn without_matches_filtering_and_revalidating(
+            nodes in proptest::collection::btree_set(0_u64..64, 0..16),
+            removed in 0_u64..64,
+        ) {
+            let nodes = nodes.into_iter().filter(|node| *node != 99).collect::<Vec<_>>();
+            let set = NeighborSet::try_from_canonical(99, limit(16), nodes.clone()).unwrap();
+            let expected = nodes.contains(&removed).then(|| {
+                let rest = nodes.iter().copied().filter(|node| *node != removed).collect::<Vec<_>>();
+                NeighborSet::try_from_canonical(99, limit(16), rest).unwrap()
+            });
+            proptest::prop_assert_eq!(set.without(removed), expected);
+        }
     }
 
     #[test]
