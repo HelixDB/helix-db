@@ -90,6 +90,14 @@ func (d *uniffiDatabase) CypherJson(request []byte) ([]byte, error) {
 	return response, nil
 }
 
+func (d *uniffiDatabase) ExplainCypherJson(request []byte) ([]byte, error) {
+	response, err := d.db.ExplainCypherJson(request)
+	if err != nil {
+		return nil, wrapNativeQueryError(err)
+	}
+	return response, nil
+}
+
 func (d *uniffiDatabase) Close() error {
 	if err := d.db.Close(); err != nil {
 		return wrapNativeQueryError(err)

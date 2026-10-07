@@ -184,10 +184,25 @@ mod protocol_tests {
             "    Given parameters are:\n      | x | (:N) |",
             "    When executing query:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then the result should be empty\n    And the side effects should be:\n      | bogus | 1 |",
             "    When executing query:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then the result should be empty\n    And the side effects should be:\n      | +nodes | x |",
+            "    When executing query:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then the result should be empty\n    And the side effects should be:",
+            "    Given having executed:",
         ] {
             let scenario = test_support::scenario("malformed",body);
             assert!(matches!(execute(&scenario,&mut false,Duration::from_secs(60)).await.unwrap_err().status,Status::HarnessError),"{body}");
         }
+        // A failed statement must leave the graph as it found it; a change
+        // made after it, before its error assertion, is a rollback mismatch.
+        let rollback = test_support::scenario(
+            "rollback",
+            "    When executing query:\n      \"\"\"\n      RETURN 1 / 0\n      \"\"\"\n    And having executed:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then a ArithmeticError should be raised at runtime: DivisionByZero",
+        );
+        assert_eq!(
+            execute(&rollback, &mut false, Duration::from_secs(60))
+                .await
+                .unwrap_err()
+                .reason,
+            "RollbackMismatch"
+        );
         assert!(run(&[], 0).await.is_err());
         assert!(run(&[], 33).await.is_err());
         assert!(run(

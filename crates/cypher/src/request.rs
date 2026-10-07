@@ -66,6 +66,8 @@ impl Request {
         Ok(CompiledRequest {
             query,
             parameters: self.parameters,
+            text: self.query,
+            query_name: self.query_name,
         })
     }
 }
@@ -75,11 +77,14 @@ impl Request {
 /// Construct this only with [`Request::compile`]. It owns no database, catalog
 /// snapshot or transaction. The executor that consumes it obtains the current
 /// request's scoped catalog and resource limits, and checks and admits the
-/// parameters at that boundary.
+/// parameters at that boundary. The source text and query name stay available
+/// for telemetry until [`Self::into_parts`] releases them.
 #[derive(Debug)]
 pub struct CompiledRequest {
     query: r::Query,
     parameters: BTreeMap<String, query::QueryValue>,
+    text: String,
+    query_name: Option<String>,
 }
 
 impl CompiledRequest {
@@ -91,7 +96,18 @@ impl CompiledRequest {
         }
     }
 
-    /// Hand the statement and its unvalidated parameters to an executor.
+    /// The statement as the client sent it.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The client's optional name for this statement.
+    pub fn query_name(&self) -> Option<&str> {
+        self.query_name.as_deref()
+    }
+
+    /// Hand the statement and its unvalidated parameters to an executor,
+    /// releasing the source text.
     pub fn into_parts(self) -> (r::Query, BTreeMap<String, query::QueryValue>) {
         (self.query, self.parameters)
     }

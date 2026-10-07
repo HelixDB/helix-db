@@ -35,6 +35,7 @@ async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollbac
             scope::DataScope::LegacyUnscoped,
             ExecutionControl::unlimited(),
             Limits::default(),
+            None,
         )
         .await
         .unwrap();
@@ -120,6 +121,7 @@ async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollbac
                 scope::DataScope::LegacyUnscoped,
                 control,
                 limits,
+                None,
             )
             .await
             .unwrap_err();
@@ -181,6 +183,7 @@ async fn compiled_requests_obtain_the_execution_catalog_and_tenant_scope() {
             scope::DataScope::LegacyUnscoped,
             ExecutionControl::unlimited(),
             Limits::default(),
+            None,
         )
         .await
         .unwrap();
@@ -206,6 +209,7 @@ async fn compiled_requests_obtain_the_execution_catalog_and_tenant_scope() {
                 scope,
                 ExecutionControl::unlimited(),
                 Limits::default(),
+                None,
             )
             .await
             .unwrap();
@@ -216,6 +220,7 @@ async fn compiled_requests_obtain_the_execution_catalog_and_tenant_scope() {
                 scope,
                 ExecutionControl::unlimited(),
                 Limits::default(),
+                None,
             )
             .await
             .unwrap();

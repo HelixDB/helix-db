@@ -200,6 +200,7 @@ async fn execute_cypher(
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
             db::cypher::Limits::default(),
+            options.metrics_tenant_id.clone(),
         )
         .await;
     match result {

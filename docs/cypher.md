@@ -53,13 +53,21 @@ The existing `POST /v2/query` endpoint continues to accept the native DSL contra
 
 Use an existing configured client and its normal connection lifecycle:
 
-| Client | Method |
-|---|---|
-| TypeScript | `await client.cypher(query, parameters, queryName)` |
-| Rust SDK | `client.cypher(query, parameters, query_name).await` |
-| Go | `client.Cypher(ctx, helix.CypherRequest{Query: query, Parameters: parameters})` |
-| Python | `client.cypher(query, parameters, query_name="example")` |
-| Async Python | `await client.cypher(query, parameters, query_name="example")` |
+| Client | Execute | Explain | With request options |
+|---|---|---|---|
+| TypeScript | `await client.cypher(query, parameters, queryName)` | `await client.explainCypher(...)` | `client.requestBuilder().writerOnly().cypher(...).send()` |
+| Rust SDK | `client.cypher(query, parameters, query_name).await` | `client.explain_cypher(...).await` | `client.request_builder::<()>().writer_only().cypher(...).send().await` |
+| Go | `client.Cypher(ctx, helix.CypherRequest{...})` | `client.ExplainCypher(ctx, ...)` | `client.Cypher(ctx, request, helix.WriterOnly())` |
+| Python | `client.cypher(query, parameters, query_name="example")` | `client.explain_cypher(...)` | `client.cypher(query, writer_only=True)` |
+| Async Python | `await client.cypher(...)` | `await client.explain_cypher(...)` | `await client.cypher(query, writer_only=True)` |
+
+Every client sends its API key and database ID (`withDatabaseId`, `with_database_id`,
+`WithDatabaseID`, `database_id=`) on both Cypher routes; Helix Cloud requires the
+database ID. The options are the same warm, require-writer and await-durable
+options as native queries. A warm-only read that Helix Cloud answers with
+`204 No Content` returns no columns or rows, and its explain returns nothing.
+Embedded clients reject request options and explain through the native
+`explain_cypher_json` binding.
 
 TypeScript and Python default omitted parameters to an empty map. Rust SDK
 parameters are a `BTreeMap<String, serde_json::Value>` and `query_name` is

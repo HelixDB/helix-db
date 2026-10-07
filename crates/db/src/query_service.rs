@@ -45,6 +45,8 @@ impl HelixQueryService {
 
     /// Execute an already compiled Cypher request after transport routing checks.
     /// Catalog acquisition, planning, parameters and transactions use this attempt.
+    /// When anonymous telemetry is on, it records the statement's shape with every
+    /// literal redacted and `tenant_id`, which does not select the storage namespace.
     pub async fn execute_compiled_cypher_json_scoped_controlled(
         &self,
         request: crate::cypher::CompiledRequest,
@@ -52,8 +54,14 @@ impl HelixQueryService {
         scope: DataScope,
         control: ExecutionControl,
         limits: crate::cypher::Limits,
+        tenant_id: Option<query::TenantId>,
     ) -> crate::cypher::Result<crate::cypher::EncodedResponse> {
-        crate::cypher::execute_with::<crate::cypher::output::Json>(
+        let observation = self
+            .query_metrics
+            .as_ref()
+            .and_then(|_| QueryObservation::capture_cypher(&request, tenant_id));
+        let started_at = std::time::Instant::now();
+        let result = crate::cypher::execute_with::<crate::cypher::output::Json>(
             &self.db,
             crate::cypher::Input::Compiled(request),
             scope,
@@ -61,7 +69,16 @@ impl HelixQueryService {
             control,
             limits,
         )
-        .await
+        .await;
+        if let (Some(query_metrics), Some(observation)) = (self.query_metrics.as_ref(), observation)
+        {
+            let _ = query_metrics.record(observation.event(
+                result.as_ref().err().map(cypher_failure_class),
+                None,
+                started_at.elapsed(),
+            ));
+        }
+        result
     }
 
     /// Create a query service.
@@ -231,9 +248,37 @@ pub(crate) async fn execute_query_on_scoped_observed(
         Err(error) => Err(error.into()),
     };
     if let (Some(query_metrics), Some(observation)) = (query_metrics, observation) {
-        let _ = query_metrics.record(observation.event(&result, started_at.elapsed()));
+        let planner_diagnostics = result
+            .as_ref()
+            .ok()
+            .and_then(|response| serde_json::to_value(response.diagnostics()).ok());
+        let _ = query_metrics.record(observation.event(
+            result.as_ref().err().map(QueryServiceError::classify),
+            planner_diagnostics,
+            started_at.elapsed(),
+        ));
     }
     result
+}
+
+/// How telemetry and transports bucket a failed Cypher statement. Database
+/// failures classify exactly as they do for native queries.
+fn cypher_failure_class(error: &crate::cypher::Error) -> QueryFailureClass {
+    use helix_cypher::api::ErrorClass;
+    use helix_planner::relational::ErrorPhase;
+
+    match error {
+        crate::cypher::Error::Query(error) => match (ErrorClass::of(error), error.phase) {
+            (ErrorClass::InvalidQuery, ErrorPhase::Compile) => QueryFailureClass::InvalidRequest,
+            (ErrorClass::InvalidQuery, ErrorPhase::Runtime) | (ErrorClass::ResourceLimit, _) => {
+                QueryFailureClass::Execution
+            }
+            (ErrorClass::WriterRequired, _) => QueryFailureClass::WriterModeRequired,
+            (ErrorClass::Internal, _) => QueryFailureClass::Planning,
+        },
+        crate::cypher::Error::Storage(error) => QueryFailureClass::of_db(error),
+        crate::cypher::Error::Json(_) => QueryFailureClass::Internal,
+    }
 }
 
 struct QueryObservation {
@@ -258,17 +303,39 @@ impl QueryObservation {
         })
     }
 
+    /// Cypher statements record their shape with every literal replaced by `?`.
+    fn capture_cypher(
+        request: &crate::cypher::CompiledRequest,
+        tenant_id: Option<query::TenantId>,
+    ) -> Option<Self> {
+        let shape = helix_cypher::redact_literals(request.text()).ok()?;
+        Some(Self {
+            name: request
+                .query_name()
+                .and_then(|name| query::QueryName::new(name).ok()),
+            raw_query: query::CanonicalQuery::from_telemetry_serializable(
+                &serde_json::json!({ "cypher": shape }),
+            )
+            .ok()?,
+            query_type: match request.request_type() {
+                QueryRequestType::Read => query::QueryType::Read,
+                QueryRequestType::Write => query::QueryType::Write,
+            },
+            tenant_id,
+        })
+    }
+
     fn event(
         self,
-        result: &std::result::Result<QueryResponse, QueryServiceError>,
+        failure: Option<QueryFailureClass>,
+        planner_diagnostics: Option<JsonValue>,
         latency: std::time::Duration,
     ) -> query::QueryEvent {
-        let outcome = match result {
-            Ok(_) => query::QueryOutcome::Succeeded {
+        let outcome = match failure {
+            None => query::QueryOutcome::Succeeded {
                 warnings: Vec::new(),
             },
-            Err(error) => {
-                let class = error.classify();
+            Some(class) => {
                 // Backpressure shares the conflict bucket but not its cause.
                 let message = match class {
                     QueryFailureClass::InvalidRequest => "query request was invalid",
@@ -288,10 +355,6 @@ impl QueryObservation {
                 }
             }
         };
-        let planner_diagnostics = result
-            .as_ref()
-            .ok()
-            .and_then(|response| serde_json::to_value(response.diagnostics()).ok());
         query::QueryEvent::now(
             self.name,
             self.raw_query,
@@ -693,22 +756,34 @@ impl From<QueryFailureClass> for query::QueryErrorType {
     }
 }
 
+impl QueryFailureClass {
+    /// Classify a database failure, whichever query language reached it.
+    fn of_db(error: &HelixDbError) -> Self {
+        if matches!(error, HelixDbError::WriterFencedCommitOutcomeUnknown) {
+            Self::CommitOutcomeUnknown
+        } else if error.is_transaction_conflict() {
+            Self::Conflict
+        } else if error.is_index_backpressure() {
+            Self::Backpressure
+        } else if matches!(error, HelixDbError::Planner(_)) {
+            Self::Planning
+        } else if error.is_invalid_input() {
+            Self::InvalidRequest
+        } else if matches!(error, HelixDbError::WriterModeRequired { .. }) {
+            Self::WriterModeRequired
+        } else {
+            Self::Execution
+        }
+    }
+}
+
 impl QueryServiceError {
     /// Classify this failure for transports and telemetry.
     pub fn classify(&self) -> QueryFailureClass {
         match self {
-            Self::Db(HelixDbError::WriterFencedCommitOutcomeUnknown) => {
-                QueryFailureClass::CommitOutcomeUnknown
-            }
-            Self::Db(error) if error.is_transaction_conflict() => QueryFailureClass::Conflict,
-            Self::Db(error) if error.is_index_backpressure() => QueryFailureClass::Backpressure,
+            Self::Db(error) => QueryFailureClass::of_db(error),
             Self::InvalidRequest(_) => QueryFailureClass::InvalidRequest,
-            Self::Planner(_) | Self::Db(HelixDbError::Planner(_)) => QueryFailureClass::Planning,
-            Self::Db(error) if error.is_invalid_input() => QueryFailureClass::InvalidRequest,
-            Self::Db(HelixDbError::WriterModeRequired { .. }) => {
-                QueryFailureClass::WriterModeRequired
-            }
-            Self::Db(_) => QueryFailureClass::Execution,
+            Self::Planner(_) => QueryFailureClass::Planning,
             Self::JsonSerialize(_) | Self::Serialize(_) => QueryFailureClass::Internal,
         }
     }
@@ -1547,7 +1622,11 @@ mod tests {
         assert!(!public_json.contains("diagnostics"));
 
         let telemetry_event = observation
-            .event(&Ok(response), std::time::Duration::from_micros(42))
+            .event(
+                None,
+                serde_json::to_value(response.diagnostics()).ok(),
+                std::time::Duration::from_micros(42),
+            )
             .into_telemetry()
             .expect("telemetry event");
         assert!(telemetry_event
@@ -2497,6 +2576,81 @@ mod tests {
     }
 
     #[test]
+    fn cypher_observations_record_a_redacted_shape() {
+        let mut request = crate::cypher::Request::new(
+            "CREATE (p:Person {name:'Ada', age:36}) RETURN p.name, $id",
+        );
+        request.query_name = Some("create_person".to_owned());
+        let observation =
+            QueryObservation::capture_cypher(&request.compile().unwrap(), None).unwrap();
+        assert_eq!(
+            observation.raw_query.as_str(),
+            r#"{"cypher":"CREATE ( p : Person { name : ? , age : ? } ) RETURN p . name , $id"}"#
+        );
+        assert_eq!(observation.query_type, query::QueryType::Write);
+        assert_eq!(
+            observation.name,
+            Some(query::QueryName::new("create_person").unwrap())
+        );
+    }
+
+    #[test]
+    fn cypher_failures_classify_like_their_transport_status() {
+        use crate::cypher::Error;
+        use helix_planner::relational::QueryError;
+
+        let cases = [
+            (
+                Error::Query(QueryError::compile("SyntaxError", "Unexpected", "bad")),
+                QueryFailureClass::InvalidRequest,
+            ),
+            (
+                Error::Query(QueryError::runtime(
+                    "ArithmeticError",
+                    "DivisionByZero",
+                    "x",
+                )),
+                QueryFailureClass::Execution,
+            ),
+            (
+                Error::Query(QueryError::runtime("ResourceLimit", "MemoryLimit", "x")),
+                QueryFailureClass::Execution,
+            ),
+            (
+                Error::Query(QueryError::compile(
+                    "AccessModeError",
+                    "WriterRequired",
+                    "x",
+                )),
+                QueryFailureClass::WriterModeRequired,
+            ),
+            (
+                Error::Query(QueryError::compile(
+                    "InternalPlannerError",
+                    "Invariant",
+                    "x",
+                )),
+                QueryFailureClass::Planning,
+            ),
+            (
+                Error::Storage(HelixDbError::WriterFencedCommitOutcomeUnknown),
+                QueryFailureClass::CommitOutcomeUnknown,
+            ),
+            (
+                Error::Storage(HelixDbError::TransactionConflict("retry".to_owned())),
+                QueryFailureClass::Conflict,
+            ),
+            (
+                Error::Json(serde_json::from_str::<u8>("x").unwrap_err()),
+                QueryFailureClass::Internal,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(cypher_failure_class(&error), expected, "{error}");
+        }
+    }
+
+    #[test]
     fn query_failure_classes_map_to_telemetry_error_types() {
         let cases = [
             (
@@ -2615,15 +2769,17 @@ mod tests {
         );
 
         let failed = observation.event(
-            &Err(QueryServiceError::Db(
-                HelixDbError::UniqueConstraintViolation {
+            Some(
+                QueryServiceError::Db(HelixDbError::UniqueConstraintViolation {
                     label: "User".to_owned(),
                     property: "email".to_owned(),
                     value: "\"secret@example.com\"".to_owned(),
                     existing_node_id: 1,
                     attempted_node_id: 2,
-                },
-            )),
+                })
+                .classify(),
+            ),
+            None,
             std::time::Duration::from_micros(1),
         );
         let encoded = serde_json::to_string(
@@ -2641,13 +2797,17 @@ mod tests {
         let rejected = QueryObservation::capture(&request, None)
             .expect("canonical query")
             .event(
-                &Err(QueryServiceError::Db(HelixDbError::IndexBackpressure {
-                    scope: DataScope::LegacyUnscoped,
-                    index_id: 4,
-                    resource: crate::error::IndexBackpressureResource::SuppressedSearchResults,
-                    requested: 810,
-                    limit: 800,
-                })),
+                Some(
+                    QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                        scope: DataScope::LegacyUnscoped,
+                        index_id: 4,
+                        resource: crate::error::IndexBackpressureResource::SuppressedSearchResults,
+                        requested: 810,
+                        limit: 800,
+                    })
+                    .classify(),
+                ),
+                None,
                 std::time::Duration::from_micros(1),
             );
         let query::QueryOutcome::Failed { errors } = &rejected.outcome else {

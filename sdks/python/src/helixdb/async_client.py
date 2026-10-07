@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from . import _client_common
 from ._client_common import (
     HelixError,
     decode_response,
@@ -33,6 +34,7 @@ Timeout = float | httpx.Timeout | None
 class _ServerBackend:
     base_url: str
     api_key: str | None
+    database_id: str | None
     http_client: httpx.AsyncClient
     timeout: Timeout
 
@@ -60,6 +62,7 @@ class _ServerRequestBackend:
     state: _ClientState
     base_url: str
     api_key: str | None
+    database_id: str | None
     http_client: httpx.AsyncClient
     timeout: Timeout
 
@@ -97,6 +100,7 @@ class AsyncClient:
         url: str | None = None,
         *,
         api_key: str | None = None,
+        database_id: str | None = None,
         timeout: Timeout = None,
         limits: httpx.Limits | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -113,6 +117,7 @@ class AsyncClient:
             _ServerBackend(
                 validate_base_url(url),
                 api_key,
+                database_id,
                 httpx.AsyncClient(**client_options),
                 timeout,
             )
@@ -130,6 +135,7 @@ class AsyncClient:
         url: str | None = None,
         *,
         api_key: str | None = None,
+        database_id: str | None = None,
         timeout: Timeout = None,
         limits: httpx.Limits | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -139,6 +145,7 @@ class AsyncClient:
         return cls(
             url,
             api_key=api_key,
+            database_id=database_id,
             timeout=timeout,
             limits=limits,
             transport=transport,
@@ -204,6 +211,19 @@ class AsyncClient:
             raise HelixError.invalid_request("client is closed")
         return self
 
+    def with_database_id(self, database_id: str | None = None) -> "AsyncClient":
+        """Set or clear the ``x-helix-database-id`` header sent on future server requests.
+
+        Helix Cloud gateways require it on native and Cypher query routes.
+        """
+
+        backend = self._state.backend
+        if isinstance(backend, _ServerBackend):
+            self._state.backend = replace(backend, database_id=database_id)
+        elif backend is _ClosedBackend.CLOSED:
+            raise HelixError.invalid_request("client is closed")
+        return self
+
     def _request_backend(self) -> _RequestBackend:
         backend = self._state.backend
         if isinstance(backend, _ServerBackend):
@@ -211,6 +231,7 @@ class AsyncClient:
                 self._state,
                 backend.base_url,
                 backend.api_key,
+                backend.database_id,
                 backend.http_client,
                 backend.timeout,
             )
@@ -235,40 +256,76 @@ class AsyncClient:
         *,
         query_name: str | None = None,
         timeout: Timeout = None,
+        **options: Any,
     ) -> Any:
-        """Execute Cypher with the existing owned asynchronous transport."""
-        from urllib.parse import urljoin
+        """Execute Cypher with the existing owned asynchronous transport.
 
-        from ._client_common import serialize_cypher
+        ``options`` are the ``execute`` routing options: ``writer_only``,
+        ``warm_only``, and ``await_durability``. Embedded mode rejects them.
+        """
 
+        return await self._cypher(
+            _client_common.CypherRoute.EXECUTE, query, parameters, query_name, timeout, options
+        )
+
+    async def explain_cypher(
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        query_name: str | None = None,
+        timeout: Timeout = None,
+        **options: Any,
+    ) -> Any:
+        """Plan Cypher without executing it and return the explain JSON object.
+
+        Accepts the same arguments and routing options as :meth:`cypher`.
+        """
+
+        return await self._cypher(
+            _client_common.CypherRoute.EXPLAIN, query, parameters, query_name, timeout, options
+        )
+
+    async def _cypher(
+        self,
+        route: _client_common.CypherRoute,
+        query: str,
+        parameters: dict[str, Any] | None,
+        query_name: str | None,
+        timeout: Timeout,
+        options: dict[str, Any],
+    ) -> Any:
         backend = self._request_backend()
-        body = serialize_cypher(query, parameters, query_name)
+        body = _client_common.serialize_cypher(query, parameters, query_name)
+        parsed = parse_execute_options(
+            options, embedded=isinstance(backend, _EmbeddedRequestBackend)
+        )
         if isinstance(backend, _EmbeddedRequestBackend):
-            if not hasattr(backend.native, "cypher_json"):
-                raise HelixError(
-                    "EmbeddedUnavailable", "rebuild native bindings with Cypher support"
-                )
+            native_method = getattr(backend.native, route.native_method, None)
+            if native_method is None:
+                raise HelixError("EmbeddedUnavailable", route.unavailable)
             try:
-                return decode_response(bytes(await backend.native.cypher_json(body)))
+                response = await native_method(body)
             except Exception as exc:
                 raise HelixError.from_embedded(exc) from exc
-        headers = {"content-type": "application/json"}
-        if backend.api_key:
-            headers["authorization"] = "Bearer " + backend.api_key
+            return decode_response(bytes(response))
+        prepared = _client_common.prepare_cypher_request(
+            backend.base_url, backend.api_key, backend.database_id, route, body, parsed
+        )
         try:
             async with backend.http_client.stream(
                 "POST",
-                urljoin(backend.base_url, "/v2/cypher"),
-                headers=headers,
-                content=body,
+                prepared.url,
+                headers=prepared.header_map(),
+                content=prepared.body,
                 timeout=backend.timeout if timeout is None else timeout,
             ) as response:
                 data = await response.aread()
-                if response.status_code != 200:
+                if response.status_code not in {200, 204}:
                     raise remote_error(
                         data, response.reason_phrase, status_code=response.status_code
                     )
-                return decode_response(data)
+                return route.decode(response.status_code, data)
         except httpx.RequestError as exc:
             raise HelixError.network(str(exc), cause=exc) from exc
 
@@ -393,6 +450,7 @@ class AsyncQueryExecutionRequest:
             self._backend.api_key,
             dict(self._headers),
             self._query,
+            self._backend.database_id,
         )
         request_timeout = self._backend.timeout if timeout is None else timeout
         try:

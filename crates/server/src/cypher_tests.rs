@@ -515,3 +515,67 @@ async fn cypher_rejects_malformed_bodies_and_options_before_executing() {
     assert_eq!(value["rows"], json!([[0]]));
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn cypher_executions_emit_anonymous_query_telemetry() {
+    let db = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemory {
+            database: "cypher-telemetry".into(),
+        })
+        .await
+        .unwrap(),
+    );
+    let identity =
+        helix_metrics::query::OssIdentity::new(helix_metrics::query::InstallationId::now(), None);
+    // An unroutable endpoint: events are counted when queued, never delivered.
+    let started = helix_metrics::query::transport::start(
+        helix_metrics::telemetry::Source::Server,
+        &identity,
+        "http://127.0.0.1:9",
+    )
+    .unwrap();
+    let state = state::ServerState::new(Arc::clone(&db), Some(started.recorder.clone()));
+    let router = http::router(state.clone());
+    let grpc = grpc::GrpcService::new(state);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v2/cypher")
+                .header(crate::TENANT_ID_HEADER_NAME, "tenant-1")
+                .body(Body::from(
+                    json!({"query":"CREATE (:Logged {secret:'value'})","query_name":"log"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut failing = tonic::Request::new(grpc::pb::QueryJsonRequest {
+        body: json!({"query":"WITH 1 AS x RETURN 1 / (x - x)"})
+            .to_string()
+            .into_bytes()
+            .into(),
+        ..Default::default()
+    });
+    failing.metadata_mut().insert(
+        crate::TENANT_ID_HEADER_NAME,
+        "tenant-1".parse().expect("valid metadata"),
+    );
+    let error = grpc.execute_cypher(failing).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    // A statement that fails to compile never reaches execution or telemetry.
+    grpc.execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
+        body: json!({"query":"RETURN ("}).to_string().into_bytes().into(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap_err();
+
+    assert_eq!(started.recorder.counters().emitted_events, 2);
+    drop(router);
+    drop(grpc);
+    started.runtime.shutdown().await;
+    db.close().await.unwrap();
+}

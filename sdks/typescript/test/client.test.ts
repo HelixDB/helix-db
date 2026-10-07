@@ -104,12 +104,16 @@ async function withFakeNativeModule<T>(run: (moduleUrl: string) => Promise<T>): 
     `
 export const calls = [];
 export const queryBodies = [];
+export const cypherBodies = [];
 let closed = false;
 let queryError;
+const missingMethods = new Set();
 export const wasClosed = () => closed;
 export const setQueryError = (error, msg) => {
   queryError = { error, msg };
 };
+// Simulate an older native package; applies to handles opened afterwards.
+export const removeMethod = (name) => missingMethods.add(name);
 
 export const HelixDbSource = {
   InMemory: (database) => ({ variant: "InMemory", database }),
@@ -138,16 +142,30 @@ export const EmbeddedCacheMode = {
 };
 
 function handle() {
-  return {
+  const native = {
     async query_json(request) {
       queryBodies.push(new TextDecoder().decode(request));
       if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
       return new TextEncoder().encode('{"users":0}');
     },
+    // Both Cypher methods read instance state through \`this\`, like UniFFI handles.
+    marker: "native-handle",
+    async cypher_json(request) {
+      cypherBodies.push(["cypher", this.marker, new TextDecoder().decode(request)]);
+      if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
+      return new TextEncoder().encode('{"columns":["x"],"rows":[[1]]}');
+    },
+    async explain_cypher_json(request) {
+      cypherBodies.push(["explain", this.marker, new TextDecoder().decode(request)]);
+      if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
+      return new TextEncoder().encode('{"effect":"Write","operators":[{"position":0}],"notices":[]}');
+    },
     async close() {
       closed = true;
     },
   };
+  for (const name of missingMethods) delete native[name];
+  return native;
 }
 
 export const HelixDB = {
@@ -558,17 +576,23 @@ await withFakeNativeModule(async () => {
   );
 });
 
-console.log("client.test.ts passed");
+// ---- Cypher over HTTP -------------------------------------------------------
 
 {
   const result = { columns: ["x"], rows: [[{ $type: "integer", value: "9223372036854775807" }]] };
   const server = await spawnCaptureServer({ body: JSON.stringify(result) });
   try {
-    const client = new Client(server.base).withApiKey("local-test");
+    const client = new Client(server.base).withApiKey("local-test").withDatabaseId("db_cypher");
     assert.deepEqual(await client.cypher("RETURN $x AS x", { x: 9223372036854775807n, f: Infinity }, "parameter"), result);
     const request = await server.captured;
+    assert.equal(request.method, "POST");
     assert.equal(request.path, "/v2/cypher");
+    assert.equal(request.headers["content-type"], "application/json");
     assert.equal(request.headers.authorization, "Bearer local-test");
+    assert.equal(request.headers["x-helix-database-id"], "db_cypher");
+    for (const option of ["x-helix-warm", "x-helix-require-writer", "x-helix-await-durable"]) {
+      assert.equal(request.headers[option], undefined);
+    }
     assert.deepEqual(JSON.parse(request.body), {
       query: "RETURN $x AS x",
       parameters: { x: { $type: "integer", value: "9223372036854775807" }, f: { $type: "float", value: "Infinity" } },
@@ -579,3 +603,292 @@ console.log("client.test.ts passed");
     await server.close();
   }
 }
+
+{
+  const result = { columns: ["n"], rows: [[{ $type: "node", id: "1", labels: ["User"], properties: { name: "Ada" } }]] };
+  const server = await spawnCaptureServer({ body: JSON.stringify(result) });
+  try {
+    const client = new Client(server.base).withApiKey("hx_secret").withDatabaseId("db_writer");
+    const response = await client
+      .requestBuilder()
+      .writerOnly()
+      .shouldAwaitDurability(true)
+      .cypher("CREATE (n:User {name: $name}) RETURN n", { name: "Ada" }, "create_user")
+      .send();
+    const request = await server.captured;
+    assert.deepEqual(response, result);
+    assert.equal(request.path, "/v2/cypher");
+    assert.equal(request.headers.authorization, "Bearer hx_secret");
+    assert.equal(request.headers["x-helix-database-id"], "db_writer");
+    assert.equal(request.headers["x-helix-require-writer"], "true");
+    assert.equal(request.headers["x-helix-await-durable"], "true");
+    assert.equal(request.headers["x-helix-warm"], undefined);
+    assert.deepEqual(JSON.parse(request.body), {
+      query: "CREATE (n:User {name: $name}) RETURN n",
+      parameters: { name: "Ada" },
+      query_name: "create_user",
+    });
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  // The explanation is returned as the server encoded it, including untyped planner fields.
+  const explanation = {
+    effect: "Read",
+    bindings: [{ name: "n" }],
+    returns: [["n", 0]],
+    operators: [{ position: 0, blocking: [] }],
+    planner: { candidates: 1 },
+    notices: [{ kind: "buffered_response" }],
+  };
+  const server = await spawnCaptureServer({ body: JSON.stringify(explanation) });
+  try {
+    const client = new Client(server.base).withApiKey("hx_secret").withDatabaseId("db_reader");
+    const response = await client
+      .requestBuilder()
+      .warmOnly()
+      .cypher("MATCH (n:User) WHERE n.score > $min RETURN n", { min: 9007199254740993n }, "explain_users")
+      .explain();
+    const request = await server.captured;
+    assert.deepEqual(response, explanation);
+    assert.equal(response.effect, "Read");
+    assert.equal(request.method, "POST");
+    assert.equal(request.path, "/v2/cypher/explain");
+    assert.equal(request.headers["content-type"], "application/json");
+    assert.equal(request.headers.authorization, "Bearer hx_secret");
+    assert.equal(request.headers["x-helix-database-id"], "db_reader");
+    assert.equal(request.headers["x-helix-warm"], "true");
+    assert.deepEqual(JSON.parse(request.body), {
+      query: "MATCH (n:User) WHERE n.score > $min RETURN n",
+      parameters: { min: { $type: "integer", value: "9007199254740993" } },
+      query_name: "explain_users",
+    });
+    assert.equal(server.requestCount(), 1);
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const explanation = { effect: "Write", operators: [] };
+  const server = await spawnCaptureServer({ body: JSON.stringify(explanation) });
+  try {
+    const client = new Client(server.base).withDatabaseId("db_plain");
+    assert.deepEqual(await client.explainCypher("CREATE (:User)"), explanation);
+    const request = await server.captured;
+    assert.equal(request.path, "/v2/cypher/explain");
+    assert.equal(request.headers.authorization, undefined);
+    assert.equal(request.headers["x-helix-database-id"], "db_plain");
+    // Omitted parameters default to an empty map and an absent name is not sent.
+    assert.deepEqual(JSON.parse(request.body), { query: "CREATE (:User)", parameters: {} });
+  } finally {
+    await server.close();
+  }
+}
+
+// ---- Cloud warm 204 is a successful Cypher response without a payload -------
+
+{
+  const server = await spawnCaptureServer({ status: 204, body: "" });
+  try {
+    const client = new Client(server.base).withDatabaseId("db_warm");
+    const response = await client.requestBuilder().warmOnly().cypher("MATCH (u:User) RETURN u").send();
+    const request = await server.captured;
+    assert.deepEqual(response, { columns: [], rows: [] });
+    assert.equal(request.path, "/v2/cypher");
+    assert.equal(request.headers["x-helix-warm"], "true");
+    assert.equal(request.headers["x-helix-database-id"], "db_warm");
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const server = await spawnCaptureServer({ status: 204, body: "" });
+  try {
+    const client = new Client(server.base).withDatabaseId("db_warm");
+    const response = await client.requestBuilder().warmOnly().cypher("MATCH (u:User) RETURN u").explain();
+    const request = await server.captured;
+    assert.equal(response, undefined);
+    assert.equal(request.path, "/v2/cypher/explain");
+    assert.equal(request.headers["x-helix-warm"], "true");
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  // `explainCypher` sends no warm option, so a payload-less 204 breaks the explain contract.
+  const server = await spawnCaptureServer({ status: 204, body: "" });
+  try {
+    await assert.rejects(
+      new Client(server.base).explainCypher("MATCH (u:User) RETURN u"),
+      (error: unknown) => error instanceof HelixError && error.kind === "Remote" && error.statusCode === 204,
+    );
+    assert.equal((await server.captured).headers["x-helix-warm"], undefined);
+  } finally {
+    await server.close();
+  }
+}
+
+for (const explain of [false, true]) {
+  const body = JSON.stringify({
+    error: "SyntaxError",
+    msg: "parameter name cannot be empty",
+    details: { detail: "InvalidParameter", phase: "compile", span: null },
+  });
+  const server = await spawnCaptureServer({ status: 400, body });
+  try {
+    const request = new Client(server.base).requestBuilder().cypher("RETURN $x AS x", { "": 1 });
+    await assert.rejects(
+      explain ? request.explain() : request.send(),
+      (error: unknown) =>
+        error instanceof HelixError &&
+        error.kind === "Remote" &&
+        error.statusCode === 400 &&
+        error.code === "SyntaxError" &&
+        error.serverMessage === "parameter name cannot be empty" &&
+        error.rawBody === body &&
+        !error.isRetryable(),
+    );
+    assert.equal((await server.captured).path, explain ? "/v2/cypher/explain" : "/v2/cypher");
+    assert.equal(server.requestCount(), 1);
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const body = '{"error":"tenant_id_required","msg":"x-helix-database-id is required"}';
+  const server = await spawnCaptureServer({ status: 400, body });
+  try {
+    await assert.rejects(
+      new Client(server.base).explainCypher("RETURN 1 AS x"),
+      (error: unknown) => error instanceof HelixError && error.kind === "Remote" && error.code === "tenant_id_required",
+    );
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const server = await spawnCaptureServer({ body: "not JSON" });
+  try {
+    await assert.rejects(
+      new Client(server.base).explainCypher("RETURN 1 AS x"),
+      (error: unknown) => error instanceof HelixError && error.kind === "Serialization",
+    );
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const client = new Client("http://127.0.0.1:1");
+  await assert.rejects(
+    client.explainCypher("RETURN 1 AS x"),
+    (error: unknown) =>
+      error instanceof HelixError && error.kind === "Network" && error.message.includes("http://127.0.0.1:1/v2/cypher/explain"),
+  );
+
+  // Request serialization fails before any transport is attempted.
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  for (const run of [() => client.cypher("RETURN $x AS x", { x: cyclic }), () => client.explainCypher("RETURN $x AS x", { x: cyclic })]) {
+    await assert.rejects(run(), (error: unknown) => error instanceof HelixError && error.kind === "Serialization");
+  }
+}
+
+// ---- Cypher embedded --------------------------------------------------------
+
+type FakeNative = {
+  cypherBodies: [string, string, string][];
+  setQueryError: (error: string, msg: string) => void;
+  removeMethod: (name: string) => void;
+};
+
+await withFakeNativeModule(async (moduleUrl) => {
+  const native = (await import(moduleUrl)) as FakeNative;
+  const client = await Client.embedded({ kind: "inMemory", database: "ts-sdk-cypher" });
+
+  assert.deepEqual(await client.cypher("RETURN $x AS x", { x: 1 }, "embedded"), { columns: ["x"], rows: [[1]] });
+  assert.deepEqual(await client.requestBuilder().cypher("CREATE (:User)", { big: -9007199254740993n }).explain(), {
+    effect: "Write",
+    operators: [{ position: 0 }],
+    notices: [],
+  });
+  assert.deepEqual(await client.explainCypher("RETURN 1 AS x"), { effect: "Write", operators: [{ position: 0 }], notices: [] });
+  assert.deepEqual(
+    native.cypherBodies.map(([method, marker, body]) => [method, marker, JSON.parse(body)]),
+    [
+      ["cypher", "native-handle", { query: "RETURN $x AS x", parameters: { x: 1 }, query_name: "embedded" }],
+      ["explain", "native-handle", { query: "CREATE (:User)", parameters: { big: { $type: "integer", value: "-9007199254740993" } } }],
+      ["explain", "native-handle", { query: "RETURN 1 AS x", parameters: {} }],
+    ],
+  );
+
+  // Server request options are rejected before reaching the native handle.
+  for (const [builder, option] of [
+    [client.requestBuilder().writerOnly(), "x-helix-require-writer"],
+    [client.requestBuilder().warmOnly(), "x-helix-warm"],
+    [client.requestBuilder().shouldAwaitDurability(false), "x-helix-await-durable"],
+  ] as const) {
+    for (const run of [() => builder.cypher("RETURN 1 AS x").send(), () => builder.cypher("RETURN 1 AS x").explain()]) {
+      await assert.rejects(
+        run(),
+        (error: unknown) =>
+          error instanceof HelixError &&
+          error.kind === "InvalidRequest" &&
+          error.details === `embedded queries do not support server request options: ${option}`,
+      );
+    }
+  }
+  assert.equal(native.cypherBodies.length, 3);
+
+  native.setQueryError("SyntaxError", "unexpected token");
+  for (const run of [() => client.cypher("RETURN"), () => client.explainCypher("RETURN")]) {
+    await assert.rejects(
+      run(),
+      (error: unknown) =>
+        error instanceof HelixError && error.kind === "Embedded" && error.code === "SyntaxError" && error.details === "unexpected token",
+    );
+  }
+  await client.close();
+});
+
+await withFakeNativeModule(async (moduleUrl) => {
+  const native = (await import(moduleUrl)) as FakeNative;
+  native.removeMethod("explain_cypher_json");
+  const client = await Client.embedded({ kind: "inMemory", database: "ts-sdk-cypher-no-explain" });
+
+  assert.deepEqual(await client.cypher("RETURN 1 AS x"), { columns: ["x"], rows: [[1]] });
+  await assert.rejects(
+    client.explainCypher("RETURN 1 AS x"),
+    (error: unknown) =>
+      error instanceof HelixError &&
+      error.kind === "EmbeddedUnavailable" &&
+      error.details === "rebuild native bindings with Cypher explain support",
+  );
+  await client.close();
+});
+
+await withFakeNativeModule(async (moduleUrl) => {
+  const native = (await import(moduleUrl)) as FakeNative;
+  native.removeMethod("cypher_json");
+  native.removeMethod("explain_cypher_json");
+  const client = await Client.embedded({ kind: "inMemory", database: "ts-sdk-no-cypher" });
+
+  await assert.rejects(
+    client.cypher("RETURN 1 AS x"),
+    (error: unknown) =>
+      error instanceof HelixError &&
+      error.kind === "EmbeddedUnavailable" &&
+      error.details === "rebuild native bindings with Cypher support",
+  );
+  assert.deepEqual(native.cypherBodies, []);
+  await client.close();
+});
+
+console.log("client.test.ts passed");

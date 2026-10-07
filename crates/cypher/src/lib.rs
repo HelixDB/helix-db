@@ -43,6 +43,36 @@ pub fn resolve(
     bind::resolve(statement)
 }
 
+/// A statement's shape without its values, for telemetry: every string and
+/// number literal becomes `?`, comments are dropped, and the remaining tokens
+/// (keywords, names, parameters and punctuation) are joined by single spaces.
+///
+/// ```
+/// let shape = helix_cypher::redact_literals(
+///     "MATCH (p:Person {name:'Ada'}) /* note */ WHERE p.age > 30 RETURN p.name, $limit",
+/// )?;
+/// assert_eq!(
+///     shape,
+///     "MATCH ( p : Person { name : ? } ) WHERE p . age > ? RETURN p . name , $limit",
+/// );
+/// # Ok::<(), helix_cypher::QueryError>(())
+/// ```
+pub fn redact_literals(text: &str) -> Result<String, QueryError> {
+    Ok(lexer::lex(text)?
+        .iter()
+        .filter_map(|token| match token.kind {
+            lexer::Kind::String(_) | lexer::Kind::Number(_) => Some("?"),
+            lexer::Kind::Word(_)
+            | lexer::Kind::Escaped(_)
+            | lexer::Kind::Parameter(_)
+            | lexer::Kind::Symbol(_)
+            | lexer::Kind::Pattern(_) => Some(&text[token.span.start..token.span.end]),
+            lexer::Kind::End => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
 /// Compile Cypher into the shared logical query contract.
 ///
 /// ```

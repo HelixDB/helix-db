@@ -27,15 +27,28 @@ QUERY_PATH = _client_common.QUERY_PATH
 class Client:
     """Synchronous client for running queries against HelixDB."""
 
-    def __init__(self, url: str | None = None, *, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        url: str | None = None,
+        *,
+        api_key: str | None = None,
+        database_id: str | None = None,
+    ) -> None:
         self._mode: Literal["server", "embedded"] = "server"
         self._base_url = validate_base_url(url)
         self._api_key = api_key
+        self._database_id = database_id
         self._native: Any | None = None
 
     @classmethod
-    def server(cls, url: str | None = None, *, api_key: str | None = None) -> "Client":
-        return cls(url, api_key=api_key)
+    def server(
+        cls,
+        url: str | None = None,
+        *,
+        api_key: str | None = None,
+        database_id: str | None = None,
+    ) -> "Client":
+        return cls(url, api_key=api_key, database_id=database_id)
 
     @classmethod
     def embedded(
@@ -88,8 +101,18 @@ class Client:
             self._api_key = api_key
         return self
 
+    def with_database_id(self, database_id: str | None = None) -> "Client":
+        """Set or clear the ``x-helix-database-id`` header sent on every request.
+
+        Helix Cloud gateways require it on native and Cypher query routes.
+        """
+
+        if self._mode == "server":
+            self._database_id = database_id
+        return self
+
     def request_builder(self) -> "QueryBuilder":
-        return QueryBuilder(self._base_url, self._api_key)
+        return QueryBuilder(self._base_url, self._api_key, _database_id=self._database_id)
 
     def query(self, request: QueryRequest | None = None) -> Any:
         if request is None:
@@ -139,29 +162,67 @@ class Client:
         *,
         query_name: str | None = None,
         timeout: float = 30,
+        **options: Any,
     ) -> Any:
-        """Execute Cypher and retain lossless tagged values in rectangular rows."""
+        """Execute Cypher and retain lossless tagged values in rectangular rows.
+
+        ``options`` are the ``execute`` routing options: ``writer_only``,
+        ``warm_only``, and ``await_durability``. Embedded mode rejects them.
+        """
+
+        return self._cypher(
+            _client_common.CypherRoute.EXECUTE, query, parameters, query_name, timeout, options
+        )
+
+    def explain_cypher(
+        self,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        query_name: str | None = None,
+        timeout: float = 30,
+        **options: Any,
+    ) -> Any:
+        """Plan Cypher without executing it and return the explain JSON object.
+
+        Accepts the same arguments and routing options as :meth:`cypher`.
+        """
+
+        return self._cypher(
+            _client_common.CypherRoute.EXPLAIN, query, parameters, query_name, timeout, options
+        )
+
+    def _cypher(
+        self,
+        route: _client_common.CypherRoute,
+        query: str,
+        parameters: dict[str, Any] | None,
+        query_name: str | None,
+        timeout: float,
+        options: dict[str, Any],
+    ) -> Any:
         body = _client_common.serialize_cypher(query, parameters, query_name)
+        parsed = parse_execute_options(options, embedded=self._mode == "embedded")
         if self._mode == "embedded":
-            if self._native is None or not hasattr(self._native, "cypher_json"):
-                raise HelixError(
-                    "EmbeddedUnavailable", "rebuild native bindings with Cypher support"
-                )
+            native_method = getattr(self._native, route.native_method, None)
+            if native_method is None:
+                raise HelixError("EmbeddedUnavailable", route.unavailable)
             try:
-                return decode_response(bytes(_run_native(self._native.cypher_json(body))))
+                response = _run_native(native_method(body))
+            except HelixError:
+                raise
             except Exception as exc:
                 raise HelixError.from_embedded(exc) from exc
-        from urllib.parse import urljoin
-
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = "Bearer " + self._api_key
+            return decode_response(bytes(response))
+        prepared = _client_common.prepare_cypher_request(
+            self._base_url, self._api_key, self._database_id, route, body, parsed
+        )
         request = Request(
-            urljoin(self._base_url, "/v2/cypher"), data=body, headers=headers, method="POST"
+            prepared.url, data=prepared.body, headers=prepared.header_map(), method="POST"
         )
         try:
             with urlopen(request, timeout=timeout) as response:
-                return decode_response(response.read())
+                return route.decode(response.getcode(), response.read())
         except HTTPError as exc:
             raise remote_error(exc.read(), str(exc.reason), status_code=exc.code) from exc
         except (URLError, TimeoutError) as exc:
@@ -248,6 +309,7 @@ class QueryBuilder:
     _base_url: str
     _api_key: str | None = None
     _headers: dict[str, str] | None = None
+    _database_id: str | None = None
 
     def __post_init__(self) -> None:
         if self._headers is None:
@@ -271,6 +333,7 @@ class QueryBuilder:
             api_key=self._api_key,
             headers=dict(self._headers or {}),
             query=query,
+            database_id=self._database_id,
         )
 
 
@@ -280,9 +343,12 @@ class QueryExecutionRequest:
     api_key: str | None
     headers: dict[str, str]
     query: QueryRequest
+    database_id: str | None = None
 
     def send_bytes(self) -> bytes:
-        prepared = prepare_request(self.base_url, self.api_key, self.headers, self.query)
+        prepared = prepare_request(
+            self.base_url, self.api_key, self.headers, self.query, self.database_id
+        )
         request = Request(
             prepared.url,
             data=prepared.body,

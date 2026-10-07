@@ -175,3 +175,46 @@ fn request_bodies_reject_unknown_fields_and_default_optional_ones() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn compiled_requests_keep_their_text_and_name_until_released() {
+    let mut request = Request::new("RETURN 1 AS one");
+    request.query_name = Some("one".into());
+    let compiled = request.compile().unwrap();
+    assert_eq!(compiled.text(), "RETURN 1 AS one");
+    assert_eq!(compiled.query_name(), Some("one"));
+    let (query, parameters) = compiled.into_parts();
+    assert_eq!(query.returns()[0].0, "one");
+    assert!(parameters.is_empty());
+}
+
+#[test]
+fn telemetry_shapes_redact_every_literal_and_drop_comments() {
+    for (text, shape) in [
+        (
+            "CREATE (:Person {name:'O\\'Brien', `full name`: \"Ada\", age: 36, score: -1.5e3})",
+            "CREATE ( : Person { name : ? , `full name` : ? , age : ? , score : - ? } )",
+        ),
+        (
+            "MATCH (a)-[:KNOWS*1..3]->(b) // trailing note\nRETURN $`a b`, $limit, [1, 2], 0x1F",
+            "MATCH ( a ) - [ : KNOWS * ? .. ? ] - > ( b ) RETURN $`a b` , $limit , [ ? , ? ] , ?",
+        ),
+        (
+            "/* only a comment */ RETURN true, null",
+            "RETURN true , null",
+        ),
+        ("", ""),
+    ] {
+        assert_eq!(
+            helix_cypher::redact_literals(text).unwrap(),
+            shape,
+            "{text}"
+        );
+    }
+    assert_eq!(
+        helix_cypher::redact_literals("RETURN 'unterminated")
+            .unwrap_err()
+            .category,
+        "SyntaxError"
+    );
+}

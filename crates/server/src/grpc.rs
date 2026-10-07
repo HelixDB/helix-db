@@ -62,6 +62,12 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
+        let metrics_tenant_id = crate::query_metrics_tenant_id(
+            request
+                .metadata()
+                .get(crate::TENANT_ID_HEADER_NAME)
+                .and_then(|value| value.to_str().ok()),
+        );
         let request = request.into_inner();
         let query = cypher_request(&request.body)?
             .compile()
@@ -82,6 +88,7 @@ impl HelixDbServer for GrpcService {
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
                 db::cypher::Limits::default(),
+                metrics_tenant_id,
             )
             .await
             .map_err(cypher_status)?;
