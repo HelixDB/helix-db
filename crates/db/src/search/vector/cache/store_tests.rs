@@ -305,7 +305,7 @@ async fn unbounded_hydration_returns_every_row_byte_for_byte() {
 }
 
 /// Every bounded hydration admits an exact scan-order prefix and never charges
-/// more than its budget; a generous budget admits every row.
+/// more than its budget; a budget of the unbounded charge admits every row.
 #[tokio::test]
 async fn bounded_hydration_admits_an_exact_scan_prefix_within_budget() {
     let fixture = HydrationFixture::build("store_oracle_bounded", 1_024).await;
@@ -344,8 +344,13 @@ async fn bounded_hydration_admits_an_exact_scan_prefix_within_budget() {
         if budget == 0 {
             assert_eq!(summary.loaded_entries, 0);
         }
-        if budget == generous {
-            assert_eq!(summary.loaded_entries, fixture.rows.len());
+        if budget >= full.estimated_bytes {
+            assert_eq!(
+                summary.loaded_entries,
+                fixture.rows.len(),
+                "budget {budget}"
+            );
+            assert_eq!(summary.estimated_bytes, full.estimated_bytes);
         }
         fixture
             .prefix_model(summary.loaded_entries)
