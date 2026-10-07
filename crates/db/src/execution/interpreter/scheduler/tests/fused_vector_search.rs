@@ -101,18 +101,19 @@ enum Run {
     StepByStep,
 }
 
-/// Runs `plan` in a read view and returns its bound `hits` and `others`, and
-/// the work it counted.
+/// Runs `plan` with `params` in a read view and returns its bound `hits` and
+/// `others`, and the work it counted.
 async fn run(
     db: &HelixDB,
     plan: &exec::ExecutablePlan,
+    params: context::ParamBindings,
     budget: Option<crate::query_resources::Budget>,
     how: Run,
 ) -> (
     Result<Vec<ExecutionValue>>,
     crate::execution::interpreter::pull::metrics::WorkSnapshot,
 ) {
-    let mut ctx = ExecutionContext::new(db, context::ParamBindings::default());
+    let mut ctx = ExecutionContext::new(db, params);
     ctx.enable_request_read_view().await.unwrap();
     ctx.row_memory = budget;
     let ran = match how {
@@ -293,8 +294,22 @@ async fn fused_searches_match_their_steps_for_every_index_set() {
         assert!(kind(access), "{name}: {:#?}", plan.steps());
         let pulls_rows = !matches!(access, exec::ExecNodeAccessPlan::SecondarySet { .. });
 
-        let (fused, fused_work) = run(&db, &plan, None, Run::Scheduled).await;
-        let (unfused, unfused_work) = run(&db, &plan, None, Run::StepByStep).await;
+        let (fused, fused_work) = run(
+            &db,
+            &plan,
+            context::ParamBindings::default(),
+            None,
+            Run::Scheduled,
+        )
+        .await;
+        let (unfused, unfused_work) = run(
+            &db,
+            &plan,
+            context::ParamBindings::default(),
+            None,
+            Run::StepByStep,
+        )
+        .await;
         let fused = fused.unwrap();
         assert_eq!(fused, unfused.unwrap(), "{name}");
         assert_hits(&fused[0], &ids, ranks);
@@ -353,15 +368,124 @@ async fn fused_searches_see_deleted_and_updated_nodes() {
     ] {
         let plan = plan_read(&db, &search(source, 4)).await;
         fused_access(&plan);
-        let (fused, work) = run(&db, &plan, None, Run::Scheduled).await;
+        let (fused, work) = run(
+            &db,
+            &plan,
+            context::ParamBindings::default(),
+            None,
+            Run::Scheduled,
+        )
+        .await;
         let fused = fused.unwrap();
         assert_eq!(work.fused_vector_searches, 1);
         assert_eq!(
             fused,
-            run(&db, &plan, None, Run::StepByStep).await.0.unwrap()
+            run(
+                &db,
+                &plan,
+                context::ParamBindings::default(),
+                None,
+                Run::StepByStep
+            )
+            .await
+            .0
+            .unwrap()
         );
         assert_hits(&fused[0], &ids, &ranks);
     }
+}
+
+/// A search of a category whose query vector is the request parameter `q`.
+fn search_by_param(category: &str) -> batch::ReadBatch {
+    batch::read_batch()
+        .var_as(
+            "hits",
+            docs(expr::Predicate::eq("category", category)).vector_search_with(
+                "Doc",
+                "embedding",
+                value::PropertyInput::param("q"),
+                2_usize,
+                None,
+            ),
+        )
+        .returning(["hits"])
+}
+
+/// A query vector bound at run time is read only once the set holds a node,
+/// fused as when the steps run one by one: an empty set returns nothing
+/// whatever `q` is, and a non-empty set fails with the same error when `q` is
+/// missing or has the wrong dimension.
+#[tokio::test]
+async fn fused_searches_read_a_runtime_query_vector_as_their_steps_do() {
+    let (db, ids) = seed(test_support::in_memory_config("fused-vector-runtime-query")).await;
+    let bound = |vector: Vec<f32>| context::ParamBindings::default().with_value(named("q"), vector);
+    for (name, category, params, ranks) in [
+        ("bound", "a", bound(vec![0.0, 0.0]), Some(&[0, 2][..])),
+        ("missing", "a", context::ParamBindings::default(), None),
+        ("wrong dimension", "a", bound(vec![0.0, 0.0, 0.0]), None),
+        (
+            "missing over an empty set",
+            "none",
+            context::ParamBindings::default(),
+            Some(&[][..]),
+        ),
+        (
+            "wrong dimension over an empty set",
+            "none",
+            bound(vec![0.0, 0.0, 0.0]),
+            Some(&[][..]),
+        ),
+    ] {
+        let plan = plan_read(&db, &search_by_param(category)).await;
+        fused_access(&plan);
+        let (fused, work) = run(&db, &plan, params.clone(), None, Run::Scheduled).await;
+        let (unfused, _) = run(&db, &plan, params, None, Run::StepByStep).await;
+        assert_eq!(work.fused_vector_searches, 1, "{name}");
+        let Some(ranks) = ranks else {
+            assert_eq!(
+                fused.expect_err(name).to_string(),
+                unfused.expect_err(name).to_string(),
+                "{name}"
+            );
+            continue;
+        };
+        let fused = fused.unwrap();
+        assert_eq!(fused, unfused.unwrap(), "{name}");
+        assert_hits(&fused[0], &ids, ranks);
+    }
+}
+
+/// A `for_each` body is its own DAG: each run of it fuses its search, with
+/// that frame's query vector.
+#[tokio::test]
+async fn fused_searches_run_in_each_nested_plan() {
+    let (db, ids) = seed(test_support::in_memory_config("fused-vector-nested")).await;
+    let frame = |vector: Vec<f32>| {
+        value::PropertyValue::Object(
+            [("q".to_string(), value::PropertyValue::from(vector))]
+                .into_iter()
+                .collect(),
+        )
+    };
+    let read = batch::read_batch()
+        .for_each_param("items", search_by_param("a"))
+        .returning(["hits"]);
+    let plan = plan_read(&db, &read).await;
+    assert!(roles(plan.steps(), plan.root(), plan.execution_program()).is_empty());
+    // The last frame binds `hits`: the even ranks nearest `[11, 0]`.
+    let (hits, work) = run(
+        &db,
+        &plan,
+        context::ParamBindings::default().with_value(
+            named("items"),
+            value::PropertyValue::Array(vec![frame(vec![0.0, 0.0]), frame(vec![11.0, 0.0])]),
+        ),
+        None,
+        Run::Scheduled,
+    )
+    .await;
+    assert_eq!(work.fused_vector_searches, 2);
+    assert_hits(&hits.unwrap()[0], &ids, &[10, 8]);
 }
 
 /// Joins two planned reads into one DAG whose root stores both results as
@@ -447,12 +571,28 @@ async fn parallel_stages_fuse_each_search() {
             4
         );
 
-        let (fused, work) = run(&reader, &plan, None, Run::Scheduled).await;
+        let (fused, work) = run(
+            &reader,
+            &plan,
+            context::ParamBindings::default(),
+            None,
+            Run::Scheduled,
+        )
+        .await;
         assert_eq!(work.fused_vector_searches, 2);
         let fused = fused.unwrap();
         assert_eq!(
             fused,
-            run(&reader, &plan, None, Run::StepByStep).await.0.unwrap()
+            run(
+                &reader,
+                &plan,
+                context::ParamBindings::default(),
+                None,
+                Run::StepByStep
+            )
+            .await
+            .0
+            .unwrap()
         );
         assert_hits(&fused[0], &ids, &[0, 2, 1, 3]);
     }
@@ -493,25 +633,39 @@ async fn fused_pairs_run_beside_pull_regions() {
             steps[1].schedule = search_schedule;
             let plan = test_support::executable(ir::PlanKind::Read, steps, root);
             assert!(parallel_stages(&plan) >= 1);
-            assert!(plan.execution_order().stages().iter().any(|stage| {
-                stage
+            assert!(plan.execution_order().stages().iter().any(|stage| stage
+                .iter()
+                .any(|id| plan.execution_program().is_absorbed(id))
+                && stage
                     .iter()
-                    .any(|id| plan.execution_program().is_absorbed(id))
-                    && stage
-                        .iter()
-                        .any(|id| id == plan.steps()[0].id || id == plan.steps()[1].id)
-            }));
+                    .any(|id| id == plan.steps()[0].id || id == plan.steps()[1].id)));
             assert_eq!(
                 roles(plan.steps(), plan.root(), plan.execution_program()).len(),
                 2
             );
 
-            let (fused, work) = run(db, &plan, None, Run::Scheduled).await;
+            let (fused, work) = run(
+                db,
+                &plan,
+                context::ParamBindings::default(),
+                None,
+                Run::Scheduled,
+            )
+            .await;
             assert_eq!(work.fused_vector_searches, 1);
             let fused = fused.unwrap();
             assert_eq!(
                 fused,
-                run(db, &plan, None, Run::StepByStep).await.0.unwrap()
+                run(
+                    db,
+                    &plan,
+                    context::ParamBindings::default(),
+                    None,
+                    Run::StepByStep
+                )
+                .await
+                .0
+                .unwrap()
             );
             assert_hits(&fused[0], &ids, &[0, 2, 1, 3]);
         }
@@ -538,7 +692,14 @@ async fn fused_searches_are_admitted_under_the_request_budget() {
         let plan = plan_read(&db, &search(source, 2)).await;
         fused_access(&plan);
         let budget = crate::query_resources::Budget::new(64 << 20);
-        let (fused, work) = run(&db, &plan, Some(budget.clone()), Run::Scheduled).await;
+        let (fused, work) = run(
+            &db,
+            &plan,
+            context::ParamBindings::default(),
+            Some(budget.clone()),
+            Run::Scheduled,
+        )
+        .await;
         let fused = fused.unwrap();
         assert_eq!(work.fused_vector_searches, 1);
         assert!(budget.peak() > 0, "the set is admitted");
@@ -546,6 +707,7 @@ async fn fused_searches_are_admitted_under_the_request_budget() {
         let (unfused, _) = run(
             &db,
             &plan,
+            context::ParamBindings::default(),
             Some(crate::query_resources::Budget::new(64 << 20)),
             Run::StepByStep,
         )
@@ -556,6 +718,7 @@ async fn fused_searches_are_admitted_under_the_request_budget() {
         let (fused, _) = run(
             &db,
             &plan,
+            context::ParamBindings::default(),
             Some(crate::query_resources::Budget::new(1)),
             Run::Scheduled,
         )
@@ -563,6 +726,7 @@ async fn fused_searches_are_admitted_under_the_request_budget() {
         let (unfused, _) = run(
             &db,
             &plan,
+            context::ParamBindings::default(),
             Some(crate::query_resources::Budget::new(1)),
             Run::StepByStep,
         )
@@ -619,12 +783,28 @@ async fn planned_shapes_that_must_not_fuse_run_unfused() {
             "{name}: {:#?}",
             plan.steps()
         );
-        let (scheduled, work) = run(&db, &plan, None, Run::Scheduled).await;
+        let (scheduled, work) = run(
+            &db,
+            &plan,
+            context::ParamBindings::default(),
+            None,
+            Run::Scheduled,
+        )
+        .await;
         let scheduled = scheduled.unwrap();
         assert_eq!(work.fused_vector_searches, 0, "{name}");
         assert_eq!(
             scheduled,
-            run(&db, &plan, None, Run::StepByStep).await.0.unwrap(),
+            run(
+                &db,
+                &plan,
+                context::ParamBindings::default(),
+                None,
+                Run::StepByStep
+            )
+            .await
+            .0
+            .unwrap(),
             "{name}"
         );
         assert_hits(&scheduled[0], &ids, ranks);
