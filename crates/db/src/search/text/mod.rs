@@ -534,13 +534,19 @@ enum TextLiveStateSource<'a> {
 /// version is not the entity's live version.
 ///
 /// Each split serves its candidates in descending [`HitRank`] and is
-/// re-searched with a doubled limit only while its frontier (last served
-/// candidate) still outranks the `k`-th live hit, so unseen candidates can
-/// never displace a hit. Live state is resolved lazily: candidates wait in a
-/// best-first queue and are resolved in batches only while the best of them
-/// outranks the `k`-th live hit, so a search reads about `k` states (plus dead
-/// or stale candidates above them) however many splits it searches. V2 hits
-/// that are served have their statistics markers validated before return.
+/// re-searched with a doubled limit only while fewer than `k` live hits are
+/// known or its frontier (last served candidate) still outranks the `k`-th,
+/// so unseen candidates can never displace a hit. Live state is resolved
+/// lazily: candidates wait in a best-first queue and are resolved in batches
+/// only while the best of them outranks the `k`-th live hit, so a search
+/// reads about `k` states (plus dead or stale candidates above them) however
+/// many splits it searches.
+///
+/// Corruption is reported only where it is read: a missing or foreign state
+/// row, or live copies of one entity with different scores, fail the search
+/// when the candidate is resolved, and a served V2 hit's statistics marker is
+/// validated before return. Candidates ranked below every resolved batch are
+/// never read, so corruption confined to them is not reported.
 async fn search_manifest_with_state_source(
     reader: &(impl DbReadOps + Send + Sync),
     runtime: TextSearchRuntime<'_>,
@@ -567,10 +573,12 @@ async fn search_manifest_with_state_source(
 
     /// How much of one split's ranked candidate list has been read.
     enum SplitProgress {
-        /// Not searched yet.
+        /// Not searched yet; the first search asks for `min(k, total_docs)`.
         Unsearched,
-        /// Served a full page; unseen candidates rank at or below `frontier`.
-        Partial { frontier: HitRank },
+        /// Served a full page of its best `served` candidates, fewer than its
+        /// documents; unseen candidates rank at or below `frontier`, and the
+        /// next search asks for twice as many.
+        Partial { frontier: HitRank, served: usize },
         /// Served every candidate.
         Exhausted,
     }
@@ -579,8 +587,6 @@ async fn search_manifest_with_state_source(
         split_ref: TextSplitRef,
         reader: Arc<SplitSearchReader>,
         total_docs: usize,
-        candidate_limit: usize,
-        processed_candidates: usize,
         progress: SplitProgress,
     }
 
@@ -593,8 +599,6 @@ async fn search_manifest_with_state_source(
                 split_ref,
                 reader: Arc::new(index_reader),
                 total_docs,
-                candidate_limit: k.min(total_docs).max(1),
-                processed_candidates: 0,
                 progress: if total_docs == 0 {
                     SplitProgress::Exhausted
                 } else {
@@ -675,12 +679,14 @@ async fn search_manifest_with_state_source(
             .iter()
             .enumerate()
             .filter_map(|(index, split)| {
-                let search = match split.progress {
-                    SplitProgress::Unsearched => true,
-                    SplitProgress::Partial { frontier } => kth.is_none_or(|kth| frontier > kth),
-                    SplitProgress::Exhausted => false,
+                let limit = match split.progress {
+                    SplitProgress::Unsearched => Some(k.min(split.total_docs)),
+                    SplitProgress::Partial { frontier, served } => kth
+                        .is_none_or(|kth| frontier > kth)
+                        .then(|| served.saturating_mul(2).min(split.total_docs)),
+                    SplitProgress::Exhausted => None,
                 };
-                search.then(|| (index, Arc::clone(&split.reader), split.candidate_limit))
+                limit.map(|limit| (index, Arc::clone(&split.reader), limit))
             })
             .collect::<Vec<_>>();
         if selected.is_empty() {
@@ -716,19 +722,21 @@ async fn search_manifest_with_state_source(
 
         for (index, requested, candidates) in searched {
             let split = &mut splits[index];
-            let candidate_count = candidates.len();
+            // A re-search serves the previous page again first; skip it.
+            let served = match split.progress {
+                SplitProgress::Partial { served, .. } => served,
+                SplitProgress::Unsearched | SplitProgress::Exhausted => 0,
+            };
             split.progress = match candidates.last() {
-                Some(last) if candidate_count >= requested && requested < split.total_docs => {
-                    split.candidate_limit = requested.saturating_mul(2).min(split.total_docs);
+                Some(last) if candidates.len() >= requested && requested < split.total_docs => {
                     SplitProgress::Partial {
                         frontier: HitRank::new(last.score, last.entity_id),
+                        served: candidates.len(),
                     }
                 }
                 _ => SplitProgress::Exhausted,
             };
-            let processed = split.processed_candidates.min(candidate_count);
-            split.processed_candidates = candidate_count;
-            unresolved.extend(candidates.into_iter().skip(processed).map(|candidate| {
+            unresolved.extend(candidates.into_iter().skip(served).map(|candidate| {
                 (
                     HitRank::new(candidate.score, candidate.entity_id),
                     candidate.logical_version,
