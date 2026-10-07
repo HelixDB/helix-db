@@ -1,0 +1,186 @@
+name: Rust CI
+
+on:
+  pull_request:
+    paths:
+      - ".config/nextest.toml"
+      - ".github/workflows/rust-ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "bindings/uniffi/**"
+      - "crates/**"
+      - "rust-toolchain.toml"
+      - "scripts/**"
+      - "sdks/rust/**"
+      - "sdks/typescript/**"
+      - "tools/**"
+  push:
+    branches: [main]
+    paths:
+      - ".config/nextest.toml"
+      - ".github/workflows/rust-ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "bindings/uniffi/**"
+      - "crates/**"
+      - "rust-toolchain.toml"
+      - "scripts/**"
+      - "sdks/rust/**"
+      - "sdks/typescript/**"
+      - "tools/**"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    name: Format, Clippy, and target references
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all -- --check
+      # Exact test-filter references compile test binaries, so they run in
+      # cargo-target-references.yml only when a referenced target can change.
+      - run: python3 scripts/validate-cargo-target-references.py --skip-test-filters
+      - run: cargo clippy --locked --workspace -- -D warnings
+      # The test profile also lints the cfg(test) unit tests of both crates.
+      - name: Clippy async index benchmark feature
+        run: >-
+          cargo clippy --locked -p db -p server --lib --bins --profile test
+          --features server/async-index-benchmark -- -D warnings
+
+  build-tests:
+    name: Build test archive
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@nextest
+      # Bench targets have custom harnesses that nextest cannot list; the
+      # doctests job runs them in test mode instead.
+      - name: Build every workspace test target once
+        run: >-
+          cargo nextest archive --locked --workspace --lib --bins --tests --examples
+          --archive-file nextest-archive.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: Tests (partition ${{ matrix.partition }}/8)
+    needs: build-tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: taiki-e/install-action@nextest
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: sdks/typescript
+      - uses: actions/download-artifact@v5
+        with:
+          name: nextest-archive
+      - name: Run partition
+        run: >-
+          cargo nextest run --profile ci
+          --archive-file nextest-archive.tar.zst
+          --workspace-remap . --extract-to . --extract-overwrite
+          --partition hash:${{ matrix.partition }}/8
+
+  feature-contracts:
+    name: DB feature-gated contracts
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@nextest
+      # The archive skips targets whose required features are off. List every
+      # db test target that requires `production-coverage` or
+      # `index-lifecycle-testing` (but not `production-scale`) here; the
+      # target-reference validator fails when one is missing. Nextest runs
+      # each test in its own process, so suites that serialize on a
+      # process-wide lock still run in parallel.
+      - run: >-
+          cargo nextest run --profile ci --locked -p db
+          --features production-coverage,index-lifecycle-testing
+          --test index_lifecycle_contracts
+          --test production_index_lifecycle_contracts
+          --test production_index_operation_queue
+          --test production_internal_contracts
+          --test production_migration_contracts
+          --test production_queue_admission_memory
+          --test production_queue_publication
+          --test production_secondary_equality_hot_path_contracts
+          --test production_text_correctness_regressions
+          --test production_text_lifecycle
+          --test production_text_queue_contracts
+
+  doctests:
+    name: Doctests, benches, and planner corpus
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked --workspace --doc
+      - run: cargo test --locked --workspace --benches
+      - run: scripts/planner-normalized-corpus.sh
+
+  benchmark-feature:
+    name: Async index benchmark feature
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Benchmark unit tests
+        run: >-
+          cargo test --locked -p db -p server --lib
+          --features server/async-index-benchmark benchmark::
+      - name: Benchmark doctests
+        run: cargo test --locked -p server --doc --features async-index-benchmark benchmark
