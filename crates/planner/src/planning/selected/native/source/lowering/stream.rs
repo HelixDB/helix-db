@@ -19,7 +19,7 @@ impl SourcePredicatePlan {
         ctx: &context::PlannerContext,
         predicate: &helix_ast::expr::Predicate,
     ) -> Result<Self, error::PlannerError> {
-        let _ = ir::PredicatePlan::new(predicate.clone())?;
+        ir::PredicatePlan::validate(predicate)?;
         let predicate = parameter_specialization::predicate(ctx, predicate)?;
         Ok(
             match analysis::prune_statically_impossible_branches(&predicate)? {

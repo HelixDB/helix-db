@@ -39,7 +39,7 @@ pub(in crate::rules) fn index_access_filter(
             return AccessFilterRewrite::NotApplicable;
         }
         let Ok(analysis::PrunedPredicate::Feasible { predicate, .. }) =
-            analysis::prune_statically_impossible_branches(filter.predicate().as_ref())
+            analysis::prune_borrowed(filter.predicate().as_ref())
         else {
             return AccessFilterRewrite::NotApplicable;
         };
@@ -74,7 +74,7 @@ pub(in crate::rules) fn required_index_access_filter(
     if filter.access().may_repeat_elements() {
         return AccessFilterRewrite::NotApplicable;
     }
-    let pruned = match analysis::prune_statically_impossible_branches(filter.predicate().as_ref()) {
+    let pruned = match analysis::prune_borrowed(filter.predicate().as_ref()) {
         Ok(predicate) => predicate,
         Err(_) => return AccessFilterRewrite::NotApplicable,
     };
