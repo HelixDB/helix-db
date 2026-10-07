@@ -671,9 +671,17 @@ impl<'db> ExecutionContext<'db> {
             };
             let row = ExecutionRow::current(ElementRef::Node(id));
             // Nothing writes between the scan and this read, so the scanned
-            // record is the one storage would return.
+            // record is the one storage would return. It is admitted like the
+            // storage read it replaces and counted as the scanned row it is.
+            if let Some(budget) = &self.row_memory {
+                budget.record_reads(crate::cypher::StorageReadUsage {
+                    scan_rows: 1,
+                    ..Default::default()
+                });
+            }
+            let record = storage::retain_read(entry.value, self.row_memory.as_ref())?;
             let read =
-                self.eval_predicate_plan_on_record(&row, predicate, entry.value, &mut buffers);
+                self.eval_predicate_plan_on_record(&row, predicate, Some(record), &mut buffers);
             if read.await? {
                 accepted = accepted.saturating_add(1);
             }
@@ -1484,7 +1492,8 @@ impl<'db> ExecutionContext<'db> {
                     let mut buffers =
                         crate::encoding::v2::values::property::view::Buffers::default();
                     // The scanned records are the ones storage would return:
-                    // nothing writes before they are evaluated.
+                    // nothing writes before they are evaluated. The scan
+                    // admitted each, and each is released once evaluated.
                     for (key, record) in records {
                         let Some(id) = access::kv::parse_element_id(keyspace, &key) else {
                             continue;
@@ -1493,7 +1502,7 @@ impl<'db> ExecutionContext<'db> {
                         let read = self.eval_predicate_plan_on_record(
                             &row,
                             predicate,
-                            record,
+                            Some(record),
                             &mut buffers,
                         );
                         if read.await? {
@@ -5976,6 +5985,88 @@ mod tests {
                 ExecutionValue::Count(2)
             );
             assert_eq!(execution.pull_work.snapshot().raw_gets, 0);
+        }
+        db.close().await.unwrap();
+    }
+
+    /// Direct and cursor scan counts charge every row they evaluate to the
+    /// request's row-memory budget, as the storage reads they once made did:
+    /// a row larger than the budget fails the count, every charge is released
+    /// after it, and the rows are reported as scanned, not point-read.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_charge_evaluated_rows_to_the_row_memory_budget() {
+        use crate::encoding::property::{encode_properties, Property};
+        let db = test_support::open_db("count-scan-predicate-budget").await;
+        let rows = [
+            vec![Property::string("status", "active")],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+            ],
+            vec![Property::string("status", "inactive")],
+            Vec::new(),
+            vec![Property::bytes("blob", vec![1; 4096])],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+                    }
+                    .to_bytes(),
+                    encode_properties(properties),
+                )
+                .await
+                .unwrap();
+        }
+        let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+            ir::PredicatePlan::new(Predicate::eq("status", "active")).unwrap(),
+        );
+        let plans = [
+            exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                predicate: predicate.clone(),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+        ];
+        for plan in &plans {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+            assert!(matches!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await,
+                Err(HelixDbError::QueryMemoryLimitExceeded)
+            ));
+            let limit = 1 << 20;
+            let budget = crate::query_resources::Budget::new(limit);
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(budget.clone());
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(2)
+            );
+            assert!(
+                budget.peak() >= 1536 * size_of::<f32>(),
+                "{}",
+                budget.peak()
+            );
+            assert_eq!(budget.available(), limit);
+            let reads = budget.reads();
+            assert_eq!(
+                (reads.scan_rows, reads.point_gets, reads.multi_get_keys),
+                (5, 0, 0)
+            );
         }
         db.close().await.unwrap();
     }

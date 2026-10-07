@@ -621,6 +621,7 @@ impl<'a> Source<'a> {
                     // Inside a write transaction a consumer may write a later
                     // row after this scan read it, so only read-only requests
                     // reuse the scanned record instead of reading it again.
+                    // A predicate admits it like the read it replaces.
                     let record = (*keyspace == exec::ElementKeyspace::NodeProperty
                         && ctx.active_write_tx().is_none())
                     .then_some(entry.value);
@@ -654,18 +655,20 @@ impl<'a> Source<'a> {
                                 exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
                             ),
                     },
-                )) => match record {
-                    Some(record) => {
-                        ctx.eval_predicate_plan_on_record(
-                            &row,
-                            predicate,
-                            record,
-                            &mut self.buffers,
-                        )
-                        .await?
-                    }
-                    None => ctx.eval_predicate_plan(&row, predicate).await?,
-                },
+                )) => {
+                    let record = record
+                        .map(|record| storage::retain_read(record, ctx.row_memory.as_ref()))
+                        .transpose()?;
+                    // Boxed so a source that never evaluates a predicate does
+                    // not carry the evaluation's state in every row's future.
+                    Box::pin(ctx.eval_predicate_plan_on_record(
+                        &row,
+                        predicate,
+                        record,
+                        &mut self.buffers,
+                    ))
+                    .await?
+                }
                 Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => true,
             };
             if !accepted {
@@ -1524,6 +1527,64 @@ mod tests {
         assert_eq!(rest, vec![6]);
         assert!(ctx.pull_work.snapshot().raw_gets > 0);
         ctx.abort_request_write_scope();
+        db.close().await.unwrap();
+    }
+
+    /// A predicate scan charges every row it evaluates to the request's
+    /// row-memory budget, as the storage read it once made did: a row larger
+    /// than the budget fails the scan, and every charge is released after it.
+    #[tokio::test]
+    async fn predicate_scans_charge_evaluated_rows_to_the_row_memory_budget() {
+        let db = test_support::open_db("pull-scan-predicate-budget").await;
+        scan_predicate_fixture(&db).await;
+        let plan = node_scan_plan(helix_ast::expr::Predicate::eq("status", "active"));
+        // Row 3 holds a 6 KiB embedding and row 7 a 4 KiB blob.
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        ctx.row_memory = Some(crate::query_resources::Budget::new(2048));
+        assert!(matches!(
+            scan_ids(&mut ctx, &plan).await,
+            Err(HelixDbError::QueryMemoryLimitExceeded)
+        ));
+        let limit = 1 << 20;
+        let budget = crate::query_resources::Budget::new(limit);
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        ctx.row_memory = Some(budget.clone());
+        assert_eq!(scan_ids(&mut ctx, &plan).await.unwrap(), vec![1, 3, 6]);
+        assert!(
+            budget.peak() >= 1536 * size_of::<f32>(),
+            "{}",
+            budget.peak()
+        );
+        assert_eq!(budget.available(), limit);
+        db.close().await.unwrap();
+    }
+
+    /// Reusing scanned records reads each row once: the scan reports its
+    /// rows and no predicate makes a point read.
+    #[tokio::test]
+    async fn predicate_scans_report_scanned_rows_without_point_reads() {
+        let db = test_support::open_db("pull-scan-predicate-usage").await;
+        scan_predicate_fixture(&db).await;
+        for (predicate, expected) in scan_predicate_cases() {
+            let budget = crate::query_resources::Budget::new(1 << 20);
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.enable_request_read_view().await.unwrap();
+            ctx.row_memory = Some(budget.clone());
+            assert_eq!(
+                scan_ids(&mut ctx, &node_scan_plan(predicate.clone()))
+                    .await
+                    .unwrap(),
+                expected
+            );
+            let reads = budget.reads();
+            assert_eq!(
+                (reads.scan_rows, reads.point_gets, reads.multi_get_keys),
+                (7, 0, 0),
+                "{predicate:?}"
+            );
+        }
         db.close().await.unwrap();
     }
 }

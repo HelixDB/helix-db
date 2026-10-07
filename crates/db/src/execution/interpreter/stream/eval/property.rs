@@ -28,9 +28,6 @@ pub(in crate::execution::interpreter::stream) struct RowValueResolver<'ctx, 'db>
     context: &'ctx ExecutionContext<'db>,
     property_blobs: BTreeMap<ElementRef, CachedPropertyBlob>,
     edge_endpoints: BTreeMap<u64, Option<(u64, u64)>>,
-    /// A record its caller already read from this request's view, loaded in
-    /// place of a storage read the first time its element is loaded.
-    scanned: Option<(ElementRef, bytes::Bytes)>,
     buffers: view::Buffers,
 }
 
@@ -42,29 +39,34 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             context,
             property_blobs: BTreeMap::new(),
             edge_endpoints: BTreeMap::new(),
-            scanned: None,
             buffers: view::Buffers::default(),
         }
     }
 
-    /// A resolver for a row whose element `record` the caller already read
-    /// from this request's view, as a storage scan does.
+    /// A resolver that borrows aligned copies from `buffers`, given back by
+    /// [`Self::into_buffers`], and, given `record`, holds an element's record
+    /// the caller already read from this request's view, as a storage scan
+    /// does.
     ///
-    /// The record is validated only when evaluation first reads it, exactly
-    /// where a storage read would have happened, so errors and their timing
-    /// are unchanged. `buffers` lends aligned copies across rows; take them
-    /// back with [`Self::into_buffers`].
+    /// The record is cached in place of a storage read and validated only
+    /// when evaluation first reads it, exactly where that read would have
+    /// happened, so errors and their timing are unchanged.
     pub(in crate::execution::interpreter::stream) fn with_record(
         context: &'ctx ExecutionContext<'db>,
-        element: ElementRef,
-        record: bytes::Bytes,
+        record: Option<(ElementRef, bytes::Bytes)>,
         buffers: view::Buffers,
     ) -> Self {
-        Self {
-            scanned: Some((element, record)),
+        let mut resolver = Self {
             buffers,
             ..Self::new(context)
-        }
+        };
+        let Some((element, record)) = record else {
+            return resolver;
+        };
+        resolver
+            .property_blobs
+            .insert(element, CachedPropertyBlob::Scanned(record));
+        resolver
     }
 
     /// Release every cached record and return the aligned copies for reuse.
@@ -147,6 +149,9 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             return Ok(row.decode()?);
         }
         let blob = match self.property_blobs.remove(element) {
+            Some(CachedPropertyBlob::Scanned(record)) => {
+                decode_blob(self.context, &mut self.buffers, Some(record))?
+            }
             Some(blob) => blob,
             None => self.load_blob(element).await?,
         };
@@ -167,31 +172,22 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             let blob = self.load_blob(element).await?;
             self.property_blobs.insert(element.clone(), blob);
         }
-        Ok(self
+        let blob = self
             .property_blobs
-            .get(element)
-            .expect("visited element has a cached property blob")
-            .row())
+            .get_mut(element)
+            .expect("visited element has a cached property blob");
+        let CachedPropertyBlob::Scanned(record) = blob else {
+            return Ok(blob.row());
+        };
+        // A rejected record stays cached unvalidated, so every read of it
+        // fails as a repeated storage read would.
+        *blob = decode_blob(self.context, &mut self.buffers, Some(record.clone()))?;
+        Ok(blob.row())
     }
 
     async fn load_blob(&mut self, element: &ElementRef) -> Result<CachedPropertyBlob> {
-        let value = match self.scanned.take_if(|(scanned, _)| *scanned == *element) {
-            Some((_, record)) => Some(record),
-            None => self.context.property_bytes(element).await?,
-        };
-        self.decode_blob(value)
-    }
-
-    fn decode_blob(&mut self, value: Option<bytes::Bytes>) -> Result<CachedPropertyBlob> {
-        let Some(value) = value else {
-            return Ok(CachedPropertyBlob::Missing);
-        };
-        #[cfg(test)]
-        self.context.record_property_decode();
-        Ok(CachedPropertyBlob::Row(view::Row::new(
-            value,
-            &mut self.buffers,
-        )?))
+        let value = self.context.property_bytes(element).await?;
+        decode_blob(self.context, &mut self.buffers, value)
     }
 
     /// Load the stored records of `elements` with one multi-get.
@@ -218,7 +214,7 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         for (element, value) in missing.into_iter().zip(values) {
             #[cfg(test)]
             self.context.record_property_get();
-            let blob = self.decode_blob(value)?;
+            let blob = decode_blob(self.context, &mut self.buffers, value)?;
             self.property_blobs.insert(element, blob);
         }
         Ok(())
@@ -432,16 +428,35 @@ pub(in crate::execution::interpreter::stream) fn record_read<'r>(
 
 enum CachedPropertyBlob {
     Missing,
+    /// A record the caller already read, validated when first read.
+    Scanned(bytes::Bytes),
     Row(view::Row),
 }
 
 impl CachedPropertyBlob {
+    /// The validated record. Callers validate a [`Self::Scanned`] record,
+    /// replacing it, before reading it.
     fn row(&self) -> Option<&view::Row> {
         match self {
             Self::Missing => None,
             Self::Row(row) => Some(row),
+            Self::Scanned(_) => unreachable!("a scanned record is validated before it is read"),
         }
     }
+}
+
+/// Validates a stored record, borrowing aligned copies from `buffers`.
+fn decode_blob(
+    #[cfg_attr(not(test), allow(unused_variables))] context: &ExecutionContext<'_>,
+    buffers: &mut view::Buffers,
+    value: Option<bytes::Bytes>,
+) -> Result<CachedPropertyBlob> {
+    let Some(value) = value else {
+        return Ok(CachedPropertyBlob::Missing);
+    };
+    #[cfg(test)]
+    context.record_property_decode();
+    Ok(CachedPropertyBlob::Row(view::Row::new(value, buffers)?))
 }
 
 #[derive(Clone, Copy)]

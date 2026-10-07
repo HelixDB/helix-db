@@ -14,11 +14,11 @@ fn placed(row: &[u8], offset: usize) -> Bytes {
     Bytes::from_owner(buffer).slice(offset..)
 }
 
-/// Error text with the validator's absolute buffer addresses masked.
-fn masked(error: &EncodingError) -> String {
-    let error = error.to_string();
+/// Error text with the validator's absolute buffer addresses masked, so
+/// errors from different copies of the same bytes compare equal.
+pub(crate) fn masked(error: &str) -> String {
     let mut masked = String::with_capacity(error.len());
-    let mut rest = error.as_str();
+    let mut rest = error;
     while let Some(start) = rest.find("0x") {
         masked.push_str(&rest[..start]);
         masked.push_str("0x?");
@@ -146,7 +146,7 @@ proptest! {
                     (Ok(expected), Ok(actual)) => prop_assert!(same(&actual, expected)),
                     (Err(expected), Err(actual)) => {
                         prop_assert!(matches!(actual, EncodingError::Rkyv(_)));
-                        prop_assert_eq!(masked(&actual), masked(expected));
+                        prop_assert_eq!(masked(&actual.to_string()), masked(&expected.to_string()));
                     }
                     (expected, actual) => {
                         prop_assert!(false, "{expected:?} vs {actual:?}");
