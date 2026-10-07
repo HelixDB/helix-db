@@ -2319,7 +2319,7 @@ impl HelixDB {
     /// Execute an SDK-built query request.
     pub async fn query(&self, request: QueryRequest) -> Result<JsonValue> {
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_observed(
+        query_service::execute_query_on_observed::<JsonValue>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2327,7 +2327,7 @@ impl HelixDB {
             query_metrics.as_ref(),
         )
         .await
-        .map(|response| JsonValue::Object(response.returns().clone().into_iter().collect()))
+        .map(query_service::QueryResponse::into_value)
         .map_err(HelixDbError::from)
     }
 
@@ -2338,7 +2338,7 @@ impl HelixDB {
         tenant_scope: DataScope,
     ) -> Result<JsonValue> {
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_scoped_observed(
+        query_service::execute_query_on_scoped_observed::<JsonValue>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2348,7 +2348,7 @@ impl HelixDB {
             execution_control::ExecutionControl::unlimited(),
         )
         .await
-        .map(|response| JsonValue::Object(response.returns().clone().into_iter().collect()))
+        .map(query_service::QueryResponse::into_value)
         .map_err(HelixDbError::from)
     }
 
@@ -2367,7 +2367,7 @@ impl HelixDB {
         let request = QueryRequest::from_json_slice(request_json)
             .map_err(|error| HelixDbError::InvalidQueryJson(error.to_string()))?;
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_scoped_observed(
+        query_service::execute_query_on_scoped_observed::<Vec<u8>>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2377,8 +2377,7 @@ impl HelixDB {
             execution_control::ExecutionControl::unlimited(),
         )
         .await
-        .map_err(HelixDbError::from)?
-        .to_json_bytes()
+        .map(query_service::QueryResponse::into_json_bytes)
         .map_err(HelixDbError::from)
     }
 

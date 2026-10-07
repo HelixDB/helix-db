@@ -75,12 +75,7 @@ impl QueryCorpusAdapter for ServiceAdapter {
             .execute_query(request)
             .await
             .map_err(|error| TestkitError::Adapter(error.to_string()))?;
-        serde_json::from_slice(
-            &response
-                .to_json_bytes()
-                .map_err(|error| TestkitError::Adapter(error.to_string()))?,
-        )
-        .map_err(Into::into)
+        serde_json::from_slice(response.json_bytes()).map_err(Into::into)
     }
 
     async fn close(&mut self) -> TestkitResult<()> {
@@ -236,7 +231,7 @@ fn transport_response_uses_empty_default_planner_diagnostics() {
     })
     .expect("empty execution result converts");
 
-    assert!(response.returns().is_empty());
+    assert_eq!(response.json_bytes(), b"{}");
     assert!(response.diagnostics().insights.is_empty());
 }
 
@@ -258,13 +253,7 @@ fn transport_response_preserves_declared_empty_return_shapes() {
     })
     .expect("shaped empty execution result converts");
 
-    assert_eq!(
-        response.returns(),
-        &BTreeMap::from([
-            ("list".to_string(), serde_json::json!([])),
-            ("object".to_string(), serde_json::Value::Null),
-        ])
-    );
+    assert_eq!(response.json_bytes(), br#"{"list":[],"object":null}"#);
 }
 
 #[test]
@@ -306,17 +295,8 @@ fn transport_response_preserves_ranked_public_element_metadata() {
     .expect("ranked execution result converts");
 
     assert_eq!(
-        response.returns(),
-        &BTreeMap::from([
-            (
-                "distance".to_string(),
-                serde_json::json!([{ "$id": 7, "$distance": 0.25 }]),
-            ),
-            (
-                "score".to_string(),
-                serde_json::json!([{ "$id": 9, "$score": 1.5 }]),
-            ),
-        ])
+        response.json_bytes(),
+        br#"{"distance":[{"$distance":0.25,"$id":7}],"score":[{"$id":9,"$score":1.5}]}"#
     );
 }
 
@@ -622,8 +602,8 @@ async fn query_service_scoped_entry_points_execute_the_same_tenant_read() {
         .await
         .expect("direct tenant-scoped read succeeds");
 
-    assert_eq!(service_response.returns(), direct_response.returns());
-    assert_eq!(service_response.returns().get("count"), Some(&0.into()));
+    assert_eq!(service_response.json_bytes(), direct_response.json_bytes());
+    assert_eq!(service_response.json_bytes(), br#"{"count":0}"#);
     db.close().await.unwrap();
 }
 

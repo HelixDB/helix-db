@@ -194,13 +194,13 @@ mod legacy {
 
 /// Bytes the HTTP/gRPC transports and `HelixDB::query_json` send for `result`.
 fn production_bytes(result: ExecutionResult) -> std::result::Result<Vec<u8>, QueryServiceError> {
-    QueryResponse::from_execution_result(result)?.to_json_bytes()
+    QueryResponse::from_execution_result(result).map(QueryResponse::into_json_bytes)
 }
 
 /// Value the embedded `HelixDB::query` API returns for `result`.
 fn production_value(result: ExecutionResult) -> std::result::Result<JsonValue, QueryServiceError> {
-    QueryResponse::from_execution_result(result)
-        .map(|response| JsonValue::Object(response.returns().clone().into_iter().collect()))
+    QueryResponse::<JsonValue>::encode(result, PlannerDiagnostics::default())
+        .map(QueryResponse::into_value)
 }
 
 fn object<K: AsRef<str>>(entries: impl IntoIterator<Item = (K, PropertyValue)>) -> ExecutionScalar {
@@ -932,7 +932,7 @@ fn arb_name() -> impl Strategy<Value = NonEmptyString> {
     prop_oneof![
         proptest::sample::select(vec!["$distance", "$score", "$id", "current", "a", "B"])
             .prop_map(name),
-        arb_string().prop_filter_map("names are non-empty", |value| NonEmptyString::new(value)),
+        arb_string().prop_filter_map("names are non-empty", NonEmptyString::new),
     ]
 }
 

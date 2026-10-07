@@ -507,7 +507,7 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
     )
     .expect("diagnostic response converts");
 
-    assert_eq!(response.returns().get("count"), Some(&serde_json::json!(0)));
+    assert_eq!(response.json_bytes(), br#"{"count":0}"#);
     let missing_index = response
         .diagnostics()
         .insights
@@ -543,12 +543,7 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
     let diagnostics_json = serde_json::to_string(response.diagnostics())
         .expect("diagnostics serialize for metadata transports");
     assert!(!diagnostics_json.contains(SECRET_LITERAL));
-    assert_eq!(
-        response
-            .to_json_bytes()
-            .expect("public response serializes"),
-        br#"{"count":0}"#
-    );
+    assert_eq!(response.json_bytes(), br#"{"count":0}"#);
 
     let default_response =
         db::query_service::QueryResponse::from_execution_result(ExecutionResult {

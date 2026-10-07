@@ -502,8 +502,8 @@ async fn indexed_source_intersection_with_post_expansion_membership_matches_the_
                 .unwrap();
             super::QueryResponse::from_execution_result(result)
                 .unwrap()
-                .returns()["result"]
-                .clone()
+                .json()["result"]
+                .take()
         }
     };
     // `ih` reaches `a1` through `i1`, `i2`, and itself twice, and `a4`
