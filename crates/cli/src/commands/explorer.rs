@@ -109,28 +109,31 @@ pub async fn run(args: Args) -> Result<()> {
     let helix_url = runtime.explorer_helix_url(instance_port);
 
     let running = runtime.running_explorer(&instance);
-    let was_running = running.is_some();
-    let reusable = running.filter(|running| {
-        let Some(reason) = replacement_reason(running, &image, &helix_url, args.port) else {
-            return true;
-        };
-        output::remark(&format!("Replacing the running Explorer: {reason}"));
-        false
+    let reason = running.as_ref().and_then(|running| {
+        let image_id = runtime.image_id(&image);
+        replacement_reason(running, &image, image_id.as_deref(), &helix_url, args.port)
     });
-    let (port, image, reused) = match reusable {
-        Some(running) => {
+    let (port, image, reused) = match (running, reason) {
+        (Some(running), None) => {
             output::info(&format!(
                 "The Explorer is already running on port {}",
                 running.port
             ));
             (running.port, running.image.unwrap_or(image), true)
         }
-        None => {
-            if was_running {
-                // Free the replaced Explorer's port before picking one.
-                runtime.remove_explorer(&instance)?;
+        (running, reason) => {
+            if let Some(reason) = reason {
+                output::remark(&format!("Replacing the running Explorer: {reason}"));
             }
-            let port = launch(&runtime, &instance, &image, &helix_url, args.port).await?;
+            let port = launch(
+                &runtime,
+                &instance,
+                &image,
+                &helix_url,
+                args.port,
+                running.as_ref(),
+            )
+            .await?;
             (port, image, false)
         }
     };
@@ -203,10 +206,13 @@ fn explorer_image(flag: Option<String>, env: Option<String>) -> Result<String, C
 }
 
 /// Why a running Explorer cannot serve this request, or `None` to reuse it.
-/// What the runtime did not report is not held against it.
+/// `image_id` is the requested image's ID, `None` when it is not available
+/// locally. What the runtime did not report about the running Explorer is not
+/// held against it.
 fn replacement_reason(
     running: &RunningExplorer,
     image: &str,
+    image_id: Option<&str>,
     helix_url: &str,
     explicit_port: Option<u16>,
 ) -> Option<String> {
@@ -215,35 +221,83 @@ fn replacement_reason(
             "it reads {stale}, but the instance now listens at {helix_url}"
         ));
     }
-    // Podman reports short names in full (`localhost/helix-explorer:local`).
-    let same_image = |running: &str| {
-        running == image
-            || running.ends_with(&format!("/{image}"))
-            || image.ends_with(&format!("/{running}"))
+    let same_reference = running
+        .image
+        .as_deref()
+        .is_none_or(|other| same_image_reference(other, image));
+    // Image IDs settle it when the runtime reports one: a reference names
+    // another registry's image as easily as a rebuilt or re-pulled tag.
+    let other_image = match (running.image_id.as_deref(), image_id) {
+        (Some(running_id), Some(id)) => !same_image_id(running_id, id),
+        // The requested image is not here yet, so the Explorer cannot run it.
+        (Some(_), None) => true,
+        (None, _) => !same_reference,
     };
-    if let Some(other) = running.image.as_deref().filter(|other| !same_image(other)) {
-        return Some(format!("it runs {other}, not {image}"));
+    if other_image {
+        return Some(match running.image.as_deref() {
+            Some(other) if !same_reference => format!("it runs {other}, not {image}"),
+            _ => format!("{image} has changed since it started"),
+        });
     }
     explicit_port
         .filter(|port| *port != running.port)
         .map(|port| format!("it serves port {}, not {port}", running.port))
 }
 
-/// Pick the host port, make the image available, and start the container.
-/// Returns the port the runtime reports it published.
+/// Whether two image IDs name the same image. Docker prefixes IDs with
+/// `sha256:` and Podman does not.
+fn same_image_id(a: &str, b: &str) -> bool {
+    let digest = |id: &str| id.strip_prefix("sha256:").unwrap_or(id).to_owned();
+    digest(a) == digest(b)
+}
+
+/// Whether two references name the same image once the parts each runtime
+/// fills in are spelled out: Docker Hub's `docker.io/library/`, Podman's
+/// `localhost/` for local builds, and the `latest` tag. Any other registry or
+/// path prefix makes them different images.
+fn same_image_reference(a: &str, b: &str) -> bool {
+    fn expanded(reference: &str) -> String {
+        let short = ["docker.io/library/", "docker.io/", "localhost/"]
+            .into_iter()
+            .find_map(|prefix| reference.strip_prefix(prefix))
+            .unwrap_or(reference);
+        let name = short.rsplit('/').next().unwrap_or(short);
+        if name.contains([':', '@']) {
+            short.to_owned()
+        } else {
+            format!("{short}:latest")
+        }
+    }
+    expanded(a) == expanded(b)
+}
+
+/// Pick the host port and make the image available, then replace `running`
+/// with a new Explorer. Both checks come before the removal, so a busy port
+/// or a failed pull leaves a working Explorer in place. Returns the port the
+/// runtime reports it published.
 async fn launch(
     runtime: &LocalRuntime,
     instance: &str,
     image: &str,
     helix_url: &str,
     explicit_port: Option<u16>,
+    running: Option<&RunningExplorer>,
 ) -> Result<u16> {
-    let port = select_port(explicit_port)?;
+    let port = match (explicit_port, running) {
+        // The running Explorer frees its own port when it is removed, so a
+        // replacement keeps that port unless another is asked for.
+        (None, Some(running)) => running.port,
+        (Some(port), Some(running)) if port == running.port => port,
+        (explicit_port, _) => select_port(explicit_port)?,
+    };
     runtime.ensure_image(image).await.map_err(|error| {
         CliError::from_report(&error).with_hint(format!(
             "check the image reference, or run another with --image or {EXPLORER_IMAGE_ENV}"
         ))
     })?;
+    if running.is_some() {
+        runtime.remove_explorer(instance)?;
+    }
     runtime.run_explorer(
         instance,
         &ExplorerLaunch {
@@ -374,11 +428,17 @@ fn stop(runtime: &LocalRuntime, instance: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn running(port: u16, image: Option<&str>, helix_url: Option<&str>) -> RunningExplorer {
+    const URL: &str = "http://host.docker.internal:6969";
+    const IMAGE: &str = "ghcr.io/helixdb/helix-explorer:latest";
+    const IMAGE_ID: &str = "sha256:1111";
+
+    /// An Explorer on 6970 that runs [`IMAGE`] as [`IMAGE_ID`] against [`URL`].
+    fn running() -> RunningExplorer {
         RunningExplorer {
-            port,
-            image: image.map(str::to_owned),
-            helix_url: helix_url.map(str::to_owned),
+            port: 6970,
+            image: Some(IMAGE.to_owned()),
+            image_id: Some(IMAGE_ID.to_owned()),
+            helix_url: Some(URL.to_owned()),
         }
     }
 
@@ -414,31 +474,42 @@ mod tests {
 
     #[test]
     fn a_matching_explorer_is_reused() {
-        let url = "http://host.docker.internal:6969";
-        let image = "ghcr.io/helixdb/helix-explorer:latest";
         assert_eq!(
-            replacement_reason(&running(6970, Some(image), Some(url)), image, url, None),
+            replacement_reason(&running(), IMAGE, Some(IMAGE_ID), URL, None),
             None
         );
         assert_eq!(
-            replacement_reason(
-                &running(6970, Some(image), Some(url)),
-                image,
-                url,
-                Some(6970)
-            ),
+            replacement_reason(&running(), IMAGE, Some(IMAGE_ID), URL, Some(6970)),
             None
         );
         // Nothing reported means nothing to compare.
+        let unreported = RunningExplorer {
+            port: 6971,
+            image: None,
+            image_id: None,
+            helix_url: None,
+        };
         assert_eq!(
-            replacement_reason(&running(6971, None, None), image, url, None),
+            replacement_reason(&unreported, IMAGE, None, URL, None),
             None
         );
+        // Podman reports a local build in full, with its ID unprefixed.
+        let podman = RunningExplorer {
+            image: Some("localhost/helix-explorer:local".to_owned()),
+            image_id: Some("1111".to_owned()),
+            ..running()
+        };
+        assert_eq!(
+            replacement_reason(&podman, "helix-explorer:local", Some(IMAGE_ID), URL, None),
+            None
+        );
+        // Two tags of one image are the same image.
         assert_eq!(
             replacement_reason(
-                &running(6970, Some("localhost/helix-explorer:local"), Some(url)),
+                &running(),
                 "helix-explorer:local",
-                url,
+                Some(IMAGE_ID),
+                URL,
                 None
             ),
             None
@@ -447,35 +518,82 @@ mod tests {
 
     #[test]
     fn a_stale_or_different_explorer_is_replaced() {
-        let url = "http://host.docker.internal:6969";
-        let image = "ghcr.io/helixdb/helix-explorer:latest";
-        let stale = replacement_reason(
-            &running(6970, Some(image), Some("http://host.docker.internal:7000")),
-            image,
-            url,
-            None,
-        )
-        .unwrap();
-        assert!(stale.contains(":7000") && stale.contains(url), "{stale}");
+        let stale = RunningExplorer {
+            helix_url: Some("http://host.docker.internal:7000".to_owned()),
+            ..running()
+        };
+        let stale = replacement_reason(&stale, IMAGE, Some(IMAGE_ID), URL, None).unwrap();
+        assert!(stale.contains(":7000") && stale.contains(URL), "{stale}");
         let other_image = replacement_reason(
-            &running(6970, Some(image), Some(url)),
+            &running(),
             "helix-explorer:local",
-            url,
+            Some("sha256:2222"),
+            URL,
             None,
         )
         .unwrap();
-        assert!(
-            other_image.contains("helix-explorer:local"),
-            "{other_image}"
+        assert_eq!(
+            other_image,
+            format!("it runs {IMAGE}, not helix-explorer:local")
         );
-        let other_port = replacement_reason(
-            &running(6970, Some(image), Some(url)),
-            image,
-            url,
-            Some(7100),
-        )
-        .unwrap();
+        let other_port =
+            replacement_reason(&running(), IMAGE, Some(IMAGE_ID), URL, Some(7100)).unwrap();
         assert!(other_port.contains("7100"), "{other_port}");
+    }
+
+    /// A local `helix-explorer:latest` is not the published image, even
+    /// though the published reference ends with it.
+    #[test]
+    fn an_image_from_another_registry_is_another_image() {
+        let local = "helix-explorer:latest";
+        let reason = replacement_reason(&running(), local, Some("sha256:2222"), URL, None).unwrap();
+        assert_eq!(reason, format!("it runs {IMAGE}, not {local}"));
+        // Without IDs, the references alone still tell them apart.
+        let unidentified = RunningExplorer {
+            image_id: None,
+            ..running()
+        };
+        assert!(replacement_reason(&unidentified, local, None, URL, None).is_some());
+    }
+
+    #[test]
+    fn a_rebuilt_or_missing_image_replaces_the_explorer() {
+        let rebuilt =
+            replacement_reason(&running(), IMAGE, Some("sha256:2222"), URL, None).unwrap();
+        assert_eq!(rebuilt, format!("{IMAGE} has changed since it started"));
+        let missing = replacement_reason(&running(), "helix-explorer:local", None, URL, None);
+        assert_eq!(
+            missing.unwrap(),
+            format!("it runs {IMAGE}, not helix-explorer:local")
+        );
+    }
+
+    #[test]
+    fn references_match_only_across_the_parts_runtimes_fill_in() {
+        for (a, b) in [
+            ("helix-explorer:local", "localhost/helix-explorer:local"),
+            ("nginx", "docker.io/library/nginx:latest"),
+            (
+                "helixdb/helix-explorer:1",
+                "docker.io/helixdb/helix-explorer:1",
+            ),
+            ("localhost:5000/explorer", "localhost:5000/explorer:latest"),
+        ] {
+            assert!(same_image_reference(a, b), "{a} vs {b}");
+        }
+        for (a, b) in [
+            (
+                "ghcr.io/helixdb/helix-explorer:latest",
+                "helix-explorer:latest",
+            ),
+            ("helixdb/helix-explorer:latest", "helix-explorer:latest"),
+            ("helix-explorer:local", "helix-explorer:latest"),
+            ("localhost:5000/explorer", "explorer"),
+        ] {
+            assert!(!same_image_reference(a, b), "{a} vs {b}");
+        }
+        assert!(same_image_id("sha256:abc", "abc"));
+        assert!(!same_image_id("sha256:abc", "sha256:abd"));
     }
 
     #[test]

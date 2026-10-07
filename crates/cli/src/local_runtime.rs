@@ -21,10 +21,24 @@ pub const CONTAINER_PORT: u16 = 8080;
 /// inside its container.
 pub const EXPLORER_CONTAINER_PORT: u16 = 3000;
 const IDENTITY_LABEL: &str = "helixdb.identity";
-/// The Explorer's image reference, then one `KEY=value` environment entry
-/// per line, so a running Explorer can be compared with the one requested.
-const EXPLORER_CONFIG_FORMAT: &str =
-    "{{println .Config.Image}}{{range .Config.Env}}{{println .}}{{end}}";
+/// Marks a container as an instance's Explorer rather than the instance
+/// itself, which carries the same identity label.
+const ROLE_LABEL: &str = "helixdb.role";
+const EXPLORER_ROLE: &str = "explorer";
+/// Appended to the instance's container name. Instance names never contain a
+/// `.`, and the hash suffix is hex, so no instance's container name ends with
+/// it.
+const EXPLORER_NAME_SUFFIX: &str = ".explorer";
+/// One line each for the container's identity and role labels, image ID, and
+/// image reference, then one `KEY=value` environment entry per line: enough
+/// to check that the container is the instance's Explorer and to compare it
+/// with the one requested. Raw-string keys keep double quotes out of the
+/// argument, and `println` keeps newlines out of it.
+const EXPLORER_INSPECT_FORMAT: &str = concat!(
+    "{{if .Config.Labels}}{{index .Config.Labels `helixdb.identity`}}{{end}}{{println}}",
+    "{{if .Config.Labels}}{{index .Config.Labels `helixdb.role`}}{{end}}{{println}}",
+    "{{println .Image}}{{println .Config.Image}}{{range .Config.Env}}{{println .}}{{end}}",
+);
 const CONTAINER_OWNER_FORMAT: &str =
     r#"{{if .Config.Labels}}{{index .Config.Labels "helixdb.identity"}}{{end}}"#;
 const RESOURCE_OWNER_FORMAT: &str = r#"{{if .Labels}}{{index .Labels "helixdb.identity"}}{{end}}"#;
@@ -95,13 +109,27 @@ pub struct ExplorerLaunch {
     pub helix_url: String,
 }
 
-/// An Explorer container that is running now. `image` and `helix_url` are
-/// `None` when the runtime does not report them.
+/// An instance's Explorer container that is running now. The other fields
+/// are `None` when the runtime does not report them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningExplorer {
     pub port: u16,
+    /// The image reference it was started from.
     pub image: Option<String>,
+    /// The ID of the image it runs.
+    pub image_id: Option<String>,
     pub helix_url: Option<String>,
+}
+
+/// What the runtime reports about the container at an instance's Explorer
+/// name; see [`EXPLORER_INSPECT_FORMAT`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ExplorerInspection {
+    identity: String,
+    role: String,
+    image_id: Option<String>,
+    image: Option<String>,
+    helix_url: Option<String>,
 }
 
 /// A start configuration whose required images have all been resolved.
@@ -600,9 +628,13 @@ impl LocalRuntime {
     }
 
     /// Name of the Explorer container `helix explorer` runs for an instance.
-    /// It extends the instance's container name, so it is as unique as that.
+    /// It extends the instance's container name, so it is as unique as that,
+    /// with a suffix that no instance's own container name can end with.
     pub fn explorer_container_name(&self, instance_name: &str) -> String {
-        format!("{}-explorer", self.container_name(instance_name))
+        format!(
+            "{}{EXPLORER_NAME_SUFFIX}",
+            self.container_name(instance_name)
+        )
     }
 
     /// The host port the instance's container publishes for the server, or
@@ -620,44 +652,58 @@ impl LocalRuntime {
     /// The host port an instance's running Explorer publishes, or `None` when
     /// no Explorer runs for it.
     pub fn explorer_port(&self, instance_name: &str) -> Option<u16> {
-        self.published_port(
-            &self.explorer_container_name(instance_name),
-            EXPLORER_CONTAINER_PORT,
-        )
+        self.running_explorer(instance_name)
+            .map(|explorer| explorer.port)
     }
 
-    /// The Explorer running for an instance, if any.
+    /// The Explorer running for an instance, if any. A container that holds
+    /// the Explorer's name without the instance's identity and the Explorer
+    /// role belongs to something else, so it never counts.
     pub fn running_explorer(&self, instance_name: &str) -> Option<RunningExplorer> {
         let name = self.explorer_container_name(instance_name);
-        let port = self.explorer_port(instance_name)?;
-        let config = self
-            .runtime_command()
-            .args(["inspect", "--format", EXPLORER_CONFIG_FORMAT, &name])
-            .output()
+        let identity = self.instance_identity(instance_name);
+        let inspection = self
+            .inspect_explorer(&name)
             .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-            .unwrap_or_default();
-        let (image, helix_url) = parse_explorer_config(&config);
+            .flatten()
+            .filter(|inspection| inspection.belongs_to(&identity))?;
+        let port = self.published_port(&name, EXPLORER_CONTAINER_PORT)?;
         Some(RunningExplorer {
             port,
-            image,
-            helix_url,
+            image: inspection.image,
+            image_id: inspection.image_id,
+            helix_url: inspection.helix_url,
         })
     }
 
+    /// The ID of `image`, or `None` when it is not available locally.
+    pub fn image_id(&self, image: &str) -> Option<String> {
+        self.inspect_image(image).ok()
+    }
+
     /// Start a detached Explorer for `instance_name`, replacing a stopped
-    /// container of the same name. The container removes itself when it stops.
+    /// Explorer of the same name. The container removes itself when it stops.
     pub fn run_explorer(&self, instance_name: &str, launch: &ExplorerLaunch) -> Result<()> {
         let name = self.explorer_container_name(instance_name);
-        let _ = self.remove_container(&name);
-        let args = explorer_run_args(
-            self.runtime,
-            &name,
-            launch,
-            instance_name,
-            &self.instance_identity(instance_name),
-        );
+        let identity = self.instance_identity(instance_name);
+        match self.inspect_explorer(&name)? {
+            None => {}
+            Some(inspection) if inspection.belongs_to(&identity) => {
+                let _ = self.remove_container(&name);
+            }
+            Some(_) => {
+                return Err(CliError::new(format!(
+                    "the container name {name} is taken by a container Helix did not start"
+                ))
+                .with_hint(format!(
+                    "rename it with `{} rename {name} <new name>`, then run `helix explorer \
+                     {instance_name}` again",
+                    self.runtime.binary()
+                ))
+                .into());
+            }
+        }
+        let args = explorer_run_args(self.runtime, &name, launch, instance_name, &identity);
         let output = self
             .runtime_command()
             .args(&args)
@@ -677,9 +723,43 @@ impl LocalRuntime {
         )
     }
 
-    /// Stop and remove an instance's Explorer. Returns whether one existed.
+    /// Stop and remove an instance's Explorer. Returns whether one existed. A
+    /// container that holds the Explorer's name without its labels is left
+    /// alone.
     pub fn remove_explorer(&self, instance_name: &str) -> Result<bool> {
-        self.remove_container(&self.explorer_container_name(instance_name))
+        let name = self.explorer_container_name(instance_name);
+        let identity = self.instance_identity(instance_name);
+        match self.inspect_explorer(&name)? {
+            Some(inspection) if inspection.belongs_to(&identity) => self.remove_container(&name),
+            _ => Ok(false),
+        }
+    }
+
+    /// What the runtime reports about the container named `name`, or `None`
+    /// when no container has that name.
+    fn inspect_explorer(&self, name: &str) -> Result<Option<ExplorerInspection>> {
+        let output = self
+            .runtime_command()
+            .args([
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                EXPLORER_INSPECT_FORMAT,
+                name,
+            ])
+            .output()
+            .map_err(|e| eyre!("Failed to inspect {name}: {e}"))?;
+        if output.status.success() {
+            return Ok(Some(parse_explorer_inspection(&String::from_utf8_lossy(
+                &output.stdout,
+            ))));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if missing_resource(&stderr) {
+            return Ok(None);
+        }
+        Err(eyre!("Failed to inspect {name}: {}", stderr.trim()))
     }
 
     /// Make `image` available locally, pulling it when it is missing with the
@@ -1575,7 +1655,8 @@ fn explorer_host(runtime: ContainerRuntime) -> &'static str {
 }
 
 /// `run` arguments for an Explorer: detached and removed when it stops,
-/// labelled with the instance's identity, and published on loopback only.
+/// labelled with the instance's identity and the Explorer role, and published
+/// on loopback only.
 fn explorer_run_args(
     runtime: ContainerRuntime,
     name: &str,
@@ -1591,6 +1672,8 @@ fn explorer_run_args(
         name.to_string(),
         "--label".to_string(),
         format!("{IDENTITY_LABEL}={identity}"),
+        "--label".to_string(),
+        format!("{ROLE_LABEL}={EXPLORER_ROLE}"),
     ];
     if runtime == ContainerRuntime::Docker {
         args.extend([
@@ -1621,18 +1704,38 @@ fn parse_published_port(output: &str) -> Option<u16> {
         .filter(|port| *port != 0)
 }
 
-/// Splits [`EXPLORER_CONFIG_FORMAT`] output into the image reference and the
-/// `HELIX_URL` the container runs with.
-fn parse_explorer_config(output: &str) -> (Option<String>, Option<String>) {
+/// Splits [`EXPLORER_INSPECT_FORMAT`] output into its fields. An empty line
+/// is a value the runtime did not report.
+fn parse_explorer_inspection(output: &str) -> ExplorerInspection {
     let mut lines = output.lines().map(str::trim);
-    let image = lines
-        .next()
-        .filter(|image| !image.is_empty())
-        .map(str::to_owned);
+    let mut field = || {
+        lines
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let identity = field().unwrap_or_default();
+    let role = field().unwrap_or_default();
+    let image_id = field();
+    let image = field();
     let helix_url = lines
         .find_map(|line| line.strip_prefix("HELIX_URL="))
         .map(str::to_owned);
-    (image, helix_url)
+    ExplorerInspection {
+        identity,
+        role,
+        image_id,
+        image,
+        helix_url,
+    }
+}
+
+impl ExplorerInspection {
+    /// Whether the container is the Explorer `helix explorer` started for the
+    /// instance with this identity, and so is safe to reuse or remove.
+    fn belongs_to(&self, identity: &str) -> bool {
+        self.identity == identity && self.role == EXPLORER_ROLE
+    }
 }
 
 /// Runs SeaweedFS's single-process `mini` mode (master, volume, filer, and S3)
@@ -2220,13 +2323,33 @@ mod tests {
     fn explorer_names_extend_the_instance_container_name() {
         assert_eq!(
             runtime_for("demo").explorer_container_name("dev"),
-            "helix-demo-dev-explorer"
+            "helix-demo-dev.explorer"
         );
         let hashed = runtime_for("My Project");
         assert_eq!(
             hashed.explorer_container_name("dev"),
-            format!("{}-explorer", hashed.container_name("dev"))
+            format!("{}.explorer", hashed.container_name("dev"))
         );
+    }
+
+    /// An instance named after another's Explorer keeps its own container:
+    /// stopping or exploring `dev` must never touch `dev-explorer`.
+    #[test]
+    fn no_instance_container_is_named_like_an_explorer() {
+        for project in ["demo", "My Project"] {
+            let runtime = runtime_for(project);
+            for instance in ["dev-explorer", "dev_explorer", "explorer", "dev"] {
+                let container = runtime.container_name(instance);
+                assert!(
+                    !container.ends_with(EXPLORER_NAME_SUFFIX),
+                    "{project}/{instance}: {container}"
+                );
+            }
+            assert_ne!(
+                runtime.explorer_container_name("dev"),
+                runtime.container_name("dev-explorer")
+            );
+        }
     }
 
     #[test]
@@ -2255,7 +2378,7 @@ mod tests {
         assert_eq!(
             explorer_run_args(
                 ContainerRuntime::Docker,
-                "helix-demo-dev-explorer",
+                "helix-demo-dev.explorer",
                 &launch,
                 "dev",
                 "4:demo/dev",
@@ -2265,9 +2388,11 @@ mod tests {
                 "-d",
                 "--rm",
                 "--name",
-                "helix-demo-dev-explorer",
+                "helix-demo-dev.explorer",
                 "--label",
                 "helixdb.identity=4:demo/dev",
+                "--label",
+                "helixdb.role=explorer",
                 "--add-host",
                 "host.docker.internal:host-gateway",
                 "-e",
@@ -2295,7 +2420,7 @@ mod tests {
         };
         let args = explorer_run_args(
             ContainerRuntime::Podman,
-            "helix-demo-qa-explorer",
+            "helix-demo-qa.explorer",
             &launch,
             "qa",
             "4:demo/qa",
@@ -2307,6 +2432,7 @@ mod tests {
             "HELIX_URL=http://host.containers.internal:6969"
         ));
         assert!(has_pair(&args, "-e", "HELIX_INSTANCE_NAME=qa"));
+        assert!(has_pair(&args, "--label", "helixdb.role=explorer"));
         assert!(has_pair(&args, "-p", "127.0.0.1:7001:3000"));
         assert_eq!(
             args.last().map(String::as_str),
@@ -2335,24 +2461,42 @@ mod tests {
     }
 
     #[test]
-    fn explorer_config_reads_the_image_and_helix_url() {
-        assert_eq!(
-            parse_explorer_config(
-                "helix-explorer:local\nPATH=/usr/bin\nHELIX_URL=http://host.docker.internal:6969\nHELIX_INSTANCE_NAME=dev\n"
-            ),
-            (
-                Some("helix-explorer:local".to_string()),
-                Some("http://host.docker.internal:6969".to_string())
-            )
+    fn explorer_inspection_reads_labels_image_and_helix_url() {
+        let inspection = parse_explorer_inspection(
+            "4:demo/dev\nexplorer\nsha256:abc\nhelix-explorer:local\nPATH=/usr/bin\n\
+             HELIX_URL=http://host.docker.internal:6969\nHELIX_INSTANCE_NAME=dev\n",
         );
-        assert_eq!(parse_explorer_config(""), (None, None));
         assert_eq!(
-            parse_explorer_config("ghcr.io/helixdb/helix-explorer:latest\nPATH=/bin\n"),
-            (
-                Some("ghcr.io/helixdb/helix-explorer:latest".to_string()),
-                None
-            )
+            inspection,
+            ExplorerInspection {
+                identity: "4:demo/dev".to_string(),
+                role: "explorer".to_string(),
+                image_id: Some("sha256:abc".to_string()),
+                image: Some("helix-explorer:local".to_string()),
+                helix_url: Some("http://host.docker.internal:6969".to_string()),
+            }
         );
+        assert!(inspection.belongs_to("4:demo/dev"));
+        assert!(!inspection.belongs_to("4:demo/qa"));
+        assert_eq!(parse_explorer_inspection(""), ExplorerInspection::default());
+    }
+
+    /// The instance container carries the same identity label, and an
+    /// unlabelled container may hold the name, so neither is an Explorer.
+    #[test]
+    fn only_a_container_with_the_explorer_role_is_the_explorer() {
+        let instance = parse_explorer_inspection(
+            "4:demo/dev\n\nsha256:abc\nghcr.io/helixdb/helixdb:v0.0.11\nPATH=/bin\n",
+        );
+        assert_eq!(instance.role, "");
+        assert_eq!(
+            instance.image.as_deref(),
+            Some("ghcr.io/helixdb/helixdb:v0.0.11")
+        );
+        assert!(!instance.belongs_to("4:demo/dev"));
+        let unlabelled = parse_explorer_inspection("\n\nsha256:def\nnginx\n");
+        assert!(!unlabelled.belongs_to("4:demo/dev"));
+        assert!(!unlabelled.belongs_to(""));
     }
 
     #[test]

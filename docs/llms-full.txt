@@ -7196,7 +7196,7 @@ helix explorer dev --no-open  # print the URL only
 helix explorer dev --stop     # stop the Explorer, keep the instance
 ```
 
-[`helix explorer`](/cli/command-reference/explorer) runs the Explorer in a `helix-<project>-<instance>-explorer` container on `http://127.0.0.1:6970` (or the next free port) and points it at the running instance. `helix stop <instance>` stops it too.
+[`helix explorer`](/cli/command-reference/explorer) runs the Explorer in a `helix-<project>-<instance>.explorer` container on `http://127.0.0.1:6970` (or the next free port) and points it at the running instance. `helix stop <instance>` stops it too.
 
 ## Inspecting logs
 
@@ -8028,10 +8028,12 @@ helix explorer [INSTANCE] [OPTIONS]
 
 - The instance must be running. Otherwise the command fails and suggests `helix start <instance>`.
 - The CLI reads the host port the instance's container publishes, so an instance started with `helix start --port` works without changes to `helix.toml`.
-- The Explorer runs as `helix-<project>-<instance>-explorer`, with the instance's identity label. It is detached and removed when it stops (`-d --rm`), and its port is published on `127.0.0.1` only.
+- The Explorer runs as `helix-<project>-<instance>.explorer`, labelled with the instance's identity (`helixdb.identity`) and `helixdb.role=explorer`. Instance names cannot contain `.`, so no instance's container has that name. It is detached and removed when it stops (`-d --rm`), and its port is published on `127.0.0.1` only.
+- The CLI only reuses, lists, or removes a container with that name when it carries both labels. Any other container under that name is left alone, and starting the Explorer fails until it is renamed.
 - The container reaches the instance through the host. With Docker, `HELIX_URL` is `http://host.docker.internal:<instance port>` and the CLI adds `--add-host host.docker.internal:host-gateway`. With Podman, `HELIX_URL` is `http://host.containers.internal:<instance port>`, a name Podman provides itself.
-- A missing image is pulled first, with the pull's progress on the spinner. An image that is already present is not pulled again; run `docker pull ghcr.io/helixdb/helix-explorer:latest` (or `podman pull`) to update it.
-- When the instance's Explorer is already running, the CLI reuses it and prints its URL. It replaces it instead when it runs another image, serves another port than an explicit `--port`, or reads an instance port that has since changed.
+- A missing image is pulled first, with the pull's progress on the spinner. An image that is already present is not pulled again; run `docker pull ghcr.io/helixdb/helix-explorer:latest` (or `podman pull`) to update it, then `helix explorer` again to switch to it.
+- When the instance's Explorer is already running, the CLI reuses it and prints its URL. It replaces it instead when it runs another image (images are compared by ID, so a re-pulled or rebuilt tag counts as another image), serves another port than an explicit `--port`, or reads an instance port that has since changed.
+- A replacement keeps the running Explorer's port unless `--port` names another. The CLI checks that port and pulls the image before it removes the running Explorer, so a busy port or a failed pull leaves the running Explorer in place.
 - The CLI waits up to 30 seconds for the Explorer's `GET /healthz`. If the Explorer reports that it cannot reach the instance, the CLI prints a warning and still succeeds. If the container exits first, the error shows how to run the image attached to see its output.
 - The browser opens only in an interactive terminal, and never with `--no-open` or `--json`.
 - [`helix stop`](/cli/command-reference/stop) and [`helix prune`](/cli/command-reference/prune) also remove the instance's Explorer, and [`helix status`](/cli/command-reference/status) lists a running one.
@@ -8427,7 +8429,7 @@ helix prune [INSTANCE] [OPTIONS]
 
 `helix prune` only touches resources the CLI manages:
 
-- The container named `helix-<project>-<instance>`, and its `-explorer` container from [`helix explorer`](/cli/command-reference/explorer).
+- The container named `helix-<project>-<instance>`, and its `helix-<project>-<instance>.explorer` container from [`helix explorer`](/cli/command-reference/explorer).
 - The disk-mode SeaweedFS sidecar, network, and persistent volume when present, plus any MinIO sidecar and volume left by an older CLI.
 - The disk-cache volume of a disk-mode or S3 instance.
 - The per-instance directory under `.helix/`.
@@ -8821,7 +8823,7 @@ helix status [INSTANCE]
 
 - Prints a `Project` / `Root` header, then a table with `INSTANCE`, `KIND`, `STATUS`, and `ENDPOINT` columns.
 - Local status comes from the configured Docker/Podman runtime: URL, container state (`not created` if there is no container), and storage mode.
-- A running [Explorer](/cli/command-reference/explorer) shows as an extra `explorer` row under its instance, with its URL.
+- A running [Explorer](/cli/command-reference/explorer) shows as an extra `explorer` row under its instance, with its URL, even when the instance itself is no longer running.
 - Cloud status uses the WorkOS session and fetches the linked tenant or dedicated cluster; cluster status also includes current topology.
 - A Cloud database that cannot be reached shows as `unreachable` (or `unknown` when you are not logged in) with a warning on stderr. The command still reports every other instance.
 - `--json` prints an object with `project`, `root`, and an `instances` array. Local entries have `kind: "local"`, `name`, `state`, `url`, `storage`, and, while one runs, `explorer` (the Explorer URL). Cloud entries have `kind: "cloud"`, `name`, `state`, `database`, and, when present, `label` and `error`.
@@ -8867,7 +8869,7 @@ helix stop [INSTANCE]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--json` | Print `instance`, `wasRunning`, and `explorerStopped` as JSON on stdout, and never prompt. | Off |
+| `--json` | Print `instance`, `wasRunning`, and `explorerStopped` as JSON on stdout, plus `explorerError` when the Explorer could not be removed, and never prompt. | Off |
 
 ## Behavior
 
@@ -8876,7 +8878,7 @@ helix stop [INSTANCE]
 - For disk-mode instances, `helix stop` removes the Helix and SeaweedFS containers, and any MinIO sidecar left by an older CLI, but keeps the persistent local volumes. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
 - The disk-cache volume of a disk-mode or S3 instance is kept too, so the next start reads recently used data locally.
 - Remote S3 data is never touched.
-- The instance's [Explorer](/cli/command-reference/explorer) container, when one is running, is stopped too. Failing to remove it never fails the stop.
+- The instance's [Explorer](/cli/command-reference/explorer) container, when one is running, is stopped too. Failing to remove it never fails the stop: the CLI prints a warning with the cause and suggests `helix explorer <instance> --stop` to retry.
 
 ## Examples
 

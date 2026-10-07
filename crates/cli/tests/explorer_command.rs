@@ -8,8 +8,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CONTAINER: &str = "helix-explorer-project-dev";
-const EXPLORER: &str = "helix-explorer-project-dev-explorer";
+const EXPLORER: &str = "helix-explorer-project-dev.explorer";
 const DEFAULT_IMAGE: &str = "ghcr.io/helixdb/helix-explorer:latest";
+const IDENTITY: &str = "16:explorer-project/dev";
 
 fn stdout_json(assert: Assert) -> Value {
     serde_json::from_slice(&assert.get_output().stdout).expect("stdout should be one JSON value")
@@ -65,6 +66,38 @@ fn explorer_runs(log: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Where the fake runtime keeps what `inspect` reports for `container`.
+fn container_state(fixture: &CliFixture, container: &str) -> PathBuf {
+    fixture.root().join(format!("runtime.log.{container}"))
+}
+
+/// The runtime log without Windows line endings.
+fn runtime_log(fixture: &CliFixture) -> String {
+    fixture.runtime_log().replace('\r', "")
+}
+
+/// Whether the runtime was asked to remove `container`.
+fn removed(fixture: &CliFixture, container: &str) -> bool {
+    runtime_log(fixture)
+        .lines()
+        .any(|line| line == format!("rm -f {container}"))
+}
+
+/// The Explorer URL `helix status` lists for `instance`, if any.
+fn status_explorer(fixture: &CliFixture, project: &Path, instance: &str) -> Value {
+    let status = stdout_json(
+        fixture
+            .command()
+            .current_dir(project)
+            .env("HELIX_TEST_RUNTIME_PORT_OUTPUT", "0.0.0.0:6969")
+            .env("HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT", "127.0.0.1:6970")
+            .args(["status", instance, "--json"])
+            .assert()
+            .success(),
+    );
+    status["instances"][0]["explorer"].clone()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explorer_starts_against_the_instance_port_then_reuses_and_stops() {
     let server = explorer_health("reachable").await;
@@ -95,8 +128,8 @@ async fn explorer_starts_against_the_instance_port_then_reuses_and_stops() {
     assert_eq!(
         explorer_runs(&log),
         [format!(
-            "run -d --rm --name {EXPLORER} --label helixdb.identity=16:explorer-project/dev \
-             --add-host host.docker.internal:host-gateway \
+            "run -d --rm --name {EXPLORER} --label helixdb.identity={IDENTITY} \
+             --label helixdb.role=explorer --add-host host.docker.internal:host-gateway \
              -e HELIX_URL=http://host.docker.internal:6969 -e HELIX_INSTANCE_NAME=dev \
              -p 127.0.0.1:{ui_port}:3000 {DEFAULT_IMAGE}"
         )],
@@ -117,6 +150,9 @@ async fn explorer_starts_against_the_instance_port_then_reuses_and_stops() {
     );
     assert_eq!(reused["reused"], true);
     assert_eq!(reused["url"], url.as_str());
+    // The image and instance URL come from the running container.
+    assert_eq!(reused["image"], DEFAULT_IMAGE);
+    assert_eq!(reused["helixUrl"], "http://host.docker.internal:6969");
     assert_eq!(explorer_runs(&fixture.runtime_log()).len(), 1);
 
     let status = stdout_json(
@@ -130,6 +166,15 @@ async fn explorer_starts_against_the_instance_port_then_reuses_and_stops() {
             .success(),
     );
     assert_eq!(status["instances"][0]["explorer"], url.as_str());
+    // An Explorer outlives an instance container that is gone.
+    let orphaned = stdout_json(
+        explorer(&fixture, &project, explorer_port)
+            .args(["status", "dev", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(orphaned["instances"][0]["state"], "not created");
+    assert_eq!(orphaned["instances"][0]["explorer"], url.as_str());
 
     let stopped = stdout_json(
         explorer(&fixture, &project, explorer_port)
@@ -168,16 +213,230 @@ async fn a_running_explorer_on_another_port_is_replaced() {
             .success(),
     );
     assert!(
-        replaced.contains("Replacing the running Explorer"),
+        replaced.contains(&format!(
+            "Replacing the running Explorer: it serves port {}, not {other_port}",
+            server.address().port()
+        )),
         "{replaced}"
     );
-    let log = fixture.runtime_log().replace('\r', "");
+    let log = runtime_log(&fixture);
     let runs = explorer_runs(&log);
     assert_eq!(runs.len(), 2, "{log}");
     assert!(
         runs[1].contains(&format!("-p 127.0.0.1:{other_port}:3000 ")),
         "{log}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_explorer_is_replaced_when_the_image_changes() {
+    let server = explorer_health("reachable").await;
+    let port = server.address().port();
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    explorer(&fixture, &project, port)
+        .args(["explorer", "--no-open"])
+        .assert()
+        .success();
+
+    let replaced = stderr(
+        explorer(&fixture, &project, port)
+            .args(["explorer", "--no-open", "--image", "helix-explorer:local"])
+            .assert()
+            .success(),
+    );
+    assert!(
+        replaced.contains(&format!(
+            "Replacing the running Explorer: it runs {DEFAULT_IMAGE}, not helix-explorer:local"
+        )),
+        "{replaced}"
+    );
+    let log = runtime_log(&fixture);
+    let runs = explorer_runs(&log);
+    assert_eq!(runs.len(), 2, "{log}");
+    // The replacement keeps the port the running Explorer frees.
+    assert!(
+        runs[1].contains(&format!("-p 127.0.0.1:{port}:3000 ")),
+        "{log}"
+    );
+    assert!(runs[1].ends_with(" helix-explorer:local"), "{log}");
+
+    // The new container reports the new image, so it is reused from now on.
+    let reused = stdout_json(
+        explorer(&fixture, &project, port)
+            .args(["explorer", "--image", "helix-explorer:local", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(reused["reused"], true);
+    assert_eq!(reused["image"], "helix-explorer:local");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuilt_image_replaces_the_explorer_running_its_old_build() {
+    let server = explorer_health("reachable").await;
+    let port = server.address().port();
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    explorer(&fixture, &project, port)
+        .args(["explorer", "--no-open", "--image", "helix-explorer:local"])
+        .assert()
+        .success();
+
+    let rebuilt = || {
+        let mut command = explorer(&fixture, &project, port);
+        command
+            .env("HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID", "sha256:rebuilt")
+            .args(["explorer", "--no-open", "--image", "helix-explorer:local"]);
+        command
+    };
+    let replaced = stderr(rebuilt().assert().success());
+    assert!(
+        replaced.contains("helix-explorer:local has changed since it started"),
+        "{replaced}"
+    );
+    let again = stderr(rebuilt().assert().success());
+    assert!(again.contains("The Explorer is already running"), "{again}");
+    assert_eq!(explorer_runs(&runtime_log(&fixture)).len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_explorer_is_replaced_when_the_instance_port_changes() {
+    let server = explorer_health("reachable").await;
+    let port = server.address().port();
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    explorer(&fixture, &project, port)
+        .args(["explorer", "--no-open"])
+        .assert()
+        .success();
+
+    let replaced = stdout_json(
+        explorer(&fixture, &project, port)
+            .env("HELIX_TEST_RUNTIME_PORT_OUTPUT", "0.0.0.0:7000")
+            .args(["explorer", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(replaced["reused"], false);
+    assert_eq!(replaced["helixUrl"], "http://host.docker.internal:7000");
+    let log = runtime_log(&fixture);
+    let runs = explorer_runs(&log);
+    assert_eq!(runs.len(), 2, "{log}");
+    assert!(
+        runs[1].contains(" -e HELIX_URL=http://host.docker.internal:7000 "),
+        "{log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_pull_keeps_the_running_explorer() {
+    let server = explorer_health("reachable").await;
+    let port = server.address().port();
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    explorer(&fixture, &project, port)
+        .args(["explorer", "--no-open"])
+        .assert()
+        .success();
+
+    let error = stderr(
+        explorer(&fixture, &project, port)
+            .env("HELIX_TEST_RUNTIME_IMAGE_MISSING", "1")
+            .env("HELIX_TEST_RUNTIME_FAIL_IMAGE", "helix-explorer:broken")
+            .args(["explorer", "--no-open", "--image", "helix-explorer:broken"])
+            .assert()
+            .failure(),
+    );
+    assert!(
+        error.contains("failed to pull helix-explorer:broken"),
+        "{error}"
+    );
+    assert!(!removed(&fixture, EXPLORER), "{}", runtime_log(&fixture));
+    assert_eq!(explorer_runs(&runtime_log(&fixture)).len(), 1);
+    assert_eq!(
+        status_explorer(&fixture, &project, "dev"),
+        "http://127.0.0.1:6970"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_port_keeps_the_running_explorer() {
+    let server = explorer_health("reachable").await;
+    let port = server.address().port();
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    explorer(&fixture, &project, port)
+        .args(["explorer", "--no-open"])
+        .assert()
+        .success();
+
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy_port = busy.local_addr().unwrap().port();
+    let error = stderr(
+        explorer(&fixture, &project, port)
+            .args(["explorer", "--no-open", "--port"])
+            .arg(busy_port.to_string())
+            .assert()
+            .failure(),
+    );
+    assert!(
+        error.contains(&format!("port {busy_port} is already in use")),
+        "{error}"
+    );
+    assert!(!removed(&fixture, EXPLORER), "{}", runtime_log(&fixture));
+    assert_eq!(
+        status_explorer(&fixture, &project, "dev"),
+        "http://127.0.0.1:6970"
+    );
+}
+
+/// The port an explicit `--port` names is busy only because the Explorer
+/// being replaced holds it, so the replacement takes it over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replacement_can_take_over_the_port_its_predecessor_holds() {
+    let server = explorer_health("reachable").await;
+    // The fake reports the Explorer on the health server's port, which the
+    // server holds as the running container would.
+    let port = server.address().port();
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    explorer(&fixture, &project, port)
+        .args(["explorer", "--no-open"])
+        .assert()
+        .success();
+
+    explorer(&fixture, &project, port)
+        .args([
+            "explorer",
+            "--no-open",
+            "--image",
+            "helix-explorer:local",
+            "--port",
+        ])
+        .arg(port.to_string())
+        .assert()
+        .success();
+    let log = runtime_log(&fixture);
+    let runs = explorer_runs(&log);
+    assert_eq!(runs.len(), 2, "{log}");
+    assert!(
+        runs[1].contains(&format!("-p 127.0.0.1:{port}:3000 ")),
+        "{log}"
+    );
+    // The new image is in place before the old Explorer goes.
+    let lines: Vec<_> = log.lines().collect();
+    let removal = lines
+        .iter()
+        .position(|line| *line == format!("rm -f {EXPLORER}"))
+        .expect("the old Explorer is removed");
+    let inspected = lines
+        .iter()
+        .rposition(|line| {
+            line.starts_with("image inspect ") && line.ends_with(" helix-explorer:local")
+        })
+        .expect("the new image is checked");
+    assert!(inspected < removal, "{log}");
 }
 
 #[test]
@@ -354,4 +613,143 @@ async fn stopping_an_instance_stops_its_explorer_too() {
             .success(),
     );
     assert_eq!(again["explorerStopped"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_explorer_removal_warns_without_failing_the_stop() {
+    let server = explorer_health("reachable").await;
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    explorer(&fixture, &project, server.address().port())
+        .args(["explorer", "--no-open"])
+        .assert()
+        .success();
+
+    let warning = stderr(
+        fixture
+            .command()
+            .current_dir(&project)
+            .env("HELIX_TEST_RUNTIME_FAIL_COMMAND", "inspect")
+            .args(["stop", "dev"])
+            .assert()
+            .success(),
+    );
+    assert!(
+        warning.contains("Could not stop the dev Explorer (")
+            && warning.contains("simulated runtime failure"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("retry with `helix explorer dev --stop`"),
+        "{warning}"
+    );
+
+    let report = stdout_json(
+        fixture
+            .command()
+            .current_dir(&project)
+            .env("HELIX_TEST_RUNTIME_FAIL_COMMAND", "inspect")
+            .args(["stop", "dev", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(report["explorerStopped"], false);
+    let error = report["explorerError"].as_str().unwrap();
+    assert!(error.contains("simulated runtime failure"), "{error}");
+    assert!(!error.contains('\n'), "{error:?}");
+}
+
+/// `helix-<project>-dev-explorer` is the `dev-explorer` instance's own
+/// container, never `dev`'s Explorer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instance_named_like_an_explorer_is_never_touched() {
+    let server = explorer_health("reachable").await;
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    let config = project.join("helix.toml");
+    let toml = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!("{toml}\n[local.dev-explorer]\nport = 7979\n"),
+    )
+    .unwrap();
+    let neighbour = "helix-explorer-project-dev-explorer";
+
+    explorer(&fixture, &project, server.address().port())
+        .args(["explorer", "dev", "--no-open"])
+        .assert()
+        .success();
+    explorer(&fixture, &project, server.address().port())
+        .args(["explorer", "dev", "--stop"])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["stop", "dev"])
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["prune", "dev", "--yes"])
+        .assert()
+        .success();
+
+    let log = runtime_log(&fixture);
+    assert!(removed(&fixture, EXPLORER), "{log}");
+    assert!(!removed(&fixture, neighbour), "{log}");
+    assert!(
+        !log.split_whitespace().any(|word| word == neighbour),
+        "nothing may name the neighbour's container: {log}"
+    );
+}
+
+/// A container that holds the Explorer's name without the Explorer's labels
+/// is someone else's: it is never reused, listed, or removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreign_container_at_the_explorer_name_is_left_alone() {
+    let server = explorer_health("reachable").await;
+    let fixture = CliFixture::new_with_fake_runtime();
+    let project = project(&fixture);
+    // The instance's identity, but not the Explorer role.
+    std::fs::write(
+        container_state(&fixture, EXPLORER),
+        format!("{IDENTITY}\n\nsha256:other\nnginx:latest\nPATH=/bin\n"),
+    )
+    .unwrap();
+
+    let stopped = stdout_json(
+        explorer(&fixture, &project, server.address().port())
+            .args(["explorer", "--stop", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(stopped["wasRunning"], false);
+    let instance_stopped = stdout_json(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["stop", "dev", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(instance_stopped["explorerStopped"], false);
+    assert_eq!(status_explorer(&fixture, &project, "dev"), Value::Null);
+
+    let error = stderr(
+        explorer(&fixture, &project, server.address().port())
+            .args(["explorer", "--no-open"])
+            .assert()
+            .failure(),
+    );
+    assert!(
+        error.contains(&format!(
+            "the container name {EXPLORER} is taken by a container Helix did not start"
+        )),
+        "{error}"
+    );
+    assert!(!removed(&fixture, EXPLORER), "{}", runtime_log(&fixture));
+    assert!(explorer_runs(&runtime_log(&fixture)).is_empty());
+    assert!(container_state(&fixture, EXPLORER).exists());
 }

@@ -72,11 +72,10 @@ pub async fn run(instance: Option<String>) -> Result<()> {
         instances.push(match project.config.get_instance(&name)? {
             InstanceInfo::Local(config) => {
                 let status = runtime.status(&name)?;
-                // An Explorer only runs beside an existing instance container,
-                // so a missing one costs no extra runtime call.
-                let explorer = status
-                    .as_ref()
-                    .and_then(|_| runtime.explorer_port(&name))
+                // An Explorer outlives an instance that exited on its own, so
+                // it is listed whatever state the instance is in.
+                let explorer = runtime
+                    .explorer_port(&name)
                     .map(super::explorer::explorer_url);
                 InstanceStatus::Local {
                     state: status.map_or_else(|| "not created".to_owned(), |status| status.status),

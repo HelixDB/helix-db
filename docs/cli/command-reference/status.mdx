@@ -32,7 +32,7 @@ helix status [INSTANCE]
 
 - Prints a `Project` / `Root` header, then a table with `INSTANCE`, `KIND`, `STATUS`, and `ENDPOINT` columns.
 - Local status comes from the configured Docker/Podman runtime: URL, container state (`not created` if there is no container), and storage mode.
-- A running [Explorer](/cli/command-reference/explorer) shows as an extra `explorer` row under its instance, with its URL.
+- A running [Explorer](/cli/command-reference/explorer) shows as an extra `explorer` row under its instance, with its URL, even when the instance itself is no longer running.
 - Cloud status uses the WorkOS session and fetches the linked tenant or dedicated cluster; cluster status also includes current topology.
 - A Cloud database that cannot be reached shows as `unreachable` (or `unknown` when you are not logged in) with a warning on stderr. The command still reports every other instance.
 - `--json` prints an object with `project`, `root`, and an `instances` array. Local entries have `kind: "local"`, `name`, `state`, `url`, `storage`, and, while one runs, `explorer` (the Explorer URL). Cloud entries have `kind: "cloud"`, `name`, `state`, `database`, and, when present, `label` and `error`.
