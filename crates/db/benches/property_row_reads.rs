@@ -15,11 +15,12 @@ use db::{HelixDB, HelixDbSource};
 use helix_ast::prelude::*;
 use helix_planner::{context::ParamBindings, exec::ExecutablePlan, planning};
 
-#[cfg(not(test))]
-const ENTITY_COUNT: u64 = 2_000;
-// `cargo test --all-targets` executes the Divan harness; keep that smoke run small.
-#[cfg(test)]
-const ENTITY_COUNT: u64 = 4;
+/// Nodes seeded for `cargo bench`, which passes `--bench` to the harness.
+const BENCH_ENTITY_COUNT: u64 = 2_000;
+/// Nodes seeded when `cargo test --all-targets` runs the harness as a smoke
+/// test. Cargo compiles bench targets with `cfg(test)` in both modes, so the
+/// size is chosen from the arguments at run time instead.
+const SMOKE_ENTITY_COUNT: u64 = 4;
 
 const EMBEDDING_DIMENSIONS: usize = 384;
 
@@ -66,8 +67,13 @@ async fn seed_and_plan() -> (HelixDB, [ExecutablePlan; 4]) {
     .await
     .expect("benchmark database opens");
 
+    let entity_count = if std::env::args().any(|argument| argument == "--bench") {
+        BENCH_ENTITY_COUNT
+    } else {
+        SMOKE_ENTITY_COUNT
+    };
     let body = "lorem ipsum dolor sit amet ".repeat(80);
-    for chunk in (0..ENTITY_COUNT).collect::<Vec<_>>().chunks(250) {
+    for chunk in (0..entity_count).collect::<Vec<_>>().chunks(250) {
         let mut create = write_batch();
         for &id in chunk {
             let embedding = (0..EMBEDDING_DIMENSIONS)
@@ -103,7 +109,7 @@ async fn seed_and_plan() -> (HelixDB, [ExecutablePlan; 4]) {
             .expect("benchmark graph is created");
     }
 
-    let threshold = ENTITY_COUNT as i64 / 2;
+    let threshold = entity_count as i64 / 2;
     let queries = [
         read_batch()
             .var_as(
