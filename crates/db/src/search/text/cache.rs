@@ -2948,4 +2948,61 @@ mod tests {
         );
         assert_exact_memory_bytes(&cache);
     }
+
+    /// A hydration that finds the artifact another handle already published
+    /// still drops this handle's remote split, so its next search opens the
+    /// artifact.
+    #[tokio::test]
+    async fn hydration_of_an_already_published_artifact_drops_the_remote_split() {
+        let database = "fts-cache-hydration-finds-published";
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (bytes, split) = valid_split(32);
+        put_split(&store, database, bytes, &split).await;
+        let disk = tempfile::tempdir().expect("disk cache");
+        let open_cache = || {
+            cache(
+                database,
+                Arc::clone(&store),
+                Some(disk.path().to_path_buf()),
+                split.total_size_bytes,
+                split.total_size_bytes * 2,
+                Duration::from_secs(300),
+            )
+        };
+        let (holding, publishing) = (open_cache(), open_cache());
+
+        let remote = holding
+            .get_or_open_split(&split)
+            .await
+            .expect("remote open");
+        assert!(matches!(remote.backing, SplitBacking::Remote));
+        publishing
+            .ensure_artifact(&split)
+            .await
+            .expect("the other handle publishes");
+        assert_eq!(
+            holding.ensure_artifact(&split).await.expect("reuse"),
+            0,
+            "the artifact was already published"
+        );
+        let state = holding.snapshot();
+        assert_eq!(
+            (state.retained_split_count, state.retained_split_bytes),
+            (0, 0),
+            "the reused artifact dropped the remote split"
+        );
+
+        let local = holding.get_or_open_split(&split).await.expect("disk open");
+        assert!(matches!(local.backing, SplitBacking::Local { .. }));
+        let state = holding.snapshot();
+        assert_eq!(
+            (
+                state.remote_opens,
+                state.disk_hits,
+                state.retained_split_count
+            ),
+            (1, 1, 1)
+        );
+        assert_exact_memory_bytes(&holding);
+    }
 }
