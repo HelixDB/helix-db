@@ -12,6 +12,8 @@ db = { path = "../db" }
 helix-ast = { path = "../ast" }
 helix-metrics = { path = "../metrics" }
 axum = "0.8.8"
+# Default features build mimalloc v3 from 0.1.49 on; keep the `v2` feature off.
+mimalloc = "0.1.52"
 object_store = "0.14"
 prost = "0.14.3"
 serde = { version = "1", features = ["derive"] }
