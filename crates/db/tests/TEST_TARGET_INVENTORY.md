@@ -53,6 +53,7 @@ Cargo discovers these targets:
 | `secondary_equality_read_scale` | `bench` | `crates/db/benches/secondary_equality_read_scale.rs` | Measures equality lookup cost over the 10,000-node shared-value fixture. |
 | `text_transaction_batching` | `bench` | `crates/db/benches/text_transaction_batching.rs` | Measures text transaction batching. |
 | `vector_batch_insert` | `bench` | `crates/db/benches/vector_batch_insert.rs` | Measures vector batch insertion. |
+| `vector_memory_store` | `bench` | `crates/db/benches/vector_memory_store.rs` | Measures resident vector-memory hydration from on-disk SSTs: retained heap against charged bytes, hydration time and allocations, and warm lookup latency. |
 | `write_path_mutations` | `bench` | `crates/db/benches/write_path_mutations.rs` | Measures graph mutation write paths. |
 
 The `queue_acceptance_verify` example is an existing-database acceptance

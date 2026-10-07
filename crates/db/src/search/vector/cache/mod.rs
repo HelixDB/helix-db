@@ -1,5 +1,7 @@
 //! Resident vector-cache ownership, hydration, and commit effects.
 
+#[cfg(feature = "production-coverage")]
+pub(super) mod benchmark;
 pub(super) mod commit;
 pub(super) mod hydration;
 pub(super) mod part_warm;
