@@ -1189,8 +1189,12 @@ pub(crate) async fn run_fused_vector_search_contracts() {
         let plan = helix_planner::planning::plan_read_batch(&read, prepared.context())
             .expect("read plans");
         assert_eq!(
-            super::scheduler::fusion::plan(plan.steps(), plan.root(), plan.execution_program())
-                .len(),
+            super::scheduler::fusion::plan(
+                &plan.steps().iter().map(|step| (step.id, step)).collect(),
+                &super::scheduler::output_uses(plan.steps(), plan.root()).expect("use plan"),
+                plan.execution_program(),
+            )
+            .len(),
             if fused { 2 } else { 0 },
             "{:#?}",
             plan.steps()
@@ -1259,9 +1263,12 @@ pub(crate) async fn run_fused_vector_search_contracts() {
     steps[1]
         .dependencies
         .push(exec::ExecStepId::new(3).expect("positive step ID"));
-    assert!(
-        super::scheduler::fusion::plan(&steps, plan.root(), plan.execution_program()).is_empty()
-    );
+    assert!(super::scheduler::fusion::plan(
+        &steps.iter().map(|step| (step.id, step)).collect(),
+        &super::scheduler::output_uses(&steps, plan.root()).expect("use plan"),
+        plan.execution_program(),
+    )
+    .is_empty());
     let (exec::ExecOp::Access { plan: access }, exec::ExecOp::VectorSearch { plan: search }) =
         (&steps[0].op, &steps[1].op)
     else {
