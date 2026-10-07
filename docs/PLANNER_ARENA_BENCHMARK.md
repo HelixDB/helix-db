@@ -1,201 +1,287 @@
-# Planner arenas: what they could save, and what saves more
+# Planner time and allocation: arenas measured, targeted fixes kept
 
-Measured on an Apple M4 Pro (10 performance and 4 efficiency cores, macOS), `rustc 1.101.0-nightly
-(75a75c3e0 2026-09-26)`, release `bench` profile, mimalloc as the global allocator, as the server uses.
-Follow-up F7 of [AST_ARENA_PROTOTYPE_BENCHMARK.md](AST_ARENA_PROTOTYPE_BENCHMARK.md).
+Follow-up F7 of [AST_ARENA_PROTOTYPE_BENCHMARK.md](AST_ARENA_PROTOTYPE_BENCHMARK.md). The question was
+whether a planner arena would pay off. The answer is no: targeted changes to the planner's data
+structures saved far more than any arena could, and are in this branch.
+
+Two platforms were measured. **Graviton4 decides:** it runs Linux, as production does, and a macOS
+result has already misled once (see [shared names](#shared-names-and-aarch64-atomics)).
+
+- **AWS Graviton4:** i8g.4xlarge (16 Neoverse V2 cores), Amazon Linux 2023 (glibc 2.34),
+  `rustc 1.97.1 (8bab26f4f 2026-07-14)`.
+- **Apple M4 Pro:** 10 performance and 4 efficiency cores, macOS, `rustc 1.101.0-nightly`.
+
+Both use the release `bench` profile with mimalloc as the global allocator, as the server does.
 
 ## Summary
 
-**Planning allocates a lot, but almost all of it is short-lived.** Planning a 1 KB read makes 762
-allocations. The returned plan holds 36 of them. Across all 56 workloads, 78–100% of planning's
-allocations are freed before planning returns (median 92%).
+**Planning is 1.8× faster on Graviton4.** Planning time changed as follows from `7e7c9e15` (before any
+planner change in this branch) to `c6878dd4`, over 56 workloads:
 
-**An arena would save at most about a tenth of planning time.** The test served every allocation planning
-makes from a per-thread bump region and reset the region after each plan, so allocating was a pointer bump
-and freeing cost nothing:
+| Threads | Median | Smallest gain | Largest gain |
+| --- | ---: | ---: | ---: |
+| 1 | −45.2% (1.82×) | −30.3% (`predicate_heavy/1024`) | −82.2% (`ManyAvailableIndexes/1024`) |
+| 16 | −43.2% (1.76×) | −29.1% (`WideBooleanPredicates/8`) | −81.0% (`ManyAvailableIndexes/1024`) |
 
-- **One thread:** a median saving of 9.9% (2–21%).
-- **All 14 cores:** a median saving of 16.5% (3–35%).
+Every workload got faster. Allocations per plan fell by a median of 36% (by up to 93%), requested
+bytes by 33% (by up to 87%), and the heap peak by 9% (by up to 96%).
 
-A real arena would keep the plan it returns on the heap, so it would save less again. mimalloc already
-makes allocation cheap. The earlier profile that put malloc and free at 40–50% of small-request planning
-predates the switch to mimalloc.
+**A planner arena is not worth building.** On Graviton4, serving every planning allocation from a bump
+region would have saved:
 
-**Two small changes beat that ceiling where planning is slowest.** Both are in the working tree, and the
-planner (1,438 tests), its doctests and the db lib suite pass with them.
+- a median 8.6% on one thread, and 9.9% on 16 threads, before these changes;
+- about 4% for an arena that held only temporaries, which is what a real arena could do.
 
-| Change | Planning time, one thread |
-| --- | --- |
-| **Shared names.** `NonEmptyString` holds an `Arc<str>`, so cloning a name counts a reference instead of copying it. Each request's index catalog snapshot gets its own copies of the names (`NonEmptyString::detached`). | median −7.1%; −62% on `BatchedRootReuse/256` and `ForEachBodyRootReuse/256`, −59% on `ManyAvailableIndexes/1024`, −26% on `OrderedRangeWindowPushdown/64` |
-| **No throwaway map.** The contradiction check for a single atomic predicate stops building a `BTreeMap` for its one property. | a further median −1.5% (up to −5%) |
+The changes above have since removed a third of the allocations, so the ceiling is lower still. An arena
+would also need a lifetime threaded through the memo, the rules, the analysis passes and the IR.
 
-With both, allocations per plan fall by a median of 26% (by up to 93%), and requested bytes also by 26%
-(by up to 49%). Requests with no names to share stay within run-to-run noise: `dynamic-delete` measured
-+3% in one paired run and +10% in another.
+**Shared names (`Arc<str>`) won on macOS and lost on Graviton4, so they were reverted.** On the M4 Pro
+they saved a median 7.1%. On Graviton4 the same change cost a median +2.6% on one thread and +3.5% on
+16 threads, because every reference-count update on aarch64 Linux is a call to an atomics helper (see
+[Shared names and aarch64 atomics](#shared-names-and-aarch64-atomics)). Only the map-free
+contradiction check from that commit stayed.
 
-**Recommendation.**
+**Recommendations.**
 
-1. Keep the two changes.
-2. Don't build a planner arena now. After the two changes, a real arena that held only planning's
-   temporaries would save a median of about 6%. That saving would cost a lifetime threaded through the
-   memo, the rules, the analysis passes and the IR, all of which own their data today.
-3. Watch the arena's memory. An arena that never reuses memory holds every byte planning ever asked for.
-   That is 4–25× what the heap holds at its peak (median 4.2×). For `wide_batch/1000` it is 34 MiB per
-   in-flight plan, against 8 MiB of heap.
-4. Pursue the remaining allocation sites listed below one by one instead.
+1. Keep the changes in this branch.
+2. Don't build a planner arena.
+3. Measure the server built with `-C target-feature=+lse` on Graviton (see the atomics section).
+4. Work through [what remains](#what-remains), measured on Graviton rather than macOS.
 
 ## Method
 
-Two benchmark binaries in `helix-ast-bench`.
+**Benchmarks**, both in `helix-ast-bench`:
 
-**`planner_alloc`** counts what one plan allocates on the calling thread:
+- **`planner_alloc`** counts what one plan allocates on the calling thread:
+  - allocations, requested bytes and the heap peak;
+  - what the returned plan still holds;
+  - sampled allocation sites for eight workloads, with up to three planner callers each.
 
-- allocations, requested bytes, and the peak;
-- what the returned plan still holds;
-- for eight representative workloads, sampled allocation backtraces grouped by the innermost planner
-  function and by the standard container that allocated.
+  Build it with line tables so that inlined frames resolve:
 
-Grouping uses source files, because inlined frames carry only short names. Build it with line tables:
+  ```bash
+  CARGO_PROFILE_BENCH_DEBUG=line-tables-only cargo bench -p helix-ast-bench --bench planner_alloc
+  ```
 
-```bash
-CARGO_PROFILE_BENCH_DEBUG=line-tables-only cargo bench -p helix-ast-bench --bench planner_alloc
-```
+- **`planner_arena`** times one plan plus freeing its result, in three arms:
+  - **`heap`:** mimalloc.
+  - **`arena`:** `support::scoped_bump`, a global allocator that bump-allocates from a per-thread region
+    inside a scope.
+  - **`plan_clone`:** cloning a finished plan. `arena` + `plan_clone` estimates an arena that holds only
+    temporaries.
 
-**`planner_arena`** times one plan plus freeing its result, in three arms:
-
-- `heap`: mimalloc.
-- `arena`: `support::scoped_bump`, a global allocator. Inside a scope it bump-allocates from a 1 GiB
-  per-thread region, grows the most recent allocation in place, and pops it when it is freed first. It
-  asserts that every region allocation was freed before the scope resets the region.
-- `plan_clone`: cloning a finished plan on the heap and freeing the clone. `arena` + `plan_clone`
-  estimates an arena that holds only temporaries. It is a lower bound, because the plan shares its resolved
-  predicates and expressions through `Arc`s, which a clone only counts.
-
-```bash
-cargo bench -p helix-ast-bench --bench planner_arena
-```
+  ```bash
+  cargo bench -p helix-ast-bench --bench planner_arena -- heap
+  ```
 
 **Workloads.**
 
-- The 21 plannable corpus shapes, planned against an empty catalog as `query_service` plans them.
+- The 21 plannable corpus shapes, planned against an empty catalog, as `query_service` plans them.
 - The planner's 35 scalability fixtures, each with its own catalog.
+- Every thread plans its own copy of each workload, because every request has its own planner context.
 
-Every thread plans its own copy of each workload, because every request has its own planner context.
+**A/B protocol on Graviton4.** For each change:
 
-**Statistics.** Times are divan medians at 1 and 14 threads. The 14-thread runs include the efficiency
-cores and vary by ±10% between runs on this laptop. Full tables are in
-[planner_arena_benchmark_results.json](planner_arena_benchmark_results.json).
+- The base tree is the commit before the change, and the candidate is the change.
+- Both are built in separate target directories.
+- The `heap` arm runs three times per tree, alternating base and candidate.
+- Each workload's result is the median of its three divan medians.
+- The base spread (slowest base run ÷ fastest − 1) shows the noise; it was under 3% for nearly every
+  workload.
+- A change stayed only if it saved clearly more than the spread somewhere. The one slowdown beyond the
+  spread is noted under the per-change table.
 
-## Where planning allocates
+The final comparison ran the same way at 1 and 16 threads. Older revisions lack the benchmarks, so both
+trees used this branch's `helix-ast-bench`.
 
-Per plan, before the two changes → after them:
+Full tables are in [planner_arena_benchmark_results.json](planner_arena_benchmark_results.json), under
+`graviton4` and `apple_m4_pro`.
 
-| Workload | Allocations | Requested | Heap peak | Requested ÷ peak |
-| --- | ---: | ---: | ---: | ---: |
-| dynamic-read | 762 → 657 | 0.10 → 0.06 MiB | 0.01 → 0.01 MiB | 6.7× → 4.5× |
-| ordered-range-wide-projection | 1,389 → 885 | 0.12 → 0.08 MiB | 0.02 → 0.02 MiB | 5.9× → 4.7× |
-| deep_chain/123 | 12,665 → 10,280 | 2.07 → 1.88 MiB | 0.11 → 0.11 MiB | 18.3× → 16.8× |
-| wide_batch/1000 | 361,772 → 282,772 | 48.0 → 34.5 MiB | 8.38 → 8.15 MiB | 5.7× → 4.2× |
-| predicate_heavy/1024 | 176,581 → 155,041 | 18.9 → 9.8 MiB | 0.93 → 0.93 MiB | 20.2× → 10.5× |
-| fixture/ManyMemoAlternatives/64 | 9,523 → 3,999 | 1.49 → 0.76 MiB | 0.12 → 0.10 MiB | 12.4× → 7.6× |
-| fixture/BatchedRootReuse/256 | 225,980 → 23,691 | 15.2 → 9.7 MiB | 0.41 → 0.38 MiB | 37.4× → 25.5× |
-| fixture/ManyAvailableIndexes/1024 | 6,784 → 484 | 0.46 → 0.29 MiB | 0.37 → 0.23 MiB | 1.2× → 1.3× |
-| fixture/MutationHeavyBatches/64 | 71,928 → 54,124 | 11.5 → 8.4 MiB | 2.63 → 2.51 MiB | 4.4× → 3.4× |
+## Results on Graviton4
 
-The last column is how much more memory an arena that never reuses would hold than the heap does.
+### Before and after
 
-**Before the changes, names dominated.** Cloning `NonEmptyString`s, on their own or inside
-`AtLeast<NonEmptyString>` lists and access plans, made up:
+Planning time from `7e7c9e15` to `c6878dd4`:
 
-| Workload | Name clones, share of allocations |
-| --- | ---: |
-| dynamic-read | 13% |
-| fixture/BranchHeavyQueries/16 | 20% |
-| wide_batch/1000 | 23% |
-| fixture/WideBooleanPredicates/64 | over 30% |
-| fixture/ManyMemoAlternatives/64 | over 39% |
-| ordered-range-wide-projection | 41% |
-
-The next largest site was `atomic_predicate_is_statically_impossible`. It built a `BTreeMap` node of
-about 600 bytes for every atomic predicate, which was 12 MiB of the 49 MiB that `wide_batch/1000` requests.
-
-**What remains after the changes:**
-
-| Site | Share of allocations | Possible fix |
+| Workload | One thread | 16 threads |
 | --- | --- | --- |
-| `property_literal_value` (`analysis/scalar/extract.rs`) | 10–22% on predicate workloads | It copies each constrained property's name; returning a `&str` borrowed from the predicate removes the copy. |
-| Making each name's `Arc` (`NonEmptyString::new`) | 5–10% | Unavoidable while the AST hands names over as `String`s. |
-| `ResolvedPredicate` clones in `relational/selection.rs` | 20% on deep chains | These clone a `BTreeMap`. |
-| `access_stream_parts` | 19% on deep chains | — |
-| `exec/pull` `derive`, `exec/validation/order.rs` `execution_order`, `exec/plan/subplan.rs` | 9–16% on batch-heavy plans | `BTreeMap`-keyed DAG bookkeeping, rebuilt for every plan and subplan. |
-| The candidate list in `optimizer/driver/schedule` | 6–9% on small requests | — |
+| dynamic-read | 30.5 → 16.9 µs (−45%) | 33.6 → 19.4 µs (−42%) |
+| dynamic-write | 9.26 → 4.87 µs (−48%) | 10.2 → 5.68 µs (−44%) |
+| bulk_write_typed/1000x768 | 10.9 → 6.73 µs (−39%) | 11.9 → 7.30 µs (−39%) |
+| ordered-range-wide-projection | 55.9 → 24.9 µs (−55%) | 49.3 → 27.8 µs (−44%) |
+| deep_chain/123 | 786 → 251 µs (−68%) | 842 → 256 µs (−70%) |
+| string_heavy_projection/256x64 | 257 → 142 µs (−45%) | 271 → 152 µs (−44%) |
+| wide_batch/1000 | 30.0 → 11.3 ms (−62%) | 32.1 → 13.1 ms (−59%) |
+| predicate_heavy/1024 | 6.91 → 4.82 ms (−30%) | 6.96 → 4.85 ms (−30%) |
+| fixture/BatchedRootReuse/256 | 3.74 ms → 793 µs (−79%) | 3.73 ms → 721 µs (−81%) |
+| fixture/ForEachBodyRootReuse/256 | 3.35 ms → 680 µs (−80%) | 3.52 ms → 718 µs (−80%) |
+| fixture/ManyAvailableIndexes/1024 | 96.3 → 17.1 µs (−82%) | 98.8 → 18.8 µs (−81%) |
+| fixture/DeepTraversalChain/32 | 117 → 45.5 µs (−61%) | 122 → 48.7 µs (−60%) |
+| fixture/OrderedRangeWindowPushdown/64 | 685 → 285 µs (−58%) | 751 → 291 µs (−61%) |
+| fixture/SearchIndexDdlWorkloads/64 | 2.27 → 1.12 ms (−51%) | 2.42 → 1.25 ms (−48%) |
+| fixture/OverLimitIndexDisjunction/512 | 4.76 → 2.56 ms (−46%) | 4.85 → 2.69 ms (−44%) |
+| fixture/MutationHeavyBatches/64 | 4.62 → 2.52 ms (−46%) | 4.90 → 2.84 ms (−42%) |
+| fixture/ManyMemoAlternatives/64 | 402 → 247 µs (−38%) | 408 → 251 µs (−38%) |
+| fixture/WideBooleanPredicates/64 | 410 → 268 µs (−35%) | 413 → 270 µs (−35%) |
+
+Allocation per plan:
+
+| Workload | Allocations | Requested | Heap peak |
+| --- | ---: | ---: | ---: |
+| dynamic-read | 762 → 429 | 102 → 55 KiB | 15.2 → 12.1 KiB |
+| ordered-range-wide-projection | 1,389 → 592 | 124 → 66 KiB | 20.9 → 14.4 KiB |
+| deep_chain/123 | 12,665 → 4,948 | 2.07 → 1.56 MiB | 116 → 112 KiB |
+| wide_batch/1000 | 361,772 → 207,944 | 48.0 → 30.0 MiB | 8.38 → 8.20 MiB |
+| predicate_heavy/1024 | 176,581 → 98,755 | 18.9 → 7.5 MiB | 955 → 792 KiB |
+| fixture/BatchedRootReuse/256 | 225,980 → 19,095 | 15.2 → 2.0 MiB | 416 → 416 KiB |
+| fixture/ManyAvailableIndexes/1024 | 6,784 → 447 | 468 → 61 KiB | 379 → 13 KiB |
+| fixture/ManyMemoAlternatives/64 | 9,523 → 7,076 | 1.49 → 0.83 MiB | 123 → 111 KiB |
+| fixture/OverLimitIndexDisjunction/512 | 73,649 → 55,075 | 11.6 → 6.6 MiB | 914 → 820 KiB |
+| fixture/MutationHeavyBatches/64 | 71,928 → 56,791 | 11.5 → 8.1 MiB | 2.63 → 2.65 MiB |
+
+### Each change
+
+Each row is one commit, measured against its parent. Times are for one thread; the median is over all 56
+workloads.
+
+| Commit | Change | Median | Largest gains |
+| --- | --- | ---: | --- |
+| `c35d6c59` | Executable DAG validation, ordering and pull-region derivation keep per-step state in vectors indexed by dense step position (`StepPositions`), not in `BTreeMap`s keyed by step ID. | −6.4% | `wide_batch/100` −34%, `wide_batch/1000` −32%, `SearchIndexDdlWorkloads/64` −26% |
+| `25089ba3` | Catalog index lookups use borrowed `(label, property)` key views instead of building owned keys. | 0.0% | `predicate_heavy/64`, `dynamic-read` and `wide_batch/100` −7% |
+| `d97c76f2` | `OptimizerConfig` borrows the index catalog and statistics unless runtime feedback changes them. | −0.5% | `ManyAvailableIndexes/1024` −36%, `/256` −20% |
+| `7bd7323f` | The seed optimizer is built once per process; rules are `Send + Sync`. | −1.3% | `dynamic-write` −28%, small writes and counts −22 to −25% |
+| `d027924c` | Contradiction analysis keys constraints by borrowed property names. | −1.6% | `ordered-range-wide-projection` −7% |
+| `9dc078e7` | Lowering moves pipeline parts into each step instead of cloning the pipeline per step. | −0.3% | `deep_chain/123` −48%, `deep_chain/64` −35%, `DeepTraversalChain/32` −18% |
+| `852f1b53`, `2abe3bba` | Digests hash a compact binary serde encoding instead of formatting JSON. Physical tie-breaks keep the JSON digest, so selected plans are unchanged. Executable returns resolve bindings from one index instead of a reverse scan per binding. | −8.2% | `string_heavy_projection` −30%, `wide_batch/1000` −19%, `DeepTraversalChain/32` −16% |
+| `88f315f3` | Projection property lists are shared behind an `Arc`. | +0.8% | `ordered-range-wide-projection` −29% |
+| `2bc5bdfb` | Index translation extends conjunction branches in place instead of copying them. | −0.9% | `predicate_heavy/64` −7%, `/1024` −6% |
+| `bdd6959e` | A batch scopes the planner context once (once per foreach body) instead of cloning it, index catalog included, for every query root. | −1.7% | `ForEachBodyRootReuse/256` −72%, `BatchedRootReuse/256` −67%, `ManyAvailableIndexes/1024` −62% |
+| `5146e284` | A physical alternative's tie-break digest is computed only when two costs tie, then cached. | −5.4% | `dynamic-delete` −11%, small writes −8 to −10% |
+| `e424d9a0` | The diagnostics analyzer keeps its per-step state by position instead of in SipHash maps. | −1.3% | `wide_batch/1000` −6%, `DeepTraversalChain/32` −6% |
+| `0c988d62` | Digests hash struct fields by position instead of by name, marking skipped fields. | −3.2% | `string_heavy_projection` −12%, `DeepTraversalChain/32` −10% |
+| `71b6c730` | An OR's literal equality branches are grouped by sorting borrowed keys, not by a quadratic search over cloned ones. | −0.6% | `OverLimitIndexDisjunction/512` −18%, `/128` −9%, `ManyMemoAlternatives/64` −8% |
+| `4fbc1b11` | Index rules borrow pruned predicates. Lowering validates filters without building and discarding a `PredicatePlan`. | −3.8% | `BatchedRootReuse/256` −20%, `ForEachBodyRootReuse/256` −13%, `predicate_heavy/64` −8% |
+| `2afd3952` | Sets wider than eight sources compare source digests before testing two sources for equality in the subsumption check. | −0.7% | `OverLimitIndexDisjunction/512` −16% |
+| `c6878dd4` | A memo expression caches its identity digest, which the memoizer, the memo's insertion and its duplicate check each computed. | −2.0% | `DeepTraversalChain/32` −9%, `string_heavy_projection` −6% |
+
+The largest slowdown any single change measured was +4.3%, on two 7 µs requests under the shared
+projection lists, where the base spread was 1.5–2.6%. In the final comparison every workload is faster.
+
+### Rejected
+
+| Change | Result on Graviton4 | Why it was dropped |
+| --- | --- | --- |
+| Shared names: `NonEmptyString` holding an `Arc<str>` (`7ac71ad2`, reverted in `d37f522d`) | median +2.6% on one thread (up to +13%), +3.5% on 16 threads (up to +74%) | atomics; see below |
+| Shared names built with `+lse` | median +1.7% on one thread, +2.3% on 16 threads | still slower than copying short names |
+| `Arc`-shared selection internals in `relational/selection.rs` | median −0.2% (−1.6 to +1.9%) | no effect |
+| foldhash instead of SipHash for the catalog maps | median −0.3% (−2.7 to +2.6%) | no effect |
+| Binary digests for physical tie-breaks too | median −10.9% | changed which of two equal-cost plans won for 100 reviewed Cypher queries. Keeping the JSON digest for tie-breaks (−8.2%) and then computing it only on ties (−5.4%) saved more. |
+
+## Shared names and aarch64 atomics
+
+On `aarch64-unknown-linux-gnu`, Rust compiles every atomic read-modify-write to a call to a helper such
+as `__aarch64_ldadd8_rel`. The helper checks at run time whether the CPU has the ARMv8.1 LSE atomic
+instructions. macOS assumes those instructions and inlines them, and allocation costs more there. That
+is why shared names won on the Mac and lost on Graviton4:
+
+- **The helpers dominated.** With shared names, 15% of Graviton4 planning time was in the
+  `__aarch64_ldadd8_*` helpers.
+- **Inlining helped, but not enough.** Built with `-C target-feature=+lse`, the helpers disappear, but
+  an atomic update on Graviton4 still costs more than mimalloc copying a short name.
+- **Contention hurt even with private counters.** With the helper-call build, 16 threads each updating
+  only their own counters slowed `dynamic-read` from 33 µs to 57 µs. `+lse` removed that.
+
+**A name as a reference into a per-request arena needs no atomics,** but it would gain little. Making
+every planning allocation free saved only 4.7% on `BatchedRootReuse/256`, and nothing (+0.3%) on
+`ForEachBodyRootReuse/256`, the two most name-heavy plans. Names are only part of those allocations.
+Against that, it would cost:
+
+- a lifetime through about 1,400 uses of `NonEmptyString` in the planner and db;
+- an arena that travels with the plan until execution ends, since the plan keeps its names into async
+  execution.
+
+**What `+lse` would mean for the server.**
+
+- After this branch, the helpers still take 3.7% of planning time, mostly to count references when
+  cloning and dropping the `Arc`s that plans share.
+- On the planner alone, `+lse` measured −1.0% to +0.1%.
+- The production Dockerfile builds aarch64 with default flags, so any `Arc`-heavy server path pays for
+  the helper calls.
+- Every Graviton generation from Graviton2 supports LSE. ARMv8.0 cores such as Graviton1 do not.
+
+It is worth measuring on the server itself.
 
 ## The arena ceiling
 
-Median change in planning time against `heap`, over the 56 workloads:
+The median change in planning time against `heap`, over the 56 workloads. The first row was measured on
+`7e7c9e15`, before this branch's planner changes. The temporaries-only row was measured one commit later,
+on `7ac71ad2`:
 
-| | One thread | 14 threads |
-| --- | ---: | ---: |
-| Bump arena, before the changes | −9.9% (−2 to −21%) | −16.5% (−3 to −35%) |
-| Bump arena, after the changes | −7.7% (−2 to −20%) | −16.9% |
-| Arena for temporaries only (arena + `plan_clone`), after the changes | −6.1% (−2 to −19%) | — |
-| The two changes, against the original heap | −7.1% (−62 to +10%) | −3.1% |
-| The two changes plus a bump arena, against the original heap | −14.8% | — |
+| | Graviton4, 1 thread | Graviton4, 16 threads | M4 Pro, 1 thread | M4 Pro, 14 threads |
+| --- | ---: | ---: | ---: | ---: |
+| Bump arena for all of planning | −8.6% (+0.3 to −15%) | −9.9% (+10 to −19%) | −9.9% (−2 to −21%) | −16.5% (−3 to −35%) |
+| Arena for temporaries only (arena + `plan_clone`) | about −4% | — | about −6% | — |
 
-- **The arena gains most at high thread counts.** Turning mimalloc's page purging off
-  (`MIMALLOC_PURGE_DELAY=-1`) or stretching it to 1 s moved `heap` by no more than the noise, so the gap is
-  not mimalloc returning pages to the OS.
-- **The arena gains least on big plans.** `wide_batch/1000` and the 256-entry root-reuse fixtures stream
-  through 10–50 MiB of fresh memory per plan. mimalloc reuses memory that is still in cache.
-- **The thread-local access dominates a naive bump.** A first version of the bump allocator read and wrote
-  its thread-local twice per call. On macOS each access is a call through the TLV getter, and that version
-  was 1–16% *slower* than mimalloc. Any production arena reached through a thread-local inherits that cost.
+**Why no arena:**
 
-## Strategies compared
+- **It saves less than the targeted fixes.** The ceiling is about a tenth of planning time, against the
+  45% the targeted fixes saved. Those fixes also removed a third of the allocations the arena would have
+  served.
+- **It holds far more memory.** An arena that never reuses memory holds every byte planning asks for. On
+  the M4 Pro, before these changes, that was 4–25× the heap's peak (median 4.2×). For `wide_batch/1000`
+  it was 34 MiB per in-flight plan, against 8 MiB of heap.
+- **Thread-local access costs too.** A first bump allocator that read its thread-local twice per call was
+  1–16% *slower* than mimalloc on macOS. Any arena reached through a thread-local pays for that access.
+- **The benchmark arm is not production-safe.** The global-allocator scope is a measurement tool only:
+  - anything planning keeps beyond the call would be freed under it;
+  - a pointer freed on another thread would reach mimalloc;
+  - a cloned plan still shares the `Arc`s made inside the scope.
 
-| Strategy | Time saved, one thread | Memory | Cost | Verdict |
-| --- | --- | --- | --- | --- |
-| Shared names (`Arc<str>`), with detached catalog snapshots | median 7%, up to 62% | fewer, smaller allocations (`NonEmptyString` shrinks from 24 to 16 bytes) | one type and one snapshot builder | **keep** |
-| No throwaway map in the atomic contradiction check | median 1.5%, up to 5% | 12 MiB less requested for `wide_batch/1000` | one function | **keep** |
-| Fix the remaining sites above | about 1–5% each, by analogy | less | local to each site | next |
-| Typed arena (bumpalo) for planning's temporaries | about 6% | holds 4–25× the heap's peak until reset | a lifetime through the memo, the rules, the analysis passes and the IR | not now |
-| Bump the whole planning call through the global allocator | 8–10% (17% on 14 cores) | as above | unsound in production | measurement only |
-| Per-thread reusable scratch collections | not measured | retained per thread | per collection | possible, after the targeted fixes |
+## What remains
 
-The global-allocator scope is unsound outside a benchmark:
+A Graviton4 profile of `c6878dd4` (one thread, all workloads), as shares of planning time:
 
-- anything planning stores beyond the call would be freed under it;
-- a region pointer freed on another thread would be passed to mimalloc;
-- a cloned plan still shares the `Arc`s it made inside the scope (the benchmark's first copy-out arm
-  caught exactly this).
+| Where | Share | Possible fix |
+| --- | ---: | --- |
+| Allocation and freeing (mimalloc and Rust's allocation shims) | 23% | Keep removing clones; the remaining volume is spread thinly. |
+| Drop glue | 12% (inclusive) | Fewer intermediate trees, as above. |
+| Access-filter rules | 23% (inclusive), 19% in `required_index_access_filter` | Three rules (`RootStreamAccessRewriteRule`, `AccessSourceIndexFilterRule`, `StreamProjectImplementationRule`) each run `required_index_access_filter`. Caching its result per filter would share that work. |
+| Digests | 9% (inclusive) | Most now hash each memo expression once. Expressions still nest whole access pipelines, so the hashing grows with pipeline length. |
+| Diagnostics analyzer | 6% (inclusive) | Runs on every plan; computing its statistics during lowering would avoid a second walk. |
+| Executable validation, ordering and pull regions | 5% (inclusive) | Share `StepPositions` between validation and derivation instead of rebuilding them. |
+| Outlined atomics | 4% | `+lse`; see above. |
+| Static predicate analysis (`static_predicate_value`, `label_scope`) | 3% | Recomputed by each pruning call; cache per predicate. |
+| Subsumption checks over set sources | 3% | Still quadratic in set width; group sources by kind and label first. |
 
-## One hazard of shared names: counters shared between requests
+## Changes in this branch
 
-An `Arc` clone writes a reference count. When concurrent requests clone the *same* `Arc`, every core
-writes one cache line:
+**Kept:**
 
-- When the benchmark shared one context between all 14 threads, `ManyAvailableIndexes/64` planned 3.3×
-  slower with shared names (109 µs against 33 µs).
-- Per-request contexts showed no such effect.
-
-Production builds a fresh `IndexCatalogSnapshot` for every request, but it used to copy the snapshot's
-keys from the database's long-lived catalog. With shared names, those copies would share the catalog's
-counters across every in-flight request. `RuntimeIndexCatalog::planner_snapshot` therefore gives each request
-detached copies of the label and property names (`NonEmptyString::detached`). Nothing else long-lived
-feeds planning: there is no plan cache, and parameter names and AST names are converted per request.
-
-Any future shared planner state must hand out detached names the same way.
-
-## Changes in the working tree
-
-- `crates/planner/src/ir/contracts/non_empty_string.rs`: `NonEmptyString` stores an `Arc<str>` and gains
-  `detached()`. Its API, ordering, hashing, `Debug` output and serde format are unchanged. `into_string`
-  now copies.
-- `crates/db/src/config/indexes.rs`: `planner_snapshot` detaches the key names it hands each request.
-- `crates/planner/src/analysis/scalar/constraints/collect.rs`: atomic predicates check against one
-  `ScalarPropertyConstraint` through a small `ConstraintSink` trait, which the conjunction's map also
-  implements.
-- `crates/planner/src/exec/op/membership.rs`: drops its `clippy::large_enum_variant` expectation, which
-  the smaller `NonEmptyString` no longer triggers.
-- `crates/ast-bench`: the `planner_alloc` and `planner_arena` benchmarks, the `scoped_bump` allocator and
+- `crates/planner/src/exec/positions.rs`: `StepPositions`, and position-indexed state in:
+  - `exec/validation` (with a CSR dependents list and a ready-set bitset);
+  - `exec/pull`;
+  - the diagnostics analyzer.
+- `crates/planner/src/catalog/property.rs`: `ScopedPropertyKeyView` and `ScopedPropertyDirectionKeyView`,
+  borrowed key views for catalog lookups.
+- `crates/planner/src/optimizer/config.rs`: `OptimizerConfig<'ctx>` borrows the catalog and stats through
+  `Cow`.
+- `crates/planner/src/rules/registry.rs`: `SeedRuleSet::shared_optimizer()`, a process-wide seed
+  optimizer.
+- `crates/planner/src/digest.rs`: a binary serde digest serializer. Struct fields are hashed by
+  position. `PlanDigest::for_tie_break` keeps the JSON digest for physical alternatives.
+- `crates/planner/src/physical/alternative.rs` and `optimizer/ordering.rs`: lazy tie-break digests and
+  `compare_alternatives`.
+- `crates/planner/src/planning/selected/native/batch`: the scoped planner context.
+- `crates/planner/src/ir/access.rs`: digest-filtered subsumption for wide sets.
+- `crates/planner/src/memo/expression.rs`: memo expressions cache their identity digest.
+- Smaller moves and borrows in:
+  - `exec/returns.rs`;
+  - `ir/projection/property.rs`;
+  - `logical/access`;
+  - `rules/access/filter`;
+  - `analysis/scalar`;
+  - `ir/expr/predicate.rs` (`PredicatePlan::validate`).
+- `crates/ast-bench`: the `planner_alloc` and `planner_arena` benchmarks, the `scoped_bump` allocator, and
   per-thread workload copies.
+
+**Reverted:** the shared names of `7ac71ad2`. The map-free contradiction check from that commit stays.
