@@ -8,10 +8,10 @@ cloud gateway deployment is separate.
 
 ## Execute a statement
 
-Cypher is off by default. Start the server with `HELIX_ENABLE_CYPHER=true` to
-route `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`;
-without it they return 404 and `Unimplemented`, and only native queries are
-served.
+Every server serves Cypher on its own routes, `POST /v2/cypher` and
+`POST /v2/cypher/explain`, and on the gRPC `ExecuteCypher` and `ExplainCypher`
+methods, alongside the native `POST /v2/query` and `ExecuteQuery`. Clients can use
+either language against the same database.
 
 Send one statement to a local server's `POST /v2/cypher` endpoint:
 
@@ -25,8 +25,9 @@ curl http://localhost:6969/v2/cypher \
 {"columns":["name","age"],"rows":[["Ada",30]]}
 ```
 
-Use the host and port of your configured instance. Existing server authentication
-and tenant routing apply. `query` is required; `parameters` and `query_name` are
+Use the host and port of your configured instance. The standalone server has no
+authentication and, like `POST /v2/query`, runs every statement against the
+unscoped graph. `query` is required; `parameters` and `query_name` are
 optional. Each row has one value per column in column order. Duplicates are
 preserved unless the query uses `DISTINCT`. Use `ORDER BY` when row order matters.
 
@@ -84,8 +85,26 @@ HTTP and gRPC use this path. Compilation retains no database or catalog snapshot
 execution still acquires the current scoped catalog, validates parameters, and
 applies the attempt's limits and cancellation control.
 
-The additive gRPC `ExecuteCypher(QueryJsonRequest)` method accepts the same JSON
-body and existing request options, returning a `QueryJsonResponse`.
+The gRPC `ExecuteCypher(QueryJsonRequest)` and `ExplainCypher(QueryJsonRequest)`
+methods accept the same JSON body and existing request options, returning a
+`QueryJsonResponse` whose body matches the HTTP response. `ExplainCypher` applies
+the options as a read, like `POST /v2/cypher/explain`.
+
+Every transport reports a Cypher query error with the same class. HTTP returns a
+`{"error","msg","details":{"detail","phase","span"}}` body; gRPC carries the same
+query error as JSON in the status details. Request, storage and transaction
+failures keep the native error envelope and codes.
+
+| Error category | HTTP | gRPC |
+|---|---|---|
+| `ResourceLimit` | 429 | `RESOURCE_EXHAUSTED` |
+| `AccessModeError` (a write on a reader) | 503 | `FAILED_PRECONDITION` |
+| `InternalPlannerError` | 500 | `INTERNAL` |
+| Any other category | 400 | `INVALID_ARGUMENT` |
+
+Rust transports reuse this contract from `helix_cypher::api` (`ErrorClass`,
+`ErrorBody` and the route paths) and decode requests with
+`helix_cypher::request::Request`, which needs no database.
 
 From a linked local Helix project:
 

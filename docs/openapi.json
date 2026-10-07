@@ -285,7 +285,7 @@
       "post": {
         "operationId": "executeCypher",
         "summary": "Execute a Cypher statement",
-        "description": "Executes the supported Cypher read/CRUD profile. The server derives read/write effects from the statement. Modifying statements execute atomically in one write transaction. X-Helix-Warm is valid only for reads; X-Helix-Await-Durable:true is valid only for writes. This operation is available on the standalone local server started with HELIX_ENABLE_CYPHER=true; otherwise the path returns 404. Cloud gateway deployment is outside the MVP. The body limit is 16 MiB, the default deadline is 30 seconds, and the response limit is 16 MiB. Resource exhaustion returns an error instead of truncation.",
+        "description": "Executes the supported Cypher read/CRUD profile. The server derives read/write effects from the statement. Modifying statements execute atomically in one write transaction. X-Helix-Warm is valid only for reads; X-Helix-Await-Durable:true is valid only for writes. This operation is available on the standalone local server. Cloud gateway deployment is outside the MVP. The body limit is 16 MiB, the default deadline is 30 seconds, and the response limit is 16 MiB. Resource exhaustion returns an error instead of truncation.",
         "tags": [
           "Cypher"
         ],
@@ -405,7 +405,7 @@
       "post": {
         "operationId": "explainCypher",
         "summary": "Explain a Cypher statement",
-        "description": "Parses, binds, and plans one statement against the current catalog without executing it. Uses read request options even for a modifying statement. X-Helix-Await-Durable:true is invalid. This operation is available on the standalone local server started with HELIX_ENABLE_CYPHER=true; otherwise the path returns 404. Cloud gateway deployment is outside the MVP. The body limit is 16 MiB, the default deadline is 30 seconds, and the response limit is 16 MiB. Resource exhaustion returns an error instead of truncation.",
+        "description": "Parses, binds, and plans one statement against the current catalog without executing it. Uses read request options even for a modifying statement. X-Helix-Await-Durable:true is invalid. This operation is available on the standalone local server. Cloud gateway deployment is outside the MVP. The body limit is 16 MiB, the default deadline is 30 seconds, and the response limit is 16 MiB. Resource exhaustion returns an error instead of truncation.",
         "tags": [
           "Cypher"
         ],

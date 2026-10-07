@@ -18,6 +18,7 @@ flowchart LR
     server["server · crates/server"] --> db["db · crates/db"]
     server --> ast["helix-ast · crates/ast"]
     server --> metrics["helix-metrics · crates/metrics"]
+    server --> cypher
     server -.-> sdk["helix-db · sdks/rust"]
     server -.-> testkit["helix-db-testkit · crates/db-testkit"]
     server -.-> planner["helix-planner · crates/planner"]
@@ -31,7 +32,7 @@ flowchart LR
     planner --> semantics
     planner -.-> ast
     cypher --> planner
-    cypher -.-> ast
+    cypher --> ast
     sdk --> db
     sdk --> ast
     sdk --> macros["helix-dsl-macros · sdks/rust/helix-dsl-macros"]
@@ -87,7 +88,7 @@ flowchart TD
 | Transports | [HTTP](../crates/server/src/http.rs), [gRPC](../crates/server/src/grpc.rs), [protobuf](../crates/server/proto) | Decode requests, routing, request limits and error mapping; delegate query semantics to the service. |
 | Request service | [query_service.rs](../crates/db/src/query_service.rs), [cypher.rs](../crates/db/src/cypher.rs) | Tenant scope, execute/explain mode, parameters, catalog observation, cancellation and output format belong to one attempt. |
 | Native language | [AST](../crates/ast/src), [native planning](../crates/planner/src/planning) | SDK JSON contracts and native semantics remain supported. |
-| Cypher language | [frontend](../crates/cypher/src), [compiled requests](../crates/db/src/cypher/compiled.rs) | Resolve names to stable slots; reject unsupported semantics before execution; never translate through native DSL syntax. |
+| Cypher language | [frontend](../crates/cypher/src), [requests](../crates/cypher/src/request.rs), [transport contract](../crates/cypher/src/api.rs) | Resolve names to stable slots; reject unsupported semantics before execution; never translate through native DSL syntax. |
 | Result encoding | [Cypher output](../crates/db/src/cypher/output.rs), [parameter decoding](../crates/db/src/cypher/parameters.rs) | Ordered columns, rectangular rows, lossless graph IDs and values; diagnostics stay outside result data. Prepare output before committing writes. |
 | Native bindings | [UniFFI](../bindings/uniffi/src), [Rust SDK](../sdks/rust/src) | Own API/language conversion and runtime handles; delegate storage and query execution to the engine. |
 

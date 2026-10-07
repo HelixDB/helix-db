@@ -18,8 +18,7 @@ async fn cypher_http_and_grpc_preserve_values_errors_and_atomic_writes() {
         .await
         .unwrap(),
     );
-    let state = state::ServerState::new(Arc::clone(&db), None)
-        .with_cypher_endpoints(crate::CypherEndpoints::Enabled);
+    let state = state::ServerState::new(Arc::clone(&db), None);
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
     let response = router.clone().oneshot(Request::post("/v2/cypher").header("content-type","application/json")
@@ -108,26 +107,29 @@ async fn cypher_explain_has_a_separate_read_only_http_contract() {
         .embedded_default_config()
         .with_query_telemetry(db::config::QueryTelemetry::Disabled);
     let db = Arc::new(db::HelixDB::open_with_config(source, config).await.unwrap());
-    let router = http::router(
-        state::ServerState::new(Arc::clone(&db), None)
-            .with_cypher_endpoints(crate::CypherEndpoints::Enabled),
-    );
-    for (body, status) in [
+    let router = http::router(state::ServerState::new(Arc::clone(&db), None));
+    let create = json!({"query":"CREATE (:N {key:7})"}).to_string();
+    for (body, durable, status) in [
+        (create.clone(), false, StatusCode::OK),
+        // Explaining never commits, so it cannot await durability.
+        (create, true, StatusCode::BAD_REQUEST),
         (
-            json!({"query":"CREATE (:N {key:7})"}).to_string(),
+            json!({"query":"RETURN 1/0"}).to_string(),
+            false,
             StatusCode::OK,
         ),
-        (json!({"query":"RETURN 1/0"}).to_string(), StatusCode::OK),
         (
             json!({"query":"RETURN $missing"}).to_string(),
+            false,
             StatusCode::BAD_REQUEST,
         ),
-        ("invalid json".to_owned(), StatusCode::BAD_REQUEST),
+        ("invalid json".to_owned(), false, StatusCode::BAD_REQUEST),
     ] {
         let response = router
             .clone()
             .oneshot(
                 Request::post("/v2/cypher/explain")
+                    .header("x-helix-await-durable", durable.to_string())
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -162,8 +164,7 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
         .embedded_default_config()
         .with_query_telemetry(db::config::QueryTelemetry::Disabled);
     let db = Arc::new(db::HelixDB::open_with_config(source, config).await.unwrap());
-    let state = state::ServerState::new(Arc::clone(&db), None)
-        .with_cypher_endpoints(crate::CypherEndpoints::Enabled);
+    let state = state::ServerState::new(Arc::clone(&db), None);
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
     for (text, warm, durable, detail) in [
@@ -233,55 +234,231 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
 }
 
 #[tokio::test]
-async fn cypher_endpoints_are_unrouted_unless_enabled() {
+async fn native_and_cypher_share_one_state() {
     let db = Arc::new(
         db::HelixDB::open(db::HelixDbSource::InMemory {
-            database: "cypher-disabled".into(),
+            database: "cypher-beside-native".into(),
         })
         .await
         .unwrap(),
     );
     let state = state::ServerState::new(Arc::clone(&db), None);
-    assert_eq!(state.cypher_endpoints(), crate::CypherEndpoints::Disabled);
     let router = http::router(state.clone());
-    for path in ["/v2/cypher", "/v2/cypher/explain"] {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post(path)
-                    .body(Body::from(json!({"query":"RETURN 1"}).to_string()))
-                    .unwrap(),
+    let grpc = grpc::GrpcService::new(state);
+    let post = |path: &'static str, body: Vec<u8>| {
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(Request::post(path).body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), 65_536).await.unwrap(),
             )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-    }
-    let error = grpc::GrpcService::new(state)
-        .execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
-            body: json!({"query":"RETURN 1"}).to_string().into_bytes().into(),
-            ..Default::default()
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), tonic::Code::Unimplemented);
-    // Native queries are unaffected.
-    let response = router
+            .unwrap()
+        }
+    };
+    let cypher = |query: &str| json!({ "query": query }).to_string().into_bytes();
+    let grpc_body = |query: &str| grpc::pb::QueryJsonRequest {
+        body: cypher(query).into(),
+        ..Default::default()
+    };
+    let native_count = serde_json::to_vec(&helix_ast::query::QueryRequest::read(
+        helix_ast::batch::read_batch()
+            .var_as(
+                "count",
+                helix_ast::traversal::g().n_with_label("Shared").count(),
+            )
+            .returning(["count"]),
+    ))
+    .unwrap();
+
+    let native_write = helix_ast::query::QueryRequest::write(
+        helix_ast::batch::write_batch()
+            .var_as(
+                "created",
+                helix_ast::traversal::g().add_n(
+                    "Shared",
+                    vec![("source", helix_ast::value::PropertyInput::from("native"))],
+                ),
+            )
+            .returning(["created"]),
+    );
+    post("/v2/query", serde_json::to_vec(&native_write).unwrap()).await;
+    let durable = router
+        .clone()
         .oneshot(
-            Request::post("/v2/query")
-                .body(Body::from(
-                    serde_json::to_vec(&helix_ast::query::QueryRequest::read(
-                        helix_ast::batch::read_batch()
-                            .var_as("n", helix_ast::traversal::g().n_with_label("X").count())
-                            .returning(["n"]),
-                    ))
-                    .unwrap(),
-                ))
+            Request::post(helix_cypher::api::HTTP_PATH)
+                .header("x-helix-await-durable", "true")
+                .body(Body::from(cypher(
+                    "CREATE (:Shared {source:'cypher-http'})",
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(durable.status(), StatusCode::OK);
+    grpc.execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
+        await_durable: true,
+        ..grpc_body("CREATE (:Shared {source:'cypher-grpc'})")
+    }))
+    .await
+    .unwrap();
+
+    assert_eq!(post("/v2/query", native_count.clone()).await["count"], 3);
+    let sources = grpc
+        .execute_query(tonic::Request::new(grpc::pb::QueryJsonRequest {
+            body: native_count.clone().into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&sources.body).unwrap()["count"],
+        3
+    );
+    assert_eq!(
+        post(
+            helix_cypher::api::HTTP_PATH,
+            cypher("MATCH (n:Shared) RETURN n.source AS source ORDER BY source"),
+        )
+        .await["rows"],
+        json!([["cypher-grpc"], ["cypher-http"], ["native"]])
+    );
+
+    // Explaining plans without executing, and both transports return one body.
+    let explain = "CREATE (:Shared {source:'explained'})";
+    let without_timing = |mut value: serde_json::Value| {
+        let Some(_) = value["planner"]
+            .as_object_mut()
+            .and_then(|planner| planner.remove("optimization_micros"))
+        else {
+            panic!("explanation omitted its optimization duration: {value:#}");
+        };
+        value
+    };
+    let http_plan = post(helix_cypher::api::HTTP_EXPLAIN_PATH, cypher(explain)).await;
+    let grpc_plan = grpc
+        .explain_cypher(tonic::Request::new(grpc_body(explain)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        without_timing(http_plan),
+        without_timing(serde_json::from_slice(&grpc_plan.body).unwrap())
+    );
+    assert_eq!(post("/v2/query", native_count).await["count"], 3);
+    drop(router);
+    drop(grpc);
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
+    let token = db::ProcessLocalDatabaseToken::new("cypher-grpc-rejections").unwrap();
+    let writer = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        })
+        .await
+        .unwrap(),
+    );
+    let grpc = grpc::GrpcService::new(state::ServerState::new(Arc::clone(&writer), None));
+    let request = |body: Vec<u8>, require_writer: bool, await_durable: bool| {
+        tonic::Request::new(grpc::pb::QueryJsonRequest {
+            body: body.into(),
+            warm_only: false,
+            require_writer,
+            await_durable,
+        })
+    };
+    let error_code = |status: &tonic::Status| {
+        status
+            .metadata()
+            .get(grpc::HELIX_ERROR_CODE_METADATA)
+            .expect("status includes an error code")
+            .to_str()
+            .expect("error codes are ASCII")
+            .to_owned()
+    };
+    let create = json!({"query":"CREATE (:Rejected)"})
+        .to_string()
+        .into_bytes();
+    for (body, code, metadata) in [
+        (
+            b"{".to_vec(),
+            tonic::Code::InvalidArgument,
+            "invalid_query_json",
+        ),
+        (
+            vec![b' '; crate::MAX_QUERY_BODY_BYTES + 1],
+            tonic::Code::ResourceExhausted,
+            "invalid_request_body",
+        ),
+    ] {
+        for status in [
+            grpc.execute_cypher(request(body.clone(), false, false))
+                .await
+                .unwrap_err(),
+            grpc.explain_cypher(request(body.clone(), false, false))
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(status.code(), code);
+            assert_eq!(error_code(&status), metadata);
+        }
+    }
+    let durable_explain = grpc
+        .explain_cypher(request(create.clone(), false, true))
+        .await
+        .unwrap_err();
+    assert_eq!(durable_explain.code(), tonic::Code::InvalidArgument);
+    assert_eq!(error_code(&durable_explain), "invalid_request_option");
+    let missing = grpc
+        .explain_cypher(request(
+            json!({"query":"RETURN $missing"}).to_string().into_bytes(),
+            false,
+            false,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code(), tonic::Code::InvalidArgument);
+    let details: helix_planner::relational::QueryError =
+        serde_json::from_slice(missing.details()).unwrap();
+    assert_eq!(details.detail, "MissingParameter");
+    writer.flush_writer().await.unwrap();
+
+    let reader = Arc::new(
+        db::HelixDB::open_reader(db::HelixDbSource::InMemoryToken { token })
+            .await
+            .unwrap(),
+    );
+    let read_grpc = grpc::GrpcService::new(state::ServerState::new(Arc::clone(&reader), None));
+    let require_writer = read_grpc
+        .explain_cypher(request(create.clone(), true, false))
+        .await
+        .unwrap_err();
+    assert_eq!(require_writer.code(), tonic::Code::Unavailable);
+    assert_eq!(error_code(&require_writer), "invalid_request_option");
+    // A reader still plans a modifying statement, and refuses to run it.
+    read_grpc
+        .explain_cypher(request(create.clone(), false, false))
+        .await
+        .unwrap();
+    let write_on_reader = read_grpc
+        .execute_cypher(request(create, false, false))
+        .await
+        .unwrap_err();
+    assert_eq!(write_on_reader.code(), tonic::Code::FailedPrecondition);
+    let details: helix_planner::relational::QueryError =
+        serde_json::from_slice(write_on_reader.details()).unwrap();
+    assert_eq!(details.detail, "WriterRequired");
+    drop(read_grpc);
+    drop(grpc);
+    reader.close().await.unwrap();
+    writer.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -293,8 +470,7 @@ async fn cypher_rejects_malformed_bodies_and_options_before_executing() {
         .await
         .unwrap(),
     );
-    let state = state::ServerState::new(Arc::clone(&db), None)
-        .with_cypher_endpoints(crate::CypherEndpoints::Enabled);
+    let state = state::ServerState::new(Arc::clone(&db), None);
     let router = http::router(state.clone());
     let malformed = router
         .clone()

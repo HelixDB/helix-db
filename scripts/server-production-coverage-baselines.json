@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "uncovered_source_lines": {
-    "count": 109,
-    "sha256": "e09770b5224133566344b6ccc4638cc54f880b70141a081210006f9fc202b10e",
+    "count": 108,
+    "sha256": "29defe1c5a336efdc4748c32325d2e7074385c156ed7a3f9a41eb85f2ec6767c",
     "classification": "test-required",
     "reason": "Every remaining uncovered production line in the transport server and its production-compiled query-service dependency remains in the explicit launch test backlog. Three static error-code mapping lines are exhaustively covered by the database mapping tests rather than this server-only shard. The exact digest makes coverage changes require a reviewed ratchet update."
   },

@@ -1,10 +1,15 @@
 //! Cypher frontend: text → syntax → resolved shared relational query.
 //!
-//! This crate never reads storage or emits the native traversal AST.
+//! This crate never reads storage or emits the native traversal AST. It also
+//! owns the Cypher API contract ([`request`] and [`api`]) so that every
+//! transport, including ones without a database, decodes, routes and reports
+//! errors identically.
 
+pub mod api;
 mod bind;
 mod lexer;
 mod parser;
+pub mod request;
 pub mod syntax;
 
 pub use helix_planner::relational::{QueryError, Span};

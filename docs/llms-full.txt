@@ -496,7 +496,6 @@ SeaweedFS 4.09 or later enforce both.
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
 | `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` | Most unpublished vector work, in bytes, one `strong` vector search scores before it fails with `index_backpressure`; defaults to the index's retained-byte limit (1,000,000,000), which writes reach first. See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 | `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` | Most unpublished text, in analysis bytes, one `strong` text search includes per partition before it fails with `index_backpressure`; defaults to 512 MiB (536,870,912). See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
-| `HELIX_ENABLE_CYPHER` | Set to `true` or `1` to serve Cypher at `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`; off by default |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
 the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use
@@ -5092,9 +5091,8 @@ Page type: Reference
 
 The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
 same contract is available from a local server and a Helix Cloud gateway.
-Local servers started with `HELIX_ENABLE_CYPHER=true` also accept Cypher
-statements at `POST /v2/cypher` and provide read-only planning at
-`POST /v2/cypher/explain`; otherwise both paths return 404.
+Local servers also accept Cypher statements at `POST /v2/cypher` and provide
+read-only planning at `POST /v2/cypher/explain`, alongside `POST /v2/query`.
 
 ## Machine-readable specification
 

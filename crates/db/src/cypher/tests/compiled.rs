@@ -1,44 +1,9 @@
 use super::*;
-use crate::cypher::{Error, Limits};
 use crate::encoding::v2::keys::scope;
 use crate::execution_control::ExecutionControl;
 use crate::query_service::{HelixQueryService, QueryMode};
 use serde_json::json;
 use std::sync::Arc;
-
-#[test]
-fn routing_reuses_validated_effects_and_moves_parameter_ownership() {
-    for (text, expected) in [
-        ("RETURN $value", query::QueryRequestType::Read),
-        ("CREATE (:N {key:$value})", query::QueryRequestType::Write),
-    ] {
-        let mut source = Request::new(text);
-        let payload = "owned".repeat(16 * 1024);
-        let address = payload.as_ptr();
-        source
-            .parameters
-            .insert("value".into(), query::QueryValue::String(payload));
-        let (kind, original) = crate::allocation_testing::observe(|| source.request_type());
-        assert_eq!(kind.unwrap(), expected);
-        assert!(original.allocations > 0);
-        let compiled = source.compile().unwrap();
-        let query::QueryValue::String(payload) = &compiled.parameters["value"] else {
-            panic!("original string parameter")
-        };
-        assert_eq!(payload.as_ptr(), address);
-        let (kind, reused) = crate::allocation_testing::observe(|| compiled.request_type());
-        assert_eq!(kind, expected);
-        assert_eq!(reused.allocations, 0);
-    }
-    for text in ["RETURN missing", "RETURN (", "MERGE (:N)"] {
-        let original = Request::new(text).request_type().unwrap_err();
-        let compiled = Request::new(text).compile().err().unwrap();
-        assert_eq!(
-            serde_json::to_value(original).unwrap(),
-            serde_json::to_value(compiled).unwrap()
-        );
-    }
-}
 
 #[tokio::test]
 async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollback() {
