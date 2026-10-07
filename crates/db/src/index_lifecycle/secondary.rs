@@ -27,7 +27,7 @@ use crate::config::{
 };
 use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDirection;
 use crate::encoding::property::property_value::PropertyValue;
-use crate::encoding::property::{decode_properties, Property};
+use crate::encoding::property::Property;
 #[cfg(test)]
 use crate::encoding::v2::keys::metadata::MetadataKey;
 use crate::encoding::v2::keys::scope::DataScope;
@@ -49,6 +49,7 @@ use crate::encoding::v2::values::property::equality_index_value::{
 use crate::encoding::v2::values::property::range_index_value::{
     project_range_value, CanonicalRangeValue, RangeValueProjection,
 };
+use crate::encoding::v2::values::property::view;
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_delta, decode_index_record, decode_secondary_entry,
     encode_applied_state, encode_build_delta, encode_secondary_entry, BitmapMembershipDelta,
@@ -1041,6 +1042,7 @@ async fn scan_source(
     let mut candidates = Vec::with_capacity(limits.max_entities().get());
     let mut candidate_input_bytes = 0_u64;
     let mut exhausted = true;
+    let mut scratch = view::Scratch::new();
     while candidates.len() < limits.max_entities().get() {
         let Some(row) = rows.next().await? else {
             break;
@@ -1072,7 +1074,9 @@ async fn scan_source(
             candidate_input_bytes = candidate_input_bytes.saturating_add(input_bytes);
             continue;
         };
-        let properties = match decode_properties(&row.value) {
+        let properties = match view::decode_selected(&row.value, &mut scratch, |name| {
+            name == "$label" || name == definition.property().as_str()
+        }) {
             Ok(properties) => properties,
             Err(_) => {
                 return Ok(IndexOperationStepResult::Blocked(
@@ -1327,7 +1331,8 @@ async fn catch_up(
             }
             break;
         }
-        let properties = read_authoritative_properties(transaction, scope, entity).await?;
+        let properties =
+            read_authoritative_properties(transaction, scope, definition, entity).await?;
         let next_value = match properties {
             Some(properties) => match storable_value(
                 scope,
@@ -1487,6 +1492,7 @@ async fn catch_up_exact(
     let applied_values = transaction.multi_get(&applied_keys).await?;
     let mut rows = Vec::with_capacity(decoded.len());
     let mut unique_keys = Vec::new();
+    let mut scratch = view::Scratch::new();
     for (
         (((delta_key, entity, delta_value_bytes, delta_state), property_key), property_value),
         applied_pair,
@@ -1498,7 +1504,9 @@ async fn catch_up_exact(
     {
         let next_value = match property_value.as_ref() {
             Some(properties) => {
-                let properties = decode_properties(properties)?;
+                let properties = view::decode_selected(properties, &mut scratch, |name| {
+                    name == "$label" || name == definition.property().as_str()
+                })?;
                 match storable_value(
                     scope,
                     operation.index_id(),
@@ -1722,7 +1730,7 @@ async fn validate_and_release_applied(
             return Err(corruption("secondary applied-state ownership mismatch"));
         }
         if definition.unique() {
-            let properties = read_authoritative_properties(transaction, scope, entity)
+            let properties = read_authoritative_properties(transaction, scope, definition, entity)
                 .await?
                 .ok_or_else(|| corruption("unique secondary owner source row disappeared"))?;
             let authoritative = canonical_value(definition, &properties, entity.id)
@@ -3140,6 +3148,7 @@ pub(crate) async fn verified_unindexed_rows(
     const BATCH: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
     let mut ids = candidates.into_iter();
     let mut verified = crate::query_resources::bitmap::Builder::new(budget)?;
+    let mut scratch = view::Scratch::new();
     loop {
         deadline()?;
         let batch = ids.by_ref().take(BATCH).collect::<Vec<_>>();
@@ -3191,7 +3200,9 @@ pub(crate) async fn verified_unindexed_rows(
             let Some(record) = record else {
                 continue;
             };
-            let properties = decode_properties(&record)?;
+            let properties = view::decode_selected(&record, &mut scratch, |name| {
+                name == "$label" || name == label.property
+            })?;
             let carries_label = properties.iter().any(|property| {
                 property.name == "$label" && property.value.as_str() == Some(label.label)
             });
@@ -3243,7 +3254,9 @@ async fn authoritative_equality_matches(
     let _properties_memory = budget
         .map(|budget| budget.reserve(bytes.len().saturating_mul(33)))
         .transpose()?;
-    let properties = decode_properties(&bytes)?;
+    let properties = view::decode_selected(&bytes, &mut view::Scratch::new(), |name| {
+        name == "$label" || name == definition.property().as_str()
+    })?;
     Ok(properties_match_definition(definition, &properties)
         && properties
             .iter()
@@ -3483,7 +3496,9 @@ async fn authoritative_range_matches(
         return Ok(false);
     };
     progress.authoritative_decode();
-    let properties = decode_properties(&bytes)?;
+    let properties = view::decode_selected(&bytes, &mut view::Scratch::new(), |name| {
+        name == "$label" || name == definition.property().as_str()
+    })?;
     if !properties_match_definition(definition, &properties) {
         return Ok(false);
     }
@@ -3675,15 +3690,23 @@ fn decode_applied(
     Ok((key.entity, value))
 }
 
+/// The label and indexed property of `entity`'s authoritative row, in stored
+/// order; every other property is left undecoded.
 async fn read_authoritative_properties(
     reader: &(impl DbReadOps + Sync),
     scope: DataScope,
+    definition: &ValidatedSecondaryIndexDefinition,
     entity: IndexEntity,
 ) -> Result<Option<Vec<Property>>> {
     reader
         .get(authoritative_property_key(scope, entity))
         .await?
-        .map(|bytes| decode_properties(&bytes).map_err(HelixDbError::from))
+        .map(|bytes| {
+            view::decode_selected(&bytes, &mut view::Scratch::new(), |name| {
+                name == "$label" || name == definition.property().as_str()
+            })
+            .map_err(HelixDbError::from)
+        })
         .transpose()
 }
 
@@ -3832,7 +3855,7 @@ mod tests {
         SearchIndexBackfillLimits, SecondaryIndexDefinition, VectorIndexDefinition,
     };
     use crate::encoding::v2::values::encode_index_record;
-    use crate::encoding::v2::values::property::encode_properties;
+    use crate::encoding::v2::values::property::{decode_properties, encode_properties};
     use crate::index_lifecycle::lifecycle::{
         create_index_operation, drop_index_operation, InitialBuildProgress,
     };
@@ -7985,7 +8008,10 @@ mod tests {
         };
         let a = PropertyValue::String("a".into());
         let rows = [
-            vec![Property::string("$label", "User"), Property::string("email", "a")],
+            vec![
+                Property::string("$label", "User"),
+                Property::string("email", "a"),
+            ],
             vec![
                 Property::string("$label", "Other"),
                 Property::string("$label", "User"),
@@ -7999,7 +8025,10 @@ mod tests {
             vec![Property::string("$label", "User")],
             vec![Property::string("email", "a")],
             Vec::new(),
-            vec![Property::string("$label", "User"), Property::i64("email", 5)],
+            vec![
+                Property::string("$label", "User"),
+                Property::i64("email", 5),
+            ],
             vec![
                 Property::f32_array("embedding", vec![0.25; 1536]),
                 Property::string("email", "a"),
@@ -8008,7 +8037,9 @@ mod tests {
             ],
         ];
         for (id, properties) in (1_u64..).zip(&rows) {
-            db.put(key(id), encode_properties(properties)).await.unwrap();
+            db.put(key(id), encode_properties(properties))
+                .await
+                .unwrap();
         }
         db.put(key(9), Bytes::from_static(b"corrupt authority"))
             .await
@@ -8030,9 +8061,8 @@ mod tests {
                 None,
             )
         };
-        let rows_of = |bitmap: crate::query_resources::bitmap::Bitmap| {
-            bitmap.iter().collect::<Vec<_>>()
-        };
+        let rows_of =
+            |bitmap: crate::query_resources::bitmap::Bitmap| bitmap.iter().collect::<Vec<_>>();
         assert_eq!(
             rows_of(
                 verified(
@@ -8045,7 +8075,11 @@ mod tests {
             vec![1, 2, 8]
         );
         assert_eq!(
-            rows_of(verified(|value| value.is_none(), (1..=8).collect()).await.unwrap()),
+            rows_of(
+                verified(|value| value.is_none(), (1..=8).collect())
+                    .await
+                    .unwrap()
+            ),
             vec![4]
         );
         assert!(matches!(
@@ -8122,7 +8156,7 @@ mod tests {
         for id in 1..=8 {
             let stored = db.get(key(id)).await.unwrap().unwrap();
             let decoded = decode_properties(&stored).unwrap();
-            let read = read_authoritative_properties(&db, scope, entity(id))
+            let read = read_authoritative_properties(&db, scope, &equality, entity(id))
                 .await
                 .unwrap()
                 .unwrap();
@@ -8140,12 +8174,14 @@ mod tests {
                 );
             }
         }
-        assert!(read_authoritative_properties(&db, scope, entity(10))
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            read_authoritative_properties(&db, scope, &equality, entity(10))
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
-            read_authoritative_properties(&db, scope, entity(9)).await,
+            read_authoritative_properties(&db, scope, &equality, entity(9)).await,
             Err(HelixDbError::Encoding(_))
         ));
         db.close().await.unwrap();

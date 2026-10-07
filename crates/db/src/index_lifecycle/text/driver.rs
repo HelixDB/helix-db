@@ -1758,6 +1758,7 @@ async fn scan_partition_documents(
     let mut retirements = Vec::new();
     let mut empty_root = None::<PreparedEmptyManifestRoot>;
     let mut exhausted = true;
+    let mut scratch = property::view::Scratch::new();
 
     while batch_entities < batch.max_entities().get() {
         let Some(row) = rows.next().await? else {
@@ -1920,10 +1921,15 @@ async fn scan_partition_documents(
         };
         let document = match &graph_read.value {
             Some(value) if state.live => {
-                let Some(document) = property::decode_properties(value)
-                    .ok()
-                    .and_then(|properties| text_document(definition, &properties, &state).ok())
-                else {
+                let Some(document) = property::view::decode_selected(value, &mut scratch, |name| {
+                    name == "$label"
+                        || name == definition.property().as_str()
+                        || definition
+                            .tenant_property()
+                            .is_some_and(|tenant| name == tenant.as_str())
+                })
+                .ok()
+                .and_then(|properties| text_document(definition, &properties, &state).ok()) else {
                     return Ok(PartitionScanSelection::Blocked(
                         invalid_source,
                         Some(graph_read),
@@ -2509,6 +2515,7 @@ async fn scan_source(
     let mut writes = Vec::new();
     let mut statistics_batch = super::statistics::PreparedTextStatisticsBatch::default();
     let mut exhausted = true;
+    let mut scratch = property::view::Scratch::new();
 
     'scan_rows: while batch_entities < limits.max_entities().get() {
         let Some(row) = rows.next().await? else {
@@ -2540,9 +2547,15 @@ async fn scan_source(
             let Some(entity_id) = entity_id else {
                 break 'stage_entity;
             };
-            let projection = property::decode_properties(&row.value)
-                .ok()
-                .and_then(|properties| super::projection::project(definition, &properties).ok());
+            let projection = property::view::decode_selected(&row.value, &mut scratch, |name| {
+                name == "$label"
+                    || name == definition.property().as_str()
+                    || definition
+                        .tenant_property()
+                        .is_some_and(|tenant| name == tenant.as_str())
+            })
+            .ok()
+            .and_then(|properties| super::projection::project(definition, &properties).ok());
             let (partition, text) = match projection {
                 Some(super::projection::TextSourceProjection::NotIndexed) => break 'stage_entity,
                 Some(super::projection::TextSourceProjection::Indexed { partition, text }) => {
