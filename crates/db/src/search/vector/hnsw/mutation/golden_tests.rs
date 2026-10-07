@@ -419,8 +419,14 @@ async fn seeded_euclidean_workloads_keep_golden_rows_and_cache_behavior() {
             ("tiny", EUCLIDEAN_SEED_1),
             ("large", EUCLIDEAN_SEED_1),
             ("one-off", EUCLIDEAN_SEED_1),
-            ("backfill", "a03743504040462fad25621372320c0c20530d3669d87eb2d7c7c9ed9d1a86e7"),
-            ("tiny-3", "262debfb7b3ffd696a8381955784d1a0a92554b38806c53f37a35368904d215d"),
+            (
+                "backfill",
+                "a03743504040462fad25621372320c0c20530d3669d87eb2d7c7c9ed9d1a86e7",
+            ),
+            (
+                "tiny-3",
+                "262debfb7b3ffd696a8381955784d1a0a92554b38806c53f37a35368904d215d",
+            ),
         ],
         &[
             (
@@ -447,7 +453,10 @@ async fn seeded_manhattan_workloads_keep_golden_rows_and_cache_behavior() {
         &[
             ("tiny", MANHATTAN_SEED_4),
             ("one-off", MANHATTAN_SEED_4),
-            ("backfill", "62acf336d1752c0f2ab1fa659716895a7333a00cdc36144258e5ab544501643c"),
+            (
+                "backfill",
+                "62acf336d1752c0f2ab1fa659716895a7333a00cdc36144258e5ab544501643c",
+            ),
         ],
         &[(
             "backfill",
