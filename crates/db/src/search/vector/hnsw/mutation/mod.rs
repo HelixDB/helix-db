@@ -3974,6 +3974,8 @@ const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) ->
 pub(crate) mod production_contracts;
 
 #[cfg(test)]
+mod golden_tests;
+#[cfg(test)]
 mod locator_tests;
 #[cfg(test)]
 mod relink_tests;
