@@ -1271,4 +1271,163 @@ mod tests {
             db.close().await.unwrap();
         }
     }
+
+    /// Rows written straight to the node keyspace: varied value types,
+    /// duplicate and dotted names, an empty row and a large payload.
+    async fn scan_predicate_fixture(db: &crate::HelixDB) {
+        use crate::encoding::property::{encode_properties, property_value::PropertyValue as V, Property};
+        let object = |score: i64| V::Object([("score".to_string(), V::I64(score))].into());
+        let rows = [
+            vec![
+                Property::string("$label", "User"),
+                Property::string("status", "active"),
+                Property::i64("score", 5),
+                Property::new("meta", object(9)),
+            ],
+            vec![
+                Property::string("$label", "User"),
+                Property::string("status", "inactive"),
+                Property::f64("score", 7.5),
+            ],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+                Property::i64("score", 11),
+                Property::string("status", "inactive"),
+            ],
+            vec![Property::string("$label", "User"), Property::new("score", V::Null)],
+            Vec::new(),
+            vec![
+                Property::string("status", "active"),
+                Property::i64("meta.score", 1),
+                Property::new("meta", object(3)),
+            ],
+            vec![
+                Property::string("status", "inactive"),
+                Property::string("status", "active"),
+                Property::bytes("blob", vec![1; 4096]),
+            ],
+        ];
+        for (id, properties) in (1_u64..).zip(rows) {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+                    }
+                    .to_bytes(),
+                    encode_properties(&properties),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Predicates over the fixture with the node IDs they select.
+    fn scan_predicate_cases() -> Vec<(helix_ast::expr::Predicate, Vec<u64>)> {
+        use helix_ast::expr::Predicate as P;
+        vec![
+            (P::eq("status", "active"), vec![1, 3, 6]),
+            (P::gt("score", 6_i64), vec![2, 3]),
+            (P::eq("meta.score", 9_i64), vec![1]),
+            (P::eq("meta.score", 1_i64), vec![6]),
+            (P::is_null("status"), vec![4, 5]),
+            (P::is_not_null("embedding"), vec![3]),
+            (
+                P::and(vec![P::eq("status", "active"), P::gt("score", 6_i64)]),
+                vec![3],
+            ),
+            (
+                P::or(vec![P::eq("status", "inactive"), P::is_null("score")]),
+                vec![2, 4, 5, 6, 7],
+            ),
+            (P::eq("$id", 2_i64), vec![2]),
+            (P::not(P::eq("status", "active")), vec![2, 4, 5, 7]),
+        ]
+    }
+
+    fn node_scan_plan(predicate: helix_ast::expr::Predicate) -> exec::ExecAccessPlan {
+        exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::AuthoritativeScan {
+            predicate: exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate).unwrap(),
+            ),
+        })
+    }
+
+    async fn scan_ids(
+        ctx: &mut ExecutionContext<'_>,
+        plan: &exec::ExecAccessPlan,
+    ) -> Result<Vec<u64>> {
+        let mut source = Source::new(ctx, Plan::Access(plan))?;
+        let mut ids = Vec::new();
+        while let Some(value) = source.next(ctx).await? {
+            ids.extend(
+                ctx.stream_rows(value, "test")?
+                    .into_iter()
+                    .map(|row| row.current.unwrap().id()),
+            );
+        }
+        Ok(ids)
+    }
+
+    #[tokio::test]
+    async fn authoritative_scan_predicates_select_exactly_the_stored_matches() {
+        let db = test_support::open_db("pull-scan-predicate-golden").await;
+        scan_predicate_fixture(&db).await;
+        for (predicate, expected) in scan_predicate_cases() {
+            let plan = node_scan_plan(predicate.clone());
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.enable_request_read_view().await.unwrap();
+            assert_eq!(
+                scan_ids(&mut ctx, &plan).await.unwrap(),
+                expected,
+                "{predicate:?}"
+            );
+            assert_eq!(ctx.pull_work.snapshot().source_visits, 7);
+        }
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authoritative_scan_reports_a_corrupt_row_only_when_a_predicate_reads_it() {
+        let db = test_support::open_db("pull-scan-predicate-corruption").await;
+        scan_predicate_fixture(&db).await;
+        db.inner_db()
+            .put(
+                keys::DataKey::Data {
+                    scope: keys::scope::DataScope::LegacyUnscoped,
+                    kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(4)),
+                }
+                .to_bytes(),
+                Bytes::from_static(b"corrupt node row"),
+            )
+            .await
+            .unwrap();
+        let reads = node_scan_plan(helix_ast::expr::Predicate::eq("status", "active"));
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        let mut source = Source::new(&ctx, Plan::Access(&reads)).unwrap();
+        let first = source.next(&mut ctx).await.unwrap().unwrap();
+        assert_eq!(
+            ctx.stream_rows(first, "test").unwrap()[0].current,
+            Some(ElementRef::Node(1))
+        );
+        let mut error = None;
+        while error.is_none() {
+            match source.next(&mut ctx).await {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the corrupt row must fail the scan"),
+                Err(failure) => error = Some(failure),
+            }
+        }
+        assert!(matches!(
+            error,
+            Some(HelixDbError::Encoding(crate::encoding::error::EncodingError::Rkyv(_)))
+        ));
+        let id_only = node_scan_plan(helix_ast::expr::Predicate::eq("$id", 4_i64));
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        assert_eq!(scan_ids(&mut ctx, &id_only).await.unwrap(), vec![4]);
+        db.close().await.unwrap();
+    }
 }

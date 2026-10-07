@@ -5792,4 +5792,117 @@ mod tests {
         authoritative_null_count_applies_its_normalized_window_after_matches().await;
         terminal_cursor_counts_avoid_row_output_and_stop_at_the_encoded_threshold().await;
     }
+
+    /// Direct and cursor authoritative counts select exactly the stored
+    /// matches, read a corrupt row only when the predicate needs it, and
+    /// report it like the full-row decoder.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_match_stored_rows_and_fail_on_read_corruption() {
+        use crate::encoding::property::{
+            encode_properties, property_value::PropertyValue as V, Property,
+        };
+        let db = test_support::open_db("count-scan-predicate-golden").await;
+        let key = |id: u64| {
+            keys::DataKey::Data {
+                scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+            }
+            .to_bytes()
+        };
+        let rows = [
+            vec![
+                Property::string("status", "active"),
+                Property::i64("score", 5),
+                Property::new("meta", V::Object([("score".into(), V::I64(9))].into())),
+            ],
+            vec![Property::string("status", "inactive"), Property::f64("score", 7.5)],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+                Property::i64("score", 11),
+                Property::string("status", "inactive"),
+            ],
+            Vec::new(),
+            vec![
+                Property::string("status", "inactive"),
+                Property::string("status", "active"),
+            ],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(key(id), encode_properties(properties))
+                .await
+                .unwrap();
+        }
+        let cases = [
+            (Predicate::eq("status", "active"), 2),
+            (Predicate::gt("score", 6_i64), 2),
+            (Predicate::eq("meta.score", 9_i64), 1),
+            (Predicate::is_null("status"), 1),
+            (
+                Predicate::and(vec![
+                    Predicate::eq("status", "active"),
+                    Predicate::gt("score", 6_i64),
+                ]),
+                1,
+            ),
+            (Predicate::eq("$id", 4_i64), 1),
+        ];
+        let count = |predicate: Predicate| {
+            let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate).unwrap(),
+            );
+            [
+                exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                    predicate: predicate.clone(),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+                exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                    cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+            ]
+        };
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        for (predicate, expected) in cases.clone() {
+            for plan in count(predicate.clone()) {
+                assert_eq!(
+                    execution
+                        .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                        .await
+                        .unwrap(),
+                    ExecutionValue::Count(expected),
+                    "{predicate:?}"
+                );
+            }
+        }
+        db.inner_db()
+            .put(key(4), bytes::Bytes::from_static(b"corrupt node row"))
+            .await
+            .unwrap();
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        for plan in count(Predicate::eq("$id", 4_i64)) {
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(1)
+            );
+        }
+        for plan in count(Predicate::eq("status", "active")) {
+            assert!(matches!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await,
+                Err(HelixDbError::Encoding(
+                    crate::encoding::error::EncodingError::Rkyv(_)
+                ))
+            ));
+        }
+        db.close().await.unwrap();
+    }
 }
