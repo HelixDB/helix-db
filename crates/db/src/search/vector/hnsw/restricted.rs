@@ -574,6 +574,21 @@ impl RestrictedVectorCandidates {
         }
     }
 
+    /// Takes an already exact ID set, such as an index bitmap, under the same
+    /// unique-candidate limit as [`Self::from_ids`], without rebuilding it.
+    pub(crate) fn from_bitmap(ids: RoaringTreemap) -> Result<Self, HelixDbError> {
+        if ids.len() > MAX_RESTRICTED_CANDIDATES {
+            return Err(HelixDbError::Query(format!(
+                "restricted vector search accepts at most {MAX_RESTRICTED_CANDIDATES} unique candidates"
+            )));
+        }
+        if ids.is_empty() {
+            Ok(Self::Empty)
+        } else {
+            Ok(Self::NonEmpty(NonEmptyCandidateSet { ids }))
+        }
+    }
+
     /// Tests authoritative membership.
     pub(crate) fn contains(&self, node_id: NodeId) -> bool {
         match self {
@@ -1476,6 +1491,43 @@ mod tests {
             RestrictedVectorCandidates::Empty.without(&RoaringTreemap::new()),
             RestrictedVectorCandidates::Empty
         ));
+    }
+
+    /// An exact bitmap becomes the same candidate set as its IDs would, and
+    /// is held to the same unique-candidate limit.
+    #[test]
+    fn bitmap_candidates_match_id_candidates_and_their_limit() {
+        assert!(matches!(
+            RestrictedVectorCandidates::from_bitmap(RoaringTreemap::new()),
+            Ok(RestrictedVectorCandidates::Empty)
+        ));
+
+        let ids = [2, 4, 9, u64::MAX];
+        let from_bitmap =
+            RestrictedVectorCandidates::from_bitmap(RoaringTreemap::from_iter(ids)).unwrap();
+        let from_ids = RestrictedVectorCandidates::from_ids(ids).unwrap();
+        assert_eq!(
+            from_bitmap.iter().collect::<Vec<_>>(),
+            from_ids.iter().collect::<Vec<_>>()
+        );
+        assert!(!from_bitmap.contains(3));
+
+        let mut at_limit = RoaringTreemap::new();
+        at_limit.insert_range(0..MAX_RESTRICTED_CANDIDATES);
+        let RestrictedVectorCandidates::NonEmpty(candidates) =
+            RestrictedVectorCandidates::from_bitmap(at_limit.clone()).unwrap()
+        else {
+            panic!("a set at the limit is accepted");
+        };
+        assert_eq!(candidates.len(), MAX_RESTRICTED_CANDIDATES);
+
+        at_limit.insert(MAX_RESTRICTED_CANDIDATES);
+        let over_limit = RestrictedVectorCandidates::from_bitmap(at_limit.clone())
+            .expect_err("one candidate past the limit fails");
+        let id_error = RestrictedVectorCandidates::from_ids(at_limit)
+            .expect_err("the ID path rejects the same set");
+        assert!(matches!(&over_limit, HelixDbError::Query(_)));
+        assert_eq!(over_limit.to_string(), id_error.to_string());
     }
 
     #[test]
