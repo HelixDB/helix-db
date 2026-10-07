@@ -14,7 +14,7 @@
 //!
 //! # Resident layout
 //!
-//! Upper-row bytes are copied into large slab chunks ([`VectorMemorySlab`])
+//! Upper-row bytes are copied into slab chunks ([`VectorMemorySlab`])
 //! instead of retaining the zero-copy scan values, which would keep whole
 //! SlateDB block buffers alive. Each node keeps one compact index entry
 //! ([`UpperNodeRows`]) holding `(chunk, offset, len)` locations for its
@@ -24,21 +24,20 @@
 //!
 //! # Accounting
 //!
-//! A load charges the exact bytes it allocates: slab chunk capacity (the final
-//! chunk is shrunk to its length when the load ends) plus a per-entry bound for
-//! the hash-index memory ([`hash_index_entry_bytes`]). Evicted rows stay
-//! charged until the store is replaced, because their chunk bytes are only
-//! released when the whole store drops. Fixed per-store overhead independent of
-//! row count (the hash maps' shard arrays and their smallest tables) is not
+//! A load charges the exact bytes it allocates: each chunk's length (chunks
+//! are shrunk when sealed) and handle, plus a per-entry bound for the
+//! hash-index memory ([`hash_index_entry_bytes`]). Evicted rows stay charged
+//! until the store is replaced, because their chunk bytes are only released
+//! when the whole store drops. Fixed per-store overhead independent of row
+//! count (the hash maps' shard arrays and their smallest tables) is not
 //! charged.
 
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use dashmap::{DashMap, DashSet};
@@ -67,7 +66,14 @@ use crate::search::vector::storage::{SimHashRow, VectorRowKeyspace, VectorRows};
 
 const VECTOR_MEMORY_LOAD_MAX_FETCH_TASKS: usize = 4;
 /// Capacity of a slab chunk opened while the admission budget allows it.
-const VECTOR_MEMORY_SLAB_CHUNK_BYTES: usize = 1024 * 1024;
+///
+/// Every lookup bumps its chunk's reference count, so chunks stay small
+/// enough that concurrent searches spread over many counters; sealing shrinks
+/// each chunk, so the size costs no tail waste.
+const VECTOR_MEMORY_SLAB_CHUNK_BYTES: usize = 16 * 1024;
+/// Charged bytes for one chunk's handle: at most two table slots (buckets
+/// double) and the `Bytes` shared header, rounded up to a 32-byte class.
+const SLAB_CHUNK_HANDLE_BYTES: u64 = 2 * core::mem::size_of::<OnceLock<Bytes>>() as u64 + 32;
 /// Charged index bytes for one SimHash entry.
 const SIMHASH_INDEX_ENTRY_BYTES: u64 = hash_index_entry_bytes::<NodeId, SimHash>();
 /// Charged index bytes for one node's upper-row entry.
@@ -817,7 +823,7 @@ impl VectorMemoryStore {
         }
         let appended = self.slab.append(&value, budget.remaining(index_bytes))?;
         self.upsert_upper_row(node_id, kind, appended.row);
-        Some(index_bytes + appended.allocated)
+        Some(index_bytes + appended.allocated - appended.released)
     }
 
     /// Hydrates a descriptor-bound unpublished store with fail-closed parsing.
@@ -992,10 +998,11 @@ const fn hash_index_entry_bytes<K, V>() -> u64 {
 }
 
 /// Exact charge for one upper row of `value_len` bytes admitted into an
-/// empty store: its index entry plus a chunk sized to the row.
+/// empty store: its index entry plus a chunk, with its handle, sized to the
+/// row.
 #[cfg(any(test, feature = "production-coverage"))]
 pub(crate) const fn isolated_upper_row_admission_bytes(value_len: u64) -> u64 {
-    UPPER_NODE_INDEX_ENTRY_BYTES + value_len
+    UPPER_NODE_INDEX_ENTRY_BYTES + SLAB_CHUNK_HANDLE_BYTES + value_len
 }
 
 /// One fully validated cache row held only until its admission decision.
@@ -1168,89 +1175,106 @@ impl UpperNeighborRows {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SlabAppend {
     row: SlabRow,
-    /// Bytes of a chunk opened for this row, or zero when it fit the open one.
+    /// Bytes of a chunk opened for this row (capacity plus its handle), or
+    /// zero when the row fit the open chunk.
     allocated: u64,
+    /// Bytes released by shrinking the chunk sealed to make room.
+    released: u64,
 }
 
 /// Append-only byte arena that owns the store's upper-row bytes.
 ///
 /// Rows are copied into one open chunk. When the next row does not fit, the
-/// open chunk is frozen into an immutable [`Bytes`] and published in
-/// `sealed`, which lookups read without locking. Rows still in the open chunk
-/// (only during an unpublished load, or after fixture inserts) are copied out
-/// under its lock. Chunk ids are never reused, so a location read before
-/// [`Self::clear`] can only miss afterwards, never alias newer bytes. Chunks
-/// are freed once the slab and every returned slice of them drop.
+/// open chunk is shrunk to its length, frozen into an immutable [`Bytes`],
+/// and published once in [`SealedChunks`], which lookups read with plain
+/// atomic loads. Rows still in the open chunk (only during an unpublished
+/// load, or after fixture inserts) are copied out under its lock. Chunks
+/// stay alive until the slab and every returned slice of them drop.
 struct VectorMemorySlab {
-    sealed: ArcSwap<SealedChunks>,
-    /// Open chunk, never empty while present; its id is `sealed.next_id()`.
-    open: parking_lot::Mutex<Option<Vec<u8>>>,
+    sealed: SealedChunks,
+    open: parking_lot::Mutex<OpenChunk>,
 }
 
 impl Default for VectorMemorySlab {
     fn default() -> Self {
         Self {
-            sealed: ArcSwap::from_pointee(SealedChunks {
-                first_id: 0,
-                chunks: Vec::new(),
-            }),
-            open: parking_lot::Mutex::new(None),
+            sealed: SealedChunks {
+                buckets: std::array::from_fn(|_| OnceLock::new()),
+            },
+            open: parking_lot::Mutex::new(OpenChunk { id: 0, bytes: None }),
         }
     }
 }
 
-/// Immutable chunks published to lookups.
+/// The chunk rows are appended to, and the id it takes when sealed.
+struct OpenChunk {
+    /// Id of the open chunk; ids below it are sealed or were skipped by a
+    /// clear, so a released open chunk's id is never reused.
+    id: u32,
+    /// Open chunk bytes, never empty while present.
+    bytes: Option<Vec<u8>>,
+}
+
+/// Lock-free, append-only table of sealed chunks.
+///
+/// Bucket `b` holds the `2^b` ids `2^b - 1 ..= 2^(b + 1) - 2`, so 33 buckets
+/// cover every `u32` id. A bucket is allocated when its first chunk seals, so
+/// slots never move and each is set once.
 struct SealedChunks {
-    /// Id of `chunks[0]`; lower ids were released by a clear.
-    first_id: u32,
-    chunks: Vec<Bytes>,
+    buckets: [OnceLock<Box<[OnceLock<Bytes>]>>; u32::BITS as usize + 1],
 }
 
 impl SealedChunks {
-    fn get(&self, id: u32) -> Option<&Bytes> {
-        self.chunks
-            .get(usize::try_from(id.checked_sub(self.first_id)?).ok()?)
+    /// Bucket and slot of chunk `id`.
+    fn position(id: u32) -> (usize, usize) {
+        let ordinal = u64::from(id) + 1;
+        let bucket = 63 - ordinal.leading_zeros();
+        // Both values are below 2^32, so they fit usize on supported targets.
+        (bucket as usize, (ordinal - (1 << bucket)) as usize)
     }
 
-    /// Id of the chunk sealed next, which is the open chunk's id.
-    ///
-    /// Ids are `u32`: even fixture-sized chunks would need petabytes of rows to
-    /// exhaust them, so exhaustion is an invariant violation.
-    fn next_id(&self) -> u32 {
-        u32::try_from(self.chunks.len())
-            .ok()
-            .and_then(|len| self.first_id.checked_add(len))
-            .expect("vector memory slab chunk ids fit u32")
+    fn get(&self, id: u32) -> Option<&Bytes> {
+        let (bucket, slot) = Self::position(id);
+        self.buckets[bucket].get()?[slot].get()
+    }
+
+    /// Publishes `chunk` under `id`; each id is published at most once.
+    fn publish(&self, id: u32, chunk: Bytes) {
+        let (bucket, slot) = Self::position(id);
+        let slots = self.buckets[bucket]
+            .get_or_init(|| (0..1usize << bucket).map(|_| OnceLock::new()).collect());
+        assert!(
+            slots[slot].set(chunk).is_ok(),
+            "vector memory slab chunk {id} was sealed twice"
+        );
     }
 }
 
 impl VectorMemorySlab {
-    /// Returns the bytes at `row`, or `None` when its chunk was released.
+    /// Returns the bytes at `row`, or `None` when its open chunk was released.
     fn read(&self, row: SlabRow) -> Option<Bytes> {
         if row.len == 0 {
             return Some(Bytes::new());
         }
-        match self.sealed.load().get(row.chunk) {
+        match self.sealed.get(row.chunk) {
             Some(chunk) => Some(chunk.slice(row.range())),
             None => {
                 let open = self.open.lock();
-                // Sealing publishes under this lock, so reload before trusting
-                // that the row still lives in the open chunk.
-                let sealed = self.sealed.load();
-                sealed
+                // Sealing publishes under this lock, so look again before
+                // trusting that the row still lives in the open chunk.
+                self.sealed
                     .get(row.chunk)
                     .map(|chunk| chunk.slice(row.range()))
                     .or_else(|| {
-                        let chunk = open.as_ref()?;
-                        (sealed.next_id() == row.chunk)
-                            .then(|| Bytes::copy_from_slice(&chunk[row.range()]))
+                        let bytes = open.bytes.as_ref()?;
+                        (open.id == row.chunk).then(|| Bytes::copy_from_slice(&bytes[row.range()]))
                     })
             }
         }
     }
 
-    /// Copies `bytes` into the open chunk, first opening a new chunk when it
-    /// lacks room and `budget` admits one.
+    /// Copies `bytes` into the open chunk, first sealing it and opening a new
+    /// chunk when it lacks room and `budget` admits one.
     ///
     /// A new chunk takes half of a bounded budget, between the row length and
     /// [`VECTOR_MEMORY_SLAB_CHUNK_BYTES`], leaving the rest for the index
@@ -1263,19 +1287,22 @@ impl VectorMemorySlab {
             return Some(SlabAppend {
                 row: SlabRow::EMPTY,
                 allocated: 0,
+                released: 0,
             });
         }
         let mut open = self.open.lock();
         let room = open
+            .bytes
             .as_ref()
             .map_or(0, |chunk| chunk.capacity() - chunk.len());
-        let allocated = if bytes.len() <= room {
-            0
+        let (allocated, released) = if bytes.len() <= room {
+            (0, 0)
         } else {
             let largest = VECTOR_MEMORY_SLAB_CHUNK_BYTES.max(bytes.len());
             let capacity = match budget {
                 VectorMemoryAdmissionBudget::Unbounded => largest,
                 VectorMemoryAdmissionBudget::Bounded(remaining) => {
+                    let remaining = remaining.checked_sub(SLAB_CHUNK_HANDLE_BYTES)?;
                     let remaining = usize::try_from(remaining).unwrap_or(usize::MAX);
                     if bytes.len() > remaining {
                         return None;
@@ -1283,67 +1310,59 @@ impl VectorMemorySlab {
                     (remaining / 2).clamp(bytes.len(), largest)
                 }
             };
-            self.seal_locked(&mut open, false);
-            *open = Some(Vec::with_capacity(capacity));
+            let released = self.seal_locked(&mut open);
+            open.bytes = Some(Vec::with_capacity(capacity));
             // usize -> u64 is lossless on every supported target.
-            capacity as u64
+            (capacity as u64 + SLAB_CHUNK_HANDLE_BYTES, released)
         };
         // A chunk always exists here; capacity never exceeds a u32-length row
         // or the chunk size, so offsets fit u32.
-        let chunk = open.get_or_insert_with(Vec::new);
+        let chunk = open.bytes.get_or_insert_with(Vec::new);
         let offset = u32::try_from(chunk.len()).expect("slab chunk offsets fit u32");
         chunk.extend_from_slice(bytes);
         Some(SlabAppend {
             row: SlabRow {
-                chunk: self.sealed.load().next_id(),
+                chunk: open.id,
                 offset,
                 len,
             },
             allocated,
+            released,
         })
     }
 
-    /// Seals the open chunk, shrunk to its length, and returns the bytes the
-    /// shrink released.
+    /// Seals the open chunk and returns the bytes its shrink released.
     fn seal(&self) -> u64 {
-        self.seal_locked(&mut self.open.lock(), true)
+        self.seal_locked(&mut self.open.lock())
     }
 
-    fn seal_locked(&self, open: &mut Option<Vec<u8>>, shrink: bool) -> u64 {
-        let Some(mut chunk) = open.take() else {
+    /// Shrinks the open chunk to its length and publishes it under its id.
+    fn seal_locked(&self, open: &mut OpenChunk) -> u64 {
+        let Some(mut chunk) = open.bytes.take() else {
             return 0;
         };
         let capacity = chunk.capacity();
-        if shrink {
-            chunk.shrink_to_fit();
-        }
+        chunk.shrink_to_fit();
         let released = capacity - chunk.capacity();
-        let sealed = self.sealed.load();
-        let mut chunks = Vec::with_capacity(sealed.chunks.len() + 1);
-        chunks.extend(sealed.chunks.iter().cloned());
-        chunks.push(Bytes::from(chunk));
-        self.sealed.store(Arc::new(SealedChunks {
-            first_id: sealed.first_id,
-            chunks,
-        }));
+        self.sealed.publish(open.id, Bytes::from(chunk));
+        open.id = open
+            .id
+            .checked_add(1)
+            .expect("vector memory slab chunk ids fit u32");
         // usize -> u64 is lossless on every supported target.
         released as u64
     }
 
-    /// Releases every chunk; ids keep increasing past the released ones.
+    /// Releases the open chunk and skips its id. Sealed chunks are released
+    /// when the slab drops, which follows every production clear.
     fn clear(&self) {
         let mut open = self.open.lock();
-        *open = None;
-        let first_id = self
-            .sealed
-            .load()
-            .next_id()
-            .checked_add(1)
-            .expect("vector memory slab chunk ids fit u32");
-        self.sealed.store(Arc::new(SealedChunks {
-            first_id,
-            chunks: Vec::new(),
-        }));
+        if open.bytes.take().is_some() {
+            open.id = open
+                .id
+                .checked_add(1)
+                .expect("vector memory slab chunk ids fit u32");
+        }
     }
 }
 
@@ -1752,9 +1771,10 @@ mod tests {
     }
 
     /// Rows read back from the open chunk and from sealed chunks, empty rows
-    /// never occupy a chunk, and released chunk ids are never reused.
+    /// never occupy a chunk, and a released open chunk's id is never reused.
     #[test]
     fn slab_reads_open_and_sealed_rows_and_never_aliases_after_clear() {
+        let chunk = VECTOR_MEMORY_SLAB_CHUNK_BYTES as u64;
         let slab = VectorMemorySlab::default();
         assert_eq!(slab.seal(), 0, "sealing without an open chunk is a no-op");
         let empty = slab
@@ -1767,7 +1787,8 @@ mod tests {
         let first = slab
             .append(b"first", VectorMemoryAdmissionBudget::Unbounded)
             .unwrap();
-        assert_eq!(first.allocated, VECTOR_MEMORY_SLAB_CHUNK_BYTES as u64);
+        assert_eq!(first.allocated, chunk + SLAB_CHUNK_HANDLE_BYTES);
+        assert_eq!(first.released, 0);
         let second = slab
             .append(b"second", VectorMemoryAdmissionBudget::Bounded(0))
             .unwrap();
@@ -1779,25 +1800,29 @@ mod tests {
         assert_eq!(second.row.offset, 5);
         assert_eq!(slab.read(first.row).as_deref(), Some(&b"first"[..]));
 
-        let released = slab.seal();
-        assert_eq!(released, VECTOR_MEMORY_SLAB_CHUNK_BYTES as u64 - 11);
+        assert_eq!(slab.seal(), chunk - 11, "sealing shrinks to the length");
         assert_eq!(slab.read(second.row).as_deref(), Some(&b"second"[..]));
-        assert_eq!(slab.sealed.load().chunks[0].len(), 11);
+        assert_eq!(slab.sealed.get(first.row.chunk).map(Bytes::len), Some(11));
 
-        let third = slab
-            .append(b"third", VectorMemoryAdmissionBudget::Unbounded)
+        let open = slab
+            .append(b"open", VectorMemoryAdmissionBudget::Unbounded)
             .unwrap();
-        assert_eq!(third.row.chunk, first.row.chunk + 1);
+        assert_eq!(open.row.chunk, first.row.chunk + 1);
         slab.clear();
-        assert_eq!(slab.read(first.row), None);
-        assert_eq!(slab.read(third.row), None, "the open chunk is released too");
+        assert_eq!(slab.read(open.row), None, "the open chunk is released");
+        assert_eq!(
+            slab.read(first.row).as_deref(),
+            Some(&b"first"[..]),
+            "sealed chunks live until the slab drops"
+        );
+        slab.clear();
 
         let after = slab
             .append(b"after", VectorMemoryAdmissionBudget::Unbounded)
             .unwrap();
-        assert!(after.row.chunk > third.row.chunk);
+        assert_eq!(after.row.chunk, open.row.chunk + 1);
         assert_eq!(slab.read(after.row).as_deref(), Some(&b"after"[..]));
-        assert_eq!(slab.read(third.row), None);
+        assert_eq!(slab.read(open.row), None, "a skipped id never aliases");
         assert_eq!(
             slab.read(SlabRow {
                 chunk: after.row.chunk + 1,
@@ -1809,37 +1834,69 @@ mod tests {
         );
     }
 
-    /// Bounded appends size new chunks from the remaining budget and leave the
-    /// slab untouched when a row cannot fit.
+    /// Chunk ids map onto doubling buckets without gaps or overlap.
+    #[test]
+    fn sealed_chunk_positions_fill_doubling_buckets() {
+        assert_eq!(SealedChunks::position(0), (0, 0));
+        assert_eq!(SealedChunks::position(1), (1, 0));
+        assert_eq!(SealedChunks::position(2), (1, 1));
+        assert_eq!(SealedChunks::position(3), (2, 0));
+        assert_eq!(SealedChunks::position(6), (2, 3));
+        assert_eq!(SealedChunks::position(7), (3, 0));
+        assert_eq!(SealedChunks::position(u32::MAX - 1), (31, (1 << 31) - 1));
+        assert_eq!(SealedChunks::position(u32::MAX), (32, 0));
+        let slab = VectorMemorySlab::default();
+        for id in 0..20u32 {
+            slab.sealed.publish(id, Bytes::from(vec![id as u8]));
+        }
+        for id in 0..20u32 {
+            assert_eq!(slab.sealed.get(id).map(|chunk| chunk[0]), Some(id as u8));
+        }
+        assert_eq!(slab.sealed.get(20), None);
+        assert_eq!(slab.sealed.get(40), None);
+    }
+
+    /// Bounded appends size new chunks from the remaining budget, net out the
+    /// shrink of the chunk they seal, and leave the slab untouched when a row
+    /// cannot fit.
     #[test]
     fn slab_bounded_appends_size_chunks_within_the_budget() {
         let chunk = VECTOR_MEMORY_SLAB_CHUNK_BYTES as u64;
+        let handle = SLAB_CHUNK_HANDLE_BYTES;
         let slab = VectorMemorySlab::default();
         assert_eq!(
-            slab.append(b"four", VectorMemoryAdmissionBudget::Bounded(3)),
+            slab.append(b"four", VectorMemoryAdmissionBudget::Bounded(handle + 3)),
             None
         );
-        assert!(slab.open.lock().is_none());
+        assert_eq!(
+            slab.append(b"four", VectorMemoryAdmissionBudget::Bounded(3)),
+            None,
+            "a budget below the handle refuses every chunk"
+        );
+        assert!(slab.open.lock().bytes.is_none());
 
         let exact = slab
-            .append(b"four", VectorMemoryAdmissionBudget::Bounded(4))
+            .append(b"four", VectorMemoryAdmissionBudget::Bounded(handle + 4))
             .unwrap();
-        assert_eq!(exact.allocated, 4);
+        assert_eq!(exact.allocated, handle + 4);
         let halved = slab
-            .append(b"next", VectorMemoryAdmissionBudget::Bounded(100))
+            .append(b"next", VectorMemoryAdmissionBudget::Bounded(handle + 100))
             .unwrap();
-        assert_eq!(halved.allocated, 50, "a new chunk takes half the budget");
+        assert_eq!(halved.allocated, handle + 50, "a new chunk takes half");
+        assert_eq!(halved.released, 0, "the exact chunk had no tail");
         assert_eq!(halved.row.chunk, exact.row.chunk + 1);
         let capped = slab
             .append(&[7; 60], VectorMemoryAdmissionBudget::Bounded(u64::MAX))
             .unwrap();
-        assert_eq!(capped.allocated, chunk);
+        assert_eq!(capped.allocated, handle + chunk);
+        assert_eq!(capped.released, 46, "sealing shrinks the halved chunk");
 
         let oversized = vec![9; VECTOR_MEMORY_SLAB_CHUNK_BYTES + 1];
         let large = slab
             .append(&oversized, VectorMemoryAdmissionBudget::Unbounded)
             .unwrap();
-        assert_eq!(large.allocated, chunk + 1);
+        assert_eq!(large.allocated, handle + chunk + 1);
+        assert_eq!(large.released, chunk - 60);
         assert_eq!(slab.seal(), 0, "an exactly filled chunk releases nothing");
         assert_eq!(slab.read(large.row).as_deref(), Some(&oversized[..]));
         assert_eq!(slab.read(capped.row).as_deref(), Some(&[7; 60][..]));
@@ -1898,6 +1955,7 @@ mod tests {
         let expected = 3 * UPPER_NODE_INDEX_ENTRY_BYTES
             + 2 * UPPER_LAYER_SLOT_BYTES
             + SIMHASH_INDEX_ENTRY_BYTES
+            + SLAB_CHUNK_HANDLE_BYTES
             + 10
             + 20
             + 30
@@ -1905,13 +1963,12 @@ mod tests {
         assert_eq!(summary.loaded_entries, rows.len());
         assert_eq!(summary.estimated_bytes, expected);
         assert_eq!(store.estimated_bytes(), expected);
-        let sealed = store.slab.sealed.load();
         assert_eq!(
-            sealed.chunks.iter().map(Bytes::len).collect::<Vec<_>>(),
-            [b"fixture".len(), 100],
+            [0, 1, 2].map(|id| store.slab.sealed.get(id).map(Bytes::len)),
+            [Some(b"fixture".len()), Some(100), None],
             "the fixture chunk stays separate and the load's chunk is shrunk"
         );
-        assert!(store.slab.open.lock().is_none());
+        assert!(store.slab.open.lock().bytes.is_none());
         assert_eq!(store.get_upper_vector(7).as_deref(), Some(&[][..]));
         assert_eq!(store.get_upper_vector(99).as_deref(), Some(&b"fixture"[..]));
 
@@ -1952,7 +2009,7 @@ mod tests {
                 written.store(node_id + 1, Ordering::Release);
             }
         });
-        assert!(store.slab.sealed.load().chunks.len() >= 3);
+        assert!(store.slab.sealed.get(2).is_some());
         for node_id in 0..64 {
             assert_eq!(store.get_upper_vector(node_id), Some(row(node_id)));
         }
