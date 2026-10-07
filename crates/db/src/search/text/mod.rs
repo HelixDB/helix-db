@@ -65,6 +65,8 @@ mod caching_directory;
 pub(crate) mod compaction;
 mod debug_proxy_directory;
 mod hot_directory;
+#[cfg(test)]
+mod live_state_tests;
 mod overlay_directory;
 pub(crate) mod pending;
 #[cfg(feature = "production-coverage")]
