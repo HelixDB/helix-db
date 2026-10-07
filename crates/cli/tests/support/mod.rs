@@ -342,10 +342,10 @@ if /I "%1"=="%HELIX_TEST_RUNTIME_FAIL_COMMAND%" (
   exit /b 42
 )
 if "%1"=="exec" exit /b 0
-if "%1"=="port" (
-  if defined HELIX_TEST_RUNTIME_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_PORT_OUTPUT%
-  exit /b 0
-)
+if "%1"=="inspect" exit /b 0
+if "%1"=="port" goto :port
+if "%1"=="run" goto :run
+if "%1"=="rm" goto :rm
 if "%1"=="image" (
   if "%HELIX_TEST_RUNTIME_IMAGE_MISSING%"=="1" (
     if not exist "%HELIX_TEST_RUNTIME_LOG%.pulled" exit /b 1
@@ -388,11 +388,6 @@ if "%1"=="container" (
     exit /b 0
   )
   exit /b 0
-)
-if "%1"=="rm" (
-  if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
-  echo No such container 1>&2
-  exit /b 1
 )
 if "%1"=="network" (
   if "%2"=="inspect" if "%3"=="--format" (
@@ -456,6 +451,37 @@ if "%1"=="volume" (
   exit /b 1
 )
 exit /b 0
+
+:port
+set "HELIX_TEST_CONTAINER=%~2"
+if not "%HELIX_TEST_CONTAINER:~-9%"=="-explorer" goto :port_instance
+if not exist "%HELIX_TEST_RUNTIME_LOG%.explorer" exit /b 0
+if defined HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT%
+exit /b 0
+:port_instance
+if defined HELIX_TEST_RUNTIME_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_PORT_OUTPUT%
+exit /b 0
+
+:run
+if "%~1"=="" exit /b 0
+if "%~1"=="--name" goto :run_name
+shift
+goto :run
+:run_name
+set "HELIX_TEST_CONTAINER=%~2"
+if "%HELIX_TEST_CONTAINER:~-9%"=="-explorer" type nul > "%HELIX_TEST_RUNTIME_LOG%.explorer"
+exit /b 0
+
+:rm
+set "HELIX_TEST_CONTAINER=%~3"
+if not "%HELIX_TEST_CONTAINER:~-9%"=="-explorer" goto :rm_resource
+if not exist "%HELIX_TEST_RUNTIME_LOG%.explorer" goto :rm_resource
+del "%HELIX_TEST_RUNTIME_LOG%.explorer"
+exit /b 0
+:rm_resource
+if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
+echo No such container 1>&2
+exit /b 1
 "#;
 
 fn install_fake_docker(bin: &Path) -> PathBuf {
@@ -485,7 +511,30 @@ if [ "$1" = "$HELIX_TEST_RUNTIME_FAIL_COMMAND" ]; then
 fi
 case "$1" in
   exec) exit 0 ;;
-  port) printf '%s\n' "$HELIX_TEST_RUNTIME_PORT_OUTPUT"; exit 0 ;;
+  port)
+    case "$2" in
+      *-explorer)
+        # An Explorer publishes its port only while `run` has started one.
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.explorer" ]; then
+          printf '%s\n' "$HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT"
+        fi
+        exit 0
+        ;;
+    esac
+    printf '%s\n' "$HELIX_TEST_RUNTIME_PORT_OUTPUT"; exit 0 ;;
+  run)
+    previous=""
+    for argument in "$@"; do
+      if [ "$previous" = "--name" ]; then
+        case "$argument" in
+          *-explorer) touch "$HELIX_TEST_RUNTIME_LOG.explorer" ;;
+        esac
+        break
+      fi
+      previous="$argument"
+    done
+    exit 0
+    ;;
   image)
     if [ "$HELIX_TEST_RUNTIME_IMAGE_MISSING" = "1" ] && [ ! -f "$HELIX_TEST_RUNTIME_LOG.pulled" ]; then exit 1; fi
     case "$5" in
@@ -522,6 +571,14 @@ case "$1" in
     exit 0
     ;;
   rm)
+    case "$3" in
+      *-explorer)
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.explorer" ]; then
+          rm -f "$HELIX_TEST_RUNTIME_LOG.explorer"
+          exit 0
+        fi
+        ;;
+    esac
     if [ "$HELIX_TEST_RUNTIME_RESOURCES_EXIST" = "1" ]; then exit 0; fi
     echo "No such container" >&2
     exit 1

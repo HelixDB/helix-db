@@ -156,6 +156,16 @@ helix status
 
 Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
 
+## Browsing the graph
+
+```bash
+helix explorer dev            # start the graph Explorer and open it in your browser
+helix explorer dev --no-open  # print the URL only
+helix explorer dev --stop     # stop the Explorer, keep the instance
+```
+
+[`helix explorer`](/cli/command-reference/explorer) runs the Explorer in a `helix-<project>-<instance>-explorer` container on `http://127.0.0.1:6970` (or the next free port) and points it at the running instance. `helix stop <instance>` stops it too.
+
 ## Inspecting logs
 
 ```bash
@@ -170,6 +180,7 @@ helix logs dev --follow      # stream
 | Goal | Command |
 |------|---------|
 | Stop one instance | `helix stop <instance>` |
+| Stop only an instance's Explorer | `helix explorer <instance> --stop` |
 | Restart one instance | `helix restart <instance>` |
 | Remove containers, workspace state, and Helix-managed volumes for one instance | `helix prune <instance>` |
 | Remove everything Helix-owned, for every local instance | `helix prune --all` (`--yes` in non-TTY) |

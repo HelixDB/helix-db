@@ -13,10 +13,18 @@ use std::net::TcpStream;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncBufReadExt as _;
 use tokio::process::Command as TokioCommand;
 
 pub const CONTAINER_PORT: u16 = 8080;
+/// Port the Explorer image serves its UI, `/api/query`, and `/healthz` on
+/// inside its container.
+pub const EXPLORER_CONTAINER_PORT: u16 = 3000;
 const IDENTITY_LABEL: &str = "helixdb.identity";
+/// The Explorer's image reference, then one `KEY=value` environment entry
+/// per line, so a running Explorer can be compared with the one requested.
+const EXPLORER_CONFIG_FORMAT: &str =
+    "{{println .Config.Image}}{{range .Config.Env}}{{println .}}{{end}}";
 const CONTAINER_OWNER_FORMAT: &str =
     r#"{{if .Config.Labels}}{{index .Config.Labels "helixdb.identity"}}{{end}}"#;
 const RESOURCE_OWNER_FORMAT: &str = r#"{{if .Labels}}{{index .Labels "helixdb.identity"}}{{end}}"#;
@@ -76,6 +84,24 @@ pub struct LocalStatus {
     pub container_name: String,
     pub status: String,
     pub ports: String,
+}
+
+/// What `helix explorer` runs: the image, the loopback host port that serves
+/// its UI, and the instance's base URL as the container reaches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerLaunch {
+    pub image: String,
+    pub port: u16,
+    pub helix_url: String,
+}
+
+/// An Explorer container that is running now. `image` and `helix_url` are
+/// `None` when the runtime does not report them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningExplorer {
+    pub port: u16,
+    pub image: Option<String>,
+    pub helix_url: Option<String>,
 }
 
 /// A start configuration whose required images have all been resolved.
@@ -476,13 +502,7 @@ impl LocalRuntime {
                     String::from_utf8_lossy(&published.stderr)
                 ));
             }
-            let ports = String::from_utf8_lossy(&published.stdout);
-            let port = ports
-                .lines()
-                .next()
-                .and_then(|line| line.rsplit_once(':'))
-                .and_then(|(_, port)| port.parse::<u16>().ok())
-                .filter(|port| *port != 0)
+            let port = parse_published_port(&String::from_utf8_lossy(&published.stdout))
                 .ok_or_else(|| eyre!("No valid published port for {name} on 8080/tcp"))?;
             self.wait_ready(port)?;
             return Ok(());
@@ -572,10 +592,194 @@ impl LocalRuntime {
 
     pub fn prune_instance(&self, instance_name: &str) -> Result<bool> {
         let name = self.container_name(instance_name);
+        let removed_explorer = self.remove_explorer(instance_name)?;
         let removed_helix = self.remove_container(&name)?;
         let removed_disk_resources = self.remove_disk_resources(instance_name, true)?;
         let removed_cache = self.remove_volume(&self.cache_volume(instance_name))?;
-        Ok(removed_helix || removed_disk_resources || removed_cache)
+        Ok(removed_explorer || removed_helix || removed_disk_resources || removed_cache)
+    }
+
+    /// Name of the Explorer container `helix explorer` runs for an instance.
+    /// It extends the instance's container name, so it is as unique as that.
+    pub fn explorer_container_name(&self, instance_name: &str) -> String {
+        format!("{}-explorer", self.container_name(instance_name))
+    }
+
+    /// The host port the instance's container publishes for the server, or
+    /// `None` when that container is missing or not running.
+    pub fn instance_port(&self, instance_name: &str) -> Option<u16> {
+        self.published_port(&self.container_name(instance_name), CONTAINER_PORT)
+    }
+
+    /// The instance's base URL as an Explorer container reaches the port the
+    /// instance publishes on the host.
+    pub fn explorer_helix_url(&self, instance_port: u16) -> String {
+        format!("http://{}:{instance_port}", explorer_host(self.runtime))
+    }
+
+    /// The host port an instance's running Explorer publishes, or `None` when
+    /// no Explorer runs for it.
+    pub fn explorer_port(&self, instance_name: &str) -> Option<u16> {
+        self.published_port(
+            &self.explorer_container_name(instance_name),
+            EXPLORER_CONTAINER_PORT,
+        )
+    }
+
+    /// The Explorer running for an instance, if any.
+    pub fn running_explorer(&self, instance_name: &str) -> Option<RunningExplorer> {
+        let name = self.explorer_container_name(instance_name);
+        let port = self.explorer_port(instance_name)?;
+        let config = self
+            .runtime_command()
+            .args(["inspect", "--format", EXPLORER_CONFIG_FORMAT, &name])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .unwrap_or_default();
+        let (image, helix_url) = parse_explorer_config(&config);
+        Some(RunningExplorer {
+            port,
+            image,
+            helix_url,
+        })
+    }
+
+    /// Start a detached Explorer for `instance_name`, replacing a stopped
+    /// container of the same name. The container removes itself when it stops.
+    pub fn run_explorer(&self, instance_name: &str, launch: &ExplorerLaunch) -> Result<()> {
+        let name = self.explorer_container_name(instance_name);
+        let _ = self.remove_container(&name);
+        let args = explorer_run_args(
+            self.runtime,
+            &name,
+            launch,
+            instance_name,
+            &self.instance_identity(instance_name),
+        );
+        let output = self
+            .runtime_command()
+            .args(&args)
+            .output()
+            .map_err(|e| eyre!("Failed to start {name}: {e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(
+            CliError::new(format!("failed to start the Explorer container {name}"))
+                .with_caused_by(String::from_utf8_lossy(&output.stderr).trim())
+                .with_hint(format!(
+                    "if port {} is taken, pass another with --port",
+                    launch.port
+                ))
+                .into(),
+        )
+    }
+
+    /// Stop and remove an instance's Explorer. Returns whether one existed.
+    pub fn remove_explorer(&self, instance_name: &str) -> Result<bool> {
+        self.remove_container(&self.explorer_container_name(instance_name))
+    }
+
+    /// Make `image` available locally, pulling it when it is missing with the
+    /// pull's latest progress line on a spinner. Returns whether it pulled.
+    pub async fn ensure_image(&self, image: &str) -> Result<bool> {
+        if self.inspect_image(image).is_ok() {
+            return Ok(false);
+        }
+        // Every early return fails the step, so the success line is set last.
+        let mut step = Step::with_messages(
+            &format!("Pulling {image}"),
+            &format!("Could not pull {image}"),
+        );
+        step.start();
+        let spawned = self
+            .runtime_tokio_command()
+            .args(["pull", image])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                step.fail();
+                return Err(eyre!("Failed to pull {image}: {error}"));
+            }
+        };
+        // Docker reports progress on stdout and Podman on stderr, so both feed
+        // the spinner; stderr is also kept for the error.
+        let mut stdout =
+            tokio::io::BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+        let mut stderr =
+            tokio::io::BufReader::new(child.stderr.take().expect("piped stderr")).lines();
+        let (mut stdout_open, mut stderr_open) = (true, true);
+        let mut errors = Vec::new();
+        loop {
+            let line = tokio::select! {
+                line = stdout.next_line(), if stdout_open => match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) | Err(_) => {
+                        stdout_open = false;
+                        continue;
+                    }
+                },
+                line = stderr.next_line(), if stderr_open => match line {
+                    Ok(Some(line)) => {
+                        errors.push(line.clone());
+                        line
+                    }
+                    Ok(None) | Err(_) => {
+                        stderr_open = false;
+                        continue;
+                    }
+                },
+                else => break,
+            };
+            if !line.trim().is_empty() {
+                step.set_message(&format!(
+                    "Pulling {image}  {}",
+                    console::style(line.trim()).dim().for_stderr()
+                ));
+            }
+        }
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(error) => {
+                step.fail();
+                return Err(eyre!("Failed to pull {image}: {error}"));
+            }
+        };
+        if !status.success() {
+            step.fail();
+            let error = CliError::new(format!("failed to pull {image}"));
+            let stderr = errors.join("\n");
+            return Err(match stderr.trim() {
+                "" => error,
+                stderr => error.with_caused_by(stderr),
+            }
+            .into());
+        }
+        let Err(error) = self.inspect_image(image) else {
+            step.set_completion(&format!("Pulled {image}"));
+            step.done();
+            return Ok(true);
+        };
+        step.fail();
+        Err(error)
+    }
+
+    /// The host port `container` publishes for `container_port`/tcp, or
+    /// `None` when the container is missing, stopped, or publishes nothing.
+    fn published_port(&self, container: &str, container_port: u16) -> Option<u16> {
+        let output = self
+            .runtime_command()
+            .args(["port", container, &format!("{container_port}/tcp")])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        parse_published_port(&String::from_utf8_lossy(&output.stdout))
     }
 
     pub fn run_command(&self, args: &[&str]) -> Result<Output> {
@@ -1354,6 +1558,83 @@ fn helix_run_args(
     args
 }
 
+/// Host name an Explorer container uses for the host, where the instance
+/// publishes its port.
+///
+/// Docker needs `--add-host host.docker.internal:host-gateway` for the name
+/// on Linux engines (Docker Desktop and OrbStack also resolve it on their
+/// own). Podman resolves `host.containers.internal` itself: it writes the name
+/// into `/etc/hosts` on Linux, and `podman machine` answers it over DNS. Its
+/// `host-gateway` mapping fails inside `podman machine`, so Podman gets no
+/// `--add-host`.
+fn explorer_host(runtime: ContainerRuntime) -> &'static str {
+    match runtime {
+        ContainerRuntime::Docker => "host.docker.internal",
+        ContainerRuntime::Podman => "host.containers.internal",
+    }
+}
+
+/// `run` arguments for an Explorer: detached and removed when it stops,
+/// labelled with the instance's identity, and published on loopback only.
+fn explorer_run_args(
+    runtime: ContainerRuntime,
+    name: &str,
+    launch: &ExplorerLaunch,
+    instance_name: &str,
+    identity: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--rm".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
+    ];
+    if runtime == ContainerRuntime::Docker {
+        args.extend([
+            "--add-host".to_string(),
+            format!("{}:host-gateway", explorer_host(runtime)),
+        ]);
+    }
+    args.extend([
+        "-e".to_string(),
+        format!("HELIX_URL={}", launch.helix_url),
+        "-e".to_string(),
+        format!("HELIX_INSTANCE_NAME={instance_name}"),
+        "-p".to_string(),
+        format!("127.0.0.1:{}:{EXPLORER_CONTAINER_PORT}", launch.port),
+        launch.image.clone(),
+    ]);
+    args
+}
+
+/// The host port on the first line of `docker port` / `podman port` output,
+/// such as `0.0.0.0:6969` or `[::]:6969`. `None` for no line or port 0.
+fn parse_published_port(output: &str) -> Option<u16> {
+    output
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit_once(':'))
+        .and_then(|(_, port)| port.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+}
+
+/// Splits [`EXPLORER_CONFIG_FORMAT`] output into the image reference and the
+/// `HELIX_URL` the container runs with.
+fn parse_explorer_config(output: &str) -> (Option<String>, Option<String>) {
+    let mut lines = output.lines().map(str::trim);
+    let image = lines
+        .next()
+        .filter(|image| !image.is_empty())
+        .map(str::to_owned);
+    let helix_url = lines
+        .find_map(|line| line.strip_prefix("HELIX_URL="))
+        .map(str::to_owned);
+    (image, helix_url)
+}
+
 /// Runs SeaweedFS's single-process `mini` mode (master, volume, filer, and S3)
 /// with its other gateways and admin UI turned off.
 ///
@@ -1932,6 +2213,145 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn explorer_names_extend_the_instance_container_name() {
+        assert_eq!(
+            runtime_for("demo").explorer_container_name("dev"),
+            "helix-demo-dev-explorer"
+        );
+        let hashed = runtime_for("My Project");
+        assert_eq!(
+            hashed.explorer_container_name("dev"),
+            format!("{}-explorer", hashed.container_name("dev"))
+        );
+    }
+
+    #[test]
+    fn explorer_reaches_the_instance_through_each_runtimes_host_name() {
+        let podman = LocalRuntime {
+            runtime: ContainerRuntime::Podman,
+            project_name: "demo".to_string(),
+        };
+        assert_eq!(
+            runtime_for("demo").explorer_helix_url(6969),
+            "http://host.docker.internal:6969"
+        );
+        assert_eq!(
+            podman.explorer_helix_url(7000),
+            "http://host.containers.internal:7000"
+        );
+    }
+
+    #[test]
+    fn docker_explorer_args_map_the_host_gateway_and_publish_on_loopback() {
+        let launch = ExplorerLaunch {
+            image: "ghcr.io/helixdb/helix-explorer:latest".to_string(),
+            port: 6970,
+            helix_url: "http://host.docker.internal:6969".to_string(),
+        };
+        assert_eq!(
+            explorer_run_args(
+                ContainerRuntime::Docker,
+                "helix-demo-dev-explorer",
+                &launch,
+                "dev",
+                "4:demo/dev",
+            ),
+            vec![
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                "helix-demo-dev-explorer",
+                "--label",
+                "helixdb.identity=4:demo/dev",
+                "--add-host",
+                "host.docker.internal:host-gateway",
+                "-e",
+                "HELIX_URL=http://host.docker.internal:6969",
+                "-e",
+                "HELIX_INSTANCE_NAME=dev",
+                "-p",
+                "127.0.0.1:6970:3000",
+                "ghcr.io/helixdb/helix-explorer:latest",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    /// `podman machine` cannot resolve `host-gateway`, so Podman relies on
+    /// the `host.containers.internal` name it provides itself.
+    #[test]
+    fn podman_explorer_args_skip_the_host_gateway_mapping() {
+        let launch = ExplorerLaunch {
+            image: "helix-explorer:local".to_string(),
+            port: 7001,
+            helix_url: "http://host.containers.internal:6969".to_string(),
+        };
+        let args = explorer_run_args(
+            ContainerRuntime::Podman,
+            "helix-demo-qa-explorer",
+            &launch,
+            "qa",
+            "4:demo/qa",
+        );
+        assert!(!args.contains(&"--add-host".to_string()), "{args:?}");
+        assert!(has_pair(
+            &args,
+            "-e",
+            "HELIX_URL=http://host.containers.internal:6969"
+        ));
+        assert!(has_pair(&args, "-e", "HELIX_INSTANCE_NAME=qa"));
+        assert!(has_pair(&args, "-p", "127.0.0.1:7001:3000"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("helix-explorer:local")
+        );
+    }
+
+    #[test]
+    fn published_ports_parse_from_the_first_runtime_line() {
+        assert_eq!(
+            parse_published_port("0.0.0.0:6969\n[::]:6969\n"),
+            Some(6969)
+        );
+        assert_eq!(parse_published_port("[::]:7000"), Some(7000));
+        assert_eq!(parse_published_port("127.0.0.1:6970\r\n"), Some(6970));
+        for invalid in [
+            "",
+            "\n",
+            "garbage",
+            "127.0.0.1:0",
+            "127.0.0.1:65536",
+            "x:abc",
+        ] {
+            assert_eq!(parse_published_port(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn explorer_config_reads_the_image_and_helix_url() {
+        assert_eq!(
+            parse_explorer_config(
+                "helix-explorer:local\nPATH=/usr/bin\nHELIX_URL=http://host.docker.internal:6969\nHELIX_INSTANCE_NAME=dev\n"
+            ),
+            (
+                Some("helix-explorer:local".to_string()),
+                Some("http://host.docker.internal:6969".to_string())
+            )
+        );
+        assert_eq!(parse_explorer_config(""), (None, None));
+        assert_eq!(
+            parse_explorer_config("ghcr.io/helixdb/helix-explorer:latest\nPATH=/bin\n"),
+            (
+                Some("ghcr.io/helixdb/helix-explorer:latest".to_string()),
+                None
+            )
         );
     }
 

@@ -25,7 +25,7 @@ helix stop [INSTANCE]
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--json` | Print `instance` and `wasRunning` as JSON on stdout, and never prompt. | Off |
+| `--json` | Print `instance`, `wasRunning`, and `explorerStopped` as JSON on stdout, and never prompt. | Off |
 
 ## Behavior
 
@@ -34,6 +34,7 @@ helix stop [INSTANCE]
 - For disk-mode instances, `helix stop` removes the Helix and SeaweedFS containers, and any MinIO sidecar left by an older CLI, but keeps the persistent local volumes. Use [`helix prune`](/cli/command-reference/prune) to delete disk-mode data.
 - The disk-cache volume of a disk-mode or S3 instance is kept too, so the next start reads recently used data locally.
 - Remote S3 data is never touched.
+- The instance's [Explorer](/cli/command-reference/explorer) container, when one is running, is stopped too. Failing to remove it never fails the stop.
 
 ## Examples
 

@@ -27,6 +27,9 @@ enum InstanceStatus {
         state: String,
         url: String,
         storage: String,
+        /// URL of the instance's running Explorer (`helix explorer`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        explorer: Option<String>,
     },
     Cloud {
         name: String,
@@ -67,14 +70,22 @@ pub async fn run(instance: Option<String>) -> Result<()> {
     let mut instances = Vec::with_capacity(names.len());
     for name in names {
         instances.push(match project.config.get_instance(&name)? {
-            InstanceInfo::Local(config) => InstanceStatus::Local {
-                state: runtime
-                    .status(&name)?
-                    .map_or_else(|| "not created".to_owned(), |status| status.status),
-                url: format!("http://localhost:{}", config.port),
-                storage: config.storage.as_str().to_owned(),
-                name,
-            },
+            InstanceInfo::Local(config) => {
+                let status = runtime.status(&name)?;
+                // An Explorer only runs beside an existing instance container,
+                // so a missing one costs no extra runtime call.
+                let explorer = status
+                    .as_ref()
+                    .and_then(|_| runtime.explorer_port(&name))
+                    .map(super::explorer::explorer_url);
+                InstanceStatus::Local {
+                    state: status.map_or_else(|| "not created".to_owned(), |status| status.status),
+                    url: format!("http://localhost:{}", config.port),
+                    storage: config.storage.as_str().to_owned(),
+                    explorer,
+                    name,
+                }
+            }
             InstanceInfo::Enterprise(config) => match &cloud {
                 Ok(client) => cloud_status(client, name, &config.database).await,
                 Err(message) => InstanceStatus::Cloud {
@@ -104,25 +115,37 @@ pub async fn run(instance: Option<String>) -> Result<()> {
         println!();
         let mut rows = table::Table::new(["INSTANCE", "KIND", "STATUS", "ENDPOINT"]);
         for instance in &report.instances {
-            rows.row(match instance {
+            match instance {
                 InstanceStatus::Local {
                     name,
                     state,
                     url,
                     storage,
-                } => [
-                    name.clone(),
-                    "local".to_owned(),
-                    table::state(state),
-                    format!("{url} {}", style(format!("({storage})")).dim()),
-                ],
+                    explorer,
+                } => {
+                    rows.row([
+                        name.clone(),
+                        "local".to_owned(),
+                        table::state(state),
+                        format!("{url} {}", style(format!("({storage})")).dim()),
+                    ]);
+                    let Some(explorer) = explorer else {
+                        continue;
+                    };
+                    rows.row([
+                        name.clone(),
+                        "explorer".to_owned(),
+                        table::state("running"),
+                        explorer.clone(),
+                    ]);
+                }
                 InstanceStatus::Cloud {
                     name,
                     state,
                     database,
                     label,
                     ..
-                } => [
+                } => rows.row([
                     name.clone(),
                     "cloud".to_owned(),
                     table::state(state),
@@ -130,8 +153,8 @@ pub async fn run(instance: Option<String>) -> Result<()> {
                         Some(label) => format!("{label} {}", style(format!("({database})")).dim()),
                         None => database.clone(),
                     },
-                ],
-            });
+                ]),
+            }
         }
         rows.print();
         for instance in &report.instances {
@@ -215,6 +238,7 @@ mod tests {
             state: "not created".into(),
             url: "http://localhost:6969".into(),
             storage: "memory".into(),
+            explorer: None,
         })
         .unwrap();
         assert_eq!(local["kind"], "local");
