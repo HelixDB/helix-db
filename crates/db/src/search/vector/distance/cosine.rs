@@ -216,9 +216,7 @@ mod tests {
             reference.to_bits(),
             "norm of {values:?}"
         );
-        let Some(fast) = fast_norm(&vector) else {
-            return None;
-        };
+        let fast = fast_norm(&vector)?;
         assert_eq!(
             fast.to_bits(),
             reference.to_bits(),
