@@ -6,12 +6,17 @@
 //! row materialization is measured alongside so that reading every field
 //! cannot regress unnoticed. Graph creation and planning happen once outside
 //! measurement; each sample executes only the planned read.
+//!
+//! The top-level benchmarks read rows still in the memtable, where each row
+//! is its own allocation. The `reopened` benchmarks read the same rows after
+//! the database is closed and reopened, so rows come from stored blocks at
+//! arbitrary offsets, as on a long-running server.
 
 #![recursion_limit = "256"]
 
 use std::sync::OnceLock;
 
-use db::{HelixDB, HelixDbSource};
+use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::prelude::*;
 use helix_planner::{context::ParamBindings, exec::ExecutablePlan, planning};
 
@@ -40,14 +45,28 @@ struct Fixture {
     full_rows: ExecutablePlan,
 }
 
-fn fixture() -> &'static Fixture {
-    static FIXTURE: OnceLock<Fixture> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
+/// Where the measured rows are read from.
+#[derive(Clone, Copy)]
+enum Rows {
+    /// The memtable the rows were written to.
+    Written,
+    /// Stored blocks, after the database is closed and reopened.
+    Reopened,
+}
+
+fn fixture(rows: Rows) -> &'static Fixture {
+    static WRITTEN: OnceLock<Fixture> = OnceLock::new();
+    static REOPENED: OnceLock<Fixture> = OnceLock::new();
+    let fixture = match rows {
+        Rows::Written => &WRITTEN,
+        Rows::Reopened => &REOPENED,
+    };
+    fixture.get_or_init(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("benchmark runtime starts");
-        let fixture = runtime.block_on(seed_and_plan());
+        let fixture = runtime.block_on(seed_and_plan(rows));
         let (db, [filtered_count, filtered_project_one, project_one, full_rows]) = fixture;
         Fixture {
             runtime,
@@ -60,12 +79,15 @@ fn fixture() -> &'static Fixture {
     })
 }
 
-async fn seed_and_plan() -> (HelixDB, [ExecutablePlan; 4]) {
-    let db = HelixDB::open(HelixDbSource::InMemory {
-        database: "property-row-reads-bench".to_string(),
-    })
-    .await
-    .expect("benchmark database opens");
+async fn seed_and_plan(rows: Rows) -> (HelixDB, [ExecutablePlan; 4]) {
+    let token = ProcessLocalDatabaseToken::new("property-row-reads-bench")
+        .expect("benchmark database token is valid");
+    let source = || HelixDbSource::InMemoryToken {
+        token: token.clone(),
+    };
+    let db = HelixDB::open(source())
+        .await
+        .expect("benchmark database opens");
 
     let entity_count = if std::env::args().any(|argument| argument == "--bench") {
         BENCH_ENTITY_COUNT
@@ -112,6 +134,16 @@ async fn seed_and_plan() -> (HelixDB, [ExecutablePlan; 4]) {
             .expect("benchmark graph is created");
     }
 
+    let db = match rows {
+        Rows::Written => db,
+        Rows::Reopened => {
+            db.close().await.expect("benchmark database closes");
+            HelixDB::open(source())
+                .await
+                .expect("benchmark database reopens")
+        }
+    };
+
     let threshold = entity_count as i64 / 2;
     let queries = [
         read_batch()
@@ -154,8 +186,8 @@ async fn seed_and_plan() -> (HelixDB, [ExecutablePlan; 4]) {
     (db, plans)
 }
 
-fn run(bencher: divan::Bencher<'_, '_>, plan: fn(&Fixture) -> &ExecutablePlan) {
-    let fixture = fixture();
+fn run(bencher: divan::Bencher<'_, '_>, rows: Rows, plan: fn(&Fixture) -> &ExecutablePlan) {
+    let fixture = fixture(rows);
     bencher.bench_local(|| {
         divan::black_box(
             fixture
@@ -168,20 +200,48 @@ fn run(bencher: divan::Bencher<'_, '_>, plan: fn(&Fixture) -> &ExecutablePlan) {
 
 #[divan::bench(threads = 1)]
 fn filtered_count(bencher: divan::Bencher<'_, '_>) {
-    run(bencher, |fixture| &fixture.filtered_count);
+    run(bencher, Rows::Written, |fixture| &fixture.filtered_count);
 }
 
 #[divan::bench(threads = 1)]
 fn filtered_project_one(bencher: divan::Bencher<'_, '_>) {
-    run(bencher, |fixture| &fixture.filtered_project_one);
+    run(bencher, Rows::Written, |fixture| {
+        &fixture.filtered_project_one
+    });
 }
 
 #[divan::bench(threads = 1)]
 fn project_one(bencher: divan::Bencher<'_, '_>) {
-    run(bencher, |fixture| &fixture.project_one);
+    run(bencher, Rows::Written, |fixture| &fixture.project_one);
 }
 
 #[divan::bench(threads = 1)]
 fn full_rows(bencher: divan::Bencher<'_, '_>) {
-    run(bencher, |fixture| &fixture.full_rows);
+    run(bencher, Rows::Written, |fixture| &fixture.full_rows);
+}
+
+mod reopened {
+    use super::{run, Rows};
+
+    #[divan::bench(threads = 1)]
+    fn filtered_count(bencher: divan::Bencher<'_, '_>) {
+        run(bencher, Rows::Reopened, |fixture| &fixture.filtered_count);
+    }
+
+    #[divan::bench(threads = 1)]
+    fn filtered_project_one(bencher: divan::Bencher<'_, '_>) {
+        run(bencher, Rows::Reopened, |fixture| {
+            &fixture.filtered_project_one
+        });
+    }
+
+    #[divan::bench(threads = 1)]
+    fn project_one(bencher: divan::Bencher<'_, '_>) {
+        run(bencher, Rows::Reopened, |fixture| &fixture.project_one);
+    }
+
+    #[divan::bench(threads = 1)]
+    fn full_rows(bencher: divan::Bencher<'_, '_>) {
+        run(bencher, Rows::Reopened, |fixture| &fixture.full_rows);
+    }
 }
