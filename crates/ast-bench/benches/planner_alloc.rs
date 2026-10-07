@@ -180,12 +180,17 @@ const SITE_WORKLOADS: [&str; 8] = [
 const SAMPLES_PER_WORKLOAD: usize = 4_000;
 
 /// Allocation sites listed per workload.
-const TOP_SITES: usize = 15;
+const TOP_SITES: usize = 25;
 
-/// One resolved frame: its function name, and its source file when known.
+/// Planner frames shown per site: the innermost, then its planner callers.
+const CALLER_DEPTH: usize = 3;
+
+/// One resolved frame: its function name, and its source location when
+/// known.
 struct Frame {
     name: String,
     file: Option<String>,
+    line: Option<u32>,
 }
 
 /// The standard-library container a planner function allocated through:
@@ -253,16 +258,34 @@ fn sites() {
                     file: symbol
                         .filename()
                         .map(|file| file.to_string_lossy().into_owned()),
+                    line: symbol.lineno(),
                 })
                 .collect::<Vec<_>>();
             let planner = frames
                 .iter()
                 .enumerate()
-                .find_map(|(index, frame)| planner_file(frame).map(|file| (index, file)));
-            let (site, below) = match planner {
-                Some((index, file)) => {
-                    (format!("{} ({file})", frames[index].name), &frames[..index])
+                .filter_map(|(index, frame)| planner_file(frame).map(|file| (index, frame, file)))
+                .collect::<Vec<_>>();
+            // The innermost planner frame with its line, then its planner
+            // callers, skipping frames of the same function.
+            let mut chain = Vec::<String>::new();
+            let mut last_name = None;
+            for (_, frame, file) in &planner {
+                if chain.len() == CALLER_DEPTH {
+                    break;
                 }
+                if last_name == Some(frame.name.as_str()) {
+                    continue;
+                }
+                last_name = Some(frame.name.as_str());
+                chain.push(format!(
+                    "{} ({file}:{})",
+                    frame.name,
+                    frame.line.unwrap_or_default()
+                ));
+            }
+            let (site, below) = match planner.first() {
+                Some((index, _, _)) => (chain.join(" ← "), &frames[..*index]),
                 None => (String::from("(outside the planner)"), &frames[..]),
             };
             let kind = container(below);
