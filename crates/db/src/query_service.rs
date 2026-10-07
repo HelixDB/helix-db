@@ -336,18 +336,23 @@ async fn execute_validated(
         }
     };
     let prepared = execution_control
-        .run(db.planner_context_scoped_prepared(params.clone(), tenant_scope))
+        .run(db.planner_context_scoped_prepared(params, tenant_scope))
         .await?;
     execution_control.check()?;
     let planning = helix_planner::planning::plan_with_diagnostics(&batch, prepared.context())?;
+    // The plan owns every AST fragment it executes, so the request tree is
+    // freed before execution rather than held until it ends.
+    drop(batch);
     execution_control.check()?;
+    // Planning and execution share the request's one parameter copy.
+    let (params, proof) = prepared.into_execution_inputs();
     let result = db
         .execute_prepared_scoped_controlled(
             planning.plan(),
             params,
             tenant_scope,
             execution_control,
-            prepared.into_catalog_proof(),
+            proof,
             search_consistency,
         )
         .await?;

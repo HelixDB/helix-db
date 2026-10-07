@@ -8,8 +8,9 @@
 //! - `sizes`: in-memory size of the AST's core types.
 //! - `parse`: what parsing each shape allocates, its peak, what it retains,
 //!   and that dropping the request returns every byte.
-//! - `lifecycle`: live heap at each `query_service` stage boundary and the
-//!   peak across the request, in today's stage order.
+//! - `lifecycle`: live heap at each `query_service` stage boundary, while
+//!   execution would run, and the peak across the request, for the order
+//!   values were freed in before this change and the order they are now.
 //! - `stack`: the smallest thread stack that parses and drops the deepest
 //!   accepted chain, found by re-running this binary in a child process,
 //!   because a stack overflow aborts the process.
@@ -188,33 +189,74 @@ fn parse() {
     }
 }
 
-/// Today's `query_service` order: the body lives until the handler returns,
-/// the planner context gets a copy of the parameters, and the batch lives
-/// until execution ends.
-fn lifecycle() {
-    println!("\n## lifecycle (today's stage order, sonic)\n");
+/// The order a request's front-end values are freed in.
+#[derive(Clone, Copy)]
+enum Retention {
+    /// Before this change: the transport holds the body and `query_service`
+    /// holds the batch until execution ends, and the planner context gets its
+    /// own copy of the parameters.
+    HeldUntilExecution,
+    /// The body is freed after parsing, the batch after planning, and planning
+    /// and execution share one parameter copy.
+    FreedEarly,
+}
+
+impl Retention {
+    fn name(self) -> &'static str {
+        match self {
+            Self::HeldUntilExecution => "held until execution (before)",
+            Self::FreedEarly => "freed early (current)",
+        }
+    }
+}
+
+/// Live heap at each `query_service` stage boundary, the peak across the
+/// request, and the heap still live while execution would run.
+fn lifecycle(retention: Retention) {
+    println!("\n## lifecycle: {} (sonic)\n", retention.name());
     println!(
-        "| shape | body | +parse | +check_nesting | +bindings | +context copy | +plan | peak | after drop |"
+        "| shape | body | +parse | +check_nesting | +bindings | +context | +plan | during execution | peak | after drop |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for name in support::plannable_shape_names() {
         let json = &support::shape(name).json;
         let (boundaries, count) = observe(|| {
             let body = json.clone();
             let after_body = live();
             let request = QueryRequest::from_json_slice(&body).expect("corpus shapes parse");
+            let body = match retention {
+                Retention::HeldUntilExecution => Some(body),
+                Retention::FreedEarly => {
+                    drop(body);
+                    None
+                }
+            };
             let after_parse = live();
             request.check_nesting().expect("corpus shapes are bounded");
             let after_check = live();
             let (batch, parameters) = request.into_query();
             let params = helix_ast_bench::param_bindings(parameters);
             let after_bindings = live();
-            let context = helix_ast_bench::planner_context(params.clone());
+            let (context, params) = match retention {
+                Retention::HeldUntilExecution => (
+                    helix_ast_bench::planner_context(params.clone()),
+                    Some(params),
+                ),
+                Retention::FreedEarly => (helix_ast_bench::planner_context(params), None),
+            };
             let after_context = live();
             let planning = helix_planner::planning::plan_with_diagnostics(&batch, &context)
                 .expect("plannable shapes plan");
             let after_plan = live();
-            // Execution would run here with all of these still alive.
+            let batch = match retention {
+                Retention::HeldUntilExecution => Some(batch),
+                Retention::FreedEarly => {
+                    drop(batch);
+                    None
+                }
+            };
+            // Execution runs with exactly these alive.
+            let during_execution = live();
             drop((body, batch, params, context, planning));
             [
                 after_body,
@@ -223,11 +265,12 @@ fn lifecycle() {
                 after_bindings,
                 after_context,
                 after_plan,
+                during_execution,
             ]
         });
-        let [body, parse, check, bindings, context, plan] = boundaries.map(mib);
+        let [body, parse, check, bindings, context, plan, execution] = boundaries.map(mib);
         println!(
-            "| {name} | {body} | {parse} | {check} | {bindings} | {context} | {plan} | {} | {} |",
+            "| {name} | {body} | {parse} | {check} | {bindings} | {context} | {plan} | {execution} | {} | {} |",
             mib(count.peak),
             count.live
         );
@@ -365,7 +408,8 @@ fn main() {
             support::print_environment();
             sizes();
             parse();
-            lifecycle();
+            lifecycle(Retention::HeldUntilExecution);
+            lifecycle(Retention::FreedEarly);
             stack();
         }
     }

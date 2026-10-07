@@ -897,6 +897,9 @@ impl PreparedPlannerContext {
         &self.context
     }
 
+    /// The catalog proof alone, for test plans built without the request's
+    /// parameters; request execution takes [`Self::into_execution_inputs`].
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn into_catalog_proof(self) -> CatalogRefreshProof {
         self.proof
     }

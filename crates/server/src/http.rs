@@ -90,7 +90,11 @@ async fn execute_query(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
-    let request = match QueryRequest::from_json_slice(&bytes) {
+    let parsed = QueryRequest::from_json_slice(&bytes);
+    // The request owns everything it needs, so the body is freed now rather
+    // than held through planning and execution.
+    drop(bytes);
+    let request = match parsed {
         Ok(request) => request,
         Err(error) => {
             return error_response(
