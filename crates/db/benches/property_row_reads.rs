@@ -94,7 +94,10 @@ async fn seed_and_plan() -> (HelixDB, [ExecutablePlan; 4]) {
                         ("attribute_1", PropertyInput::from(id as i64 + 1)),
                         ("attribute_2", PropertyInput::from(id as f64 / 3.0)),
                         ("attribute_3", PropertyInput::from(id % 3 == 0)),
-                        ("attribute_4", PropertyInput::from(format!("tag-{}", id % 17))),
+                        (
+                            "attribute_4",
+                            PropertyInput::from(format!("tag-{}", id % 17)),
+                        ),
                         ("body", PropertyInput::from(body.clone())),
                         ("embedding", PropertyInput::from(embedding)),
                     ],
