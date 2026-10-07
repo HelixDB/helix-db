@@ -195,13 +195,16 @@ async fn fused_searches_match_their_steps_for_every_index_set() {
     let label: Kind = |access| matches!(access, exec::ExecNodeAccessPlan::LabelScan { .. });
     let bitmap: Kind = |access| matches!(access, exec::ExecNodeAccessPlan::Bitmap { .. });
     let secondary: Kind = |access| matches!(access, exec::ExecNodeAccessPlan::SecondarySet { .. });
-    let cases: [(
-        &str,
+    /// A name, the filtered source, `k`, the planned access kind and the
+    /// ranks of the expected hits.
+    type Case = (
+        &'static str,
         traversal::Traversal<traversal::OnNodes>,
         usize,
         Kind,
-        &[usize],
-    ); 8] = [
+        &'static [usize],
+    );
+    let cases: [Case; 8] = [
         (
             "label",
             traversal::g().n_with_label("Doc"),

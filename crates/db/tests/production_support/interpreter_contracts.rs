@@ -413,20 +413,23 @@ pub async fn run_get_operation_keeps_open_graph_write() {
     let db = test_support::open_db("production-get-op-keeps-write").await;
     let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
     let created = context
-        .execute_step(&test_support::step(
-            1,
-            Vec::new(),
-            exec::ExecOp::IndexDdl {
-                plan: ir::IndexDdlPlan::Create {
-                    spec: ir::IndexDdlCreateSpec::NodeEquality {
-                        key: catalog::ScopedPropertyKey::try_new("User", "email")
-                            .expect("scoped key"),
-                        uniqueness: catalog::IndexUniqueness::NonUnique,
+        .execute_step(
+            &test_support::step(
+                1,
+                Vec::new(),
+                exec::ExecOp::IndexDdl {
+                    plan: ir::IndexDdlPlan::Create {
+                        spec: ir::IndexDdlCreateSpec::NodeEquality {
+                            key: catalog::ScopedPropertyKey::try_new("User", "email")
+                                .expect("scoped key"),
+                            uniqueness: catalog::IndexUniqueness::NonUnique,
+                        },
+                        mode: ir::IndexCreateMode::ErrorIfExists,
                     },
-                    mode: ir::IndexCreateMode::ErrorIfExists,
                 },
-            },
-        ))
+            ),
+            None,
+        )
         .await
         .expect("create enqueues a durable operation");
     let ExecutionValue::IndexDdlReceipt(crate::index_lifecycle::IndexDdlReceipt::Accepted {
@@ -444,19 +447,22 @@ pub async fn run_get_operation_keeps_open_graph_write() {
         .await
         .expect("request write opens");
     let added = context
-        .execute_step(&test_support::step(
-            2,
-            Vec::new(),
-            exec::ExecOp::Mutation {
-                plan: exec::ExecMutationPlan::AddNodeSource {
-                    label: test_support::name("User"),
-                    properties: test_support::assignments(vec![(
-                        "email",
-                        AstPropertyValue::from("uncommitted@example.com"),
-                    )]),
+        .execute_step(
+            &test_support::step(
+                2,
+                Vec::new(),
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::AddNodeSource {
+                        label: test_support::name("User"),
+                        properties: test_support::assignments(vec![(
+                            "email",
+                            AstPropertyValue::from("uncommitted@example.com"),
+                        )]),
+                    },
                 },
-            },
-        ))
+            ),
+            None,
+        )
         .await
         .expect("graph write stays on the request transaction");
     let ExecutionValue::Stream(rows) = added else {
@@ -480,13 +486,16 @@ pub async fn run_get_operation_keeps_open_graph_write() {
     );
 
     let got = context
-        .execute_step(&test_support::step(
-            3,
-            Vec::new(),
-            exec::ExecOp::IndexDdl {
-                plan: ir::IndexDdlPlan::GetOperation { operation_id },
-            },
-        ))
+        .execute_step(
+            &test_support::step(
+                3,
+                Vec::new(),
+                exec::ExecOp::IndexDdl {
+                    plan: ir::IndexDdlPlan::GetOperation { operation_id },
+                },
+            ),
+            None,
+        )
         .await
         .expect("status read stays on the open graph write");
     assert!(matches!(got, ExecutionValue::IndexOperationStatus(_)));
@@ -494,7 +503,7 @@ pub async fn run_get_operation_keeps_open_graph_write() {
     assert!(writer_db(&db).get(&node_key).await.expect("peek").is_none());
 
     let missing = context
-        .execute_step(&test_support::step(4, Vec::new(), status))
+        .execute_step(&test_support::step(4, Vec::new(), status), None)
         .await
         .expect_err("unknown operation ID is a status miss, not a commit");
     assert!(matches!(
