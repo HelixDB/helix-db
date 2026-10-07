@@ -39,7 +39,7 @@ pub(in crate::execution::interpreter) enum Role<'a> {
 ///   what the access would have seen when it ran.
 ///
 /// Every other step, and every step of a DAG that writes, runs as planned.
-pub(super) fn plan<'a>(
+pub(in crate::execution::interpreter) fn plan<'a>(
     steps: &'a [exec::ExecStep],
     root: exec::ExecStepId,
     program: &exec::ExecProgram,
