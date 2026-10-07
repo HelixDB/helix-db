@@ -2294,7 +2294,9 @@ impl HelixDB {
             .await
     }
 
-    /// Execute a plan with the non-forgeable catalog observation used to plan it.
+    /// Execute a plan with the non-forgeable catalog observation used to plan
+    /// it, keeping the whole interpreter result for test inspection.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) async fn execute_prepared_scoped_controlled(
         &self,
         plan: &exec::ExecutablePlan,
@@ -2313,6 +2315,30 @@ impl HelixDB {
         )
         .with_search_consistency(search_consistency)
         .execute(plan)
+        .await
+    }
+
+    /// Execute a plan like [`Self::execute_prepared_scoped_controlled`] but keep
+    /// only the requested returns, moved out of the interpreter without copies.
+    /// The query service encodes nothing else.
+    pub(crate) async fn execute_prepared_returns_scoped_controlled(
+        &self,
+        plan: &exec::ExecutablePlan,
+        params: ParamBindings,
+        tenant_scope: DataScope,
+        execution_control: execution_control::ExecutionControl,
+        proof: CatalogRefreshProof,
+        search_consistency: helix_ast::query::SearchConsistency,
+    ) -> Result<execution::interpreter::ReturnedValues> {
+        Interpreter::new_scoped_controlled_prepared(
+            self,
+            params,
+            tenant_scope,
+            execution_control,
+            proof,
+        )
+        .with_search_consistency(search_consistency)
+        .execute_returns(plan)
         .await
     }
 

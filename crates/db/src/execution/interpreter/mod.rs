@@ -36,7 +36,7 @@ pub mod production_contracts;
 
 pub use types::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionScalar, ExecutionValue, FoldedStream,
-    ReturnedValue, RowPath, RowSack, RowVirtualProperties,
+    ReturnedValue, ReturnedValues, RowPath, RowSack, RowVirtualProperties,
 };
 use types::{ExecutionValueSlot, ExecutionValueStore};
 
@@ -140,8 +140,32 @@ impl<'db> Interpreter<'db> {
         self
     }
 
-    /// Execute a validated executable plan.
-    pub async fn execute(mut self, plan: &exec::ExecutablePlan) -> Result<ExecutionResult> {
+    /// Execute a validated executable plan, keeping the root output and every
+    /// bound variable in the result.
+    pub async fn execute(self, plan: &exec::ExecutablePlan) -> Result<ExecutionResult> {
+        self.run(plan, |ctx| {
+            ctx.finish(plan.root(), plan.executable_returns())
+        })
+        .await
+    }
+
+    /// Execute a validated executable plan and keep only its requested
+    /// returns, which move out of the interpreter without being copied.
+    pub(crate) async fn execute_returns(
+        self,
+        plan: &exec::ExecutablePlan,
+    ) -> Result<ReturnedValues> {
+        self.run(plan, |ctx| ctx.finish_returns(plan.executable_returns()))
+            .await
+    }
+
+    /// Runs the request lifecycle around `finish`, which shapes the result
+    /// once execution and any commit have succeeded.
+    async fn run<T>(
+        mut self,
+        plan: &exec::ExecutablePlan,
+        finish: impl FnOnce(&mut ExecutionContext<'db>) -> Result<T>,
+    ) -> Result<T> {
         self.ctx.check_execution_deadline()?;
         let request_mode = RequestExecutionMode::try_from(plan)?;
         match request_mode {
@@ -189,7 +213,7 @@ impl<'db> Interpreter<'db> {
         {
             return Err(error);
         }
-        let result = self.ctx.finish(plan.root(), plan.executable_returns());
+        let result = finish(&mut self.ctx);
         if result.is_ok()
             && matches!(
                 request_mode,

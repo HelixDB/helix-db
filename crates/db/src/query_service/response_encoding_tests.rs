@@ -199,7 +199,7 @@ fn production_bytes(result: ExecutionResult) -> std::result::Result<Vec<u8>, Que
 
 /// Value the embedded `HelixDB::query` API returns for `result`.
 fn production_value(result: ExecutionResult) -> std::result::Result<JsonValue, QueryServiceError> {
-    QueryResponse::<JsonValue>::encode(result, PlannerDiagnostics::default())
+    QueryResponse::<JsonValue>::encode(&result.returns, PlannerDiagnostics::default())
         .map(QueryResponse::into_value)
 }
 

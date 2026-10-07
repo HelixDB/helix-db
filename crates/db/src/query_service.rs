@@ -19,7 +19,7 @@ use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::error::HelixDbError;
 use crate::execution::interpreter::{
-    ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue,
+    ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue, ReturnedValues,
 };
 use crate::execution_control::ExecutionControl;
 use crate::HelixDB;
@@ -341,8 +341,8 @@ async fn execute_validated<B: ResponseBody>(
     execution_control.check()?;
     let planning = helix_planner::planning::plan_with_diagnostics(&batch, prepared.context())?;
     execution_control.check()?;
-    let result = db
-        .execute_prepared_scoped_controlled(
+    let returns = db
+        .execute_prepared_returns_scoped_controlled(
             planning.plan(),
             params,
             tenant_scope,
@@ -352,7 +352,7 @@ async fn execute_validated<B: ResponseBody>(
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
-    QueryResponse::encode(result, diagnostics)
+    QueryResponse::encode(&returns, diagnostics)
 }
 
 enum ValidatedQuery {
@@ -472,7 +472,7 @@ impl QueryResponse {
         result: ExecutionResult,
         diagnostics: PlannerDiagnostics,
     ) -> std::result::Result<Self, QueryServiceError> {
-        Self::encode(result, diagnostics)
+        Self::encode(&result.returns, diagnostics)
     }
 
     /// Borrow the exact JSON response bytes.
@@ -494,16 +494,16 @@ impl QueryResponse<JsonValue> {
 }
 
 impl<B> QueryResponse<B> {
-    /// Encode the requested returns exactly once; the result is dropped after.
+    /// Encode the requested returns exactly once, borrowing them.
     pub(crate) fn encode(
-        result: ExecutionResult,
+        returns: &ReturnedValues,
         diagnostics: PlannerDiagnostics,
     ) -> std::result::Result<Self, QueryServiceError>
     where
         B: ResponseBody,
     {
         Ok(Self {
-            body: B::encode(&ReturnsJson(&result.returns))?,
+            body: B::encode(&ReturnsJson(returns))?,
             diagnostics,
         })
     }
@@ -540,7 +540,7 @@ impl ResponseBody for JsonValue {
 // strings reach the serializer as the same serde events that shape produced.
 
 /// Requested returns as one JSON object keyed by return name.
-pub(crate) struct ReturnsJson<'a>(&'a BTreeMap<NonEmptyString, ReturnedValue>);
+pub(crate) struct ReturnsJson<'a>(&'a ReturnedValues);
 
 impl Serialize for ReturnsJson<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
@@ -2523,7 +2523,7 @@ mod tests {
         assert_eq!(converted.to_string(), expected_message);
 
         let json = QueryResponse::<JsonValue>::encode(
-            unrenderable_datetime_result(),
+            &unrenderable_datetime_result().returns,
             PlannerDiagnostics::default(),
         )
         .expect_err("invalid datetime should fail JSON conversion");
@@ -2544,7 +2544,7 @@ mod tests {
     #[test]
     fn query_failure_classes_cover_every_service_error() {
         let json_error = QueryResponse::<JsonValue>::encode(
-            unrenderable_datetime_result(),
+            &unrenderable_datetime_result().returns,
             PlannerDiagnostics::default(),
         )
         .expect_err("invalid datetime should fail JSON conversion");

@@ -550,6 +550,9 @@ impl ExecutionValue {
     }
 }
 
+/// Requested return values, keyed by the planner return list.
+pub type ReturnedValues = BTreeMap<ir::NonEmptyString, ReturnedValue>;
+
 /// Final result of executing an executable plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionResult {
@@ -559,7 +562,7 @@ pub struct ExecutionResult {
     /// requested returns. Requested values move into [`Self::returns`].
     pub variables: BTreeMap<ir::NonEmptyString, ExecutionValue>,
     /// Requested return values, keyed by the planner return list.
-    pub returns: BTreeMap<ir::NonEmptyString, ReturnedValue>,
+    pub returns: ReturnedValues,
 }
 
 #[cfg(test)]

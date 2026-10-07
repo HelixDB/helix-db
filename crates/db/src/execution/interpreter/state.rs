@@ -10,6 +10,12 @@ use std::sync::Arc;
 use super::*;
 
 impl<'db> ExecutionContext<'db> {
+    /// Finishes execution keeping the root output, unreturned variables and
+    /// requested returns, for callers that inspect the whole result.
+    ///
+    /// When the root step binds a returned variable, both `last` and the
+    /// return own one copy of that value: two owned results cannot share it.
+    /// Callers that only need the returns use [`Self::finish_returns`].
     pub(in crate::execution::interpreter) fn finish(
         &mut self,
         root: exec::ExecStepId,
@@ -17,11 +23,33 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<ExecutionResult> {
         self.step_output_uses.remove(&root);
         let last = self.step_outputs.remove(&root);
-        // Returned values move out of the table: the result becomes their only
-        // owner, so a uniquely owned value is never copied.
-        let mut variables = std::mem::take(&mut self.variables);
-        let returns = match returns {
-            exec::ExecutableReturns::None => BTreeMap::new(),
+        let returns = self.take_returns(returns)?;
+        Ok(ExecutionResult {
+            last,
+            variables: std::mem::take(&mut self.variables).into_values(),
+            returns,
+        })
+    }
+
+    /// Finishes execution keeping only the requested returns.
+    ///
+    /// Every retained step output is released first, so a returned value
+    /// whose other owner was a step output (the root step binding the
+    /// returned variable, or any observed bound step) moves out without a
+    /// copy.
+    pub(in crate::execution::interpreter) fn finish_returns(
+        &mut self,
+        returns: &exec::ExecutableReturns,
+    ) -> Result<ReturnedValues> {
+        drop(std::mem::take(&mut self.step_outputs));
+        self.take_returns(returns)
+    }
+
+    /// Moves requested returns out of the variable table. A value is copied
+    /// only while another live interpreter location still shares it.
+    fn take_returns(&mut self, returns: &exec::ExecutableReturns) -> Result<ReturnedValues> {
+        match returns {
+            exec::ExecutableReturns::None => Ok(BTreeMap::new()),
             exec::ExecutableReturns::Variables(returns) => returns
                 .as_ref()
                 .iter()
@@ -31,7 +59,7 @@ impl<'db> ExecutionContext<'db> {
                         .get(planned.name())
                         .copied()
                         .unwrap_or_else(|| planned.shape());
-                    let value = match variables.remove(planned.name()) {
+                    let value = match self.variables.remove(planned.name()) {
                         Some(value) if value.is_empty() => match shape {
                             exec::ReturnShape::List => ReturnedValue::EmptyList,
                             exec::ReturnShape::Object => ReturnedValue::EmptyObject,
@@ -48,13 +76,8 @@ impl<'db> ExecutionContext<'db> {
                     };
                     Ok((planned.name().clone(), value))
                 })
-                .collect::<Result<BTreeMap<_, _>>>()?,
-        };
-        Ok(ExecutionResult {
-            last,
-            variables: variables.into_values(),
-            returns,
-        })
+                .collect(),
+        }
     }
 
     #[cfg(test)]
@@ -281,6 +304,173 @@ mod tests {
         };
         assert_eq!(rows.as_ptr(), allocation);
         assert!(result.variables.is_empty());
+    }
+
+    fn allocation(value: &ExecutionValue) -> *const () {
+        match value {
+            ExecutionValue::Stream(rows) => rows.as_ptr().cast(),
+            ExecutionValue::Scalars(values) => values.as_ptr().cast(),
+            other @ (ExecutionValue::FoldedStream(_)
+            | ExecutionValue::Count(_)
+            | ExecutionValue::Bool(_)
+            | ExecutionValue::IndexDdlReceipt(_)
+            | ExecutionValue::IndexOperationStatus(_)) => {
+                panic!("expected a row or scalar collection, got {other:?}")
+            }
+        }
+    }
+
+    fn returned_allocation(returns: &ReturnedValues, variable: &str) -> *const () {
+        let Some(ReturnedValue::Present(value)) = returns.get(&name(variable)) else {
+            panic!("`{variable}` is returned with a value");
+        };
+        allocation(value)
+    }
+
+    #[tokio::test]
+    async fn finish_returns_moves_returns_shared_with_observed_step_outputs() {
+        let db = test_support::open_db("state-finish-returns-shared").await;
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let bound = |id, variable| exec::ExecStep {
+            output: ir::BatchOutputPlan::Bind(name(variable)),
+            ..test_support::step(id, Vec::new(), exec::ExecOp::Noop)
+        };
+        let earlier = bound(1, "earlier");
+        let root = bound(2, "rows");
+        for step in [&earlier, &root] {
+            ctx.step_output_uses
+                .insert(step.id, std::num::NonZeroUsize::MIN);
+        }
+        let earlier_rows = vec![row(1)];
+        let root_rows = vec![row(2), row(3)];
+        let (earlier_allocation, root_allocation) = (
+            earlier_rows.as_ptr().cast::<()>(),
+            root_rows.as_ptr().cast::<()>(),
+        );
+        ctx.record_step_value(&earlier, ExecutionValue::Stream(earlier_rows));
+        ctx.record_step_value(&root, ExecutionValue::Stream(root_rows));
+
+        let returns = ctx
+            .finish_returns(&return_variables(vec![
+                ("earlier", exec::ReturnShape::List),
+                ("rows", exec::ReturnShape::List),
+            ]))
+            .unwrap();
+
+        assert_eq!(returned_allocation(&returns, "earlier"), earlier_allocation);
+        assert_eq!(returned_allocation(&returns, "rows"), root_allocation);
+        assert_eq!(
+            returns.get(&name("rows")),
+            Some(&ReturnedValue::Present(ExecutionValue::Stream(vec![
+                row(2),
+                row(3)
+            ])))
+        );
+        assert!(ctx.step_outputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finish_returns_matches_finish_and_rejects_missing_returns() {
+        let db = test_support::open_db("state-finish-returns-errors").await;
+        let returns = return_variables(vec![
+            ("list", exec::ReturnShape::List),
+            ("missing_object", exec::ReturnShape::Object),
+            ("count", exec::ReturnShape::Scalar),
+        ]);
+        let context = || {
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.variables
+                .insert(name("list"), ExecutionValue::Stream(Vec::new()));
+            ctx.variables
+                .insert(name("count"), ExecutionValue::Count(4));
+            ctx
+        };
+
+        assert_eq!(
+            context().finish_returns(&returns).unwrap(),
+            context().finish(step_id(1), &returns).unwrap().returns
+        );
+        assert!(context()
+            .finish_returns(&exec::ExecutableReturns::None)
+            .unwrap()
+            .is_empty());
+        let err = context()
+            .finish_returns(&return_variables(vec![(
+                "missing",
+                exec::ReturnShape::Scalar,
+            )]))
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("return variable `missing` is not bound"));
+    }
+
+    /// Pins the production shape: the planner binds the returned variable on
+    /// the root step, which the scheduler always observes, so the variable and
+    /// the root output share one allocation until execution finishes.
+    #[tokio::test]
+    async fn planned_root_bound_returns_move_out_without_copying() {
+        use helix_ast::batch::read_batch;
+        use helix_ast::traversal::g;
+
+        let db = test_support::open_db("state-planned-root-returns").await;
+        for user in ["ada", "grace", "linus"] {
+            test_support::add_user(&db, user).await;
+        }
+        let batches = [
+            read_batch()
+                .var_as("rows", g().n_with_label("User"))
+                .returning(["rows"]),
+            read_batch()
+                .var_as("rows", g().n_with_label("User").values(vec!["name"]))
+                .returning(["rows"]),
+        ];
+        for batch in batches {
+            let plan = helix_planner::planning::plan_read_batch(
+                &batch,
+                &db.planner_context(context::ParamBindings::default()),
+            )
+            .unwrap();
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.enable_request_read_view().await.unwrap();
+            ctx.execute_steps(
+                plan.steps(),
+                plan.execution_order(),
+                plan.root(),
+                plan.execution_program(),
+            )
+            .await
+            .unwrap();
+            let variable = ctx.variables.get(&name("rows")).expect("rows are bound");
+            let root_output = ctx
+                .step_outputs
+                .get(&plan.root())
+                .expect("root is observed");
+            let shared = allocation(variable);
+            assert_eq!(allocation(root_output), shared);
+            assert_eq!(variable.len(), 3);
+
+            let returns = ctx.finish_returns(plan.executable_returns()).unwrap();
+
+            assert_eq!(returned_allocation(&returns, "rows"), shared);
+            let full = Interpreter::new(&db, context::ParamBindings::default())
+                .execute(&plan)
+                .await
+                .unwrap();
+            assert_eq!(full.returns, returns);
+            let Some(ReturnedValue::Present(returned)) = returns.get(&name("rows")) else {
+                panic!("rows are returned");
+            };
+            assert_eq!(full.last.as_ref(), Some(returned));
+            assert_eq!(
+                Interpreter::new(&db, context::ParamBindings::default())
+                    .execute_returns(&plan)
+                    .await
+                    .unwrap(),
+                returns
+            );
+        }
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
