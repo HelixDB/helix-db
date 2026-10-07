@@ -616,5 +616,41 @@
     "line": 252,
     "reason": "The reader-outrun branch is exercised, but LLVM does not attribute the tracing macro field expression to the enclosing covered branch.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/storage/mod.rs",
+    "line": 2291,
+    "reason": "The reverse-edge scan prefix includes the exact target node ID, so a successfully parsed locator under that prefix cannot contain another target.",
+    "evidence": "vector_storage_exercises_all_current_row_families"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/search.rs",
+    "line": 1084,
+    "reason": "Production instantiates score_exact_in_memory only for Cosine, Euclidean and Manhattan, through the pending-vector overlay dispatch, and each has a durable semantic identity, so this error cannot be constructed.",
+    "evidence": "score_exact_in_memory runs 264 times in this shard; execution/interpreter/access/search/dispatch.rs closes the metric set"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/search.rs",
+    "line": 1088,
+    "reason": "This propagation belongs to the missing-semantic-identity error that the production metrics cannot produce.",
+    "evidence": "score_exact_in_memory runs 264 times in this shard; execution/interpreter/access/search/dispatch.rs closes the metric set"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 1239,
+    "reason": "Both callers, flush_one_cached_neighbor and flush_build_session_neighbor, pass only dirty rows, and a dirty row always keeps its original value, so this clean-row return is unreachable.",
+    "evidence": "vector_mutation_cache_exercises_closed_state_transitions"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 1790,
+    "reason": "load_neighbors_for_mutation has just cached this row, so staging cannot reach the unloaded-row guard. The staged known-absent value encodes nothing, and the loaded row re-encodes within the degree bound it was decoded under, so payload accounting cannot fail.",
+    "evidence": "vector_mutation_cache_exercises_closed_state_transitions"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 2507,
+    "reason": "Every caller stamps a fresh take_touch sequence, which exceeds each cached value's recorded touch even right after renumbering, so a touch never repeats a value's sequence.",
+    "evidence": "vector_mutation_cache_exercises_closed_state_transitions"
   }
 ]

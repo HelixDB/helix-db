@@ -8,6 +8,7 @@
       287,
       290,
       320,
+      452,
       477,
       480,
       482,
@@ -28,11 +29,9 @@
       967,
       992,
       1024,
-      1069,
       1082,
       1083,
       1084,
-      1117,
       1128,
       1158,
       1169,
@@ -86,13 +85,11 @@
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
     "lines": [
       438,
-      466,
       475,
       481,
       482,
       496,
       497,
-      527,
       534,
       539,
       542,
@@ -105,9 +102,8 @@
       667,
       671,
       675,
-      728,
+      735,
       742,
-      782,
       801,
       806,
       896,
@@ -116,9 +112,7 @@
       952,
       957,
       969,
-      1016,
       1025,
-      1049,
       1053,
       1111,
       1114,
@@ -143,8 +137,8 @@
       1648,
       1678,
       1707,
-      1746,
-      1750,
+      1786,
+      1792,
       1838,
       1878,
       1948,
@@ -282,5 +276,72 @@
     "classification": "named-test",
     "evidence": "vector_hydration_exercises_active_generation_boundaries",
     "reason": "The named contract fails warm scans as they open and asserts the skip, the failure count, and the partial charge. A row read that fails partway through a range returns the same RangeEnd::Failed with the bytes read so far; failing an open SlateDB iterator between rows needs an object-store fault beneath SlateDB, which no current fixture injects."
+  },
+  {
+    "path": "crates/db/src/search/vector/access/read_view.rs",
+    "lines": [
+      54,
+      65,
+      66,
+      67,
+      69,
+      86,
+      97,
+      98,
+      99,
+      101,
+      119,
+      131,
+      132,
+      133,
+      135,
+      152,
+      163,
+      164,
+      165,
+      167,
+      186,
+      199,
+      200,
+      201,
+      203,
+      204,
+      207
+    ],
+    "classification": "named-test",
+    "evidence": "vector_dispatch_does_not_add_an_unadmitted_frame and vector_dispatch_rejects_without_allocation",
+    "reason": "SlateDB requires these option-taking methods, but vector storage reads only through the overridden convenience methods, so this integration shard never reaches them. The named db unit tests call every option-taking delegation through both the transaction and snapshot views and assert that each forwards the admitted frame or refuses without allocating."
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/restricted.rs",
+    "lines": [
+      591,
+      601,
+      605
+    ],
+    "classification": "named-test",
+    "evidence": "without_removes_exactly_the_excluded_ids and result_count_is_validated_against_the_exact_candidate_set",
+    "reason": "Search planning receives only non-empty candidate sets, and no search in this shard excludes every candidate, so the Empty arms and the collapse to Empty are unreached here. The named db unit tests assert that an empty set accepts any result count and that removing every candidate, or removing from an empty set, yields Empty."
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "lines": [
+      2554,
+      2555
+    ],
+    "classification": "named-test",
+    "evidence": "recency_map_orders_values_like_an_ordered_set",
+    "reason": "A namespace receives a touch older than its newest entry only after another namespace of the same session renumbers the shared sequence, which this shard does not combine. The named property test inserts older touches among newer ones and checks the order against an ordered-set model."
+  },
+  {
+    "path": "crates/db/src/search/vector/cache/commit.rs",
+    "lines": [
+      162,
+      167,
+      170
+    ],
+    "classification": "named-test",
+    "evidence": "planned_writes_dirty_exactly_the_resident_rows_of_their_namespace",
+    "reason": "Production plans hold only vector rows staged under the generation's own data scope, so these fail-closed guards are unreached here. The named db unit test records a plan against a handle in another scope, and a plan with a non-vector key, and asserts that both fail with an invariant violation."
   }
 ]
