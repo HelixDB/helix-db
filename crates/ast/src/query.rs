@@ -1794,41 +1794,51 @@ mod tests {
     /// own thread with a larger stack.
     #[test]
     fn deeply_nested_escaped_strings_parse_without_a_copy_per_level() {
-        const DEPTH: usize = 40;
-        const LEN: usize = 1 << 20;
-        // The escape makes the parser hand over an owned copy of the string.
-        let body = read_wire(
-            &format!(
-                r#"{{"p":{}"{}\n"{}}}"#,
-                "[".repeat(DEPTH),
-                "a".repeat(LEN),
-                "]".repeat(DEPTH)
-            ),
-            None,
-        );
+        // Unoptimized aarch64 Linux builds need more than the default 2 MiB
+        // test stack for 40 levels of the parser's frames (an optimized
+        // build needs a fraction). The heap counter is per thread, so the
+        // whole measurement runs on the larger stack.
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| {
+                const DEPTH: usize = 40;
+                const LEN: usize = 1 << 20;
+                // The escape makes the parser hand over an owned copy of the string.
+                let body = read_wire(
+                    &format!(
+                        r#"{{"p":{}"{}\n"{}}}"#,
+                        "[".repeat(DEPTH),
+                        "a".repeat(LEN),
+                        "]".repeat(DEPTH)
+                    ),
+                    None,
+                );
 
-        heap::HEAP.with(|heap| heap.set((0, 0)));
-        let request = QueryRequest::from_json_slice(body.as_bytes()).unwrap();
-        let peak = heap::HEAP.with(std::cell::Cell::get).1;
+                heap::HEAP.with(|heap| heap.set((0, 0)));
+                let request = QueryRequest::from_json_slice(body.as_bytes()).unwrap();
+                let peak = heap::HEAP.with(std::cell::Cell::get).1;
 
-        let innermost =
-            (0..DEPTH).try_fold(
-                &request.parameters().unwrap()["p"],
-                |value, _| match value {
-                    QueryValue::Array(values) => values.first(),
-                    _ => None,
-                },
-            );
-        assert!(matches!(
-            innermost,
-            Some(QueryValue::String(text)) if text.len() == LEN + 1 && text.ends_with('\n')
-        ));
-        // Parser scratch and the owned string take about 3x the string. The
-        // derived untagged impl held a copy per level: about 40x here.
-        assert!(
-            peak < (8 * LEN) as isize,
-            "parsing peaked at {peak} heap bytes"
-        );
+                let innermost = (0..DEPTH).try_fold(
+                    &request.parameters().unwrap()["p"],
+                    |value, _| match value {
+                        QueryValue::Array(values) => values.first(),
+                        _ => None,
+                    },
+                );
+                assert!(matches!(
+                    innermost,
+                    Some(QueryValue::String(text)) if text.len() == LEN + 1 && text.ends_with('\n')
+                ));
+                // Parser scratch and the owned string take about 3x the string. The
+                // derived untagged impl held a copy per level: about 40x here.
+                assert!(
+                    peak < (8 * LEN) as isize,
+                    "parsing peaked at {peak} heap bytes"
+                );
+            })
+            .expect("test thread spawns")
+            .join()
+            .expect("nested strings parse within the larger stack");
     }
 
     fn typed(ty: QueryParamType, value: QueryValue) -> Result<QueryRequest, QueryError> {
