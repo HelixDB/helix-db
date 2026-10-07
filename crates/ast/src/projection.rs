@@ -1,8 +1,9 @@
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Serialize};
 
-use crate::expr::Expr;
+use crate::expr::{ArenaExpr, Expr};
 /// A property projection with optional rename.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 pub struct PropertyProjection {
     /// Source property.
     pub source: String,
@@ -30,7 +31,7 @@ impl PropertyProjection {
 }
 
 /// Expression-backed projection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 pub struct ExprProjection {
     /// Output name.
     pub alias: String,
@@ -49,7 +50,7 @@ impl ExprProjection {
 }
 
 /// Projection entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum Projection {
     /// Property projection.
@@ -103,7 +104,7 @@ impl From<ExprProjection> for Projection {
 ///     r#"{"binding":"service"}"#
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingTarget {
     /// Current traverser element.
@@ -135,7 +136,7 @@ impl BindingTarget {
 ///     r#"{"target":{"binding":"service"},"source":"$id"}"#
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 pub struct BindingValueRef {
     /// Target element.
     pub target: BindingTarget,
@@ -180,7 +181,7 @@ impl BindingValueRef {
 ///     r#"{"coalesce":{"refs":[{"target":{"binding":"deployment"},"source":"$id"},{"target":{"binding":"owner"},"source":"$id"}],"alias":"workload_id"}}"#
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingProjection {
     /// Project a single property.

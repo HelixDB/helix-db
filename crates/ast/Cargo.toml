@@ -10,7 +10,9 @@ test-utils = []
 simd-json = ["dep:simd-json"]
 
 [dependencies]
+bumpalo = { version = "3.20.3", features = ["collections"] }
 chrono = "0.4"
+helix-ast-arena-derive = { path = "../ast-arena-derive" }
 serde = { version = "1", features = ["derive"] }
 sonic-rs = "0.5.8"
 simd-json = { version = "0.18.1", optional = true, default-features = false, features = [

@@ -2102,11 +2102,22 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "helix-ast"
 version = "0.1.0"
 dependencies = [
+ "bumpalo",
  "chrono",
+ "helix-ast-arena-derive",
  "serde",
  "serde_json",
  "simd-json",
  "sonic-rs",
+]
+
+[[package]]
+name = "helix-ast-arena-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

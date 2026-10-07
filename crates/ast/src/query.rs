@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
+use helix_ast_arena_derive::ArenaMirror;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::batch::{BatchQuery, ReadBatch, WriteBatch};
+use crate::arena::{self, ArenaDeserialize, IntoOwned};
+use crate::batch::{ArenaBatchQuery, BatchQuery, ReadBatch, WriteBatch};
 use crate::value::PropertyValue;
 /// Declared query parameter shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +34,7 @@ pub enum QueryParamType {
 }
 
 /// Query request type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "lowercase")]
 pub enum QueryRequestType {
     /// Read-only query.
@@ -349,7 +351,7 @@ impl Default for QueryParameters {
 /// assert_eq!(SearchConsistency::default(), SearchConsistency::Strong);
 /// assert_eq!(sonic_rs::to_string(&SearchConsistency::Eventual).unwrap(), "\"eventual\"");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchConsistency {
     /// Every committed graph change in the serving node's pinned snapshot is
@@ -792,15 +794,19 @@ impl Serialize for QueryRequest {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ArenaMirror)]
 struct RawQueryRequest {
     request_type: QueryRequestType,
     #[serde(default)]
     query_name: Option<String>,
     query: BatchQuery,
+    // Parameters live through execution, so they stay owned rather than
+    // pinning the request's arena until the response is built.
     #[serde(default)]
+    #[arena(owned)]
     parameters: Option<UniqueMap<QueryValue>>,
     #[serde(default)]
+    #[arena(owned)]
     parameter_types: Option<UniqueMap<QueryParamType>>,
     #[serde(default)]
     search_consistency: Option<SearchConsistency>,
@@ -854,74 +860,395 @@ impl<'de> Deserialize<'de> for QueryRequest {
         D: Deserializer<'de>,
     {
         let raw = RawQueryRequest::deserialize(deserializer)?;
-        if !matches!(
-            (&raw.request_type, &raw.query),
-            (QueryRequestType::Read, BatchQuery::Read(_))
-                | (QueryRequestType::Write, BatchQuery::Write(_))
-        ) {
-            return Err(serde::de::Error::custom(
-                "request_type must match the query batch variant",
-            ));
-        }
-
-        let search_consistency = raw.search_consistency.unwrap_or_default();
-        if search_consistency == SearchConsistency::Eventual
-            && raw.request_type == QueryRequestType::Write
-        {
-            return Err(serde::de::Error::custom(
-                QueryError::EventualWriteSearchConsistency,
-            ));
-        }
-        let values = raw.parameters.map_or_else(BTreeMap::new, |values| values.0);
-        let parameters = match raw.parameter_types.map(|types| types.0) {
-            None => {
-                for (name, value) in &values {
-                    validate_parameter_name(name).map_err(serde::de::Error::custom)?;
-                    validate_json_value(value, name).map_err(serde::de::Error::custom)?;
-                }
-                QueryParameters::Untyped(values)
-            }
-            Some(types) => {
-                let missing_values = types
-                    .keys()
-                    .filter(|name| !values.contains_key(*name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let extra_values = values
-                    .keys()
-                    .filter(|name| !types.contains_key(*name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !missing_values.is_empty() || !extra_values.is_empty() {
-                    return Err(serde::de::Error::custom(
-                        QueryError::ParameterNameMismatch {
-                            missing_values,
-                            extra_values,
-                        },
-                    ));
-                }
-                let values = values
-                    .into_iter()
-                    .map(|(name, value)| {
-                        validate_parameter_name(&name).map_err(serde::de::Error::custom)?;
-                        let ty = types
-                            .get(&name)
-                            .expect("schema and value names were proven equal");
-                        normalize_typed_value(ty, value, &name)
-                            .map(|value| (name, value))
-                            .map_err(serde::de::Error::custom)
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()?;
-                QueryParameters::Typed { values, types }
-            }
+        let batch_type = match &raw.query {
+            BatchQuery::Read(_) => QueryRequestType::Read,
+            BatchQuery::Write(_) => QueryRequestType::Write,
         };
-
+        let (parameters, search_consistency) = validate_raw_request(
+            raw.request_type,
+            batch_type,
+            raw.search_consistency,
+            raw.parameters,
+            raw.parameter_types,
+        )
+        .map_err(serde::de::Error::custom)?;
         Ok(Self {
             query_name: raw.query_name,
             query: raw.query,
             parameters,
             search_consistency,
         })
+    }
+}
+
+/// Why a well-formed raw request is still invalid.
+enum RawRequestError {
+    /// The declared `request_type` disagrees with the batch variant.
+    BatchTypeMismatch,
+    /// Search consistency or parameters are invalid.
+    Query(QueryError),
+}
+
+impl std::fmt::Display for RawRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BatchTypeMismatch => {
+                f.write_str("request_type must match the query batch variant")
+            }
+            Self::Query(error) => error.fmt(f),
+        }
+    }
+}
+
+/// Everything a request decides beyond its JSON shape. Owned and arena
+/// parsing both finish with it, so they reject the same requests with the
+/// same messages.
+fn validate_raw_request(
+    request_type: QueryRequestType,
+    batch_type: QueryRequestType,
+    search_consistency: Option<SearchConsistency>,
+    parameters: Option<UniqueMap<QueryValue>>,
+    parameter_types: Option<UniqueMap<QueryParamType>>,
+) -> Result<(QueryParameters, SearchConsistency), RawRequestError> {
+    if request_type != batch_type {
+        return Err(RawRequestError::BatchTypeMismatch);
+    }
+    let search_consistency = search_consistency.unwrap_or_default();
+    if search_consistency == SearchConsistency::Eventual && request_type == QueryRequestType::Write
+    {
+        return Err(RawRequestError::Query(
+            QueryError::EventualWriteSearchConsistency,
+        ));
+    }
+    let values = parameters.map_or_else(BTreeMap::new, |values| values.0);
+    let parameters = match parameter_types.map(|types| types.0) {
+        None => {
+            for (name, value) in &values {
+                validate_parameter_name(name).map_err(RawRequestError::Query)?;
+                validate_json_value(value, name).map_err(RawRequestError::Query)?;
+            }
+            QueryParameters::Untyped(values)
+        }
+        Some(types) => {
+            let missing_values = types
+                .keys()
+                .filter(|name| !values.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            let extra_values = values
+                .keys()
+                .filter(|name| !types.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing_values.is_empty() || !extra_values.is_empty() {
+                return Err(RawRequestError::Query(QueryError::ParameterNameMismatch {
+                    missing_values,
+                    extra_values,
+                }));
+            }
+            let values = values
+                .into_iter()
+                .map(|(name, value)| {
+                    validate_parameter_name(&name)?;
+                    let ty = types
+                        .get(&name)
+                        .expect("schema and value names were proven equal");
+                    normalize_typed_value(ty, value, &name).map(|value| (name, value))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(RawRequestError::Query)?;
+            QueryParameters::Typed { values, types }
+        }
+    };
+    Ok((parameters, search_consistency))
+}
+
+/// A native request parsed into an arena: the arena counterpart of
+/// [`QueryRequest`], with the same validation.
+///
+/// Its batch is an arena tree borrowed from the [`arena::Bump`] it was parsed
+/// into, so dropping the request frees nothing node by node; freeing or
+/// resetting the arena frees the whole tree at once. Parameters stay owned
+/// because they live through execution, after the tree is no longer needed.
+///
+/// ```
+/// use helix_ast::arena::{self, IntoOwned};
+/// use helix_ast::query::{ArenaQueryRequest, QueryRequest};
+///
+/// let body = br#"{"request_type":"read","query":{"read":{"entries":[{"query":{"name":"users","root":{"limit":{"input":{"nodes":{"reference":"all"}},"count":{"literal":10}}}}}],"returns":["users"]}},"parameters":{"tenant":"acme"}}"#;
+/// let bump = arena::Bump::new();
+/// let request = ArenaQueryRequest::from_json_slice(&bump, body).unwrap();
+/// let arena::BatchQuery::Read(batch) = request.query() else { panic!("read batch") };
+/// let arena::BatchEntry::Query(query) = batch.entries()[0] else { panic!("query entry") };
+/// assert!(matches!(query.root, arena::AstNode::Limit { .. }));
+/// assert_eq!(request.into_owned(), QueryRequest::from_json_slice(body).unwrap());
+///
+/// // Mutations in a read batch are rejected exactly as the owned parse does.
+/// let write_in_read = br#"{"request_type":"read","query":{"read":{"entries":[{"query":{"root":{"drop":{"input":{"nodes":{"reference":"all"}}}}}}]}}}"#;
+/// assert_eq!(
+///     ArenaQueryRequest::from_json_slice(&bump, write_in_read).unwrap_err().to_string(),
+///     QueryRequest::from_json_slice(write_in_read).unwrap_err().to_string(),
+/// );
+/// ```
+#[derive(Debug, PartialEq)]
+pub struct ArenaQueryRequest<'a> {
+    query_name: Option<&'a str>,
+    query: ArenaBatchQuery<'a>,
+    parameters: QueryParameters,
+    search_consistency: SearchConsistency,
+}
+
+impl<'a> ArenaQueryRequest<'a> {
+    /// Parse a request into `bump` with sonic-rs, after the same flat depth
+    /// scan as [`QueryRequest::from_json_slice`].
+    ///
+    /// # Errors
+    ///
+    /// Returns every error [`QueryRequest::from_json_slice`] returns for the
+    /// same body (an invalid UTF-8 body is reported with different wording),
+    /// and [`arena::ALLOCATION_LIMIT_EXCEEDED`] when `bump` refuses memory.
+    pub fn from_json_slice(bump: &'a arena::Bump, bytes: &[u8]) -> sonic_rs::Result<Self> {
+        check_json_depth::<sonic_rs::Error>(bytes)?;
+        // Only sonic-rs's own entry points validate UTF-8 after parsing, so a
+        // seeded parse checks the body first.
+        let text =
+            std::str::from_utf8(bytes).map_err(<sonic_rs::Error as serde::de::Error>::custom)?;
+        let mut deserializer = sonic_rs::Deserializer::from_str(text);
+        let request = Self::deserialize_in(bump, &mut deserializer)?;
+        deserializer.end()?;
+        Ok(request)
+    }
+
+    /// Parse a request into `bump` with simd-json, which selects its SIMD
+    /// implementation at runtime; see [`QueryRequest::from_json_slice_mut`].
+    ///
+    /// # Errors
+    ///
+    /// Returns every error [`QueryRequest::from_json_slice_mut`] returns for
+    /// the same body, and [`arena::ALLOCATION_LIMIT_EXCEEDED`] when `bump`
+    /// refuses memory.
+    #[cfg(feature = "simd-json")]
+    pub fn from_json_slice_mut(bump: &'a arena::Bump, bytes: &mut [u8]) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        Self::deserialize_in(bump, &mut simd_json::Deserializer::from_slice(bytes)?)
+    }
+
+    /// [`Self::from_json_slice_mut`] reusing simd-json's buffers.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_json_slice_mut`].
+    #[cfg(feature = "simd-json")]
+    pub fn from_json_slice_mut_with_buffers(
+        bump: &'a arena::Bump,
+        bytes: &mut [u8],
+        buffers: &mut simd_json::Buffers,
+    ) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        Self::deserialize_in(
+            bump,
+            &mut simd_json::Deserializer::from_slice_with_buffers(bytes, buffers)?,
+        )
+    }
+
+    /// Derived request kind.
+    pub const fn request_type(&self) -> QueryRequestType {
+        match self.query {
+            ArenaBatchQuery::Read(_) => QueryRequestType::Read,
+            ArenaBatchQuery::Write(_) => QueryRequestType::Write,
+        }
+    }
+
+    /// Closed query payload, borrowed from the arena.
+    pub const fn query(&self) -> &ArenaBatchQuery<'a> {
+        &self.query
+    }
+
+    /// Optional query name.
+    pub const fn query_name(&self) -> Option<&'a str> {
+        self.query_name
+    }
+
+    /// Search visibility requested for unpublished vector/text work.
+    pub const fn search_consistency(&self) -> SearchConsistency {
+        self.search_consistency
+    }
+
+    /// Consume the request into its arena batch and owned runtime values.
+    pub fn into_query(self) -> (ArenaBatchQuery<'a>, BTreeMap<String, QueryValue>) {
+        let values = match self.parameters {
+            QueryParameters::Untyped(values) | QueryParameters::Typed { values, .. } => values,
+        };
+        (self.query, values)
+    }
+}
+
+/// The arena counterpart of `QueryRequest`'s `Deserialize`.
+impl<'a> ArenaDeserialize<'a> for ArenaQueryRequest<'a> {
+    fn deserialize_in<'de, D: Deserializer<'de>>(
+        bump: &'a arena::Bump,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        let raw = ArenaRawQueryRequest::deserialize_in(bump, deserializer)?;
+        let batch_type = match raw.query {
+            ArenaBatchQuery::Read(_) => QueryRequestType::Read,
+            ArenaBatchQuery::Write(_) => QueryRequestType::Write,
+        };
+        let (parameters, search_consistency) = validate_raw_request(
+            raw.request_type,
+            batch_type,
+            raw.search_consistency,
+            raw.parameters,
+            raw.parameter_types,
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            query_name: raw.query_name,
+            query: raw.query,
+            parameters,
+            search_consistency,
+        })
+    }
+}
+
+impl IntoOwned<QueryRequest> for ArenaQueryRequest<'_> {
+    fn into_owned(self) -> QueryRequest {
+        QueryRequest {
+            query_name: self.query_name.map(str::to_owned),
+            query: self.query.into_owned(),
+            parameters: self.parameters,
+            search_consistency: self.search_consistency,
+        }
+    }
+}
+
+/// A parameter value in an arena: the arena counterpart of [`QueryValue`],
+/// parsed by the same rules. Request parsing keeps parameters owned, because
+/// they live through execution; this type measures what a separate parameter
+/// arena would save.
+///
+/// ```
+/// use helix_ast::arena::{self, IntoOwned};
+/// use helix_ast::query::{ArenaQueryValue, QueryValue};
+///
+/// let bump = arena::Bump::new();
+/// let json = r#"[null,-1,18446744073709551615,0.5,"a\n",{"k":true,"k":false}]"#;
+/// let mut deserializer = sonic_rs::Deserializer::from_str(json);
+/// let value: ArenaQueryValue<'_> =
+///     serde::de::DeserializeSeed::deserialize(arena::Seed::new(&bump), &mut deserializer).unwrap();
+/// let owned: QueryValue = sonic_rs::from_str(json).unwrap();
+/// assert_eq!(value.into_owned(), owned);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ArenaQueryValue<'a> {
+    /// Null.
+    Null,
+    /// Boolean.
+    Bool(bool),
+    /// 64-bit signed integer.
+    I64(i64),
+    /// 64-bit float.
+    F64(f64),
+    /// 32-bit float.
+    F32(f32),
+    /// String.
+    String(&'a str),
+    /// Array.
+    Array(&'a [ArenaQueryValue<'a>]),
+    /// Object.
+    Object(arena::Map<'a, ArenaQueryValue<'a>>),
+}
+
+/// `QueryValue`'s visitor, allocating in the arena.
+impl<'a> ArenaDeserialize<'a> for ArenaQueryValue<'a> {
+    fn deserialize_in<'de, D: Deserializer<'de>>(
+        bump: &'a arena::Bump,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        struct ValueVisitor<'a> {
+            bump: &'a arena::Bump,
+        }
+
+        impl<'a, 'de> Visitor<'de> for ValueVisitor<'a> {
+            type Value = ArenaQueryValue<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::Null)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                ArenaQueryValue::deserialize_in(self.bump, deserializer)
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::I64(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(i64::try_from(value)
+                    .map_or(ArenaQueryValue::F64(value as f64), ArenaQueryValue::I64))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::F64(value))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                <&'a str as ArenaDeserialize<'a>>::deserialize_in(
+                    self.bump,
+                    serde::de::value::StrDeserializer::<E>::new(value),
+                )
+                .map(ArenaQueryValue::String)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                <&'a [ArenaQueryValue<'a>] as ArenaDeserialize<'a>>::deserialize_in(
+                    self.bump,
+                    serde::de::value::SeqAccessDeserializer::new(seq),
+                )
+                .map(ArenaQueryValue::Array)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                <arena::Map<'a, ArenaQueryValue<'a>> as ArenaDeserialize<'a>>::deserialize_in(
+                    self.bump,
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )
+                .map(ArenaQueryValue::Object)
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor { bump })
+    }
+}
+
+impl IntoOwned<QueryValue> for ArenaQueryValue<'_> {
+    fn into_owned(self) -> QueryValue {
+        match self {
+            Self::Null => QueryValue::Null,
+            Self::Bool(value) => QueryValue::Bool(value),
+            Self::I64(value) => QueryValue::I64(value),
+            Self::F64(value) => QueryValue::F64(value),
+            Self::F32(value) => QueryValue::F32(value),
+            Self::String(value) => QueryValue::String(value.to_owned()),
+            Self::Array(values) => QueryValue::Array(values.into_owned()),
+            Self::Object(values) => QueryValue::Object(values.into_owned()),
+        }
     }
 }
 

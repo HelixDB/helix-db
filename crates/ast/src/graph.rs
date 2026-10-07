@@ -1,3 +1,4 @@
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Serialize};
 
 /// Type alias for node IDs.
@@ -6,13 +7,13 @@ pub type NodeId = u64;
 /// Type alias for edge IDs.
 pub type EdgeId = u64;
 /// A reference to nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRef {
     /// All nodes.
     All,
     /// Concrete node IDs.
-    Ids(Vec<NodeId>),
+    Ids(#[arena(copy)] Vec<NodeId>),
     /// Named variable.
     Var(String),
     /// Runtime parameter containing IDs.
@@ -71,13 +72,13 @@ impl From<&str> for NodeRef {
 }
 
 /// A reference to edges.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeRef {
     /// All edges.
     All,
     /// Concrete edge IDs.
-    Ids(Vec<EdgeId>),
+    Ids(#[arena(copy)] Vec<EdgeId>),
     /// Named variable.
     Var(String),
     /// Runtime parameter containing IDs.

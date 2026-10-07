@@ -32,6 +32,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod arena;
 pub mod batch;
 pub mod error_code;
 pub mod expr;
