@@ -1720,21 +1720,37 @@ fn run_build_session_discard_contract() {
 }
 
 /// A session lends its one scratch set to the namespace cache it hands out
-/// and takes it back on restore, so namespaces at rest hold none, and
-/// releases every buffer once a mutation grew one past the retained bound.
+/// and takes it back on restore, so namespaces at rest hold none. Restoring
+/// empties every buffer, so no item a mutation loaded stays referenced
+/// outside the cache budget, and releases only the buffers a mutation grew
+/// past the retained bound.
 fn run_build_session_scratch_contract() {
     use crate::encoding::v2::keys::scope::DataScope;
 
     let first = session_identity(DataScope::LegacyUnscoped, 81);
     let second = session_identity(DataScope::LegacyUnscoped, 82);
     let mut session = VectorBuildSession::<Cosine>::new(NonZeroU64::new(1 << 20).unwrap());
+    let found = Arc::new(Item::<Cosine>::new(vec![1.0, 0.0]));
+    let scored = Arc::new(Item::<Cosine>::new(vec![0.0, 1.0]));
     let mut cache = session.take_cache(&first, 8, 4).unwrap();
+    cache.scratch.frontier.extend([1, 2, 3]);
     cache.scratch.frontier.reserve(64);
     let lent = cache.scratch.frontier.capacity();
+    cache.scratch.items.found.insert(1, Arc::clone(&found));
+    cache.scratch.items.missing.push(2);
+    cache.scratch.items.seen_missing.insert(2);
+    cache.scratch.scored.insert(3, Arc::clone(&scored));
     cache.put_simhash(1, None);
     session.restore_cache(first.clone(), cache);
     assert_eq!(session.caches[&first].scratch.frontier.capacity(), 0);
     assert_eq!(session.scratch.frontier.capacity(), lent);
+    assert!(session.scratch.frontier.is_empty());
+    assert!(session.scratch.items.is_empty());
+    assert!(session.scratch.items.missing.is_empty());
+    assert!(session.scratch.items.seen_missing.is_empty());
+    assert!(session.scratch.scored.is_empty());
+    assert_eq!(Arc::strong_count(&found), 1);
+    assert_eq!(Arc::strong_count(&scored), 1);
 
     let mut cache = session.take_cache(&second, 8, 4).unwrap();
     assert_eq!(cache.scratch.frontier.capacity(), lent);
@@ -1743,9 +1759,10 @@ fn run_build_session_scratch_contract() {
         .scratch
         .visited
         .reserve(MUTATION_SCRATCH_RETAINED_CAPACITY + 1);
+    cache.scratch.visited.insert(1);
     session.restore_cache(second, cache);
     assert_eq!(session.scratch.visited.capacity(), 0);
-    assert_eq!(session.scratch.frontier.capacity(), 0);
+    assert_eq!(session.scratch.frontier.capacity(), lent);
 }
 
 async fn run_unbound_metric_rejection_contract() {
