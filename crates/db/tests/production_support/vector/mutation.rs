@@ -76,6 +76,63 @@ fn run_value_contracts() {
     assert_eq!(cached.original(), None);
 }
 
+/// Verifies the recency order stays sorted under out-of-order and repeated touches.
+///
+/// A namespace sees a touch older than its newest entry only after another
+/// namespace of its session renumbered the shared sequence; a repeated touch
+/// keeps the value's place.
+fn run_recency_order_contract() {
+    let simhash = |touch| CachedSimHash {
+        value: None,
+        last_touch: CacheSequence(touch),
+    };
+    let keys = |map: &RecencyMap<NodeId, CachedSimHash>| {
+        map.oldest_first().map(|(key, _)| key).collect::<Vec<_>>()
+    };
+    let mut map = RecencyMap::<NodeId, CachedSimHash>::default();
+    map.insert(1, simhash(10));
+    map.insert(2, simhash(20));
+    map.insert(3, simhash(5));
+    assert_eq!(map.oldest(), Some((CacheSequence(5), 3)));
+    assert_eq!(keys(&map), [3, 1, 2]);
+
+    let repeated = map
+        .touch(3, CacheSequence(5))
+        .map(|cached| cached.last_touch);
+    assert_eq!(repeated, Some(CacheSequence(5)));
+    assert_eq!(map.order.len(), 3, "a repeated touch records no entry");
+    assert_eq!(keys(&map), [3, 1, 2]);
+
+    let newer = map
+        .touch(3, CacheSequence(30))
+        .map(|cached| cached.last_touch);
+    assert_eq!(newer, Some(CacheSequence(30)));
+    assert_eq!(map.oldest(), Some((CacheSequence(10), 1)));
+    assert_eq!(keys(&map), [1, 2, 3]);
+}
+
+/// Verifies a clean cached row, which has no baseline to diff, stages nothing.
+async fn run_clean_row_transition_contract(db: &Db) {
+    let index = VectorIndex::<Cosine>::new("production-vector-clean-row-transition");
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&txn);
+    let rows = VectorWriteRows::new(&measured, index.row_keyspace());
+    let clean = CachedNeighbor::clean(neighbors(1, vec![2]), CacheSequence::initial());
+    assert!(!clean.is_dirty());
+    VectorIndex::<Cosine>::stage_neighbor_row_transition(
+        &rows,
+        MutationOpCache::<Cosine>::node_row_id(0, 1),
+        &clean,
+        NeighborDegreeLimit::try_new(8).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        measured.measurement().unwrap(),
+        VectorWriteMeasurement::zero()
+    );
+    txn.rollback();
+}
+
 /// Verifies admission, proof, eviction ordering, rollover, and prefetch policy.
 fn run_cache_contracts<D: Distance>() {
     assert!(MutationOpCache::<D>::with_degree_limits(0, 8).is_err());
@@ -1598,6 +1655,7 @@ async fn run_unbound_metric_rejection_contract() {
 /// Exercises every constructible cache, repair, and typed graph-write transition.
 pub(crate) async fn run() {
     run_value_contracts();
+    run_recency_order_contract();
     run_cache_contracts::<Cosine>();
     run_cache_contracts::<Euclidean>();
     run_cache_contracts::<Manhattan>();
@@ -1623,4 +1681,5 @@ pub(crate) async fn run() {
     run_entry_repair_contracts(&db).await;
     run_neighbor_write_contracts(&db).await;
     run_graph_delete_contracts(&db).await;
+    run_clean_row_transition_contract(&db).await;
 }
