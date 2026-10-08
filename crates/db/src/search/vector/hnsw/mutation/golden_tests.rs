@@ -10,9 +10,10 @@
 //! fails here.
 //!
 //! Vectors hold small integers, so every distance is exact in `f32` whatever
-//! order a kernel sums in (a cosine norm is summed in one fixed scalar order,
-//! and its dot product is exact), and SimHash projections are scalar: the
-//! digests hold on every architecture and under `force-vector-scalar-kernel`.
+//! order a kernel sums in (a cosine norm always rounds to its fixed scalar
+//! reference's bits, and its dot product is exact), and SimHash projections
+//! are scalar: the digests hold on every architecture and under
+//! `force-vector-scalar-kernel`.
 //!
 //! A workload may run several namespaces in one database, interleaving their
 //! operations through one shared build session, so the scratch a session lends
