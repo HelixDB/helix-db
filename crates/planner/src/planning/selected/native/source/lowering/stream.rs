@@ -20,49 +20,55 @@ impl SourcePredicatePlan {
         predicate: &helix_ast::expr::Predicate,
     ) -> Result<Self, error::PlannerError> {
         ir::PredicatePlan::validate(predicate)?;
-        let predicate = parameter_specialization::predicate(ctx, predicate)?;
-        Ok(
-            match analysis::prune_statically_impossible_branches(&predicate)? {
-                analysis::PrunedPredicate::Impossible => Self::Empty,
-                analysis::PrunedPredicate::Tautology => Self::Unfiltered,
-                analysis::PrunedPredicate::Feasible { predicate, label } => match label {
-                    analysis::FeasibleLabelScope::Scoped(label) => Self::Label {
-                        residual: residual_after_label_scope(&predicate, &label),
-                        label,
-                    },
-                    analysis::FeasibleLabelScope::Unscoped => Self::Residual(
-                        ir::PredicatePlan::new(predicate)
-                            .expect("predicate pruning preserves validated predicate names"),
-                    ),
-                },
+        let specialized = parameter_specialization::predicate(ctx, predicate)?;
+        // Pruning borrows the specialized predicate; when it keeps the whole
+        // tree, that tree moves into the plan rather than being copied.
+        let (pruned, label) = match analysis::prune_borrowed(&specialized)? {
+            analysis::PrunedPredicate::Impossible => return Ok(Self::Empty),
+            analysis::PrunedPredicate::Tautology => return Ok(Self::Unfiltered),
+            analysis::PrunedPredicate::Feasible { predicate, label } => match predicate {
+                std::borrow::Cow::Borrowed(kept) if std::ptr::eq(kept, &specialized) => {
+                    (None, label)
+                }
+                predicate => (Some(predicate.into_owned()), label),
             },
-        )
+        };
+        let predicate = pruned.unwrap_or(specialized);
+        Ok(match label {
+            analysis::FeasibleLabelScope::Scoped(label) => Self::Label {
+                residual: residual_after_label_scope(predicate, &label),
+                label,
+            },
+            analysis::FeasibleLabelScope::Unscoped => Self::Residual(
+                ir::PredicatePlan::new(predicate)
+                    .expect("predicate pruning preserves validated predicate names"),
+            ),
+        })
     }
 }
 
 fn residual_after_label_scope(
-    predicate: &helix_ast::expr::Predicate,
+    predicate: helix_ast::expr::Predicate,
     label: &ir::NonEmptyString,
 ) -> Option<ir::PredicatePlan> {
-    if analysis::predicate_is_tautological_for_label(predicate, label) {
+    if analysis::predicate_is_tautological_for_label(&predicate, label) {
         return None;
     }
     let residual = match predicate {
         helix_ast::expr::Predicate::And { predicates } => {
-            let residuals = predicates
-                .iter()
+            let mut residuals = predicates
+                .into_iter()
                 .filter(|predicate| {
                     !analysis::predicate_is_tautological_for_label(predicate, label)
                 })
-                .cloned()
                 .collect::<Vec<_>>();
-            match residuals.as_slice() {
-                [] => None,
-                [predicate] => Some(predicate.clone()),
+            match residuals.len() {
+                0 => None,
+                1 => residuals.pop(),
                 _ => Some(helix_ast::expr::Predicate::and(residuals)),
             }
         }
-        _ => Some(predicate.clone()),
+        predicate => Some(predicate),
     };
     residual.map(|predicate| {
         ir::PredicatePlan::new(predicate)
