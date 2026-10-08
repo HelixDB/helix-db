@@ -261,7 +261,7 @@ TypeScript, and Python ship embedded runtimes; the Go SDK is currently HTTP-only
 
 Page type: Guide
 
-The `ghcr.io/helixdb/helixdb:v0.0.11` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.12` image runs the standalone HelixDB server.
 It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
@@ -300,7 +300,7 @@ helix start dev             # add --disk to persist this instance
 
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
-For an existing project, set `tag = "v0.0.11"` in its `[local.dev]` block in
+For an existing project, set `tag = "v0.0.12"` in its `[local.dev]` block in
 `helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
 
 The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
@@ -350,7 +350,7 @@ Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 ```bash
 docker run --rm --name helixdb \
   -p 6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.11
+  ghcr.io/helixdb/helixdb:v0.0.12
 ```
 
 The standalone server exposes liveness and readiness checks:
@@ -374,7 +374,7 @@ docker run --rm --name helixdb \
   -p 6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
-  ghcr.io/helixdb/helixdb:v0.0.11
+  ghcr.io/helixdb/helixdb:v0.0.12
 ```
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
@@ -433,7 +433,7 @@ services:
       retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.11
+    image: ghcr.io/helixdb/helixdb:v0.0.12
     restart: unless-stopped
     depends_on:
       seaweedfs:
@@ -524,7 +524,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.11
+  ghcr.io/helixdb/helixdb:v0.0.12
 ```
 
 In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
@@ -7055,7 +7055,7 @@ When a command cannot choose a resource on its own, pass it by ID, slug, or name
 
 Page type: Guide
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.11` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.12` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -8740,7 +8740,7 @@ helix start [INSTANCE] [OPTIONS]
 
 ## Behavior
 
-- Defaults to `ghcr.io/helixdb/helixdb:v0.0.11`. Flags override the image tag and pull policy set in `[local.<instance>]`.
+- Defaults to `ghcr.io/helixdb/helixdb:v0.0.12`. Flags override the image tag and pull policy set in `[local.<instance>]`.
 - `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
 - All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
@@ -8781,7 +8781,7 @@ helix start dev --disk
 helix start dev --image-version latest
 
 # Save a specific image version
-helix start dev --image-version v0.0.11 --persist
+helix start dev --image-version v0.0.12 --persist
 
 # Start using cached images only
 helix start dev --pull never
