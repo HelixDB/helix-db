@@ -625,7 +625,7 @@ impl<'a> Source<'a> {
                     // A predicate admits it like the read it replaces.
                     record = (*keyspace == exec::ElementKeyspace::NodeProperty
                         && ctx.active_write_tx().is_none())
-                    .then_some(entry.value);
+                    .then_some(storage::ScannedValue::Unadmitted(entry.value));
                     ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
             };
@@ -654,9 +654,6 @@ impl<'a> Source<'a> {
                             ),
                     },
                 )) => {
-                    let record = record
-                        .map(|record| storage::retain_read(record, ctx.row_memory.as_ref()))
-                        .transpose()?;
                     ctx.eval_predicate_plan_on_record(&row, predicate, record, &mut self.buffers)
                         .await?
                 }
@@ -1521,9 +1518,10 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// A predicate scan charges every row it evaluates to the request's
-    /// row-memory budget, as the storage read it once made did: a row larger
-    /// than the budget fails the scan, and every charge is released after it.
+    /// A predicate scan charges every row its predicate reads to the
+    /// request's row-memory budget, as the storage read it once made did: a
+    /// row larger than the budget fails the scan only when read, and every
+    /// charge is released after it.
     #[tokio::test]
     async fn predicate_scans_charge_evaluated_rows_to_the_row_memory_budget() {
         let db = test_support::open_db("pull-scan-predicate-budget").await;
@@ -1537,6 +1535,19 @@ mod tests {
             scan_ids(&mut ctx, &plan).await,
             Err(HelixDbError::QueryMemoryLimitExceeded)
         ));
+        // A predicate that reads no record charges none, as before.
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.enable_request_read_view().await.unwrap();
+        ctx.row_memory = Some(crate::query_resources::Budget::new(2048));
+        assert_eq!(
+            scan_ids(
+                &mut ctx,
+                &node_scan_plan(helix_ast::expr::Predicate::eq("$id", 3_i64))
+            )
+            .await
+            .unwrap(),
+            vec![3]
+        );
         let limit = 1 << 20;
         let budget = crate::query_resources::Budget::new(limit);
         let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());

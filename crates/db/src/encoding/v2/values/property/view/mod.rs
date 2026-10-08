@@ -11,6 +11,10 @@
 //! [`PROPERTY_ALIGNMENT`], the largest alignment of any archived property
 //! type. A row already at such an address is read where it is; any other row
 //! is copied once into an aligned buffer its caller reuses across rows.
+//!
+//! The `prepared` decoder also reads rows selectively, but it bounds archive
+//! nesting and reports its own errors, so rows it rejects or reports
+//! differently would no longer fail exactly as `decode_properties` does.
 
 use bytes::Bytes;
 use rkyv::{rancor, util::AlignedVec};

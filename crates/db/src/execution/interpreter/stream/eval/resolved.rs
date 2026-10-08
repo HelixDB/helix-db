@@ -28,8 +28,9 @@ impl<'db> ExecutionContext<'db> {
     /// stored record of the row's current element that the caller already
     /// read from this request's view, the predicate reads it instead of
     /// storage. Only a caller that cannot have written the element since
-    /// reading it may pass its record, and must have admitted it to the
-    /// request's row-memory budget like the storage read it replaces.
+    /// reading it may pass its record. An unadmitted record is charged to the
+    /// request's row-memory budget only if the predicate reads it, where the
+    /// storage read it replaces was charged.
     ///
     /// `buffers` holds aligned record copies the caller reuses across rows.
     ///
@@ -40,7 +41,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         row: &ExecutionRow,
         plan: &ir::PredicatePlan,
-        record: Option<bytes::Bytes>,
+        record: Option<storage::ScannedValue>,
         buffers: &mut crate::encoding::v2::values::property::view::Buffers,
     ) -> Result<bool> {
         let record = record.map(|record| {

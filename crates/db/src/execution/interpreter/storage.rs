@@ -433,14 +433,35 @@ async fn collect_limited(
 
 /// Admits a storage-returned value to `budget`, when the request has one,
 /// for as long as the value is held.
-pub(in crate::execution::interpreter) fn retain_read(
-    bytes: Bytes,
-    budget: Option<&super::rows::memory::Budget>,
-) -> Result<Bytes> {
+fn retain_read(bytes: Bytes, budget: Option<&super::rows::memory::Budget>) -> Result<Bytes> {
     let Some(budget) = budget else {
         return Ok(bytes);
     };
     budget.retain_read(bytes)
+}
+
+/// A stored value a scan of this request's view already returned, held so a
+/// later read of the same key can use it instead of reading storage again.
+pub(in crate::execution::interpreter) enum ScannedValue {
+    /// Taken straight from a storage iterator, not yet charged to the row
+    /// budget. [`Self::admit`] charges it where the replaced read would have.
+    Unadmitted(Bytes),
+    /// Admitted by the scan that collected it, and charged until dropped.
+    Admitted(Bytes),
+}
+
+impl ScannedValue {
+    /// The value as the storage read it replaces returns it: admitted to
+    /// `budget`, when the request has one, unless the scan already admitted it.
+    pub(in crate::execution::interpreter) fn admit(
+        &self,
+        budget: Option<&super::rows::memory::Budget>,
+    ) -> Result<Bytes> {
+        match self {
+            Self::Unadmitted(bytes) => retain_read(bytes.clone(), budget),
+            Self::Admitted(bytes) => Ok(bytes.clone()),
+        }
+    }
 }
 
 fn writer_from_storage(db: &HelixDB) -> std::result::Result<&HelixWriter, crate::HelixDbMode> {

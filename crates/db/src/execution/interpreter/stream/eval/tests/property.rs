@@ -573,6 +573,7 @@ async fn resolver_rejects_corrupt_rows_lazily_with_the_decoder_error() {
 
 #[tokio::test]
 async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_read() {
+    use crate::execution::interpreter::storage::ScannedValue::Unadmitted;
     let db = test_support::open_db("stream-eval-resolver-scanned-record").await;
     let stored =
         crate::encoding::property::encode_properties(&[Property::string("name", "stored")]);
@@ -600,7 +601,7 @@ async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_r
         let record_is_unaligned = record.as_ptr().align_offset(alignment) != 0;
         let mut resolver = RowValueResolver::with_record(
             &ctx,
-            Some((ElementRef::Node(1), record)),
+            Some((ElementRef::Node(1), Unadmitted(record))),
             Default::default(),
         );
         let before = ctx.projection_read_snapshot();
@@ -647,7 +648,10 @@ async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_r
     // A corrupt scanned record fails only when it is read.
     let mut resolver = RowValueResolver::with_record(
         &ctx,
-        Some((ElementRef::Node(1), bytes::Bytes::from_static(b"corrupt"))),
+        Some((
+            ElementRef::Node(1),
+            Unadmitted(bytes::Bytes::from_static(b"corrupt")),
+        )),
         buffers,
     );
     let before = ctx.projection_read_snapshot();
@@ -691,7 +695,7 @@ async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_r
     // The full row of a scanned record decodes like the stored decoder.
     let mut resolver = RowValueResolver::with_record(
         &ctx,
-        Some((ElementRef::Node(1), scanned.clone())),
+        Some((ElementRef::Node(1), Unadmitted(scanned.clone()))),
         Default::default(),
     );
     assert_eq!(
@@ -716,5 +720,78 @@ async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_r
             .unwrap(),
         vec![Property::string("name", "stored")]
     );
+    db.close().await.unwrap();
+}
+
+/// A scanned record is charged to the row budget where the storage read it
+/// replaces was: an unadmitted record only when evaluation first reads it,
+/// and a record its scan already admitted never again.
+#[tokio::test]
+async fn a_scanned_record_is_charged_to_the_row_budget_only_when_read() {
+    use crate::execution::interpreter::storage::ScannedValue::{Admitted, Unadmitted};
+    let db = test_support::open_db("stream-eval-resolver-scanned-budget").await;
+    let record = crate::encoding::property::encode_properties(&[
+        Property::string("name", "scanned"),
+        Property::bytes("blob", vec![1; 4096]),
+    ]);
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(crate::query_resources::Budget::new(1024));
+    {
+        let mut resolver = RowValueResolver::with_record(
+            &ctx,
+            Some((ElementRef::Node(1), Unadmitted(record.clone()))),
+            Default::default(),
+        );
+        // A read that needs no record charges nothing.
+        assert_eq!(
+            resolver
+                .row_property(&current_node(1), &name("$id"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::I64(1))
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                resolver.row_property(&current_node(1), &name("name")).await,
+                Err(HelixDbError::QueryMemoryLimitExceeded)
+            ));
+        }
+        assert!(matches!(
+            resolver.row_properties(&current_node(1), true).await,
+            Err(HelixDbError::QueryMemoryLimitExceeded)
+        ));
+        let mut resolver = RowValueResolver::with_record(
+            &ctx,
+            Some((ElementRef::Node(1), Admitted(record.clone()))),
+            Default::default(),
+        );
+        assert_eq!(
+            resolver
+                .row_property(&current_node(1), &name("name"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::String("scanned".into()))
+        );
+    }
+    let limit = 1 << 20;
+    let budget = crate::query_resources::Budget::new(limit);
+    ctx.row_memory = Some(budget.clone());
+    let mut resolver = RowValueResolver::with_record(
+        &ctx,
+        Some((ElementRef::Node(1), Unadmitted(record.clone()))),
+        Default::default(),
+    );
+    assert_eq!(budget.peak(), 0);
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), false)
+            .await
+            .unwrap(),
+        crate::encoding::property::decode_properties(&record).unwrap()
+    );
+    assert!(budget.peak() >= record.len(), "{}", budget.peak());
+    drop(resolver.into_buffers());
+    assert_eq!(budget.available(), limit);
+    assert_eq!(budget.reads(), Default::default());
     db.close().await.unwrap();
 }
