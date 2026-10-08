@@ -16,7 +16,9 @@ pub(in crate::rules) use self::filter::{
     access_filter_alternatives, index_access_filter, label_domain_has_candidate,
     AccessFilterRewrite,
 };
-pub(crate) use self::filter::{missing_index_candidates, CandidateIndexKind};
+pub(crate) use self::filter::{
+    missing_index_candidates, with_index_rewrite_cache, CandidateIndexKind,
+};
 pub(in crate::rules) use self::pipeline::required_filter_rewrite_pending;
 #[cfg(test)]
 pub(in crate::rules) use self::pipeline::{membership_rewrite, source_index_rewrite};

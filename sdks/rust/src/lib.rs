@@ -286,7 +286,7 @@ impl CypherExecutionRequest<'_, '_> {
     /// atomically; the request is sent once and never retried. A warm-only read
     /// that Helix Cloud answers with `204 No Content` returns no columns or rows.
     pub async fn send(self) -> Result<CypherResponse, HelixError> {
-        let bytes = match &self.client.backend {
+        let mut bytes = match &self.client.backend {
             ClientBackend::Server(server) => {
                 let Some(bytes) = self.post(server, "/v2/cypher").await? else {
                     return Ok(CypherResponse {
@@ -302,17 +302,17 @@ impl CypherExecutionRequest<'_, '_> {
                     .cypher(self.embedded_request()?)
                     .await
                     .map_err(embedded_cypher_error)?;
-                sonic_rs::to_vec(&response)?
+                simd_json::to_vec(&response)?
             }
         };
-        Ok(sonic_rs::from_slice(&bytes)?)
+        Ok(simd_json::from_slice(&mut bytes)?)
     }
 
     /// Plan the statement without executing it (`POST /v2/cypher/explain`). A
     /// warm-only request that Helix Cloud answers with `204 No Content` returns
     /// [`serde_json::Value::Null`].
     pub async fn explain(self) -> Result<serde_json::Value, HelixError> {
-        let bytes = match &self.client.backend {
+        let mut bytes = match &self.client.backend {
             ClientBackend::Server(server) => {
                 let Some(bytes) = self.post(server, "/v2/cypher/explain").await? else {
                     return Ok(serde_json::Value::Null);
@@ -325,10 +325,10 @@ impl CypherExecutionRequest<'_, '_> {
                     .explain_cypher(self.embedded_request()?)
                     .await
                     .map_err(embedded_cypher_error)?;
-                sonic_rs::to_vec(&explanation)?
+                simd_json::to_vec(&explanation)?
             }
         };
-        Ok(sonic_rs::from_slice(&bytes)?)
+        Ok(simd_json::from_slice(&mut bytes)?)
     }
 
     /// The successful response body, or `None` for a warm `204 No Content`.
@@ -339,7 +339,7 @@ impl CypherExecutionRequest<'_, '_> {
             .map_err(|e| HelixError::InvalidURL(e.to_string()))?;
         let response = server
             .post(url, &self.headers)
-            .body(sonic_rs::to_vec(&self.body)?)
+            .body(simd_json::to_vec(&self.body)?)
             .send()
             .await?;
         match response.status() {
@@ -359,7 +359,7 @@ impl CypherExecutionRequest<'_, '_> {
                 details: "request options require server mode".to_string(),
             });
         }
-        Ok(sonic_rs::from_slice(&sonic_rs::to_vec(&self.body)?)?)
+        Ok(simd_json::from_reader(&simd_json::to_vec(&self.body)?[..])?)
     }
 }
 
@@ -452,7 +452,7 @@ pub enum HelixError {
     RemoteError(Box<RemoteError>),
     /// Failed to (de)serialize a request body or response payload.
     #[error("Error serializing data: {0}")]
-    SerializationError(#[from] sonic_rs::Error),
+    SerializationError(#[from] simd_json::Error),
     /// The base URL passed to [`Client::new`] could not be parsed, or the
     /// resolved query route was not a valid URL.
     #[error("Invalid URL: {0}")]
@@ -926,7 +926,7 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
             ClientBackend::Server(server) => {
                 let response = server
                     .post(server.url.clone(), &self.headers)
-                    .body(sonic_rs::to_vec(&self.query)?)
+                    .body(simd_json::to_vec(&self.query)?)
                     .send()
                     .await?;
                 match response.status() {
@@ -947,7 +947,7 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
                         details: "request options require server mode".to_string(),
                     });
                 }
-                let request = sonic_rs::to_vec(&self.query)?;
+                let request = simd_json::to_vec(&self.query)?;
                 db.query_json(&request)
                     .await
                     .map(|body| QueryResponse {
@@ -998,11 +998,11 @@ impl<'hlx, 'a, R: for<'de> Deserialize<'de>> QueryExecutionRequest<'hlx, 'a, R> 
     /// # }
     /// ```
     pub async fn send(self) -> Result<R, HelixError> {
-        let response = self.execute().await?;
+        let mut response = self.execute().await?;
         if response.status == StatusCode::NO_CONTENT {
-            sonic_rs::from_slice::<R>(b"null").map_err(Into::into)
+            simd_json::from_reader::<_, R>(&b"null"[..]).map_err(Into::into)
         } else {
-            sonic_rs::from_slice::<R>(&response.body).map_err(Into::into)
+            simd_json::from_slice::<R>(&mut response.body).map_err(Into::into)
         }
     }
 }
@@ -1258,15 +1258,15 @@ mod tests {
     #[test]
     fn predicate_literal_json_uses_ast_shape() {
         assert_eq!(
-            sonic_rs::to_string(&Predicate::eq("username", "alice")).unwrap(),
+            simd_json::to_string(&Predicate::eq("username", "alice")).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::gt("score", 10i64)).unwrap(),
+            simd_json::to_string(&Predicate::gt("score", 10i64)).unwrap(),
             r#"{"gt":{"left":{"property":"score"},"right":{"constant":{"i64":10}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::between("age", 18i64, 65i64)).unwrap(),
+            simd_json::to_string(&Predicate::between("age", 18i64, 65i64)).unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"constant":{"i64":18}},"max":{"constant":{"i64":65}}}}"#
         );
     }
@@ -1274,15 +1274,15 @@ mod tests {
     #[test]
     fn predicate_param_json_uses_param_exprs() {
         assert_eq!(
-            sonic_rs::to_string(&Predicate::eq("username", Expr::param("name"))).unwrap(),
+            simd_json::to_string(&Predicate::eq("username", Expr::param("name"))).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::lte("score", Expr::param("max"))).unwrap(),
+            simd_json::to_string(&Predicate::lte("score", Expr::param("max"))).unwrap(),
             r#"{"lte":{"left":{"property":"score"},"right":{"param":"max"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::between("age", Expr::param("lo"), 65i64)).unwrap(),
+            simd_json::to_string(&Predicate::between("age", Expr::param("lo"), 65i64)).unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"param":"lo"},"max":{"constant":{"i64":65}}}}"#
         );
     }
@@ -1294,8 +1294,8 @@ mod tests {
             Predicate::eq("username", Expr::param("name")),
             Predicate::between("age", Expr::param("lo"), 65i64),
         ] {
-            let json = sonic_rs::to_string(&predicate).unwrap();
-            let back: Predicate = sonic_rs::from_str(&json).unwrap();
+            let json = simd_json::to_string(&predicate).unwrap();
+            let back: Predicate = simd_json::from_reader(json.as_bytes()).unwrap();
             assert_eq!(predicate, back);
         }
     }
@@ -1305,15 +1305,15 @@ mod tests {
     #[test]
     fn source_predicate_literal_json_uses_ast_shape() {
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::eq("username", "alice")).unwrap(),
+            simd_json::to_string(&SourcePredicate::eq("username", "alice")).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::gt("score", 10i64)).unwrap(),
+            simd_json::to_string(&SourcePredicate::gt("score", 10i64)).unwrap(),
             r#"{"gt":{"left":{"property":"score"},"right":{"constant":{"i64":10}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::between("age", 18i64, 65i64)).unwrap(),
+            simd_json::to_string(&SourcePredicate::between("age", 18i64, 65i64)).unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"constant":{"i64":18}},"max":{"constant":{"i64":65}}}}"#
         );
     }
@@ -1321,15 +1321,15 @@ mod tests {
     #[test]
     fn source_predicate_param_json_uses_param_exprs() {
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::eq("username", Expr::param("name"))).unwrap(),
+            simd_json::to_string(&SourcePredicate::eq("username", Expr::param("name"))).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::lte("score", Expr::param("max"))).unwrap(),
+            simd_json::to_string(&SourcePredicate::lte("score", Expr::param("max"))).unwrap(),
             r#"{"lte":{"left":{"property":"score"},"right":{"param":"max"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::between("age", Expr::param("lo"), 65i64))
+            simd_json::to_string(&SourcePredicate::between("age", Expr::param("lo"), 65i64))
                 .unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"param":"lo"},"max":{"constant":{"i64":65}}}}"#
         );
@@ -1342,8 +1342,8 @@ mod tests {
             SourcePredicate::eq("username", Expr::param("name")),
             SourcePredicate::between("age", Expr::param("lo"), 65i64),
         ] {
-            let json = sonic_rs::to_string(&sp).unwrap();
-            let back: SourcePredicate = sonic_rs::from_str(&json).unwrap();
+            let json = simd_json::to_string(&sp).unwrap();
+            let back: SourcePredicate = simd_json::from_reader(json.as_bytes()).unwrap();
             assert_eq!(sp, back);
         }
     }
@@ -1358,7 +1358,7 @@ mod tests {
                 g().n_where(SourcePredicate::eq("username", "alice")),
             )
             .returning(["user"]);
-        let literal_json = sonic_rs::to_string(&literal).unwrap();
+        let literal_json = simd_json::to_string(&literal).unwrap();
         assert!(
             literal_json.contains(r#""root":{"nodes_where":{"predicate":{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}}}"#),
             "literal nodes_where AST changed shape: {literal_json}"
@@ -1371,7 +1371,7 @@ mod tests {
                 g().n_where(SourcePredicate::eq("username", Expr::param("name"))),
             )
             .returning(["user"]);
-        let param_json = sonic_rs::to_string(&param).unwrap();
+        let param_json = simd_json::to_string(&param).unwrap();
         assert!(
             param_json.contains(r#""root":{"nodes_where":{"predicate":{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}}}}"#),
             "param nodes_where AST missing param expression: {param_json}"
@@ -1405,7 +1405,7 @@ mod tests {
             )
             .returning(["workloads"]);
 
-        let json = sonic_rs::to_string(&query).unwrap();
+        let json = simd_json::to_string(&query).unwrap();
         assert!(json.contains(r#""project_bindings""#));
         assert!(json.contains(r#""bind":{"input""#));
         assert!(json.contains(r#""name":"service""#));
@@ -1444,7 +1444,7 @@ mod tests {
                 .value_map(Some(vec!["metadata.externalID"])),
             )
             .returning(["updated"]);
-        let write_json = sonic_rs::to_string(&write).unwrap();
+        let write_json = simd_json::to_string(&write).unwrap();
         assert!(
             write_json
                 .contains(r#""metadata",{"value":{"object":{"externalID":{"string":"some_id"}"#),
@@ -1484,7 +1484,7 @@ mod tests {
                 g().n_with_label("User").values(vec!["metadata.externalID"]),
             )
             .returning(["users", "external_ids"]);
-        let read_json = sonic_rs::to_string(&read).unwrap();
+        let read_json = simd_json::to_string(&read).unwrap();
         assert!(
             read_json.contains(r#""eq":{"left":{"property":"metadata.externalID"},"right":{"constant":{"string":"some_id"}}}"#),
             "dotted SourcePredicate changed shape: {read_json}"

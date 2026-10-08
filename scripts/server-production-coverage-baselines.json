@@ -2,7 +2,7 @@
   "schema_version": 1,
   "uncovered_source_lines": {
     "count": 107,
-    "sha256": "271342bddc33d46d77f4fc1a6327611ad4bb84aab08c01980a7de0fec4aa05a4",
+    "sha256": "64804b16ffdd6cf7d89e98d0067a194b0ee41871ee6b09639c305e010adadf42",
     "classification": "test-required",
     "reason": "Every remaining uncovered production line in the transport server and its production-compiled query-service dependency remains in the explicit launch test backlog. Three static error-code mapping lines, and the Cypher telemetry failure classification, are exhaustively covered by the database query-service tests rather than this server-only shard. The exact digest makes coverage changes require a reviewed ratchet update."
   },

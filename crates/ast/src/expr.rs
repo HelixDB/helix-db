@@ -1,8 +1,9 @@
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Serialize};
 
-use crate::value::{PropertyInput, PropertyValue};
+use crate::value::{ArenaPropertyValue, PropertyInput, PropertyValue};
 /// Computed expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum Expr {
     /// Property reference.
@@ -40,7 +41,7 @@ pub enum Expr {
 }
 
 /// One conditional expression branch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 pub struct WhenThen {
     /// Condition to test.
     pub when: Predicate,
@@ -168,7 +169,7 @@ impl Expr {
     }
 }
 /// A non-negative stream bound.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamBound {
     /// Literal bound.
@@ -240,7 +241,7 @@ impl From<Expr> for StreamBound {
 }
 
 /// Comparison operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum CompareOp {
     /// Equal.
@@ -258,7 +259,7 @@ pub enum CompareOp {
 }
 
 /// Predicate expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum Predicate {
     /// Equality comparison.
@@ -308,6 +309,9 @@ pub enum Predicate {
 
 /// Source predicates are intentionally the same AST shape as normal predicates.
 pub type SourcePredicate = Predicate;
+
+/// The arena mirror of [`SourcePredicate`].
+pub type ArenaSourcePredicate<'a> = ArenaPredicate<'a>;
 
 impl Predicate {
     /// Create an equality predicate.

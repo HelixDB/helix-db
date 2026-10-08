@@ -3,6 +3,8 @@
 These Cargo Fuzz targets exercise separate semantic boundaries:
 
 - `query_json`: public `QueryRequest` JSON parsing and round-trip stability.
+- `query_json_arena`: arena parsing (`ArenaQueryRequest`) against owned
+  parsing, on both JSON backends: the same verdict, error and request.
 - `planner_context_ast`: arbitrary serialized AST/context pairs plus the finite
   normalized planner domain, including bitmap sets, verified ranges and
   windows, unique/null equality, and late-bound equality cardinality.

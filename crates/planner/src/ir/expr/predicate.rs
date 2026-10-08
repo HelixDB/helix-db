@@ -50,6 +50,11 @@ impl PredicatePlan {
         })
     }
 
+    /// Check what [`Self::new`] checks, without building the plan.
+    pub(crate) fn validate(predicate: &Predicate) -> Result<(), ExprPlanError> {
+        validate_predicate(predicate)
+    }
+
     /// Build a validated conjunction from two or more already-validated predicates.
     ///
     /// This preserves the `PredicatePlan` invariant without re-validating every

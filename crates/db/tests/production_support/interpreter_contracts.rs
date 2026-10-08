@@ -413,20 +413,23 @@ pub async fn run_get_operation_keeps_open_graph_write() {
     let db = test_support::open_db("production-get-op-keeps-write").await;
     let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
     let created = context
-        .execute_step(&test_support::step(
-            1,
-            Vec::new(),
-            exec::ExecOp::IndexDdl {
-                plan: ir::IndexDdlPlan::Create {
-                    spec: ir::IndexDdlCreateSpec::NodeEquality {
-                        key: catalog::ScopedPropertyKey::try_new("User", "email")
-                            .expect("scoped key"),
-                        uniqueness: catalog::IndexUniqueness::NonUnique,
+        .execute_step(
+            &test_support::step(
+                1,
+                Vec::new(),
+                exec::ExecOp::IndexDdl {
+                    plan: ir::IndexDdlPlan::Create {
+                        spec: ir::IndexDdlCreateSpec::NodeEquality {
+                            key: catalog::ScopedPropertyKey::try_new("User", "email")
+                                .expect("scoped key"),
+                            uniqueness: catalog::IndexUniqueness::NonUnique,
+                        },
+                        mode: ir::IndexCreateMode::ErrorIfExists,
                     },
-                    mode: ir::IndexCreateMode::ErrorIfExists,
                 },
-            },
-        ))
+            ),
+            None,
+        )
         .await
         .expect("create enqueues a durable operation");
     let ExecutionValue::IndexDdlReceipt(crate::index_lifecycle::IndexDdlReceipt::Accepted {
@@ -444,19 +447,22 @@ pub async fn run_get_operation_keeps_open_graph_write() {
         .await
         .expect("request write opens");
     let added = context
-        .execute_step(&test_support::step(
-            2,
-            Vec::new(),
-            exec::ExecOp::Mutation {
-                plan: exec::ExecMutationPlan::AddNodeSource {
-                    label: test_support::name("User"),
-                    properties: test_support::assignments(vec![(
-                        "email",
-                        AstPropertyValue::from("uncommitted@example.com"),
-                    )]),
+        .execute_step(
+            &test_support::step(
+                2,
+                Vec::new(),
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::AddNodeSource {
+                        label: test_support::name("User"),
+                        properties: test_support::assignments(vec![(
+                            "email",
+                            AstPropertyValue::from("uncommitted@example.com"),
+                        )]),
+                    },
                 },
-            },
-        ))
+            ),
+            None,
+        )
         .await
         .expect("graph write stays on the request transaction");
     let ExecutionValue::Stream(rows) = added else {
@@ -480,13 +486,16 @@ pub async fn run_get_operation_keeps_open_graph_write() {
     );
 
     let got = context
-        .execute_step(&test_support::step(
-            3,
-            Vec::new(),
-            exec::ExecOp::IndexDdl {
-                plan: ir::IndexDdlPlan::GetOperation { operation_id },
-            },
-        ))
+        .execute_step(
+            &test_support::step(
+                3,
+                Vec::new(),
+                exec::ExecOp::IndexDdl {
+                    plan: ir::IndexDdlPlan::GetOperation { operation_id },
+                },
+            ),
+            None,
+        )
         .await
         .expect("status read stays on the open graph write");
     assert!(matches!(got, ExecutionValue::IndexOperationStatus(_)));
@@ -494,7 +503,7 @@ pub async fn run_get_operation_keeps_open_graph_write() {
     assert!(writer_db(&db).get(&node_key).await.expect("peek").is_none());
 
     let missing = context
-        .execute_step(&test_support::step(4, Vec::new(), status))
+        .execute_step(&test_support::step(4, Vec::new(), status), None)
         .await
         .expect_err("unknown operation ID is a status miss, not a commit");
     assert!(matches!(
@@ -1078,6 +1087,215 @@ pub(crate) async fn run_scheduler_and_projection_contracts() {
         .close_request_read_view()
         .expect("projection request view closes");
     db.close().await.expect("projection fixture closes");
+}
+
+/// Runs filtered node vector searches through the public request path, where
+/// the scheduler fuses each index-set access into its search, beside shapes
+/// that must run unfused, and proves the pairing rejects every pair that is
+/// not an exclusive node ID set feeding a node search.
+pub(crate) async fn run_fused_vector_search_contracts() {
+    use helix_ast::{batch, expr::Predicate, query::QueryRequest, traversal, value::PropertyInput};
+
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("production-fused-vector-search")
+            .with_node_vector_index(
+                "Doc",
+                "embedding",
+                2,
+                crate::search::vector::VectorDistanceMetric::Euclidean,
+            )
+            .with_equality_index("Doc", "category")
+            .with_equality_index("Doc", "status")
+            .with_range_index("Doc", "rank"),
+    )
+    .await;
+    // The node of rank r sits at [r, 0], is in category a when r is even
+    // and open while r < 3.
+    let seed = (0..6_i64)
+        .fold(batch::write_batch(), |write, rank| {
+            write.var_as(
+                &format!("d{rank}"),
+                traversal::g().add_n(
+                    "Doc",
+                    vec![
+                        ("embedding", PropertyInput::from(vec![rank as f32, 0.0])),
+                        (
+                            "category",
+                            PropertyInput::from(if rank % 2 == 0 { "a" } else { "b" }),
+                        ),
+                        (
+                            "status",
+                            PropertyInput::from(if rank < 3 { "open" } else { "closed" }),
+                        ),
+                        ("rank", PropertyInput::from(rank)),
+                    ],
+                ),
+            )
+        })
+        .returning((0..6).map(|rank| format!("d{rank}")));
+    let created = db
+        .query(QueryRequest::write(seed))
+        .await
+        .expect("fixture nodes are written");
+    let ids = (0..6)
+        .map(|rank| {
+            created[format!("d{rank}")][0]["$id"]
+                .as_u64()
+                .expect("node ID")
+        })
+        .collect::<Vec<_>>();
+    let hit_ids = |response: &serde_json::Value| {
+        response["hits"]
+            .as_array()
+            .expect("hits are rows")
+            .iter()
+            .map(|hit| hit["$id"].as_u64().expect("hit ID"))
+            .collect::<Vec<_>>()
+    };
+    let search = |source: traversal::Traversal<traversal::OnNodes>| {
+        batch::read_batch()
+            .var_as(
+                "hits",
+                source.vector_search("Doc", "embedding", vec![0.0, 0.0], 2, None),
+            )
+            .returning(["hits"])
+    };
+    let docs = |predicate| traversal::g().n_with_label_where("Doc", predicate);
+    // Label, equality bitmap, secondary set and an empty set fuse; a range
+    // scan and a residual filter do not.
+    for (source, fused, ranks) in [
+        (traversal::g().n_with_label("Doc"), true, &[0, 1][..]),
+        (docs(Predicate::eq("category", "a")), true, &[0, 2][..]),
+        (
+            docs(Predicate::and(vec![
+                Predicate::eq("category", "a"),
+                Predicate::eq("status", "open"),
+            ])),
+            true,
+            &[0, 2][..],
+        ),
+        (docs(Predicate::eq("category", "none")), true, &[][..]),
+        (docs(Predicate::gt("rank", 3_i64)), false, &[4, 5][..]),
+        (docs(Predicate::eq("unindexed", "x")), false, &[][..]),
+    ] {
+        let read = search(source);
+        let prepared = db
+            .planner_context_scoped_prepared(
+                context::ParamBindings::default(),
+                DataScope::LegacyUnscoped,
+            )
+            .await
+            .expect("planner context opens");
+        let plan = helix_planner::planning::plan_read_batch(&read, prepared.context())
+            .expect("read plans");
+        assert_eq!(
+            super::scheduler::fusion::plan(
+                &plan.steps().iter().map(|step| (step.id, step)).collect(),
+                &super::scheduler::output_uses(plan.steps(), plan.root()).expect("use plan"),
+                plan.execution_program(),
+            )
+            .len(),
+            if fused { 2 } else { 0 },
+            "{:#?}",
+            plan.steps()
+        );
+        let response = db
+            .query(QueryRequest::read(read))
+            .await
+            .expect("search executes");
+        assert_eq!(
+            hit_ids(&response),
+            ranks.iter().map(|rank| ids[*rank]).collect::<Vec<_>>()
+        );
+    }
+
+    // A request that writes reads its set when its access runs.
+    let response = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![
+                            ("embedding", PropertyInput::from(vec![0.5_f32, 0.0])),
+                            ("category", PropertyInput::from("a")),
+                        ],
+                    ),
+                )
+                .var_as(
+                    "hits",
+                    docs(Predicate::eq("category", "a")).vector_search(
+                        "Doc",
+                        "embedding",
+                        vec![0.0, 0.0],
+                        2,
+                        None,
+                    ),
+                )
+                .returning(["created", "hits"]),
+        ))
+        .await
+        .expect("write executes");
+    assert_eq!(
+        hit_ids(&response),
+        vec![
+            ids[0],
+            response["created"][0]["$id"].as_u64().expect("created ID")
+        ]
+    );
+
+    // A search over two inputs, an edge search and an edge set never pair.
+    let prepared = db
+        .planner_context_scoped_prepared(
+            context::ParamBindings::default(),
+            DataScope::LegacyUnscoped,
+        )
+        .await
+        .expect("planner context opens");
+    let plan = helix_planner::planning::plan_read_batch(
+        &search(docs(Predicate::eq("category", "a"))),
+        prepared.context(),
+    )
+    .expect("read plans");
+    let mut steps = plan.steps().to_vec();
+    steps.push(test_support::step(3, Vec::new(), exec::ExecOp::Noop));
+    steps[1]
+        .dependencies
+        .push(exec::ExecStepId::new(3).expect("positive step ID"));
+    assert!(super::scheduler::fusion::plan(
+        &steps.iter().map(|step| (step.id, step)).collect(),
+        &super::scheduler::output_uses(&steps, plan.root()).expect("use plan"),
+        plan.execution_program(),
+    )
+    .is_empty());
+    let (exec::ExecOp::Access { plan: access }, exec::ExecOp::VectorSearch { plan: search }) =
+        (&steps[0].op, &steps[1].op)
+    else {
+        panic!("planned an access feeding a search: {steps:#?}");
+    };
+    assert!(super::access::IdSetVectorSearch::new(access, search).is_some());
+    let ir::RestrictedVectorSearchPlan::Nodes {
+        index,
+        query_vector,
+        k,
+        ..
+    } = search.as_ref()
+    else {
+        panic!("planned a node search: {search:?}");
+    };
+    let edge_search = ir::RestrictedVectorSearchPlan::Edges {
+        key: catalog::EdgeSearchIndexKey::try_new("Doc", "embedding").expect("edge key"),
+        index: index.clone(),
+        query_vector: query_vector.clone(),
+        k: k.clone(),
+    };
+    assert!(super::access::IdSetVectorSearch::new(access, &edge_search).is_none());
+    let edge_set = exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::LabelScan {
+        label: test_support::name("Doc"),
+    });
+    assert!(super::access::IdSetVectorSearch::new(&edge_set, search).is_none());
+    db.close().await.expect("fused search fixture closes");
 }
 
 /// Seeds one canonical Active text generation before the runtime opens.

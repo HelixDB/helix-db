@@ -897,14 +897,18 @@ impl PreparedPlannerContext {
         &self.context
     }
 
+    /// The catalog proof alone, for test plans built without the request's
+    /// parameters; request execution takes [`Self::into_execution_inputs`].
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn into_catalog_proof(self) -> CatalogRefreshProof {
         self.proof
     }
 
     /// Transfer the request's original parameters together with its catalog
-    /// proof. Serial planning and execution need no duplicate binding tables.
+    /// proof. Planning only borrows the shared bindings, so once it is done
+    /// they move out without a copy.
     pub(crate) fn into_execution_inputs(self) -> (ParamBindings, CatalogRefreshProof) {
-        (self.context.params, self.proof)
+        (self.context.params.into_inner(), self.proof)
     }
 }
 
@@ -2168,7 +2172,7 @@ impl HelixDB {
     pub fn planner_context(&self, params: ParamBindings) -> PlannerContext {
         let indexes = self.runtime_catalog_snapshot();
         PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2187,7 +2191,7 @@ impl HelixDB {
     ) -> Result<PlannerContext> {
         let indexes = self.runtime_catalog_snapshot_scoped(tenant_scope).await?;
         Ok(PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2236,7 +2240,7 @@ impl HelixDB {
         };
         Ok(PreparedPlannerContext {
             context: PlannerContext {
-                params,
+                params: params.into(),
                 late_bound_params: Default::default(),
                 indexes,
                 stats: Default::default(),
@@ -4373,7 +4377,7 @@ mod tests {
         db.query_scoped(request.clone(), DataScope::LegacyUnscoped)
             .await
             .expect("scoped query");
-        let encoded = sonic_rs::to_vec(&request).expect("encode request");
+        let encoded = simd_json::to_vec(&request).expect("encode request");
         db.query_json(&encoded).await.expect("JSON query");
         db.query_json_scoped(&encoded, DataScope::LegacyUnscoped)
             .await
@@ -6124,20 +6128,20 @@ mod tests {
             .await
             .expect("tenant b second write succeeds");
 
-        let tenant_a_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_a_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_a)
                 .await
-                .expect("tenant a read succeeds"),
+                .expect("tenant a read succeeds")[..],
         )
         .expect("tenant a response decodes");
-        let tenant_b_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_b_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_b)
                 .await
-                .expect("tenant b read succeeds"),
+                .expect("tenant b read succeeds")[..],
         )
         .expect("tenant b response decodes");
         let legacy_json: serde_json::Value =
-            sonic_rs::from_slice(&db.query_json(&read).await.expect("legacy read succeeds"))
+            simd_json::from_reader(&db.query_json(&read).await.expect("legacy read succeeds")[..])
                 .expect("legacy response decodes");
 
         assert_eq!(tenant_a_json.get("users"), Some(&serde_json::json!(1)));

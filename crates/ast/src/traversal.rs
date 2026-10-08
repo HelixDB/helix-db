@@ -2,15 +2,19 @@
 
 use std::marker::PhantomData;
 
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Serialize};
 
-use crate::expr::{Predicate, SourcePredicate, StreamBound};
-use crate::graph::{EdgeRef, NodeRef};
-use crate::index::IndexSpec;
-use crate::projection::{
-    validate_binding_name, validate_binding_projections, BindingProjection, Projection,
+use crate::expr::{
+    ArenaPredicate, ArenaSourcePredicate, ArenaStreamBound, Predicate, SourcePredicate, StreamBound,
 };
-use crate::value::{PropertyInput, PropertyValue};
+use crate::graph::{ArenaEdgeRef, ArenaNodeRef, EdgeRef, NodeRef};
+use crate::index::{ArenaIndexSpec, IndexSpec};
+use crate::projection::{
+    validate_binding_name, validate_binding_projections, ArenaBindingProjection, ArenaProjection,
+    BindingProjection, Projection,
+};
+use crate::value::{ArenaPropertyInput, ArenaPropertyValue, PropertyInput, PropertyValue};
 /// Marker trait for traversal states.
 pub trait TraversalState: private::Sealed {}
 
@@ -59,7 +63,7 @@ pub struct WriteEnabled;
 impl MutationMode for ReadOnly {}
 impl MutationMode for WriteEnabled {}
 /// Sort order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum Order {
     /// Ascending.
@@ -70,7 +74,7 @@ pub enum Order {
 }
 
 /// Direction used by shortest-path traversal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum ShortestPathDirection {
     /// Follow outgoing edges from the source.
@@ -83,7 +87,7 @@ pub enum ShortestPathDirection {
 }
 
 /// Repeat emit behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum EmitBehavior {
     /// Do not emit intermediate results.
@@ -98,7 +102,7 @@ pub enum EmitBehavior {
 }
 
 /// Aggregate function.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum AggregateFunction {
     /// Count.
@@ -113,7 +117,7 @@ pub enum AggregateFunction {
     Mean,
 }
 /// Query AST node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum AstNode {
     /// Implicit branch input for sub-traversals.
@@ -794,6 +798,116 @@ impl AstNode {
     }
 }
 
+impl ArenaAstNode<'_> {
+    /// [`AstNode::is_read_only`] for an arena node. The match is the owned
+    /// one verbatim, so the two cannot disagree on a read-safety decision;
+    /// `batch.rs` tests them over every mutation family and nesting position.
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            Self::Context
+            | Self::Nodes { .. }
+            | Self::NodesWhere { .. }
+            | Self::Edges { .. }
+            | Self::EdgesWhere { .. }
+            | Self::VectorSearchNodes { .. }
+            | Self::TextSearchNodes { .. }
+            | Self::VectorSearchEdges { .. }
+            | Self::TextSearchEdges { .. }
+            | Self::GetIndexOperation { .. }
+            | Self::ShortestPath { .. } => true,
+            Self::CreateIndex { .. }
+            | Self::DropIndex { .. }
+            | Self::RetryIndexOperation { .. }
+            | Self::AbortIndexOperation { .. }
+            | Self::AddN { .. }
+            | Self::AddE { .. }
+            | Self::SetProperty { .. }
+            | Self::RemoveProperty { .. }
+            | Self::Drop { .. }
+            | Self::DropEdge { .. }
+            | Self::DropEdgeLabeled { .. }
+            | Self::DropEdgeById { .. } => false,
+            Self::TextSearchNodesWithin { input, .. }
+            | Self::TextSearchEdgesWithin { input, .. }
+            | Self::VectorSearchNodesWithin { input, .. }
+            | Self::VectorSearchEdgesWithin { input, .. }
+            | Self::Out { input, .. }
+            | Self::In { input, .. }
+            | Self::Both { input, .. }
+            | Self::OutE { input, .. }
+            | Self::InE { input, .. }
+            | Self::BothE { input, .. }
+            | Self::OutN { input }
+            | Self::InN { input }
+            | Self::OtherN { input }
+            | Self::Has { input, .. }
+            | Self::HasLabel { input, .. }
+            | Self::HasKey { input, .. }
+            | Self::Where { input, .. }
+            | Self::Dedup { input }
+            | Self::Within { input, .. }
+            | Self::Without { input, .. }
+            | Self::EdgeHas { input, .. }
+            | Self::EdgeHasLabel { input, .. }
+            | Self::Limit { input, .. }
+            | Self::Skip { input, .. }
+            | Self::Range { input, .. }
+            | Self::As { input, .. }
+            | Self::Store { input, .. }
+            | Self::Select { input, .. }
+            | Self::Bind { input, .. }
+            | Self::Count { input }
+            | Self::Exists { input }
+            | Self::Id { input }
+            | Self::Label { input }
+            | Self::Values { input, .. }
+            | Self::ValueMap { input, .. }
+            | Self::Project { input, .. }
+            | Self::ProjectBindings { input, .. }
+            | Self::EdgeProperties { input }
+            | Self::OrderBy { input, .. }
+            | Self::OrderByMultiple { input, .. }
+            | Self::Group { input, .. }
+            | Self::GroupCount { input, .. }
+            | Self::AggregateBy { input, .. }
+            | Self::Fold { input }
+            | Self::Unfold { input }
+            | Self::Path { input }
+            | Self::SimplePath { input }
+            | Self::WithSack { input, .. }
+            | Self::SackSet { input, .. }
+            | Self::SackAdd { input, .. }
+            | Self::SackGet { input } => input.is_read_only(),
+            Self::Inject { input, .. } => input.as_deref().map(Self::is_read_only).unwrap_or(true),
+            Self::Repeat { input, config } => {
+                input.is_read_only() && config.traversal.root.is_read_only()
+            }
+            Self::Union { input, traversals } | Self::Coalesce { input, traversals } => {
+                input.is_read_only()
+                    && traversals
+                        .iter()
+                        .all(|traversal| traversal.root.is_read_only())
+            }
+            Self::Choose {
+                input,
+                then_traversal,
+                else_traversal,
+                ..
+            } => {
+                input.is_read_only()
+                    && then_traversal.root.is_read_only()
+                    && else_traversal
+                        .as_ref()
+                        .map(|traversal| traversal.root.is_read_only())
+                        .unwrap_or(true)
+            }
+            Self::Optional { input, traversal } => {
+                input.is_read_only() && traversal.root.is_read_only()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Operation {
     Out(Option<String>),
@@ -1081,7 +1195,7 @@ impl Operation {
 }
 
 /// Sub-traversal for branching operations.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 pub struct SubTraversal {
     /// Root node. The default root is [`AstNode::Context`].
     pub root: Box<AstNode>,
@@ -1263,7 +1377,7 @@ pub fn sub() -> SubTraversal {
 }
 
 /// Repeat configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 pub struct RepeatConfig {
     /// Traversal body.
     pub traversal: SubTraversal,

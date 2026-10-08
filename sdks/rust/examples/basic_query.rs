@@ -42,16 +42,16 @@ fn get_user(name: String) -> ReadBatch {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new(None)?; // defaults to http://localhost:6969
 
-    let new_user: sonic_rs::Value = client
+    let new_user: simd_json::OwnedValue = client
         .query(add_user("John Doe".to_string())?)
         .send()
         .await?;
-    println!("new user: {:#}", sonic_rs::to_string_pretty(&new_user)?);
+    println!("new user: {:#}", simd_json::to_string_pretty(&new_user)?);
 
-    let user: sonic_rs::Value = client
+    let user: simd_json::OwnedValue = client
         .query(get_user("John Doe".to_string())?)
         .send()
         .await?;
-    println!("user: {:#}", sonic_rs::to_string_pretty(&user)?);
+    println!("user: {:#}", simd_json::to_string_pretty(&user)?);
     Ok(())
 }

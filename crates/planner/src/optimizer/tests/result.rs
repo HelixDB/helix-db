@@ -7,8 +7,8 @@ use crate::{cost, exec, ir, memo, optimizer, physical, properties, rules};
 fn cascades_optimizer_assigns_alternative_ids_and_breaks_cost_ties_by_digest() {
     let first_by_digest = support::alternative_with_expr(physical::PhysicalExpr::Sort, 10);
     let second_by_digest = support::alternative_with_expr(physical::PhysicalExpr::Barrier, 10);
-    assert_ne!(first_by_digest.digest, second_by_digest.digest);
-    let (lower_digest, higher_digest) = if first_by_digest.digest < second_by_digest.digest {
+    assert_ne!(first_by_digest.digest(), second_by_digest.digest());
+    let (lower_digest, higher_digest) = if first_by_digest.digest() < second_by_digest.digest() {
         (first_by_digest, second_by_digest)
     } else {
         (second_by_digest, first_by_digest)
@@ -40,8 +40,8 @@ fn cascades_optimizer_assigns_alternative_ids_and_breaks_cost_ties_by_digest() {
         "stable_tie_break"
     );
     assert_eq!(
-        result.best_alternative(result.root()).unwrap().digest,
-        lower_digest.digest
+        result.best_alternative(result.root()).unwrap().digest(),
+        lower_digest.digest()
     );
 }
 

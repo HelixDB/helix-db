@@ -31,7 +31,8 @@ fn cascades_chooses_less_expansion_work_over_the_smallest_start() {
     .unwrap();
     let seed = pattern.schedule(&storage);
     assert_eq!(seed.steps[0], r::MatchStep::Scan(r::Slot(0)));
-    let config = optimizer::OptimizerConfig::from_context(&context::PlannerContext::default());
+    let config =
+        optimizer::OptimizerConfig::from_context(&context::PlannerContext::default()).into_owned();
     let rules = rules::SeedRuleSet::default();
     let result = rules
         .optimizer()
@@ -288,7 +289,8 @@ fn correlated_lookup_contracts_and_scan_alternatives_share_the_memo() {
         invalid["lookups"][0]["probe"] = serde_json::json!(99);
         assert!(serde_json::from_value::<r::GraphPatternOrder>(invalid).is_err());
         let rules = rules::SeedRuleSet::default();
-        let config = optimizer::OptimizerConfig::from_context(&context::PlannerContext::default());
+        let config = optimizer::OptimizerConfig::from_context(&context::PlannerContext::default())
+            .into_owned();
         let result = rules
             .optimizer()
             .optimize(logical::LogicalExpr::GraphPattern(indexed), &config)

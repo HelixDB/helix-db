@@ -540,9 +540,9 @@ async fn eventual_consistency_is_rejected_for_write_requests() {
         .with_search_consistency(SearchConsistency::Eventual)
         .is_err());
     let json = r#"{"request_type":"write","query_name":null,"query":{"write":{"entries":[],"returns":[]}},"search_consistency":"eventual"}"#;
-    assert!(sonic_rs::from_str::<QueryRequest>(json).is_err());
+    assert!(simd_json::from_reader::<_, QueryRequest>(json.as_bytes()).is_err());
     let json = r#"{"request_type":"read","query_name":null,"query":{"read":{"entries":[],"returns":[]}},"search_consistency":"strong"}"#;
-    let parsed = sonic_rs::from_str::<QueryRequest>(json).unwrap();
+    let parsed = simd_json::from_reader::<_, QueryRequest>(json.as_bytes()).unwrap();
     assert_eq!(parsed.search_consistency(), SearchConsistency::Strong);
     assert!(!parsed
         .to_json_string()

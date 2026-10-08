@@ -423,6 +423,12 @@ async fn interpreter_scheduler_and_projection_paths_are_production_linked() {
     db::production_coverage::interpreter_scheduler_and_projection_contracts().await;
 }
 
+/// Proves filtered node vector searches fuse index-set accesses into their search.
+#[tokio::test]
+async fn interpreter_fused_vector_searches_are_production_linked() {
+    db::production_coverage::interpreter_fused_vector_search_contracts().await;
+}
+
 /// Verifies process-local writer identity and readiness through the public boundary.
 #[test]
 fn process_local_runtime_dependencies_preserve_identity_and_readiness() {

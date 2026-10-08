@@ -143,15 +143,27 @@ impl HelixDbServer for GrpcService {
                 .get(crate::TENANT_ID_HEADER_NAME)
                 .and_then(|value| value.to_str().ok()),
         );
-        let request = request.into_inner();
-        if request.body.len() > MAX_QUERY_BODY_BYTES {
+        let QueryJsonRequest {
+            body,
+            warm_only,
+            require_writer,
+            await_durable,
+        } = request.into_inner();
+        if body.len() > MAX_QUERY_BODY_BYTES {
             return Err(status_with_error_code(
                 tonic::Code::ResourceExhausted,
                 error_code::QueryErrorCode::InvalidRequestBody,
                 format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
             ));
         }
-        let query = QueryRequest::from_json_slice(&request.body).map_err(|error| {
+        // simd-json parses a uniquely owned body in place and copies a shared
+        // one. The request owns everything it needs, so the body is freed here
+        // rather than held through planning and execution.
+        let parsed = match body.try_into_mut() {
+            Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
+            Err(shared) => QueryRequest::from_json_slice(&shared),
+        };
+        let query = parsed.map_err(|error| {
             status_with_error_code(
                 tonic::Code::InvalidArgument,
                 error_code::QueryErrorCode::InvalidQueryJson,
@@ -159,9 +171,9 @@ impl HelixDbServer for GrpcService {
             )
         })?;
         validate_options_for_request_type(
-            request.warm_only,
-            request.require_writer,
-            request.await_durable,
+            warm_only,
+            require_writer,
+            await_durable,
             query.request_type(),
             self.state.db_mode(),
         )?;
@@ -170,12 +182,12 @@ impl HelixDbServer for GrpcService {
             .query_service()
             .execute_query_with_mode_and_metrics_tenant(
                 query,
-                query_mode(request.warm_only),
+                query_mode(warm_only),
                 metrics_tenant_id,
             )
             .await
             .map_err(status_from_service_error)?;
-        if request.await_durable {
+        if await_durable {
             self.state
                 .flush_writer()
                 .await

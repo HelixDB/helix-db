@@ -31,10 +31,11 @@ pub fn sdk_inputs(root: &std::path::Path, expected: usize) -> BTreeMap<String, I
             let mut context = context::PlannerContext::default();
             for (name, value) in request.parameters().into_iter().flatten() {
                 let name = helix_planner::ir::NonEmptyString::new(name.clone()).unwrap();
-                context.params = context
-                    .params
+                context.params = (*context.params)
+                    .clone()
                     .with_value(name.clone(), helix_ast::value::PropertyValue::from(value))
-                    .with_query_value(name, value.clone());
+                    .with_query_value(name, value.clone())
+                    .into();
             }
             matrix::profile(&mut context, profile);
             for active_search in [false, true] {

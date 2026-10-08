@@ -26,6 +26,9 @@ pub(super) mod kernel_agreement {
     //! than exact. Integer inputs hide this because every intermediate is
     //! exactly representable.
 
+    use super::simple::squared_l2_norm_scalar;
+    use crate::search::vector::unaligned_vector::UnalignedVector;
+
     /// Largest relative gap allowed between a kernel and the scalar reference.
     ///
     /// Measured worst case on aarch64 over 4000 random pairs was 2.0e-6 at
@@ -73,6 +76,52 @@ pub(super) mod kernel_agreement {
             "{what} at {dimension} dimensions: kernel {kernel}, scalar {scalar}, \
              error {error} exceeds allowed {allowed}"
         );
+    }
+
+    /// Check a sum-of-squares kernel against the sequential scalar reference.
+    ///
+    /// Lengths cover every remainder of the 16 and 32 wide strides, both sides
+    /// of each dispatch threshold, and common embedding sizes. Integer
+    /// components below 2^10 make every square and partial sum exact
+    /// (`4096 * 2^20 < 2^53`), so any grouping must match bit for bit. Otherwise
+    /// both sums are within a relative `(n - 1) * 2^-53` of the exact value, so
+    /// they may differ by at most `n * f64::EPSILON` of the reference; inputs
+    /// span unit embeddings and arbitrary finite binades.
+    pub fn assert_squared_norm_kernel(kernel: impl Fn(&UnalignedVector<f32>) -> f64, what: &str) {
+        let mut rng = TestRng(0x2026_1007);
+        for dimension in (1..=67).chain([128, 255, 256, 257, 768, 1536, 4096]) {
+            let integers = (0..dimension)
+                .map(|_| (rng.next_f32() * 1024.0).trunc())
+                .collect::<Vec<_>>();
+            let integers = UnalignedVector::from_slice(&integers);
+            assert_eq!(
+                kernel(&integers).to_bits(),
+                squared_l2_norm_scalar(&integers).to_bits(),
+                "{what} integer sum at {dimension} dimensions"
+            );
+
+            let wide = (0..dimension)
+                .map(|_| {
+                    rng.next_f32();
+                    let value = f32::from_bits((rng.0 >> 32) as u32);
+                    if value.is_finite() {
+                        value
+                    } else {
+                        rng.next_f32()
+                    }
+                })
+                .collect::<Vec<_>>();
+            for values in [rng.vector(dimension), wide] {
+                let values = UnalignedVector::from_slice(&values);
+                let scalar = squared_l2_norm_scalar(&values);
+                let error = (kernel(&values) - scalar).abs();
+                let allowed = dimension as f64 * f64::EPSILON * scalar;
+                assert!(
+                    error <= allowed,
+                    "{what} at {dimension} dimensions: error {error} exceeds {allowed}"
+                );
+            }
+        }
     }
 
     /// Conditioning scale for a dot product.
