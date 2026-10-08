@@ -224,7 +224,7 @@ impl Client {
         parameters: std::collections::BTreeMap<String, serde_json::Value>,
         query_name: Option<&str>,
     ) -> Result<CypherResponse, HelixError> {
-        let body = simd_json::to_vec(
+        let body = serde_json::to_vec(
             &serde_json::json!({"query":query,"parameters":parameters,"query_name":query_name}),
         )?;
         let mut bytes =
@@ -266,7 +266,7 @@ impl Client {
                             details: error.to_string(),
                         }
                     })?;
-                    simd_json::to_vec(&response)?
+                    serde_json::to_vec(&response)?
                 }
             };
         Ok(simd_json::from_slice(&mut bytes)?)
@@ -370,6 +370,15 @@ pub enum HelixError {
         /// Error text from the embedded DB layer.
         details: String,
     },
+}
+
+/// Requests are written with serde_json, which keeps each `f32` in its
+/// shortest form; responses are read with simd-json. Both failures are
+/// serialization errors.
+impl From<serde_json::Error> for HelixError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::SerializationError(<simd_json::Error as serde::ser::Error>::custom(error))
+    }
 }
 
 impl HelixError {
@@ -796,7 +805,10 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
                 if let Some(api_key) = &server.api_key {
                     request = request.bearer_auth(api_key);
                 }
-                let response = request.body(simd_json::to_vec(&self.query)?).send().await?;
+                let response = request
+                    .body(serde_json::to_vec(&self.query)?)
+                    .send()
+                    .await?;
                 match response.status() {
                     status @ (StatusCode::OK | StatusCode::NO_CONTENT) => {
                         let body = response.bytes().await?.to_vec();
@@ -815,7 +827,7 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
                         details: "request options require server mode".to_string(),
                     });
                 }
-                let request = simd_json::to_vec(&self.query)?;
+                let request = serde_json::to_vec(&self.query)?;
                 db.query_json(&request)
                     .await
                     .map(|body| QueryResponse {

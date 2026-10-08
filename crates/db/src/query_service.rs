@@ -462,9 +462,10 @@ impl QueryResponse {
         })
     }
 
-    /// Serialize the response as JSON bytes.
+    /// Serialize the response as JSON bytes. The response is already a tree of
+    /// `serde_json` values, so `serde_json` writes it.
     pub fn to_json_bytes(&self) -> std::result::Result<Vec<u8>, QueryServiceError> {
-        simd_json::to_vec(self).map_err(QueryServiceError::Serialize)
+        serde_json::to_vec(self).map_err(QueryServiceError::JsonSerialize)
     }
 
     /// Borrow the returned values.
