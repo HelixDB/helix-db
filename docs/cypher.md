@@ -3,8 +3,8 @@
 Helix supports the Cypher profile below alongside the native DSL. Both frontends
 use the existing graph storage, transactions, and indexes. Existing databases do
 not need a storage migration. This is a supported language profile, not full
-openCypher compatibility. Use a server or embedded build containing this implementation;
-cloud gateway deployment is separate.
+openCypher compatibility. Use a server, embedded build or Helix Cloud gateway
+containing this implementation.
 
 ## Execute a statement
 
@@ -30,6 +30,27 @@ authentication and, like `POST /v2/query`, runs every statement against the
 unscoped graph. `query` is required; `parameters` and `query_name` are
 optional. Each row has one value per column in column order. Duplicates are
 preserved unless the query uses `DISTINCT`. Use `ORDER BY` when row order matters.
+
+A Helix Cloud gateway serves the same routes with the same request and response
+bodies. Authenticate as for `POST /v2/query`, with the cluster API key and, on a
+GA shared gateway, the database ID:
+
+```sh
+curl "$HELIX_ENDPOINT/v2/cypher" \
+  -H "Authorization: Bearer $HELIX_API_KEY" \
+  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"MATCH (n) RETURN count(n) AS nodes"}'
+```
+
+The gateway compiles each statement to learn whether it writes. Reads go to
+readers, and writes and `X-Helix-Require-Writer` requests go to the elected
+writer. A read-only API key can read and explain, but receives `403` for a
+modifying statement. Explain always routes as a read. Cloud request bodies are
+limited to 2 MiB (`413 payload_too_large`), and the database's rate limit and
+query time limit (`408`) apply as they do to native queries. Authentication,
+rate-limit, timeout and availability failures use the native
+`{"error","msg"}` envelope; statement errors use the Cypher envelope below.
 
 Create and read a graph:
 
