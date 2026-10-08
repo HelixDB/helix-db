@@ -192,16 +192,25 @@ if (
   errors.push('openapi.json: QueryError must require only error and msg');
 }
 
+// Cypher is served by local servers and Helix Cloud gateways, like /v2/query.
+// Gateway failures use the native {error,msg} envelope, which CypherError admits.
 for (const [route, response, statuses] of [
-  ['/v2/cypher', 'CypherResponse', '200,400,409,429,500,503'],
-  ['/v2/cypher/explain', 'CypherExplanation', '200,400,429,500,503'],
+  ['/v2/cypher', 'CypherResponse', '200,204,400,401,402,403,408,409,413,429,500,503'],
+  ['/v2/cypher/explain', 'CypherExplanation', '200,204,400,401,402,403,408,413,429,500,503'],
 ]) {
   const operation = spec.paths?.[route]?.post;
-  if (operation?.servers || operation?.['x-helix-request-body-limits']?.helixCloudBytes) {
-    errors.push(`openapi.json: ${route} must inherit only the local server`);
+  if (JSON.stringify(operation?.servers) !== JSON.stringify(queryOperation?.servers)) {
+    errors.push(`openapi.json: ${route} must advertise the same servers as /v2/query`);
   }
-  if (operation?.['x-helix-request-body-limits']?.localBytes !== 16 * 1024 * 1024) {
-    errors.push(`openapi.json: ${route} must document the local 16 MiB body limit`);
+  if (JSON.stringify(operation?.security) !== JSON.stringify(queryOperation?.security)) {
+    errors.push(`openapi.json: ${route} must accept the same authentication as /v2/query`);
+  }
+  if (operation?.parameters?.[0]?.$ref !== '#/components/parameters/DatabaseId') {
+    errors.push(`openapi.json: ${route} must accept the Helix Cloud database ID`);
+  }
+  const limits = operation?.['x-helix-request-body-limits'];
+  if (limits?.localBytes !== 16 * 1024 * 1024 || limits?.helixCloudBytes !== 2 * 1024 * 1024) {
+    errors.push(`openapi.json: ${route} must document the 16 MiB local and 2 MiB Helix Cloud body limits`);
   }
   if (Object.keys(operation?.responses ?? {}).sort().join(',') !== statuses) {
     errors.push(`openapi.json: ${route} response codes must be ${statuses}`);
@@ -210,6 +219,10 @@ for (const [route, response, statuses] of [
     errors.push(`openapi.json: ${route} must use CypherRequest`);
   }
   for (const [status, item] of Object.entries(operation?.responses ?? {})) {
+    if (status === '204') {
+      if (item.content) errors.push(`openapi.json: ${route} 204 must have no body`);
+      continue;
+    }
     const expected = status === '200' ? response : 'CypherError';
     if (item.content?.['application/json']?.schema?.$ref !== `#/components/schemas/${expected}`) {
       errors.push(`openapi.json: ${route} ${status} must use ${expected}`);
@@ -268,5 +281,5 @@ if (errors.length > 0) {
 }
 
 console.log(
-  `openapi.json matches ${routerOperations.size} local operations and validates the local Cypher and Helix Cloud query contracts.`,
+  `openapi.json matches ${routerOperations.size} local operations and validates the local and Helix Cloud query and Cypher contracts.`,
 );

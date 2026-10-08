@@ -160,7 +160,9 @@ let client = Client::new(None)?;
 
 // Or point at a remote cluster and attach an API key:
 let client = Client::new(Some("https://11e2fc88c410fa5eb13e.cluster.helix-db.com"))?
-    .with_api_key(Some("hx_your_api_key"));
+    .with_api_key(Some("hx_your_api_key"))
+    // Helix Cloud selects the database from this header on every query route.
+    .with_database_id(Some("your_database_id"));
 ```
 
 Queries use `client.query(request).send().await`. Advanced server-only requests use
@@ -686,7 +688,34 @@ Licensed under Apache-2.0.
 
 ## Cypher
 
-Clients built from this checkout expose an additive Cypher method for local HTTP
-and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
-the language profile, method signatures, parameters, lossless values, and
-transaction behavior. Native DSL query methods keep their existing contract.
+Cypher runs beside the native DSL on the same database, over HTTP or embedded:
+
+```rust
+use std::collections::BTreeMap;
+
+let rows = client
+    .cypher("MATCH (u:User) WHERE u.age >= $min RETURN u.name AS name",
+        BTreeMap::from([("min".to_string(), serde_json::json!(30))]),
+        Some("adults"))
+    .await?;               // CypherResponse { columns, rows }
+
+// Plan without executing; explaining a write writes nothing. Planning
+// checks parameters too, so supply every parameter the statement uses.
+let params = BTreeMap::from([("name".to_string(), serde_json::json!("Ada"))]);
+let plan = client
+    .explain_cypher("CREATE (:User {name: $name})", params.clone(), None)
+    .await?;
+
+// Request options use the builder, like native queries.
+let created = client
+    .request_builder::<()>()
+    .should_await_durability(true)
+    .cypher("CREATE (u:User {name: $name}) RETURN u", params, None)
+    .send()               // or .explain()
+    .await?;
+```
+
+The API key and database ID apply to Cypher as they do to native queries. A
+warm-only read that Helix Cloud answers with `204 No Content` returns no rows.
+Embedded clients reject request options. See the [Cypher reference](../../docs/cypher.md)
+for the language profile, parameters, lossless values, errors and transaction behavior.

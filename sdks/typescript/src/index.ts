@@ -1,9 +1,9 @@
 // Public entry point for the Helix TypeScript SDK.
 //
 // The query DSL lives in `./dsl.ts` and is re-exported wholesale here. This file
-// adds the network client (`Client`, `QueryBuilder`, `QueryExecutionRequest`, `HelixError`),
-// mirroring the Rust SDK layout where the DSL lives in `dsl.rs` and the client in
-// `lib.rs`.
+// adds the network client (`Client`, `QueryBuilder`, `QueryExecutionRequest`,
+// `CypherExecutionRequest`, `HelixError`), mirroring the Rust SDK layout where the
+// DSL lives in `dsl.rs` and the client in `lib.rs`.
 
 export * from "./dsl.js";
 export * from "./graph.js";
@@ -19,6 +19,38 @@ export interface CypherResponse {
   columns: string[];
   rows: unknown[][];
 }
+
+/**
+ * Planning diagnostics from `POST /v2/cypher/explain`; the statement is not executed.
+ *
+ * Only the top-level effect and operator list are typed. Operator contracts,
+ * bindings, returns, planner metrics, and notices are planner diagnostics whose
+ * shape may grow between server versions. Integers outside JavaScript's safe
+ * range are `bigint`.
+ */
+export interface CypherExplanation {
+  effect: "Read" | "Write";
+  operators: unknown[];
+  [field: string]: unknown;
+}
+
+/** A Cypher route: its server path, and the native method serving it in embedded mode. */
+interface CypherRoute {
+  path: string;
+  native: "cypher_json" | "explain_cypher_json";
+  unavailable: string;
+}
+
+const CYPHER_EXECUTE: CypherRoute = {
+  path: "/v2/cypher",
+  native: "cypher_json",
+  unavailable: "rebuild native bindings with Cypher support",
+};
+const CYPHER_EXPLAIN: CypherRoute = {
+  path: "/v2/cypher/explain",
+  native: "explain_cypher_json",
+  unavailable: "rebuild native bindings with Cypher explain support",
+};
 
 /**
  * Error raised by the network {@link Client}.
@@ -197,6 +229,15 @@ interface RequestParts {
   query: QueryRequest;
 }
 
+/** Complete Cypher request handed from {@link QueryBuilder} to {@link CypherExecutionRequest}. */
+interface CypherRequestParts {
+  backend: ClientBackend;
+  headers: Record<string, string>;
+  query: string;
+  parameters: Record<string, unknown>;
+  queryName?: string;
+}
+
 interface QueryResponse {
   status: number;
   body: Uint8Array;
@@ -226,6 +267,7 @@ export type EmbeddedCacheConfig = {
 type NativeHelixDB = {
   query_json(request: Uint8Array): Promise<Uint8Array>;
   cypher_json?(request: Uint8Array): Promise<Uint8Array>;
+  explain_cypher_json?(request: Uint8Array): Promise<Uint8Array>;
   graph?(request: Uint8Array, spec: unknown): Promise<unknown>;
   close(): Promise<void>;
 };
@@ -346,45 +388,16 @@ export class Client {
   }
 
   /** Execute Cypher, retaining tagged lossless values in the response. */
-  async cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): Promise<CypherResponse> {
-    let body: string;
-    try {
-      body = JSON.stringify({ query, parameters, query_name: queryName }, (_key, value: unknown) =>
-        typeof value === "bigint"
-          ? { $type: "integer", value: value.toString() }
-          : typeof value === "number" && !Number.isFinite(value)
-            ? { $type: "float", value: String(value) }
-            : value,
-      );
-    } catch (error) {
-      throw HelixError.serialization(String(error));
-    }
-    if (this.backend.kind === "embedded") {
-      if (!this.backend.native.cypher_json) throw HelixError.embeddedUnavailable("rebuild native bindings with Cypher support");
-      try {
-        return JSON.parse(
-          new TextDecoder().decode(await this.backend.native.cypher_json(new TextEncoder().encode(body))),
-        ) as CypherResponse;
-      } catch (error) {
-        throw embeddedError(error);
-      }
-    }
-    const url = new URL("/v2/cypher", this.backend.url);
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.backend.apiKey) headers.authorization = `Bearer ${this.backend.apiKey}`;
-    let response: Response;
-    try {
-      response = await fetch(url, { method: "POST", headers, body });
-    } catch (error) {
-      throw HelixError.network(String(error), url.toString());
-    }
-    const text = await response.text();
-    if (response.status !== 200) throw HelixError.remote(response.status, text, response.statusText);
-    try {
-      return JSON.parse(text) as CypherResponse;
-    } catch (error) {
-      throw HelixError.serialization(String(error));
-    }
+  cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): Promise<CypherResponse> {
+    return this.requestBuilder().cypher(query, parameters, queryName).send();
+  }
+
+  /** Plan Cypher without executing it, including modifying statements. */
+  async explainCypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): Promise<CypherExplanation> {
+    const explanation = await this.requestBuilder().cypher(query, parameters, queryName).explain();
+    // Only a warm-only request succeeds with 204 No Content, and this one sends no options.
+    if (explanation === undefined) throw HelixError.remote(204, "", "No Content");
+    return explanation;
   }
 
   /** Begin building an advanced server request whose 200 response body deserializes into `R`. */
@@ -456,6 +469,17 @@ export class QueryBuilder<R = unknown> {
       query,
     });
   }
+
+  /** Attach one Cypher statement and target `POST /v2/cypher` or `POST /v2/cypher/explain`. */
+  cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): CypherExecutionRequest {
+    return new CypherExecutionRequest({
+      backend: this.backend,
+      headers: { ...this.headers },
+      query,
+      parameters,
+      queryName,
+    });
+  }
 }
 
 export class QueryExecutionRequest<R = unknown> {
@@ -520,6 +544,89 @@ export class QueryExecutionRequest<R = unknown> {
       return parseJson(new TextDecoder().decode(response.body)) as R;
     } catch (error) {
       throw HelixError.serialization(error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+/**
+ * One Cypher statement with the request options of the {@link QueryBuilder} that created it.
+ *
+ * ```ts
+ * const rows = await client.requestBuilder().writerOnly().cypher("CREATE (n:User {name: $name}) RETURN n", { name: "Ada" }).send();
+ * const plan = await client.requestBuilder().cypher("MATCH (n:User) RETURN n").explain();
+ * ```
+ */
+export class CypherExecutionRequest {
+  constructor(private readonly parts: CypherRequestParts) {}
+
+  /**
+   * Execute the statement (`POST /v2/cypher`), retaining tagged lossless values in the response.
+   * A Helix Cloud warm-only read answers `204 No Content`, which resolves to no columns and no rows.
+   */
+  async send(): Promise<CypherResponse> {
+    const response = await this.execute(CYPHER_EXECUTE);
+    return response === undefined ? { columns: [], rows: [] } : (response as CypherResponse);
+  }
+
+  /**
+   * Plan the statement without executing it (`POST /v2/cypher/explain`). The server applies options as a read.
+   * Resolves to `undefined` only when a Helix Cloud warm-only request answers `204 No Content`.
+   */
+  async explain(): Promise<CypherExplanation | undefined> {
+    return (await this.execute(CYPHER_EXPLAIN)) as CypherExplanation | undefined;
+  }
+
+  /** Resolves to the decoded JSON body, or `undefined` for a `204 No Content` warm success. */
+  private async execute(route: CypherRoute): Promise<unknown> {
+    const { backend, headers, query, parameters, queryName } = this.parts;
+
+    // Integers outside the JavaScript safe range and non-finite floats have no
+    // plain JSON form, so they travel as the server's lossless tagged values.
+    let body: string;
+    try {
+      body = JSON.stringify({ query, parameters, query_name: queryName }, (_key, value: unknown) =>
+        typeof value === "bigint"
+          ? { $type: "integer", value: value.toString() }
+          : typeof value === "number" && !Number.isFinite(value)
+            ? { $type: "float", value: String(value) }
+            : value,
+      );
+    } catch (error) {
+      throw HelixError.serialization(String(error));
+    }
+
+    if (backend.kind === "embedded") {
+      const serverOptions = Object.keys(headers).filter((name) => name.toLowerCase() !== "content-type");
+      if (serverOptions.length > 0) {
+        throw HelixError.invalidRequest(`embedded queries do not support server request options: ${serverOptions.join(", ")}`);
+      }
+      // Older native packages predate these methods; call through the handle to keep its `this`.
+      const run = backend.native[route.native];
+      if (run === undefined) throw HelixError.embeddedUnavailable(route.unavailable);
+      try {
+        return parseJson(new TextDecoder().decode(await run.call(backend.native, new TextEncoder().encode(body))));
+      } catch (error) {
+        throw embeddedError(error);
+      }
+    }
+
+    const url = new URL(route.path, backend.url);
+    const requestHeaders: Record<string, string> = { ...headers };
+    if (backend.apiKey !== undefined) requestHeaders["Authorization"] = `Bearer ${backend.apiKey}`;
+    if (backend.databaseId !== undefined) requestHeaders["x-helix-database-id"] = backend.databaseId;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "POST", headers: requestHeaders, body });
+    } catch (error) {
+      throw HelixError.network(String(error), url.toString());
+    }
+    const text = await response.text();
+    if (response.status === 204) return undefined;
+    if (response.status !== 200) throw HelixError.remote(response.status, text, response.statusText);
+    try {
+      return parseJson(text);
+    } catch (error) {
+      throw HelixError.serialization(String(error));
     }
   }
 }

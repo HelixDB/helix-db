@@ -38,18 +38,15 @@ pub async fn serve(
 }
 
 pub(crate) fn router(state: ServerState) -> Router {
-    let router = Router::new()
+    // Paths stay literal: docs/scripts/check-openapi.mjs reads them from this
+    // file. The Cypher paths equal `helix_cypher::api::{HTTP_PATH, HTTP_EXPLAIN_PATH}`.
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/v2/query", post(execute_query));
-    // Unrouted Cypher paths fall through to 404, as on a server without Cypher.
-    let router = match state.cypher_endpoints() {
-        crate::CypherEndpoints::Enabled => router
-            .route("/v2/cypher", post(execute_cypher))
-            .route("/v2/cypher/explain", post(explain_cypher)),
-        crate::CypherEndpoints::Disabled => router,
-    };
-    router.with_state(state)
+        .route("/v2/query", post(execute_query))
+        .route("/v2/cypher", post(execute_cypher))
+        .route("/v2/cypher/explain", post(explain_cypher))
+        .with_state(state)
 }
 
 async fn healthz(State(state): State<ServerState>) -> Response {
@@ -176,9 +173,7 @@ async fn explain_cypher(
         .explain_cypher_scoped_controlled(
             request,
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-            db::execution_control::ExecutionControl::from_timeout(std::time::Duration::from_secs(
-                30,
-            )),
+            db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
             db::cypher::Limits::default(),
         )
         .await
@@ -210,10 +205,9 @@ async fn execute_cypher(
             request,
             options.query_mode(),
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-            db::execution_control::ExecutionControl::from_timeout(std::time::Duration::from_secs(
-                30,
-            )),
+            db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
             db::cypher::Limits::default(),
+            options.metrics_tenant_id.clone(),
         )
         .await;
     match result {
@@ -236,19 +230,12 @@ async fn execute_cypher(
 
 fn cypher_error_response(error: db::cypher::Error) -> Response {
     match error {
-        db::cypher::Error::Query(error) => {
-            let status = match error.category.as_str() {
-                "ResourceLimit" => StatusCode::TOO_MANY_REQUESTS,
-                "AccessModeError" => StatusCode::SERVICE_UNAVAILABLE,
-                "InternalPlannerError" => StatusCode::INTERNAL_SERVER_ERROR,
-                _ => StatusCode::BAD_REQUEST,
-            };
-            json_response(
-                status,
-                &serde_json::json!({"error":error.category,"msg":error.message,"details":{"detail":error.detail,"phase":error.phase,"span":error.span}}),
-            )
-        }
-        db::cypher::Error::Storage(error) => service_error_response(error.into()),
+        db::cypher::Error::Query(error) => json_response(
+            StatusCode::from_u16(helix_cypher::api::ErrorClass::of(&error).http_status())
+                .expect("Cypher error classes use valid HTTP statuses"),
+            &helix_cypher::api::ErrorBody::from(&error),
+        ),
+        db::cypher::Error::Storage(error) => service_error_response(QueryServiceError::Db(error)),
         db::cypher::Error::Json(error) => {
             service_error_response(QueryServiceError::JsonSerialize(error))
         }
@@ -518,6 +505,65 @@ mod tests {
             .contains("Index operation not found"));
         assert_eq!(json.get("code"), None);
         assert_eq!(json.get("retryable"), None);
+    }
+
+    #[tokio::test]
+    async fn cypher_errors_follow_the_shared_error_contract() {
+        let query = |category| {
+            db::cypher::Error::Query(
+                helix_cypher::QueryError::runtime(category, "Detail", "msg")
+                    .at(helix_cypher::Span { start: 1, end: 2 }),
+            )
+        };
+        let cases = [
+            (query("SyntaxError"), StatusCode::BAD_REQUEST, "SyntaxError"),
+            (
+                query("ResourceLimit"),
+                StatusCode::TOO_MANY_REQUESTS,
+                "ResourceLimit",
+            ),
+            (
+                query("AccessModeError"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AccessModeError",
+            ),
+            (
+                query("InternalPlannerError"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalPlannerError",
+            ),
+            (
+                db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
+                    "retry".to_string(),
+                )),
+                StatusCode::CONFLICT,
+                "transaction_conflict",
+            ),
+            (
+                db::cypher::Error::Json(serde_json::from_str::<u8>("x").expect_err("invalid JSON")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_serialization_error",
+            ),
+        ];
+        for (error, expected_status, expected_error) in cases {
+            let is_query = matches!(error, db::cypher::Error::Query(_));
+            let response = cypher_error_response(error);
+            assert_eq!(response.status(), expected_status);
+            let body = to_bytes(response.into_body(), 4_096)
+                .await
+                .expect("Cypher error body is bounded");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("Cypher error body is JSON");
+            assert_eq!(json["error"], expected_error);
+            if is_query {
+                assert_eq!(
+                    json["details"],
+                    serde_json::json!({"detail":"Detail","phase":"runtime","span":{"start":1,"end":2}})
+                );
+            } else {
+                assert_eq!(json.get("details"), None);
+            }
+        }
     }
 
     #[tokio::test]

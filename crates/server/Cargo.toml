@@ -10,6 +10,7 @@ async-index-benchmark = ["db/async-index-benchmark"]
 [dependencies]
 db = { path = "../db" }
 helix-ast = { path = "../ast" }
+helix-cypher = { path = "../cypher" }
 helix-metrics = { path = "../metrics" }
 axum = "0.8.8"
 # Default features build mimalloc v3 from 0.1.49 on; keep the `v2` feature off.

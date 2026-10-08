@@ -496,7 +496,6 @@ SeaweedFS 4.09 or later enforce both.
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
 | `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` | Most unpublished vector work, in bytes, one `strong` vector search scores before it fails with `index_backpressure`; defaults to the index's retained-byte limit (1,000,000,000), which writes reach first. See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 | `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` | Most unpublished text, in analysis bytes, one `strong` text search includes per partition before it fails with `index_backpressure`; defaults to 512 MiB (536,870,912). See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
-| `HELIX_ENABLE_CYPHER` | Set to `true` or `1` to serve Cypher at `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`; off by default |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
 the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use
@@ -5090,11 +5089,10 @@ retry the build.
 
 Page type: Reference
 
-The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`. The
-same contract is available from a local server and a Helix Cloud gateway.
-Local servers started with `HELIX_ENABLE_CYPHER=true` also accept Cypher
-statements at `POST /v2/cypher` and provide read-only planning at
-`POST /v2/cypher/explain`; otherwise both paths return 404.
+The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`, Cypher
+statements at `POST /v2/cypher`, and read-only Cypher planning at
+`POST /v2/cypher/explain`. Local servers and Helix Cloud gateways serve the same
+contracts.
 
 ## Machine-readable specification
 
@@ -5252,10 +5250,11 @@ error codes and retry guidance, and
 [Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for
 gateway codes.
 
-## Cypher on a local server
+## Cypher
 
 Send a single statement with optional parameters and a query name. The server
-determines whether the statement reads or modifies data.
+determines whether the statement reads or modifies data. A Helix Cloud gateway
+uses that to route reads to readers and writes to the elected writer.
 
 ```http
 POST /v2/cypher
@@ -5279,8 +5278,10 @@ A successful response has ordered columns and rectangular rows:
 Each row has one cell per column. Duplicate rows are preserved unless removed
 by the query, and row order requires `ORDER BY`. Successful writes without
 `RETURN` produce empty `columns` and `rows`. Each modifying statement uses one
-atomic transaction. The read/write execution headers above apply; Cloud
-database-selection headers do not select a database on a standalone server.
+atomic transaction. The authentication and read/write execution headers above
+apply. A read-only Helix Cloud API key can read and explain, but receives `403`
+for a modifying statement. Cloud database-selection headers do not select a
+database on a standalone server.
 
 The profile includes fixed-length `MATCH` and `OPTIONAL MATCH`, `WHERE`, `WITH`,
 `RETURN`, `UNWIND`, aggregation, ordering and windows, and `CREATE`, property
@@ -5292,8 +5293,7 @@ deletion fails if relationships remain; `DETACH DELETE` removes those relationsh
 
 `MERGE`, variable-length or shortest paths, `UNION`, subqueries, comprehensions,
 procedures, schema DDL, temporal/spatial functions, and Bolt are deferred. They
-produce specific unsupported-feature errors. Cypher Cloud gateway deployment
-is outside this local profile.
+produce specific unsupported-feature errors.
 
 ### Lossless JSON values
 
@@ -5325,7 +5325,11 @@ failures return `500`; writer requirements or uncertain commits return `503`.
 An uncertain commit includes `retryable:false` and must not be retried automatically.
 
 The local request and response limits are 16 MiB, with a default 30-second query
-deadline. An oversized request returns `400` with `invalid_request_body`.
+deadline. An oversized request returns `400` with `invalid_request_body`. A Helix
+Cloud gateway accepts request bodies up to 2 MiB and returns `413` with
+`payload_too_large` above that. Its query time limit returns `408`, and its rate
+limit applies as for `POST /v2/query`. Gateway authentication, rate-limit and
+availability errors use the native envelope.
 Resource exhaustion returns an error instead of a truncated successful result.
 
 Send the same request to `POST /v2/cypher/explain` to inspect selected access
@@ -5875,13 +5879,14 @@ Page type: Guide
 
 Helix Cloud runs a dedicated writer and horizontally scalable readers behind a routing
 gateway. Applications send the same dynamic operation-tree request used in local and
-embedded modes.
+embedded modes, or a Cypher statement to `POST /v2/cypher`, which the gateway routes
+by whether the statement writes.
 
 ## Request flow
 
 ```text
 application
-   │ POST /v2/query
+   │ POST /v2/query or POST /v2/cypher
    ▼
 gateway
    ├── read request ──► reader
@@ -6656,9 +6661,10 @@ contract. HTTP 429 rate limiting below is a separate mechanism.
 
 ## Helix Cloud request rate limits
 
-Helix Cloud applies a distributed token bucket to `POST /v2/query`. The bucket is
-scoped to the authenticated Cloud database, so reads and writes from every API
-key, application instance, and gateway replica draw from the same allowance.
+Helix Cloud applies a distributed token bucket to `POST /v2/query`,
+`POST /v2/cypher` and `POST /v2/cypher/explain`. The bucket is scoped to the
+authenticated Cloud database, so reads and writes from every API key, application
+instance, and gateway replica draw from the same allowance.
 
 | Plan | Sustained rate | Burst capacity |
 | --- | ---: | ---: |
