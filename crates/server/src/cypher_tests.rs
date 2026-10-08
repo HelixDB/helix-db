@@ -546,7 +546,11 @@ async fn cypher_executions_emit_anonymous_query_telemetry() {
         "http://127.0.0.1:9",
     )
     .unwrap();
-    let state = state::ServerState::new(Arc::clone(&db), Some(started.recorder.clone()));
+    let state = state::ServerState::new(
+        Arc::clone(&db),
+        Some(started.recorder.clone()),
+        crate::StorageConfig::Memory,
+    );
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
 
