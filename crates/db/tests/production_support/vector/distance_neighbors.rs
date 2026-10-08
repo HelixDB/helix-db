@@ -227,6 +227,57 @@ pub(crate) fn run() {
         }
     }
 
+    // Integer components keep every square and partial sum exact, so the
+    // dispatched and every direct f64 sum-of-squares kernel must match exactly
+    // across the 16 and 32 wide main loops and their one-component tails.
+    let squared_norm = f64::from((0..33_u32).map(|value| value * value).sum::<u32>());
+    assert_eq!(spaces::simple::squared_l2_norm(&long_left), squared_norm);
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE2 is part of the x86_64 baseline, AVX and FMA are checked
+        // at runtime, and each kernel reads only `long_left`'s components.
+        assert_eq!(
+            unsafe { spaces::simple_sse::squared_norm_sse2(&long_left) },
+            squared_norm
+        );
+        if std::arch::is_x86_feature_detected!("avx") {
+            assert_eq!(
+                unsafe { spaces::simple_avx::squared_norm_avx(&long_left) },
+                squared_norm
+            );
+        }
+        if std::arch::is_x86_feature_detected!("avx") && std::arch::is_x86_feature_detected!("fma")
+        {
+            assert_eq!(
+                unsafe { spaces::simple_avx::squared_norm_avx_fma(&long_left) },
+                squared_norm
+            );
+        }
+    }
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: AArch64 NEON availability is checked at runtime and the
+        // kernel reads only `long_left`'s components.
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            assert_eq!(
+                unsafe { spaces::simple_neon::squared_norm_neon(&long_left) },
+                squared_norm
+            );
+        }
+    }
+
+    // The stored cosine norm must keep its pre-SIMD bits on every kernel. This
+    // norm sits within an f64 rounding of the f32 midpoint 2^24 + 1: the fast
+    // sum rounds it up while the scaled reference loop ties to even below, so
+    // the guard must fall back. Zero padding to 33 sends the fast sum through
+    // the 16 and 32 wide kernels as well as the scalar one.
+    for dimension in [3, 33] {
+        let mut boundary = vec![0.0_f32; dimension];
+        boundary[..3].copy_from_slice(&[16_777_215.0, 9.0 / 32.0, 8192.0]);
+        let boundary = unaligned_vector::UnalignedVector::<f32>::from_vec(boundary);
+        assert_eq!(distance::Cosine::norm_no_header(&boundary), 16_777_216.0);
+    }
+
     let mismatched = unaligned_vector::UnalignedVector::<f32>::from_slice(&[1.0, 2.0]);
     for rejected in [
         std::panic::catch_unwind(|| spaces::simple::dot_product(&short_left, &mismatched)),

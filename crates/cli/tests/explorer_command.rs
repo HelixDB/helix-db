@@ -9,7 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CONTAINER: &str = "helix-explorer-project-dev";
 const EXPLORER: &str = "helix-explorer-project-dev.explorer";
-const DEFAULT_IMAGE: &str = "ghcr.io/helixdb/helix-explorer:latest";
+const DEFAULT_IMAGE: &str = "ghcr.io/helixdb/helix-explorer:v0.1.0";
 const IDENTITY: &str = "16:explorer-project/dev";
 
 fn stdout_json(assert: Assert) -> Value {

@@ -589,7 +589,7 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/restricted.rs",
-    "line": 1324,
+    "line": 1339,
     "reason": "Scoring skips nodes it has already scored, so each node enters the restricted frontier at most once and inserting a popped node into the expanded set always succeeds; this closing edge belongs to the never-taken repeat case.",
     "evidence": "vector_restricted_search_exercises_bounded_graph_and_directory_paths"
   },
@@ -616,5 +616,17 @@
     "line": 252,
     "reason": "The reader-outrun branch is exercised, but LLVM does not attribute the tracing macro field expression to the enclosing covered branch.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/storage/mod.rs",
+    "line": 2291,
+    "reason": "The reverse-edge scan prefix includes the exact target node ID, so a successfully parsed locator under that prefix cannot contain another target.",
+    "evidence": "vector_storage_exercises_all_current_row_families"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 1790,
+    "reason": "load_neighbors_for_mutation has just cached this row, so staging cannot reach the unloaded-row guard. The staged known-absent value encodes nothing, and the loaded row re-encodes within the degree bound it was decoded under, so payload accounting cannot fail.",
+    "evidence": "vector_mutation_cache_exercises_closed_state_transitions"
   }
 ]
