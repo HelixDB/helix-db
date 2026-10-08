@@ -147,60 +147,30 @@ impl std::io::Write for JsonFnv64 {
     }
 }
 
-/// A 64-bit hash that absorbs one 64-bit word per multiply: each word is
-/// folded into the state with a full 128-bit product, as wyhash does, so
-/// hashing costs a multiply per eight bytes rather than one per byte.
-/// Words are read little-endian, so digests match across platforms.
-#[derive(Debug)]
+/// The standard library's hasher (SipHash-1-3) with its default keys, fed
+/// the digest's encoding. SipHash mixes every input word through several
+/// rounds of a 256-bit state, so no chosen literal can cancel what was hashed
+/// before it, and the fixed keys keep digests the same in every run of a
+/// build. Words are written little-endian, so digests match across
+/// platforms.
+#[derive(Debug, Default)]
 struct StableHasher {
-    state: u64,
-    words: u64,
-}
-
-impl Default for StableHasher {
-    fn default() -> Self {
-        Self {
-            state: 0x243f_6a88_85a3_08d3,
-            words: 0,
-        }
-    }
-}
-
-const STATE_KEY: u64 = 0xa076_1d64_78bd_642f;
-const WORD_KEY: u64 = 0xe703_7ed1_a0b4_28db;
-
-/// The high and low halves of `a * b`, xored.
-const fn fold(a: u64, b: u64) -> u64 {
-    let product = (a as u128) * (b as u128);
-    (product as u64) ^ ((product >> 64) as u64)
+    hasher: std::hash::DefaultHasher,
 }
 
 impl StableHasher {
     fn word(&mut self, word: u64) {
-        self.state = fold(self.state ^ STATE_KEY, word ^ WORD_KEY);
-        self.words += 1;
+        std::hash::Hasher::write(&mut self.hasher, &word.to_le_bytes());
     }
 
     /// Bytes with their length, so adjacent strings cannot run together.
     fn bytes(&mut self, bytes: &[u8]) {
-        const WORD: usize = size_of::<u64>();
         self.word(bytes.len() as u64);
-        let mut chunks = bytes.chunks_exact(WORD);
-        for chunk in &mut chunks {
-            self.word(u64::from_le_bytes(
-                chunk.try_into().expect("exact chunks are one word"),
-            ));
-        }
-        let rest = chunks.remainder();
-        if !rest.is_empty() {
-            let mut last = [0; WORD];
-            last[..rest.len()].copy_from_slice(rest);
-            self.word(u64::from_le_bytes(last));
-        }
+        std::hash::Hasher::write(&mut self.hasher, bytes);
     }
 
-    const fn finish(&self) -> u64 {
-        fold(self.state ^ self.words, STATE_KEY ^ WORD_KEY)
+    fn finish(&self) -> u64 {
+        std::hash::Hasher::finish(&self.hasher)
     }
 }
 
@@ -370,46 +340,31 @@ impl<'h> ser::Serializer for &mut DigestSerializer<'h> {
         Ok(())
     }
 
-    /// Streams the text in words instead of formatting it into a `String`.
+    /// Streams the text into the hasher instead of formatting it into a
+    /// `String`, then its length.
     fn collect_str<T>(self, value: &T) -> Result<(), DigestError>
     where
         T: ?Sized + std::fmt::Display,
     {
-        struct Words<'a> {
+        struct Text<'a> {
             hasher: &'a mut StableHasher,
-            pending: [u8; 8],
-            filled: usize,
             len: u64,
         }
-        impl std::fmt::Write for Words<'_> {
+        impl std::fmt::Write for Text<'_> {
             fn write_str(&mut self, text: &str) -> std::fmt::Result {
-                for byte in text.bytes() {
-                    self.pending[self.filled] = byte;
-                    self.filled += 1;
-                    if self.filled == self.pending.len() {
-                        self.hasher.word(u64::from_le_bytes(self.pending));
-                        self.filled = 0;
-                    }
-                }
+                std::hash::Hasher::write(&mut self.hasher.hasher, text.as_bytes());
                 self.len += text.len() as u64;
                 Ok(())
             }
         }
         self.tag(Tag::DisplayStr);
-        let mut words = Words {
+        let mut text = Text {
             hasher: &mut *self.hasher,
-            pending: [0; 8],
-            filled: 0,
             len: 0,
         };
-        std::fmt::Write::write_fmt(&mut words, format_args!("{value}"))
+        std::fmt::Write::write_fmt(&mut text, format_args!("{value}"))
             .map_err(|_| <DigestError as ser::Error>::custom("Display implementation failed"))?;
-        let (pending, filled, len) = (words.pending, words.filled, words.len);
-        if filled > 0 {
-            let mut last = [0; 8];
-            last[..filled].copy_from_slice(&pending[..filled]);
-            self.hasher.word(u64::from_le_bytes(last));
-        }
+        let len = text.len;
         self.hasher.word(len);
         Ok(())
     }
@@ -749,6 +704,70 @@ mod tests {
                 assert_ne!(digest, other, "{index} and {other_index}");
             }
         }
+    }
+
+    /// The literal that zeroed the previous hasher's state (its word key read
+    /// as an `i64`), and other words that might cancel a key or the state.
+    const ADVERSARIAL_WORDS: [u64; 6] = [
+        0xe703_7ed1_a0b4_28db,
+        0xa076_1d64_78bd_642f,
+        0,
+        u64::MAX,
+        0x243f_6a88_85a3_08d3,
+        0x8000_0000_0000_0000,
+    ];
+
+    #[test]
+    fn no_word_discards_what_was_hashed_before_it() {
+        for word in ADVERSARIAL_WORDS {
+            let digests = (0..4_000_u64)
+                .map(|prefix| PlanDigest::for_value(&(prefix, word as i64, "suffix")))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(digests.len(), 4_000, "{word:#x}");
+        }
+    }
+
+    /// Literals chosen per value to cancel everything hashed before them under
+    /// an earlier hasher, whose step was `(rotl(state, 5) ^ word) * odd`:
+    /// for each prefix the literal `rotl(state, 5) ^ c` left every value in
+    /// the same state, so all 4,000 shared one digest.
+    #[test]
+    fn literals_chosen_to_cancel_a_prefix_keep_distinct_digests() {
+        let step = |state: u64, word: u64| {
+            (state.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95)
+        };
+        let digests = (0..4_000_u64)
+            .map(|prefix| {
+                // The words `(prefix, literal)` hashes to, up to the literal.
+                let state = [
+                    Tag::Seq as u64,
+                    Tag::Unsigned as u64,
+                    prefix,
+                    Tag::Signed as u64,
+                ]
+                .into_iter()
+                .fold(0x243f_6a88_85a3_08d3, step);
+                let literal = (state.rotate_left(5) ^ 0x1234_5678) as i64;
+                PlanDigest::for_value(&(prefix, literal))
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(digests.len(), 4_000);
+    }
+
+    /// Filters that share the old hasher's zeroing literal but differ before
+    /// it once collapsed into one memo bucket.
+    #[test]
+    fn predicates_sharing_a_literal_keep_distinct_digests() {
+        let literal = -1_800_455_987_208_640_293_i64;
+        let digests = (0..4_000)
+            .map(|property| {
+                PlanDigest::for_value(&helix_ast::expr::Predicate::eq(
+                    format!("p{property}"),
+                    literal,
+                ))
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(digests.len(), 4_000);
     }
 
     #[test]

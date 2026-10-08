@@ -33,7 +33,10 @@ below), which raises the bulk peaks again. The heap held while the bulk insert e
 Peak heap figures are requested bytes. "main" is `main`'s stage order: the body and AST are held through
 execution and the parameters are copied. Front-end times are single-threaded medians of three runs.
 
-**JSON backend.** JSON is now parsed and serialised with simd-json instead of sonic-rs (`b74a1a4b`).
+**JSON backend.** JSON is now parsed with simd-json instead of sonic-rs (`b74a1a4b`), and serialised
+with serde_json. simd-json widens every `f32` to `f64` digits when it serialises (`0.9` becomes
+`0.8999999761581421`): a batch of 1,100 embeddings of 768 values grew past the 16 MiB body limit, so
+requests and responses are written with serde_json, which keeps the shortest form, as sonic-rs did.
 This was a decision, not something the benchmarks below asked for. simd-json picks AVX2, SSE4.2, NEON or a
 portable path at runtime, so one generic x86_64 image runs SIMD code, which closes F5. What it costs:
 

@@ -259,6 +259,18 @@ impl Client {
 
     /// Plan one Cypher statement without executing it, returning the
     /// `POST /v2/cypher/explain` JSON. Planning a modifying statement writes nothing.
+    /// Planning checks parameters, so supply every parameter the statement uses.
+    ///
+    /// ```no_run
+    /// # async fn example(client: helix_db::Client) -> Result<(), helix_db::HelixError> {
+    /// let params = std::collections::BTreeMap::from([("name".to_string(), serde_json::json!("Ada"))]);
+    /// let plan = client
+    ///     .explain_cypher("CREATE (:User {name: $name})", params, None)
+    ///     .await?;
+    /// assert_eq!(plan["effect"], "Write");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn explain_cypher(
         &self,
         query: &str,
@@ -302,7 +314,7 @@ impl CypherExecutionRequest<'_, '_> {
                     .cypher(self.embedded_request()?)
                     .await
                     .map_err(embedded_cypher_error)?;
-                simd_json::to_vec(&response)?
+                serde_json::to_vec(&response)?
             }
         };
         Ok(simd_json::from_slice(&mut bytes)?)
@@ -325,7 +337,7 @@ impl CypherExecutionRequest<'_, '_> {
                     .explain_cypher(self.embedded_request()?)
                     .await
                     .map_err(embedded_cypher_error)?;
-                simd_json::to_vec(&explanation)?
+                serde_json::to_vec(&explanation)?
             }
         };
         Ok(simd_json::from_slice(&mut bytes)?)
@@ -339,7 +351,7 @@ impl CypherExecutionRequest<'_, '_> {
             .map_err(|e| HelixError::InvalidURL(e.to_string()))?;
         let response = server
             .post(url, &self.headers)
-            .body(simd_json::to_vec(&self.body)?)
+            .body(serde_json::to_vec(&self.body)?)
             .send()
             .await?;
         match response.status() {
@@ -359,7 +371,7 @@ impl CypherExecutionRequest<'_, '_> {
                 details: "request options require server mode".to_string(),
             });
         }
-        Ok(simd_json::from_reader(&simd_json::to_vec(&self.body)?[..])?)
+        Ok(serde_json::from_value(self.body.clone())?)
     }
 }
 
@@ -472,6 +484,15 @@ pub enum HelixError {
         /// Error text from the embedded DB layer.
         details: String,
     },
+}
+
+/// Requests are written with serde_json, which keeps each `f32` in its
+/// shortest form; responses are read with simd-json. Both failures are
+/// serialization errors.
+impl From<serde_json::Error> for HelixError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::SerializationError(<simd_json::Error as serde::ser::Error>::custom(error))
+    }
 }
 
 impl HelixError {
@@ -926,7 +947,7 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
             ClientBackend::Server(server) => {
                 let response = server
                     .post(server.url.clone(), &self.headers)
-                    .body(simd_json::to_vec(&self.query)?)
+                    .body(serde_json::to_vec(&self.query)?)
                     .send()
                     .await?;
                 match response.status() {
@@ -947,7 +968,7 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
                         details: "request options require server mode".to_string(),
                     });
                 }
-                let request = simd_json::to_vec(&self.query)?;
+                let request = serde_json::to_vec(&self.query)?;
                 db.query_json(&request)
                     .await
                     .map(|body| QueryResponse {

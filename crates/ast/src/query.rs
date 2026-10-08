@@ -218,7 +218,7 @@ impl From<&QueryValue> for PropertyValue {
 #[derive(Debug)]
 pub enum QueryError {
     /// JSON serialization error.
-    Serialize(simd_json::Error),
+    Serialize(serde_json::Error),
     /// UTF-8 conversion error.
     Utf8(std::string::FromUtf8Error),
     /// Bytes cannot be represented safely in query parameters.
@@ -326,8 +326,8 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-impl From<simd_json::Error> for QueryError {
-    fn from(value: simd_json::Error) -> Self {
+impl From<serde_json::Error> for QueryError {
+    fn from(value: serde_json::Error) -> Self {
         Self::Serialize(value)
     }
 }
@@ -760,9 +760,12 @@ impl QueryRequest {
         self
     }
 
-    /// Serialize to JSON bytes.
+    /// Serialize to JSON bytes, with serde_json: it writes each `f32` in its
+    /// shortest form (`0.9`), where simd-json widens it to `f64` digits
+    /// (`0.8999999761581421`), which more than doubles bulk vector requests.
+    /// Parsing uses simd-json.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, QueryError> {
-        Ok(simd_json::to_vec(self)?)
+        Ok(serde_json::to_vec(self)?)
     }
 
     /// Serialize to JSON string.
@@ -1501,6 +1504,40 @@ mod validation_oracle;
 mod tests {
     use super::*;
     use crate::batch::{read_batch, write_batch};
+
+    /// Each `f32` is written in its shortest form: widened to `f64` digits, a
+    /// batch of 1,100 embeddings of 768 values grew past the 16 MiB body
+    /// limit while decoding to the same vectors.
+    #[test]
+    fn requests_write_f32_values_in_their_shortest_form() {
+        let request = |embedding: Vec<f32>| {
+            QueryRequest::write(write_batch().var_as(
+                "doc",
+                crate::traversal::g().add_n(
+                    "Doc",
+                    vec![("embedding", PropertyValue::F32Array(embedding))],
+                ),
+            ))
+        };
+        let small = request(vec![0.9, 0.1, -0.25, 1.0e-3]);
+        let json = small.to_json_string().unwrap();
+        assert!(json.contains("[0.9,0.1,-0.25,0.001]"), "{json}");
+        assert_eq!(
+            QueryRequest::from_json_slice(json.as_bytes()).unwrap(),
+            small
+        );
+
+        // Four-decimal values take at most eight bytes each with a separator,
+        // where widened ones took about twenty.
+        let embedding = (0..768_i32)
+            .map(|index| {
+                let ten_thousandths = i16::try_from(index * 37 % 19_999 - 9_999).unwrap();
+                f32::from(ten_thousandths) / 10_000.0
+            })
+            .collect::<Vec<_>>();
+        let bulk = request(embedding).to_json_bytes().unwrap();
+        assert!(bulk.len() < 768 * 8 + 200, "{} bytes", bulk.len());
+    }
 
     #[test]
     fn built_requests_and_parameters_are_bounded_without_recursion() {
