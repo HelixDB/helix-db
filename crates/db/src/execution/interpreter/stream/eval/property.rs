@@ -456,8 +456,13 @@ impl CachedPropertyBlob {
 }
 
 /// Validates a stored record, borrowing aligned copies from `buffers`.
+///
+/// Under a row-memory budget the record is copied, so its charged read is
+/// released right after validation, where the full decoder released it, and
+/// cached rows never hold budget the decoded rows did not. Otherwise an
+/// aligned record is read in place.
 fn decode_blob(
-    #[cfg_attr(not(test), allow(unused_variables))] context: &ExecutionContext<'_>,
+    context: &ExecutionContext<'_>,
     buffers: &mut view::Buffers,
     value: Option<bytes::Bytes>,
 ) -> Result<CachedPropertyBlob> {
@@ -466,7 +471,11 @@ fn decode_blob(
     };
     #[cfg(test)]
     context.record_property_decode();
-    Ok(CachedPropertyBlob::Row(view::Row::new(value, buffers)?))
+    let row = match context.row_memory {
+        Some(_) => view::Row::copy(&value, buffers)?,
+        None => view::Row::new(value, buffers)?,
+    };
+    Ok(CachedPropertyBlob::Row(row))
 }
 
 #[derive(Clone, Copy)]

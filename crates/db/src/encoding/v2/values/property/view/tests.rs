@@ -100,19 +100,26 @@ proptest! {
             matches!(row.0, Storage::Shared(_)),
             !data.is_empty() && data.as_ptr().align_offset(PROPERTY_ALIGNMENT) == 0
         );
-        prop_assert!(same(&row.decode().unwrap(), &full));
-        for name in full
-            .iter()
-            .map(|property| property.name.as_str())
-            .chain(["missing", ""])
-        {
-            let first = full.iter().find(|property| property.name == name);
-            match (row.value(name).unwrap(), first) {
-                (Some(actual), Some(first)) => {
-                    prop_assert!(actual.same_v1_representation(&first.value));
+        let copy = Row::copy(&data, &mut Buffers::default()).unwrap();
+        prop_assert_eq!(
+            matches!(copy.0, Storage::Copied(_)),
+            !data.is_empty()
+        );
+        for row in [row, copy] {
+            prop_assert!(same(&row.decode().unwrap(), &full));
+            for name in full
+                .iter()
+                .map(|property| property.name.as_str())
+                .chain(["missing", ""])
+            {
+                let first = full.iter().find(|property| property.name == name);
+                match (row.value(name).unwrap(), first) {
+                    (Some(actual), Some(first)) => {
+                        prop_assert!(actual.same_v1_representation(&first.value));
+                    }
+                    (None, None) => {}
+                    (actual, first) => prop_assert!(false, "{name}: {actual:?} vs {first:?}"),
                 }
-                (None, None) => {}
-                (actual, first) => prop_assert!(false, "{name}: {actual:?} vs {first:?}"),
             }
         }
     }
@@ -141,7 +148,8 @@ proptest! {
             let expected = decode_properties(&data);
             let selected = decode_selected(&data, &mut Scratch::new(), |_| true);
             let read = Row::new(data.clone(), &mut Buffers::default()).and_then(|row| row.decode());
-            for actual in [selected, read] {
+            let copied = Row::copy(&data, &mut Buffers::default()).and_then(|row| row.decode());
+            for actual in [selected, read, copied] {
                 match (&expected, actual) {
                     (Ok(expected), Ok(actual)) => prop_assert!(same(&actual, expected)),
                     (Err(expected), Err(actual)) => {
@@ -166,6 +174,10 @@ fn empty_rows_are_empty_without_validation() {
         .is_empty());
     let row = Row::new(Bytes::new(), &mut Buffers::default()).unwrap();
     assert!(matches!(row.0, Storage::Empty));
+    assert!(matches!(
+        Row::copy(&[], &mut Buffers::default()).unwrap().0,
+        Storage::Empty
+    ));
     assert!(row.properties().is_empty());
     assert_eq!(row.value("anything").unwrap(), None);
     assert_eq!(row.decode().unwrap(), Vec::new());
@@ -233,11 +245,23 @@ fn unaligned_rows_reuse_released_copies_and_aligned_rows_never_copy() {
     );
     row.recycle(&mut buffers);
 
+    // A forced copy of an aligned row also reuses released copies.
+    let row = Row::copy(&aligned, &mut buffers).unwrap();
+    assert!(buffers.0.is_empty());
+    assert!(matches!(&row.0, Storage::Copied(copy) if copy.as_ptr() == address));
+    assert_eq!(
+        row.value("name").unwrap(),
+        Some(PropertyValue::String("ada".into()))
+    );
+    row.recycle(&mut buffers);
+    assert_eq!(buffers.0.len(), 1);
+
     // A rejected row drops the copy it validated.
     let corrupt = placed(b"corrupt", 1);
     assert!(Row::new(corrupt.clone(), &mut buffers).is_err());
     assert!(buffers.0.is_empty());
     assert!(decode_properties(&corrupt).is_err());
+    assert!(Row::copy(&placed(b"corrupt", 0), &mut Buffers::default()).is_err());
 
     // The access scratch is only written for unaligned rows.
     let mut scratch = Scratch::new();
