@@ -98,13 +98,14 @@ impl Buffers {
 /// Construction is the only validation; every later read relies on it, so
 /// the bytes behind a `Row` are never mutated.
 ///
-/// An aligned row keeps the storage `Bytes` it was read as, which may be a
-/// slice of a larger memtable or block buffer. Unlike the request read
-/// cache, which copies values it keeps so a small value cannot pin a large
-/// buffer (see `Budget::copy_read`), a `Row` lives only as long as one
-/// predicate evaluation or one record batch of at most
-/// `RECORD_BATCH_ROWS` rows, and its row bytes stay charged to the request
-/// budget while it is held.
+/// A row from [`Row::new`] at an aligned address keeps the storage `Bytes`
+/// it was read as, which may be a slice of a larger memtable or block buffer.
+/// Unlike the request read cache, which copies values it keeps so a small
+/// value cannot pin a large buffer (see `Budget::copy_read`), a `Row` lives
+/// only as long as one predicate evaluation or one record batch of at most
+/// `RECORD_BATCH_ROWS` rows. A caller that must release the bytes at once,
+/// such as one whose bytes are charged to a request budget, uses
+/// [`Row::copy`].
 pub(crate) struct Row(Storage);
 
 enum Storage {
@@ -138,6 +139,22 @@ impl Row {
         } else {
             Storage::Copied(copy)
         }))
+    }
+
+    /// Validates a copy of `data` in a buffer taken from `buffers`, so the
+    /// caller can drop `data` at once, as after [`super::decode_properties`].
+    /// Fails exactly when that function fails on the same bytes.
+    pub(crate) fn copy(data: &[u8], buffers: &mut Buffers) -> Result<Self, EncodingError> {
+        if data.is_empty() {
+            return Ok(Self(Storage::Empty));
+        }
+        let mut copy = buffers.0.pop().unwrap_or_default();
+        copy.clear();
+        copy.extend_from_slice(data);
+        // The copy is aligned, so validation reads it in place and never
+        // touches this empty scratch.
+        access(copy.as_slice(), &mut Scratch::new())?;
+        Ok(Self(Storage::Copied(copy)))
     }
 
     /// The validated archived properties, in stored order.

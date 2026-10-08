@@ -805,3 +805,47 @@ async fn a_scanned_record_is_accounted_for_as_a_storage_read_only_when_read() {
     );
     db.close().await.unwrap();
 }
+
+/// Under a row-memory budget a record the resolver caches holds no charge
+/// once loaded, as the decoded rows of the full decoder held none: prefetched
+/// and single reads release their charge right after validation, and the
+/// cached rows still read as stored.
+#[tokio::test]
+async fn budgeted_resolvers_release_record_charges_once_loaded() {
+    let db = test_support::open_db("stream-eval-resolver-budget-release").await;
+    for (id, stored) in [(1, "one"), (2, "two"), (3, "three")] {
+        db.inner_db()
+            .put(
+                node_property_key(id),
+                crate::encoding::property::encode_properties(&[
+                    Property::string("name", stored),
+                    Property::bytes("blob", vec![1; 4096]),
+                ]),
+            )
+            .await
+            .unwrap();
+    }
+    let limit = 1 << 20;
+    let budget = crate::query_resources::Budget::new(limit);
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(budget.clone());
+    let mut resolver = RowValueResolver::new(&ctx);
+    resolver
+        .prefetch(&[ElementRef::Node(1), ElementRef::Node(2)])
+        .await
+        .unwrap();
+    assert!(budget.peak() >= 2 * 4096, "{}", budget.peak());
+    assert_eq!(budget.available(), limit);
+    for (id, stored) in [(1, "one"), (2, "two"), (3, "three")] {
+        assert_eq!(
+            resolver
+                .row_property(&current_node(id), &name("name"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::String(stored.into()))
+        );
+        assert_eq!(budget.available(), limit);
+    }
+    drop(resolver.into_buffers());
+    db.close().await.unwrap();
+}
