@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use super::super::AccessFilterRewrite;
-use crate::{catalog, context, digest, logical};
+use crate::{catalog, context, digest, ir, logical};
 
 thread_local! {
     static RUN: RefCell<Option<RunCache>> = const { RefCell::new(None) };
@@ -24,10 +24,38 @@ struct RunCache {
     /// the run, so no other catalog can have its address meanwhile.
     indexes: *const catalog::IndexCatalogSnapshot,
     planner_limits: context::PlannerLimits,
-    /// Rewrites by filter, bucketed by the filter's identity digest. A filter
-    /// matches only an equal filter with the same digest, so filters that
-    /// differ only in the sign of a zero literal never share a rewrite.
-    rewrites: HashMap<digest::PlanDigest, Vec<(logical::AccessFilter, AccessFilterRewrite)>>,
+    /// Rewrites by the identity digests of a filter's access path and
+    /// predicate, confirmed with [`same_filter`]. Identity digests tell the
+    /// signs of zero apart, so filters that differ only in the sign of a zero
+    /// literal never share a rewrite.
+    rewrites: HashMap<FilterKey, Vec<(logical::AccessFilter, AccessFilterRewrite)>>,
+    /// The predicate digest of each filter stored in `rewrites`, by where its
+    /// predicate lives. The rules that ask for one filter's rewrite usually
+    /// hold clones of one filter, so this spares serializing the predicate on
+    /// their lookups. Only stored filters' predicates are recorded, and the
+    /// stored filter keeps its predicate alive, so no other predicate can
+    /// take a recorded address meanwhile.
+    predicate_digests: HashMap<usize, digest::PlanDigest>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FilterKey {
+    access: digest::PlanDigest,
+    predicate: digest::PlanDigest,
+}
+
+/// The same filter as `known`, given matching digests: an equal access path
+/// and predicate, the predicate compared by allocation first.
+fn same_filter(known: &logical::AccessFilter, filter: &logical::AccessFilter) -> bool {
+    let (known_predicate, predicate) = (known.predicate(), filter.predicate());
+    let shared = std::ptr::eq(known_predicate.predicate(), predicate.predicate())
+        && std::ptr::eq(known_predicate.resolved(), predicate.resolved());
+    (shared || known_predicate == predicate) && known.access() == filter.access()
+}
+
+/// Where `predicate` lives, to key [`RunCache::predicate_digests`].
+fn allocation(predicate: &ir::PredicatePlan) -> usize {
+    std::ptr::from_ref(predicate.predicate()).addr()
 }
 
 /// Runs `run` with index rewrites under `indexes` and `planner_limits` cached
@@ -51,6 +79,7 @@ pub(crate) fn with_run_cache<R>(
             indexes,
             planner_limits: planner_limits.clone(),
             rewrites: HashMap::new(),
+            predicate_digests: HashMap::new(),
         })
     });
     let _restore = Restore(enclosing);
@@ -71,32 +100,43 @@ pub(super) fn cached(
         let run = cache.as_ref().filter(|run| {
             std::ptr::eq(run.indexes, indexes) && run.planner_limits == *planner_limits
         })?;
-        let digest = digest::PlanDigest::for_value(filter);
+        let predicate = run
+            .predicate_digests
+            .get(&allocation(filter.predicate()))
+            .copied()
+            .unwrap_or_else(|| digest::PlanDigest::for_value(filter.predicate()));
+        let key = FilterKey {
+            access: digest::PlanDigest::for_value(filter.access()),
+            predicate,
+        };
         let known = run
             .rewrites
-            .get(&digest)
-            .and_then(|known| known.iter().find(|(known, _)| known == filter))
+            .get(&key)
+            .and_then(|known| known.iter().find(|(known, _)| same_filter(known, filter)))
             .map(|(_, rewrite)| rewrite.clone());
-        Some((digest, known))
+        Some((key, known))
     });
-    match lookup {
-        None => derive(),
-        Some((_, Some(rewrite))) => rewrite,
-        Some((digest, None)) => {
-            let rewrite = derive();
-            RUN.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                let Some(run) = cache.as_mut() else {
-                    return;
-                };
-                run.rewrites
-                    .entry(digest)
-                    .or_default()
-                    .push((filter.clone(), rewrite.clone()));
-            });
-            rewrite
-        }
+    let (key, known) = match lookup {
+        None => return derive(),
+        Some(lookup) => lookup,
+    };
+    if let Some(rewrite) = known {
+        return rewrite;
     }
+    let rewrite = derive();
+    RUN.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let Some(run) = cache.as_mut() else {
+            return;
+        };
+        run.predicate_digests
+            .insert(allocation(filter.predicate()), key.predicate);
+        run.rewrites
+            .entry(key)
+            .or_default()
+            .push((filter.clone(), rewrite.clone()));
+    });
+    rewrite
 }
 
 #[cfg(test)]
@@ -141,26 +181,33 @@ mod tests {
         derive_count(&filter("User"), &indexes, &limits, &derived);
         assert_eq!(derived.get(), 1, "outside a run every call derives");
 
+        let user = filter("User");
         with_run_cache(&indexes, &limits, || {
-            derive_count(&filter("User"), &indexes, &limits, &derived);
-            derive_count(&filter("User"), &indexes, &limits, &derived);
+            derive_count(&user, &indexes, &limits, &derived);
+            derive_count(&user.clone(), &indexes, &limits, &derived);
             assert_eq!(derived.get(), 2, "a repeated filter is answered once");
             derive_count(&filter("Item"), &indexes, &limits, &derived);
             assert_eq!(derived.get(), 3, "a new filter derives");
-            derive_count(&filter("User"), &other_indexes, &limits, &derived);
+            derive_count(&user, &other_indexes, &limits, &derived);
             assert_eq!(derived.get(), 4, "another catalog bypasses the cache");
+            derive_count(&filter("User"), &indexes, &limits, &derived);
+            assert_eq!(
+                derived.get(),
+                4,
+                "an equal filter in other allocations is answered by digest"
+            );
 
             let other_limits = context::PlannerLimits {
                 max_index_union_branches: context::IndexUnionBranchLimit::limited(2).unwrap(),
             };
             with_run_cache(&indexes, &other_limits, || {
-                derive_count(&filter("User"), &indexes, &other_limits, &derived);
+                derive_count(&user, &indexes, &other_limits, &derived);
                 assert_eq!(derived.get(), 5, "a nested run starts empty");
             });
-            derive_count(&filter("User"), &indexes, &limits, &derived);
+            derive_count(&user, &indexes, &limits, &derived);
             assert_eq!(derived.get(), 5, "the enclosing run's cache is restored");
         });
-        derive_count(&filter("User"), &indexes, &limits, &derived);
+        derive_count(&user, &indexes, &limits, &derived);
         assert_eq!(derived.get(), 6, "the cache ends with its run");
     }
 }
