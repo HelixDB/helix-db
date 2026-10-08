@@ -11,7 +11,7 @@ use helix_ast::batch::{BatchQuery, ReadBatch, WriteBatch};
 use helix_ast::query::{QueryRequest, QueryRequestType, QueryValue};
 use helix_metrics::{query, query::transport::OssQueryMetrics};
 use helix_planner::{context::ParamBindings, diagnostics::PlannerDiagnostics, ir::NonEmptyString};
-use serde::ser::Serializer;
+use serde::ser::{SerializeMap, Serializer};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -19,7 +19,7 @@ use crate::encoding::keys::scope::DataScope;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::error::HelixDbError;
 use crate::execution::interpreter::{
-    ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue,
+    ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue, ReturnedValues,
 };
 use crate::execution_control::ExecutionControl;
 use crate::HelixDB;
@@ -166,13 +166,13 @@ impl HelixQueryService {
     }
 }
 
-pub(crate) async fn execute_query_on_observed(
+pub(crate) async fn execute_query_on_observed<B: ResponseBody>(
     db: &HelixDB,
     request: QueryRequest,
     mode: QueryMode,
     tenant_id: Option<query::TenantId>,
     query_metrics: Option<&OssQueryMetrics>,
-) -> std::result::Result<QueryResponse, QueryServiceError> {
+) -> std::result::Result<QueryResponse<B>, QueryServiceError> {
     execute_query_on_scoped_observed(
         db,
         request,
@@ -204,7 +204,7 @@ pub async fn execute_query_on_scoped(
     .await
 }
 
-pub(crate) async fn execute_query_on_scoped_observed(
+pub(crate) async fn execute_query_on_scoped_observed<B: ResponseBody>(
     db: &HelixDB,
     request: QueryRequest,
     mode: QueryMode,
@@ -212,7 +212,7 @@ pub(crate) async fn execute_query_on_scoped_observed(
     tenant_id: Option<query::TenantId>,
     query_metrics: Option<&OssQueryMetrics>,
     execution_control: ExecutionControl,
-) -> std::result::Result<QueryResponse, QueryServiceError> {
+) -> std::result::Result<QueryResponse<B>, QueryServiceError> {
     // Telemetry, planning and execution walk the request recursively. A JSON
     // request is bounded by its text; one built in memory is bounded here.
     request
@@ -258,9 +258,9 @@ impl QueryObservation {
         })
     }
 
-    fn event(
+    fn event<B>(
         self,
-        result: &std::result::Result<QueryResponse, QueryServiceError>,
+        result: &std::result::Result<QueryResponse<B>, QueryServiceError>,
         latency: std::time::Duration,
     ) -> query::QueryEvent {
         let outcome = match result {
@@ -304,12 +304,12 @@ impl QueryObservation {
     }
 }
 
-async fn execute_validated(
+async fn execute_validated<B: ResponseBody>(
     db: &HelixDB,
     query: ValidatedQuery,
     tenant_scope: DataScope,
     execution_control: ExecutionControl,
-) -> std::result::Result<QueryResponse, QueryServiceError> {
+) -> std::result::Result<QueryResponse<B>, QueryServiceError> {
     execution_control.check()?;
     let (batch, params, search_consistency) = match query {
         ValidatedQuery::Read {
@@ -341,8 +341,8 @@ async fn execute_validated(
     execution_control.check()?;
     let planning = helix_planner::planning::plan_with_diagnostics(&batch, prepared.context())?;
     execution_control.check()?;
-    let result = db
-        .execute_prepared_scoped_controlled(
+    let returns = db
+        .execute_prepared_returns_scoped_controlled(
             planning.plan(),
             params,
             tenant_scope,
@@ -352,7 +352,7 @@ async fn execute_validated(
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
-    QueryResponse::from_execution_result_with_diagnostics(result, diagnostics)
+    QueryResponse::encode(&returns, diagnostics)
 }
 
 enum ValidatedQuery {
@@ -419,52 +419,93 @@ fn query_param_bindings(
     })
 }
 
-/// JSON response for query returns.
+/// Public response for query returns, encoded once from the interpreter result.
 ///
 /// Ordinary graph-element streams expose public identity objects such as
 /// `{"$id": 7}` rather than interpreter row state. Ranked search streams add
 /// their public `$distance` or `$score` field. Rows with explicitly visible
 /// bindings, paths, or sacks retain their annotated row envelope.
+///
+/// The body is either the exact JSON bytes transports send (the default) or,
+/// for the embedded API, the equivalent `JsonValue`. Both serialize the
+/// result directly, without an intermediate tree or copies of returned rows.
+///
+/// ```
+/// use std::collections::BTreeMap;
+///
+/// use db::execution::interpreter::{ExecutionResult, ExecutionValue, ReturnedValue};
+/// use db::query_service::QueryResponse;
+/// use helix_planner::ir::NonEmptyString;
+///
+/// let response = QueryResponse::from_execution_result(ExecutionResult {
+///     last: None,
+///     variables: BTreeMap::new(),
+///     returns: BTreeMap::from([
+///         (NonEmptyString::new("users").unwrap(), ReturnedValue::EmptyList),
+///         (
+///             NonEmptyString::new("count").unwrap(),
+///             ReturnedValue::Present(ExecutionValue::Count(2)),
+///         ),
+///     ]),
+/// })
+/// .unwrap();
+/// assert_eq!(response.json_bytes(), br#"{"count":2,"users":[]}"#);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
-pub struct QueryResponse {
-    returns: BTreeMap<String, JsonValue>,
+pub struct QueryResponse<B = Vec<u8>> {
+    body: B,
     diagnostics: PlannerDiagnostics,
 }
 
 impl QueryResponse {
-    /// Convert an interpreter result into the public JSON response shape.
+    /// Encode an interpreter result as the public JSON response bytes.
     pub fn from_execution_result(
         result: ExecutionResult,
     ) -> std::result::Result<Self, QueryServiceError> {
         Self::from_execution_result_with_diagnostics(result, PlannerDiagnostics::default())
     }
 
-    /// Convert an interpreter result and its selected-plan diagnostics into a
-    /// transport response. Diagnostics remain separate from the public query
-    /// result JSON so transports can forward them through metadata channels.
+    /// Encode an interpreter result and keep its selected-plan diagnostics.
+    /// Diagnostics remain separate from the public query result JSON so
+    /// transports can forward them through metadata channels.
     pub fn from_execution_result_with_diagnostics(
         result: ExecutionResult,
         diagnostics: PlannerDiagnostics,
     ) -> std::result::Result<Self, QueryServiceError> {
-        let returns = result
-            .returns
-            .into_iter()
-            .map(|(name, value)| Ok((name.into_string(), returned_value_to_json(value)?)))
-            .collect::<std::result::Result<BTreeMap<_, _>, QueryServiceError>>()?;
+        Self::encode(&result.returns, diagnostics)
+    }
+
+    /// Borrow the exact JSON response bytes.
+    pub fn json_bytes(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Move the JSON response bytes out without copying them.
+    pub fn into_json_bytes(self) -> Vec<u8> {
+        self.body
+    }
+}
+
+impl QueryResponse<JsonValue> {
+    /// Move the embedded API value out without copying it.
+    pub(crate) fn into_value(self) -> JsonValue {
+        self.body
+    }
+}
+
+impl<B> QueryResponse<B> {
+    /// Encode the requested returns exactly once, borrowing them.
+    pub(crate) fn encode(
+        returns: &ReturnedValues,
+        diagnostics: PlannerDiagnostics,
+    ) -> std::result::Result<Self, QueryServiceError>
+    where
+        B: ResponseBody,
+    {
         Ok(Self {
-            returns,
+            body: B::encode(&ReturnsJson(returns))?,
             diagnostics,
         })
-    }
-
-    /// Serialize the response as JSON bytes.
-    pub fn to_json_bytes(&self) -> std::result::Result<Vec<u8>, QueryServiceError> {
-        sonic_rs::to_vec(self).map_err(QueryServiceError::Serialize)
-    }
-
-    /// Borrow the returned values.
-    pub fn returns(&self) -> &BTreeMap<String, JsonValue> {
-        &self.returns
     }
 
     /// Borrow the telemetry-safe diagnostics for the exact executed plan.
@@ -473,155 +514,219 @@ impl QueryResponse {
     }
 }
 
-impl Serialize for QueryResponse {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.returns.serialize(serializer)
+/// Representation a response body is encoded into.
+///
+/// Both encodings consume the same serde event stream from [`ReturnsJson`],
+/// so the embedded `JsonValue` always equals the transport bytes parsed back.
+pub(crate) trait ResponseBody: Sized {
+    fn encode(returns: &ReturnsJson<'_>) -> std::result::Result<Self, QueryServiceError>;
+}
+
+impl ResponseBody for Vec<u8> {
+    fn encode(returns: &ReturnsJson<'_>) -> std::result::Result<Self, QueryServiceError> {
+        sonic_rs::to_vec(returns).map_err(QueryServiceError::Serialize)
     }
 }
 
-fn returned_value_to_json(
-    value: ReturnedValue,
-) -> std::result::Result<JsonValue, QueryServiceError> {
-    match value {
-        ReturnedValue::Present(value) => execution_value_to_json(value),
-        ReturnedValue::EmptyList => Ok(JsonValue::Array(Vec::new())),
-        ReturnedValue::EmptyObject => Ok(JsonValue::Null),
+impl ResponseBody for JsonValue {
+    fn encode(returns: &ReturnsJson<'_>) -> std::result::Result<Self, QueryServiceError> {
+        serde_json::to_value(returns).map_err(QueryServiceError::JsonSerialize)
     }
 }
 
-fn execution_value_to_json(
-    value: ExecutionValue,
-) -> std::result::Result<JsonValue, QueryServiceError> {
-    match value {
-        ExecutionValue::Stream(rows) => rows
-            .into_iter()
-            .map(execution_row_to_json)
-            .collect::<std::result::Result<Vec<_>, QueryServiceError>>()
-            .map(JsonValue::Array),
-        ExecutionValue::FoldedStream(rows) => rows
-            .into_rows()
-            .into_iter()
-            .map(execution_row_to_json)
-            .collect::<std::result::Result<Vec<_>, QueryServiceError>>()
-            .map(JsonValue::Array),
-        ExecutionValue::Count(count) => Ok(JsonValue::from(count)),
-        ExecutionValue::Bool(value) => Ok(JsonValue::Bool(value)),
-        ExecutionValue::Scalars(values) => values
-            .into_iter()
-            .map(execution_scalar_to_json)
-            .collect::<std::result::Result<Vec<_>, QueryServiceError>>()
-            .map(JsonValue::Array),
-        ExecutionValue::IndexDdlReceipt(receipt) => {
-            serde_json::to_value(receipt).map_err(QueryServiceError::JsonSerialize)
-        }
-        ExecutionValue::IndexOperationStatus(status) => {
-            serde_json::to_value(status).map_err(QueryServiceError::JsonSerialize)
-        }
-    }
-}
+// The serializers below borrow the interpreter result and emit the public
+// JSON directly. Object keys are written in sorted order because the public
+// shape was defined by `serde_json::Map`, which sorts its keys; numbers and
+// strings reach the serializer as the same serde events that shape produced.
 
-fn execution_row_to_json(
-    row: crate::execution::interpreter::ExecutionRow,
-) -> std::result::Result<JsonValue, QueryServiceError> {
-    match row.current.as_ref() {
-        Some(current)
-            if row.bindings.is_empty()
-                && row.binding_virtual_properties.is_empty()
-                && !row.path_visible
-                && !row.sack.is_visible() =>
-        {
-            let id = match current {
-                ElementRef::Node(id) | ElementRef::Edge(id) => *id,
-            };
-            let mut object = serde_json::Map::from_iter([("$id".to_string(), JsonValue::from(id))]);
-            for property in ["$distance", "$score"] {
-                let property = NonEmptyString::new(property)
-                    .expect("public virtual property name is non-empty");
-                if let Some(value) = row.virtual_properties.get(&property) {
-                    object.insert(property.into_string(), property_value_to_json(value)?);
-                }
-            }
-            return Ok(JsonValue::Object(object));
-        }
-        Some(_) | None => {}
-    }
+/// Requested returns as one JSON object keyed by return name.
+pub(crate) struct ReturnsJson<'a>(&'a ReturnedValues);
 
-    let path = row.path_visible.then(|| {
-        JsonValue::Array(
-            row.path
-                .elements()
+impl Serialize for ReturnsJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_map(
+            self.0
                 .iter()
-                .cloned()
-                .map(element_ref_to_json)
-                .collect(),
+                .map(|(name, value)| (name.as_ref(), ReturnedJson(value))),
         )
-    });
-    let sack = if row.sack.is_visible() {
-        Some(
-            row.sack
-                .value()
-                .cloned()
-                .map(property_value_to_json)
-                .transpose()?
-                .unwrap_or(JsonValue::Null),
+    }
+}
+
+struct ReturnedJson<'a>(&'a ReturnedValue);
+
+impl Serialize for ReturnedJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self.0 {
+            ReturnedValue::Present(value) => ValueJson(value).serialize(serializer),
+            ReturnedValue::EmptyList => serializer.collect_seq(std::iter::empty::<()>()),
+            ReturnedValue::EmptyObject => serializer.serialize_unit(),
+        }
+    }
+}
+
+struct ValueJson<'a>(&'a ExecutionValue);
+
+impl Serialize for ValueJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self.0 {
+            ExecutionValue::Stream(rows) => serializer.collect_seq(rows.iter().map(RowJson)),
+            ExecutionValue::FoldedStream(folded) => {
+                serializer.collect_seq(folded.rows().iter().map(RowJson))
+            }
+            ExecutionValue::Count(count) => serializer.serialize_u64(*count as u64),
+            ExecutionValue::Bool(value) => serializer.serialize_bool(*value),
+            ExecutionValue::Scalars(values) => {
+                serializer.collect_seq(values.iter().map(ScalarJson))
+            }
+            // Lifecycle payloads keep their `JsonValue` round trip: the public
+            // shape sorts their fields by name, unlike the derived field order.
+            // They are single small values, never per-row data.
+            ExecutionValue::IndexDdlReceipt(receipt) => serde_json::to_value(receipt)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer),
+            ExecutionValue::IndexOperationStatus(status) => serde_json::to_value(status)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer),
+        }
+    }
+}
+
+static PUBLIC_DISTANCE: std::sync::LazyLock<NonEmptyString> =
+    std::sync::LazyLock::new(|| NonEmptyString::from_static("$distance"));
+static PUBLIC_SCORE: std::sync::LazyLock<NonEmptyString> =
+    std::sync::LazyLock::new(|| NonEmptyString::from_static("$score"));
+
+struct RowJson<'a>(&'a crate::execution::interpreter::ExecutionRow);
+
+impl Serialize for RowJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let row = self.0;
+        match row.current.as_ref() {
+            Some(ElementRef::Node(id) | ElementRef::Edge(id))
+                if row.bindings.is_empty()
+                    && row.binding_virtual_properties.is_empty()
+                    && !row.path_visible
+                    && !row.sack.is_visible() =>
+            {
+                let distance = row.virtual_properties.get(&PUBLIC_DISTANCE);
+                let score = row.virtual_properties.get(&PUBLIC_SCORE);
+                let mut object = serializer.serialize_map(Some(
+                    1 + usize::from(distance.is_some()) + usize::from(score.is_some()),
+                ))?;
+                distance
+                    .as_ref()
+                    .map(|value| object.serialize_entry("$distance", &PropertyJson(value)))
+                    .transpose()?;
+                object.serialize_entry("$id", id)?;
+                score
+                    .as_ref()
+                    .map(|value| object.serialize_entry("$score", &PropertyJson(value)))
+                    .transpose()?;
+                object.end()
+            }
+            Some(_) | None => {
+                let mut object = serializer.serialize_map(Some(
+                    2 + usize::from(row.path_visible) + usize::from(row.sack.is_visible()),
+                ))?;
+                object.serialize_entry("bindings", &BindingsJson(&row.bindings))?;
+                object.serialize_entry("current", &row.current.as_ref().map(ElementJson))?;
+                if row.path_visible {
+                    object.serialize_entry("path", &PathJson(row.path.elements()))?;
+                }
+                if row.sack.is_visible() {
+                    object.serialize_entry("sack", &row.sack.value().map(PropertyJson))?;
+                }
+                object.end()
+            }
+        }
+    }
+}
+
+struct BindingsJson<'a>(&'a BTreeMap<NonEmptyString, ElementRef>);
+
+impl Serialize for BindingsJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_map(
+            self.0
+                .iter()
+                .map(|(name, element)| (name.as_ref(), ElementJson(element))),
         )
-    } else {
-        None
-    };
-    let bindings = row
-        .bindings
-        .into_iter()
-        .map(|(name, value)| (name.into_string(), element_ref_to_json(value)))
-        .collect::<serde_json::Map<_, _>>();
-    let mut object = serde_json::Map::from_iter([
-        (
-            "current".to_string(),
-            row.current.map_or(JsonValue::Null, element_ref_to_json),
-        ),
-        ("bindings".to_string(), JsonValue::Object(bindings)),
-    ]);
-    if let Some(path) = path {
-        object.insert("path".to_string(), path);
-    }
-    if let Some(sack) = sack {
-        object.insert("sack".to_string(), sack);
-    }
-    Ok(JsonValue::Object(object))
-}
-
-fn execution_scalar_to_json(
-    value: ExecutionScalar,
-) -> std::result::Result<JsonValue, QueryServiceError> {
-    match value {
-        ExecutionScalar::NodeId(id) | ExecutionScalar::EdgeId(id) => Ok(JsonValue::from(id)),
-        ExecutionScalar::String(value) => Ok(JsonValue::String(value)),
-        ExecutionScalar::Value(value) => property_value_to_json(value),
-        ExecutionScalar::Object(values) => values
-            .into_iter()
-            .map(|(name, value)| Ok((name, property_value_to_json(value)?)))
-            .collect::<std::result::Result<serde_json::Map<_, _>, QueryServiceError>>()
-            .map(JsonValue::Object),
     }
 }
 
-fn property_value_to_json(
-    value: DbPropertyValue,
-) -> std::result::Result<JsonValue, QueryServiceError> {
-    serde_json::to_value(value).map_err(QueryServiceError::JsonSerialize)
+struct PathJson<'a>(&'a [ElementRef]);
+
+impl Serialize for PathJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(ElementJson))
+    }
 }
 
-fn element_ref_to_json(value: ElementRef) -> JsonValue {
-    let (kind, id) = match value {
-        ElementRef::Node(id) => ("node", id),
-        ElementRef::Edge(id) => ("edge", id),
-    };
-    JsonValue::Object(serde_json::Map::from_iter([(
-        kind.to_string(),
-        JsonValue::from(id),
-    )]))
+struct ElementJson<'a>(&'a ElementRef);
+
+impl Serialize for ElementJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let (kind, id) = match self.0 {
+            ElementRef::Node(id) => ("node", id),
+            ElementRef::Edge(id) => ("edge", id),
+        };
+        serializer.collect_map([(kind, id)])
+    }
+}
+
+struct ScalarJson<'a>(&'a ExecutionScalar);
+
+impl Serialize for ScalarJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self.0 {
+            ExecutionScalar::NodeId(id) | ExecutionScalar::EdgeId(id) => {
+                serializer.serialize_u64(*id)
+            }
+            ExecutionScalar::String(value) => serializer.serialize_str(value),
+            ExecutionScalar::Value(value) => PropertyJson(value).serialize(serializer),
+            ExecutionScalar::Object(values) => serializer.collect_map(
+                values
+                    .iter()
+                    .map(|(name, value)| (&**name, PropertyJson(value))),
+            ),
+        }
+    }
+}
+
+/// A stored property in its public JSON form.
+///
+/// `f32` elements are widened to `f64` and non-finite floats become `null`,
+/// matching the `JsonValue` numbers the public shape was defined by. Nested
+/// arrays and objects recurse here so their `f32` elements are widened too.
+struct PropertyJson<'a>(&'a DbPropertyValue);
+
+impl Serialize for PropertyJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self.0 {
+            DbPropertyValue::F32Array(values) => {
+                serializer.collect_seq(values.iter().map(|value| f64::from(*value)))
+            }
+            DbPropertyValue::Array(values) => {
+                serializer.collect_seq(values.iter().map(PropertyJson))
+            }
+            DbPropertyValue::Object(values) => serializer.collect_map(
+                values
+                    .iter()
+                    .map(|(name, value)| (name, PropertyJson(value))),
+            ),
+            DbPropertyValue::Null
+            | DbPropertyValue::Bool(_)
+            | DbPropertyValue::I64(_)
+            | DbPropertyValue::DateTime(_)
+            | DbPropertyValue::F64(_)
+            | DbPropertyValue::F32(_)
+            | DbPropertyValue::String(_)
+            | DbPropertyValue::Bytes(_)
+            | DbPropertyValue::I64Array(_)
+            | DbPropertyValue::F64Array(_)
+            | DbPropertyValue::StringArray(_) => self.0.serialize(serializer),
+        }
+    }
 }
 
 /// Query service failures mapped by transports into protocol-specific errors.
@@ -774,13 +879,11 @@ impl From<QueryServiceError> for HelixDbError {
     }
 }
 
+#[cfg(test)]
 impl QueryResponse {
-    #[cfg(test)]
-    fn from_returns(returns: BTreeMap<String, JsonValue>) -> Self {
-        Self {
-            returns,
-            diagnostics: PlannerDiagnostics::default(),
-        }
+    /// Parses the encoded body for assertions.
+    pub(crate) fn json(&self) -> JsonValue {
+        sonic_rs::from_slice(&self.body).expect("response body is JSON")
     }
 }
 
@@ -790,6 +893,8 @@ mod index_membership_retention_tests;
 mod index_membership_tests;
 #[cfg(test)]
 mod index_served_sources_tests;
+#[cfg(test)]
+mod response_encoding_tests;
 #[cfg(test)]
 mod selective_equality_tests;
 
@@ -813,6 +918,19 @@ mod tests {
 
     fn name(value: &str) -> NonEmptyString {
         NonEmptyString::new(value).expect("test name is non-empty")
+    }
+
+    fn unrenderable_datetime_result() -> ExecutionResult {
+        ExecutionResult {
+            last: None,
+            variables: BTreeMap::new(),
+            returns: BTreeMap::from([(
+                name("value"),
+                ReturnedValue::Present(ExecutionValue::Scalars(vec![ExecutionScalar::Value(
+                    PropertyValue::DateTime(i64::MAX),
+                )])),
+            )]),
+        }
     }
 
     fn row(current: ElementRef) -> ExecutionRow {
@@ -1413,7 +1531,7 @@ mod tests {
             ))
             .await
             .expect("postcondition read should execute");
-        assert_eq!(response.returns().get("count"), Some(&JsonValue::from(0)));
+        assert_eq!(response.json().get("count"), Some(&JsonValue::from(0)));
     }
 
     #[tokio::test]
@@ -1449,18 +1567,28 @@ mod tests {
             ))
             .await
             .expect("postcondition read should execute");
-        assert_eq!(response.returns().get("count"), Some(&JsonValue::from(0)));
+        assert_eq!(response.json().get("count"), Some(&JsonValue::from(0)));
     }
 
     #[test]
     fn query_response_serializes_as_top_level_returns_object() {
-        let response = QueryResponse::from_returns(BTreeMap::from([
-            ("count".to_string(), JsonValue::from(2)),
-            ("exists".to_string(), JsonValue::Bool(true)),
-        ]));
+        let response = QueryResponse::from_execution_result(ExecutionResult {
+            last: None,
+            variables: BTreeMap::new(),
+            returns: BTreeMap::from([
+                (
+                    name("count"),
+                    ReturnedValue::Present(ExecutionValue::Count(2)),
+                ),
+                (
+                    name("exists"),
+                    ReturnedValue::Present(ExecutionValue::Bool(true)),
+                ),
+            ]),
+        })
+        .expect("serialize response");
 
-        let json = response.to_json_bytes().expect("serialize response");
-        let value: JsonValue = serde_json::from_slice(&json).expect("valid json");
+        let value: JsonValue = serde_json::from_slice(response.json_bytes()).expect("valid json");
 
         assert_eq!(value["count"], JsonValue::from(2));
         assert_eq!(value["exists"], JsonValue::Bool(true));
@@ -1500,7 +1628,7 @@ mod tests {
             .await
             .expect("diagnostic query should execute");
 
-        assert_eq!(response.returns().get("count"), Some(&JsonValue::from(0)));
+        assert_eq!(response.json().get("count"), Some(&JsonValue::from(0)));
         let missing_index = response
             .diagnostics()
             .insights
@@ -1541,8 +1669,8 @@ mod tests {
             .expect("diagnostics should serialize for transports");
         assert!(!diagnostics_json.contains(SECRET_LITERAL));
 
-        let public_json = response.to_json_bytes().expect("response should serialize");
-        let public_json = String::from_utf8(public_json).expect("response should be utf-8");
+        let public_json =
+            std::str::from_utf8(response.json_bytes()).expect("response should be utf-8");
         assert_eq!(public_json, r#"{"count":0}"#);
         assert!(!public_json.contains("diagnostics"));
 
@@ -1641,9 +1769,7 @@ mod tests {
             "email"
         ));
 
-        let public_json = response
-            .to_json_bytes()
-            .expect("public response should serialize");
+        let public_json = response.into_json_bytes();
         assert_eq!(public_json, br#"{"users":[]}"#);
         assert!(!public_json
             .windows(SECRET_LITERAL.len())
@@ -1719,9 +1845,7 @@ mod tests {
             "User",
             "email"
         ));
-        let public_json = response
-            .to_json_bytes()
-            .expect("public response should serialize");
+        let public_json = response.into_json_bytes();
         assert_eq!(public_json, br#"{"users":[]}"#);
         assert!(!public_json
             .windows(SECRET_LITERAL.len())
@@ -1988,10 +2112,7 @@ mod tests {
             ))
             .await
             .expect("fixture write should execute");
-        assert_eq!(
-            created.to_json_bytes().unwrap(),
-            br#"{"created":[{"$id":0}]}"#
-        );
+        assert_eq!(created.json_bytes(), br#"{"created":[{"$id":0}]}"#);
 
         let response = service
             .execute_query(
@@ -2033,7 +2154,7 @@ mod tests {
             .expect("shape read should execute");
 
         assert_eq!(
-            response.to_json_bytes().unwrap(),
+            response.json_bytes(),
             br#"{"bounded_object":null,"count":0,"empty_fold":[],"empty_membership":[],"missing_list":[],"missing_object":null,"present_list":[{"$id":0}],"present_object":[{"$id":0}],"skipped_object":null}"#
         );
 
@@ -2045,10 +2166,7 @@ mod tests {
             ))
             .await
             .expect("empty mutation should remain successful");
-        assert_eq!(
-            mutation.to_json_bytes().unwrap(),
-            br#"{"missing_mutation":[]}"#
-        );
+        assert_eq!(mutation.json_bytes(), br#"{"missing_mutation":[]}"#);
 
         let empty_returns = service
             .execute_query(QueryRequest::read(
@@ -2056,7 +2174,7 @@ mod tests {
             ))
             .await
             .expect("empty return declaration should execute");
-        assert_eq!(empty_returns.to_json_bytes().unwrap(), br#"{}"#);
+        assert_eq!(empty_returns.json_bytes(), br#"{}"#);
     }
 
     #[test]
@@ -2098,10 +2216,7 @@ mod tests {
             ))
             .await
             .expect("fixture write should execute");
-        assert_eq!(
-            created.to_json_bytes().unwrap(),
-            br#"{"created":[{"$id":0}]}"#
-        );
+        assert_eq!(created.json_bytes(), br#"{"created":[{"$id":0}]}"#);
 
         let empty_scalar_batch = read_batch()
             .var_as("result", g().n_with_label("Missing").count())
@@ -2118,7 +2233,7 @@ mod tests {
             )
             .await
             .expect("empty for_each should preserve the earlier binding");
-        assert_eq!(skipped.to_json_bytes().unwrap(), br#"{"result":0}"#);
+        assert_eq!(skipped.json_bytes(), br#"{"result":0}"#);
 
         let executed = service
             .execute_query(QueryRequest::read(empty_scalar_batch).with_parameter_value(
@@ -2127,7 +2242,7 @@ mod tests {
             ))
             .await
             .expect("non-empty for_each should replace the earlier binding");
-        assert_eq!(executed.to_json_bytes().unwrap(), br#"{"result":null}"#);
+        assert_eq!(executed.json_bytes(), br#"{"result":null}"#);
 
         let present_scalar = service
             .execute_query(
@@ -2144,7 +2259,7 @@ mod tests {
             )
             .await
             .expect("empty for_each should not rewrite a non-empty scalar");
-        assert_eq!(present_scalar.to_json_bytes().unwrap(), br#"{"result":1}"#);
+        assert_eq!(present_scalar.json_bytes(), br#"{"result":1}"#);
     }
 
     #[tokio::test]
@@ -2181,7 +2296,7 @@ mod tests {
             .expect("scoped warm wrapper should delegate");
 
         for response in [execute, warm, scoped, scoped_warm] {
-            assert_eq!(response.returns().get("count"), Some(&JsonValue::from(0)));
+            assert_eq!(response.json().get("count"), Some(&JsonValue::from(0)));
         }
     }
 
@@ -2276,15 +2391,15 @@ mod tests {
             QueryResponse::from_execution_result(result).expect("execution result serializes");
 
         assert_eq!(
-            response.returns()["users"][0]["name"],
+            response.json()["users"][0]["name"],
             JsonValue::from("alice")
         );
         assert_eq!(
-            response.returns()["rows"][0]["current"]["node"],
+            response.json()["rows"][0]["current"]["node"],
             JsonValue::from(7)
         );
         assert_eq!(
-            response.returns()["rows"][0]["bindings"]["friend"]["edge"],
+            response.json()["rows"][0]["bindings"]["friend"]["edge"],
             JsonValue::from(9)
         );
     }
@@ -2325,16 +2440,13 @@ mod tests {
         let response =
             QueryResponse::from_execution_result(result).expect("execution result serializes");
 
+        assert_eq!(response.json()["node"], serde_json::json!([{ "$id": 7 }]));
         assert_eq!(
-            response.returns()["node"],
-            serde_json::json!([{ "$id": 7 }])
-        );
-        assert_eq!(
-            response.returns()["ranked_edge"],
+            response.json()["ranked_edge"],
             serde_json::json!([{ "$id": 9, "$distance": 0.25 }])
         );
         assert_eq!(
-            response.returns()["scored_node"],
+            response.json()["scored_node"],
             serde_json::json!([{ "$id": 11, "$score": 1.5 }])
         );
     }
@@ -2370,14 +2482,11 @@ mod tests {
         let response = QueryResponse::from_execution_result(result).expect("values serialize");
 
         assert_eq!(
-            response.returns()["folded"],
+            response.json()["folded"],
             serde_json::json!([{ "$id": 11 }])
         );
-        assert_eq!(response.returns()["exists"], JsonValue::Bool(true));
-        assert_eq!(
-            response.returns()["scalars"],
-            serde_json::json!(["ready", 7])
-        );
+        assert_eq!(response.json()["exists"], JsonValue::Bool(true));
+        assert_eq!(response.json()["scalars"], serde_json::json!(["ready", 7]));
     }
 
     #[test]
@@ -2413,11 +2522,17 @@ mod tests {
         );
         assert_eq!(converted.to_string(), expected_message);
 
-        let json =
-            execution_scalar_to_json(ExecutionScalar::Value(PropertyValue::DateTime(i64::MAX)))
-                .expect_err("invalid datetime should fail JSON conversion");
+        let json = QueryResponse::<JsonValue>::encode(
+            &unrenderable_datetime_result().returns,
+            PlannerDiagnostics::default(),
+        )
+        .expect_err("invalid datetime should fail JSON conversion");
         assert!(matches!(json, QueryServiceError::JsonSerialize(_)));
         assert!(matches!(HelixDbError::from(json), HelixDbError::Query(_)));
+        let bytes = QueryResponse::from_execution_result(unrenderable_datetime_result())
+            .expect_err("invalid datetime should fail JSON encoding");
+        assert!(matches!(bytes, QueryServiceError::Serialize(_)));
+        assert!(matches!(HelixDbError::from(bytes), HelixDbError::Query(_)));
 
         let sonic = sonic_rs::from_str::<u8>("not-json").expect_err("invalid JSON should fail");
         assert!(matches!(
@@ -2428,9 +2543,11 @@ mod tests {
 
     #[test]
     fn query_failure_classes_cover_every_service_error() {
-        let json_error =
-            execution_scalar_to_json(ExecutionScalar::Value(PropertyValue::DateTime(i64::MAX)))
-                .expect_err("invalid datetime should fail JSON conversion");
+        let json_error = QueryResponse::<JsonValue>::encode(
+            &unrenderable_datetime_result().returns,
+            PlannerDiagnostics::default(),
+        )
+        .expect_err("invalid datetime should fail JSON conversion");
         let QueryServiceError::JsonSerialize(json_error) = json_error else {
             panic!("datetime overflow should be a JSON serialization failure");
         };
@@ -2614,7 +2731,7 @@ mod tests {
             query::QueryErrorType::Execution
         );
 
-        let failed = observation.event(
+        let failed = observation.event::<Vec<u8>>(
             &Err(QueryServiceError::Db(
                 HelixDbError::UniqueConstraintViolation {
                     label: "User".to_owned(),
@@ -2640,7 +2757,7 @@ mod tests {
         // conflicts but not described as one.
         let rejected = QueryObservation::capture(&request, None)
             .expect("canonical query")
-            .event(
+            .event::<Vec<u8>>(
                 &Err(QueryServiceError::Db(HelixDbError::IndexBackpressure {
                     scope: DataScope::LegacyUnscoped,
                     index_id: 4,

@@ -252,6 +252,34 @@ impl RowSack {
     }
 }
 
+// Fixture constructors for encoding tests outside the interpreter. Production
+// rows gain paths, sacks and virtual properties only through interpreter
+// operators, so these stay test-only.
+#[cfg(test)]
+impl RowPath {
+    pub(crate) fn from_elements(elements: Vec<ElementRef>) -> Self {
+        Self { elements }
+    }
+}
+
+#[cfg(test)]
+impl RowSack {
+    pub(crate) fn fixture(value: Option<DbPropertyValue>, visible: bool) -> Self {
+        Self { value, visible }
+    }
+}
+
+#[cfg(test)]
+impl FromIterator<(ir::NonEmptyString, DbPropertyValue)> for RowVirtualProperties {
+    fn from_iter<I: IntoIterator<Item = (ir::NonEmptyString, DbPropertyValue)>>(
+        entries: I,
+    ) -> Self {
+        Self {
+            values: entries.into_iter().collect(),
+        }
+    }
+}
+
 impl PartialEq for RowSack {
     fn eq(&self, other: &Self) -> bool {
         self.visible == other.visible
@@ -550,15 +578,19 @@ impl ExecutionValue {
     }
 }
 
+/// Requested return values, keyed by the planner return list.
+pub type ReturnedValues = BTreeMap<ir::NonEmptyString, ReturnedValue>;
+
 /// Final result of executing an executable plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionResult {
     /// Root step result.
     pub last: Option<ExecutionValue>,
-    /// Values bound by batch outputs and variable operations.
+    /// Values bound by batch outputs and variable operations that are not
+    /// requested returns. Requested values move into [`Self::returns`].
     pub variables: BTreeMap<ir::NonEmptyString, ExecutionValue>,
     /// Requested return values, keyed by the planner return list.
-    pub returns: BTreeMap<ir::NonEmptyString, ReturnedValue>,
+    pub returns: ReturnedValues,
 }
 
 #[cfg(test)]
