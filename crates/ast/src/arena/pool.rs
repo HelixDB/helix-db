@@ -66,12 +66,20 @@ impl Pool {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop();
         let bump = idle.unwrap_or_else(|| {
-            let bump = Bump::with_capacity(self.config.initial_chunk_bytes);
-            // bumpalo checks the limit only when it adds a chunk, and rounds
-            // chunk sizes up, so an oversized first chunk is checked here.
-            match self.config.allocation_limit {
-                Some(limit) if bump.allocated_bytes() > limit.get() => Bump::new(),
-                _ => bump,
+            // bumpalo checks the limit only when it adds a chunk, so a first
+            // chunk that cannot fit under it is never allocated. Chunk sizes
+            // round up, so one that fits before rounding is checked again.
+            let limit = self
+                .config
+                .allocation_limit
+                .map_or(usize::MAX, NonZeroUsize::get);
+            let bump = match self.config.initial_chunk_bytes <= limit {
+                true => Bump::with_capacity(self.config.initial_chunk_bytes),
+                false => Bump::new(),
+            };
+            match bump.allocated_bytes() <= limit {
+                true => bump,
+                false => Bump::new(),
             }
         });
         bump.set_allocation_limit(self.config.allocation_limit.map(NonZeroUsize::get));

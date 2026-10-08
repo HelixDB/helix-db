@@ -351,31 +351,35 @@ fn the_pool_keeps_small_arenas_and_frees_oversized_ones() {
     assert!(bump.try_alloc_slice_fill_copy(16 << 20, 0_u8).is_err());
 }
 
+/// Covers a first chunk larger than the limit, and one that fits only before
+/// bumpalo rounds its size up.
 #[test]
 fn a_pooled_arena_stays_under_a_limit_smaller_than_its_first_chunk() {
     const LIMIT: usize = 64 * 1024;
-    let pool = Pool::new(PoolConfig {
-        initial_chunk_bytes: 1 << 20,
-        retain_bytes: 1 << 20,
-        max_idle: 2,
-        allocation_limit: NonZeroUsize::new(LIMIT),
-    });
-    for _ in 0..2 {
-        let bump = pool.checkout();
-        assert!(
-            bump.allocated_bytes() <= LIMIT,
-            "{}",
-            bump.allocated_bytes()
-        );
-        assert!(bump.try_alloc_slice_fill_copy(LIMIT / 2, 0_u8).is_ok());
-        assert!(bump.try_alloc_slice_fill_copy(LIMIT, 0_u8).is_err());
-        assert!(
-            bump.allocated_bytes() <= LIMIT,
-            "{}",
-            bump.allocated_bytes()
-        );
+    for initial_chunk_bytes in [1 << 20, LIMIT] {
+        let pool = Pool::new(PoolConfig {
+            initial_chunk_bytes,
+            retain_bytes: 1 << 20,
+            max_idle: 2,
+            allocation_limit: NonZeroUsize::new(LIMIT),
+        });
+        for _ in 0..2 {
+            let bump = pool.checkout();
+            assert!(
+                bump.allocated_bytes() <= LIMIT,
+                "{initial_chunk_bytes}: {}",
+                bump.allocated_bytes()
+            );
+            assert!(bump.try_alloc_slice_fill_copy(LIMIT / 2, 0_u8).is_ok());
+            assert!(bump.try_alloc_slice_fill_copy(LIMIT, 0_u8).is_err());
+            assert!(
+                bump.allocated_bytes() <= LIMIT,
+                "{initial_chunk_bytes}: {}",
+                bump.allocated_bytes()
+            );
+        }
+        assert_eq!(pool.idle(), 1, "the limited arena is reused");
     }
-    assert_eq!(pool.idle(), 1, "the limited arena is reused");
 }
 
 #[test]
