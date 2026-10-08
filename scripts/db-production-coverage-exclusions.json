@@ -589,7 +589,7 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/restricted.rs",
-    "line": 1324,
+    "line": 1339,
     "reason": "Scoring skips nodes it has already scored, so each node enters the restricted frontier at most once and inserting a popped node into the expanded set always succeeds; this closing edge belongs to the never-taken repeat case.",
     "evidence": "vector_restricted_search_exercises_bounded_graph_and_directory_paths"
   },
