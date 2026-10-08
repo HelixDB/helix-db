@@ -27,6 +27,11 @@ pub(super) struct Source<'a> {
     remaining: Demand,
     /// Aligned property-record copies a predicate scan reuses across rows.
     buffers: view::Buffers,
+    /// The record of the row a read-only node scan just yielded, until that
+    /// row's predicate takes it. Held here rather than in a local so the
+    /// per-row future of every source, including ID-only lookups, stays as
+    /// small as before records were reused.
+    scanned: Option<storage::ScannedRecord>,
 }
 
 enum Ids {
@@ -89,6 +94,7 @@ impl<'a> Source<'a> {
             },
             remaining: Demand::All,
             buffers: view::Buffers::default(),
+            scanned: None,
         }
     }
 
@@ -104,6 +110,7 @@ impl<'a> Source<'a> {
             },
             remaining: Demand::All,
             buffers: view::Buffers::default(),
+            scanned: None,
         }
     }
 
@@ -140,6 +147,7 @@ impl<'a> Source<'a> {
             state: State::Unopened,
             remaining: limit.map_or(Demand::All, Demand::take),
             buffers: view::Buffers::default(),
+            scanned: None,
         })
     }
 
@@ -508,8 +516,6 @@ impl<'a> Source<'a> {
             if matches!(self.remaining, Demand::Done) {
                 return Ok(None);
             }
-            // A read-only node scan also yields the element's property record.
-            let mut record = None;
             let row = match &mut self.state {
                 State::Unopened => {
                     self.state = Box::pin(self.open(ctx)).await?;
@@ -623,7 +629,7 @@ impl<'a> Source<'a> {
                     // row after this scan read it, so only read-only requests
                     // reuse the scanned record instead of reading it again.
                     // A predicate accounts for it as the read it replaces.
-                    record = (*keyspace == exec::ElementKeyspace::NodeProperty
+                    self.scanned = (*keyspace == exec::ElementKeyspace::NodeProperty
                         && ctx.active_write_tx().is_none())
                     .then_some(storage::ScannedRecord {
                         key: entry.key,
@@ -657,10 +663,20 @@ impl<'a> Source<'a> {
                             ),
                     },
                 )) => {
-                    ctx.eval_predicate_plan_on_record(&row, predicate, record, &mut self.buffers)
-                        .await?
+                    // Boxed so a source that never evaluates a predicate does
+                    // not carry the evaluation's state in every row's future.
+                    Box::pin(ctx.eval_predicate_plan_on_record(
+                        &row,
+                        predicate,
+                        self.scanned.take(),
+                        &mut self.buffers,
+                    ))
+                    .await?
                 }
-                Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => true,
+                Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => {
+                    self.scanned = None;
+                    true
+                }
             };
             if !accepted {
                 continue;
@@ -1187,6 +1203,7 @@ mod tests {
                             state: State::Done,
                             remaining,
                             buffers: view::Buffers::default(),
+                            scanned: None,
                         };
                         source.state = source
                             .open_range(
@@ -1249,6 +1266,7 @@ mod tests {
                             state: State::Done,
                             remaining: Demand::take(take),
                             buffers: view::Buffers::default(),
+                            scanned: None,
                         };
                         source.state = source
                             .open_range(
