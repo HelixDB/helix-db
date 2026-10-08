@@ -11,6 +11,6 @@ mod planner;
 mod stats;
 
 pub use limits::{IndexUnionBranchLimit, OptimizerLimits, PlannerLimits};
-pub use params::ParamBindings;
+pub use params::{ParamBindings, SharedParamBindings};
 pub use planner::PlannerContext;
 pub use stats::StatsSnapshot;

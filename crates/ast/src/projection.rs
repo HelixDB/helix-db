@@ -1,8 +1,9 @@
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Serialize};
 
-use crate::expr::Expr;
+use crate::expr::{ArenaExpr, Expr};
 /// A property projection with optional rename.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 pub struct PropertyProjection {
     /// Source property.
     pub source: String,
@@ -30,7 +31,7 @@ impl PropertyProjection {
 }
 
 /// Expression-backed projection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 pub struct ExprProjection {
     /// Output name.
     pub alias: String,
@@ -49,7 +50,7 @@ impl ExprProjection {
 }
 
 /// Projection entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum Projection {
     /// Property projection.
@@ -97,13 +98,13 @@ impl From<ExprProjection> for Projection {
 /// ```
 /// use helix_ast::projection::BindingTarget;
 ///
-/// assert_eq!(sonic_rs::to_string(&BindingTarget::current()).unwrap(), r#""current""#);
+/// assert_eq!(simd_json::to_string(&BindingTarget::current()).unwrap(), r#""current""#);
 /// assert_eq!(
-///     sonic_rs::to_string(&BindingTarget::binding("service")).unwrap(),
+///     simd_json::to_string(&BindingTarget::binding("service")).unwrap(),
 ///     r#"{"binding":"service"}"#
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingTarget {
     /// Current traverser element.
@@ -131,11 +132,11 @@ impl BindingTarget {
 ///
 /// let value_ref = BindingValueRef::new(BindingTarget::binding("service"), "$id");
 /// assert_eq!(
-///     sonic_rs::to_string(&value_ref).unwrap(),
+///     simd_json::to_string(&value_ref).unwrap(),
 ///     r#"{"target":{"binding":"service"},"source":"$id"}"#
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 pub struct BindingValueRef {
     /// Target element.
     pub target: BindingTarget,
@@ -176,11 +177,11 @@ impl BindingValueRef {
 ///     "workload_id",
 /// );
 /// assert_eq!(
-///     sonic_rs::to_string(&projection).unwrap(),
+///     simd_json::to_string(&projection).unwrap(),
 ///     r#"{"coalesce":{"refs":[{"target":{"binding":"deployment"},"source":"$id"},{"target":{"binding":"owner"},"source":"$id"}],"alias":"workload_id"}}"#
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingProjection {
     /// Project a single property.

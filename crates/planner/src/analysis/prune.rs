@@ -9,7 +9,9 @@ use crate::error::PlannerError;
 use super::labels::{self, FeasibleLabelScope, LabelScope};
 use super::scalar;
 
-/// Materialize a pruned predicate for consumers that retain it in a plan.
+/// Materialize a pruned predicate. Planning borrows instead and moves or
+/// copies only what it keeps; tests compare the two.
+#[cfg(test)]
 pub(crate) fn prune_statically_impossible_branches(
     predicate: &Predicate,
 ) -> Result<PrunedPredicate, PlannerError> {

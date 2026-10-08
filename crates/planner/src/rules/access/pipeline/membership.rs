@@ -191,7 +191,7 @@ fn declined_leading_node_filter(
         && (access.may_repeat_elements()
             || (path.common_label().is_none()
                 && matches!(
-                    analysis::prune_statically_impossible_branches(predicate.as_ref()),
+                    analysis::prune_borrowed(predicate.as_ref()),
                     Ok(analysis::PrunedPredicate::Feasible {
                         label: analysis::FeasibleLabelScope::Unscoped,
                         ..

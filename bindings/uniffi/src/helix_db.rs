@@ -437,7 +437,7 @@ mod tests {
             .await
             .expect("query_json should execute");
         let json: BTreeMap<String, u64> =
-            sonic_rs::from_slice(&response).expect("response should decode");
+            simd_json::from_reader(&response[..]).expect("response should decode");
 
         assert_eq!(json.get("users"), Some(&0));
         db.close().await.expect("DB should close");
@@ -523,7 +523,7 @@ mod tests {
                 )
                 .returning(["matches"]),
         );
-        let body = sonic_rs::to_vec(&request).expect("query request should serialize");
+        let body = simd_json::to_vec(&request).expect("query request should serialize");
 
         let err = db
             .query_json(body)

@@ -7,8 +7,20 @@ use crate::{ir, logical, memo, optimizer, rules};
 
 use self::state::{ExplorationRun, ExplorationSeed};
 
-/// Explore all seeded logical roots under one shared guardrail budget.
+/// Explore all seeded logical roots under one shared guardrail budget. Index
+/// rewrites are derived once per filter for the whole run (see
+/// [`rules::with_index_rewrite_cache`]).
 pub(super) fn optimize_many(
+    optimizer: &CascadesOptimizer<'_>,
+    root_exprs: ir::AtLeast<logical::LogicalExpr, 1>,
+    config: &optimizer::OptimizerConfig,
+) -> Result<optimizer::OptimizationResult, memo::MemoError> {
+    rules::with_index_rewrite_cache(&config.indexes, &config.planner_limits, || {
+        explore(optimizer, root_exprs, config)
+    })
+}
+
+fn explore(
     optimizer: &CascadesOptimizer<'_>,
     root_exprs: ir::AtLeast<logical::LogicalExpr, 1>,
     config: &optimizer::OptimizerConfig,

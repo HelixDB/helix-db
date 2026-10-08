@@ -38,6 +38,14 @@ impl<S: Clone> IndexBranch<S> {
         }
     }
 
+    /// The conjunction of `self` and `other`, extending `self` in place: a
+    /// long `AND` accumulates into one branch without copying it per child.
+    fn and_extended(mut self, other: &Self) -> Self {
+        self.sources.extend(other.sources.iter().cloned());
+        self.residual.extend(other.residual.iter().cloned());
+        self
+    }
+
     /// The conjunction of `self` and `other`.
     fn and(&self, other: &Self) -> Self {
         Self {
@@ -149,7 +157,10 @@ where
     F: AccessFilterIndexFamily,
 {
     let merge_one = |conjunction: Vec<IndexBranch<F::Source>>, branch: &IndexBranch<F::Source>| {
-        conjunction.iter().map(|left| left.and(branch)).collect()
+        conjunction
+            .into_iter()
+            .map(|left| left.and_extended(branch))
+            .collect()
     };
     let [one] = child_branches.as_slice() else {
         let all_narrowed = child_branches

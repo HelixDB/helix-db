@@ -26,9 +26,9 @@ pub(crate) use self::labels::{
     conjunctive_label_domain, domain_contains, domain_labels, label_equality_atom, label_scope,
     FeasibleLabelScope, FiniteLabelDomain, LabelScope,
 };
-pub(crate) use self::prune::{
-    prune_borrowed, prune_statically_impossible_branches, PrunedPredicate,
-};
+#[cfg(test)]
+pub(crate) use self::prune::prune_statically_impossible_branches;
+pub(crate) use self::prune::{prune_borrowed, PrunedPredicate};
 pub(crate) use self::scalar::{
     predicate_is_statically_tautological, scalar_property_conjunction_is_impossible,
 };

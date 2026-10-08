@@ -90,7 +90,14 @@ async fn execute_query(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
-    let request = match QueryRequest::from_json_slice(&bytes) {
+    // simd-json parses a uniquely owned body in place and copies a shared
+    // one. The request owns everything it needs, so the body is freed here
+    // rather than held through planning and execution.
+    let parsed = match bytes.try_into_mut() {
+        Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
+        Err(shared) => QueryRequest::from_json_slice(&shared),
+    };
+    let request = match parsed {
         Ok(request) => request,
         Err(error) => {
             return error_response(

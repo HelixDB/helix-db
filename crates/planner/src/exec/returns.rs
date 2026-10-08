@@ -4,7 +4,7 @@
 //! the semantic output shape of its binding after executable lowering. Runtime
 //! code therefore never infers shape from observed rows or cost estimates.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use helix_ast::expr::StreamBound;
 use helix_ast::graph::{EdgeRef, NodeRef};
@@ -312,12 +312,15 @@ impl ExecutableReturns {
         let ir::ReturnPlan::Variables(variables) = requested else {
             return Ok(Self::None);
         };
+        let mut bindings = BTreeMap::new();
+        binding_steps(steps, &mut bindings);
         let returns = variables
             .as_ref()
             .iter()
             .map(|name| {
-                return_shape(steps, name)
-                    .map(|shape| ExecutableReturn::new(name.clone(), shape))
+                bindings
+                    .get(name.as_ref())
+                    .map(|step| ExecutableReturn::new(name.clone(), step.inferred_return_shape()))
                     .ok_or_else(|| ExecPlanError::MissingReturnBinding { name: name.clone() })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -331,16 +334,19 @@ impl ExecutableReturns {
     }
 }
 
-fn return_shape(steps: &[ExecStep], name: &ir::NonEmptyString) -> Option<ReturnShape> {
-    steps.iter().rev().find_map(|step| {
-        if matches!(&step.output, ir::BatchOutputPlan::Bind(output) if output == name) {
-            return Some(step.inferred_return_shape());
+/// The step whose output each name is bound to after `steps`: the last
+/// binding wins, a `ForEach` contributes its body's bindings at its own
+/// position, and a step's own binding wins over its body's. Indexing the
+/// bindings once keeps resolving many returns linear in the steps.
+fn binding_steps<'s>(steps: &'s [ExecStep], bindings: &mut BTreeMap<&'s str, &'s ExecStep>) {
+    for step in steps {
+        if let ExecOp::ForEach { body, .. } = &step.op {
+            binding_steps(body.steps(), bindings);
         }
-        match &step.op {
-            ExecOp::ForEach { body, .. } => return_shape(body.steps(), name),
-            _ => None,
+        if let ir::BatchOutputPlan::Bind(output) = &step.output {
+            bindings.insert(output.as_ref(), step);
         }
-    })
+    }
 }
 
 #[cfg(test)]
@@ -574,5 +580,81 @@ mod tests {
             ExecutableReturns::resolve(&requested, &[foreach]),
             Ok(expected)
         );
+    }
+
+    /// The resolution this module used before indexing bindings: scan the
+    /// steps backwards per name. An oracle for the precedence rules only.
+    fn reverse_scan_shape(steps: &[ExecStep], name: &ir::NonEmptyString) -> Option<ReturnShape> {
+        steps.iter().rev().find_map(|step| {
+            if matches!(&step.output, ir::BatchOutputPlan::Bind(output) if output == name) {
+                return Some(step.inferred_return_shape());
+            }
+            match &step.op {
+                ExecOp::ForEach { body, .. } => reverse_scan_shape(body.steps(), name),
+                _ => None,
+            }
+        })
+    }
+
+    #[test]
+    fn indexed_bindings_resolve_as_the_reverse_scan_did() {
+        let object = || {
+            step(
+                ExecOp::Noop,
+                properties::CardinalityBounds::zero_to(Some(1)),
+            )
+        };
+        let list = || step(ExecOp::Noop, properties::CardinalityBounds::unknown());
+        let foreach = |body: ExecStep, output: ir::BatchOutputPlan| {
+            let mut foreach = step(
+                ExecOp::ForEach {
+                    param: name("items"),
+                    body: Box::new(
+                        super::super::ExecutableSubplan::new(
+                            ir::AtLeast::from_one(body),
+                            ExecStepId::new(1).unwrap(),
+                        )
+                        .unwrap(),
+                    ),
+                },
+                properties::CardinalityBounds::unknown(),
+            );
+            foreach.output = output;
+            foreach
+        };
+        let bound = ir::BatchOutputPlan::Bind(name("result"));
+        let cases = [
+            // The last binding wins.
+            vec![object(), list()],
+            vec![list(), object()],
+            // A body's binding sits at its loop's position.
+            vec![foreach(object(), ir::BatchOutputPlan::Discard), list()],
+            vec![list(), foreach(object(), ir::BatchOutputPlan::Discard)],
+            // A loop's own binding wins over its body's.
+            vec![foreach(object(), bound.clone())],
+            vec![
+                object(),
+                foreach(list(), ir::BatchOutputPlan::Discard),
+                object(),
+            ],
+        ];
+        let requested = ir::ReturnPlan::Variables(
+            ir::ReturnVariables::new(ir::AtLeast::from_one(name("result"))).unwrap(),
+        );
+        for (index, steps) in cases.iter().enumerate() {
+            let expected = reverse_scan_shape(steps, &name("result")).expect("result is bound");
+            let Ok(ExecutableReturns::Variables(resolved)) =
+                ExecutableReturns::resolve(&requested, steps)
+            else {
+                panic!("case {index} resolves");
+            };
+            assert_eq!(resolved.as_ref()[0].shape(), expected, "case {index}");
+        }
+        // The cases above must exercise both shapes.
+        let shapes = cases
+            .iter()
+            .filter_map(|steps| reverse_scan_shape(steps, &name("result")))
+            .collect::<Vec<_>>();
+        assert!(shapes.contains(&ReturnShape::Object) && shapes.contains(&ReturnShape::List));
     }
 }

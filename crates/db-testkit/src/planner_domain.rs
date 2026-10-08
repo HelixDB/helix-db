@@ -246,13 +246,13 @@ impl OptionalContextClass {
         match self {
             Self::Absent => {}
             Self::PropertyParameter => {
-                ctx.params = ctx.params.clone().with_value(name, 7_i64);
+                ctx.params = (*ctx.params).clone().with_value(name, 7_i64).into();
             }
             Self::QueryParameter => {
-                ctx.params = ctx
-                    .params
+                ctx.params = (*ctx.params)
                     .clone()
-                    .with_query_value(name, QueryValue::String("seven".to_string()));
+                    .with_query_value(name, QueryValue::String("seven".to_string()))
+                    .into();
             }
             Self::RuntimeFeedback => {
                 let label = ir::NonEmptyString::new("User")

@@ -490,9 +490,10 @@ mod tests {
             assert!(strings.insert(code.as_str()), "duplicate code {code}");
             assert_eq!(code.to_string(), code.as_str());
             assert_eq!(code.as_str().parse(), Ok(*code));
-            assert_eq!(sonic_rs::to_string(code).unwrap(), format!("\"{code}\""));
+            assert_eq!(simd_json::to_string(code).unwrap(), format!("\"{code}\""));
             assert_eq!(
-                sonic_rs::from_str::<QueryErrorCode>(&format!("\"{code}\"")).unwrap(),
+                simd_json::from_reader::<_, QueryErrorCode>(format!("\"{code}\"").as_bytes())
+                    .unwrap(),
                 *code
             );
         }

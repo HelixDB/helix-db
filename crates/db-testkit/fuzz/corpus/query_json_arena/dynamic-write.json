@@ -1,0 +1,40 @@
+{
+  "request_type": "write",
+  "query": {
+    "write": {
+      "entries": [
+        {
+          "query": {
+            "name": "created",
+            "root": {
+              "add_n": {
+                "label": "DockerImageSmokeUser",
+                "properties": [
+                  [
+                    "scenario",
+                    {
+                      "value": {
+                        "string": "docker-image-smoke"
+                      }
+                    }
+                  ],
+                  [
+                    "name",
+                    {
+                      "value": {
+                        "string": "Alice"
+                      }
+                    }
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "returns": [
+        "created"
+      ]
+    }
+  }
+}

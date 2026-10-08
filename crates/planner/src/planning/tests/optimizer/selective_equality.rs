@@ -28,7 +28,8 @@ fn unique_membership_keeps_bounded_index_access_without_statistics() {
                     );
                     let predicate = if parameterized {
                         context.params = ParamBindings::default()
-                            .with_value(NonEmptyString::new("keys").unwrap(), values);
+                            .with_value(NonEmptyString::new("keys").unwrap(), values)
+                            .into();
                         Predicate::is_in_param("external_key", "keys")
                     } else {
                         Predicate::is_in("external_key", values)
@@ -168,7 +169,7 @@ fn selective_equality_type_union_keeps_the_tenant_intersection() {
                 })
                 .collect::<Vec<_>>();
             let mut context = PlannerContext {
-                params,
+                params: params.into(),
                 ..ctx(indexes.clone())
             };
             context.storage.default_equality_index_rows = crate::cost::EstimatedRows::rows(200);
@@ -262,10 +263,12 @@ fn selective_equality_intersects_every_index_with_absent_or_stale_statistics() {
                 };
                 let context = PlannerContext {
                     stats: stats.clone(),
-                    params: ParamBindings::default().with_value(
-                        NonEmptyString::new("deleted").unwrap(),
-                        PropertyValue::Bool(true),
-                    ),
+                    params: ParamBindings::default()
+                        .with_value(
+                            NonEmptyString::new("deleted").unwrap(),
+                            PropertyValue::Bool(true),
+                        )
+                        .into(),
                     ..ctx(indexes.clone())
                 };
                 for traversal in [
@@ -381,10 +384,13 @@ fn indexed_conjunction_avoids_the_scan_cliff() {
                         .iter()
                         .take(count)
                         .map(|property| {
-                            context.params = context.params.clone().with_value(
-                                NonEmptyString::new(*property).unwrap(),
-                                PropertyValue::from("fixture-value"),
-                            );
+                            context.params = (*context.params)
+                                .clone()
+                                .with_value(
+                                    NonEmptyString::new(*property).unwrap(),
+                                    PropertyValue::from("fixture-value"),
+                                )
+                                .into();
                             if parameterized {
                                 Predicate::eq_param(*property, *property)
                             } else {
@@ -464,10 +470,13 @@ fn indexed_conjunctions_are_permutation_invariant_full_intersections() {
                     let terms = permutation
                         .iter()
                         .map(|property| {
-                            context.params = context.params.clone().with_value(
-                                NonEmptyString::new(*property).unwrap(),
-                                PropertyValue::from(7),
-                            );
+                            context.params = (*context.params)
+                                .clone()
+                                .with_value(
+                                    NonEmptyString::new(*property).unwrap(),
+                                    PropertyValue::from(7),
+                                )
+                                .into();
                             if parameterized {
                                 Predicate::eq_param(*property, *property)
                             } else {
