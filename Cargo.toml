@@ -28,3 +28,13 @@ db = { path = "crates/db" }
 wildcard_enum_match_arm = "deny"
 # optional companion:
 match_wildcard_for_single_variants = "warn"
+
+# The profile the server image ships with (see Dockerfile). On Graviton4,
+# thin LTO with one codegen unit planned a median 8% faster than `release`
+# (every planner benchmark 2-13% faster), for about twice the clean build
+# time; fat LTO added under a point more for nearly three times the build.
+# `release` stays as it is for local and benchmark builds.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
