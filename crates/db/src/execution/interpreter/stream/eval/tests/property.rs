@@ -786,7 +786,7 @@ async fn a_scanned_record_is_accounted_for_as_a_storage_read_only_when_read() {
         crate::encoding::property::decode_properties(&record).unwrap()
     );
     assert!(budget.peak() >= record.len(), "{}", budget.peak());
-    // A cached record is read once.
+    // A cached record is read once, and holds no charge once validated.
     assert_eq!(
         resolver
             .row_property(&current_node(1), &name("name"))
@@ -794,8 +794,14 @@ async fn a_scanned_record_is_accounted_for_as_a_storage_read_only_when_read() {
             .unwrap(),
         Some(DbPropertyValue::String("scanned".into()))
     );
-    drop(resolver.into_buffers());
     assert_eq!(budget.available(), limit);
+    // The scanned bytes carry no charge, so an aligned record is still read
+    // in place under the budget.
+    let unaligned = record
+        .as_ptr()
+        .align_offset(std::mem::align_of::<rkyv::Archived<Property>>())
+        != 0;
+    assert_eq!(resolver.into_buffers().retained(), usize::from(unaligned));
     assert_eq!(
         budget.reads(),
         crate::query_resources::StorageReadUsage {

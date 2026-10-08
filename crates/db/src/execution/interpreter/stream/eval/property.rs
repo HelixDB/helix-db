@@ -157,8 +157,7 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         }
         let blob = match self.property_blobs.remove(element) {
             Some(CachedPropertyBlob::Scanned(record)) => {
-                let value = self.context.read_scanned(&record)?;
-                decode_blob(self.context, &mut self.buffers, value)?
+                decode_scanned(self.context, &mut self.buffers, &record)?
             }
             Some(blob) => blob,
             None => self.load_blob(element).await?,
@@ -189,8 +188,7 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         };
         // A rejected record stays cached unvalidated, so every read of it
         // fails as a repeated storage read would.
-        let value = self.context.read_scanned(record)?;
-        *blob = decode_blob(self.context, &mut self.buffers, value)?;
+        *blob = decode_scanned(self.context, &mut self.buffers, record)?;
         Ok(blob.row())
     }
 
@@ -476,6 +474,30 @@ fn decode_blob(
         None => view::Row::new(value, buffers)?,
     };
     Ok(CachedPropertyBlob::Row(row))
+}
+
+/// Validates a scanned record where the storage read it replaces happened,
+/// accounted for as that read.
+///
+/// The charged value of that read is held only while the record is
+/// validated, as the full decoder held it while decoding. The row keeps the
+/// scanned bytes, which the read view returned and which carry no charge, so
+/// an aligned record is still read in place under a row-memory budget. A
+/// cached read holds the same stored value as the scan.
+fn decode_scanned(
+    context: &ExecutionContext<'_>,
+    buffers: &mut view::Buffers,
+    record: &storage::ScannedRecord,
+) -> Result<CachedPropertyBlob> {
+    let Some(_charged) = context.read_scanned(record)? else {
+        return Ok(CachedPropertyBlob::Missing);
+    };
+    #[cfg(test)]
+    context.record_property_decode();
+    Ok(CachedPropertyBlob::Row(view::Row::new(
+        record.value.clone(),
+        buffers,
+    )?))
 }
 
 #[derive(Clone, Copy)]
