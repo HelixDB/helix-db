@@ -334,6 +334,11 @@ exit "${{HELIX_TEST_TOOL_EXIT_CODE:-0}}"
 /// `cmd /C call` line that delivered them, so whatever survived that line
 /// survives this one. `echo(` also prints a first argument such as `off` or
 /// `/?` instead of acting on it.
+///
+/// An Explorer that `run` starts (a `--name` ending in `.explorer`) is saved
+/// as `<log>.<name>` in the shape `inspect` reports it: identity and role
+/// labels, image ID, image, then its environment. `cmd` splits `KEY=value`
+/// arguments at the `=`, so the value is the token after its key.
 #[allow(dead_code)]
 pub const WINDOWS_FAKE_DOCKER: &str = r#"@echo off
 if defined HELIX_TEST_RUNTIME_LOG >>"%HELIX_TEST_RUNTIME_LOG%" echo(%*
@@ -342,21 +347,11 @@ if /I "%1"=="%HELIX_TEST_RUNTIME_FAIL_COMMAND%" (
   exit /b 42
 )
 if "%1"=="exec" exit /b 0
-if "%1"=="port" (
-  if defined HELIX_TEST_RUNTIME_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_PORT_OUTPUT%
-  exit /b 0
-)
-if "%1"=="image" (
-  if "%HELIX_TEST_RUNTIME_IMAGE_MISSING%"=="1" (
-    if not exist "%HELIX_TEST_RUNTIME_LOG%.pulled" exit /b 1
-  )
-  if "%5"=="ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882" (
-    echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-    exit /b 0
-  )
-  echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  exit /b 0
-)
+if "%1"=="inspect" goto :inspect
+if "%1"=="port" goto :port
+if "%1"=="run" goto :run
+if "%1"=="rm" goto :rm
+if "%1"=="image" goto :image
 if "%1"=="pull" (
   if "%2"=="%HELIX_TEST_RUNTIME_FAIL_IMAGE%" exit /b 42
   type nul > "%HELIX_TEST_RUNTIME_LOG%.pulled"
@@ -388,11 +383,6 @@ if "%1"=="container" (
     exit /b 0
   )
   exit /b 0
-)
-if "%1"=="rm" (
-  if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
-  echo No such container 1>&2
-  exit /b 1
 )
 if "%1"=="network" (
   if "%2"=="inspect" if "%3"=="--format" (
@@ -456,6 +446,93 @@ if "%1"=="volume" (
   exit /b 1
 )
 exit /b 0
+
+:image
+if "%HELIX_TEST_RUNTIME_IMAGE_MISSING%"=="1" if not exist "%HELIX_TEST_RUNTIME_LOG%.pulled" exit /b 1
+if "%~5"=="" goto :image_server
+if "%~5"=="ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882" (
+  echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  exit /b 0
+)
+set "HELIX_TEST_IMAGE=%~5"
+if "%HELIX_TEST_IMAGE:helix-explorer=%"=="%HELIX_TEST_IMAGE%" goto :image_server
+if defined HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID (
+  echo %HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID%
+  exit /b 0
+)
+echo sha256:%HELIX_TEST_IMAGE%
+exit /b 0
+:image_server
+echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+exit /b 0
+
+:inspect
+set "HELIX_TEST_CONTAINER=%~6"
+if "%HELIX_TEST_CONTAINER%"=="" goto :inspect_missing
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" goto :inspect_missing
+if not exist "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%" goto :inspect_missing
+type "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%"
+exit /b 0
+:inspect_missing
+echo Error: No such object: %HELIX_TEST_CONTAINER% 1>&2
+exit /b 1
+
+:port
+set "HELIX_TEST_CONTAINER=%~2"
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" goto :port_instance
+if not exist "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%" exit /b 0
+if defined HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT%
+exit /b 0
+:port_instance
+if defined HELIX_TEST_RUNTIME_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_PORT_OUTPUT%
+exit /b 0
+
+:run
+if "%~1"=="" exit /b 0
+if "%~1"=="--name" goto :run_name
+shift
+goto :run
+:run_name
+set "HELIX_TEST_CONTAINER=%~2"
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" exit /b 0
+set "HELIX_TEST_EXPLORER_IDENTITY="
+set "HELIX_TEST_EXPLORER_ROLE="
+set "HELIX_TEST_EXPLORER_URL="
+set "HELIX_TEST_EXPLORER_INSTANCE="
+set "HELIX_TEST_EXPLORER_IMAGE="
+shift
+shift
+:run_explorer_argument
+if "%~1"=="" goto :run_explorer
+if "%~1"=="helixdb.identity" set "HELIX_TEST_EXPLORER_IDENTITY=%~2"
+if "%~1"=="helixdb.role" set "HELIX_TEST_EXPLORER_ROLE=%~2"
+if "%~1"=="HELIX_URL" set "HELIX_TEST_EXPLORER_URL=%~2"
+if "%~1"=="HELIX_INSTANCE_NAME" set "HELIX_TEST_EXPLORER_INSTANCE=%~2"
+set "HELIX_TEST_EXPLORER_IMAGE=%~1"
+shift
+goto :run_explorer_argument
+:run_explorer
+set "HELIX_TEST_EXPLORER_STATE=%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%"
+set "HELIX_TEST_EXPLORER_ID=sha256:%HELIX_TEST_EXPLORER_IMAGE%"
+if defined HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID set "HELIX_TEST_EXPLORER_ID=%HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID%"
+>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_IDENTITY%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_ROLE%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_ID%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_IMAGE%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(HELIX_URL=%HELIX_TEST_EXPLORER_URL%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(HELIX_INSTANCE_NAME=%HELIX_TEST_EXPLORER_INSTANCE%
+exit /b 0
+
+:rm
+set "HELIX_TEST_CONTAINER=%~3"
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" goto :rm_resource
+if not exist "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%" goto :rm_resource
+del "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%"
+exit /b 0
+:rm_resource
+if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
+echo No such container 1>&2
+exit /b 1
 "#;
 
 fn install_fake_docker(bin: &Path) -> PathBuf {
@@ -485,11 +562,67 @@ if [ "$1" = "$HELIX_TEST_RUNTIME_FAIL_COMMAND" ]; then
 fi
 case "$1" in
   exec) exit 0 ;;
-  port) printf '%s\n' "$HELIX_TEST_RUNTIME_PORT_OUTPUT"; exit 0 ;;
+  inspect)
+    for argument in "$@"; do name="$argument"; done
+    case "$name" in
+      *.explorer)
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.$name" ]; then
+          cat "$HELIX_TEST_RUNTIME_LOG.$name"
+          exit 0
+        fi
+        ;;
+    esac
+    echo "Error: No such object: $name" >&2
+    exit 1
+    ;;
+  port)
+    case "$2" in
+      *.explorer)
+        # An Explorer publishes its port only while `run` has started one.
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.$2" ]; then
+          printf '%s\n' "$HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT"
+        fi
+        exit 0
+        ;;
+    esac
+    printf '%s\n' "$HELIX_TEST_RUNTIME_PORT_OUTPUT"; exit 0 ;;
+  run)
+    name="" identity="" role="" helix_url="" instance="" previous=""
+    for argument in "$@"; do
+      case "$previous" in
+        --name) name="$argument" ;;
+        --label)
+          case "$argument" in
+            helixdb.identity=*) identity="${argument#helixdb.identity=}" ;;
+            helixdb.role=*) role="${argument#helixdb.role=}" ;;
+          esac
+          ;;
+        -e)
+          case "$argument" in
+            HELIX_URL=*) helix_url="$argument" ;;
+            HELIX_INSTANCE_NAME=*) instance="$argument" ;;
+          esac
+          ;;
+      esac
+      previous="$argument"
+    done
+    case "$name" in
+      *.explorer)
+        # Saved as `inspect` reports it: identity and role labels, image ID,
+        # image (the last argument), then the environment.
+        printf '%s\n' "$identity" "$role" \
+          "${HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID:-sha256:$previous}" "$previous" \
+          "$helix_url" "$instance" > "$HELIX_TEST_RUNTIME_LOG.$name"
+        ;;
+    esac
+    exit 0
+    ;;
   image)
     if [ "$HELIX_TEST_RUNTIME_IMAGE_MISSING" = "1" ] && [ ! -f "$HELIX_TEST_RUNTIME_LOG.pulled" ]; then exit 1; fi
     case "$5" in
       ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882) echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; exit 0 ;;
+      # Each Explorer image gets its own ID, as distinct images do.
+      *helix-explorer*) echo "${HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID:-sha256:$5}"; exit 0 ;;
     esac
     echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     exit 0
@@ -522,6 +655,14 @@ case "$1" in
     exit 0
     ;;
   rm)
+    case "$3" in
+      *.explorer)
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.$3" ]; then
+          rm -f "$HELIX_TEST_RUNTIME_LOG.$3"
+          exit 0
+        fi
+        ;;
+    esac
     if [ "$HELIX_TEST_RUNTIME_RESOURCES_EXIST" = "1" ]; then exit 0; fi
     echo "No such container" >&2
     exit 1

@@ -10,9 +10,15 @@ use super::*;
 impl<'db> ExecutionContext<'db> {
     /// Nested plans recurse through each step, so its state is boxed here and
     /// callers hold only a pointer across the await.
+    ///
+    /// `fused` is the step's part in an index-set vector search the scheduler
+    /// runs as one (see [`super::scheduler::fusion`]): its access produces an
+    /// empty stream that nothing reads, and its search releases that stream
+    /// and ranks the access's ID set itself. Both still log their step event.
     pub(in crate::execution::interpreter) fn execute_step<'a>(
         &'a mut self,
         step: &'a exec::ExecStep,
+        fused: Option<super::scheduler::fusion::Role<'a>>,
     ) -> futures::future::BoxFuture<'a, Result<ExecutionValue>> {
         Box::pin(async move {
             self.check_execution_deadline()?;
@@ -24,6 +30,25 @@ impl<'db> ExecutionContext<'db> {
             }
             self.flush_required_mutations(mutation::visibility::required_for(&step.op))
                 .await?;
+            match fused {
+                None => {}
+                Some(super::scheduler::fusion::Role::Source) => {
+                    self.release_dependency_references(&step.dependencies);
+                    let value = ExecutionValue::Stream(Vec::new());
+                    trace_step(&step.op, &value, std::time::Instant::now());
+                    return Ok(value);
+                }
+                Some(super::scheduler::fusion::Role::Search(search)) => {
+                    self.release_dependency_references(&step.dependencies);
+                    let started = std::time::Instant::now();
+                    let control = self.execution_control.clone();
+                    let value = control.run(self.id_set_vector_search(search)).await?;
+                    self.enforce_row_mode_cap(row_mode::op_name(&step.op), &value)?;
+                    trace_step(&step.op, &value, started);
+                    self.check_execution_deadline()?;
+                    return Ok(value);
+                }
+            }
             if let exec::ExecOp::Merge { mode } = &step.op {
                 let dependencies = self.dependency_values(&step.dependencies)?;
                 let value = self.merge_values(dependencies, *mode)?;
@@ -225,7 +250,7 @@ mod tests {
         };
 
         assert_eq!(
-            ctx.execute_step(&step).await.unwrap(),
+            ctx.execute_step(&step, None).await.unwrap(),
             ExecutionValue::Stream(Vec::new())
         );
     }
@@ -247,7 +272,7 @@ mod tests {
         );
 
         assert_eq!(
-            ctx.execute_step(&step).await.unwrap(),
+            ctx.execute_step(&step, None).await.unwrap(),
             ExecutionValue::Stream(vec![row(1), row(2), row(3)])
         );
     }
@@ -647,13 +672,16 @@ mod tests {
 
         assert!(matches!(
             context
-                .execute_step(&test_support::step(
-                    1,
-                    Vec::new(),
-                    exec::ExecOp::Barrier {
-                        name: test_support::name("unique visibility"),
-                    },
-                ))
+                .execute_step(
+                    &test_support::step(
+                        1,
+                        Vec::new(),
+                        exec::ExecOp::Barrier {
+                            name: test_support::name("unique visibility"),
+                        },
+                    ),
+                    None
+                )
                 .await,
             Err(HelixDbError::UniqueConstraintViolation { .. })
         ));

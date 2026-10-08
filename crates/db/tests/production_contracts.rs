@@ -425,8 +425,21 @@ async fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget_contrac
     })
     .await
     .expect("a split searched twice reaches the disk tier");
-    let admitted = db.fts_cache_state().await.unwrap().disk_artifact_count;
+    let hydrated = db.fts_cache_state().await.unwrap();
+    let admitted = hydrated.disk_artifact_count;
     assert_eq!(admitted, 1);
+    // The split retained since the first search reads the object store;
+    // the next search reopens it from the published artifact instead.
+    assert_eq!(
+        db.query(search.clone()).await.unwrap(),
+        serde_json::json!({ "ids": [0] })
+    );
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (state.remote_opens, state.disk_hits),
+        (hydrated.remote_opens, hydrated.disk_hits + 1),
+        "the search after hydration opens the split from disk"
+    );
     db.close().await.expect("server writer closes");
     // Past the one-second grace that protects recently used splits.
     tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -668,24 +681,102 @@ async fn public_execute_boundary_logs_every_executed_step() {
     let logs = QUERY_STEP_LOGS.take().expect("this thread records");
 
     assert_eq!(result.last, Some(ExecutionValue::Count(1)));
-    let steps = logs
-        .iter()
-        .map(|record| {
-            let field = |name: &str| {
-                record
-                    .split(' ')
-                    .find_map(|token| token.strip_prefix(name))
-                    .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
-            };
-            field("elapsed_us=")
-                .parse::<u64>()
-                .expect("latency is whole microseconds");
-            (field("op="), field("rows="))
-        })
-        .collect::<Vec<_>>();
+    let steps = |logs: &[String]| {
+        logs.iter()
+            .map(|record| {
+                let field = |name: &str| {
+                    record
+                        .split(' ')
+                        .find_map(|token| token.strip_prefix(name))
+                        .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
+                        .to_owned()
+                };
+                field("elapsed_us=")
+                    .parse::<u64>()
+                    .expect("latency is whole microseconds");
+                (field("op="), field("rows="))
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        steps,
-        [("\"mutation()\"", "1"), ("\"count()\"", "0")],
+        steps(&logs),
+        [
+            ("\"mutation()\"".to_owned(), "1".to_owned()),
+            ("\"count()\"".to_owned(), "0".to_owned())
+        ],
+        "{logs:?}"
+    );
+
+    // A label-filtered vector search runs its access and its search as one
+    // step pair: the search ranks the label's ID set, the access builds no
+    // rows, and both steps still log.
+    let operation = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(index::IndexSpec::node_vector(
+                        "Logged",
+                        "embedding",
+                        NonZeroUsize::new(2).expect("dimension is positive"),
+                        index::VectorDistanceMetric::Euclidean,
+                        None::<String>,
+                    )),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .expect("vector index DDL is accepted");
+    await_index_operation_success(
+        &db,
+        operation["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted vector-index operation has an ID"),
+        "logged vector index",
+    )
+    .await;
+    db.query(QueryRequest::write(
+        [[1.0_f32, 0.0], [2.0, 0.0]].into_iter().enumerate().fold(
+            batch::write_batch(),
+            |write, (index, embedding)| {
+                write.var_as(
+                    &format!("embedded{index}"),
+                    traversal::g().add_n(
+                        "Logged",
+                        vec![("embedding", PropertyInput::from(embedding.to_vec()))],
+                    ),
+                )
+            },
+        ),
+    ))
+    .await
+    .expect("embedded nodes commit");
+    QUERY_STEP_LOGS.set(Some(Vec::new()));
+    let searched = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g().n_with_label("Logged").vector_search(
+                        "Logged",
+                        "embedding",
+                        vec![0.0, 0.0],
+                        2,
+                        None,
+                    ),
+                )
+                .returning(["hits"]),
+        ))
+        .await
+        .expect("logged search executes");
+    let logs = QUERY_STEP_LOGS.take().expect("this thread records");
+    assert_eq!(searched["hits"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        steps(&logs),
+        [
+            ("\"source()\"".to_owned(), "0".to_owned()),
+            ("\"vector_search()\"".to_owned(), "2".to_owned())
+        ],
         "{logs:?}"
     );
     db.close().await.unwrap();

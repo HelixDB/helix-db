@@ -1,7 +1,7 @@
 use std::arch::x86_64::*;
 use std::ptr::read_unaligned;
 
-use crate::search::vector::dimension::SameDimensionPair;
+use crate::search::vector::{dimension::SameDimensionPair, unaligned_vector};
 
 #[target_feature(enable = "avx")]
 unsafe fn hsum256_ps_avx(x: __m256) -> f32 {
@@ -9,6 +9,12 @@ unsafe fn hsum256_ps_avx(x: __m256) -> f32 {
     let x64: __m128 = _mm_add_ps(x128, _mm_movehl_ps(x128, x128));
     let x32: __m128 = _mm_add_ss(x64, _mm_shuffle_ps(x64, x64, 0x55));
     _mm_cvtss_f32(x32)
+}
+
+#[target_feature(enable = "avx")]
+unsafe fn hsum256_pd_avx(x: __m256d) -> f64 {
+    let x128: __m128d = _mm_add_pd(_mm256_extractf128_pd(x, 1), _mm256_castpd256_pd128(x));
+    _mm_cvtsd_f64(_mm_add_sd(x128, _mm_unpackhi_pd(x128, x128)))
 }
 
 #[target_feature(enable = "avx")]
@@ -237,6 +243,85 @@ pub(crate) unsafe fn dot_similarity_avx_fma(pair: SameDimensionPair<'_>) -> f32 
     }
 }
 
+/// Sum of squares in f64 without FMA: four f32 lanes widen to one f64x4, eight
+/// accumulators, thirty-two components per step.
+///
+/// Each square is exact in f64, so the separate multiply never rounds and this
+/// kernel returns the same bits as [`squared_norm_avx_fma`].
+#[target_feature(enable = "avx")]
+pub(crate) unsafe fn squared_norm_avx(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
+    // SAFETY: The view holds exactly `n` f32 values. The caller guarantees AVX support,
+    // the loads accept unaligned data, and every offset read stays below `n`.
+    unsafe {
+        let n = vector.len();
+        let m = n - (n % 32);
+        let ptr = vector.as_ptr() as *const f32;
+        let mut sums = [_mm256_setzero_pd(); 8];
+        let mut i: usize = 0;
+        while i < m {
+            for (lane, sum) in sums.iter_mut().enumerate() {
+                let values = _mm256_cvtps_pd(_mm_loadu_ps(ptr.add(i + 4 * lane)));
+                *sum = _mm256_add_pd(_mm256_mul_pd(values, values), *sum);
+            }
+            i += 32;
+        }
+        let sum = _mm256_add_pd(
+            _mm256_add_pd(
+                _mm256_add_pd(sums[0], sums[1]),
+                _mm256_add_pd(sums[2], sums[3]),
+            ),
+            _mm256_add_pd(
+                _mm256_add_pd(sums[4], sums[5]),
+                _mm256_add_pd(sums[6], sums[7]),
+            ),
+        );
+        let mut result = hsum256_pd_avx(sum);
+        for i in m..n {
+            let value = f64::from(read_unaligned(ptr.add(i)));
+            result += value * value;
+        }
+        result
+    }
+}
+
+/// Sum of squares in f64 with FMA; same layout and result as [`squared_norm_avx`].
+#[target_feature(enable = "avx")]
+#[target_feature(enable = "fma")]
+pub(crate) unsafe fn squared_norm_avx_fma(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
+    // SAFETY: The view holds exactly `n` f32 values. The caller guarantees AVX and FMA
+    // support, the loads accept unaligned data, and every offset read stays below `n`.
+    unsafe {
+        let n = vector.len();
+        let m = n - (n % 32);
+        let ptr = vector.as_ptr() as *const f32;
+        let mut sums = [_mm256_setzero_pd(); 8];
+        let mut i: usize = 0;
+        while i < m {
+            for (lane, sum) in sums.iter_mut().enumerate() {
+                let values = _mm256_cvtps_pd(_mm_loadu_ps(ptr.add(i + 4 * lane)));
+                *sum = _mm256_fmadd_pd(values, values, *sum);
+            }
+            i += 32;
+        }
+        let sum = _mm256_add_pd(
+            _mm256_add_pd(
+                _mm256_add_pd(sums[0], sums[1]),
+                _mm256_add_pd(sums[2], sums[3]),
+            ),
+            _mm256_add_pd(
+                _mm256_add_pd(sums[4], sums[5]),
+                _mm256_add_pd(sums[6], sums[7]),
+            ),
+        );
+        let mut result = hsum256_pd_avx(sum);
+        for i in m..n {
+            let value = f64::from(read_unaligned(ptr.add(i)));
+            result += value * value;
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::search::vector::spaces::simple::{
@@ -361,6 +446,41 @@ mod tests {
                     dimension,
                 );
             }
+        }
+    }
+
+    /// The two AVX variants differ only in fusing an exact square into the
+    /// add, so they must agree bit for bit, not just within the bound.
+    #[test]
+    fn avx_squared_norms_agree_with_scalar_reference_and_each_other() {
+        use super::*;
+        use crate::search::vector::spaces::kernel_agreement::{
+            assert_squared_norm_kernel, TestRng,
+        };
+
+        if !is_x86_feature_detected!("avx") {
+            return;
+        }
+        assert_squared_norm_kernel(
+            |vector| unsafe { squared_norm_avx(vector) },
+            "avx squared norm",
+        );
+        if !is_x86_feature_detected!("fma") {
+            return;
+        }
+        assert_squared_norm_kernel(
+            |vector| unsafe { squared_norm_avx_fma(vector) },
+            "avx+fma squared norm",
+        );
+        let mut rng = TestRng(0x2026_1007);
+        for dimension in [32, 33, 63, 768, 1536] {
+            let values = rng.vector(dimension);
+            let vector = UnalignedVector::from_slice(&values);
+            assert_eq!(
+                unsafe { squared_norm_avx(&vector) }.to_bits(),
+                unsafe { squared_norm_avx_fma(&vector) }.to_bits(),
+                "avx variants at {dimension} dimensions"
+            );
         }
     }
 }

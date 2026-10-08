@@ -548,6 +548,12 @@ pub async fn interpreter_scheduler_and_projection_contracts() {
         .await;
 }
 
+/// Proves filtered node vector searches fuse each index-set access into its
+/// search, and that every other shape runs unfused.
+pub async fn interpreter_fused_vector_search_contracts() {
+    crate::execution::interpreter::production_contracts::run_fused_vector_search_contracts().await;
+}
+
 #[cfg(feature = "index-lifecycle-testing")]
 pub use crate::execution::interpreter::production_contracts::{
     run_text_transaction_batch_benchmark_sample, TextTransactionBatchBenchmarkCase,

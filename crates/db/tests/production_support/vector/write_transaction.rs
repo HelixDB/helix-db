@@ -159,8 +159,133 @@ async fn run_shared_recorder_contract() {
     txn.rollback();
 }
 
+/// Verifies a plan dirties only its namespace's resident rows and fails closed
+/// on a write outside the handle's data scope or with a non-vector key.
+async fn run_planned_cache_contract() {
+    use crate::encoding::keys::scope::DataScope;
+    use crate::encoding::v2::keys::indexes::vector::{
+        VectorIndexMetadataKey, VectorKey, VectorLayer0NeighborsKey, VectorSimHashKey,
+        VectorUpperNeighborsKey, VectorUpperVectorKey,
+    };
+    use crate::encoding::v2::keys::scope::TenantId;
+    use crate::encoding::v2::keys::{DataKey, DataKeyKind};
+    use crate::error::HelixDbError;
+    use crate::search::vector::distance::Cosine;
+    use crate::search::vector::{
+        ValidatedVectorGenerationHandle, VectorCacheWriteSet, VectorDimension,
+        VectorGenerationIdentity,
+    };
+
+    let handle = |scope| {
+        ValidatedVectorGenerationHandle::create_current::<Cosine>(
+            VectorGenerationIdentity::try_new(
+                scope,
+                8,
+                "production-planned-cache-rows".to_string(),
+                80,
+                std::num::NonZeroU64::MIN,
+                1,
+                crate::index_lifecycle::IndexElementKind::Node,
+                VectorDimension::try_new(3).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let key = |key| {
+        DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::Vector(key),
+        }
+        .to_bytes()
+    };
+    let db = slatedb::Db::open(
+        "production-vector-planned-cache-rows",
+        Arc::new(InMemory::new()),
+    )
+    .await
+    .unwrap();
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let recorder = VectorWriteRecorder::new();
+    let write = recorder.bind(&txn);
+    let checkpoint = write.checkpoint();
+    write
+        .put(key(VectorKey::SimHash(VectorSimHashKey::new(80, 1))), b"s")
+        .unwrap();
+    write
+        .delete(key(VectorKey::UpperVector(VectorUpperVectorKey::new(
+            80, 2,
+        ))))
+        .unwrap();
+    write
+        .put(
+            key(VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(
+                80, 3, 4,
+            ))),
+            b"n",
+        )
+        .unwrap();
+    write
+        .put(
+            key(VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(
+                80, 5,
+            ))),
+            b"l",
+        )
+        .unwrap();
+    write
+        .put(
+            key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(80))),
+            b"m",
+        )
+        .unwrap();
+    write
+        .put(key(VectorKey::SimHash(VectorSimHashKey::new(81, 6))), b"o")
+        .unwrap();
+    let plan = write.plan_since(checkpoint).unwrap();
+
+    let writes = VectorCacheWriteSet::default();
+    writes
+        .record_planned(&handle(DataScope::LegacyUnscoped), &plan)
+        .unwrap();
+    let entries = writes.entries();
+    assert_eq!(entries.len(), 1, "one namespace was recorded");
+    let rows = entries[0].dirty_rows().expect("recorded rows are evicted");
+    let mut nodes = rows.dirty_nodes();
+    nodes.sort_unstable();
+    assert_eq!(
+        nodes,
+        [1, 2],
+        "only SimHash and upper-vector rows are resident"
+    );
+    assert_eq!(rows.dirty_upper_neighbors(), [(3, 4)]);
+
+    let tenant = DataScope::Tenant(TenantId::from_u128(1));
+    assert!(
+        matches!(
+            VectorCacheWriteSet::default().record_planned(&handle(tenant), &plan),
+            Err(HelixDbError::InvariantViolation(_))
+        ),
+        "a write outside the handle's data scope fails closed"
+    );
+    let checkpoint = write.checkpoint();
+    write.put(b"not a vector key", b"x").unwrap();
+    assert!(
+        matches!(
+            VectorCacheWriteSet::default().record_planned(
+                &handle(DataScope::LegacyUnscoped),
+                &write.plan_since(checkpoint).unwrap()
+            ),
+            Err(HelixDbError::InvariantViolation(_))
+        ),
+        "a non-vector key fails closed"
+    );
+    txn.rollback();
+}
+
 /// Exercises measured-write replacement, delegation, and failure boundaries.
 pub(crate) async fn run() {
     run_measured_transaction_contract().await;
     run_shared_recorder_contract().await;
+    run_planned_cache_contract().await;
 }
