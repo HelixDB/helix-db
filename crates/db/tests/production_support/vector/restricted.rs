@@ -627,6 +627,33 @@ fn candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit() {
     assert!(error.to_string().contains("at most 1000000"));
 }
 
+#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+fn empty_candidates_accept_any_result_count_and_absorb_exclusions() {
+    let empty = RestrictedVectorCandidates::from_ids([]).unwrap();
+    empty.validate_result_count(1).unwrap();
+    empty
+        .validate_result_count(MAX_RESTRICTED_RESULT_COUNT + 1)
+        .expect("an empty set yields no results, so no count exceeds the cap");
+    assert!(matches!(
+        empty.without(&RoaringTreemap::from_iter([1])),
+        RestrictedVectorCandidates::Empty
+    ));
+
+    let candidates = RestrictedVectorCandidates::from_ids([2, 4, 9]).unwrap();
+    assert!(matches!(
+        candidates.without(&RoaringTreemap::from_iter([2, 4, 9, 11])),
+        RestrictedVectorCandidates::Empty
+    ));
+    let remaining = candidates.without(&RoaringTreemap::from_iter([4]));
+    assert!(remaining.contains(2));
+    assert!(!remaining.contains(4));
+    assert!(remaining.contains(9));
+    assert!(
+        candidates.contains(4),
+        "exclusion leaves the original set intact"
+    );
+}
+
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn oversized_result_count_rejects_before_index_metadata_io() {
     let db = Arc::new(
@@ -2221,6 +2248,7 @@ pub(crate) async fn run() {
     admission_scans_exactly_by_candidate_cardinality_and_bytes();
     restricted_result_count_clamps_before_enforcing_the_payload_limit();
     candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit();
+    empty_candidates_accept_any_result_count_and_absorb_exclusions();
     oversized_result_count_rejects_before_index_metadata_io().await;
     empty_candidates_short_circuit_before_index_metadata_io().await;
     unbound_metric_rejects_after_metadata_without_vector_reads().await;
