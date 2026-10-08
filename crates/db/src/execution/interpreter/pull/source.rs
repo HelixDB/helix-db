@@ -508,8 +508,9 @@ impl<'a> Source<'a> {
             if matches!(self.remaining, Demand::Done) {
                 return Ok(None);
             }
-            // A node scan also yields the element's property record.
-            let (row, record) = match &mut self.state {
+            // A read-only node scan also yields the element's property record.
+            let mut record = None;
+            let row = match &mut self.state {
                 State::Unopened => {
                     self.state = Box::pin(self.open(ctx)).await?;
                     continue;
@@ -521,7 +522,7 @@ impl<'a> Source<'a> {
                         continue;
                     };
                     self.remaining.consume();
-                    (ExecutionRow::current(kv::element_ref(*keyspace, id)), None)
+                    ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
                 State::Rows(items) => {
                     let item = items.next();
@@ -593,7 +594,7 @@ impl<'a> Source<'a> {
                     if !exists {
                         continue;
                     }
-                    (ExecutionRow::current(kv::element_ref(*keyspace, id)), None)
+                    ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
                 State::Scan { iter, keyspace } => {
                     let Some(entry) = iter.next().await? else {
@@ -622,13 +623,10 @@ impl<'a> Source<'a> {
                     // row after this scan read it, so only read-only requests
                     // reuse the scanned record instead of reading it again.
                     // A predicate admits it like the read it replaces.
-                    let record = (*keyspace == exec::ElementKeyspace::NodeProperty
+                    record = (*keyspace == exec::ElementKeyspace::NodeProperty
                         && ctx.active_write_tx().is_none())
                     .then_some(entry.value);
-                    (
-                        ExecutionRow::current(kv::element_ref(*keyspace, id)),
-                        record,
-                    )
+                    ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
             };
             // Null equality opens as verified label rows; only a predicate
