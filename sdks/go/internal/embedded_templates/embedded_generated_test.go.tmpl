@@ -5,6 +5,7 @@ package helix
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -26,6 +27,33 @@ func TestGeneratedEmbeddedClientExecutesQuery(t *testing.T) {
 	}
 	if len(response.Users) != 0 {
 		t.Fatalf("expected no users in a new embedded database, got %d", len(response.Users))
+	}
+}
+
+func TestGeneratedEmbeddedClientExplainsCypherWithoutExecuting(t *testing.T) {
+	client, err := NewEmbeddedClient(InMemorySource{Database: "go-generated-embedded-explain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close generated embedded client: %v", err)
+		}
+	})
+
+	plan, err := client.ExplainCypher(context.Background(), CypherRequest{Query: "CREATE (:N {key:7})"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plan["operators"]; !ok {
+		t.Fatalf("explain returned no operators: %#v", plan)
+	}
+	count, err := client.Cypher(context.Background(), CypherRequest{Query: "MATCH (n:N) RETURN count(*) AS total"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := count.Rows[0][0]; got != json.Number("0") {
+		t.Fatalf("explain executed the statement: count = %#v", got)
 	}
 }
 

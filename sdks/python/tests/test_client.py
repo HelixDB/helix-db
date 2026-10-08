@@ -202,9 +202,11 @@ class ClientTests(unittest.TestCase):
                 "embedded",
                 "embedded_reader",
                 "with_api_key",
+                "with_database_id",
                 "request_builder",
                 "query",
                 "cypher",
+                "explain_cypher",
                 "base_url",
                 "execute",
                 "graph",
@@ -249,6 +251,42 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(calls[1].headers["X-helix-require-writer"], "true")
         self.assertEqual(calls[1].headers["X-helix-warm"], "true")
         self.assertEqual(calls[1].headers["X-helix-await-durable"], "true")
+
+    def test_database_id_header_is_sent_on_native_queries_until_cleared(self) -> None:
+        request = QueryRequest.read(read_batch())
+        calls = []
+
+        def fake_urlopen(req):
+            calls.append(req)
+            return FakeResponse()
+
+        client = Client.server("http://127.0.0.1:6969", api_key="hx_secret", database_id="db-1")
+        snapshot = client.request_builder().query(request)
+        self.assertIs(client.with_database_id("db-2"), client)
+
+        with patch("helixdb.client.urlopen", fake_urlopen):
+            snapshot.send()
+            client.execute(request, writer_only=True)
+            client.with_database_id()
+            client.query(request)
+            Client(database_id="db-3").query(request)
+
+        self.assertEqual(
+            [call.get_header("X-helix-database-id") for call in calls],
+            ["db-1", "db-2", None, "db-3"],
+        )
+        self.assertEqual(calls[1].get_header("Authorization"), "Bearer hx_secret")
+        self.assertEqual(calls[1].get_header("X-helix-require-writer"), "true")
+        self.assertEqual(snapshot.database_id, "db-1")
+
+    def test_embedded_with_database_id_is_a_no_op(self) -> None:
+        request = QueryRequest.read(read_batch())
+
+        with patch.dict(sys.modules, {"helixdb_uniffi": fake_native_module()}):
+            client = Client.embedded(InMemory("py-sdk-database-id"))
+            self.assertIs(client.with_database_id("db-1"), client)
+            self.assertEqual(client.query(request), {"users": 0})
+            self.assertIsNone(client.request_builder().query(request).database_id)
 
     def test_graph_delegates_to_graph_loader(self) -> None:
         client = Client.server()

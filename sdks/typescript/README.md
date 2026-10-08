@@ -44,9 +44,14 @@ routes, registration, or query-bundle APIs.
 Server mode uses the built-in global `fetch`:
 
 ```ts
-const client = Client.server("https://cluster.helix-db.com").withApiKey("hx_secret");
+const client = Client.server("https://cluster.helix-db.com").withApiKey("hx_secret").withDatabaseId("db_123");
 const result = await client.query<MyResponse>(request).send();
 ```
+
+`withApiKey(...)` sends `Authorization: Bearer <key>` and `withDatabaseId(...)`
+sends `x-helix-database-id` on every native and Cypher request. Helix Cloud
+gateways can require the database ID on every query route, including both
+Cypher routes, and reject requests without it with `tenant_id_required`.
 
 Advanced server-only headers are available from `requestBuilder<R>()`:
 
@@ -335,7 +340,50 @@ camel case.
 
 ## Cypher
 
-Clients built from this checkout expose an additive Cypher method for local HTTP
-and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
-the language profile, method signatures, parameters, lossless values, and
-transaction behavior. Native DSL query methods keep their existing contract.
+Clients built from this checkout run one Cypher statement per request over HTTP
+or against an embedded database. See the [Cypher reference](../../docs/cypher.md)
+for the language profile, parameters, lossless values, and transaction behavior.
+Native DSL query methods keep their existing contract.
+
+```ts
+const result = await client.cypher("MATCH (u:User) WHERE u.age >= $minimumAge RETURN u.name AS name", { minimumAge: 30 }, "adult_users");
+// { columns: ["name"], rows: [["Ada"], ...] }
+
+const plan = await client.explainCypher("CREATE (:User {name: $name})", { name: "Ada" });
+// plan.effect === "Write"; nothing was written
+```
+
+`cypher(query, parameters = {}, queryName?)` sends `POST /v2/cypher` and
+resolves to `{ columns, rows }`. `explainCypher(...)` takes the same arguments,
+sends `POST /v2/cypher/explain`, and resolves to the planner's
+`CypherExplanation` without executing the statement, including modifying
+statements. Only `effect` and `operators` are typed; the remaining planner
+diagnostics are returned as the server encoded them, with integers outside
+JavaScript's safe range as `bigint`. Pass `bigint` for integers
+outside JavaScript's safe range; `bigint` and non-finite numbers are sent as
+tagged lossless values. Graph IDs and large integers in results stay tagged.
+
+Both methods send the client's API key and database ID. For server request
+options, build the request with `requestBuilder()` and finish with `.send()` or
+`.explain()`:
+
+```ts
+await client.requestBuilder().writerOnly().cypher("CREATE (u:User {name: $name}) RETURN u", { name: "Ada" }).send();
+await client.requestBuilder().shouldAwaitDurability(false).cypher("MATCH (u:User) SET u.seen = true").send();
+await client.requestBuilder().warmOnly().cypher("MATCH (u:User) RETURN u.name AS name").send();
+await client.requestBuilder().writerOnly().cypher("MATCH (u:User) RETURN u").explain();
+```
+
+`warmOnly()` applies to reads and `shouldAwaitDurability(...)` to writes.
+Explain applies the options as a read. A warm-only Cypher read returns no rows:
+Helix Cloud answers it with `204 No Content` after warming, so `send()`
+resolves to `{ columns: [], rows: [] }` and the builder's `explain()` resolves
+to `undefined`. A standalone local warm read can return its normal payload
+instead. `explainCypher(...)` sends no options, so it always resolves to a
+`CypherExplanation`. Cypher failures raise `HelixError`; a
+query diagnostic carries its category in `code` and
+`{ detail, phase, span }` in `serverDetails`.
+
+Embedded clients reject server request options with an `InvalidRequest` error,
+as for native queries. `explainCypher(...)` needs an embedded package with
+Cypher explain support; older packages raise `EmbeddedUnavailable`.

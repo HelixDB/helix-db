@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 )
 
@@ -242,10 +243,10 @@ func NewEmbeddedReaderClientWithConfig(source HelixDbSource, cache EmbeddedCache
 	return newEmbeddedClient(source, &cache, true, opts...)
 }
 
-func (c *Client) WithAPIKey(apiKey string) *Client { c.setAPIKey(apiKey); return c }
-func (c *Client) ClearAPIKey() *Client             { c.setAPIKey(""); return c }
+func (c *Client) WithAPIKey(apiKey string) *Client         { c.setAPIKey(apiKey); return c }
+func (c *Client) ClearAPIKey() *Client                     { c.setAPIKey(""); return c }
 func (c *Client) WithDatabaseID(databaseID string) *Client { c.setDatabaseID(databaseID); return c }
-func (c *Client) ClearDatabaseID() *Client                { c.setDatabaseID(""); return c }
+func (c *Client) ClearDatabaseID() *Client                 { c.setDatabaseID(""); return c }
 func (c *Client) BaseURL() string {
 	if c == nil || c.baseURL == nil {
 		return ""
@@ -299,6 +300,40 @@ func AwaitDurability(should bool) ExecOption {
 	return func(o *execOptions) { o.awaitDurability = &should }
 }
 
+// rejectEmbedded fails when any option is set, because exec options are
+// server request headers with no embedded equivalent.
+func (o execOptions) rejectEmbedded() error {
+	if !o.writerOnly && !o.warmOnly && o.awaitDurability == nil {
+		return nil
+	}
+	return &HelixError{
+		Kind:    ErrorInvalidRequest,
+		Code:    QueryErrorCode("invalid_request"),
+		Details: "exec options require server mode",
+	}
+}
+
+// setHeaders applies the headers every HTTP query route shares: JSON content,
+// the API key and database ID when set, and the request's exec options.
+func (c *Client) setHeaders(request *http.Request, options execOptions) {
+	request.Header.Set("Content-Type", "application/json")
+	if apiKey := c.getAPIKey(); apiKey != "" {
+		request.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if dbID := c.getDatabaseID(); dbID != "" {
+		request.Header.Set("x-helix-database-id", dbID)
+	}
+	if options.writerOnly {
+		request.Header.Set("x-helix-require-writer", "true")
+	}
+	if options.warmOnly {
+		request.Header.Set("x-helix-warm", "true")
+	}
+	if options.awaitDurability != nil {
+		request.Header.Set("x-helix-await-durable", strconv.FormatBool(*options.awaitDurability))
+	}
+}
+
 func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOption) error {
 	if c == nil {
 		return &HelixError{Kind: ErrorInvalidURL, Details: "nil client"}
@@ -312,12 +347,8 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 		opt(&options)
 	}
 	if c.embedded != nil {
-		if options.writerOnly || options.warmOnly || options.awaitDurability != nil {
-			return &HelixError{
-				Kind:    ErrorInvalidRequest,
-				Code:    QueryErrorCode("invalid_request"),
-				Details: "exec options require server mode",
-			}
+		if err := options.rejectEmbedded(); err != nil {
+			return err
 		}
 		response, err := c.embedded.QueryJson(body)
 		if err != nil {
@@ -341,26 +372,7 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 	if err != nil {
 		return &HelixError{Kind: ErrorInvalidURL, Err: err, Details: err.Error()}
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey := c.getAPIKey(); apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	if dbID := c.getDatabaseID(); dbID != "" {
-		httpReq.Header.Set("x-helix-database-id", dbID)
-	}
-	if options.writerOnly {
-		httpReq.Header.Set("x-helix-require-writer", "true")
-	}
-	if options.warmOnly {
-		httpReq.Header.Set("x-helix-warm", "true")
-	}
-	if options.awaitDurability != nil {
-		if *options.awaitDurability {
-			httpReq.Header.Set("x-helix-await-durable", "true")
-		} else {
-			httpReq.Header.Set("x-helix-await-durable", "false")
-		}
-	}
+	c.setHeaders(httpReq, options)
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return &HelixError{Kind: ErrorNetwork, Err: err, Details: err.Error()}

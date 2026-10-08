@@ -3,15 +3,15 @@
 Helix supports the Cypher profile below alongside the native DSL. Both frontends
 use the existing graph storage, transactions, and indexes. Existing databases do
 not need a storage migration. This is a supported language profile, not full
-openCypher compatibility. Use a server or embedded build containing this implementation;
-cloud gateway deployment is separate.
+openCypher compatibility. Use a server, embedded build or Helix Cloud gateway
+containing this implementation.
 
 ## Execute a statement
 
-Cypher is off by default. Start the server with `HELIX_ENABLE_CYPHER=true` to
-route `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`;
-without it they return 404 and `Unimplemented`, and only native queries are
-served.
+Every server serves Cypher on its own routes, `POST /v2/cypher` and
+`POST /v2/cypher/explain`, and on the gRPC `ExecuteCypher` and `ExplainCypher`
+methods, alongside the native `POST /v2/query` and `ExecuteQuery`. Clients can use
+either language against the same database.
 
 Send one statement to a local server's `POST /v2/cypher` endpoint:
 
@@ -25,10 +25,32 @@ curl http://localhost:6969/v2/cypher \
 {"columns":["name","age"],"rows":[["Ada",30]]}
 ```
 
-Use the host and port of your configured instance. Existing server authentication
-and tenant routing apply. `query` is required; `parameters` and `query_name` are
+Use the host and port of your configured instance. The standalone server has no
+authentication and, like `POST /v2/query`, runs every statement against the
+unscoped graph. `query` is required; `parameters` and `query_name` are
 optional. Each row has one value per column in column order. Duplicates are
 preserved unless the query uses `DISTINCT`. Use `ORDER BY` when row order matters.
+
+A Helix Cloud gateway serves the same routes with the same request and response
+bodies. Authenticate as for `POST /v2/query`, with the cluster API key and, on a
+GA shared gateway, the database ID:
+
+```sh
+curl "$HELIX_ENDPOINT/v2/cypher" \
+  -H "Authorization: Bearer $HELIX_API_KEY" \
+  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"MATCH (n) RETURN count(n) AS nodes"}'
+```
+
+The gateway compiles each statement to learn whether it writes. Reads go to
+readers, and writes and `X-Helix-Require-Writer` requests go to the elected
+writer. A read-only API key can read and explain, but receives `403` for a
+modifying statement. Explain always routes as a read. Cloud request bodies are
+limited to 2 MiB (`413 payload_too_large`), and the database's rate limit and
+query time limit (`408`) apply as they do to native queries. Authentication,
+rate-limit, timeout and availability failures use the native
+`{"error","msg"}` envelope; statement errors use the Cypher envelope below.
 
 Create and read a graph:
 
@@ -52,13 +74,21 @@ The existing `POST /v2/query` endpoint continues to accept the native DSL contra
 
 Use an existing configured client and its normal connection lifecycle:
 
-| Client | Method |
-|---|---|
-| TypeScript | `await client.cypher(query, parameters, queryName)` |
-| Rust SDK | `client.cypher(query, parameters, query_name).await` |
-| Go | `client.Cypher(ctx, helix.CypherRequest{Query: query, Parameters: parameters})` |
-| Python | `client.cypher(query, parameters, query_name="example")` |
-| Async Python | `await client.cypher(query, parameters, query_name="example")` |
+| Client | Execute | Explain | With request options |
+|---|---|---|---|
+| TypeScript | `await client.cypher(query, parameters, queryName)` | `await client.explainCypher(...)` | `client.requestBuilder().writerOnly().cypher(...).send()` |
+| Rust SDK | `client.cypher(query, parameters, query_name).await` | `client.explain_cypher(...).await` | `client.request_builder::<()>().writer_only().cypher(...).send().await` |
+| Go | `client.Cypher(ctx, helix.CypherRequest{...})` | `client.ExplainCypher(ctx, ...)` | `client.Cypher(ctx, request, helix.WriterOnly())` |
+| Python | `client.cypher(query, parameters, query_name="example")` | `client.explain_cypher(...)` | `client.cypher(query, writer_only=True)` |
+| Async Python | `await client.cypher(...)` | `await client.explain_cypher(...)` | `await client.cypher(query, writer_only=True)` |
+
+Every client sends its API key and database ID (`withDatabaseId`, `with_database_id`,
+`WithDatabaseID`, `database_id=`) on both Cypher routes; Helix Cloud requires the
+database ID. The options are the same warm, require-writer and await-durable
+options as native queries. A warm-only read that Helix Cloud answers with
+`204 No Content` returns no columns or rows, and its explain returns nothing.
+Embedded clients reject request options and explain through the native
+`explain_cypher_json` binding.
 
 TypeScript and Python default omitted parameters to an empty map. Rust SDK
 parameters are a `BTreeMap<String, serde_json::Value>` and `query_name` is
@@ -84,8 +114,26 @@ HTTP and gRPC use this path. Compilation retains no database or catalog snapshot
 execution still acquires the current scoped catalog, validates parameters, and
 applies the attempt's limits and cancellation control.
 
-The additive gRPC `ExecuteCypher(QueryJsonRequest)` method accepts the same JSON
-body and existing request options, returning a `QueryJsonResponse`.
+The gRPC `ExecuteCypher(QueryJsonRequest)` and `ExplainCypher(QueryJsonRequest)`
+methods accept the same JSON body and existing request options, returning a
+`QueryJsonResponse` whose body matches the HTTP response. `ExplainCypher` applies
+the options as a read, like `POST /v2/cypher/explain`.
+
+Every transport reports a Cypher query error with the same class. HTTP returns a
+`{"error","msg","details":{"detail","phase","span"}}` body; gRPC carries the same
+query error as JSON in the status details. Request, storage and transaction
+failures keep the native error envelope and codes.
+
+| Error category | HTTP | gRPC |
+|---|---|---|
+| `ResourceLimit` | 429 | `RESOURCE_EXHAUSTED` |
+| `AccessModeError` (a write on a reader) | 503 | `FAILED_PRECONDITION` |
+| `InternalPlannerError` | 500 | `INTERNAL` |
+| Any other category | 400 | `INVALID_ARGUMENT` |
+
+Rust transports reuse this contract from `helix_cypher::api` (`ErrorClass`,
+`ErrorBody` and the route paths) and decode requests with
+`helix_cypher::request::Request`, which needs no database.
 
 From a linked local Helix project:
 

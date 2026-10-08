@@ -276,7 +276,60 @@ bindings and native libraries.
 
 ## Cypher
 
-Clients built from this checkout expose an additive Cypher method for local HTTP
-and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
-the language profile, method signatures, parameters, lossless values, and
-transaction behavior. Native DSL query methods keep their existing contract.
+Clients built from this checkout expose additive Cypher methods for HTTP and
+embedded connections. See the [Cypher reference](../../docs/cypher.md) for the
+language profile, parameters, lossless values, and transaction behavior. Native
+DSL query methods keep their existing contract.
+
+`Client.Cypher` posts one statement to `/v2/cypher` and returns its columns and
+rows. It sends the statement once and never retries it, so an uncertain
+modifying statement is not replayed.
+
+```go
+result, err := client.Cypher(ctx, helix.CypherRequest{
+	Query:      "MATCH (u:User {tenantId: $tenant}) RETURN u.name AS name",
+	Parameters: map[string]any{"tenant": "acme"},
+	QueryName:  "user_names",
+})
+```
+
+`Client.ExplainCypher` posts the same request to `/v2/cypher/explain` and
+returns the plan as a `map[string]any` with `effect`, `bindings`, `returns`,
+`operators`, `planner`, and `notices`. It does not execute the statement, so
+explaining a modifying statement writes nothing.
+
+```go
+plan, err := client.ExplainCypher(ctx, helix.CypherRequest{
+	Query:      "CREATE (:User {name: $name})",
+	Parameters: map[string]any{"name": "Ada"},
+})
+```
+
+Both methods accept the same options as `Exec`: `helix.WarmOnly()` for reads,
+`helix.WriterOnly()`, and `helix.AwaitDurability(bool)` for writes. The server
+rejects `AwaitDurability(true)` on explain because explaining never commits.
+Both send the API key and the database ID set with `WithDatabaseID`. Helix
+Cloud gateways require the database ID on every query route, including both
+Cypher routes, and otherwise return `400 tenant_id_required`.
+
+```go
+client, err := helix.NewClient(cloudURL,
+	helix.WithAPIKey(apiKey),
+	helix.WithDatabaseID(databaseID),
+)
+created, err := client.Cypher(ctx, helix.CypherRequest{Query: "CREATE (:User {name: 'Ada'})"},
+	helix.WriterOnly(),
+	helix.AwaitDurability(true),
+)
+```
+
+Responses decode with `json.Decoder.UseNumber()`, so large integers stay exact.
+If a warm read returns `204 No Content`, `Cypher` returns an empty
+`CypherResponse` and `ExplainCypher` a nil map. A Cypher diagnostic is a
+`*HelixError` with `Code` set to its category, `Details` to its message, and
+`ServerDetails` to the raw `{"detail","phase","span"}` JSON. HTTP 409 matches
+`ErrConflict`, as it does for `Exec`.
+
+Embedded clients reject options with `ErrorInvalidRequest`, as `Exec` does.
+`ExplainCypher` returns `ErrorEmbeddedUnavailable` when the linked native
+bindings predate Cypher explain support.

@@ -889,6 +889,55 @@ async fn missing_text_index_preserves_the_public_error_code() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grpc_routes_native_and_cypher_rpcs_on_one_service() {
+    let db = fresh_database("transport-cypher-grpc").await;
+    let mut grpc = GrpcAdapter::start(db).await;
+    let cypher = |query: &str| QueryJsonRequest {
+        body: serde_json::json!({ "query": query })
+            .to_string()
+            .into_bytes()
+            .into(),
+        warm_only: false,
+        require_writer: false,
+        await_durable: false,
+    };
+    let body = |response: QueryJsonResponse| {
+        serde_json::from_slice::<serde_json::Value>(&response.body).expect("response body is JSON")
+    };
+
+    let created = grpc
+        .client
+        .execute_cypher(cypher("CREATE (n:Routed) RETURN count(n) AS created"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(body(created)["rows"], serde_json::json!([[1]]));
+    let plan = grpc
+        .client
+        .explain_cypher(cypher("MATCH (n:Routed) RETURN n"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(body(plan)["operators"].is_array());
+    let count = QueryRequest::read(
+        batch::read_batch()
+            .var_as("count", traversal::g().n_with_label("Routed").count())
+            .returning(["count"]),
+    );
+    let native = grpc
+        .raw_query(QueryJsonRequest {
+            body: simd_json::to_vec(&count).unwrap().into(),
+            warm_only: false,
+            require_writer: false,
+            await_durable: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(body(native)["count"], 1);
+    grpc.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() {
     let db = fresh_database("transport-errors-grpc").await;
     let mut grpc = GrpcAdapter::start(db).await;

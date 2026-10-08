@@ -107,9 +107,11 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
                 "embedded",
                 "embedded_reader",
                 "with_api_key",
+                "with_database_id",
                 "request_builder",
                 "query",
                 "cypher",
+                "explain_cypher",
                 "execute",
                 "base_url",
                 "close",
@@ -216,6 +218,39 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1].headers["x-helix-require-writer"], "true")
         self.assertEqual(calls[1].headers["x-helix-warm"], "true")
         self.assertEqual(calls[1].headers["x-helix-await-durable"], "true")
+
+    async def test_database_id_header_is_sent_on_native_queries_until_cleared(self) -> None:
+        calls: list[httpx.Request] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        client = AsyncClient.server(
+            api_key="hx_secret", database_id="db-1", transport=httpx.MockTransport(handler)
+        )
+        snapshot = client.request_builder().query(read_request())
+        self.assertIs(client.with_database_id("db-2"), client)
+
+        await snapshot.send()
+        await client.execute(read_request(), writer_only=True)
+        client.with_database_id()
+        await client.query(read_request())
+        await client.close()
+
+        self.assertEqual(
+            [call.headers.get("x-helix-database-id") for call in calls],
+            ["db-1", "db-2", None],
+        )
+        self.assertEqual(calls[1].headers["authorization"], "Bearer hx_secret")
+        self.assertEqual(calls[1].headers["x-helix-require-writer"], "true")
+
+    async def test_embedded_with_database_id_is_a_no_op(self) -> None:
+        with patch.dict(sys.modules, {"helixdb_uniffi": fake_native_module()}):
+            client = await AsyncClient.embedded(InMemory("async-database-id"))
+            self.assertIs(client.with_database_id("db-1"), client)
+            self.assertEqual(await client.query(read_request()), {"users": 0})
+            await client.close()
 
     async def test_empty_invalid_remote_and_network_responses_match_sync_contract(
         self,
@@ -367,6 +402,7 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         for operation in (
             lambda: client.request_builder(),
             lambda: client.with_api_key("closed"),
+            lambda: client.with_database_id("closed"),
             lambda: client.base_url,
         ):
             with self.assertRaises(HelixError) as closed:

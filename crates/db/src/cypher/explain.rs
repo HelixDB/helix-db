@@ -27,7 +27,7 @@ impl HelixDB {
             self,
             request,
             DataScope::LegacyUnscoped,
-            ExecutionControl::from_timeout(std::time::Duration::from_secs(30)),
+            ExecutionControl::from_timeout(DEFAULT_TIMEOUT),
             Limits::default(),
         )
         .await

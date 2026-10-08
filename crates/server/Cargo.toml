@@ -10,6 +10,7 @@ async-index-benchmark = ["db/async-index-benchmark"]
 [dependencies]
 db = { path = "../db" }
 helix-ast = { path = "../ast" }
+helix-cypher = { path = "../cypher" }
 helix-metrics = { path = "../metrics" }
 helix-planner = { path = "../planner" }
 axum = "0.8.8"

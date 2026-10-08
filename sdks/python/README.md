@@ -77,6 +77,28 @@ an empty successful response after at least one target succeeds. Pass
 return an error before backend execution. A standalone local warm read can
 return its normal query payload instead.
 
+## Database ID
+
+Helix Cloud gateways require an `x-helix-database-id` header on every query
+route, native and Cypher, and reject requests without it with
+`tenant_id_required`. Pass `database_id` when you construct a server client, or
+set it later with `with_database_id(...)`. Call `with_database_id()` with no
+argument to clear it.
+
+```python
+from helixdb import AsyncClient, Client
+
+client = Client("https://helix.example.com", api_key=api_key, database_id="db_123")
+client.with_database_id("db_456")  # later requests target another database
+
+async_client = AsyncClient.server(
+    "https://helix.example.com", api_key=api_key, database_id="db_123"
+)
+```
+
+Builders and prepared requests keep the database ID that was set when they were
+created. Embedded clients ignore it.
+
 The DSL emits the same query JSON AST as the Rust, TypeScript, and Go
 SDKs. Python methods use `snake_case`; compatibility aliases such as
 `nWithLabel` and `valueMap` are also available for users translating TypeScript
@@ -293,7 +315,43 @@ python -m unittest discover -s sdks/python/tests
 
 ## Cypher
 
-Clients built from this checkout expose an additive Cypher method for local HTTP
-and embedded connections. See the [Cypher reference](../../docs/cypher.md) for
-the language profile, method signatures, parameters, lossless values, and
-transaction behavior. Native DSL query methods keep their existing contract.
+Clients built from this checkout expose additive Cypher methods for HTTP and
+embedded connections. `cypher(...)` executes one statement through
+`POST /v2/cypher`. `explain_cypher(...)` plans the same request through
+`POST /v2/cypher/explain` without executing it and returns the explain object.
+
+```python
+from helixdb import Client
+
+client = Client(api_key=api_key, database_id="db_123")
+rows = client.cypher(
+    "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name",
+    {"age": 30},
+    query_name="adults",
+)
+plan = client.explain_cypher(
+    "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name",
+    {"age": 30},
+)
+client.cypher(
+    "CREATE (:Person {name: $name})",
+    {"name": "Ada"},
+    writer_only=True,
+    await_durability=True,
+)
+```
+
+Both methods accept the routing options that `execute` accepts: `writer_only`,
+`warm_only` (reads only), and `await_durability` (writes only). Helix Cloud
+answers a successful warm request with `204 No Content`; `cypher` then returns
+`{"columns": [], "rows": []}` and `explain_cypher` returns `None`. `timeout`
+defaults to 30 seconds on `Client` and to the client timeout on `AsyncClient`,
+whose methods have the same signatures and are awaited.
+
+Embedded clients reject routing options with an `InvalidRequest` error.
+Embedded explain needs native bindings that expose `explain_cypher_json`. Older
+builds raise `HelixError` with kind `EmbeddedUnavailable`.
+
+See the [Cypher reference](../../docs/cypher.md) for the language profile,
+parameters, lossless values, and transaction behavior. Native DSL query methods
+keep their existing contract.

@@ -22,9 +22,7 @@ use state::ServerState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-pub use config::{
-    CacheConfig, CypherEndpoints, HybridCache, ServerConfig, ServerConfigError, StorageConfig,
-};
+pub use config::{CacheConfig, HybridCache, ServerConfig, ServerConfigError, StorageConfig};
 
 /// Boxed error returned by the server runtime.
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync + 'static>>;
@@ -244,7 +242,6 @@ pub async fn run_until_ctrl_c(config: ServerConfig) -> ServerResult<()> {
 ///     db_path: "server-shutdown-example".to_string(),
 ///     storage: StorageConfig::Memory,
 ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
-///     cypher: server::CypherEndpoints::Disabled,
 /// };
 /// server::run_with_shutdown(config, async {}).await.unwrap();
 /// # });
@@ -269,8 +266,7 @@ async fn run_open_database_until_shutdown(
 ) -> ServerResult<()> {
     let ServerDatabase { db, cache_lock } = database;
     let (query_metrics, query_metrics_runtime) = server_query_metrics();
-    let state = ServerState::new(Arc::clone(&db), query_metrics, config.storage.clone())
-        .with_cypher_endpoints(config.cypher);
+    let state = ServerState::new(Arc::clone(&db), query_metrics, config.storage.clone());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let http_config = config.clone();
