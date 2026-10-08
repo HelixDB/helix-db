@@ -19,7 +19,7 @@ object_store = "0.14"
 prost = "0.14.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "77d4990879e0e4d04146a22f3ef3d5d775e204d6" }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd" }
 simd-json = { version = "0.18.1", default-features = false, features = [
     "runtime-detection",
     "serde_impl",
