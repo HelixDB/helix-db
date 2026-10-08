@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d" }
-slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d", optional = true }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "77d4990879e0e4d04146a22f3ef3d5d775e204d6" }
+slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "77d4990879e0e4d04146a22f3ef3d5d775e204d6", optional = true }
 http-body = { version = "1", optional = true }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
