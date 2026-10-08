@@ -45,7 +45,8 @@ contradiction check from that commit stayed.
 
 1. Keep the changes in this branch.
 2. Don't build a planner arena.
-3. Measure the server built with `-C target-feature=+lse` on Graviton (see the atomics section).
+3. Ship the server with the `dist` profile (thin LTO, one codegen unit), which this branch adds; see
+   [the build profile](#the-build-profile). `+lse` no longer helps planning.
 4. Work through [what remains](#what-remains), measured on Graviton rather than macOS.
 
 ## Method
@@ -237,9 +238,57 @@ on `7ac71ad2`:
   - a pointer freed on another thread would reach mimalloc;
   - a cloned plan still shares the `Arc`s made inside the scope.
 
+## After merging main
+
+Four more planner changes followed. Each was measured against its parent as above, with both sides
+rebuilt from clean (see the next section).
+
+| Commit | Change | Largest gains |
+| --- | --- | --- |
+| `b34ff8fc` | One cache per optimization run holds each filter's index rewrite. The exploration rule and the implementation rules that defer to it had derived the same rewrite about three times per filter (over four in the mixed workloads). | `predicate_heavy` −34 to −38%, `OverLimitIndexDisjunction/128` −10%, `ManyMemoAlternatives/64` −9% |
+| `90b4c4e2` | The memoizer compares against the memo's copy of each expression instead of keeping its own. | median −2.6%, `string_heavy_projection` −10% |
+| `91857501` | Cache lookups skip serializing a predicate whose allocation the cache already knows, and hits write nothing. | `predicate_heavy` −5 to −6% |
+| `50d73a0a` | A source filter's specialized predicate moves into its plan instead of being copied twice more. | `BatchedRootReuse/256` −18%, `ForEachBodyRootReuse/256` −7% |
+
+`b34ff8fc` measured a median −0.1%: most workloads derive few rewrites. Keying the cache by predicate
+allocation alone lost hits for predicates that rules rebuild (`deep_chain/123` +8%), so other
+allocations still match by digest.
+
+Two measurement problems turned up along the way:
+
+- **Stale candidates.** `rsync` kept the source files' modification times, so a file edited before
+  the previous build finished could look older than that build, and cargo skipped it. Every
+  candidate is now rebuilt from clean. A stale build makes both sides identical, so it can only hide a
+  change, never invent one. Every change kept here showed gains on the workloads it targets, so none
+  was affected. The two experiments rejected for no effect may have been. Re-measured with both sides
+  built as the server ships, sharing the selection program's slot set saved 5–6.5% on deep chains,
+  4% on wide batches and 3% on `dynamic-read` (median −0.8%), but one 5 µs count measured +5.5%
+  against a 2.1% spread. It is not in this branch; it is the first follow-up below.
+- **Codegen-unit noise.** `release` compiles each crate in 16 codegen units. An edit anywhere can move
+  functions between units and change inlining in unrelated hot code: `deep_chain/123` flipped
+  between about 231 and 250 µs across builds whose planning code for it was identical, and executed
+  3% more instructions in one of them. Since the build-profile measurements below, A/B builds use one
+  codegen unit and thin LTO on both sides, as the server ships; the selection re-measurement was the
+  first such run.
+
+## The build profile
+
+The same source, built three ways, against `release` (single thread, three alternating runs):
+
+| Profile | Median planning time | Range | Clean server build, 16 cores | Server binary |
+| --- | ---: | --- | ---: | ---: |
+| `release` (16 codegen units, no cross-crate LTO) | — | — | 157 s | 68.6 MB |
+| One codegen unit | −5.2% | −11.1 to +0.7% | — | — |
+| Thin LTO, one codegen unit (`dist`) | −8.0% | −13.2 to −2.4% | 292 s | 47.2 MB |
+| Fat LTO, one codegen unit | −8.9% | −13.9 to −2.7% | 424 s | 43.6 MB |
+
+At 16 threads, fat LTO measured −8.2%, and −7.2% with `+lse` as well, so inlined atomics no longer
+help. The server image now builds with `dist`. Local and benchmark builds keep `release`.
+
 ## What remains
 
-A Graviton4 profile of `c6878dd4` (one thread, all workloads), as shares of planning time:
+A Graviton4 profile of `c6878dd4` (one thread, all workloads), as shares of planning time. The index
+rewrite cache since removed most of the access-filter work:
 
 | Where | Share | Possible fix |
 | --- | ---: | --- |
@@ -252,6 +301,10 @@ A Graviton4 profile of `c6878dd4` (one thread, all workloads), as shares of plan
 | Outlined atomics | 4% | `+lse`; see above. |
 | Static predicate analysis (`static_predicate_value`, `label_scope`) | 3% | Recomputed by each pruning call; cache per predicate. |
 | Subsumption checks over set sources | 3% | Still quadratic in set width; group sources by kind and label first. |
+
+Measured but not yet in the branch: sharing `SelectionProgram`'s expression and slot set behind one
+`Arc` (`relational/selection.rs`), so cloning a predicate stops copying its slot set. See
+[after merging main](#after-merging-main) for its numbers.
 
 ## Changes in this branch
 
@@ -274,6 +327,8 @@ A Graviton4 profile of `c6878dd4` (one thread, all workloads), as shares of plan
 - `crates/planner/src/planning/selected/native/batch`: the scoped planner context.
 - `crates/planner/src/ir/access.rs`: digest-filtered subsumption for wide sets.
 - `crates/planner/src/memo/expression.rs`: memo expressions cache their identity digest.
+- `crates/planner/src/rules/access/filter/index/cache.rs`: the per-run index rewrite cache.
+- `Cargo.toml` and `Dockerfile`: the `dist` profile the server image builds with.
 - Smaller moves and borrows in:
   - `exec/returns.rs`;
   - `ir/projection/property.rs`;
