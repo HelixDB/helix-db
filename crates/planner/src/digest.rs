@@ -147,10 +147,14 @@ impl std::io::Write for JsonFnv64 {
     }
 }
 
-/// A 64-bit hash that absorbs one 64-bit word per multiply: each word is
-/// folded into the state with a full 128-bit product, as wyhash does, so
-/// hashing costs a multiply per eight bytes rather than one per byte.
-/// Words are read little-endian, so digests match across platforms.
+/// A 64-bit hash that absorbs one 64-bit word per step, as FxHash does: the
+/// state is rotated, the word xored in, and the result multiplied by an odd
+/// constant. Each part is invertible, so for any word a step maps distinct
+/// states to distinct states: no word can discard what was hashed before it,
+/// and inputs that differ before a shared suffix still digest differently.
+/// One multiply per eight bytes keeps hashing cheap; [`mix`] then spreads
+/// every bit across the digest once, at the end. Words are read
+/// little-endian, so digests match across platforms.
 #[derive(Debug)]
 struct StableHasher {
     state: u64,
@@ -166,18 +170,27 @@ impl Default for StableHasher {
     }
 }
 
-const STATE_KEY: u64 = 0xa076_1d64_78bd_642f;
-const WORD_KEY: u64 = 0xe703_7ed1_a0b4_28db;
+/// The step's odd multiplier (FxHash's).
+const STEP: u64 = 0x517c_c1b7_2722_0a95;
 
-/// The high and low halves of `a * b`, xored.
-const fn fold(a: u64, b: u64) -> u64 {
-    let product = (a as u128) * (b as u128);
-    (product as u64) ^ ((product >> 64) as u64)
+/// Pelle Evensen's moremur mixer: xorshifts and odd multiplies, each
+/// invertible, so the whole is a bijection on `u64` that spreads every input
+/// bit across the output. Too slow to run per word, so it finishes a digest.
+const fn mix(mut x: u64) -> u64 {
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x3c79_ac49_2ba7_b653);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0x1c69_b3f7_4ac4_ae35);
+    x ^ (x >> 27)
 }
 
 impl StableHasher {
+    /// Replaces a folded 128-bit multiply, `hi ^ lo` of `(state ^ k1) *
+    /// (word ^ k2)`, which zeroed the state whenever a word equalled `k2`:
+    /// one literal then erased all earlier input, and every filter holding it
+    /// fell into one digest bucket.
     fn word(&mut self, word: u64) {
-        self.state = fold(self.state ^ STATE_KEY, word ^ WORD_KEY);
+        self.state = (self.state.rotate_left(5) ^ word).wrapping_mul(STEP);
         self.words += 1;
     }
 
@@ -200,7 +213,7 @@ impl StableHasher {
     }
 
     const fn finish(&self) -> u64 {
-        fold(self.state ^ self.words, STATE_KEY ^ WORD_KEY)
+        mix(self.state ^ self.words)
     }
 }
 
@@ -749,6 +762,43 @@ mod tests {
                 assert_ne!(digest, other, "{index} and {other_index}");
             }
         }
+    }
+
+    /// The literal that zeroed the previous hasher's state (its word key read
+    /// as an `i64`), and other words that might cancel a key or the state.
+    const ADVERSARIAL_WORDS: [u64; 6] = [
+        0xe703_7ed1_a0b4_28db,
+        0xa076_1d64_78bd_642f,
+        0,
+        u64::MAX,
+        0x243f_6a88_85a3_08d3,
+        0x8000_0000_0000_0000,
+    ];
+
+    #[test]
+    fn no_word_discards_what_was_hashed_before_it() {
+        for word in ADVERSARIAL_WORDS {
+            let digests = (0..4_000_u64)
+                .map(|prefix| PlanDigest::for_value(&(prefix, word as i64, "suffix")))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(digests.len(), 4_000, "{word:#x}");
+        }
+    }
+
+    /// Filters that share the old hasher's zeroing literal but differ before
+    /// it once collapsed into one memo bucket.
+    #[test]
+    fn predicates_sharing_a_literal_keep_distinct_digests() {
+        let literal = -1_800_455_987_208_640_293_i64;
+        let digests = (0..4_000)
+            .map(|property| {
+                PlanDigest::for_value(&helix_ast::expr::Predicate::eq(
+                    format!("p{property}"),
+                    literal,
+                ))
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(digests.len(), 4_000);
     }
 
     #[test]
