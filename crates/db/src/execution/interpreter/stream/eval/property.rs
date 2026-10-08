@@ -48,13 +48,14 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
     /// the caller already read from this request's view, as a storage scan
     /// does.
     ///
-    /// The record is cached in place of a storage read and admitted to the
-    /// row budget and validated only when evaluation first reads it, exactly
-    /// where that read would have happened, so errors and their timing are
-    /// unchanged.
+    /// The record is cached in place of a storage read. Evaluation reads it
+    /// through [`ExecutionContext::read_scanned`], which accounts for it as
+    /// that read, and validates it, only when it first needs it, exactly where
+    /// that read would have happened, so errors, their timing, budget use and
+    /// read usage are unchanged.
     pub(in crate::execution::interpreter::stream) fn with_record(
         context: &'ctx ExecutionContext<'db>,
-        record: Option<(ElementRef, storage::ScannedValue)>,
+        record: Option<(ElementRef, storage::ScannedRecord)>,
         buffers: view::Buffers,
     ) -> Self {
         let mut resolver = Self {
@@ -64,6 +65,11 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         let Some((element, record)) = record else {
             return resolver;
         };
+        debug_assert_eq!(
+            record.key,
+            context.property_blob_key(&element),
+            "a scanned record is the stored record of its element"
+        );
         resolver
             .property_blobs
             .insert(element, CachedPropertyBlob::Scanned(record));
@@ -151,8 +157,8 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         }
         let blob = match self.property_blobs.remove(element) {
             Some(CachedPropertyBlob::Scanned(record)) => {
-                let value = record.admit(self.context.row_memory.as_ref())?;
-                decode_blob(self.context, &mut self.buffers, Some(value))?
+                let value = self.context.read_scanned(&record)?;
+                decode_blob(self.context, &mut self.buffers, value)?
             }
             Some(blob) => blob,
             None => self.load_blob(element).await?,
@@ -183,8 +189,8 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         };
         // A rejected record stays cached unvalidated, so every read of it
         // fails as a repeated storage read would.
-        let value = record.admit(self.context.row_memory.as_ref())?;
-        *blob = decode_blob(self.context, &mut self.buffers, Some(value))?;
+        let value = self.context.read_scanned(record)?;
+        *blob = decode_blob(self.context, &mut self.buffers, value)?;
         Ok(blob.row())
     }
 
@@ -431,9 +437,9 @@ pub(in crate::execution::interpreter::stream) fn record_read<'r>(
 
 enum CachedPropertyBlob {
     Missing,
-    /// A record the caller already read, admitted and validated when first
-    /// read.
-    Scanned(storage::ScannedValue),
+    /// A record the caller already read, accounted for and validated when
+    /// first read.
+    Scanned(storage::ScannedRecord),
     Row(view::Row),
 }
 
