@@ -671,15 +671,16 @@ impl<'db> ExecutionContext<'db> {
             };
             let row = ExecutionRow::current(ElementRef::Node(id));
             // Nothing writes between the scan and this read, so the scanned
-            // record is the one storage would return. It is admitted like the
-            // storage read it replaces and counted as the scanned row it is.
+            // record is the one storage would return. It is admitted only if
+            // the predicate reads it, like the storage read it replaces, and
+            // counted as the scanned row it is.
             if let Some(budget) = &self.row_memory {
                 budget.record_reads(crate::cypher::StorageReadUsage {
                     scan_rows: 1,
                     ..Default::default()
                 });
             }
-            let record = storage::retain_read(entry.value, self.row_memory.as_ref())?;
+            let record = storage::ScannedValue::Unadmitted(entry.value);
             let read =
                 self.eval_predicate_plan_on_record(&row, predicate, Some(record), &mut buffers);
             if read.await? {
@@ -1502,7 +1503,7 @@ impl<'db> ExecutionContext<'db> {
                         let read = self.eval_predicate_plan_on_record(
                             &row,
                             predicate,
-                            Some(record),
+                            Some(storage::ScannedValue::Admitted(record)),
                             &mut buffers,
                         );
                         if read.await? {
@@ -5989,11 +5990,11 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// Direct and single-cursor stream scan counts charge every row they
-    /// evaluate to the request's row-memory budget, as the storage reads they
-    /// once made did: a row larger than the budget fails the count, every
-    /// charge is released after it, and the rows are reported as scanned, not
-    /// point-read.
+    /// Direct and single-cursor stream scan counts charge every row their
+    /// predicate reads to the request's row-memory budget, as the storage
+    /// reads they once made did: a row larger than the budget fails the count
+    /// only when read, every charge is released after it, and the rows are
+    /// reported as scanned, not point-read.
     #[cfg(test)]
     #[tokio::test]
     async fn authoritative_scan_counts_charge_evaluated_rows_to_the_row_memory_budget() {
@@ -6022,20 +6023,35 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
-            ir::PredicatePlan::new(Predicate::eq("status", "active")).unwrap(),
-        );
-        let plans = [
-            exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
-                predicate: predicate.clone(),
-                window: exec::ExecCountWindowPlan::identity(),
-            }),
-            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
-                cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
-                window: exec::ExecCountWindowPlan::identity(),
-            }),
-        ];
-        for plan in &plans {
+        let plans = |predicate: Predicate| {
+            let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate).unwrap(),
+            );
+            [
+                exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                    predicate: predicate.clone(),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+                exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                    cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+            ]
+        };
+        // A predicate that reads no record charges none, as before.
+        for plan in &plans(Predicate::eq("$id", 2_i64)) {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(1)
+            );
+        }
+        for plan in &plans(Predicate::eq("status", "active")) {
             let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
             execution.enable_request_read_view().await.unwrap();
             execution.row_memory = Some(crate::query_resources::Budget::new(2048));

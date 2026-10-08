@@ -48,12 +48,13 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
     /// the caller already read from this request's view, as a storage scan
     /// does.
     ///
-    /// The record is cached in place of a storage read and validated only
-    /// when evaluation first reads it, exactly where that read would have
-    /// happened, so errors and their timing are unchanged.
+    /// The record is cached in place of a storage read and admitted to the
+    /// row budget and validated only when evaluation first reads it, exactly
+    /// where that read would have happened, so errors and their timing are
+    /// unchanged.
     pub(in crate::execution::interpreter::stream) fn with_record(
         context: &'ctx ExecutionContext<'db>,
-        record: Option<(ElementRef, bytes::Bytes)>,
+        record: Option<(ElementRef, storage::ScannedValue)>,
         buffers: view::Buffers,
     ) -> Self {
         let mut resolver = Self {
@@ -150,7 +151,8 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         }
         let blob = match self.property_blobs.remove(element) {
             Some(CachedPropertyBlob::Scanned(record)) => {
-                decode_blob(self.context, &mut self.buffers, Some(record))?
+                let value = record.admit(self.context.row_memory.as_ref())?;
+                decode_blob(self.context, &mut self.buffers, Some(value))?
             }
             Some(blob) => blob,
             None => self.load_blob(element).await?,
@@ -181,7 +183,8 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         };
         // A rejected record stays cached unvalidated, so every read of it
         // fails as a repeated storage read would.
-        *blob = decode_blob(self.context, &mut self.buffers, Some(record.clone()))?;
+        let value = record.admit(self.context.row_memory.as_ref())?;
+        *blob = decode_blob(self.context, &mut self.buffers, Some(value))?;
         Ok(blob.row())
     }
 
@@ -428,8 +431,9 @@ pub(in crate::execution::interpreter::stream) fn record_read<'r>(
 
 enum CachedPropertyBlob {
     Missing,
-    /// A record the caller already read, validated when first read.
-    Scanned(bytes::Bytes),
+    /// A record the caller already read, admitted and validated when first
+    /// read.
+    Scanned(storage::ScannedValue),
     Row(view::Row),
 }
 
