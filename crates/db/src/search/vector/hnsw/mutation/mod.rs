@@ -55,7 +55,8 @@ pub(in crate::search::vector) const VECTOR_BUILD_SIMHASH_CACHE_LIMIT: usize = 4_
 /// Entries any one scratch buffer may hold capacity for between mutations.
 ///
 /// [`MutationScratch`] is not charged to a session's byte budget: a session
-/// keeps one, and drops every buffer once a mutation grew one past this bound.
+/// keeps one, empties it after every mutation, and drops any buffer a
+/// mutation grew past this bound.
 const MUTATION_SCRATCH_RETAINED_CAPACITY: usize = 1 << 14;
 
 #[cfg(test)]
@@ -2386,33 +2387,60 @@ impl<D: Distance> Default for MutationScratch<D> {
 }
 
 impl<D: Distance> MutationScratch<D> {
-    /// Releases every buffer once any of them holds capacity for more than
+    /// Empties every buffer, so no item outlives the mutation that loaded it,
+    /// and releases each buffer that holds capacity for more than
     /// [`MUTATION_SCRATCH_RETAINED_CAPACITY`] entries, so one unusually wide
     /// traversal cannot pin its memory for a session's lifetime.
-    fn release_oversized(&mut self) {
-        let capacities = [
-            self.visited.capacity(),
-            self.beam.capacity(),
-            self.nearest.capacity(),
-            self.frontier.capacity(),
-            self.admitted.capacity(),
-            self.prefetch_ranked.capacity(),
-            self.prefetch.capacity(),
-            self.items.found.capacity(),
-            self.items.missing.capacity(),
-            self.items.seen_missing.capacity(),
-            self.neighbors.capacity(),
-            self.node_ids.capacity(),
-            self.ranked.capacity(),
-            self.rejected.capacity(),
-            self.scored.capacity(),
-        ];
-        if capacities
-            .into_iter()
-            .any(|capacity| capacity > MUTATION_SCRATCH_RETAINED_CAPACITY)
-        {
-            *self = Self::default();
+    ///
+    /// Buffers within the bound keep their capacity for the next mutation.
+    fn settle(&mut self) {
+        macro_rules! settle {
+            ($($buffer:expr),+ $(,)?) => {$(
+                if $buffer.capacity() > MUTATION_SCRATCH_RETAINED_CAPACITY {
+                    *$buffer = Default::default();
+                } else {
+                    $buffer.clear();
+                }
+            )+};
         }
+        // Exhaustive, so a buffer added later cannot be left holding items.
+        let Self {
+            visited,
+            beam,
+            nearest,
+            frontier,
+            admitted,
+            prefetch_ranked,
+            prefetch,
+            items:
+                ItemBatch {
+                    found,
+                    missing,
+                    seen_missing,
+                },
+            neighbors,
+            node_ids,
+            ranked,
+            rejected,
+            scored,
+        } = self;
+        settle!(
+            visited,
+            beam,
+            nearest,
+            frontier,
+            admitted,
+            prefetch_ranked,
+            prefetch,
+            found,
+            missing,
+            seen_missing,
+            neighbors,
+            node_ids,
+            ranked,
+            rejected,
+            scored,
+        );
     }
 }
 
@@ -3795,8 +3823,9 @@ impl<D: Distance> VectorBuildSession<D> {
     /// Restores one detached identity cache even when mutation planning failed.
     ///
     /// A namespace left without entries is dropped rather than restored. The
-    /// session takes back the cache's scratch buffers, so a namespace at rest
-    /// holds none.
+    /// session takes back and empties the cache's scratch buffers, so a
+    /// namespace at rest holds none and no item a mutation loaded outlives
+    /// the cache bounds that evict it.
     pub(in crate::search::vector) fn restore_cache(
         &mut self,
         identity: VectorGenerationIdentity,
@@ -3804,7 +3833,7 @@ impl<D: Distance> VectorBuildSession<D> {
     ) {
         self.next_touch = cache.next_touch;
         self.scratch = core::mem::take(&mut cache.scratch);
-        self.scratch.release_oversized();
+        self.scratch.settle();
         assert!(
             !self.caches.contains_key(&identity),
             "a vector build session cannot restore one identity twice"
