@@ -122,7 +122,7 @@ fn assert_e2e_count_is_one(output: &str) {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.11"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.12"]
 fn local_runtime_lifecycle_and_query_smoke() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -243,7 +243,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.11 plus SeaweedFS"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.12 plus SeaweedFS"]
 fn disk_runtime_persists_data_across_stop_and_start() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -370,7 +370,7 @@ fn docker(args: &[&str]) -> std::process::Output {
 /// instance network and its data volume behind. Start must detach the old
 /// sidecar so stop can still remove the network, and prune must delete both.
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.11 plus SeaweedFS"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.12 plus SeaweedFS"]
 fn disk_runtime_replaces_a_legacy_minio_sidecar() {
     let fixture = CliFixture::new();
     let port = free_port();

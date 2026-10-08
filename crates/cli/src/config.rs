@@ -7,7 +7,7 @@ use std::{fmt, str::FromStr};
 
 pub const DEFAULT_LOCAL_PORT: u16 = 6969;
 pub const DEFAULT_LOCAL_IMAGE: &str = "ghcr.io/helixdb/helixdb";
-pub const DEFAULT_LOCAL_IMAGE_TAG: &str = "v0.0.11";
+pub const DEFAULT_LOCAL_IMAGE_TAG: &str = "v0.0.12";
 /// Repository of the graph Explorer image that `helix explorer` runs.
 pub const DEFAULT_EXPLORER_IMAGE: &str = "ghcr.io/helixdb/helix-explorer";
 /// Explorer tag `helix explorer` runs by default. It stays `latest` until CI
@@ -773,7 +773,7 @@ tag = "latest"
     fn local_config_defaults_to_published_standalone_image() {
         let config = LocalInstanceConfig::default();
 
-        assert_eq!(config.image_ref(), "ghcr.io/helixdb/helixdb:v0.0.11");
+        assert_eq!(config.image_ref(), "ghcr.io/helixdb/helixdb:v0.0.12");
     }
 
     #[test]
