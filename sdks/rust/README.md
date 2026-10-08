@@ -699,8 +699,12 @@ let rows = client
         Some("adults"))
     .await?;               // CypherResponse { columns, rows }
 
-// Plan without executing; explaining a write writes nothing.
-let plan = client.explain_cypher("CREATE (:User {name: $name})", BTreeMap::new(), None).await?;
+// Plan without executing; explaining a write writes nothing. Planning
+// checks parameters too, so supply every parameter the statement uses.
+let params = BTreeMap::from([("name".to_string(), serde_json::json!("Ada"))]);
+let plan = client
+    .explain_cypher("CREATE (:User {name: $name})", params.clone(), None)
+    .await?;
 
 // Request options use the builder, like native queries.
 let created = client

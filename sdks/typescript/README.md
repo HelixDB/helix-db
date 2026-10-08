@@ -358,7 +358,8 @@ resolves to `{ columns, rows }`. `explainCypher(...)` takes the same arguments,
 sends `POST /v2/cypher/explain`, and resolves to the planner's
 `CypherExplanation` without executing the statement, including modifying
 statements. Only `effect` and `operators` are typed; the remaining planner
-diagnostics are returned as the server encoded them. Pass `bigint` for integers
+diagnostics are returned as the server encoded them, with integers outside
+JavaScript's safe range as `bigint`. Pass `bigint` for integers
 outside JavaScript's safe range; `bigint` and non-finite numbers are sent as
 tagged lossless values. Graph IDs and large integers in results stay tagged.
 

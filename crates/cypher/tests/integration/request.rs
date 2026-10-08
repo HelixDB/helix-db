@@ -200,8 +200,12 @@ fn telemetry_shapes_redact_every_literal_and_drop_comments() {
             "MATCH ( a ) - [ : KNOWS * ? .. ? ] - > ( b ) RETURN $`a b` , $limit , [ ? , ? ] , ?",
         ),
         (
-            "/* only a comment */ RETURN true, null",
-            "RETURN true , null",
+            "/* only a comment */ RETURN true, FALSE, True, fAlSe, null, `true`, $true",
+            "RETURN ? , ? , ? , ? , null , `true` , $true",
+        ),
+        (
+            "MATCH (n {active: false}) WHERE n.vip = TRUE SET n.flagged = true RETURN n",
+            "MATCH ( n { active : ? } ) WHERE n . vip = ? SET n . flagged = ? RETURN n",
         ),
         ("", ""),
     ] {

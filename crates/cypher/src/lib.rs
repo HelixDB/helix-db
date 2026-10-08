@@ -43,25 +43,32 @@ pub fn resolve(
     bind::resolve(statement)
 }
 
-/// A statement's shape without its values, for telemetry: every string and
-/// number literal becomes `?`, comments are dropped, and the remaining tokens
-/// (keywords, names, parameters and punctuation) are joined by single spaces.
+/// A statement's shape without its values, for telemetry: every string,
+/// number and boolean literal becomes `?`, comments are dropped, and the
+/// remaining tokens (keywords, names, parameters and punctuation) are joined by
+/// single spaces.
 ///
 /// ```
 /// let shape = helix_cypher::redact_literals(
-///     "MATCH (p:Person {name:'Ada'}) /* note */ WHERE p.age > 30 RETURN p.name, $limit",
+///     "MATCH (p:Person {name:'Ada'}) /* note */ WHERE p.age > 30 AND p.vip = True RETURN p.name, $limit",
 /// )?;
 /// assert_eq!(
 ///     shape,
-///     "MATCH ( p : Person { name : ? } ) WHERE p . age > ? RETURN p . name , $limit",
+///     "MATCH ( p : Person { name : ? } ) WHERE p . age > ? AND p . vip = ? RETURN p . name , $limit",
 /// );
 /// # Ok::<(), helix_cypher::QueryError>(())
 /// ```
 pub fn redact_literals(text: &str) -> Result<String, QueryError> {
     Ok(lexer::lex(text)?
         .iter()
-        .filter_map(|token| match token.kind {
+        .filter_map(|token| match &token.kind {
             lexer::Kind::String(_) | lexer::Kind::Number(_) => Some("?"),
+            // Boolean literals lex as words in any letter case.
+            lexer::Kind::Word(word)
+                if word.eq_ignore_ascii_case("true") || word.eq_ignore_ascii_case("false") =>
+            {
+                Some("?")
+            }
             lexer::Kind::Word(_)
             | lexer::Kind::Escaped(_)
             | lexer::Kind::Parameter(_)

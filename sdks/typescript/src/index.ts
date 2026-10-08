@@ -25,7 +25,8 @@ export interface CypherResponse {
  *
  * Only the top-level effect and operator list are typed. Operator contracts,
  * bindings, returns, planner metrics, and notices are planner diagnostics whose
- * shape may grow between server versions.
+ * shape may grow between server versions. Integers outside JavaScript's safe
+ * range are `bigint`.
  */
 export interface CypherExplanation {
   effect: "Read" | "Write";
@@ -603,7 +604,7 @@ export class CypherExecutionRequest {
       const run = backend.native[route.native];
       if (run === undefined) throw HelixError.embeddedUnavailable(route.unavailable);
       try {
-        return JSON.parse(new TextDecoder().decode(await run.call(backend.native, new TextEncoder().encode(body))));
+        return parseJson(new TextDecoder().decode(await run.call(backend.native, new TextEncoder().encode(body))));
       } catch (error) {
         throw embeddedError(error);
       }
@@ -623,7 +624,7 @@ export class CypherExecutionRequest {
     if (response.status === 204) return undefined;
     if (response.status !== 200) throw HelixError.remote(response.status, text, response.statusText);
     try {
-      return JSON.parse(text);
+      return parseJson(text);
     } catch (error) {
       throw HelixError.serialization(String(error));
     }

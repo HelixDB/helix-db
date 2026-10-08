@@ -5,6 +5,7 @@ import { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stringifyJson } from "../src/dsl.js";
 import { Client, QueryRequest, HelixError, SourcePredicate, g, readBatch, writeBatch } from "../src/index.js";
 
 interface CapturedRequest {
@@ -158,7 +159,7 @@ function handle() {
     async explain_cypher_json(request) {
       cypherBodies.push(["explain", this.marker, new TextDecoder().decode(request)]);
       if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
-      return new TextEncoder().encode('{"effect":"Write","operators":[{"position":0}],"notices":[]}');
+      return new TextEncoder().encode('{"effect":"Write","operators":[{"position":0,"rows":-9007199254740993}],"notices":[]}');
     },
     async close() {
       closed = true;
@@ -640,10 +641,11 @@ await withFakeNativeModule(async () => {
     bindings: [{ name: "n" }],
     returns: [["n", 0]],
     operators: [{ position: 0, blocking: [] }],
-    planner: { candidates: 1 },
+    planner: { candidates: 1, estimated_rows: 9007199254740993n },
     notices: [{ kind: "buffered_response" }],
   };
-  const server = await spawnCaptureServer({ body: JSON.stringify(explanation) });
+  // Raw planner integers beyond Number.MAX_SAFE_INTEGER must survive as bigint.
+  const server = await spawnCaptureServer({ body: stringifyJson(explanation) });
   try {
     const client = new Client(server.base).withApiKey("hx_secret").withDatabaseId("db_reader");
     const response = await client
@@ -816,10 +818,14 @@ await withFakeNativeModule(async (moduleUrl) => {
   assert.deepEqual(await client.cypher("RETURN $x AS x", { x: 1 }, "embedded"), { columns: ["x"], rows: [[1]] });
   assert.deepEqual(await client.requestBuilder().cypher("CREATE (:User)", { big: -9007199254740993n }).explain(), {
     effect: "Write",
-    operators: [{ position: 0 }],
+    operators: [{ position: 0, rows: -9007199254740993n }],
     notices: [],
   });
-  assert.deepEqual(await client.explainCypher("RETURN 1 AS x"), { effect: "Write", operators: [{ position: 0 }], notices: [] });
+  assert.deepEqual(await client.explainCypher("RETURN 1 AS x"), {
+    effect: "Write",
+    operators: [{ position: 0, rows: -9007199254740993n }],
+    notices: [],
+  });
   assert.deepEqual(
     native.cypherBodies.map(([method, marker, body]) => [method, marker, JSON.parse(body)]),
     [
