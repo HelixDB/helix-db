@@ -622,10 +622,13 @@ impl<'a> Source<'a> {
                     // Inside a write transaction a consumer may write a later
                     // row after this scan read it, so only read-only requests
                     // reuse the scanned record instead of reading it again.
-                    // A predicate admits it like the read it replaces.
+                    // A predicate accounts for it as the read it replaces.
                     record = (*keyspace == exec::ElementKeyspace::NodeProperty
                         && ctx.active_write_tx().is_none())
-                    .then_some(storage::ScannedValue::Unadmitted(entry.value));
+                    .then_some(storage::ScannedRecord {
+                        key: entry.key,
+                        value: entry.value,
+                    });
                     ExecutionRow::current(kv::element_ref(*keyspace, id))
                 }
             };
@@ -1563,29 +1566,198 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// Reusing scanned records reads each row once: the scan reports its
-    /// rows and no predicate makes a point read.
+    /// Scan predicates that read scanned records instead of storage charge
+    /// the row-memory budget, fail on it and report reads exactly as their
+    /// storage reads did. Pull scans, direct and single-cursor stream counts,
+    /// and the row cursor compound counts consume are pinned, with and without
+    /// the request read cache, against figures measured on the storage-read
+    /// implementation: results, peak memory, reads, and the smallest budget
+    /// that succeeds.
     #[tokio::test]
-    async fn predicate_scans_report_scanned_rows_without_point_reads() {
-        let db = test_support::open_db("pull-scan-predicate-usage").await;
-        scan_predicate_fixture(&db).await;
-        for (predicate, expected) in scan_predicate_cases() {
-            let budget = crate::query_resources::Budget::new(1 << 20);
-            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    async fn scan_predicates_account_like_the_storage_reads_they_replace() {
+        use crate::encoding::property::{encode_properties, Property};
+        use helix_ast::expr::Predicate as P;
+        #[derive(Clone, Copy, Debug)]
+        enum Path {
+            Pull,
+            DirectCount,
+            StreamCount,
+            Cursor,
+        }
+        async fn count(
+            ctx: &mut ExecutionContext<'_>,
+            plan: &exec::ExecCountPlan,
+        ) -> Result<Vec<u64>> {
+            let read = ctx.execute_count(ExecutionValue::Stream(Vec::new()), plan);
+            let ExecutionValue::Count(count) = read.await? else {
+                panic!("a count plan returns a count");
+            };
+            Ok(vec![count as u64])
+        }
+        async fn run(
+            db: &crate::HelixDB,
+            path: Path,
+            predicate: &P,
+            limit: usize,
+            cache: bool,
+            passes: usize,
+        ) -> (
+            Result<Vec<u64>>,
+            usize,
+            crate::query_resources::StorageReadUsage,
+        ) {
+            let budget = crate::query_resources::Budget::new(limit);
+            let mut ctx = ExecutionContext::new(db, context::ParamBindings::default());
             ctx.enable_request_read_view().await.unwrap();
             ctx.row_memory = Some(budget.clone());
-            assert_eq!(
-                scan_ids(&mut ctx, &node_scan_plan(predicate.clone()))
-                    .await
-                    .unwrap(),
-                expected
+            if cache {
+                ctx.enable_request_read_cache(256 * 1024);
+            }
+            let plan = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate.clone()).unwrap(),
             );
-            let reads = budget.reads();
-            assert_eq!(
-                (reads.scan_rows, reads.point_gets, reads.multi_get_keys),
-                (7, 0, 0),
-                "{predicate:?}"
-            );
+            let mut result = Ok(Vec::new());
+            // A second pass meets the first pass's cached reads.
+            for _ in 0..passes {
+                let pass = match path {
+                    Path::Pull => {
+                        let access = exec::ExecAccessPlan::Node(
+                            exec::ExecNodeAccessPlan::AuthoritativeScan {
+                                predicate: plan.clone(),
+                            },
+                        );
+                        scan_ids(&mut ctx, &access).await
+                    }
+                    Path::DirectCount => {
+                        let plan = exec::ExecCountPlan::NodeAuthoritativeScan(
+                            exec::ExecNodeScanCountPlan {
+                                predicate: plan.clone(),
+                                window: exec::ExecCountWindowPlan::identity(),
+                            },
+                        );
+                        count(&mut ctx, &plan).await
+                    }
+                    Path::StreamCount => {
+                        let plan = exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                            cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(plan.clone()),
+                            window: exec::ExecCountWindowPlan::identity(),
+                        });
+                        count(&mut ctx, &plan).await
+                    }
+                    Path::Cursor => {
+                        let cursor = exec::ExecCountCursorPlan::NodeAuthoritativeScan(plan.clone());
+                        ctx.count_cursor(&cursor, &mut None).await.map(|rows| {
+                            rows.into_iter()
+                                .map(|row| row.current.unwrap().id())
+                                .collect()
+                        })
+                    }
+                };
+                let failed = pass.is_err();
+                result = pass;
+                if failed {
+                    break;
+                }
+            }
+            drop(ctx);
+            assert_eq!(budget.available(), limit, "every charge is released");
+            (result, budget.peak(), budget.reads())
+        }
+
+        let db = test_support::open_db("pull-scan-predicate-accounting").await;
+        let rows = [
+            vec![Property::string("status", "active")],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+            ],
+            vec![Property::string("status", "inactive")],
+            Vec::new(),
+            vec![Property::bytes("blob", vec![1; 4096])],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+                    }
+                    .to_bytes(),
+                    encode_properties(properties),
+                )
+                .await
+                .unwrap();
+        }
+        let predicates = [
+            (P::eq("status", "active"), vec![1, 2], true),
+            (P::eq("$id", 3_i64), vec![3], false),
+            (P::is_not_null("embedding"), vec![2], true),
+        ];
+        for path in [
+            Path::Pull,
+            Path::DirectCount,
+            Path::StreamCount,
+            Path::Cursor,
+        ] {
+            for (predicate, ids, reads_records) in &predicates {
+                for cache in [false, true] {
+                    let expected_rows = match path {
+                        Path::Pull | Path::Cursor => ids.clone(),
+                        Path::DirectCount | Path::StreamCount => vec![ids.len() as u64],
+                    };
+                    // Figures measured on the storage-read implementation.
+                    // Only the pull scan and the row cursor report scanned
+                    // rows; the cursor holds every collected row at once.
+                    let scan_rows = match path {
+                        Path::Pull | Path::Cursor => 10,
+                        Path::DirectCount | Path::StreamCount => 0,
+                    };
+                    let (peak, min_budget) = match (path, reads_records, cache) {
+                        (Path::Cursor, true, false) => (11_653, 11_653),
+                        (Path::Cursor, true, true) => (24_546, 11_797),
+                        (Path::Cursor, false, false) => (11_653, 11_653),
+                        (Path::Cursor, false, true) => (11_797, 11_797),
+                        (_, true, false) => (6_377, 6_377),
+                        (_, true, true) => (17_182, 6_521),
+                        (_, false, false) => (0, 0),
+                        (_, false, true) => (144, 0),
+                    };
+                    // Each pass reads every scanned row a predicate needs; a
+                    // cached read of the first pass serves the second.
+                    let point_gets = match (reads_records, cache) {
+                        (true, false) => 10,
+                        (true, true) => 5,
+                        (false, _) => 0,
+                    };
+                    let (result, actual_peak, reads) =
+                        run(&db, path, predicate, 1 << 20, cache, 2).await;
+                    let case = format!("{path:?} {predicate:?} cache={cache}");
+                    assert_eq!(result.unwrap(), expected_rows, "{case}");
+                    assert_eq!(actual_peak, peak, "{case}");
+                    assert_eq!(
+                        reads,
+                        crate::query_resources::StorageReadUsage {
+                            point_gets,
+                            scans: 2,
+                            scan_rows,
+                            ..Default::default()
+                        },
+                        "{case}"
+                    );
+                    // The smallest budget that succeeds in one pass; one byte
+                    // less fails on the row budget.
+                    if min_budget > 0 {
+                        let (result, _, _) =
+                            run(&db, path, predicate, min_budget - 1, cache, 1).await;
+                        assert!(
+                            matches!(result, Err(HelixDbError::QueryMemoryLimitExceeded)),
+                            "{case}"
+                        );
+                    }
+                    let (result, _, _) = run(&db, path, predicate, min_budget, cache, 1).await;
+                    assert_eq!(result.unwrap(), expected_rows, "{case}");
+                }
+            }
         }
         db.close().await.unwrap();
     }

@@ -671,16 +671,12 @@ impl<'db> ExecutionContext<'db> {
             };
             let row = ExecutionRow::current(ElementRef::Node(id));
             // Nothing writes between the scan and this read, so the scanned
-            // record is the one storage would return. It is admitted only if
-            // the predicate reads it, like the storage read it replaces, and
-            // counted as the scanned row it is.
-            if let Some(budget) = &self.row_memory {
-                budget.record_reads(crate::cypher::StorageReadUsage {
-                    scan_rows: 1,
-                    ..Default::default()
-                });
-            }
-            let record = storage::ScannedValue::Unadmitted(entry.value);
+            // record is the one storage would return. The predicate accounts
+            // for it as the storage read it replaces, only if it reads it.
+            let record = storage::ScannedRecord {
+                key: entry.key,
+                value: entry.value,
+            };
             let read =
                 self.eval_predicate_plan_on_record(&row, predicate, Some(record), &mut buffers);
             if read.await? {
@@ -1482,30 +1478,12 @@ impl<'db> ExecutionContext<'db> {
                 CountCursorLeaf::NodeAuthoritativeScan(
                     exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
                 ) => {
-                    let keyspace = exec::ElementKeyspace::NodeProperty;
-                    let read = self.scan_raw_range_limited(
-                        access::kv::element_prefix(keyspace).into(),
-                        access::kv::element_prefix_end(keyspace).into(),
-                        None,
-                    );
-                    let records = read.await?;
+                    let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
+                    let ids = read.await?;
                     let mut rows = Vec::new();
-                    let mut buffers =
-                        crate::encoding::v2::values::property::view::Buffers::default();
-                    // The scanned records are the ones storage would return:
-                    // nothing writes before they are evaluated. The scan
-                    // admitted each, and each is released once evaluated.
-                    for (key, record) in records {
-                        let Some(id) = access::kv::parse_element_id(keyspace, &key) else {
-                            continue;
-                        };
+                    for id in ids {
                         let row = ExecutionRow::current(ElementRef::Node(id));
-                        let read = self.eval_predicate_plan_on_record(
-                            &row,
-                            predicate,
-                            Some(storage::ScannedValue::Admitted(record)),
-                            &mut buffers,
-                        );
+                        let read = self.eval_predicate_plan(&row, predicate);
                         if read.await? {
                             rows.push(row);
                         }
@@ -5993,8 +5971,8 @@ mod tests {
     /// Direct and single-cursor stream scan counts charge every row their
     /// predicate reads to the request's row-memory budget, as the storage
     /// reads they once made did: a row larger than the budget fails the count
-    /// only when read, every charge is released after it, and the rows are
-    /// reported as scanned, not point-read.
+    /// only when read, every charge is released after it, and each read row is
+    /// reported as the point read it replaces.
     #[cfg(test)]
     #[tokio::test]
     async fn authoritative_scan_counts_charge_evaluated_rows_to_the_row_memory_budget() {
@@ -6082,7 +6060,7 @@ mod tests {
             let reads = budget.reads();
             assert_eq!(
                 (reads.scan_rows, reads.point_gets, reads.multi_get_keys),
-                (5, 0, 0)
+                (0, 5, 0)
             );
         }
         db.close().await.unwrap();
@@ -6090,8 +6068,8 @@ mod tests {
 
     /// The row cursor of an authoritative node scan, which compound counts
     /// consume, selects exactly the stored matches, reads a corrupt row only
-    /// when its predicate needs it, charges the rows it collects to the
-    /// row-memory budget and evaluates them without reading them again.
+    /// when its predicate needs it, and charges the rows it collects to the
+    /// row-memory budget.
     #[cfg(test)]
     #[tokio::test]
     async fn authoritative_scan_row_cursor_selects_stored_matches_within_its_budget() {
@@ -6152,9 +6130,7 @@ mod tests {
             // Every row is collected before any is evaluated.
             assert!(budget.peak() >= (1536 + 1024) * size_of::<f32>());
             assert_eq!(budget.available(), limit);
-            let reads = budget.reads();
-            assert_eq!((reads.scan_rows, reads.point_gets), (5, 0));
-            assert_eq!(execution.pull_work.snapshot().raw_gets, 0);
+            assert_eq!(budget.reads().scan_rows, 5);
         }
         let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
         execution.enable_request_read_view().await.unwrap();

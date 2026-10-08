@@ -440,27 +440,45 @@ fn retain_read(bytes: Bytes, budget: Option<&super::rows::memory::Budget>) -> Re
     budget.retain_read(bytes)
 }
 
-/// A stored value a scan of this request's view already returned, held so a
-/// later read of the same key can use it instead of reading storage again.
-pub(in crate::execution::interpreter) enum ScannedValue {
-    /// Taken straight from a storage iterator, not yet charged to the row
-    /// budget. [`Self::admit`] charges it where the replaced read would have.
-    Unadmitted(Bytes),
-    /// Admitted by the scan that collected it, and charged until dropped.
-    Admitted(Bytes),
+/// A stored record a scan of this request's view already returned: the full
+/// storage key and its value, held so the read of that key the scan would
+/// otherwise make next can use it instead of storage.
+pub(in crate::execution::interpreter) struct ScannedRecord {
+    pub(in crate::execution::interpreter) key: Bytes,
+    pub(in crate::execution::interpreter) value: Bytes,
 }
 
-impl ScannedValue {
-    /// The value as the storage read it replaces returns it: admitted to
-    /// `budget`, when the request has one, unless the scan already admitted it.
-    pub(in crate::execution::interpreter) fn admit(
+impl<'db> ExecutionContext<'db> {
+    /// [`Self::get_raw`] of a key whose value `record` already holds: the same
+    /// deadline check, request read cache, row-budget admission and read
+    /// accounting, in the same order, without the storage read. Budget errors,
+    /// peak usage and `ResourceUsage` therefore match a storage read.
+    pub(in crate::execution::interpreter) fn read_scanned(
         &self,
-        budget: Option<&super::rows::memory::Budget>,
-    ) -> Result<Bytes> {
-        match self {
-            Self::Unadmitted(bytes) => retain_read(bytes.clone(), budget),
-            Self::Admitted(bytes) => Ok(bytes.clone()),
-        }
+        record: &ScannedRecord,
+    ) -> Result<Option<Bytes>> {
+        self.check_execution_deadline()?;
+        let cache = self.request_read_cache();
+        let Some(cached) = cache.and_then(|cache| cache.get(&record.key)) else {
+            let _request_memory = self
+                .row_memory
+                .as_ref()
+                .map(|budget| budget.reserve(record.key.len().saturating_add(size_of::<Bytes>())))
+                .transpose()?;
+            if let Some(budget) = &self.row_memory {
+                budget.record_reads(crate::cypher::StorageReadUsage {
+                    point_gets: 1,
+                    ..Default::default()
+                });
+            }
+            let value = Some(retain_read(record.value.clone(), self.row_memory.as_ref())?);
+            let Some(cache) = cache else {
+                return Ok(value);
+            };
+            cache.insert(&record.key, &value);
+            return Ok(value);
+        };
+        Ok(cached)
     }
 }
 
