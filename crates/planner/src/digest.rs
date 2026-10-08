@@ -147,73 +147,30 @@ impl std::io::Write for JsonFnv64 {
     }
 }
 
-/// A 64-bit hash that absorbs one 64-bit word per step, as FxHash does: the
-/// state is rotated, the word xored in, and the result multiplied by an odd
-/// constant. Each part is invertible, so for any word a step maps distinct
-/// states to distinct states: no word can discard what was hashed before it,
-/// and inputs that differ before a shared suffix still digest differently.
-/// One multiply per eight bytes keeps hashing cheap; [`mix`] then spreads
-/// every bit across the digest once, at the end. Words are read
-/// little-endian, so digests match across platforms.
-#[derive(Debug)]
+/// The standard library's hasher (SipHash-1-3) with its default keys, fed
+/// the digest's encoding. SipHash mixes every input word through several
+/// rounds of a 256-bit state, so no chosen literal can cancel what was hashed
+/// before it, and the fixed keys keep digests the same in every run of a
+/// build. Words are written little-endian, so digests match across
+/// platforms.
+#[derive(Debug, Default)]
 struct StableHasher {
-    state: u64,
-    words: u64,
-}
-
-impl Default for StableHasher {
-    fn default() -> Self {
-        Self {
-            state: 0x243f_6a88_85a3_08d3,
-            words: 0,
-        }
-    }
-}
-
-/// The step's odd multiplier (FxHash's).
-const STEP: u64 = 0x517c_c1b7_2722_0a95;
-
-/// Pelle Evensen's moremur mixer: xorshifts and odd multiplies, each
-/// invertible, so the whole is a bijection on `u64` that spreads every input
-/// bit across the output. Too slow to run per word, so it finishes a digest.
-const fn mix(mut x: u64) -> u64 {
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x3c79_ac49_2ba7_b653);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0x1c69_b3f7_4ac4_ae35);
-    x ^ (x >> 27)
+    hasher: std::hash::DefaultHasher,
 }
 
 impl StableHasher {
-    /// Replaces a folded 128-bit multiply, `hi ^ lo` of `(state ^ k1) *
-    /// (word ^ k2)`, which zeroed the state whenever a word equalled `k2`:
-    /// one literal then erased all earlier input, and every filter holding it
-    /// fell into one digest bucket.
     fn word(&mut self, word: u64) {
-        self.state = (self.state.rotate_left(5) ^ word).wrapping_mul(STEP);
-        self.words += 1;
+        std::hash::Hasher::write(&mut self.hasher, &word.to_le_bytes());
     }
 
     /// Bytes with their length, so adjacent strings cannot run together.
     fn bytes(&mut self, bytes: &[u8]) {
-        const WORD: usize = size_of::<u64>();
         self.word(bytes.len() as u64);
-        let mut chunks = bytes.chunks_exact(WORD);
-        for chunk in &mut chunks {
-            self.word(u64::from_le_bytes(
-                chunk.try_into().expect("exact chunks are one word"),
-            ));
-        }
-        let rest = chunks.remainder();
-        if !rest.is_empty() {
-            let mut last = [0; WORD];
-            last[..rest.len()].copy_from_slice(rest);
-            self.word(u64::from_le_bytes(last));
-        }
+        std::hash::Hasher::write(&mut self.hasher, bytes);
     }
 
-    const fn finish(&self) -> u64 {
-        mix(self.state ^ self.words)
+    fn finish(&self) -> u64 {
+        std::hash::Hasher::finish(&self.hasher)
     }
 }
 
@@ -383,46 +340,31 @@ impl<'h> ser::Serializer for &mut DigestSerializer<'h> {
         Ok(())
     }
 
-    /// Streams the text in words instead of formatting it into a `String`.
+    /// Streams the text into the hasher instead of formatting it into a
+    /// `String`, then its length.
     fn collect_str<T>(self, value: &T) -> Result<(), DigestError>
     where
         T: ?Sized + std::fmt::Display,
     {
-        struct Words<'a> {
+        struct Text<'a> {
             hasher: &'a mut StableHasher,
-            pending: [u8; 8],
-            filled: usize,
             len: u64,
         }
-        impl std::fmt::Write for Words<'_> {
+        impl std::fmt::Write for Text<'_> {
             fn write_str(&mut self, text: &str) -> std::fmt::Result {
-                for byte in text.bytes() {
-                    self.pending[self.filled] = byte;
-                    self.filled += 1;
-                    if self.filled == self.pending.len() {
-                        self.hasher.word(u64::from_le_bytes(self.pending));
-                        self.filled = 0;
-                    }
-                }
+                std::hash::Hasher::write(&mut self.hasher.hasher, text.as_bytes());
                 self.len += text.len() as u64;
                 Ok(())
             }
         }
         self.tag(Tag::DisplayStr);
-        let mut words = Words {
+        let mut text = Text {
             hasher: &mut *self.hasher,
-            pending: [0; 8],
-            filled: 0,
             len: 0,
         };
-        std::fmt::Write::write_fmt(&mut words, format_args!("{value}"))
+        std::fmt::Write::write_fmt(&mut text, format_args!("{value}"))
             .map_err(|_| <DigestError as ser::Error>::custom("Display implementation failed"))?;
-        let (pending, filled, len) = (words.pending, words.filled, words.len);
-        if filled > 0 {
-            let mut last = [0; 8];
-            last[..filled].copy_from_slice(&pending[..filled]);
-            self.hasher.word(u64::from_le_bytes(last));
-        }
+        let len = text.len;
         self.hasher.word(len);
         Ok(())
     }
@@ -783,6 +725,33 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>();
             assert_eq!(digests.len(), 4_000, "{word:#x}");
         }
+    }
+
+    /// Literals chosen per value to cancel everything hashed before them under
+    /// an earlier hasher, whose step was `(rotl(state, 5) ^ word) * odd`:
+    /// for each prefix the literal `rotl(state, 5) ^ c` left every value in
+    /// the same state, so all 4,000 shared one digest.
+    #[test]
+    fn literals_chosen_to_cancel_a_prefix_keep_distinct_digests() {
+        let step = |state: u64, word: u64| {
+            (state.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95)
+        };
+        let digests = (0..4_000_u64)
+            .map(|prefix| {
+                // The words `(prefix, literal)` hashes to, up to the literal.
+                let state = [
+                    Tag::Seq as u64,
+                    Tag::Unsigned as u64,
+                    prefix,
+                    Tag::Signed as u64,
+                ]
+                .into_iter()
+                .fold(0x243f_6a88_85a3_08d3, step);
+                let literal = (state.rotate_left(5) ^ 0x1234_5678) as i64;
+                PlanDigest::for_value(&(prefix, literal))
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(digests.len(), 4_000);
     }
 
     /// Filters that share the old hasher's zeroing literal but differ before
