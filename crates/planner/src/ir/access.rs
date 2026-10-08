@@ -67,7 +67,9 @@ const SUBSUMPTION_DIGEST_WIDTH: usize = 8;
 
 /// `subsumes(superset, subset)` over source positions: equality, or
 /// `structurally_subsumes`. In a wide set, equality is tested only between
-/// sources whose digests match, so checking every pair stays cheap.
+/// sources whose equality screens match, so checking every pair stays cheap;
+/// a screen, unlike an identity digest, matches for every pair `==` would
+/// accept, `-0.0` and `+0.0` literals included.
 fn positional_subsumption<'s, T, F>(
     sources: &'s super::AtLeast<T, 2>,
     structurally_subsumes: F,
@@ -80,7 +82,7 @@ where
     let digests = (sources.len() > SUBSUMPTION_DIGEST_WIDTH).then(|| {
         sources
             .iter()
-            .map(digest::PlanDigest::for_value)
+            .map(digest::PlanDigest::for_equality_screen)
             .collect::<Vec<_>>()
     });
     move |superset, subset| {

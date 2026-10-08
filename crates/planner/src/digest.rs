@@ -9,9 +9,12 @@ use serde::{ser, Deserialize, Serialize};
 /// hashed by position, with a marker for each skipped field, so two struct
 /// types with the same field values digest alike; digests only compare values
 /// of one type. Nothing depends on addresses or randomized hashers, so
-/// optimizer ordering is the same in every process run. Equal values
-/// serialize equally and so digest equally; callers confirm a digest match
-/// with `==` wherever identity matters.
+/// optimizer ordering is the same in every process run. Values that serialize
+/// equally digest equally, and callers confirm a digest match with `==`
+/// wherever identity matters. Floats hash by their bits, so `-0.0` and `+0.0`,
+/// which `==` treats as equal, digest differently;
+/// [`Self::for_equality_screen`] hashes them alike for callers that rule out
+/// equality by digest.
 ///
 /// ```
 /// use helix_planner::digest::PlanDigest;
@@ -43,10 +46,40 @@ impl PlanDigest {
     where
         T: Serialize,
     {
+        Self::digest(value, Zero::Signed)
+    }
+
+    /// A digest that values equal under a derived `==` always share, so
+    /// values whose screens differ cannot be equal. Unlike
+    /// [`Self::for_value`], it hashes `-0.0` and `+0.0` alike, as `==`
+    /// compares them. It is not an identity: values that share it may still
+    /// differ.
+    ///
+    /// ```
+    /// use helix_planner::digest::PlanDigest;
+    ///
+    /// assert_ne!(PlanDigest::for_value(&-0.0_f64), PlanDigest::for_value(&0.0_f64));
+    /// assert_eq!(
+    ///     PlanDigest::for_equality_screen(&-0.0_f64),
+    ///     PlanDigest::for_equality_screen(&0.0_f64)
+    /// );
+    /// ```
+    pub fn for_equality_screen<T>(value: &T) -> Self
+    where
+        T: Serialize,
+    {
+        Self::digest(value, Zero::Unsigned)
+    }
+
+    fn digest<T>(value: &T, zero: Zero) -> Self
+    where
+        T: Serialize,
+    {
         let mut hasher = StableHasher::default();
         value
             .serialize(&mut DigestSerializer {
                 hasher: &mut hasher,
+                zero,
             })
             .expect("planner digest serialization cannot fail");
         Self(hasher.finish())
@@ -201,8 +234,18 @@ enum Tag {
     End,
 }
 
+/// How a digest hashes floating-point zero.
+#[derive(Clone, Copy)]
+enum Zero {
+    /// By its bits, as it serializes: `-0.0` and `+0.0` differ.
+    Signed,
+    /// As `==` compares it: `-0.0` and `+0.0` hash alike.
+    Unsigned,
+}
+
 struct DigestSerializer<'h> {
     hasher: &'h mut StableHasher,
+    zero: Zero,
 }
 
 impl DigestSerializer<'_> {
@@ -297,12 +340,20 @@ impl<'h> ser::Serializer for &mut DigestSerializer<'h> {
 
     fn serialize_f32(self, v: f32) -> Result<(), DigestError> {
         self.tag(Tag::Float32);
+        let v = match self.zero {
+            Zero::Unsigned if v == 0.0 => 0.0,
+            Zero::Signed | Zero::Unsigned => v,
+        };
         self.hasher.word(u64::from(v.to_bits()));
         Ok(())
     }
 
     fn serialize_f64(self, v: f64) -> Result<(), DigestError> {
         self.tag(Tag::Float64);
+        let v = match self.zero {
+            Zero::Unsigned if v == 0.0 => 0.0,
+            Zero::Signed | Zero::Unsigned => v,
+        };
         self.hasher.word(v.to_bits());
         Ok(())
     }
@@ -698,6 +749,37 @@ mod tests {
                 assert_ne!(digest, other, "{index} and {other_index}");
             }
         }
+    }
+
+    #[test]
+    fn equality_screens_hash_signed_zeros_alike_and_identities_do_not() {
+        #[derive(Serialize)]
+        struct Floats {
+            single: f32,
+            double: Vec<f64>,
+        }
+        let floats = |zero: f64| Floats {
+            single: zero as f32,
+            double: vec![1.5, zero],
+        };
+        assert_eq!(
+            PlanDigest::for_equality_screen(&floats(-0.0)),
+            PlanDigest::for_equality_screen(&floats(0.0))
+        );
+        assert_ne!(
+            PlanDigest::for_value(&floats(-0.0)),
+            PlanDigest::for_value(&floats(0.0))
+        );
+        // Away from zero, the screen keeps the identity's distinctions.
+        assert_ne!(
+            PlanDigest::for_equality_screen(&floats(0.0)),
+            PlanDigest::for_equality_screen(&floats(f64::MIN_POSITIVE))
+        );
+        assert_eq!(
+            PlanDigest::for_equality_screen(&("a", 1_u8)),
+            PlanDigest::for_value(&("a", 1_u8)),
+            "values without zeros digest the same either way"
+        );
     }
 
     #[test]

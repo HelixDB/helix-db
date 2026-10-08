@@ -492,15 +492,14 @@ mod tests {
     /// Sets wider than the digest threshold find the same candidates.
     #[test]
     fn wide_sets_find_duplicate_and_structural_subsumption_candidates() {
-        let email = |value: i64| {
+        let lookup = |value: PropertyValue| {
             source(NodeAccessPlan::EqualityIndex {
                 index: catalog::NodeEqualityIndexMeta::try_new("user_email").unwrap(),
                 key: catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
-                value: ir::IndexValue::Literal(
-                    ir::SecondaryIndexLiteral::new(PropertyValue::I64(value)).unwrap(),
-                ),
+                value: ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(value).unwrap()),
             })
         };
+        let email = |value: i64| lookup(PropertyValue::I64(value));
         let distinct = (0..12).map(email).collect::<Vec<_>>();
         let set = |sources: Vec<NodeAccessSourcePlan>| {
             let union = source(NodeAccessPlan::Union(
@@ -518,7 +517,17 @@ mod tests {
         assert_eq!(set(distinct.clone()), (false, false));
         let duplicated = [distinct.clone(), vec![email(5)]].concat();
         assert_eq!(set(duplicated), (true, true));
-        let covered = [distinct, vec![label_scan("User")]].concat();
+        let covered = [distinct.clone(), vec![label_scan("User")]].concat();
         assert_eq!(set(covered), (true, true));
+        // `==` treats the two zeros as equal, though their bits differ.
+        let signed_zeros = [
+            distinct,
+            vec![
+                lookup(PropertyValue::F64(0.0)),
+                lookup(PropertyValue::F64(-0.0)),
+            ],
+        ]
+        .concat();
+        assert_eq!(set(signed_zeros), (true, true));
     }
 }
