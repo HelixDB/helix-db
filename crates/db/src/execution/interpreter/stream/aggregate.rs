@@ -140,7 +140,7 @@ impl<'db> ExecutionContext<'db> {
                 ))
             }
             ir::AggregatePlan::AggregateBy { function, property } => {
-                self.aggregate_by(rows, function.clone(), property).await
+                self.aggregate_by(rows, *function, property).await
             }
         }
     }

@@ -26,8 +26,8 @@ ARG HELIX_CARGO_FEATURES=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
-    cargo build --locked --release --package server --bin server --features "${HELIX_CARGO_FEATURES}" \
-    && cp target/release/server /tmp/helix-server \
+    cargo build --locked --profile dist --package server --bin server --features "${HELIX_CARGO_FEATURES}" \
+    && cp target/dist/server /tmp/helix-server \
     && readelf -l /tmp/helix-server \
         | grep -Eq '/(lib/ld-linux-aarch64\.so\.1|lib64/ld-linux-x86-64\.so\.2)' \
     && ! readelf -l /tmp/helix-server | grep -qi musl \

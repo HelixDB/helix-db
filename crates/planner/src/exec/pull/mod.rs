@@ -1,6 +1,7 @@
 //! Validated pull regions. These describe execution, never access-path selection.
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::positions::StepPositions;
 use super::{ExecCondition, ExecExecutionOrder, ExecOp, ExecStep, ExecStepId, ExecVariableOp};
 use crate::ir;
 
@@ -106,17 +107,24 @@ impl ExecPullCapability {
     /// A pure, exclusively consumed tree can suspend without exposing a frame's
     /// partial results or skipping effects. Other subplans remain boundaries.
     pub fn pure_subplan(plan: &super::ExecutableSubplan) -> bool {
-        let mut uses = BTreeMap::<ExecStepId, usize>::new();
+        let positions = StepPositions::new(plan.steps().iter().map(|step| step.id))
+            .expect("validated subplans have unique step IDs");
+        let position = |id| {
+            positions
+                .position(id)
+                .expect("validated dependencies are steps")
+        };
+        let mut uses = vec![0usize; positions.len()];
         for step in plan.steps() {
             for dependency in &step.dependencies {
-                *uses.entry(*dependency).or_default() += 1;
+                uses[position(*dependency)] += 1;
             }
         }
-        *uses.entry(plan.root()).or_default() += 1;
+        uses[position(plan.root())] += 1;
         // Purity is independent of whether this subplan itself has a window:
         // an enclosing branch can supply demand to an exclusive child tree.
         plan.steps().iter().all(|step| {
-            uses.get(&step.id) == Some(&1)
+            uses[position(step.id)] == 1
                 && matches!(step.condition, ExecCondition::Always)
                 && matches!(step.output, ir::BatchOutputPlan::Discard)
                 && Self::of(&step.op) != Self::Boundary
@@ -150,6 +158,9 @@ thread_local! {
 }
 
 impl ExecProgram {
+    /// Per-step state lives in vectors indexed by step position (see
+    /// [`StepPositions`]); a component's members are a list plus marks that
+    /// are cleared again before the next component.
     pub(in crate::exec) fn derive(
         steps: &[ExecStep],
         order: &ExecExecutionOrder,
@@ -157,92 +168,96 @@ impl ExecProgram {
     ) -> Self {
         #[cfg(test)]
         DERIVATION_VISITS.set((0, 0));
-        let capabilities = steps
+        let positions = StepPositions::new(steps.iter().map(|step| step.id))
+            .expect("validated steps have unique IDs");
+        let position = |id| positions.position(id).expect("validated IDs are steps");
+        let mut by_position = steps.iter().collect::<Vec<_>>();
+        by_position.sort_unstable_by_key(|step| step.id);
+        let capabilities = by_position
             .iter()
-            .map(|step| (step.id, ExecPullCapability::of(&step.op)))
-            .collect::<BTreeMap<_, _>>();
-        let by_id = steps
-            .iter()
-            .map(|step| (step.id, step))
-            .collect::<BTreeMap<_, _>>();
-        let mut uses = BTreeMap::<ExecStepId, usize>::new();
+            .map(|step| ExecPullCapability::of(&step.op))
+            .collect::<Vec<_>>();
+        let mut uses = vec![0usize; positions.len()];
         for step in steps {
             for id in &step.dependencies {
-                *uses.entry(*id).or_default() += 1;
+                uses[position(*id)] += 1;
             }
-            if let ExecCondition::PreviousStepNotEmpty { dependency } = step.condition {
-                *uses.entry(dependency).or_default() += 1;
-            }
+            let ExecCondition::PreviousStepNotEmpty { dependency } = step.condition else {
+                continue;
+            };
+            uses[position(dependency)] += 1;
         }
-        *uses.entry(root).or_default() += 1;
+        uses[position(root)] += 1;
         // Captures and effects separate epochs even if an unrelated ready step
         // appears between a producer and consumer in topological order.
-        let mut epochs = BTreeMap::new();
+        let ids = order.step_ids().collect::<Vec<_>>();
+        let mut epochs = vec![0usize; positions.len()];
+        let mut ranks = vec![0usize; positions.len()];
         let mut epoch = 0usize;
-        for id in order.step_ids() {
-            let step = by_id[&id];
-            if capabilities[&id] == ExecPullCapability::Boundary {
+        for (rank, id) in ids.iter().enumerate() {
+            let at = position(*id);
+            if capabilities[at] == ExecPullCapability::Boundary {
                 epoch += 1;
             }
-            epochs.insert(id, epoch);
-            if !matches!(step.output, ir::BatchOutputPlan::Discard) {
+            epochs[at] = epoch;
+            ranks[at] = rank;
+            if !matches!(by_position[at].output, ir::BatchOutputPlan::Discard) {
                 epoch += 1;
             }
         }
         let mut program = Self::default();
-        let ids = order.step_ids().collect::<Vec<_>>();
-        let positions = ids
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (*id, position))
-            .collect::<BTreeMap<_, _>>();
         // Eligible edges have one consumer, so components do not overlap.
         // Rejected components contain no demand anywhere in their ancestry and
         // need not be reconsidered for each of their remaining steps.
-        let mut examined = BTreeSet::new();
+        let mut examined = vec![false; positions.len()];
+        let mut member = vec![false; positions.len()];
         for id in ids.into_iter().rev() {
-            if examined.contains(&id) {
+            let at = position(id);
+            if examined[at] || capabilities[at] == ExecPullCapability::Boundary {
                 continue;
             }
-            let terminal = by_id[&id];
-            if capabilities[&id] == ExecPullCapability::Boundary {
-                continue;
-            }
-            let mut members = BTreeSet::from([id]);
-            let mut pending = vec![id];
+            let terminal = by_position[at];
+            member[at] = true;
+            let mut members = vec![at];
+            let mut pending = vec![at];
             while let Some(current) = pending.pop() {
                 #[cfg(test)]
                 DERIVATION_VISITS.with(|visits| {
                     let (nodes, edges) = visits.get();
                     visits.set((nodes + 1, edges));
                 });
-                for dependency in &by_id[&current].dependencies {
+                for dependency in &by_position[current].dependencies {
                     #[cfg(test)]
                     DERIVATION_VISITS.with(|visits| {
                         let (nodes, edges) = visits.get();
                         visits.set((nodes, edges + 1));
                     });
-                    let parent = by_id[dependency];
-                    if uses[dependency] != 1
+                    let parent_at = position(*dependency);
+                    let parent = by_position[parent_at];
+                    if uses[parent_at] != 1
                         || !matches!(parent.output, ir::BatchOutputPlan::Discard)
                         || parent.condition != terminal.condition
-                        || epochs[dependency] != epochs[&id]
-                        || capabilities[dependency] == ExecPullCapability::Boundary
+                        || epochs[parent_at] != epochs[at]
+                        || capabilities[parent_at] == ExecPullCapability::Boundary
+                        || member[parent_at]
                     {
                         continue;
                     }
-                    if members.insert(*dependency) {
-                        pending.push(*dependency);
-                    }
+                    member[parent_at] = true;
+                    members.push(parent_at);
+                    pending.push(parent_at);
                 }
             }
-            examined.extend(members.iter().copied());
+            for at in &members {
+                examined[*at] = true;
+                member[*at] = false;
+            }
             // Without a window or terminal cardinality consumer, ordinary
             // whole-value operators avoid per-row polling overhead. Their
             // existing implementations also serve effect/materialization edges.
-            let needs_demand = members.iter().any(|id| {
+            let needs_demand = members.iter().any(|at| {
                 matches!(
-                    by_id[id].op,
+                    by_position[*at].op,
                     ExecOp::Limit { .. }
                         | ExecOp::Range { .. }
                         | ExecOp::Count { .. }
@@ -252,11 +267,19 @@ impl ExecProgram {
                 )
             });
             if members.len() > 1 && needs_demand {
-                let mut steps = members.iter().copied().collect::<Vec<_>>();
-                steps.sort_unstable_by_key(|id| positions[id]);
-                members.remove(&id);
-                program.absorbed.extend(members);
-                program.regions.insert(id, ExecPullRegion { steps });
+                members.sort_unstable_by_key(|at| ranks[*at]);
+                program.absorbed.extend(
+                    members
+                        .iter()
+                        .filter(|member| **member != at)
+                        .map(|member| by_position[*member].id),
+                );
+                program.regions.insert(
+                    id,
+                    ExecPullRegion {
+                        steps: members.iter().map(|at| by_position[*at].id).collect(),
+                    },
+                );
             }
         }
         program

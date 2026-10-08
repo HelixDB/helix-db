@@ -42,16 +42,25 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
 
     fn equality_index(
         indexes: &catalog::IndexCatalogSnapshot,
-        key: &catalog::ScopedPropertyKey,
+        label: &str,
+        property: &str,
     ) -> Option<Self::EqualityIndex> {
-        indexes.edge_eq.get(key).cloned()
+        indexes
+            .edge_eq
+            .get(&(label, property) as &dyn catalog::ScopedPropertyKeyView)
+            .cloned()
     }
 
     fn range_index(
         indexes: &catalog::IndexCatalogSnapshot,
-        key: &catalog::ScopedPropertyDirectionKey,
+        label: &str,
+        property: &str,
+        direction: helix_ast::index::RangeIndexDirection,
     ) -> Option<Self::RangeIndex> {
-        indexes.edge_range.get(key).cloned()
+        indexes
+            .edge_range
+            .get(&(label, property, direction) as &dyn catalog::ScopedPropertyDirectionKeyView)
+            .cloned()
     }
 
     fn equality_source(

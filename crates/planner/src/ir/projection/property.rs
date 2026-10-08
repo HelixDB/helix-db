@@ -1,6 +1,7 @@
 //! Projection property-list contracts.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -42,9 +43,13 @@ pub enum PropertyNamesError {
 ///     Err(PropertyNamesError::DuplicateName { .. })
 /// ));
 /// ```
+///
+/// The validated list is shared: plans copy their projections with every
+/// copy of a logical root, and a copy counts a reference instead of copying
+/// each name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyNames {
-    names: AtLeast<NonEmptyString, 1>,
+    names: Arc<AtLeast<NonEmptyString, 1>>,
 }
 
 impl PropertyNames {
@@ -52,11 +57,13 @@ impl PropertyNames {
     pub fn new(names: AtLeast<NonEmptyString, 1>) -> Result<Self, PropertyNamesError> {
         let mut seen = BTreeSet::new();
         for name in &names {
-            if !seen.insert(name.clone()) {
+            if !seen.insert(name.as_ref()) {
                 return Err(PropertyNamesError::DuplicateName { name: name.clone() });
             }
         }
-        Ok(Self { names })
+        Ok(Self {
+            names: Arc::new(names),
+        })
     }
 }
 

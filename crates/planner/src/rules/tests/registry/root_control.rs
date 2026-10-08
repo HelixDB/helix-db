@@ -9,9 +9,9 @@ fn seed_rule_set_simplifies_empty_root_control_flow_before_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let branch = optional_branch_expr(edge_access_expr(ir::EdgeAccessPlan::Empty), node_all_expr());
     let repeat = repeat_root_expr(

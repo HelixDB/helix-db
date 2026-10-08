@@ -50,13 +50,17 @@ impl<'a> SelectionSession<'a> {
             saw_satisfying_properties = true;
             match self.entry_total_cost(group, entry) {
                 Ok(cost) => {
-                    let candidate_key =
-                        ordering::alternative_key_for_cost(&entry.alternative, cost);
-                    let replace = best
-                        .as_ref()
-                        .is_none_or(|(_, _, best_key)| candidate_key < *best_key);
+                    let replace = best.as_ref().is_none_or(
+                        |(best, best_cost): &(&PhysicalAlternativeEntry, cost::CostVector)| {
+                            ordering::compare_alternatives(
+                                (&entry.alternative, cost),
+                                (&best.alternative, *best_cost),
+                            )
+                            .is_lt()
+                        },
+                    );
                     if replace {
-                        best = Some((entry, cost, candidate_key));
+                        best = Some((entry, cost));
                     }
                 }
                 Err(error) => {
@@ -65,7 +69,7 @@ impl<'a> SelectionSession<'a> {
             }
         }
 
-        if let Some((entry, cost, _)) = best {
+        if let Some((entry, cost)) = best {
             return Ok((entry, cost));
         }
         if !saw_satisfying_properties {

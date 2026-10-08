@@ -91,7 +91,7 @@ fn rewrite_stream_expr(
             rewrite_root_stream(cardinality.input(), rewrite).map(|input| {
                 logical::LogicalExpr::StreamCardinality(
                     logical::StreamCardinality::new(input).with_planning_bindings(
-                        cardinality.params().clone(),
+                        cardinality.shared_params().clone(),
                         cardinality.late_bound_params().clone(),
                     ),
                 )

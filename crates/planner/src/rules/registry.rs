@@ -68,6 +68,27 @@ pub struct SeedRuleSet {
 }
 
 impl SeedRuleSet {
+    /// The seed rules' optimizer, built once per process. The rules are
+    /// immutable and the optimizer's compiled schedule depends only on them,
+    /// so every planning session can share one instead of rebuilding the rule
+    /// metadata and candidate lists each time.
+    ///
+    /// ```
+    /// use helix_planner::rules::SeedRuleSet;
+    ///
+    /// assert!(std::ptr::eq(
+    ///     SeedRuleSet::shared_optimizer(),
+    ///     SeedRuleSet::shared_optimizer(),
+    /// ));
+    /// ```
+    pub fn shared_optimizer() -> &'static optimizer::CascadesOptimizer<'static> {
+        static SEED: std::sync::LazyLock<SeedRuleSet> =
+            std::sync::LazyLock::new(SeedRuleSet::default);
+        static OPTIMIZER: std::sync::LazyLock<optimizer::CascadesOptimizer<'static>> =
+            std::sync::LazyLock::new(|| SEED.optimizer());
+        &OPTIMIZER
+    }
+
     /// Build the optimizer view over the seed rule registry.
     pub fn optimizer(&self) -> optimizer::CascadesOptimizer<'_> {
         optimizer::CascadesOptimizer::new(self.registry())
@@ -75,7 +96,7 @@ impl SeedRuleSet {
 
     /// Build the validated optimizer registry over the seed rules.
     pub fn registry(&self) -> optimizer::OptimizerRuleRegistry<'_> {
-        let registry = optimizer::OptimizerRuleRegistry::try_from_known_rules(vec![
+        let rules: Vec<&dyn optimizer::OptimizerRule> = vec![
             &self.static_predicate,
             &self.filter_merge,
             &self.filter_pushdown,
@@ -128,10 +149,17 @@ impl SeedRuleSet {
             &self.stream,
             &self.order,
             &self.barrier,
-        ]);
+        ];
         // The seed registry is a closed static field inventory. The validator
-        // still runs here so future duplicate, custom, or missing built-in
-        // rule IDs fail before they can corrupt provenance/scheduling.
-        registry.expect("built-in seed rule registry must match the complete known rule inventory")
+        // still runs, once per process rather than once per optimization, so
+        // future duplicate, custom, or missing built-in rule IDs fail before
+        // they can corrupt provenance/scheduling. Every seed rule set lists
+        // the same rules in the same order, so one validation covers them all.
+        static VALIDATED: std::sync::Once = std::sync::Once::new();
+        VALIDATED.call_once(|| {
+            optimizer::OptimizerRuleRegistry::try_from_known_rules(rules.clone())
+                .expect("built-in seed rule registry must match the complete known rule inventory");
+        });
+        optimizer::OptimizerRuleRegistry::from_validated_rules(rules)
     }
 }

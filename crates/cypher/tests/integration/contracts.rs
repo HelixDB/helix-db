@@ -100,6 +100,7 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
         if let Some(value) = parameter {
             context
                 .params
+                .make_mut()
                 .values
                 .insert(ir::NonEmptyString::new("keys").unwrap(), value);
         }
@@ -519,7 +520,7 @@ fn correlated_lookups_accept_bound_parameters_in_the_predicate() {
     };
     // An unbound parameter could fail on a row the lookup would skip.
     assert_eq!(lookups(&context), 0);
-    context.params.values.insert(
+    context.params.make_mut().values.insert(
         ir::NonEmptyString::new("r").unwrap(),
         helix_ast::value::PropertyValue::from("us"),
     );
@@ -1197,6 +1198,7 @@ fn bound_parameter_properties_and_elements_read_indexes() {
     ] {
         context
             .params
+            .make_mut()
             .values
             .insert(ir::NonEmptyString::new(name).unwrap(), value);
     }

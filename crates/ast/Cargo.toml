@@ -7,9 +7,23 @@ edition = "2024"
 test-utils = []
 
 [dependencies]
+bumpalo = { version = "3.20.3", features = ["collections"] }
 chrono = "0.4"
+helix-ast-arena-derive = { path = "../ast-arena-derive" }
 serde = { version = "1", features = ["derive"] }
-sonic-rs = "0.5.8"
+# The parser picks AVX2, SSE4.2, NEON or its portable implementation for the
+# running CPU (`runtime-detection`).
+# `big-int-as-float` reads integers outside i64/u64 as f64, as request
+# parameters always have, instead of rejecting them.
+simd-json = { version = "0.18.1", default-features = false, features = [
+    "big-int-as-float",
+    "runtime-detection",
+    "serde_impl",
+    "swar-number-parsing",
+] }
+
+# Serializes requests: it writes each f32 in its shortest form, where
+# simd-json widens it to f64 digits and bulk vectors outgrow the body limit.
+serde_json = "1"
 
 [dev-dependencies]
-serde_json = "1"

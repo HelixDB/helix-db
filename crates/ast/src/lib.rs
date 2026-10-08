@@ -23,7 +23,7 @@
 //!             .limit(1),
 //!     )
 //!     .returning(["users"]);
-//! let json = sonic_rs::to_string(&query).unwrap();
+//! let json = simd_json::to_string(&query).unwrap();
 //!
 //! assert!(json.contains(r#""root":{"limit""#));
 //! assert!(json.contains(r#""input":{"where""#));
@@ -32,6 +32,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod arena;
 pub mod batch;
 pub mod error_code;
 pub mod expr;
@@ -41,6 +42,8 @@ mod nesting;
 pub mod prelude;
 pub mod projection;
 pub mod query;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testing;
 pub mod traversal;
 pub mod value;
 
@@ -70,7 +73,7 @@ mod tests {
         let query = query_entry(&batch.entries()[0]);
         assert!(matches!(query.root, AstNode::ValueMap { .. }));
 
-        let json = sonic_rs::to_string(&QueryRequest::read(batch)).unwrap();
+        let json = simd_json::to_string(&QueryRequest::read(batch)).unwrap();
         assert!(json.contains(r#""root":{"value_map":{"input":{"limit""#));
         assert!(json.contains(r#""eq":{"left":{"property":"username"}"#));
         assert!(!json.contains("steps"));
@@ -108,7 +111,7 @@ mod tests {
         let query = query_entry(&batch.entries()[0]);
         assert!(matches!(query.root, AstNode::ShortestPath { .. }));
 
-        let json = sonic_rs::to_string(&QueryRequest::read(batch)).unwrap();
+        let json = simd_json::to_string(&QueryRequest::read(batch)).unwrap();
         assert!(json.contains(r#""shortest_path""#));
         assert!(json.contains(r#""direction":"both""#));
         assert!(json.contains(r#""max_depth":5"#));
