@@ -659,15 +659,8 @@ impl<'a> Source<'a> {
                     let record = record
                         .map(|record| storage::retain_read(record, ctx.row_memory.as_ref()))
                         .transpose()?;
-                    // Boxed so a source that never evaluates a predicate does
-                    // not carry the evaluation's state in every row's future.
-                    Box::pin(ctx.eval_predicate_plan_on_record(
-                        &row,
-                        predicate,
-                        record,
-                        &mut self.buffers,
-                    ))
-                    .await?
+                    ctx.eval_predicate_plan_on_record(&row, predicate, record, &mut self.buffers)
+                        .await?
                 }
                 Plan::Prepared | Plan::Access(_) | Plan::Kv(_) => true,
             };
