@@ -449,7 +449,7 @@
             }
           },
           "503": {
-            "description": "Writer required, server access mode unavailable, or uncertain write commit. A local uncertain outcome carries retryable:false; Helix Cloud reports one as WRITE_OUTCOME_UNKNOWN with retryable:false, like native queries.",
+            "description": "Writer required, server access mode unavailable, or uncertain write commit. A local uncertain outcome carries retryable:false; Helix Cloud reports one as write_outcome_unknown with retryable:false, like native queries.",
             "content": {
               "application/json": {
                 "schema": {

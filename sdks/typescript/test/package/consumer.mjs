@@ -31,6 +31,13 @@ const cases = [
   },
   {
     status: 503,
+    body: '{"error":"write_outcome_unknown","msg":"unknown outcome","retryable":false}',
+    code: "write_outcome_unknown",
+    message: "unknown outcome",
+    retryable: false,
+  },
+  {
+    status: 503,
     body: '{"code":"WRITE_OUTCOME_UNKNOWN","error":"unknown outcome","retryable":false}',
     code: "WRITE_OUTCOME_UNKNOWN",
     message: "unknown outcome",
