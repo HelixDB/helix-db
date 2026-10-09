@@ -24,11 +24,17 @@ use crate::execution::interpreter::{
 use crate::execution_control::ExecutionControl;
 use crate::HelixDB;
 
+pub mod insight_tally;
+
 /// Shared request executor used by server transports.
+///
+/// Clones share one [`insight_tally::InsightTally`] of the executions they
+/// run without a storage namespace.
 #[derive(Clone)]
 pub struct HelixQueryService {
     db: Arc<HelixDB>,
     query_metrics: Option<OssQueryMetrics>,
+    insights: Arc<insight_tally::InsightTally>,
 }
 
 impl HelixQueryService {
@@ -86,6 +92,7 @@ impl HelixQueryService {
         Self {
             db,
             query_metrics: None,
+            insights: Arc::default(),
         }
     }
 
@@ -94,7 +101,15 @@ impl HelixQueryService {
         Self {
             db,
             query_metrics: Some(query_metrics),
+            insights: Arc::default(),
         }
+    }
+
+    /// Recent missing-index and unbounded-scan insights of the executions
+    /// this service ran without a storage namespace, less those an active
+    /// index now answers ([`insight_tally`]).
+    pub fn planner_insights(&self) -> insight_tally::InsightSnapshot {
+        self.insights.snapshot(&self.db.index_catalog_snapshot())
     }
 
     /// Execute an inline query.
@@ -120,6 +135,8 @@ impl HelixQueryService {
     ///
     /// This identity does not select the storage namespace. Call
     /// [`Self::execute_query_with_mode_scoped`] when execution must be tenant-scoped.
+    /// A successful execution adds its plan's insights to
+    /// [`Self::planner_insights`].
     pub async fn execute_query_with_mode_and_metrics_tenant(
         &self,
         request: QueryRequest,
@@ -134,6 +151,7 @@ impl HelixQueryService {
             self.query_metrics.as_ref(),
         )
         .await
+        .inspect(|response| self.insights.record(response.diagnostics()))
     }
 
     /// Execute an inline query in a request storage namespace.
@@ -1547,6 +1565,70 @@ mod tests {
         assert_eq!(value["exists"], JsonValue::Bool(true));
         assert!(value.get("returns").is_none());
         assert!(value.get("diagnostics").is_none());
+    }
+
+    #[tokio::test]
+    async fn planner_insights_tally_successful_executions_until_an_index_answers_them() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-insight-tally".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(Arc::clone(&db));
+        let unindexed = || {
+            QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "users",
+                        g().n_with_label_where("User", Predicate::eq("username", "ada")),
+                    )
+                    .var_as("count", g().n(NodeRef::var("users")).count())
+                    .returning(["count"]),
+            )
+        };
+        service.execute_query(unindexed()).await.unwrap();
+        service.execute_query(unindexed()).await.unwrap();
+        service
+            .execute_query(QueryRequest::read(
+                read_batch()
+                    .var_as("users", g().n_with_label("User"))
+                    .returning(["missing"]),
+            ))
+            .await
+            .expect_err("an unknown return fails before it is tallied");
+
+        // Clones share the tally; the scan the missing index bounds is
+        // counted under that index only.
+        let snapshot = service.clone().planner_insights();
+        assert_eq!(snapshot.analyzed_queries, 2);
+        assert_eq!(snapshot.evicted_insights, 0);
+        assert_eq!(snapshot.insights.len(), 1, "{:?}", snapshot.insights);
+        let count = &snapshot.insights[0];
+        assert_eq!(count.queries, 2);
+        assert_eq!(
+            count.insight,
+            insight_tally::TalliedInsight::MissingIndex {
+                element: helix_planner::catalog::ElementKind::Node,
+                label: name("User"),
+                property: name("username"),
+                index_kind: helix_planner::diagnostics::SecondaryIndexKind::Equality,
+            }
+        );
+
+        db.install_index_for_tests(
+            crate::config::SecondaryIndexDefinition::node_equality("User", "username")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        service.execute_query(unindexed()).await.unwrap();
+        let answered = service.planner_insights();
+        assert_eq!(answered.analyzed_queries, 3);
+        assert!(answered.insights.is_empty(), "{:?}", answered.insights);
     }
 
     #[tokio::test]

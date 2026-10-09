@@ -246,18 +246,7 @@ impl ServerConfig {
 
     /// The hybrid disk cache in front of durable storage, if one is set.
     pub(crate) fn hybrid_cache(&self) -> Option<&HybridCache> {
-        match &self.storage {
-            StorageConfig::Memory
-            | StorageConfig::Disk {
-                cache: CacheConfig::Memory,
-                ..
-            } => None,
-            StorageConfig::Disk {
-                cache: CacheConfig::Hybrid(cache),
-                ..
-            }
-            | StorageConfig::S3 { cache, .. } => Some(cache),
-        }
+        self.storage.hybrid_cache()
     }
 }
 
@@ -295,6 +284,22 @@ pub enum StorageConfig {
 }
 
 impl StorageConfig {
+    /// The hybrid disk cache in front of durable storage, if one is set.
+    pub(crate) fn hybrid_cache(&self) -> Option<&HybridCache> {
+        match self {
+            Self::Memory
+            | Self::Disk {
+                cache: CacheConfig::Memory,
+                ..
+            } => None,
+            Self::Disk {
+                cache: CacheConfig::Hybrid(cache),
+                ..
+            }
+            | Self::S3 { cache, .. } => Some(cache),
+        }
+    }
+
     fn from_lookup(
         lookup: &mut impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ServerConfigError> {
@@ -595,6 +600,25 @@ impl HybridCache {
         &self.root
     }
 
+    /// Disk bytes shared by every disk tier (`HELIX_DISK_CACHE_BYTES`).
+    pub(crate) const fn disk_bytes(&self) -> usize {
+        self.disk_bytes
+    }
+
+    /// Whether the server warms this cache at startup (`HELIX_DISK_CACHE_WARM`).
+    pub(crate) const fn warms_at_startup(&self) -> bool {
+        matches!(self.warm, DiskCacheWarm::On)
+    }
+
+    /// This cache as `HELIX_DISK_CACHE_WARM=off` configures it.
+    #[cfg(test)]
+    pub(crate) fn without_startup_warm_for_tests(self) -> Self {
+        Self {
+            warm: DiskCacheWarm::Off,
+            ..self
+        }
+    }
+
     /// Claims this cache directory for one server: takes the exclusive lock
     /// that keeps every other server off it until the returned file is
     /// dropped.
@@ -660,7 +684,7 @@ impl HybridCache {
     /// Only when free space alone falls short does this walk every file below
     /// the root, which at the largest budget is on the order of 10^5 files.
     #[cfg(unix)]
-    fn disk_shortfall(&self) -> std::io::Result<Option<u64>> {
+    pub(crate) fn disk_shortfall(&self) -> std::io::Result<Option<u64>> {
         let filesystem = rustix::fs::statvfs(&self.root)?;
         let free = filesystem.f_bavail.saturating_mul(filesystem.f_frsize);
         let Some(beyond_free) = (self.disk_bytes as u64)

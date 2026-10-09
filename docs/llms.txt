@@ -98,6 +98,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [helix cluster](https://docs.helix-db.com/cli/command-reference/cluster): List and inspect Helix Cloud clusters and their active indexes — Page type: Reference
 - [helix database](https://docs.helix-db.com/cli/command-reference/database): Discover and manage Helix Cloud databases and application keys — Page type: Reference
 - [helix delete](https://docs.helix-db.com/cli/command-reference/delete): Remove an instance from helix.toml and clean up its local state — Page type: Reference
+- [helix doctor](https://docs.helix-db.com/cli/command-reference/doctor): Check an instance's setup: runtime, storage, disk cache, memory, and index use — Page type: Reference
 - [helix explorer](https://docs.helix-db.com/cli/command-reference/explorer): Browse a running local instance in the graph Explorer — Page type: Reference
 - [helix feedback](https://docs.helix-db.com/cli/command-reference/feedback): Open a pre-filled feedback issue for the Helix team — Page type: Reference
 - [helix init](https://docs.helix-db.com/cli/command-reference/init): Create a local project or a WorkOS-authenticated Cloud link — Page type: Reference
