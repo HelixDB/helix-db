@@ -75,7 +75,7 @@ async fn projection_copies_only_needed_inputs_after_memory_admission() {
                 "{consumer:?}, needs_original={needs_original}: copied a large input before admission: {allocated:?}");
             if needs_original {
                 assert!(
-                    matches!(result, Err(Error::Query(error)) if error.category=="ResourceLimit" && error.detail=="MemoryLimit")
+                    matches!(result, Err(Error::Query(error)) if error.category=="resource_limit" && error.detail=="memory_limit")
                 );
             } else {
                 let rows = result.unwrap();
@@ -156,7 +156,7 @@ async fn sorting_admits_live_keys_cumulatively_before_evaluating_later_keys() {
                 assert!(allocated.bytes <= memory_bytes,
                     "{consumer:?}, late_error={late_error}: key construction exceeded available memory: {allocated:?}");
                 assert!(
-                    matches!(result, Err(Error::Query(error)) if error.category=="ResourceLimit" && error.detail=="MemoryLimit")
+                    matches!(result, Err(Error::Query(error)) if error.category=="resource_limit" && error.detail=="memory_limit")
                 );
                 assert_eq!(ctx.row_budget().available(), memory_bytes);
             }
@@ -222,7 +222,7 @@ async fn projection_input_masks_allocate_only_for_referenced_bindings() {
                 Err(error) => {
                     assert!(references && memory_bytes < 3);
                     assert!(
-                        matches!(error, Error::Query(ref error) if error.detail == "MemoryLimit"),
+                        matches!(error, Error::Query(ref error) if error.detail == "memory_limit"),
                         "{error}"
                     );
                 }

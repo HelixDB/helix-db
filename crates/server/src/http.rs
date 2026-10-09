@@ -511,26 +511,30 @@ mod tests {
     async fn cypher_errors_follow_the_shared_error_contract() {
         let query = |category| {
             db::cypher::Error::Query(
-                helix_cypher::QueryError::runtime(category, "Detail", "msg")
+                helix_cypher::QueryError::runtime(category, "detail", "msg")
                     .at(helix_cypher::Span { start: 1, end: 2 }),
             )
         };
         let cases = [
-            (query("SyntaxError"), StatusCode::BAD_REQUEST, "SyntaxError"),
             (
-                query("ResourceLimit"),
+                query("syntax_error"),
+                StatusCode::BAD_REQUEST,
+                "syntax_error",
+            ),
+            (
+                query("resource_limit"),
                 StatusCode::TOO_MANY_REQUESTS,
-                "ResourceLimit",
+                "resource_limit",
             ),
             (
-                query("AccessModeError"),
+                query("access_mode_error"),
                 StatusCode::SERVICE_UNAVAILABLE,
-                "AccessModeError",
+                "access_mode_error",
             ),
             (
-                query("InternalPlannerError"),
+                query("internal_planner_error"),
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "InternalPlannerError",
+                "internal_planner_error",
             ),
             (
                 db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
@@ -558,7 +562,7 @@ mod tests {
             if is_query {
                 assert_eq!(
                     json["details"],
-                    serde_json::json!({"detail":"Detail","phase":"runtime","span":{"start":1,"end":2}})
+                    serde_json::json!({"detail":"detail","phase":"runtime","span":{"start":1,"end":2}})
                 );
             } else {
                 assert_eq!(json.get("details"), None);

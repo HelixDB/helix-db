@@ -38,8 +38,8 @@ mod tests {
             match entity {
                 Entity::Node(1) => Ok(&self.0),
                 _ => Err(QueryError::runtime(
-                    "EntityNotFound",
-                    "Missing",
+                    "entity_not_found",
+                    "missing",
                     "not prepared",
                 )),
             }
@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn hydration_is_borrowed_and_errors_are_evaluated_only_on_access() {
-        let unsupported = QueryError::unsupported("StoredValue");
+        let unsupported = QueryError::unsupported("stored_value", "this stored value");
         let graph = Graph(BTreeMap::from([
             ("large".into(), Ok(Value::String("x".repeat(2048)))),
             ("unsupported".into(), Err(unsupported.clone())),

@@ -45,7 +45,7 @@ async fn collection_limits_apply_to_materialized_lists_and_roll_back_writes() {
     ] {
         let error = execute(query, 1).await.unwrap_err();
         assert!(matches!(error, cypher::Error::Query(error)
-            if error.category=="ResourceLimit" && error.detail=="CollectionLimit"
+            if error.category=="resource_limit" && error.detail=="collection_limit"
                 && error.phase==helix_planner::relational::ErrorPhase::Runtime));
         assert_eq!(
             run(&db, "MATCH (n:LimitedList) RETURN count(n)").await.rows,
@@ -69,7 +69,7 @@ async fn collection_limits_apply_to_materialized_lists_and_roll_back_writes() {
     let error = execute("MATCH (n:StoredList) RETURN n.values", 1)
         .await
         .unwrap_err();
-    assert!(matches!(error,cypher::Error::Query(error) if error.detail=="CollectionLimit"));
+    assert!(matches!(error,cypher::Error::Query(error) if error.detail=="collection_limit"));
     assert_eq!(
         execute("MATCH (n:StoredList) RETURN n.values", 2)
             .await

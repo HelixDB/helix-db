@@ -4,6 +4,9 @@
 //! in front of database nodes, serves these paths and reports a [`QueryError`]
 //! with the same status and body. Clients see one API wherever they connect.
 use crate::QueryError;
+/// The codes a [`QueryError`] reports, in the lower snake case of every
+/// HelixDB error code.
+pub use helix_planner::relational::{category, detail};
 use helix_planner::relational::{ErrorPhase, Span};
 use serde::Serialize;
 
@@ -39,9 +42,9 @@ impl ErrorClass {
     /// ```
     pub fn of(error: &QueryError) -> Self {
         match error.category.as_str() {
-            "ResourceLimit" => Self::ResourceLimit,
-            "AccessModeError" => Self::WriterRequired,
-            "InternalPlannerError" => Self::Internal,
+            category::RESOURCE_LIMIT => Self::ResourceLimit,
+            category::ACCESS_MODE_ERROR => Self::WriterRequired,
+            category::INTERNAL_PLANNER_ERROR => Self::Internal,
             _ => Self::InvalidQuery,
         }
     }
@@ -57,15 +60,21 @@ impl ErrorClass {
     }
 }
 
-/// The JSON body every Cypher HTTP endpoint returns for a [`QueryError`].
+/// The JSON body every Cypher HTTP endpoint returns for a [`QueryError`]. The
+/// gRPC methods carry the same body in their status details.
 ///
 /// ```
-/// let error = helix_cypher::QueryError::compile("SyntaxError", "UnexpectedEnd", "unexpected end");
+/// use helix_cypher::api::{category, detail};
+/// let error = helix_cypher::QueryError::compile(
+///     category::SYNTAX_ERROR,
+///     detail::UNEXPECTED_END,
+///     "unexpected end",
+/// );
 /// let body = serde_json::to_value(helix_cypher::api::ErrorBody::from(&error))?;
 /// assert_eq!(body, serde_json::json!({
-///     "error": "SyntaxError",
+///     "error": "syntax_error",
 ///     "msg": "unexpected end",
-///     "details": {"detail": "UnexpectedEnd", "phase": "compile", "span": null},
+///     "details": {"detail": "unexpected_end", "phase": "compile", "span": null},
 /// }));
 /// # Ok::<(), serde_json::Error>(())
 /// ```

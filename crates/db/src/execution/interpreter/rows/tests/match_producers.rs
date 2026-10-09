@@ -101,7 +101,7 @@ async fn a_distinct_barrier_does_not_force_the_following_product_to_materialize(
         )
         .await
         .unwrap_err();
-    assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="memory_limit"));
     db.close().await.unwrap();
 }
 
@@ -127,9 +127,9 @@ async fn matches_after_writes_see_index_changes_and_drain_late_errors() {
     .await
     .unwrap();
     for (text,detail) in [
-        ("CREATE (:Rollback {key:1}) WITH 1 AS k MATCH (b:B) WHERE 1/(b.key-2)>0 RETURN 1 LIMIT 0","DivisionByZero"),
-        ("UNWIND [1] AS a WITH DISTINCT a OPTIONAL MATCH (a)-[:R]->(b) RETURN b LIMIT 0","ExpectedNode"),
-        ("UNWIND [null,1] AS a WITH DISTINCT a OPTIONAL MATCH (a) RETURN a LIMIT 0","ExpectedNode"),
+        ("CREATE (:Rollback {key:1}) WITH 1 AS k MATCH (b:B) WHERE 1/(b.key-2)>0 RETURN 1 LIMIT 0","division_by_zero"),
+        ("UNWIND [1] AS a WITH DISTINCT a OPTIONAL MATCH (a)-[:R]->(b) RETURN b LIMIT 0","expected_node"),
+        ("UNWIND [null,1] AS a WITH DISTINCT a OPTIONAL MATCH (a) RETURN a LIMIT 0","expected_node"),
     ] {
         let query=helix_cypher::compile(text).unwrap();
         let plan=r::plan(query.clone(),&db.planner_context(context::ParamBindings::default())).unwrap();

@@ -94,7 +94,7 @@ async fn verify_decimal_keys() {
     // index at the previously committed exact integer value.
     let error = db.cypher(cypher::Request::new("MATCH (n:ExactInteger {key:9007199254740993}) SET n.key=toInteger('9007199254740995.0') RETURN 1/0")).await.unwrap_err();
     assert!(matches!(error, cypher::Error::Query(error)
-    if error.category == "ArithmeticError" && error.detail == "DivisionByZero"
+    if error.category == "arithmetic_error" && error.detail == "division_by_zero"
         && error.phase == helix_planner::relational::ErrorPhase::Runtime));
     assert_eq!(
         run(

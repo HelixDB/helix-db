@@ -3,6 +3,7 @@ use super::{
     Aggregate, Binary, Connective, Entity, Expression, Function, GraphValues, QueryError, Result,
     Unary, Value,
 };
+use crate::relational::{category, detail};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 mod formatting;
@@ -91,8 +92,8 @@ impl Evaluation<'_> {
             E::Slot(slot) => {
                 let value = self.row.get(slot.0 as usize).ok_or_else(|| {
                     QueryError::runtime(
-                        "InternalPlannerError",
-                        "InvalidSlot",
+                        category::INTERNAL_PLANNER_ERROR,
+                        detail::INVALID_SLOT,
                         "row schema does not contain a referenced slot",
                     )
                 })?;
@@ -103,8 +104,8 @@ impl Evaluation<'_> {
             E::Parameter(name) => {
                 let value = self.parameters.get(name).ok_or_else(|| {
                     QueryError::runtime(
-                        "ParameterMissing",
-                        "MissingParameter",
+                        category::PARAMETER_MISSING,
+                        detail::MISSING_PARAMETER,
                         format!("missing parameter ${name}"),
                     )
                 })?;
@@ -141,8 +142,8 @@ impl Evaluation<'_> {
                     }
                     (Value::List(_), _) => {
                         return Err(QueryError::runtime(
-                            "TypeError",
-                            "ListElementAccessByNonInteger",
+                            category::TYPE_ERROR,
+                            detail::LIST_ELEMENT_ACCESS_BY_NON_INTEGER,
                             "list index must be an integer",
                         ))
                     }
@@ -157,8 +158,8 @@ impl Evaluation<'_> {
                     }
                     (Value::Map(_) | Value::Entity(_), _) => {
                         return Err(QueryError::runtime(
-                            "TypeError",
-                            "MapElementAccessByNonString",
+                            category::TYPE_ERROR,
+                            detail::MAP_ELEMENT_ACCESS_BY_NON_STRING,
                             "map index must be a string",
                         ))
                     }
@@ -435,8 +436,8 @@ impl Evaluation<'_> {
     fn collection(&self, count: usize) -> Result<()> {
         if count > self.max_collection_items {
             return Err(QueryError::runtime(
-                "ResourceLimit",
-                "CollectionLimit",
+                category::RESOURCE_LIMIT,
+                detail::COLLECTION_LIMIT,
                 "expression exceeds collection budget",
             ));
         }
@@ -669,8 +670,8 @@ impl Evaluation<'_> {
                 // output. UNWIND retains the allocation-free generator path.
                 if count as u128 > self.max_collection_items as u128 {
                     return Err(QueryError::runtime(
-                        "ResourceLimit",
-                        "CollectionLimit",
+                        category::RESOURCE_LIMIT,
+                        detail::COLLECTION_LIMIT,
                         "range exceeds the collection budget",
                     ));
                 }
@@ -838,14 +839,14 @@ pub fn nonnegative(value: &Value) -> Result<usize> {
     match value {
         Value::Integer(i) => usize::try_from(*i).map_err(|_| {
             QueryError::runtime(
-                "SyntaxError",
-                "NegativeIntegerArgument",
+                category::SYNTAX_ERROR,
+                detail::NEGATIVE_INTEGER_ARGUMENT,
                 "expected a nonnegative integer",
             )
         }),
         _ => Err(QueryError::runtime(
-            "SyntaxError",
-            "InvalidArgumentType",
+            category::SYNTAX_ERROR,
+            detail::INVALID_ARGUMENT_TYPE,
             "expected an integer",
         )),
     }
@@ -871,12 +872,12 @@ fn truth(value: Option<bool>) -> Value {
     value.map(Value::Boolean).unwrap_or(Value::Null)
 }
 pub(super) fn type_error(message: &str) -> QueryError {
-    QueryError::runtime("TypeError", "InvalidArgumentType", message)
+    QueryError::runtime(category::TYPE_ERROR, detail::INVALID_ARGUMENT_TYPE, message)
 }
 pub(super) fn overflow() -> QueryError {
     QueryError::runtime(
-        "ArithmeticError",
-        "NumberOutOfRange",
+        category::ARITHMETIC_ERROR,
+        detail::NUMBER_OUT_OF_RANGE,
         "integer result is outside the signed 64-bit range",
     )
 }
@@ -950,8 +951,8 @@ pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
     if let (Value::Integer(a), Value::Integer(b)) = (&a, &b) {
         if matches!(op, B::Divide | B::Modulo) && *b == 0 {
             return Err(QueryError::runtime(
-                "ArithmeticError",
-                "DivisionByZero",
+                category::ARITHMETIC_ERROR,
+                detail::DIVISION_BY_ZERO,
                 "integer division by zero",
             ));
         }
@@ -1013,8 +1014,8 @@ impl IntegerRange {
     fn new(arguments: &[Value]) -> Result<Self> {
         let [Value::Integer(start), Value::Integer(end), rest @ ..] = arguments else {
             return Err(QueryError::runtime(
-                "ArgumentError",
-                "InvalidArgumentType",
+                category::ARGUMENT_ERROR,
+                detail::INVALID_ARGUMENT_TYPE,
                 "range requires integer endpoints",
             ));
         };
@@ -1023,16 +1024,16 @@ impl IntegerRange {
             [Value::Integer(step)] => *step,
             _ => {
                 return Err(QueryError::runtime(
-                    "ArgumentError",
-                    "InvalidArgumentType",
+                    category::ARGUMENT_ERROR,
+                    detail::INVALID_ARGUMENT_TYPE,
                     "range requires an integer step",
                 ))
             }
         };
         let step = std::num::NonZeroI64::new(step).ok_or_else(|| {
             QueryError::runtime(
-                "ArgumentError",
-                "NumberOutOfRange",
+                category::ARGUMENT_ERROR,
+                detail::NUMBER_OUT_OF_RANGE,
                 "range step cannot be zero",
             )
         })?;

@@ -39,7 +39,9 @@ async fn dead_projection_bindings_do_not_widen_every_retained_row() {
     let reference = reference.unwrap();
     assert_eq!(result.rows, reference.rows);
     assert!(result.resources.peak_memory_bytes < reference.resources.peak_memory_bytes);
-    assert!(matches!(bounded_reference, Err(Error::Query(error)) if error.detail == "MemoryLimit"));
+    assert!(
+        matches!(bounded_reference, Err(Error::Query(error)) if error.detail == "memory_limit")
+    );
     assert_eq!(result.columns, vec!["value"]);
     assert_eq!(
         result.rows,
@@ -71,7 +73,7 @@ async fn projection_chains_keep_global_windows_and_bounded_intermediate_memory()
         assert_eq!(result.rows, expected, "materialized: {text}");
         if text.contains("20000") {
             let failure = Interpreter::new(&db, context::ParamBindings::default()).execute_rows(&reference, &BTreeMap::new(), limits).await.unwrap_err();
-            assert!(matches!(failure, Error::Query(error) if error.detail == "MemoryLimit"));
+            assert!(matches!(failure, Error::Query(error) if error.detail == "memory_limit"));
         }
     }
     db.close().await.unwrap();
@@ -108,7 +110,7 @@ async fn projection_chain_limits_keep_later_errors_and_mutation_barriers() {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error, Error::Query(error) if error.detail == "DivisionByZero"),
+                matches!(error, Error::Query(error) if error.detail == "division_by_zero"),
                 "{text}"
             );
         }

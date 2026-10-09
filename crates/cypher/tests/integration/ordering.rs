@@ -42,7 +42,7 @@ fn invalid_ordering_aggregates_keep_precedence_over_later_clause_errors() {
     ] {
         let error = compile(query).unwrap_err();
         assert_eq!(error.phase, helix_planner::relational::ErrorPhase::Compile);
-        assert_eq!(error.detail, "UndefinedVariable", "{query}");
+        assert_eq!(error.detail, "undefined_variable", "{query}");
         assert_eq!(
             error.message, "ORDER BY aggregate must be projected",
             "{query}"

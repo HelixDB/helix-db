@@ -240,8 +240,9 @@ fn cypher_request(body: &[u8]) -> Result<db::cypher::Request, Status> {
     })
 }
 
-/// Cypher diagnostics carry the [`helix_cypher::QueryError`] JSON in the status
-/// details; storage and encoding failures report exactly as native queries do.
+/// Cypher diagnostics carry the HTTP error body ([`helix_cypher::api::ErrorBody`])
+/// in the status details; storage and encoding failures report exactly as
+/// native queries do.
 fn cypher_status(error: db::cypher::Error) -> Status {
     use helix_cypher::api::ErrorClass;
 
@@ -256,7 +257,7 @@ fn cypher_status(error: db::cypher::Error) -> Status {
             Status::with_details(
                 code,
                 error.message.clone(),
-                serde_json::to_vec(&error)
+                serde_json::to_vec(&helix_cypher::api::ErrorBody::from(&error))
                     .expect("Cypher error serializes")
                     .into(),
             )
@@ -388,17 +389,21 @@ mod tests {
     #[test]
     fn cypher_statuses_follow_the_shared_error_classes() {
         let query = |category| {
-            db::cypher::Error::Query(helix_cypher::QueryError::compile(category, "Detail", "msg"))
+            db::cypher::Error::Query(helix_cypher::QueryError::compile(category, "detail", "msg"))
         };
         let cases = [
-            (query("SyntaxError"), tonic::Code::InvalidArgument, None),
-            (query("ResourceLimit"), tonic::Code::ResourceExhausted, None),
+            (query("syntax_error"), tonic::Code::InvalidArgument, None),
             (
-                query("AccessModeError"),
+                query("resource_limit"),
+                tonic::Code::ResourceExhausted,
+                None,
+            ),
+            (
+                query("access_mode_error"),
                 tonic::Code::FailedPrecondition,
                 None,
             ),
-            (query("InternalPlannerError"), tonic::Code::Internal, None),
+            (query("internal_planner_error"), tonic::Code::Internal, None),
             (
                 db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
                     "retry".to_string(),
@@ -413,8 +418,11 @@ mod tests {
             ),
         ];
         for (error, expected_status_code, expected_error_code) in cases {
-            let query_error = match &error {
-                db::cypher::Error::Query(error) => Some(error.clone()),
+            let error_body = match &error {
+                db::cypher::Error::Query(error) => Some(
+                    serde_json::to_value(helix_cypher::api::ErrorBody::from(error))
+                        .expect("Cypher error body serializes"),
+                ),
                 db::cypher::Error::Storage(_) | db::cypher::Error::Json(_) => None,
             };
             let status = cypher_status(error);
@@ -427,9 +435,10 @@ mod tests {
                 expected_error_code
             );
             assert_eq!(
-                query_error,
+                error_body,
                 (!status.details().is_empty()).then(|| {
-                    serde_json::from_slice(status.details()).expect("details are a query error")
+                    serde_json::from_slice::<serde_json::Value>(status.details())
+                        .expect("details are the Cypher error body")
                 })
             );
         }

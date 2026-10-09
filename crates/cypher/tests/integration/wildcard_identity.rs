@@ -55,12 +55,12 @@ fn wildcard_modifiers_and_explicit_projections_keep_their_operators() {
 #[test]
 fn wildcard_validation_preserves_scope_composition_and_statement_limits() {
     for (query, detail) in [
-        ("WITH * RETURN 1", "NoVariablesInScope"),
-        ("CREATE (:N) WITH * RETURN 1", "NoVariablesInScope"),
-        ("WITH 1 AS x WITH *,* RETURN x", "ColumnNameConflict"),
-        ("WITH 1 AS x WITH *", "InvalidClauseComposition"),
-        ("RETURN 1 WITH *", "InvalidClauseComposition"),
-        ("WITH 1 AS x WITH * RETURN missing", "UndefinedVariable"),
+        ("WITH * RETURN 1", "no_variables_in_scope"),
+        ("CREATE (:N) WITH * RETURN 1", "no_variables_in_scope"),
+        ("WITH 1 AS x WITH *,* RETURN x", "column_name_conflict"),
+        ("WITH 1 AS x WITH *", "invalid_clause_composition"),
+        ("RETURN 1 WITH *", "invalid_clause_composition"),
+        ("WITH 1 AS x WITH * RETURN missing", "undefined_variable"),
     ] {
         let error = helix_cypher::compile(query).expect_err(query);
         assert_eq!(error.phase, r::ErrorPhase::Compile, "{query}");
@@ -68,7 +68,7 @@ fn wildcard_validation_preserves_scope_composition_and_statement_limits() {
     }
     let query = format!("WITH 1 AS x {}RETURN x", "WITH * ".repeat(4096));
     let error = helix_cypher::compile(&query).unwrap_err();
-    assert_eq!(error.detail, "InvalidStatement");
+    assert_eq!(error.detail, "invalid_statement");
 }
 
 #[test]

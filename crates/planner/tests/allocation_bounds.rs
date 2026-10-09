@@ -160,8 +160,8 @@ fn tree_bounds_cover_graph_property_result_layout_and_wide_values() {
                         Ok(r::Value::Integer(index as i64))
                     } else {
                         Err(r::QueryError::runtime(
-                            "UnsupportedFeature",
-                            "StoredValue",
+                            "unsupported_feature",
+                            "stored_value",
                             "unsupported stored property",
                         ))
                     };
@@ -311,7 +311,7 @@ fn shape_validation_has_no_heap_frontier_for_scalar_wide_or_deep_values() {
         (0..48).fold(r::Value::Null, |value, _| r::Value::List(vec![value])),
     ] {
         let error = value.validate_shape().unwrap_err();
-        assert_eq!(error.detail, "ValueDepth");
+        assert_eq!(error.detail, "value_depth");
     }
 }
 
@@ -339,7 +339,7 @@ fn runtime_depth_rejection_allocates_only_the_error_before_borrowed_value_clonin
             let error = evaluation.eval(&expression).unwrap_err();
             (error, OBSERVATION.with(Cell::get).peak)
         });
-        assert_eq!(error.detail, "ValueDepth");
+        assert_eq!(error.detail, "value_depth");
         assert_eq!(error.phase, r::ErrorPhase::Runtime);
         let error_bytes =
             error.category.capacity() + error.detail.capacity() + error.message.capacity();
@@ -414,7 +414,7 @@ fn case_conversion_admission_covers_live_buffers_and_rejection() {
                         );
                         assert_eq!(
                             (&*error.category, &*error.detail),
-                            ("ResourceLimit", "MemoryLimit")
+                            ("resource_limit", "memory_limit")
                         );
                         assert!(
                             peak < source.len() + 256,
@@ -536,7 +536,7 @@ fn property_keys_admit_one_output_buffer_and_do_not_evaluate_values() {
                 .map(|i| {
                     (
                         format!("key{i:04}😀"),
-                        Err(r::QueryError::unsupported("StoredValue")),
+                        Err(r::QueryError::unsupported("stored_value", "this value")),
                     )
                 })
                 .collect(),
@@ -575,7 +575,7 @@ fn property_keys_admit_one_output_buffer_and_do_not_evaluate_values() {
                     let error = result.unwrap_err();
                     assert_eq!(
                         (&*error.category, &*error.detail),
-                        ("ResourceLimit", "MemoryLimit")
+                        ("resource_limit", "memory_limit")
                     );
                     let error_bytes = error.category.capacity()
                         + error.detail.capacity()
@@ -639,7 +639,7 @@ fn map_keys_admit_output_slots_while_the_owned_map_is_live() {
                 let error = result.unwrap_err();
                 assert_eq!(
                     (&*error.category, &*error.detail),
-                    ("ResourceLimit", "MemoryLimit")
+                    ("resource_limit", "memory_limit")
                 );
             }
         }
@@ -733,7 +733,7 @@ fn concatenation_moves_owned_payloads_and_preserves_parameters() {
             let error = limited.eval(&expression).unwrap_err();
             (error, OBSERVATION.with(Cell::get).peak)
         });
-        assert_eq!(error.detail, "MemoryLimit");
+        assert_eq!(error.detail, "memory_limit");
         let error_bytes =
             error.category.capacity() + error.detail.capacity() + error.message.capacity();
         assert!(
@@ -942,7 +942,7 @@ fn addition_preserves_nulls_errors_and_operand_order() {
         );
         assert_eq!(
             evaluation.eval(&expression).unwrap_err().category,
-            "TypeError"
+            "type_error"
         );
     }
     let overflow = r::Expression::Binary(
@@ -952,23 +952,23 @@ fn addition_preserves_nulls_errors_and_operand_order() {
     );
     assert_eq!(
         evaluation.eval(&overflow).unwrap_err().detail,
-        "NumberOutOfRange"
+        "number_out_of_range"
     );
     for (left, right, detail) in [
         (
             overflow.clone(),
             r::Expression::Parameter("missing".into()),
-            "NumberOutOfRange",
+            "number_out_of_range",
         ),
         (
             r::Expression::Parameter("missing".into()),
             overflow,
-            "MissingParameter",
+            "missing_parameter",
         ),
         (
             r::Expression::Literal(r::Value::Null),
             r::Expression::Parameter("missing".into()),
-            "MissingParameter",
+            "missing_parameter",
         ),
     ] {
         let expression = r::Expression::Binary(r::Binary::Add, Box::new(left), Box::new(right));
@@ -1052,7 +1052,7 @@ fn numeric_text_uses_exact_buffers_and_rejects_before_formatting_output() {
                     assert!(peak <= budget, "{peak} > {budget}");
                 } else {
                     let error = result.unwrap_err();
-                    assert_eq!(error.detail, "MemoryLimit");
+                    assert_eq!(error.detail, "memory_limit");
                     let error_bytes = error.category.capacity()
                         + error.detail.capacity()
                         + error.message.capacity();
@@ -1114,8 +1114,8 @@ fn numeric_text_uses_exact_buffers_and_rejects_before_formatting_output() {
         let expression =
             r::Expression::Function(r::Function::ToString, vec![r::Expression::Literal(value)]);
         let error = evaluation.eval(&expression).unwrap_err();
-        assert_eq!(error.category, "TypeError");
-        assert_eq!(error.detail, "InvalidArgumentType");
+        assert_eq!(error.category, "type_error");
+        assert_eq!(error.detail, "invalid_argument_type");
         assert_eq!(error.phase, r::ErrorPhase::Runtime);
         assert_eq!(error.message, "value cannot be converted to a string");
     }
@@ -1140,7 +1140,7 @@ fn impossible_expression_sequence_capacity_is_a_resource_error() {
         attempt.is_ok(),
         "an impossible capacity must be rejected before Vec allocation"
     );
-    assert_eq!(attempt.unwrap().unwrap_err().detail, "MemoryLimit");
+    assert_eq!(attempt.unwrap().unwrap_err().detail, "memory_limit");
 }
 
 #[test]
@@ -1207,7 +1207,7 @@ fn scalar_ranges_admit_exact_outputs_at_integer_boundaries() {
                 assert!(peak <= budget, "{arguments:?}: {peak} > {budget}");
             } else {
                 let error = result.unwrap_err();
-                assert_eq!(error.detail, "MemoryLimit");
+                assert_eq!(error.detail, "memory_limit");
                 let error_bytes =
                     error.category.capacity() + error.detail.capacity() + error.message.capacity();
                 assert!(
@@ -1227,16 +1227,16 @@ fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
             vec![i64::MIN, i64::MAX],
             usize::MAX,
             usize::MAX,
-            "CollectionLimit",
+            "collection_limit",
         ),
         (
             vec![i64::MIN, i64::MAX - 1],
             usize::MAX,
             usize::MAX,
             if usize::BITS == 64 {
-                "MemoryLimit"
+                "memory_limit"
             } else {
-                "CollectionLimit"
+                "collection_limit"
             },
         ),
         (
@@ -1246,16 +1246,16 @@ fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
             ],
             usize::MAX,
             usize::MAX,
-            "MemoryLimit",
+            "memory_limit",
         ),
         (
             vec![0, 1000],
             3,
             6 * size_of::<r::Value>(),
-            "CollectionLimit",
+            "collection_limit",
         ),
-        (vec![10, 0, -1], 3, usize::MAX, "CollectionLimit"),
-        (vec![0, 1000], 3, 0, "MemoryLimit"),
+        (vec![10, 0, -1], 3, usize::MAX, "collection_limit"),
+        (vec![0, 1000], 3, 0, "memory_limit"),
     ] {
         let input_bytes = arguments.len() * size_of::<r::Value>();
         let expression = r::Expression::Function(
@@ -1392,7 +1392,7 @@ fn collection_rejection_does_not_clone_borrowed_payloads() {
             let error = evaluation.eval(&expression).unwrap_err();
             (error, OBSERVATION.with(Cell::get).peak)
         });
-        assert_eq!(error.detail, "CollectionLimit");
+        assert_eq!(error.detail, "collection_limit");
         let error_bytes =
             error.category.capacity() + error.detail.capacity() + error.message.capacity();
         assert_eq!(
@@ -1428,7 +1428,7 @@ fn graph_collection_rejection_does_not_allocate_output_buffers() {
         ),
         (
             "unsupported".into(),
-            Err(r::QueryError::unsupported("StoredValue")),
+            Err(r::QueryError::unsupported("stored_value", "this value")),
         ),
     ]));
     let evaluation = r::Evaluation {
@@ -1456,7 +1456,7 @@ fn graph_collection_rejection_does_not_allocate_output_buffers() {
             let error = evaluation.eval(&expression).unwrap_err();
             (error, OBSERVATION.with(Cell::get).peak)
         });
-        assert_eq!(error.detail, "CollectionLimit");
+        assert_eq!(error.detail, "collection_limit");
         let error_bytes =
             error.category.capacity() + error.detail.capacity() + error.message.capacity();
         assert_eq!(
@@ -1545,7 +1545,7 @@ fn scalar_memory_peaks_cover_transient_allocations() {
         ("text".into(), Ok(V::String(input))),
         (
             "unused".into(),
-            Err(r::QueryError::unsupported("DormantProperty")),
+            Err(r::QueryError::unsupported("dormant_property", "this value")),
         ),
     ]));
     let expression = size(E::Function(
@@ -1629,8 +1629,8 @@ fn scalar_distinct_count_admits_input_and_key_copy_together() {
         );
         if bytes >= 4096 {
             let error = result.unwrap_err();
-            assert_eq!(error.category, "ResourceLimit");
-            assert_eq!(error.detail, "MemoryLimit");
+            assert_eq!(error.category, "resource_limit");
+            assert_eq!(error.detail, "memory_limit");
         } else {
             assert_eq!(result.unwrap(), V::Integer(1));
         }

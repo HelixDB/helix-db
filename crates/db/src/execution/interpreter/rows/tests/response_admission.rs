@@ -27,7 +27,7 @@ async fn result_column_admission_precedes_large_alias_copies() {
         })
         .await
     };
-    assert!(matches!(result,Err(Error::Query(error)) if error.detail == "MemoryLimit"));
+    assert!(matches!(result,Err(Error::Query(error)) if error.detail == "memory_limit"));
     assert!(
         allocated < alias.len(),
         "rejected column payload was copied: {allocated}"
@@ -47,7 +47,7 @@ async fn response_limits_after_create_roll_back_and_allow_retry() {
                 memory_bytes: 128 * 1024,
                 ..Limits::default()
             },
-            "MemoryLimit",
+            "memory_limit",
         ),
         (
             "escaped\"column\\".into(),
@@ -55,7 +55,7 @@ async fn response_limits_after_create_roll_back_and_allow_retry() {
                 result_bytes: 1,
                 ..Limits::default()
             },
-            "ResultLimit",
+            "result_limit",
         ),
     ] {
         let error = crate::cypher::execute(
@@ -71,7 +71,7 @@ async fn response_limits_after_create_roll_back_and_allow_retry() {
         .await
         .unwrap_err();
         assert!(
-            matches!(error, Error::Query(error) if error.category == "ResourceLimit" && error.phase == r::ErrorPhase::Runtime && error.detail == detail)
+            matches!(error, Error::Query(error) if error.category == "resource_limit" && error.phase == r::ErrorPhase::Runtime && error.detail == detail)
         );
         let after = db
             .cypher(crate::cypher::Request::new(

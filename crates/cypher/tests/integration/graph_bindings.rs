@@ -51,8 +51,8 @@ fn computed_aliases_reject_incompatible_graph_categories() {
         "WITH CASE WHEN true THEN 1 END AS x MATCH (x) RETURN x",
     ] {
         let error = helix_cypher::compile(query).expect_err(query);
-        assert_eq!(error.category, "SyntaxError");
-        assert_eq!(error.detail, "VariableTypeConflict");
+        assert_eq!(error.category, "syntax_error");
+        assert_eq!(error.detail, "variable_type_conflict");
         assert_eq!(error.phase, r::ErrorPhase::Compile);
     }
 }

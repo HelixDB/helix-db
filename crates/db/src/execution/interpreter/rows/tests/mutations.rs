@@ -27,12 +27,12 @@ async fn created_path_payload_is_admitted_before_allocation_and_retained_with_ro
         (
             r::Value::Null,
             r::Value::Entity(r::Entity::Relationship(7)),
-            Some("ExpectedNode"),
+            Some("expected_node"),
         ),
         (
             r::Value::Entity(r::Entity::Node(5)),
             r::Value::Null,
-            Some("ExpectedRelationship"),
+            Some("expected_relationship"),
         ),
     ] {
         for short in [false, true] {
@@ -43,7 +43,7 @@ async fn created_path_payload_is_admitted_before_allocation_and_retained_with_ro
             let result = ctx
                 .create_rows(rows, &pattern, &params, Limits::default())
                 .await;
-            let expected = if short { Some("MemoryLimit") } else { error };
+            let expected = if short { Some("memory_limit") } else { error };
             match expected {
                 Some(detail) => {
                     assert!(matches!(result, Err(Error::Query(error)) if error.detail == detail))
@@ -124,7 +124,7 @@ async fn delete_target_memory_failure_rolls_back_prior_writes_and_keeps_indexes(
     .await
     .unwrap_err();
     assert!(
-        matches!(error, Error::Query(error) if error.category == "ResourceLimit" && error.detail == "MemoryLimit")
+        matches!(error, Error::Query(error) if error.category == "resource_limit" && error.detail == "memory_limit")
     );
     for (query, expected) in [
         ("MATCH (n:Transient) RETURN count(*)", 0),
@@ -188,7 +188,7 @@ async fn cumulative_property_limits_roll_back_creates_and_updates() {
         .await
         .unwrap_err();
         assert!(
-            matches!(error, Error::Query(error) if error.category == "ResourceLimit" && error.detail == "MemoryLimit"),
+            matches!(error, Error::Query(error) if error.category == "resource_limit" && error.detail == "memory_limit"),
             "{query}"
         );
         assert_eq!(
@@ -268,52 +268,52 @@ async fn dynamic_mutation_types_and_reserved_keys_roll_back_prior_updates() {
         (
             "MATCH (n:N) SET n.key=9 SET n=$value",
             json!(false),
-            "ExpectedMap",
+            "expected_map",
         ),
         (
             "MATCH (n:N) SET n.key=9 SET n += $value",
             json!({"$label":"Bad"}),
-            "ReservedPropertyName",
+            "reserved_property_name",
         ),
         (
             "MATCH (n:N) SET n.key=9 SET n += $value",
             json!({"":7}),
-            "EmptyPropertyName",
+            "empty_property_name",
         ),
         (
             "MATCH (n:N) SET n.key=9 SET n.x=$value",
             json!([1, "two"]),
-            "InvalidPropertyType",
+            "invalid_property_type",
         ),
         (
             "MATCH (n:N) SET n.key=9 SET n.x=$value",
             json!([null]),
-            "InvalidPropertyType",
+            "invalid_property_type",
         ),
         (
             "MATCH (n:N) SET n.key=9 SET n.x=$value",
             json!({"nested":1}),
-            "InvalidPropertyType",
+            "invalid_property_type",
         ),
         (
             "MATCH (n:N) SET n.key=9 WITH $value AS x DELETE x",
             json!(1),
-            "InvalidArgumentType",
+            "invalid_argument_type",
         ),
         (
             "MATCH (n:N) SET n.key=9 WITH $value AS x SET x.y=1",
             json!(1),
-            "ExpectedEntity",
+            "expected_entity",
         ),
         (
             "MATCH (n:N) SET n.key=9 WITH $value AS x CREATE (x)-[:R]->(:N)",
             json!(null),
-            "ExpectedNode",
+            "expected_node",
         ),
         (
             "MATCH (n:N) SET n.key=9 WITH $value AS x CREATE (:N)-[:R]->(x)",
             json!(null),
-            "ExpectedNode",
+            "expected_node",
         ),
     ] {
         let mut request = crate::cypher::Request::new(query);
@@ -348,8 +348,8 @@ async fn late_bound_match_type_errors_roll_back_instead_of_silently_dropping_row
     let db =
         crate::execution::interpreter::test_support::open_db("cypher-bound-pattern-types").await;
     for (pattern, detail) in [
-        ("(x)", "ExpectedNode"),
-        ("()-[x]->()", "ExpectedRelationship"),
+        ("(x)", "expected_node"),
+        ("()-[x]->()", "expected_relationship"),
     ] {
         let mut request = crate::cypher::Request::new(format!(
             "CREATE (:Marker) WITH $value AS x MATCH {pattern} RETURN x"
@@ -408,7 +408,7 @@ async fn match_label_access_errors_propagate_and_roll_back_deletion() {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error,Error::Query(error) if error.category=="EntityNotFound" && error.detail=="DeletedEntityAccess"),
+                matches!(error,Error::Query(error) if error.category=="entity_not_found" && error.detail=="deleted_entity_access"),
                 "{text}"
             );
             assert_eq!(
@@ -460,7 +460,7 @@ async fn deleted_relationship_types_survive_but_properties_fail_and_roll_back() 
             .await
             .unwrap_err();
         assert!(
-            matches!(error,Error::Query(error) if error.category=="EntityNotFound" && error.detail=="DeletedEntityAccess")
+            matches!(error,Error::Query(error) if error.category=="entity_not_found" && error.detail=="deleted_entity_access")
         );
         assert_eq!(
             db.cypher(crate::cypher::Request::new(
@@ -549,7 +549,7 @@ async fn relationship_property_failures_roll_back_created_endpoints() {
         ))
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::Query(error) if error.detail == "DivisionByZero"));
+    assert!(matches!(error, Error::Query(error) if error.detail == "division_by_zero"));
     assert_eq!(
         db.cypher(crate::cypher::Request::new("MATCH (n) RETURN count(n)"))
             .await
@@ -566,7 +566,7 @@ async fn relationship_property_failures_roll_back_created_endpoints() {
 #[tokio::test]
 async fn untyped_relationship_patterns_are_rejected_before_staging_writes() {
     let error = helix_cypher::compile("CREATE (a)-[r]->(b)").unwrap_err();
-    assert_eq!(error.detail, "NoSingleRelationshipType");
+    assert_eq!(error.detail, "no_single_relationship_type");
     let db = crate::execution::interpreter::test_support::open_db("untyped-relationship").await;
     let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
     ctx.row_memory = Some(memory::Budget::new(64 * 1024));
@@ -601,7 +601,7 @@ async fn untyped_relationship_patterns_are_rejected_before_staging_writes() {
     };
     assert_eq!(
         (error.category.as_str(), error.detail.as_str()),
-        ("SyntaxError", "NoRelationshipType")
+        ("syntax_error", "no_relationship_type")
     );
     assert!(!ctx.has_active_write_tx());
     assert_eq!(ctx.row_budget().available(), 64 * 1024);
@@ -682,7 +682,7 @@ async fn cancelled_or_rejected_property_updates_leave_every_node_unchanged() {
                     break;
                 }
                 Err(Error::Storage(crate::HelixDbError::QueryDeadlineExceeded)) if cancel => {}
-                Err(Error::Query(error)) if !cancel && error.detail == "MemoryLimit" => {}
+                Err(Error::Query(error)) if !cancel && error.detail == "memory_limit" => {}
                 Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) if !cancel => {}
                 Err(error) => panic!("{update} attempt {attempt}: {error:?}"),
             }

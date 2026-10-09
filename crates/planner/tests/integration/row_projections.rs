@@ -98,7 +98,7 @@ fn projection_validation_rejects_duplicate_dangling_and_malformed_expressions() 
         r::ProjectionProgram::new(vec![item.clone(), item.clone()])
             .unwrap_err()
             .detail,
-        "InvalidSchema"
+        "invalid_schema"
     );
     let encoded = serde_json::to_string(&vec![item.clone(), item.clone()]).unwrap();
     assert!(serde_json::from_str::<r::ProjectionProgram>(&encoded).is_err());
@@ -108,7 +108,7 @@ fn projection_validation_rejects_duplicate_dangling_and_malformed_expressions() 
             .validate_input(&BTreeSet::from([r::Slot(1)]))
             .unwrap_err()
             .detail,
-        "UnboundSlot"
+        "unbound_slot"
     );
     assert_eq!(
         r::ProjectionProgram::new(vec![r::Projection {
@@ -117,7 +117,7 @@ fn projection_validation_rejects_duplicate_dangling_and_malformed_expressions() 
         }])
         .unwrap_err()
         .detail,
-        "FunctionArity"
+        "function_arity"
     );
 }
 
@@ -138,11 +138,11 @@ fn earlier_values_consume_the_budget_and_expression_failures_keep_their_order() 
     assert!(evaluate(&make(1), &row, 1000).is_ok());
     assert_eq!(
         evaluate(&make(2), &row, 1000).unwrap_err().detail,
-        "MemoryLimit"
+        "memory_limit"
     );
     assert_eq!(
         evaluate(&make(1), &row, 1).unwrap_err().detail,
-        "MemoryLimit"
+        "memory_limit"
     );
     let program = r::ProjectionProgram::new(vec![
         r::Projection {
@@ -157,7 +157,7 @@ fn earlier_values_consume_the_budget_and_expression_failures_keep_their_order() 
     .unwrap();
     assert_eq!(
         evaluate(&program, &row, 4096).unwrap_err().detail,
-        "MissingParameter"
+        "missing_parameter"
     );
     assert_eq!(row, vec![r::Value::String("x".repeat(512))]);
 }

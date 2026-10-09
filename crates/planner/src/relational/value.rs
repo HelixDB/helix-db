@@ -1,3 +1,4 @@
+use crate::relational::{category, detail};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use super::{QueryError, Result};
@@ -35,8 +36,8 @@ impl Path {
     pub fn new(nodes: Vec<u64>, relationships: Vec<u64>) -> Result<Self> {
         if nodes.len() != relationships.len().saturating_add(1) {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidPath",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATH,
                 "a path must alternate nodes and relationships",
             ));
         }
@@ -103,8 +104,8 @@ impl Value {
             return Ok(());
         }
         Err(QueryError::compile(
-            "ResourceLimit",
-            "ValueDepth",
+            category::RESOURCE_LIMIT,
+            detail::VALUE_DEPTH,
             "value exceeds structural limits",
         ))
     }
@@ -126,8 +127,8 @@ impl Value {
             return Ok(());
         }
         Err(QueryError::runtime(
-            "ResourceLimit",
-            "ValueDepth",
+            category::RESOURCE_LIMIT,
+            detail::VALUE_DEPTH,
             "value exceeds structural limits",
         ))
     }
@@ -140,12 +141,15 @@ impl Value {
         self.check_shape(depth, &mut remaining, max_items)
             .map_err(|violation| {
                 let (detail, message) = match violation {
-                    ShapeViolation::Structure => ("ValueDepth", "value exceeds structural limits"),
-                    ShapeViolation::Collection => {
-                        ("CollectionLimit", "expression exceeds collection budget")
+                    ShapeViolation::Structure => {
+                        (detail::VALUE_DEPTH, "value exceeds structural limits")
                     }
+                    ShapeViolation::Collection => (
+                        detail::COLLECTION_LIMIT,
+                        "expression exceeds collection budget",
+                    ),
                 };
-                QueryError::runtime("ResourceLimit", detail, message)
+                QueryError::runtime(category::RESOURCE_LIMIT, detail, message)
             })
     }
 
@@ -187,8 +191,8 @@ impl Value {
             Self::Null => Ok(None),
             Self::Boolean(value) => Ok(Some(*value)),
             _ => Err(QueryError::runtime(
-                "TypeError",
-                "InvalidArgumentType",
+                category::TYPE_ERROR,
+                detail::INVALID_ARGUMENT_TYPE,
                 "expected a boolean or null",
             )),
         }
@@ -352,8 +356,8 @@ impl GroupingKey {
             .all(|value| value.check_shape(0, &mut remaining, usize::MAX).is_ok())
         {
             return Err(QueryError::runtime(
-                "ResourceLimit",
-                "ValueDepth",
+                category::RESOURCE_LIMIT,
+                detail::VALUE_DEPTH,
                 "grouping columns exceed structural limits",
             ));
         }

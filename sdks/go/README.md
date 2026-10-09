@@ -326,8 +326,10 @@ created, err := client.Cypher(ctx, helix.CypherRequest{Query: "CREATE (:User {na
 Responses decode with `json.Decoder.UseNumber()`, so large integers stay exact.
 If a warm read returns `204 No Content`, `Cypher` returns an empty
 `CypherResponse` and `ExplainCypher` a nil map. A Cypher diagnostic is a
-`*HelixError` with `Code` set to its category, `Details` to its message, and
-`ServerDetails` to the raw `{"detail","phase","span"}` JSON. HTTP 409 matches
+`*HelixError` with `Code` set to its lower snake case category, such as
+`syntax_error`, `Details` to its message, and `ServerDetails` to the raw
+`{"detail","phase","span"}` JSON. Embedded clients set `Code` to
+`category:phase:detail`, such as `syntax_error:compile:undefined_variable`. HTTP 409 matches
 `ErrConflict`, as it does for `Exec`.
 
 Embedded clients reject options with `ErrorInvalidRequest`, as `Exec` does.

@@ -1,6 +1,7 @@
 //! Shared physical planning for resolved graph/row queries. Graph access uses
 //! the production Cascades rules and executable lowering, not frontend ASTs.
 use super::*;
+use crate::relational::{category, detail};
 use crate::{analysis, catalog, context, exec, ir, logical, optimizer, rules, trace};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1716,7 +1717,11 @@ fn literal(value: Value) -> Option<helix_ast::value::PropertyValue> {
 }
 
 fn planning_error(message: impl Into<String>) -> QueryError {
-    QueryError::compile("InternalPlannerError", "PhysicalPlanning", message)
+    QueryError::compile(
+        category::INTERNAL_PLANNER_ERROR,
+        detail::PHYSICAL_PLANNING,
+        message,
+    )
 }
 
 fn source_rows(root: &logical::LogicalExpr, config: &optimizer::OptimizerConfig) -> u64 {

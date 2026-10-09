@@ -737,9 +737,9 @@ await withFakeNativeModule(async () => {
 
 for (const explain of [false, true]) {
   const body = JSON.stringify({
-    error: "SyntaxError",
+    error: "syntax_error",
     msg: "parameter name cannot be empty",
-    details: { detail: "InvalidParameter", phase: "compile", span: null },
+    details: { detail: "invalid_parameter", phase: "compile", span: null },
   });
   const server = await spawnCaptureServer({ status: 400, body });
   try {
@@ -750,7 +750,7 @@ for (const explain of [false, true]) {
         error instanceof HelixError &&
         error.kind === "Remote" &&
         error.statusCode === 400 &&
-        error.code === "SyntaxError" &&
+        error.code === "syntax_error" &&
         error.serverMessage === "parameter name cannot be empty" &&
         error.rawBody === body &&
         !error.isRetryable(),
@@ -853,12 +853,14 @@ await withFakeNativeModule(async (moduleUrl) => {
   }
   assert.equal(native.cypherBodies.length, 3);
 
-  native.setQueryError("SyntaxError", "unexpected token");
+  native.setQueryError("syntax_error:compile:unexpected_end", "unexpected token");
   for (const run of [() => client.cypher("RETURN"), () => client.explainCypher("RETURN")]) {
     await assert.rejects(
       run(),
       (error: unknown) =>
-        error instanceof HelixError && error.kind === "Embedded" && error.code === "SyntaxError" && error.details === "unexpected token",
+        error instanceof HelixError && error.kind === "Embedded" &&
+        error.code === "syntax_error:compile:unexpected_end" &&
+        error.details === "unexpected token",
     );
   }
   await client.close();

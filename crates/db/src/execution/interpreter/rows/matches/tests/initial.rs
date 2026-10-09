@@ -333,7 +333,7 @@ async fn deferred_initial_sources_release_ownership_on_drop_cancellation_and_adm
         }
         if stop == 3 {
             assert!(
-                matches!(stream.next().await, Some(Err(crate::cypher::Error::Query(error))) if error.detail == "MemoryLimit")
+                matches!(stream.next().await, Some(Err(crate::cypher::Error::Query(error))) if error.detail == "memory_limit")
             );
         }
         drop(stream);

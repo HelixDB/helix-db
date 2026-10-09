@@ -15,7 +15,7 @@ fn ratchet_rejects_missing_duplicate_unclassified_and_regressed_results() {
     let mut required = Required {
         revision: revision.into(),
         required: vec!["required".into()],
-        exclusions: BTreeMap::from([("excluded".into(), "Merge".into())]),
+        exclusions: BTreeMap::from([("excluded".into(), "merge".into())]),
         unclassified: vec![],
     };
     let path = root.path().join("required-mvp.json");
@@ -42,7 +42,7 @@ fn ratchet_rejects_missing_duplicate_unclassified_and_regressed_results() {
             parsed: true,
             resolved: false,
             planned: false,
-            reason: Some("Merge".into()),
+            reason: Some("merge".into()),
         },
     ]);
     verify(root.path(), &corpus, &report).unwrap();
@@ -78,7 +78,7 @@ fn ratchet_rejects_missing_duplicate_unclassified_and_regressed_results() {
     required.unclassified.clear();
     required
         .exclusions
-        .insert("excluded".into(), "Merge".into());
+        .insert("excluded".into(), "merge".into());
     std::fs::write(&path, serde_json::to_vec(&required).unwrap()).unwrap();
     for (revision, scenarios) in [
         ("wrong", vec!["required"]),
@@ -131,14 +131,10 @@ fn exclusions_must_match_the_draft_and_stop_at_their_capability() {
             reason: reason.map(Into::into),
         }])
     };
-    manifest("Merge");
+    manifest("merge");
     for (status, reason) in [
-        (Status::Unsupported, Some("Merge")),
-        (Status::SetupBlocked, Some("Setup:Merge")),
-        (
-            Status::SetupBlocked,
-            Some("Setup:UnsupportedFeature: Merge: Merge is outside the Cypher MVP profile"),
-        ),
+        (Status::Unsupported, Some("merge")),
+        (Status::SetupBlocked, Some("Setup:merge")),
     ] {
         verify(root.path(), &corpus, &report(status, reason)).unwrap();
     }
@@ -146,21 +142,19 @@ fn exclusions_must_match_the_draft_and_stop_at_their_capability() {
         (Status::Passed, None),
         (Status::Failed, Some("Rows")),
         (Status::TimedOut, Some("ScenarioTimeout")),
-        (Status::Unsupported, Some("Union")),
-        (Status::SetupBlocked, Some("Setup:SyntaxError: Merge")),
-        (
-            Status::SetupBlocked,
-            Some("Setup:UnsupportedFeature: MergeAll: MergeAll is outside the Cypher MVP profile"),
-        ),
+        (Status::Unsupported, Some("union")),
+        (Status::Unsupported, Some("Merge")),
+        (Status::SetupBlocked, Some("Setup:syntax_error: merge")),
+        (Status::SetupBlocked, Some("Setup:merge_all")),
     ] {
         assert!(verify(root.path(), &corpus, &report(status, reason)).is_err());
     }
     // A reviewed manifest must equal the current draft classification.
-    manifest("Union");
+    manifest("union");
     assert!(verify(
         root.path(),
         &corpus,
-        &report(Status::Unsupported, Some("Union"))
+        &report(Status::Unsupported, Some("union"))
     )
     .is_err());
 }
@@ -181,4 +175,16 @@ fn capability_draft_uses_syntax_and_setup_never_pass_counts() {
     assert_eq!(draft.required, vec!["read", "negative", "fixture"]);
     assert_eq!(draft.unclassified, vec!["unknown", "missing"]);
     assert_eq!(draft.exclusions.len(), 3);
+}
+
+#[test]
+fn unsupported_functions_record_their_name_with_the_code() {
+    for (query, reason) in [
+        ("RETURN rand() AS r", "function:rand"),
+        ("RETURN Date({year: 2020}) AS d", "function:date"),
+        ("MERGE (n:N)", "merge"),
+    ] {
+        let error = helix_cypher::compile(query).unwrap_err();
+        assert_eq!(super::unsupported_reason(&error, query), reason, "{query}");
+    }
 }

@@ -1,6 +1,7 @@
 mod aggregation;
 use crate::syntax::{self as s, ExprKind as E};
 use helix_planner::relational::{self as r, QueryError, Result};
+use helix_planner::relational::{category, detail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 
@@ -34,8 +35,8 @@ impl<'a> ScopeRef<'a> {
 pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
     if statement.clauses.is_empty() || statement.clauses.len() > 4096 {
         return Err(QueryError::compile(
-            "SyntaxError",
-            "InvalidStatement",
+            category::SYNTAX_ERROR,
+            detail::INVALID_STATEMENT,
             "statement must contain between one and 4096 clauses",
         ));
     }
@@ -54,8 +55,8 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
                 .any(|pattern| pattern.nodes.len() != pattern.relationships.len().saturating_add(1))
         {
             return Err(QueryError::compile(
-                "SyntaxError",
-                "InvalidRelationshipPattern",
+                category::SYNTAX_ERROR,
+                detail::INVALID_RELATIONSHIP_PATTERN,
                 "patterns must alternate nodes and relationships",
             ));
         }
@@ -73,7 +74,7 @@ pub fn resolve(statement: &s::Statement) -> Result<r::Query> {
         return result;
     };
     match result {
-        Err(error) if error.category != "UnsupportedFeature" => Err(error),
+        Err(error) if error.category != category::UNSUPPORTED_FEATURE => Err(error),
         Ok(_) | Err(_) => Err(deferred),
     }
 }
@@ -112,7 +113,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                     binder.expression(expression, ScopeRef::Single(&binder.scope), false)?;
                 if binder.scope.contains_key(name) {
                     return Err(semantic(
-                        "VariableAlreadyBound",
+                        detail::VARIABLE_ALREADY_BOUND,
                         format!("{name} is already bound"),
                     ));
                 }
@@ -131,7 +132,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
             } => {
                 if *returning && position + 1 != statement.clauses.len() {
                     return Err(semantic(
-                        "InvalidClauseComposition",
+                        detail::INVALID_CLAUSE_COMPOSITION,
                         "RETURN must finish the statement",
                     ));
                 }
@@ -160,14 +161,14 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                         s::Item::Wildcard => {
                             if binder.scope.is_empty() {
                                 return Err(semantic(
-                                    "NoVariablesInScope",
+                                    detail::NO_VARIABLES_IN_SCOPE,
                                     "wildcard projection requires an input binding",
                                 ));
                             }
                             for (name, &slot) in &binder.scope {
                                 if output.insert(name.clone(), slot).is_some() {
                                     return Err(semantic(
-                                        "ColumnNameConflict",
+                                        detail::COLUMN_NAME_CONFLICT,
                                         "duplicate projection name",
                                     ));
                                 }
@@ -194,7 +195,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                             };
                             if output.contains_key(&name) {
                                 return Err(semantic(
-                                    "ColumnNameConflict",
+                                    detail::COLUMN_NAME_CONFLICT,
                                     format!("duplicate projection name {name}"),
                                 ));
                             }
@@ -279,7 +280,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                             || matches!(expression, r::Expression::HasLabel(slot, _) if !grouping.contains(&&r::Expression::Slot(*slot)));
                         if ungrouped {
                             return Err(semantic(
-                                "AmbiguousAggregationExpression",
+                                detail::AMBIGUOUS_AGGREGATION_EXPRESSION,
                                 "aggregate expression references an ungrouped binding",
                             ));
                         }
@@ -335,9 +336,9 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                                     }
                                     return Err(semantic(
                                         if aggregated {
-                                            "UndefinedVariable"
+                                            detail::UNDEFINED_VARIABLE
                                         } else {
-                                            "InvalidAggregation"
+                                            detail::INVALID_AGGREGATION
                                         },
                                         "ORDER BY aggregate must be projected",
                                     ));
@@ -379,9 +380,9 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                                         r::Expression::Slot(_) | r::Expression::Property(..)
                                     )
                                 }) {
-                                "AmbiguousAggregationExpression"
+                                detail::AMBIGUOUS_AGGREGATION_EXPRESSION
                             } else {
-                                "UndefinedVariable"
+                                detail::UNDEFINED_VARIABLE
                             };
                             return Err(semantic(
                                 detail,
@@ -396,7 +397,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                     .collect::<Result<Vec<_>>>()?;
                 if missing_alias {
                     return Err(semantic(
-                        "NoExpressionAlias",
+                        detail::NO_EXPRESSION_ALIAS,
                         "WITH expressions require an alias",
                     ));
                 }
@@ -428,7 +429,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                                 }
                                 let Some(slot) = aggregate_index.find(&node)? else {
                                     return Err(semantic(
-                                        "UndefinedVariable",
+                                        detail::UNDEFINED_VARIABLE,
                                         "ORDER BY aggregate must be projected",
                                     ));
                                 };
@@ -460,7 +461,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                     Some(predicate) if skip.is_some() || limit.is_some() => {
                         if !predicate.references().is_subset(items.outputs()) {
                             return Err(semantic(
-                                "UndefinedVariable",
+                                detail::UNDEFINED_VARIABLE,
                                 "WHERE after SKIP or LIMIT may use only the bindings its WITH projects",
                             ));
                         }
@@ -540,7 +541,10 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                         let expression =
                             binder.expression(e, ScopeRef::Single(&binder.scope), false)?;
                         if matches!(expression, r::Expression::HasLabel(..)) {
-                            return Err(semantic("InvalidDelete", "DELETE cannot remove a label"));
+                            return Err(semantic(
+                                detail::INVALID_DELETE,
+                                "DELETE cannot remove a label",
+                            ));
                         }
                         if !matches!(
                             expression.value_type(&binder.bindings)?,
@@ -551,7 +555,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                                 | r::ValueType::Path
                         ) {
                             return Err(semantic(
-                                "InvalidArgumentType",
+                                detail::INVALID_ARGUMENT_TYPE,
                                 "DELETE requires graph entities or paths",
                             ));
                         }
@@ -575,7 +579,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
         )
     ) {
         return Err(semantic(
-            "InvalidClauseComposition",
+            detail::INVALID_CLAUSE_COMPOSITION,
             "statement must end in RETURN or a mutation",
         ));
     }
@@ -596,7 +600,7 @@ impl Binder {
         let expression = self.expression(e, ScopeRef::Single(&self.scope), false)?;
         if !expression.slots().is_empty() {
             return Err(semantic(
-                "NonConstantExpression",
+                detail::NON_CONSTANT_EXPRESSION,
                 "SKIP and LIMIT cannot depend on row bindings",
             ));
         }
@@ -607,7 +611,7 @@ impl Binder {
             r::Value::Integer(i) if *i >= 0 => {}
             r::Value::Integer(_) => {
                 return Err(semantic(
-                    "NegativeIntegerArgument",
+                    detail::NEGATIVE_INTEGER_ARGUMENT,
                     "SKIP and LIMIT require nonnegative integers",
                 ))
             }
@@ -620,7 +624,7 @@ impl Binder {
             | r::Value::Entity(_)
             | r::Value::Path(_) => {
                 return Err(semantic(
-                    "InvalidArgumentType",
+                    detail::INVALID_ARGUMENT_TYPE,
                     "SKIP and LIMIT require integers",
                 ))
             }
@@ -634,7 +638,7 @@ impl Binder {
             r::ValueType::Any | r::ValueType::Null | r::ValueType::Boolean
         ) {
             return Err(semantic(
-                "InvalidArgumentType",
+                detail::INVALID_ARGUMENT_TYPE,
                 "predicate requires a boolean",
             ));
         }
@@ -652,16 +656,18 @@ impl Binder {
         };
         // A pattern predicate cannot introduce variables in openCypher.
         if let Some(name) = variables.iter().find(|name| scope.get(name).is_none()) {
-            return Err(semantic("UndefinedVariable", format!("{name} is not defined")).at(e.span));
+            return Err(
+                semantic(detail::UNDEFINED_VARIABLE, format!("{name} is not defined")).at(e.span),
+            );
         }
-        Err(QueryError::unsupported("PatternExpression").at(e.span))
+        Err(QueryError::unsupported(detail::PATTERN_EXPRESSION, "pattern expressions").at(e.span))
     }
 
     fn allocate(&mut self, name: String, kind: r::BindingType, nullable: bool) -> Result<r::Slot> {
         if self.bindings.len() >= 4096 {
             return Err(QueryError::compile(
-                "ResourceLimit",
-                "TooManyBindings",
+                category::RESOURCE_LIMIT,
+                detail::TOO_MANY_BINDINGS,
                 "query exceeds 4096 bindings",
             ));
         }
@@ -695,7 +701,7 @@ impl Binder {
                     )
                 {
                     return Err(semantic(
-                        "VariableTypeConflict",
+                        detail::VARIABLE_TYPE_CONFLICT,
                         format!("{name} has an incompatible type"),
                     ));
                 }
@@ -712,7 +718,7 @@ impl Binder {
     fn entity(&self, name: &str) -> Result<r::Slot> {
         let Some(slot) = self.scope.get(name).copied() else {
             return Err(semantic(
-                "UndefinedVariable",
+                detail::UNDEFINED_VARIABLE,
                 format!("{name} is not defined"),
             ));
         };
@@ -721,7 +727,7 @@ impl Binder {
             r::BindingType::Node | r::BindingType::Relationship | r::BindingType::Scalar
         ) {
             return Err(semantic(
-                "InvalidArgumentType",
+                detail::INVALID_ARGUMENT_TYPE,
                 "mutation target must be a graph entity",
             ));
         }
@@ -729,14 +735,21 @@ impl Binder {
     }
     fn property_target(&self, e: &s::Expr) -> Result<(r::Slot, String)> {
         if matches!(e.kind, E::HasLabel(..)) {
-            return Err(QueryError::unsupported("LabelMutation").at(e.span));
+            return Err(QueryError::unsupported(
+                detail::LABEL_MUTATION,
+                "setting or removing labels",
+            )
+            .at(e.span));
         }
         let E::Property(target, key) = &e.kind else {
-            return Err(semantic("InvalidArgumentType", "expected entity.property"));
+            return Err(semantic(
+                detail::INVALID_ARGUMENT_TYPE,
+                "expected entity.property",
+            ));
         };
         let E::Variable(name) = &target.kind else {
             return Err(semantic(
-                "InvalidArgumentType",
+                detail::INVALID_ARGUMENT_TYPE,
                 "expected an entity variable",
             ));
         };
@@ -757,7 +770,7 @@ impl Binder {
                 .any(|rel| rel.direction == r::Direction::Undirected)
         {
             return Err(semantic(
-                "RequiresDirectedRelationship",
+                detail::REQUIRES_DIRECTED_RELATIONSHIP,
                 "CREATE requires a directed relationship",
             ));
         }
@@ -772,10 +785,16 @@ impl Binder {
             let mut path_rels = Vec::new();
             for node in &pattern.nodes {
                 if node.labels.len() > 1 {
-                    return Err(QueryError::unsupported("MultipleNodeLabels"));
+                    return Err(QueryError::unsupported(
+                        detail::MULTIPLE_NODE_LABELS,
+                        "multiple node labels",
+                    ));
                 }
                 if node.labels.iter().any(String::is_empty) {
-                    return Err(QueryError::unsupported("EmptyLabel"));
+                    return Err(QueryError::unsupported(
+                        detail::EMPTY_LABEL,
+                        "an empty label",
+                    ));
                 }
                 let slot = self.binding(&node.name, r::BindingType::Node, optional)?;
                 if create
@@ -783,8 +802,12 @@ impl Binder {
                     && !nodes.iter().any(|(s, _)| *s == slot)
                     && node.labels.len() != 1
                 {
-                    self.deferred
-                        .get_or_insert_with(|| QueryError::unsupported("NodeLabelRequired"));
+                    self.deferred.get_or_insert_with(|| {
+                        QueryError::unsupported(
+                            detail::NODE_LABEL_REQUIRED,
+                            "a created node without exactly one label",
+                        )
+                    });
                 }
                 if create
                     && ((slot.0 as usize) < first_new_binding
@@ -794,7 +817,7 @@ impl Binder {
                         || pattern.relationships.is_empty())
                 {
                     return Err(semantic(
-                        "VariableAlreadyBound",
+                        detail::VARIABLE_ALREADY_BOUND,
                         "CREATE cannot redeclare a bound node",
                     ));
                 }
@@ -803,11 +826,14 @@ impl Binder {
             }
             for (i, rel) in pattern.relationships.iter().enumerate() {
                 if rel.types.iter().any(String::is_empty) {
-                    return Err(QueryError::unsupported("EmptyRelationshipType"));
+                    return Err(QueryError::unsupported(
+                        detail::EMPTY_RELATIONSHIP_TYPE,
+                        "an empty relationship type",
+                    ));
                 }
                 if create && rel.direction == r::Direction::Undirected {
                     return Err(semantic(
-                        "RequiresDirectedRelationship",
+                        detail::REQUIRES_DIRECTED_RELATIONSHIP,
                         "CREATE requires a directed relationship",
                     ));
                 }
@@ -817,19 +843,19 @@ impl Binder {
                         || relationships.iter().any(|(s, _, _, _)| *s == slot))
                 {
                     return Err(semantic(
-                        "VariableAlreadyBound",
+                        detail::VARIABLE_ALREADY_BOUND,
                         "CREATE cannot redeclare a relationship",
                     ));
                 }
                 if create && rel.types.len() != 1 {
                     return Err(semantic(
-                        "NoSingleRelationshipType",
+                        detail::NO_SINGLE_RELATIONSHIP_TYPE,
                         "CREATE requires one type and a directed relationship",
                     ));
                 }
                 if !create && relationships.iter().any(|(s, _, _, _)| *s == slot) {
                     return Err(semantic(
-                        "RelationshipUniquenessViolation",
+                        detail::RELATIONSHIP_UNIQUENESS_VIOLATION,
                         "a relationship variable cannot repeat within one MATCH",
                     ));
                 }
@@ -839,7 +865,7 @@ impl Binder {
             if let Some(name) = &pattern.name {
                 if self.scope.contains_key(name) {
                     return Err(semantic(
-                        "VariableAlreadyBound",
+                        detail::VARIABLE_ALREADY_BOUND,
                         format!("{name} is already bound"),
                     ));
                 }
@@ -889,7 +915,7 @@ impl Binder {
                 check_property(name)?;
                 if !names.insert(name) {
                     return Err(semantic(
-                        "MapElementAccessByNonString",
+                        detail::MAP_ELEMENT_ACCESS_BY_NON_STRING,
                         "duplicate property key",
                     ));
                 }
@@ -911,12 +937,12 @@ impl Binder {
         let expression = match &e.kind {
             E::Literal(v) => r::Expression::Literal(v.clone()),
             E::Variable(name) => r::Expression::Slot(*scope.get(name).ok_or_else(|| {
-                semantic("UndefinedVariable", format!("{name} is not defined")).at(e.span)
+                semantic(detail::UNDEFINED_VARIABLE, format!("{name} is not defined")).at(e.span)
             })?),
             E::Parameter(name) => r::Expression::Parameter(name.clone()),
             E::PatternPredicate(_) => {
                 return Err(semantic(
-                    "UnexpectedSyntax",
+                    detail::UNEXPECTED_SYNTAX,
                     "a pattern predicate cannot be used as a scalar value",
                 )
                 .at(e.span))
@@ -954,7 +980,7 @@ impl Binder {
                         r::ValueType::Any | r::ValueType::Null | r::ValueType::Boolean
                     ) {
                         return Err(semantic(
-                            "InvalidArgumentType",
+                            detail::INVALID_ARGUMENT_TYPE,
                             format!("expected [Boolean], received {actual:?}"),
                         ));
                     }
@@ -986,13 +1012,13 @@ impl Binder {
             E::HasLabel(x, label) => {
                 let r::Expression::Slot(slot) = resolve(x)? else {
                     return Err(semantic(
-                        "InvalidArgumentType",
+                        detail::INVALID_ARGUMENT_TYPE,
                         "label predicate requires a node",
                     ));
                 };
                 if self.bindings[slot.0 as usize].kind != r::BindingType::Node {
                     return Err(semantic(
-                        "InvalidArgumentType",
+                        detail::INVALID_ARGUMENT_TYPE,
                         "label predicate requires a node",
                     ));
                 }
@@ -1023,7 +1049,7 @@ impl Binder {
                     Some(operand) => r::Expression::SimpleCase(Box::new(r::SimpleCase {
                         operand,
                         branches: helix_planner::ir::AtLeast::try_from_vec(branches).ok_or_else(
-                            || semantic("InvalidCase", "CASE requires a WHEN branch"),
+                            || semantic(detail::INVALID_CASE, "CASE requires a WHEN branch"),
                         )?,
                         otherwise,
                     })),
@@ -1052,7 +1078,7 @@ impl Binder {
                 if let Some(function) = aggregate {
                     if !allow_aggregate {
                         return Err(semantic(
-                            "InvalidAggregation",
+                            detail::INVALID_AGGREGATION,
                             "aggregate is not allowed in this context",
                         ));
                     }
@@ -1060,7 +1086,7 @@ impl Binder {
                         || (!*star && arguments.len() != 1)
                     {
                         return Err(semantic(
-                            "InvalidNumberOfArguments",
+                            detail::INVALID_NUMBER_OF_ARGUMENTS,
                             "aggregate requires one argument",
                         ));
                     }
@@ -1070,7 +1096,7 @@ impl Binder {
                             let expression = self.expression(a, scope.aggregate_input(), true)?;
                             if expression.has_aggregate() {
                                 return Err(semantic(
-                                    "NestedAggregation",
+                                    detail::NESTED_AGGREGATION,
                                     "aggregates cannot be nested",
                                 ));
                             }
@@ -1085,7 +1111,7 @@ impl Binder {
                 } else {
                     if *distinct || *star {
                         return Err(semantic(
-                            "InvalidAggregation",
+                            detail::INVALID_AGGREGATION,
                             "DISTINCT and * require an aggregate",
                         ));
                     }
@@ -1118,13 +1144,15 @@ impl Binder {
                         "toupper" => (F::ToUpper, 1, 1),
                         "substring" => (F::Substring, 2, 3),
                         _ if DEFERRED_FUNCTIONS.contains(&name.as_str()) => {
-                            return Err(
-                                QueryError::unsupported(&format!("Function:{name}")).at(e.span)
+                            return Err(QueryError::unsupported(
+                                detail::FUNCTION,
+                                format!("function `{name}`"),
                             )
+                            .at(e.span))
                         }
                         _ => {
                             return Err(semantic(
-                                "UnknownFunction",
+                                detail::UNKNOWN_FUNCTION,
                                 format!("{name} is not a known function"),
                             )
                             .at(e.span))
@@ -1132,7 +1160,7 @@ impl Binder {
                     };
                     if arguments.len() < min || arguments.len() > max {
                         return Err(semantic(
-                            "InvalidNumberOfArguments",
+                            detail::INVALID_NUMBER_OF_ARGUMENTS,
                             format!("wrong argument count for {name}"),
                         ));
                     }
@@ -1210,12 +1238,15 @@ const DEFERRED_FUNCTIONS: [&str; 47] = [
 ];
 
 fn semantic(detail: &str, message: impl Into<String>) -> QueryError {
-    QueryError::compile("SyntaxError", detail, message)
+    QueryError::compile(category::SYNTAX_ERROR, detail, message)
 }
 
 fn check_property(name: &str) -> Result<()> {
     if name.starts_with('$') {
-        Err(QueryError::unsupported("ReservedPropertyName"))
+        Err(QueryError::unsupported(
+            detail::RESERVED_PROPERTY_NAME,
+            "property names that begin with `$`",
+        ))
     } else {
         Ok(())
     }

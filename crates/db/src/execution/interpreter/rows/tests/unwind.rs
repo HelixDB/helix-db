@@ -127,7 +127,7 @@ async fn unwind_errors_and_cancellation_release_hydration_and_output() {
                 Error::Storage(crate::HelixDbError::QueryDeadlineExceeded)
             ));
         } else {
-            assert!(matches!(error, Error::Query(error) if error.detail == "DivisionByZero"));
+            assert!(matches!(error, Error::Query(error) if error.detail == "division_by_zero"));
         }
         drop(batches);
         assert_eq!(ctx.row_budget().available(), limits.memory_bytes);
@@ -150,7 +150,7 @@ fn row_admission_precedes_cloning_and_does_not_copy_overwritten_values() {
             source.clone()
         })
         .unwrap_err();
-    assert!(matches!(error, Error::Query(error) if error.detail == "MemoryLimit"));
+    assert!(matches!(error, Error::Query(error) if error.detail == "memory_limit"));
     assert!(!invoked.get());
     output
         .push_replacing(&source, r::Slot(0), r::Value::Integer(9))

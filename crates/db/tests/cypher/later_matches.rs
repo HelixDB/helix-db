@@ -75,7 +75,7 @@ async fn later_match_labels_keep_failing_constraints_evaluated() {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("DivisionByZero"), "{query}: {error}");
+        assert!(error.contains("division_by_zero"), "{query}: {error}");
     }
     db.close().await.unwrap();
 }

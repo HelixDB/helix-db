@@ -3,6 +3,7 @@
 use super::{memory, ExecutionContext, Limits, Result, RowBuffer};
 use futures::{Stream, StreamExt};
 use helix_planner::relational as r;
+use helix_planner::relational::detail;
 use r::GraphValues;
 use std::collections::{BTreeMap, HashMap};
 
@@ -110,11 +111,11 @@ impl HashJoinTable {
                 memory.resize(retained.saturating_add(old_table))?;
                 buckets
                     .try_reserve(usize::from(new_key))
-                    .map_err(|_| super::resource("MemoryLimit", "join allocation failed"))?;
+                    .map_err(|_| super::resource(detail::MEMORY_LIMIT, "join allocation failed"))?;
                 let bucket = buckets.entry(key).or_default();
-                bucket
-                    .try_reserve(1)
-                    .map_err(|_| super::resource("MemoryLimit", "join bucket allocation failed"))?;
+                bucket.try_reserve(1).map_err(|_| {
+                    super::resource(detail::MEMORY_LIMIT, "join bucket allocation failed")
+                })?;
                 bucket.push(id);
                 memory.resize(retained)?;
             }
