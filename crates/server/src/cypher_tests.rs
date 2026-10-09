@@ -51,8 +51,9 @@ async fn cypher_http_and_grpc_preserve_values_errors_and_atomic_writes() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let error: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(error["error"], "arithmetic_error");
     assert_eq!(error["details"]["phase"], "runtime");
-    assert_eq!(error["details"]["detail"], "DivisionByZero");
+    assert_eq!(error["details"]["detail"], "division_by_zero");
 
     let error = grpc
         .execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
@@ -65,13 +66,9 @@ async fn cypher_http_and_grpc_preserve_values_errors_and_atomic_writes() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
-    let details: helix_planner::relational::QueryError =
-        serde_json::from_slice(error.details()).unwrap();
-    assert_eq!(details.detail, "UndefinedVariable");
-    assert_eq!(
-        details.phase,
-        helix_planner::relational::ErrorPhase::Compile
-    );
+    let details: serde_json::Value = serde_json::from_slice(error.details()).unwrap();
+    assert_eq!(details["details"]["detail"], "undefined_variable");
+    assert_eq!(details["details"]["phase"], "compile");
 
     let response = router
         .clone()
@@ -170,8 +167,8 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
     for (text, warm, durable, detail) in [
         ("CREATE (:N {key:$missing})", true, false, None),
         ("RETURN $missing", false, true, None),
-        ("RETURN $missing", true, false, Some("MissingParameter")),
-        ("RETURN missing", false, true, Some("UndefinedVariable")),
+        ("RETURN $missing", true, false, Some("missing_parameter")),
+        ("RETURN missing", false, true, Some("undefined_variable")),
     ] {
         let body = json!({"query":text}).to_string();
         let response = router
@@ -202,10 +199,8 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
             Some(detail) => {
                 assert_eq!(value["details"]["detail"], detail);
                 assert_eq!(value["details"]["phase"], "compile");
-                let error: helix_planner::relational::QueryError =
-                    serde_json::from_slice(error.details()).unwrap();
-                assert_eq!(error.detail, detail);
-                assert_eq!(error.phase, helix_planner::relational::ErrorPhase::Compile);
+                let grpc_body: serde_json::Value = serde_json::from_slice(error.details()).unwrap();
+                assert_eq!(grpc_body, value, "gRPC details carry the HTTP body");
             }
             None => {
                 assert_eq!(value["error"], "invalid_request_option");
@@ -425,9 +420,8 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
         .await
         .unwrap_err();
     assert_eq!(missing.code(), tonic::Code::InvalidArgument);
-    let details: helix_planner::relational::QueryError =
-        serde_json::from_slice(missing.details()).unwrap();
-    assert_eq!(details.detail, "MissingParameter");
+    let details: serde_json::Value = serde_json::from_slice(missing.details()).unwrap();
+    assert_eq!(details["details"]["detail"], "missing_parameter");
     writer.flush_writer().await.unwrap();
 
     let reader = Arc::new(
@@ -452,9 +446,9 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
         .await
         .unwrap_err();
     assert_eq!(write_on_reader.code(), tonic::Code::FailedPrecondition);
-    let details: helix_planner::relational::QueryError =
-        serde_json::from_slice(write_on_reader.details()).unwrap();
-    assert_eq!(details.detail, "WriterRequired");
+    let details: serde_json::Value = serde_json::from_slice(write_on_reader.details()).unwrap();
+    assert_eq!(details["error"], "access_mode_error");
+    assert_eq!(details["details"]["detail"], "writer_required");
     drop(read_grpc);
     drop(grpc);
     reader.close().await.unwrap();

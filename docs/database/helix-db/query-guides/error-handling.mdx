@@ -51,6 +51,43 @@ are unchanged, so use both the status and static code when deciding whether to
 retry. A non-JSON response from an older proxy or intermediary is still exposed
 by each SDK as readable details with no code.
 
+## Cypher errors
+
+`POST /v2/cypher` and `POST /v2/cypher/explain` report a failed statement with the
+same `error` and `msg` fields and a `details` object:
+
+```json
+{
+  "error": "resource_limit",
+  "msg": "expression temporaries exceed the query memory budget",
+  "details": { "detail": "memory_limit", "phase": "runtime", "span": null }
+}
+```
+
+`error` is the category and `details.detail` the specific condition. Both are lower
+snake case, like every code on this page. `details.phase` is `compile` (nothing ran)
+or `runtime`, and `span` locates the failing statement text when it is known. A
+failed statement commits nothing. gRPC carries the same JSON in the status details.
+Embedded SDK errors join the three parts into one code,
+`category:phase:detail`, such as `syntax_error:compile:undefined_variable`.
+
+Request, storage, and transaction failures on the Cypher routes keep the native
+envelope and the codes below.
+
+| Category | Meaning | HTTP | Retry |
+| --- | --- | --- | --- |
+| `syntax_error` | The statement is not valid Cypher, for example `undefined_variable`, `unexpected_syntax`, or `invalid_parameter_use`. | 400 | After fixing the statement |
+| `unsupported_feature` | Valid openCypher outside the supported profile, for example `merge` or `variable_length_pattern`. | 400 | After rewriting the statement |
+| `type_error` | A value has the wrong type for its use, for example `expected_node` or `invalid_property_type`. | 400 | After fixing the statement or data |
+| `argument_error` | A function argument is invalid, for example `number_out_of_range`. | 400 | After fixing the argument |
+| `arithmetic_error` | Arithmetic failed, for example `division_by_zero`. | 400 | After fixing the expression or data |
+| `parameter_missing` | A referenced parameter was not supplied (`missing_parameter`). | 400 | After supplying it |
+| `entity_not_found` | A statement read a node or relationship it had deleted (`deleted_entity_access`). | 400 | After fixing the statement |
+| `constraint_verification_failed` | A plain `DELETE` targeted a node that still has relationships (`delete_connected_node`). | 400 | After using `DETACH DELETE` or removing the relationships |
+| `resource_limit` | A per-query budget was exceeded, for example `memory_limit`, `result_limit`, `collection_limit`, or `expression_depth`. | 429 | Not unchanged; reduce the work. Distinct from the gateway's `rate_limited` |
+| `access_mode_error` | A modifying statement reached a reader or a warm-only request (`writer_required`). | 503 | On the writer |
+| `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
+
 ## Access the code in an SDK
 
 <CodeGroup>
@@ -201,7 +238,7 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 500 | With a larger deadline or less work | Sometimes |
-| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `ResourceLimit` / `MemoryLimit` with HTTP 429. | 500 (native), 429 (Cypher) | After reducing retained data or increasing the embedded query budget | Sometimes |
+| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 500 (native), 429 (Cypher) | After reducing retained data or increasing the embedded query budget | Sometimes |
 | `invalid_node_id` | A supplied node ID is invalid. | 500 | After fixing the ID | Yes |
 | `node_not_found` | A requested node does not exist. | 500 | After fixing state or ID | Yes |
 | `edge_not_found` | A requested edge does not exist. | 500 | After fixing state or endpoints | Yes |

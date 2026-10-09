@@ -45,20 +45,74 @@ fn error_bodies_keep_the_documented_envelope() {
     assert_eq!(
         serde_json::to_value(api::ErrorBody::from(&error)).unwrap(),
         json!({
-            "error": "ResourceLimit",
+            "error": "resource_limit",
             "msg": "over budget",
-            "details": {"detail": "MemoryLimit", "phase": "runtime", "span": {"start": 7, "end": 12}},
+            "details": {"detail": "memory_limit", "phase": "runtime", "span": {"start": 7, "end": 12}},
         })
     );
 
     let error = helix_cypher::compile("RETURN (").unwrap_err();
     let body = serde_json::to_value(api::ErrorBody::from(&error)).unwrap();
-    assert_eq!(body["error"], error.category);
+    let code = api::ErrorCode::from(&error);
+    assert_eq!(body["error"], code.category);
     assert_eq!(body["msg"], error.message);
-    assert_eq!(body["details"]["detail"], error.detail);
+    assert_eq!(body["details"]["detail"], code.detail);
     assert_eq!(body["details"]["phase"], "compile");
     assert_eq!(
         body["details"]["span"],
         serde_json::to_value(error.span).unwrap()
+    );
+}
+
+#[test]
+fn error_codes_use_the_lower_snake_case_of_native_codes() {
+    for (category, code) in [
+        ("ResourceLimit", "resource_limit"),
+        ("AccessModeError", "access_mode_error"),
+        ("InternalPlannerError", "internal_planner_error"),
+        ("SyntaxError", "syntax_error"),
+        ("TypeError", "type_error"),
+        ("UnsupportedFeature", "unsupported_feature"),
+        ("ParameterMissing", "parameter_missing"),
+        ("ArgumentError", "argument_error"),
+        ("EntityNotFound", "entity_not_found"),
+        ("ArithmeticError", "arithmetic_error"),
+        (
+            "ConstraintVerificationFailed",
+            "constraint_verification_failed",
+        ),
+        ("IDOverflow", "id_overflow"),
+        ("Utf8Literal", "utf8_literal"),
+        ("already_snake", "already_snake"),
+    ] {
+        let error = QueryError::compile(category, category, "message");
+        let error_code = api::ErrorCode::from(&error);
+        assert_eq!(error_code.category, code);
+        assert_eq!(error_code.detail, code);
+        assert!(
+            code.split('_').all(|word| !word.is_empty()
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn single_string_codes_join_category_phase_and_detail() {
+    let compile = QueryError::compile("SyntaxError", "UndefinedVariable", "message");
+    assert_eq!(
+        api::ErrorCode::from(&compile).to_string(),
+        "syntax_error:compile:undefined_variable"
+    );
+    let runtime = QueryError::runtime(
+        "ConstraintVerificationFailed",
+        "DeleteConnectedNode",
+        "message",
+    );
+    assert_eq!(
+        api::ErrorCode::from(&runtime).to_string(),
+        "constraint_verification_failed:runtime:delete_connected_node"
     );
 }

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 mod explain;
 pub use explain::{explain, Explanation};
+pub use helix_cypher::api::ErrorCode;
 pub use helix_cypher::request::{CompiledRequest, Request};
 pub(crate) mod output;
 mod parameters;

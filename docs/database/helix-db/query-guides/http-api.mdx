@@ -236,7 +236,10 @@ parameters. Graph elements cannot be passed as parameter values.
 ### Cypher errors and planning
 
 Cypher errors include `error`, `msg`, and `details` with a specific `detail`,
-`phase` (`compile` or `runtime`), and a nullable UTF-8 byte `span`. Malformed
+`phase` (`compile` or `runtime`), and a nullable UTF-8 byte `span`. `error` and
+`detail` are lower snake case codes, such as `resource_limit` and `memory_limit`;
+the [query error reference](/database/helix-db/query-guides/error-handling#cypher-errors)
+lists the categories. Malformed
 requests and storage errors retain the native envelope. Resource limits return
 `429`; request/semantic errors return `400`; conflicts return `409`; internal
 failures return `500`; writer requirements or uncertain commits return `503`.

@@ -154,7 +154,7 @@ func TestExplainCypherDecodesPlanLosslessly(t *testing.T) {
 }
 
 func TestCypherRoutesDecodeRemoteDiagnostics(t *testing.T) {
-	const diagnostic = `{"error":"SyntaxError","msg":"unexpected end","details":{"detail":"UnexpectedEnd","phase":"compile","span":{"start":7,"end":8}}}`
+	const diagnostic = `{"error":"syntax_error","msg":"unexpected end","details":{"detail":"unexpected_end","phase":"compile","span":{"start":7,"end":8}}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(diagnostic))
@@ -176,10 +176,10 @@ func TestCypherRoutesDecodeRemoteDiagnostics(t *testing.T) {
 		if helixErr.Kind != ErrorRemote || helixErr.StatusCode != http.StatusBadRequest {
 			t.Fatalf("unexpected kind/status: %s %d", helixErr.Kind, helixErr.StatusCode)
 		}
-		if helixErr.Code != QueryErrorCode("SyntaxError") || helixErr.Details != "unexpected end" {
+		if helixErr.Code != QueryErrorCode("syntax_error") || helixErr.Details != "unexpected end" {
 			t.Fatalf("unexpected code/details: %q %q", helixErr.Code, helixErr.Details)
 		}
-		if helixErr.ServerDetails != `{"detail":"UnexpectedEnd","phase":"compile","span":{"start":7,"end":8}}` {
+		if helixErr.ServerDetails != `{"detail":"unexpected_end","phase":"compile","span":{"start":7,"end":8}}` {
 			t.Fatalf("unexpected server details: %s", helixErr.ServerDetails)
 		}
 		if IsConflict(err) || IsRetryable(err) {
@@ -373,7 +373,7 @@ func TestEmbeddedCypherReportsMissingBindingMethods(t *testing.T) {
 
 func TestEmbeddedCypherPreservesNativeErrorCodeAndMessage(t *testing.T) {
 	native := &fakeCypherExplainDB{fakeCypherDB: fakeCypherDB{&fakeNativeDB{err: &fakeQueryError{
-		code: QueryErrorCode("SyntaxError"),
+		code: QueryErrorCode("syntax_error:compile:unexpected_end"),
 		msg:  "unexpected end",
 	}}}}
 	client := &Client{embedded: native}
@@ -386,7 +386,7 @@ func TestEmbeddedCypherPreservesNativeErrorCodeAndMessage(t *testing.T) {
 		if !errors.As(err, &helixErr) || helixErr.Kind != ErrorEmbedded {
 			t.Fatalf("expected embedded HelixError, got %T %v", err, err)
 		}
-		if helixErr.Code != QueryErrorCode("SyntaxError") || helixErr.Details != "unexpected end" {
+		if helixErr.Code != QueryErrorCode("syntax_error:compile:unexpected_end") || helixErr.Details != "unexpected end" {
 			t.Fatalf("unexpected embedded error: code=%q details=%q", helixErr.Code, helixErr.Details)
 		}
 	}

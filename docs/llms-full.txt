@@ -5318,7 +5318,10 @@ parameters. Graph elements cannot be passed as parameter values.
 ### Cypher errors and planning
 
 Cypher errors include `error`, `msg`, and `details` with a specific `detail`,
-`phase` (`compile` or `runtime`), and a nullable UTF-8 byte `span`. Malformed
+`phase` (`compile` or `runtime`), and a nullable UTF-8 byte `span`. `error` and
+`detail` are lower snake case codes, such as `resource_limit` and `memory_limit`;
+the [query error reference](/database/helix-db/query-guides/error-handling#cypher-errors)
+lists the categories. Malformed
 requests and storage errors retain the native envelope. Resource limits return
 `429`; request/semantic errors return `400`; conflicts return `409`; internal
 failures return `500`; writer requirements or uncertain commits return `503`.
@@ -5391,6 +5394,43 @@ The response never adds a separate `code` field. HTTP status classifications
 are unchanged, so use both the status and static code when deciding whether to
 retry. A non-JSON response from an older proxy or intermediary is still exposed
 by each SDK as readable details with no code.
+
+## Cypher errors
+
+`POST /v2/cypher` and `POST /v2/cypher/explain` report a failed statement with the
+same `error` and `msg` fields and a `details` object:
+
+```json
+{
+  "error": "resource_limit",
+  "msg": "expression temporaries exceed the query memory budget",
+  "details": { "detail": "memory_limit", "phase": "runtime", "span": null }
+}
+```
+
+`error` is the category and `details.detail` the specific condition. Both are lower
+snake case, like every code on this page. `details.phase` is `compile` (nothing ran)
+or `runtime`, and `span` locates the failing statement text when it is known. A
+failed statement commits nothing. gRPC carries the same JSON in the status details.
+Embedded SDK errors join the three parts into one code,
+`category:phase:detail`, such as `syntax_error:compile:undefined_variable`.
+
+Request, storage, and transaction failures on the Cypher routes keep the native
+envelope and the codes below.
+
+| Category | Meaning | HTTP | Retry |
+| --- | --- | --- | --- |
+| `syntax_error` | The statement is not valid Cypher, for example `undefined_variable`, `unexpected_syntax`, or `invalid_parameter_use`. | 400 | After fixing the statement |
+| `unsupported_feature` | Valid openCypher outside the supported profile, for example `merge` or `variable_length_pattern`. | 400 | After rewriting the statement |
+| `type_error` | A value has the wrong type for its use, for example `expected_node` or `invalid_property_type`. | 400 | After fixing the statement or data |
+| `argument_error` | A function argument is invalid, for example `number_out_of_range`. | 400 | After fixing the argument |
+| `arithmetic_error` | Arithmetic failed, for example `division_by_zero`. | 400 | After fixing the expression or data |
+| `parameter_missing` | A referenced parameter was not supplied (`missing_parameter`). | 400 | After supplying it |
+| `entity_not_found` | A statement read a node or relationship it had deleted (`deleted_entity_access`). | 400 | After fixing the statement |
+| `constraint_verification_failed` | A plain `DELETE` targeted a node that still has relationships (`delete_connected_node`). | 400 | After using `DETACH DELETE` or removing the relationships |
+| `resource_limit` | A per-query budget was exceeded, for example `memory_limit`, `result_limit`, `collection_limit`, or `expression_depth`. | 429 | Not unchanged; reduce the work. Distinct from the gateway's `rate_limited` |
+| `access_mode_error` | A modifying statement reached a reader or a warm-only request (`writer_required`). | 503 | On the writer |
+| `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
 
 ## Access the code in an SDK
 
@@ -5538,7 +5578,7 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 500 | With a larger deadline or less work | Sometimes |
-| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `ResourceLimit` / `MemoryLimit` with HTTP 429. | 500 (native), 429 (Cypher) | After reducing retained data or increasing the embedded query budget | Sometimes |
+| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 500 (native), 429 (Cypher) | After reducing retained data or increasing the embedded query budget | Sometimes |
 | `invalid_node_id` | A supplied node ID is invalid. | 500 | After fixing the ID | Yes |
 | `node_not_found` | A requested node does not exist. | 500 | After fixing state or ID | Yes |
 | `edge_not_found` | A requested edge does not exist. | 500 | After fixing state or endpoints | Yes |
@@ -6875,6 +6915,8 @@ Helix Cloud query failures use one JSON envelope:
   its exact text.
 - The HTTP status remains part of the contract. Use it with `error` when deciding
   whether and how to retry.
+- `write_outcome_unknown` adds `"retryable": false`. Cypher statement errors add a
+  `details` object; see [Cypher errors](#cypher-errors).
 
 The table below lists codes produced by the Cloud gateway itself. Errors raised by the
 database engine behind it use the same envelope; see the
@@ -6899,9 +6941,30 @@ database engine behind it use the same envelope; see the
 |  500 | `internal_error`         | An internal or backend diagnostic                                           | An unexpected gateway or backend error occurred.                          | Retry only if the operation is safe; contact support if persistent.      |
 |  503 | `backend_unavailable`    | `Backend unavailable`                                                       | No eligible database backend is currently available.                      | Retry with bounded exponential backoff and jitter.                       |
 |  503 | `rate_limit_unavailable` | `tenant rate limit is unavailable`                                          | The gateway cannot make a safe rate-limit decision.                       | Retry with bounded exponential backoff and jitter.                       |
+|  503 | `failover_wait_unavailable` | `managed writer transition wait is unavailable`                          | A write arrived during a writer transition that the gateway could not wait out, so it did not send the write. | Honor `Retry-After` (1 second), then retry.                              |
+|  503 | `write_outcome_unknown`  | `write outcome is unknown; the operation was not replayed`                  | The gateway sent a write but cannot tell whether it committed, for example because its deadline passed or the writer changed. The body includes `"retryable": false`. | Do not resubmit automatically. Reconcile first; see [Timed-out writes](#timed-out-writes). |
 
 The text in `msg` can include request-specific details. The `error` values and
 HTTP statuses above are the compatibility surface.
+
+## Cypher errors
+
+`POST /v2/cypher` and `POST /v2/cypher/explain` use the same envelope and gateway
+codes. A failed statement also carries a `details` object:
+
+```json
+{
+  "error": "resource_limit",
+  "msg": "expression temporaries exceed the query memory budget",
+  "details": { "detail": "memory_limit", "phase": "runtime", "span": null }
+}
+```
+
+The category in `error` and the condition in `details.detail` are lower snake case
+codes, listed in the [query error reference](/database/helix-db/query-guides/error-handling#cypher-errors).
+A `resource_limit` (HTTP 429) is a per-query budget, not the database's request
+rate: resending the same statement fails again, so reduce the work instead of
+honoring `Retry-After`. Check `error` to tell it apart from `rate_limited`.
 
 ## SDK access
 
@@ -6971,8 +7034,10 @@ if errors.As(err, &helixErr) &&
 ## Timed-out writes
 
 An HTTP `408` cancels the gateway's wait, but a write can race with durable
-commit. Treat the outcome as unknown. Reconcile using an application identity or
-idempotency key before submitting the write again.
+commit. A write that the gateway already sent to the writer returns `503` with
+`write_outcome_unknown` and `"retryable": false` instead. In both cases, treat the
+outcome as unknown. Reconcile using an application identity or idempotency key
+before submitting the write again.
 
 ## Migration from the previous shape
 
@@ -6987,9 +7052,15 @@ responses, migrate from this shape:
 }
 ```
 
-to `error` as the lower-snake-case code and `msg` as diagnostic text. Keep a
-readable diagnostic fallback for intermediaries and older self-hosted endpoints
-that do not return the Cloud envelope.
+to `error` as the lower-snake-case code and `msg` as diagnostic text. Earlier
+gateways also reported unknown write outcomes and unavailable failover waits in
+that shape, as `{"code":"WRITE_OUTCOME_UNKNOWN","error":"<message>","retryable":false}`
+and `"code":"FAILOVER_WAIT_UNAVAILABLE"`. They are now `write_outcome_unknown` and
+`failover_wait_unavailable` in the envelope above, and Cypher categories and
+details, formerly upper camel case such as `ResourceLimit`, are lower snake case.
+Current SDKs read both shapes. Keep a readable diagnostic fallback for
+intermediaries and older self-hosted endpoints that do not return the Cloud
+envelope.
 
 # Getting started with HelixDB CLI
 

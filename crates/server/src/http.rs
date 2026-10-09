@@ -516,21 +516,25 @@ mod tests {
             )
         };
         let cases = [
-            (query("SyntaxError"), StatusCode::BAD_REQUEST, "SyntaxError"),
+            (
+                query("SyntaxError"),
+                StatusCode::BAD_REQUEST,
+                "syntax_error",
+            ),
             (
                 query("ResourceLimit"),
                 StatusCode::TOO_MANY_REQUESTS,
-                "ResourceLimit",
+                "resource_limit",
             ),
             (
                 query("AccessModeError"),
                 StatusCode::SERVICE_UNAVAILABLE,
-                "AccessModeError",
+                "access_mode_error",
             ),
             (
                 query("InternalPlannerError"),
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "InternalPlannerError",
+                "internal_planner_error",
             ),
             (
                 db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
@@ -558,7 +562,7 @@ mod tests {
             if is_query {
                 assert_eq!(
                     json["details"],
-                    serde_json::json!({"detail":"Detail","phase":"runtime","span":{"start":1,"end":2}})
+                    serde_json::json!({"detail":"detail","phase":"runtime","span":{"start":1,"end":2}})
                 );
             } else {
                 assert_eq!(json.get("details"), None);

@@ -1608,7 +1608,13 @@
         ],
         "properties": {
           "detail": {
-            "type": "string"
+            "type": "string",
+            "description": "The specific condition within the category, in lower snake case, such as `undefined_variable` or `memory_limit`.",
+            "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$",
+            "examples": [
+              "undefined_variable",
+              "memory_limit"
+            ]
           },
           "phase": {
             "type": "string",
@@ -1655,7 +1661,13 @@
         "properties": {
           "error": {
             "type": "string",
-            "description": "Machine-readable query category or native transport/storage error code."
+            "description": "Machine-readable lower snake case code: a Cypher category, such as `syntax_error` or `resource_limit`, or a native transport or storage error code.",
+            "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$",
+            "examples": [
+              "syntax_error",
+              "resource_limit",
+              "transaction_conflict"
+            ]
           },
           "msg": {
             "type": "string"
